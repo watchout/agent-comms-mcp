@@ -1,13 +1,29 @@
 #!/usr/bin/env bun
+/**
+ * Database migration for agent-comms-mcp.
+ * Safe to run multiple times (IF NOT EXISTS).
+ *
+ * Usage: bun run migrate
+ * Or:    DATABASE_URL=postgresql://... bun db/migrate.ts
+ */
 import { Client } from 'pg'
+import { readFileSync, existsSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+// Load database_url from config.json if available, fallback to env
+let databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+const configPath = join(dirname(new URL(import.meta.url).pathname), '..', 'config.json')
+if (existsSync(configPath)) {
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+    databaseUrl = config.database_url ?? databaseUrl
+  } catch {}
+}
 
 async function migrate() {
-  const client = new Client({ connectionString: DATABASE_URL })
+  const client = new Client({ connectionString: databaseUrl })
   await client.connect()
 
-  // Core message table
   await client.query(`
     CREATE TABLE IF NOT EXISTS agent_messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -22,17 +38,10 @@ async function migrate() {
       depth INTEGER DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT now()
     );
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_channel ON agent_messages(channel_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_author ON agent_messages(author_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_type ON agent_messages(message_type, created_at);
 
-    CREATE INDEX IF NOT EXISTS idx_agent_messages_channel
-      ON agent_messages(channel_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_agent_messages_author
-      ON agent_messages(author_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_agent_messages_type
-      ON agent_messages(message_type, created_at);
-  `)
-
-  // Channel settings (retention policy, etc.)
-  await client.query(`
     CREATE TABLE IF NOT EXISTS channel_settings (
       channel_id TEXT PRIMARY KEY,
       retention_days INTEGER,
@@ -42,23 +51,22 @@ async function migrate() {
     );
   `)
 
-  // Default channel settings
-  await client.query(`
-    INSERT INTO channel_settings (channel_id, retention_days, description)
-    VALUES
-      ('approvals', NULL, '承認フロー（永続保存）'),
-      ('audit-log', NULL, '監査ログ（永続保存）'),
-      ('hotel-kanri', 30, 'Hotel Dev通信'),
-      ('haishin-puls-hub', 30, 'Haishin Dev通信'),
-      ('wbs', 30, 'WBS Dev通信'),
-      ('nyusatsu', 30, 'Nyusatsu Dev通信'),
-      ('ai-dev-framework', 30, 'ADF Dev通信'),
-      ('x-marketing-engine', 30, 'XMarketing Dev通信'),
-      ('upwork-automation', 30, 'Upwork Dev通信'),
-      ('org-build', NULL, '組織構築（永続保存）'),
-      ('ceo-cto', NULL, 'CEO-CTO戦略（永続保存）')
-    ON CONFLICT (channel_id) DO NOTHING;
-  `)
+  // Sync channel settings from config.json if available
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+      for (const [ch, settings] of Object.entries(config.channels ?? {})) {
+        const s = settings as { retention_days?: number | null; description?: string }
+        await client.query(
+          `INSERT INTO channel_settings (channel_id, retention_days, description, updated_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (channel_id) DO UPDATE SET retention_days = $2, description = $3, updated_at = now()`,
+          [ch, s.retention_days ?? null, s.description ?? null]
+        )
+      }
+      console.log(`Synced ${Object.keys(config.channels ?? {}).length} channel settings from config.json`)
+    } catch {}
+  }
 
   console.log('Migration complete.')
   await client.end()

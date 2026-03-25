@@ -1,0 +1,42 @@
+{
+  "agent_id": "cto",
+  "database_url": "postgresql://localhost/agent_comms",
+
+  "channels": {
+    "approvals":         { "retention_days": null, "description": "Approval workflows (permanent)" },
+    "audit-log":         { "retention_days": null, "description": "Audit log (permanent)" },
+    "ceo-cto":           { "retention_days": null, "description": "CEO-CTO strategy (permanent)" },
+    "org-build":         { "retention_days": null, "description": "Org building (permanent)" },
+    "hotel-kanri":       { "retention_days": 30, "description": "Hotel Dev comms" },
+    "haishin-puls-hub":  { "retention_days": 30, "description": "Haishin Dev comms" },
+    "wbs":               { "retention_days": 30, "description": "WBS Dev comms" },
+    "nyusatsu":          { "retention_days": 30, "description": "Nyusatsu Dev comms" },
+    "ai-dev-framework":  { "retention_days": 30, "description": "ADF Dev comms" },
+    "x-marketing-engine":{ "retention_days": 30, "description": "XMarketing Dev comms" },
+    "upwork-automation": { "retention_days": 30, "description": "Upwork Dev comms" }
+  },
+
+  "rate_limit": {
+    "max_per_minute": 30
+  },
+
+  "loop_detection": {
+    "max_depth": 10,
+    "max_count": 20,
+    "window_seconds": 300
+  },
+
+  "auth": {
+    "token": null
+  },
+
+  "forwarding": {
+    "discord": {
+      "webhook_url": null
+    },
+    "telegram": {
+      "bot_token": null,
+      "chat_id": null
+    }
+  }
+}
