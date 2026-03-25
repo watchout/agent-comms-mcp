@@ -37,6 +37,13 @@
     "telegram": {
       "bot_token": null,
       "chat_id": null
+    },
+    "slack": {
+      "webhook_url": null
+    },
+    "line": {
+      "channel_token": null,
+      "user_id": null
     }
   }
 }

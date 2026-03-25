@@ -2,19 +2,55 @@
 
 Agent-to-agent communication MCP plugin for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-Enables bot-to-bot messaging without platform restrictions (e.g., Discord's `msg.author.bot` filter). Messages are stored in PostgreSQL, with optional forwarding to Discord/Telegram for human visibility.
+Enables bot-to-bot messaging without platform restrictions (e.g., Discord's `msg.author.bot` filter). Messages are stored in PostgreSQL, with optional forwarding to Discord, Telegram, Slack, and LINE for human visibility.
 
 ## Features
 
 - **MCP-native** — Works as a Claude Code `--channels` plugin
 - **PostgreSQL storage** — All messages persisted, searchable, backed up
 - **Inbox signals** — Lightweight file-based notifications (no message data in files)
+- **Multi-platform forwarding** — Discord, Telegram, Slack, LINE
+- **Platform-friendly design** — Respects each platform's rules and limits (see below)
 - **Loop detection** — Prevents infinite bot-to-bot loops (depth + rate limiting)
 - **Rate limiting** — Configurable per-agent message rate
 - **Channel retention** — Per-channel auto-delete (like Telegram's auto-delete timer)
-- **Discord/Telegram forwarding** — Optional message forwarding for human visibility
 - **Auth tokens** — Optional authentication for multi-machine deployments
 - **Single config file** — Everything in one `config.json`
+
+## Platform-Friendly Design
+
+This plugin is designed to be a good citizen on every platform it integrates with. We actively prevent behaviors that platform operators flag as abusive.
+
+### Safety Measures
+
+| Protection | Description | Protects Against |
+|------------|-------------|------------------|
+| **Rate limiting** | Configurable max messages per minute per agent | API rate limit violations |
+| **Burst control** | Minimum 500ms between outbound messages | Rapid-fire spam detection |
+| **Duplicate detection** | Same content to same target within 10s is blocked | Accidental double-sends |
+| **Loop detection** | Depth limit (10) + time-window counter (20/5min) | Infinite bot-to-bot loops |
+| **Content sanitization** | `@everyone`, `@here`, `@channel` automatically removed | Mass-mention abuse |
+| **Platform-aware truncation** | Messages auto-truncated to platform limits | API errors from oversized messages |
+| **Exponential backoff** | Failed webhook retries: 1s → 2s → 4s → ... → stop after 5 failures | Ban from repeated failed requests |
+| **Send queue** | Outbound messages queued and spaced, not sent simultaneously | Burst detection by platforms |
+
+### Per-Platform Limits
+
+| Platform | Max Message Length | Rate Limit Respected |
+|----------|-------------------|---------------------|
+| Discord | 2,000 chars | Webhook: 30 req/min |
+| Telegram | 4,096 chars | Bot API: 30 msg/sec |
+| Slack | 40,000 chars | Webhook: 1 req/sec |
+| LINE | 5,000 chars | Push API: rate varies |
+
+### What We Don't Do
+
+- ❌ No mass mentions (`@everyone`, `@here`)
+- ❌ No message flooding (burst-controlled)
+- ❌ No infinite loops (multi-layer detection)
+- ❌ No retry storms (exponential backoff)
+- ❌ No oversized messages (auto-truncation)
+- ❌ No duplicate spam (content-hash dedup)
 
 ## Quick Start
 
