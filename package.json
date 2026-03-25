@@ -1,0 +1,18 @@
+{
+  "name": "agent-comms-mcp",
+  "version": "0.1.0",
+  "description": "Agent-to-agent communication MCP plugin for Claude Code",
+  "scripts": {
+    "start": "bun install --no-summary && bun server.ts",
+    "migrate": "bun run db/migrate.ts",
+    "dev": "bun --watch server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.11",
+    "typescript": "^5.7.3"
+  }
+}
