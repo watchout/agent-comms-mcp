@@ -102,6 +102,7 @@ function loadConfig(): Config {
 
 const config = loadConfig()
 const AGENT_ID = config.agent_id
+const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 const INBOX_SIGNAL_TTL_MS = 5 * 60 * 1000
 const GC_INTERVAL_MS = 5 * 60 * 1000
@@ -519,8 +520,7 @@ interface AccessConfig {
 }
 
 function loadAccessConfig(): AccessConfig {
-  const stateDir = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', `agent-comms-${AGENT_ID}`)
-  const accessPath = join(stateDir, 'access.json')
+  const accessPath = join(STATE_DIR, 'access.json')
   try {
     return JSON.parse(readFileSync(accessPath, 'utf-8'))
   } catch {
@@ -555,7 +555,7 @@ function checkAccess(authorId: string, channelId: string, content: string): { al
 
 // --- Inbox Signals ---
 function sendInboxSignal(targetAgent: string, messageId: string, from: string, channel: string) {
-  const dir = join(homedir(), '.claude', 'channels', `agent-comms-${targetAgent}`, 'inbox')
+  const dir = join(STATE_DIR, 'inbox', targetAgent)
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, `${Date.now()}-${messageId.slice(0, 8)}.signal`),
@@ -566,7 +566,7 @@ function sendInboxSignal(targetAgent: string, messageId: string, from: string, c
 }
 
 function countAndClearSignals(): number {
-  const dir = join(homedir(), '.claude', 'channels', `agent-comms-${AGENT_ID}`, 'inbox')
+  const dir = join(STATE_DIR, 'inbox', AGENT_ID)
   let count = 0
   try {
     const files = readdirSync(dir).filter(f => f.endsWith('.signal'))
