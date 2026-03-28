@@ -204,6 +204,32 @@ interface AccessConfig {
 - LLMがツールを呼ぶ必要なし（決定論的）
 - Discordプラグインと同じ仕組みを通信バス層で実現
 
+**DBポーリング方式（Phase 3）:**
+
+- ポーリング方式: setIntervalでDBを3秒間隔で監視
+- 対象: agent_messagesテーブルから自分宛（`metadata->>'to' = config.agent_id`）の未読メッセージ
+- 最終読み取り位置: メモリ上のlastPolledAtタイムスタンプ（起動時=現在時刻）
+- MCP通知フォーマット:
+  ```typescript
+  server.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content: messageText,
+      meta: {
+        chat_id: channel,
+        message_id: messageUUID,
+        user: senderAgentId,
+        user_id: senderAgentId,
+        ts: createdAt,  // ISO 8601
+        source: 'agent-comms'
+      }
+    }
+  })
+  ```
+- バッチサイズ: 最大10件/回
+- 重複防止: 注入済みメッセージIDをメモリSet（processedIds）で保持
+- エラー時: stderrログ出力、次回ポーリングで自動リトライ
+
 ---
 
 ## 5. 安全機構
@@ -416,6 +442,8 @@ claude --channels plugin:discord@claude-plugins-official \
 
 ### 9.3 check_inbox
 
+Messages are automatically pushed to your session. Use this only to re-check history or filter by channel.
+
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|------|------|------|
 | limit | number | No | 取得件数（default: 20） |
@@ -458,10 +486,13 @@ claude --channels plugin:discord@claude-plugins-official \
 - [ ] access.json管理の通信バス層への移植
 - [ ] テスト追加
 
-### Phase 3: channel plugin化
-- [ ] MCPサーバー → channel plugin + MCP toolsへの分離
-- [ ] push型通知の実装（セッションへの`<channel>`タグ注入）
-- [ ] 人間メッセージとbotメッセージの統一経路
+### Phase 3: push型通知（channel plugin化の基盤）
+- [ ] DBポーリング機構の実装（3秒間隔、setInterval）
+- [ ] notifications/claude/channel MCP通知送信
+- [ ] 重複注入防止（processedIds Set）
+- [ ] ポーリングのライフサイクル管理（起動時start、shutdown時clear）
+- [ ] check_inboxツール説明文の更新（補助ツールへ格下げ）
+- [ ] 実地テスト（CTO↔Dev Bot間push通知確認）
 
 ### Phase 4: プラグイン統合
 - [ ] Discord plugin機能の取り込み（UIアダプター化）
@@ -625,3 +656,4 @@ bun agent-com check-plugin
 |------|------|
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
 | 2026-03-28 | 追記：§5レート制限/ループ検出のDB永続化、§12エージェントID管理、§13 bot間認証、§14退行テスト |
+| 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 check_inbox説明更新 |

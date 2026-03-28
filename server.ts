@@ -507,6 +507,85 @@ async function listAgents(status?: string, agentType?: string): Promise<any[]> {
   return r.rows
 }
 
+// --- Push Notification Polling (§4.4 Phase 3) ---
+const POLL_INTERVAL_MS = 3_000
+const POLL_BATCH_SIZE = 10
+let lastPolledAt = new Date().toISOString()
+const processedIds = new Map<string, number>()  // id -> timestamp
+const PROCESSED_ID_TTL_MS = 60_000  // 1 minute
+let pollInterval: ReturnType<typeof setInterval> | null = null
+
+async function pollNewMessages(): Promise<void> {
+  const client = await tryGetDb()
+  if (!client) return
+
+  // GC: remove expired processedIds entries
+  const now = Date.now()
+  for (const [id, ts] of processedIds) {
+    if (now - ts > PROCESSED_ID_TTL_MS) processedIds.delete(id)
+  }
+
+  try {
+    const r = await client.query(
+      `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
+       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at > $2
+       ORDER BY created_at ASC LIMIT $3`,
+      [AGENT_ID, lastPolledAt, POLL_BATCH_SIZE]
+    )
+
+    for (const msg of r.rows) {
+      if (processedIds.has(msg.id)) continue
+      processedIds.set(msg.id, Date.now())
+
+      // Auth validation
+      const authResult = validateIncomingAuth(
+        msg.metadata, msg.author_id, msg.channel_id, msg.content
+      )
+      if (!authResult.valid) {
+        process.stderr.write(`agent-comms: push rejected (auth ${config.auth.mode}): ${msg.id} from ${msg.author_id}\n`)
+        continue
+      }
+
+      const tag = authResult.tag ? ` ${authResult.tag}` : ''
+      const contentText = `[${msg.message_type ?? 'chat'}] ${msg.author_id} → #${msg.channel_id}:${tag} ${msg.content}`
+
+      mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: contentText,
+          meta: {
+            chat_id: msg.channel_id,
+            message_id: msg.id,
+            user: msg.author_id,
+            user_id: msg.author_id,
+            ts: new Date(msg.created_at).toISOString(),
+            source: 'agent-comms',
+          },
+        },
+      }).catch(err => {
+        process.stderr.write(`agent-comms: push notification failed: ${err}\n`)
+      })
+
+      // Advance lastPolledAt to the latest message's timestamp
+      lastPolledAt = new Date(msg.created_at).toISOString()
+    }
+  } catch (err) {
+    process.stderr.write(`agent-comms: poll error (will retry): ${err}\n`)
+  }
+}
+
+function startPolling(): void {
+  pollInterval = setInterval(pollNewMessages, POLL_INTERVAL_MS)
+  process.stderr.write(`agent-comms: push polling started (${POLL_INTERVAL_MS}ms interval)\n`)
+}
+
+function stopPolling(): void {
+  if (pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+}
+
 // --- Access Control (§4.1 - Communication Bus Layer) ---
 interface AccessConfig {
   dmPolicy: 'open' | 'pairing'
@@ -723,7 +802,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'check_inbox',
-      description: 'Check for new messages addressed to this agent.',
+      description: 'Messages are automatically pushed to your session. Use this only to re-check history or filter by channel.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -850,12 +929,15 @@ mcp.connect(transport).then(async () => {
   } catch (err) {
     process.stderr.write(`agent-comms: WARNING — agent registration failed (non-fatal): ${err}\n`)
   }
+  // Start push notification polling (Phase 3)
+  startPolling()
 }).catch(err => {
   process.stderr.write(`agent-comms: startup failed: ${err}\n`)
   process.exit(1)
 })
 
 const shutdown = async () => {
+  stopPolling()
   await unregisterAgent()
   if (db) await db.end().catch(() => {})
   process.exit(0)
