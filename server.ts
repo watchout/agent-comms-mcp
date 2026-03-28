@@ -19,7 +19,7 @@ import { Client } from 'pg'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
-import { randomUUID, createHash } from 'node:crypto'
+import { randomUUID, createHash, createHmac } from 'node:crypto'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -29,13 +29,27 @@ interface ForwardingConfig {
   line: { channel_token: string | null; user_id: string | null }
 }
 
+interface AuthConfig {
+  mode: 'off' | 'warn' | 'enforce'
+  secret_file: string
+  replay_window_seconds: number
+}
+
+interface AgentRegistration {
+  display_name: string
+  agent_type: string
+  runtime: string
+  metadata?: Record<string, unknown>
+}
+
 interface Config {
   agent_id: string
   database_url: string
   channels: Record<string, { retention_days: number | null; description?: string }>
   rate_limit: { max_per_minute: number }
   loop_detection: { max_depth: number; max_count: number; window_seconds: number }
-  auth: { token: string | null }
+  auth: AuthConfig
+  agent: AgentRegistration
   forwarding: ForwardingConfig
 }
 
@@ -60,7 +74,17 @@ function loadConfig(): Config {
       max_count: raw.loop_detection?.max_count ?? 20,
       window_seconds: raw.loop_detection?.window_seconds ?? 300,
     },
-    auth: { token: process.env.AGENT_COMMS_TOKEN ?? raw.auth?.token ?? null },
+    auth: {
+      mode: raw.auth?.mode ?? 'off',
+      secret_file: raw.auth?.secret_file ?? join(homedir(), '.agent-com', 'secret'),
+      replay_window_seconds: raw.auth?.replay_window_seconds ?? 300,
+    },
+    agent: {
+      display_name: raw.agent?.display_name ?? raw.agent_id ?? process.env.AGENT_ID ?? 'unknown',
+      agent_type: raw.agent?.agent_type ?? 'dev',
+      runtime: raw.agent?.runtime ?? 'claude-code',
+      metadata: raw.agent?.metadata ?? undefined,
+    },
     forwarding: {
       discord: { webhook_url: process.env.DISCORD_WEBHOOK_URL ?? raw.forwarding?.discord?.webhook_url ?? null },
       telegram: {
@@ -127,10 +151,25 @@ function truncateForPlatform(content: string, platform: string): string {
   return content.slice(0, limit - 20) + '\n…(truncated)'
 }
 
-function checkDuplicate(content: string, to: string): boolean {
+async function checkDuplicate(content: string, to: string): Promise<boolean> {
   const hash = createHash('md5').update(`${to}:${content}`).digest('hex')
+
+  const client = await tryGetDb()
+  if (client) {
+    // DB mode: check if hash exists within window, then insert
+    const existing = await client.query(
+      `SELECT hash FROM duplicate_hashes WHERE hash = $1 AND created_at > now() - interval '10 seconds'`,
+      [hash]
+    )
+    if (existing.rows.length > 0) return true
+    await client.query(
+      `INSERT INTO duplicate_hashes (hash) VALUES ($1) ON CONFLICT (hash) DO UPDATE SET created_at = now()`,
+      [hash]
+    )
+    return false
+  }
+  // In-memory fallback
   const now = Date.now()
-  // Clean old entries
   for (const [h, t] of recentHashes) {
     if (now - t > DUPLICATE_WINDOW_MS) recentHashes.delete(h)
   }
@@ -181,19 +220,57 @@ function enqueueForward(fn: () => Promise<void>) {
   processQueue()
 }
 
-// --- State ---
+// --- State (in-memory fallback) ---
 const loopCounters = new Map<string, { count: number; since: number }>()
 const rateCounts = new Map<string, { count: number; since: number }>()
 
-// --- DB ---
+// --- DB (with auto-reconnect) ---
 let db: Client | null = null
+let dbAvailable = false
+const DB_MAX_RETRIES = 3
 
 async function getDb(): Promise<Client> {
-  if (!db) {
-    db = new Client({ connectionString: config.database_url })
-    await db.connect()
+  if (db) {
+    // Test connection health
+    try {
+      await db.query('SELECT 1')
+      return db
+    } catch {
+      process.stderr.write('agent-comms: DB connection lost, reconnecting...\n')
+      try { await db.end() } catch {}
+      db = null
+      dbAvailable = false
+    }
   }
-  return db
+
+  // Retry with exponential backoff
+  for (let attempt = 0; attempt < DB_MAX_RETRIES; attempt++) {
+    try {
+      const client = new Client({ connectionString: config.database_url })
+      await client.connect()
+      db = client
+      dbAvailable = true
+      if (attempt > 0) process.stderr.write(`agent-comms: DB reconnected after ${attempt + 1} attempts\n`)
+      return client
+    } catch (err) {
+      if (attempt < DB_MAX_RETRIES - 1) {
+        const delay = 1000 * Math.pow(2, attempt) // 1s, 2s, 4s
+        process.stderr.write(`agent-comms: DB connect attempt ${attempt + 1} failed, retrying in ${delay}ms...\n`)
+        await new Promise(r => setTimeout(r, delay))
+      }
+    }
+  }
+  throw new Error('DB connection failed after retries')
+}
+
+async function tryGetDb(): Promise<Client | null> {
+  try {
+    return await getDb()
+  } catch {
+    dbAvailable = false
+    process.stderr.write('agent-comms: DB unavailable, falling back to in-memory mode\n')
+    return null
+  }
 }
 
 async function saveMessage(msg: {
@@ -201,8 +278,13 @@ async function saveMessage(msg: {
   message_type?: string; reply_to?: string
   metadata?: Record<string, unknown>; depth?: number
 }): Promise<string> {
-  const client = await getDb()
   const id = randomUUID()
+  const client = await tryGetDb()
+  if (!client) {
+    // DBなしモード: IDだけ返す（プラットフォーム履歴に委ねる）
+    process.stderr.write(`agent-comms: DB unavailable, message not persisted (id: ${id})\n`)
+    return id
+  }
   await client.query(
     `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -213,7 +295,8 @@ async function saveMessage(msg: {
 }
 
 async function fetchMessages(channel_id: string, limit: number, since?: string): Promise<any[]> {
-  const client = await getDb()
+  const client = await tryGetDb()
+  if (!client) return [] // DBなしモード: 空配列（プラットフォーム履歴に委ねる）
   if (since) {
     const r = await client.query(
       `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
@@ -229,7 +312,8 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
 }
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
-  const client = await getDb()
+  const client = await tryGetDb()
+  if (!client) return [] // DBなしモード: 空配列
   const r = await client.query(
     `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
      FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1
@@ -238,8 +322,25 @@ async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]>
   return r.rows.reverse()
 }
 
-// --- Rate Limiting ---
-function checkRateLimit(agentId: string): { allowed: boolean; remaining: number } {
+// --- Rate Limiting (DB-persistent with in-memory fallback) ---
+async function checkRateLimit(agentId: string): Promise<{ allowed: boolean; remaining: number }> {
+  const client = await tryGetDb()
+  if (client) {
+    // DB mode: UPSERT into rate_limits, truncated to 1-minute window
+    const windowStart = new Date()
+    windowStart.setSeconds(0, 0) // truncate to minute
+    const r = await client.query(
+      `INSERT INTO rate_limits (agent_id, window_start, message_count)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (agent_id, window_start) DO UPDATE SET message_count = rate_limits.message_count + 1
+       RETURNING message_count`,
+      [agentId, windowStart.toISOString()]
+    )
+    const count = r.rows[0].message_count
+    const remaining = Math.max(0, config.rate_limit.max_per_minute - count)
+    return { allowed: count <= config.rate_limit.max_per_minute, remaining }
+  }
+  // In-memory fallback
   const now = Date.now()
   const r = rateCounts.get(agentId) ?? { count: 0, since: now }
   if (now - r.since > 60_000) { r.count = 0; r.since = now }
@@ -249,12 +350,33 @@ function checkRateLimit(agentId: string): { allowed: boolean; remaining: number 
   return { allowed: r.count <= config.rate_limit.max_per_minute, remaining }
 }
 
-// --- Loop Detection ---
-function checkLoop(from: string, to: string, depth: number): { blocked: boolean; reason?: string } {
+// --- Loop Detection (DB-persistent with in-memory fallback) ---
+async function checkLoop(from: string, to: string, depth: number): Promise<{ blocked: boolean; reason?: string }> {
   if (depth > config.loop_detection.max_depth) {
     return { blocked: true, reason: `depth ${depth} > ${config.loop_detection.max_depth}` }
   }
   const key = [from, to].sort().join(':')
+
+  const client = await tryGetDb()
+  if (client) {
+    // DB mode: UPSERT into loop_counters with window
+    const windowStart = new Date()
+    const windowMs = config.loop_detection.window_seconds * 1000
+    windowStart.setTime(Math.floor(windowStart.getTime() / windowMs) * windowMs)
+    const r = await client.query(
+      `INSERT INTO loop_counters (agent_pair, window_start, exchange_count)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (agent_pair, window_start) DO UPDATE SET exchange_count = loop_counters.exchange_count + 1
+       RETURNING exchange_count`,
+      [key, windowStart.toISOString()]
+    )
+    const count = r.rows[0].exchange_count
+    if (count > config.loop_detection.max_count) {
+      return { blocked: true, reason: `${count} exchanges in ${config.loop_detection.window_seconds}s` }
+    }
+    return { blocked: false }
+  }
+  // In-memory fallback
   const now = Date.now()
   const c = loopCounters.get(key) ?? { count: 0, since: now }
   if (now - c.since > LOOP_WINDOW_MS) { c.count = 0; c.since = now }
@@ -266,10 +388,169 @@ function checkLoop(from: string, to: string, depth: number): { blocked: boolean;
   return { blocked: false }
 }
 
-// --- Auth ---
-function validateAuth(token?: string): boolean {
-  if (!config.auth.token) return true
-  return token === config.auth.token
+// --- HMAC Auth (§13) ---
+function loadSecret(): string | null {
+  // Environment variable takes precedence
+  const envSecret = process.env.AGENT_COMMS_SECRET
+  if (envSecret) return envSecret
+  // Then secret file
+  try {
+    const secretPath = config.auth.secret_file.replace(/^~/, homedir())
+    return readFileSync(secretPath, 'utf-8').trim()
+  } catch {
+    return null
+  }
+}
+
+const authSecret = loadSecret()
+
+function generateSignature(agentId: string, timestamp: number, channel: string, contentHash: string): string {
+  if (!authSecret) return ''
+  const payload = `${agentId}:${timestamp}:${channel}:${contentHash}`
+  return createHmac('sha256', authSecret).update(payload).digest('hex')
+}
+
+function verifySignature(agentId: string, timestamp: number, channel: string, contentHash: string, signature: string): boolean {
+  if (!authSecret) return false
+  // Check replay window
+  const now = Math.floor(Date.now() / 1000)
+  if (Math.abs(now - timestamp) > config.auth.replay_window_seconds) return false
+  const expected = generateSignature(agentId, timestamp, channel, contentHash)
+  return expected === signature
+}
+
+function createAuthMetadata(channel: string, content: string): Record<string, unknown> | undefined {
+  if (config.auth.mode === 'off' || !authSecret) return undefined
+  const timestamp = Math.floor(Date.now() / 1000)
+  const contentHash = createHash('sha256').update(content).digest('hex')
+  const signature = generateSignature(AGENT_ID, timestamp, channel, contentHash)
+  return { auth: { signature, timestamp } }
+}
+
+function validateIncomingAuth(metadata: Record<string, any> | null, authorId: string, channel: string, content: string): { valid: boolean; tag?: string } {
+  if (config.auth.mode === 'off') return { valid: true }
+  if (!metadata?.auth) {
+    if (config.auth.mode === 'enforce') return { valid: false, tag: '[UNVERIFIED]' }
+    return { valid: true, tag: '[UNVERIFIED]' }
+  }
+  const { signature, timestamp } = metadata.auth
+  const contentHash = createHash('sha256').update(content).digest('hex')
+  const ok = verifySignature(authorId, timestamp, channel, contentHash, signature)
+  if (!ok) {
+    if (config.auth.mode === 'enforce') return { valid: false, tag: '[UNVERIFIED]' }
+    return { valid: true, tag: '[UNVERIFIED]' }
+  }
+  return { valid: true }
+}
+
+// --- Agent Registration (§12) ---
+let heartbeatInterval: ReturnType<typeof setInterval> | null = null
+
+async function registerAgent(): Promise<void> {
+  const client = await tryGetDb()
+  if (!client) return
+
+  // Check for duplicate online agent
+  const existing = await client.query(
+    `SELECT status, last_seen_at FROM agents WHERE agent_id = $1`,
+    [AGENT_ID]
+  )
+  if (existing.rows.length > 0 && existing.rows[0].status === 'online') {
+    process.stderr.write(`agent-comms: WARNING — agent '${AGENT_ID}' is already online (last seen: ${existing.rows[0].last_seen_at})\n`)
+  }
+
+  // UPSERT
+  await client.query(
+    `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
+     VALUES ($1, $2, $3, $4, 'online', now(), $5)
+     ON CONFLICT (agent_id) DO UPDATE SET
+       display_name = $2, agent_type = $3, runtime = $4,
+       status = 'online', last_seen_at = now(), metadata = $5`,
+    [AGENT_ID, config.agent.display_name, config.agent.agent_type, config.agent.runtime,
+     config.agent.metadata ? JSON.stringify(config.agent.metadata) : null]
+  )
+  process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
+
+  // Heartbeat every 5 minutes
+  heartbeatInterval = setInterval(async () => {
+    const c = await tryGetDb()
+    if (c) {
+      await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+    }
+  }, 5 * 60 * 1000)
+}
+
+async function unregisterAgent(): Promise<void> {
+  if (heartbeatInterval) clearInterval(heartbeatInterval)
+  const client = await tryGetDb()
+  if (client) {
+    await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+  }
+}
+
+async function listAgents(status?: string, agentType?: string): Promise<any[]> {
+  const client = await tryGetDb()
+  if (!client) return []
+  let query = 'SELECT agent_id, display_name, agent_type, runtime, status, last_seen_at, registered_at, metadata FROM agents WHERE 1=1'
+  const params: any[] = []
+  if (status && status !== 'all') {
+    params.push(status)
+    query += ` AND status = $${params.length}`
+  }
+  if (agentType) {
+    params.push(agentType)
+    query += ` AND agent_type = $${params.length}`
+  }
+  query += ' ORDER BY last_seen_at DESC NULLS LAST'
+  const r = await client.query(query, params)
+  return r.rows
+}
+
+// --- Access Control (§4.1 - Communication Bus Layer) ---
+interface AccessConfig {
+  dmPolicy: 'open' | 'pairing'
+  allowFrom: string[]
+  channels: Record<string, {
+    requireMention: boolean
+    allowFrom: string[]
+  }>
+  mentionPatterns: string[]
+  pending: Record<string, { user_id: string; requested_at: string }>
+}
+
+function loadAccessConfig(): AccessConfig {
+  const stateDir = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', `agent-comms-${AGENT_ID}`)
+  const accessPath = join(stateDir, 'access.json')
+  try {
+    return JSON.parse(readFileSync(accessPath, 'utf-8'))
+  } catch {
+    return { dmPolicy: 'open', allowFrom: [], channels: {}, mentionPatterns: [], pending: {} }
+  }
+}
+
+function checkAccess(authorId: string, channelId: string, content: string): { allowed: boolean; reason?: string } {
+  const access = loadAccessConfig()
+
+  // Global allowFrom
+  if (access.allowFrom.length > 0 && !access.allowFrom.includes(authorId)) {
+    return { allowed: false, reason: 'not in global allowFrom list' }
+  }
+
+  // Channel-specific rules
+  const channelRules = access.channels[channelId]
+  if (channelRules) {
+    if (channelRules.allowFrom.length > 0 && !channelRules.allowFrom.includes(authorId)) {
+      return { allowed: false, reason: `not in allowFrom for channel ${channelId}` }
+    }
+    if (channelRules.requireMention) {
+      const mentioned = access.mentionPatterns.some(p => content.includes(p))
+      if (!mentioned) {
+        return { allowed: false, reason: 'mention required but not found' }
+      }
+    }
+  }
+
+  return { allowed: true }
 }
 
 // --- Inbox Signals ---
@@ -423,7 +704,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           reply_to: { type: 'string', description: 'Message ID to reply to' },
           depth: { type: 'number', description: 'Conversation depth (loop detection)' },
           metadata: { type: 'object', description: 'Additional metadata' },
-          auth_token: { type: 'string', description: 'Auth token (if configured)' },
         },
         required: ['to', 'channel', 'content'],
       },
@@ -451,6 +731,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'list_agents',
+      description: 'List registered agents. Requires DB.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          status: { type: 'string', enum: ['online', 'offline', 'all'], description: 'Filter by status (default: all)' },
+          agent_type: { type: 'string', description: 'Filter by agent type' },
+        },
+      },
+    },
   ],
 }))
 
@@ -458,28 +749,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params
 
   if (name === 'send_message') {
-    const { to, channel, content, message_type, reply_to, depth, metadata, auth_token } = args as any
+    const { to, channel, content, message_type, reply_to, depth, metadata } = args as any
 
-    // Auth
-    if (!validateAuth(auth_token)) {
-      return { content: [{ type: 'text', text: 'AUTH FAILED: invalid or missing token' }], isError: true }
+    // Access control: check if this agent is allowed to send to the channel
+    const access = checkAccess(AGENT_ID, channel, content)
+    if (!access.allowed) {
+      return { content: [{ type: 'text', text: `ACCESS DENIED: ${access.reason}` }], isError: true }
     }
 
     // Rate limit
-    const rate = checkRateLimit(AGENT_ID)
+    const rate = await checkRateLimit(AGENT_ID)
     if (!rate.allowed) {
       return { content: [{ type: 'text', text: `RATE LIMITED: ${config.rate_limit.max_per_minute}/min exceeded` }], isError: true }
     }
 
     // Loop detection
     const msgDepth = depth ?? 0
-    const loop = checkLoop(AGENT_ID, to, msgDepth)
+    const loop = await checkLoop(AGENT_ID, to, msgDepth)
     if (loop.blocked) {
       return { content: [{ type: 'text', text: `LOOP BLOCKED: ${loop.reason}` }], isError: true }
     }
 
     // Duplicate check
-    if (checkDuplicate(content, to)) {
+    if (await checkDuplicate(content, to)) {
       return { content: [{ type: 'text', text: 'DUPLICATE: same message sent within 10s, skipped' }], isError: true }
     }
 
@@ -491,11 +783,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Sanitize
     const safeContent = sanitizeContent(content)
 
+    // Build metadata with HMAC auth signature
+    const authMeta = createAuthMetadata(channel, safeContent)
+    const fullMetadata = { ...metadata, to, ...authMeta }
+
     // Save to DB
     const id = await saveMessage({
       channel_id: channel, author_id: AGENT_ID, content: safeContent,
       message_type: message_type ?? 'chat', reply_to,
-      metadata: { ...metadata, to }, depth: msgDepth,
+      metadata: fullMetadata, depth: msgDepth,
     })
 
     // Signal + forward
@@ -525,16 +821,44 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: `${rows.length} message(s):\n\n${text}` }] }
   }
 
+  if (name === 'list_agents') {
+    const { status, agent_type } = (args ?? {}) as any
+    const agents = await listAgents(status, agent_type)
+    if (agents.length === 0) return { content: [{ type: 'text', text: '(no agents found — DB may be unavailable)' }] }
+    const text = agents.map((a: any) =>
+      `${a.agent_id} (${a.agent_type}/${a.runtime}) — ${a.status} — last seen: ${a.last_seen_at ?? 'never'}`
+    ).join('\n')
+    return { content: [{ type: 'text', text: `${agents.length} agent(s):\n${text}` }] }
+  }
+
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
 })
 
 // --- Start ---
 const transport = new StdioServerTransport()
-mcp.connect(transport).catch(err => {
+mcp.connect(transport).then(async () => {
+  // Startup validations
+  if (AGENT_ID === 'unknown') {
+    process.stderr.write('agent-comms: WARNING — agent_id is "unknown". Set agent_id in config.json or AGENT_ID env var.\n')
+  }
+  if (config.auth.mode === 'enforce' && !authSecret) {
+    process.stderr.write('agent-comms: ERROR — auth.mode is "enforce" but no secret found. Set AGENT_COMMS_SECRET or create secret file via: bun cli/auth-init.ts\n')
+  }
+  // Register agent (non-fatal on failure)
+  try {
+    await registerAgent()
+  } catch (err) {
+    process.stderr.write(`agent-comms: WARNING — agent registration failed (non-fatal): ${err}\n`)
+  }
+}).catch(err => {
   process.stderr.write(`agent-comms: startup failed: ${err}\n`)
   process.exit(1)
 })
 
-const shutdown = async () => { if (db) await db.end().catch(() => {}); process.exit(0) }
+const shutdown = async () => {
+  await unregisterAgent()
+  if (db) await db.end().catch(() => {})
+  process.exit(0)
+}
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
