@@ -31,6 +31,46 @@ async function cleanup() {
     }
   }
 
+  // Clean up rate_limits older than 1 day
+  try {
+    const rateLimitResult = await client.query(
+      `DELETE FROM rate_limits WHERE window_start < now() - interval '1 day' RETURNING agent_id`
+    )
+    if (rateLimitResult.rowCount! > 0) {
+      console.log(`rate_limits: deleted ${rateLimitResult.rowCount} old records`)
+    }
+  } catch {} // Table may not exist yet
+
+  // Clean up loop_counters older than 1 day
+  try {
+    const loopResult = await client.query(
+      `DELETE FROM loop_counters WHERE window_start < now() - interval '1 day' RETURNING agent_pair`
+    )
+    if (loopResult.rowCount! > 0) {
+      console.log(`loop_counters: deleted ${loopResult.rowCount} old records`)
+    }
+  } catch {} // Table may not exist yet
+
+  // Clean up duplicate_hashes older than 1 hour
+  try {
+    const dupResult = await client.query(
+      `DELETE FROM duplicate_hashes WHERE created_at < now() - interval '1 hour' RETURNING hash`
+    )
+    if (dupResult.rowCount! > 0) {
+      console.log(`duplicate_hashes: deleted ${dupResult.rowCount} old records`)
+    }
+  } catch {} // Table may not exist yet
+
+  // Mark stale agents as offline (no heartbeat for 15+ minutes)
+  try {
+    const agentResult = await client.query(
+      `UPDATE agents SET status = 'offline' WHERE status = 'online' AND last_seen_at < now() - interval '15 minutes' RETURNING agent_id`
+    )
+    if (agentResult.rowCount! > 0) {
+      console.log(`agents: marked ${agentResult.rowCount} stale agents as offline`)
+    }
+  } catch {} // Table may not exist yet
+
   // Report table size
   const { rows: [size] } = await client.query(
     `SELECT pg_size_pretty(pg_total_relation_size('agent_messages')) AS size,
