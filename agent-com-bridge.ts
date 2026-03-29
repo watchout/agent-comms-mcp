@@ -15,16 +15,52 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { z } from 'zod'
 
 const PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
+const OUTBOUND_PORT = PORT + 1000  // Discord adapter outbound port
 
 const mcp = new Server(
   { name: 'agent-com-bridge', version: '0.1.0' },
   {
     capabilities: {
-      experimental: { 'claude/channel': {} },
+      experimental: {
+        'claude/channel': {},
+        // Permission-relay opt-in: we authenticate repliers via
+        // discord-adapter's access control (allowFrom gate).
+        'claude/channel/permission': {},
+      },
     },
   }
+)
+
+// --- Permission relay: CC → bridge → discord-adapter → Discord DM ---
+mcp.setNotificationHandler(
+  z.object({
+    method: z.literal('notifications/claude/channel/permission_request'),
+    params: z.object({
+      request_id: z.string(),
+      tool_name: z.string(),
+      description: z.string(),
+      input_preview: z.string(),
+    }),
+  }),
+  async ({ params }) => {
+    const { request_id, tool_name, description, input_preview } = params
+    try {
+      const resp = await fetch(`http://127.0.0.1:${OUTBOUND_PORT}/permission`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id, tool_name, description, input_preview }),
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '(no body)')
+        process.stderr.write(`agent-com-bridge: permission forward failed (HTTP ${resp.status}): ${text}\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-com-bridge: permission forward failed: ${err}\n`)
+    }
+  },
 )
 
 // HTTP server: receives POST with message payload, pushes to session
@@ -36,6 +72,34 @@ const httpServer = Bun.serve({
       return new Response('Method not allowed', { status: 405 })
     }
 
+    const url = new URL(req.url)
+
+    // --- Permission response from discord-adapter ---
+    if (url.pathname === '/permission-response') {
+      try {
+        const body = await req.json() as { request_id: string; behavior: 'allow' | 'deny' }
+        if (!body.request_id || !body.behavior) {
+          return new Response(JSON.stringify({ error: 'request_id and behavior required' }), {
+            status: 400, headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        await mcp.notification({
+          method: 'notifications/claude/channel/permission',
+          params: { request_id: body.request_id, behavior: body.behavior },
+        })
+        process.stderr.write(`agent-com-bridge: permission ${body.behavior} for ${body.request_id}\n`)
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        process.stderr.write(`agent-com-bridge: permission-response error: ${err}\n`)
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // --- Regular message injection (default path: /) ---
     try {
       const body = await req.json() as {
         content: string
