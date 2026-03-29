@@ -1,202 +1,196 @@
-# agent-comms-mcp
+# agent-com
 
-Agent-to-agent communication MCP plugin for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+> Push-based agent-to-agent communication for Claude Code
 
-Enables bot-to-bot messaging without platform restrictions (e.g., Discord's `msg.author.bot` filter). Messages are stored in PostgreSQL, with optional forwarding to Discord, Telegram, Slack, and LINE for human visibility.
+![demo](demo.gif)
 
-## Features
+**agent-com** is a unified communication plugin that enables real-time, push-based messaging between Claude Code sessions. Human-to-bot, bot-to-bot -- all messages flow through the same channel, delivered instantly without polling.
 
-- **MCP-native** — Works as a Claude Code `--channels` plugin
-- **PostgreSQL storage** — All messages persisted, searchable, backed up
-- **Inbox signals** — Lightweight file-based notifications (no message data in files)
-- **Multi-platform forwarding** — Discord, Telegram, Slack, LINE
-- **Platform-friendly design** — Respects each platform's rules and limits (see below)
-- **Loop detection** — Prevents infinite bot-to-bot loops (depth + rate limiting)
-- **Rate limiting** — Configurable per-agent message rate
-- **Channel retention** — Per-channel auto-delete (like Telegram's auto-delete timer)
-- **Auth tokens** — Optional authentication for multi-machine deployments
-- **Single config file** — Everything in one `config.json`
+## Why agent-com?
 
-## Platform-Friendly Design
+Existing solutions require LLMs to actively poll for messages. If the LLM doesn't call a tool to check, it never sees incoming messages. **agent-com solves this fundamentally:**
 
-This plugin is designed to be a good citizen on every platform it integrates with. We actively prevent behaviors that platform operators flag as abusive.
+| | Pull-based (polling) | agent-com (push) |
+|---|---|---|
+| Message delivery | LLM must call a tool to check | Automatically injected into session |
+| Latency | Depends on poll interval | Near-instant via Webhook channel |
+| Reliability | Messages missed if LLM forgets to check | Every message delivered |
 
-### Safety Measures
+**Built-in safety for production use:**
 
-| Protection | Description | Protects Against |
-|------------|-------------|------------------|
-| **Rate limiting** | Configurable max messages per minute per agent | API rate limit violations |
-| **Burst control** | Minimum 500ms between outbound messages | Rapid-fire spam detection |
-| **Duplicate detection** | Same content to same target within 10s is blocked | Accidental double-sends |
-| **Loop detection** | Depth limit (10) + time-window counter (20/5min) | Infinite bot-to-bot loops |
-| **Content sanitization** | `@everyone`, `@here`, `@channel` automatically removed | Mass-mention abuse |
-| **Platform-aware truncation** | Messages auto-truncated to platform limits | API errors from oversized messages |
-| **Exponential backoff** | Failed webhook retries: 1s → 2s → 4s → ... → stop after 5 failures | Ban from repeated failed requests |
-| **Send queue** | Outbound messages queued and spaced, not sent simultaneously | Burst detection by platforms |
-
-### Per-Platform Limits
-
-| Platform | Max Message Length | Rate Limit Respected |
-|----------|-------------------|---------------------|
-| Discord | 2,000 chars | Webhook: 30 req/min |
-| Telegram | 4,096 chars | Bot API: 30 msg/sec |
-| Slack | 40,000 chars | Webhook: 1 req/sec |
-| LINE | 5,000 chars | Push API: rate varies |
-
-### What We Don't Do
-
-- ❌ No mass mentions (`@everyone`, `@here`)
-- ❌ No message flooding (burst-controlled)
-- ❌ No infinite loops (multi-layer detection)
-- ❌ No retry storms (exponential backoff)
-- ❌ No oversized messages (auto-truncation)
-- ❌ No duplicate spam (content-hash dedup)
+- **HMAC-SHA256 authentication** -- Verify message origin with shared-secret signing
+- **Rate limiting** -- 30 msg/min/agent, persisted in PostgreSQL (survives restarts)
+- **Loop detection** -- Depth limits + exchange counters prevent infinite bot-to-bot loops
+- **Access control** -- Per-channel allowlists and mention requirements
+- **Content sanitization** -- `@everyone` / `@here` automatically stripped
 
 ## Quick Start
 
-### Prerequisites
-
-- [Bun](https://bun.sh/) v1.0+
-- PostgreSQL 14+
-
-### Setup
+### 1. Install
 
 ```bash
-# Clone
 git clone https://github.com/watchout/agent-comms-mcp.git
 cd agent-comms-mcp
-
-# Install dependencies
 bun install
+```
 
-# Create database
-createdb agent_comms
+### 2. Configure
 
-# Configure
-cp config.example.json config.json
-# Edit config.json with your settings
+```bash
+export AGENT_ID=my-bot
+export DATABASE_URL=postgresql://localhost/agent_comms
 
-# Run migrations
+# Initialize database
 bun run migrate
-
-# Test
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | AGENT_ID=test bun server.ts
 ```
 
-### Use with Claude Code
+Or use `config.json`:
 
-```bash
-claude --channels plugin:agent-comms@local --dangerously-skip-permissions
+```json
+{
+  "agent_id": "my-bot",
+  "database_url": "postgresql://localhost/agent_comms"
+}
 ```
 
-Or with environment overrides:
+### 3. Launch
 
 ```bash
-AGENT_ID=cto claude --channels plugin:agent-comms@local --dangerously-skip-permissions
+# Start with Claude Code (push notifications enabled)
+claude --dangerously-load-development-channels server:agent-com-bridge \
+       --mcp agent-comms
+
+# In a separate terminal: start the message listener
+bun scripts/listener.ts
+```
+
+That's it. Messages sent to your agent are now automatically injected into the session.
+
+## How It Works
+
+```
+Agent A calls send_message(to: "agent-b", content: "hello")
+  → DB INSERT + pg_notify('agent_inbox')
+  → Listener receives NOTIFY
+  → HTTP POST to Agent B's Webhook bridge
+  → Claude Code session receives <channel> message automatically
+  → Agent B sees and responds immediately
+```
+
+No polling. No tool calls needed to receive. Messages appear instantly.
+
+## Features
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `send_message` | Send a message to another agent |
+| `fetch_messages` | Retrieve channel history |
+| `check_inbox` | Re-check history (push handles delivery automatically) |
+| `list_agents` | Discover registered agents and their status |
+
+### Security
+
+| Mechanism | Description |
+|-----------|-------------|
+| **HMAC authentication** | Shared-secret signing with replay protection (5-min window) |
+| **Rate limiting** | Configurable per-agent limits, DB-persisted |
+| **Loop detection** | Depth limit (10) + exchange counter (20/5min window) |
+| **Duplicate detection** | Content-hash dedup within 10-second window |
+| **Content sanitization** | Mass-mention patterns automatically removed |
+| **Burst control** | 500ms minimum interval between outbound messages |
+
+### Multi-Platform Adapters
+
+agent-com uses a unified adapter layer. Each platform translates to/from a common message format:
+
+| Platform | Status | Max Message Length |
+|----------|--------|-------------------|
+| Discord | Available | 2,000 chars |
+| Telegram | Planned | 4,096 chars |
+| Slack | Planned | 40,000 chars |
+| LINE | Planned | 5,000 chars |
+
+### Database Optional
+
+| Mode | Features |
+|------|----------|
+| **With PostgreSQL** | Full features: persistent rate limits, loop counters, message history, agent discovery |
+| **Without PostgreSQL** | File-based fallback: in-memory safety, platform history for messages |
+
+## Architecture
+
+```
+Unified Plugin (agent-com)
+├── UI Adapter Layer (swappable)
+│   ├── Discord Adapter
+│   ├── Slack Adapter (planned)
+│   ├── Telegram Adapter (planned)
+│   └── LINE Adapter (planned)
+│
+├── Communication Bus (shared)
+│   ├── Message Routing
+│   ├── Access Control (allowlists, mention rules)
+│   ├── Push Notifications (Webhook channel)
+│   └── Safety Mechanisms (rate limit, loop detection, HMAC)
+│
+└── MCP Management Tools
+    └── send_message / fetch_messages / check_inbox / list_agents
 ```
 
 ## Configuration
 
-All settings live in `config.json`:
+### config.json
 
 ```json
 {
-  "agent_id": "cto",
+  "agent_id": "my-bot",
   "database_url": "postgresql://localhost/agent_comms",
-
-  "channels": {
-    "approvals":   { "retention_days": null, "description": "Permanent" },
-    "dev-chat":    { "retention_days": 30, "description": "Auto-delete after 30 days" }
-  },
-
   "rate_limit": { "max_per_minute": 30 },
-  "loop_detection": { "max_depth": 10, "max_count": 20, "window_seconds": 300 },
-  "auth": { "token": "your-secret-token-here" },
-
-  "forwarding": {
-    "discord": { "webhook_url": "https://discord.com/api/webhooks/..." },
-    "telegram": { "bot_token": "123:ABC...", "chat_id": "-100..." }
+  "loop_detection": {
+    "max_depth": 10,
+    "max_count": 20,
+    "window_seconds": 300
+  },
+  "auth": {
+    "mode": "warn",
+    "secret_file": "~/.agent-com/secret",
+    "replay_window_seconds": 300
   }
 }
 ```
 
-Environment variables override config values:
-- `AGENT_ID` — Agent identifier
-- `DATABASE_URL` — PostgreSQL connection string
-- `AGENT_COMMS_TOKEN` — Auth token
-- `AGENT_COMMS_CONFIG` — Path to config file
-- `DISCORD_WEBHOOK_URL` — Discord webhook for forwarding
-- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — Telegram forwarding
+### Environment Variables
 
-## Tools
+| Variable | Description |
+|----------|-------------|
+| `AGENT_ID` | Agent identifier |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `WEBHOOK_PORT` | Webhook bridge port (default: 8789) |
+| `AGENT_COMMS_SECRET` | HMAC shared secret (hex-encoded) |
 
-### send_message
-
-Send a message to another agent.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `to` | Yes | Target agent ID |
-| `channel` | Yes | Logical channel name |
-| `content` | Yes | Message content |
-| `message_type` | No | `instruction`, `report`, `approval`, `chat` |
-| `reply_to` | No | Message ID to reply to |
-| `depth` | No | Conversation depth (loop detection) |
-| `metadata` | No | Additional JSON metadata |
-| `auth_token` | No | Auth token (if configured) |
-
-### fetch_messages
-
-Fetch recent messages from a channel.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `channel` | Yes | Channel name |
-| `limit` | No | Max messages (default: 20, max: 100) |
-| `since` | No | ISO timestamp — messages after this time |
-
-### check_inbox
-
-Check for new messages addressed to this agent.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `limit` | No | Max messages (default: 20) |
-
-## Maintenance
-
-### Daily cleanup (cron)
+## Development
 
 ```bash
-# Delete expired messages based on retention policy
-0 4 * * * bun /path/to/agent-comms-mcp/db/cleanup.ts
+# Run all tests
+bun test tests/
 
-# Backup database
-30 3 * * * bash /path/to/agent-comms-mcp/scripts/backup-to-conoha.sh
+# Run with watch mode
+bun run dev
+
+# Run database migrations
+bun run migrate
 ```
-
-### Manual cleanup
-
-```bash
-bun db/cleanup.ts
-```
-
-## Design
-
-```
-Agent A ──→ MCPPlugin ──→ PostgreSQL (source of truth)
-                │              │
-                ├──→ inbox/ signal (lightweight notification)
-                ├──→ Discord webhook (optional, for human visibility)
-                └──→ Telegram API (optional, for notifications)
-
-Agent B ──→ check_inbox ──→ reads signals → fetches from DB
-```
-
-Inspired by:
-- **Discord**: DB as single source of truth, Gateway push for realtime, REST API for history
-- **Telegram**: Per-channel auto-delete timers, client-side caching
 
 ## License
 
 MIT
+
+---
+
+## 日本語ドキュメント
+
+詳細な仕様書は [docs/SSOT.md](docs/SSOT.md) を参照してください。
+
+agent-comは、Claude Codeセッション間のpush型エージェント通信を実現する統合プラグインです。Webhookチャネル方式により、ポーリング不要でメッセージがセッションに自動注入されます。

@@ -508,12 +508,13 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - **注記:** MCP通知方式はchannel plugin allowlist制約により単独では機能しない。Phase 4でhook方式に移行
 
 ### Phase 4: Webhookチャネルによるpush型通知
-- [ ] Webhook MCPサーバー（agent-com-bridge.ts）作成
-- [ ] send_messageにpg_notify追加
-- [ ] リスナースクリプト（listener.ts）作成
-- [ ] 起動コマンド変更（--dangerously-load-development-channels追加）
-- [ ] 実地テスト（CTO↔Dev Bot間push通知確認）
-- [ ] 全botの起動コマンド更新
+- [x] Webhook MCPサーバー（agent-com-bridge.ts）作成
+- [x] send_messageにpg_notify追加
+- [x] リスナースクリプト（listener.ts）作成
+- [x] 起動コマンド変更（--dangerously-load-development-channels追加）
+- [x] 実地テスト（CTO↔Dev Bot間push通知確認）
+- [x] Agent ID正規化対応
+- [ ] 全botの起動コマンド更新（docs/operations/discord-bot-config.md）
 
 ### Phase 5: マルチプラットフォーム
 - [ ] Slackアダプター
