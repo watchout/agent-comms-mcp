@@ -2,6 +2,9 @@
   "name": "agent-comms-mcp",
   "version": "0.1.0",
   "description": "Agent-to-agent communication MCP plugin for Claude Code",
+  "repository": "https://github.com/watchout/agent-comms-mcp.git",
+  "author": "IYASAKA Inc.",
+  "license": "MIT",
   "scripts": {
     "start": "bun install --no-summary && bun server.ts",
     "test": "bun test tests/",
