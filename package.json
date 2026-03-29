@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "discord.js": "^14.25.1",
     "pg": "^8.13.3"
   },
   "devDependencies": {
