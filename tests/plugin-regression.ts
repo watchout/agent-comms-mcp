@@ -643,11 +643,9 @@ describe('10. Webhook Channel Push (Phase 4)', () => {
     expect(LISTENER_SOURCE).toContain("LISTEN agent_inbox")
   })
 
-  test('listener has default port mappings per SSOT', () => {
-    expect(LISTENER_SOURCE).toContain('cto: 8789')
-    expect(LISTENER_SOURCE).toContain('hotel: 8790')
-    expect(LISTENER_SOURCE).toContain('vice: 8796')
-    expect(LISTENER_SOURCE).toContain('auditor: 8797')
+  test('listener supports AGENT_PORTS env for port mapping', () => {
+    expect(LISTENER_SOURCE).toContain('AGENT_PORTS')
+    expect(LISTENER_SOURCE).toContain('DEFAULT_PORTS')
   })
 
   test('listener delivers via HTTP POST to bot port', () => {

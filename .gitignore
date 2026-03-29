@@ -3,3 +3,6 @@ node_modules/
 config.json
 logs/
 *.log
+.mcp.json.bak
+.claude/
+agent-com-dev-state.md

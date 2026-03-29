@@ -11,25 +11,15 @@
  * Env:
  *   DATABASE_URL  — PostgreSQL connection string
  *   AGENT_PORTS   — JSON object mapping agent_id → webhook port
- *                   Default ports per SSOT §4.4:
- *                   cto=8789, hotel=8790, haishin=8791, wbs=8792,
- *                   nyusatsu=8793, adf=8794, agent-com=8795, vice=8796, auditor=8797
+ *                   Example: {"bot-a":8789,"bot-b":8790}
+ *                   See SSOT §4.4 for default port assignments
  */
 
 import { Client } from 'pg'
 
 // --- Port mapping ---
-const DEFAULT_PORTS: Record<string, number> = {
-  cto: 8789,
-  hotel: 8790,
-  haishin: 8791,
-  wbs: 8792,
-  nyusatsu: 8793,
-  adf: 8794,
-  'agent-com': 8795,
-  vice: 8796,
-  auditor: 8797,
-}
+// Override with AGENT_PORTS env. Example: AGENT_PORTS='{"bot-a":8789,"bot-b":8790}'
+const DEFAULT_PORTS: Record<string, number> = {}
 
 const agentPorts: Record<string, number> = process.env.AGENT_PORTS
   ? JSON.parse(process.env.AGENT_PORTS)

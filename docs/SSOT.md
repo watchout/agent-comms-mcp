@@ -363,16 +363,16 @@ DBが設定されていない場合：
 
 ```json
 {
-  "agent_id": "cto",
+  "agent_id": "my-bot",
   "database_url": "postgresql://localhost/agent_comms",
   "channels": {
-    "ceo-cto": {
+    "general": {
       "retention_days": null,
-      "description": "CEO-CTO戦略チャンネル"
+      "description": "General comms (permanent)"
     },
-    "hotel-kanri": {
+    "dev-chat": {
       "retention_days": 30,
-      "description": "Hotel Dev通信"
+      "description": "Dev team comms"
     }
   },
   "rate_limit": { "max_per_minute": 30 },
