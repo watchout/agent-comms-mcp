@@ -37,6 +37,16 @@ const agentPorts: Record<string, number> = process.env.AGENT_PORTS
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 
+// --- Agent ID normalization ---
+export function normalizeAgentId(id: string, ports: Record<string, number>): string {
+  if (ports[id]) return id
+  // prefix match: "agent-com-dev" → "agent-com"
+  for (const key of Object.keys(ports)) {
+    if (id.startsWith(key)) return key
+  }
+  return id
+}
+
 // --- DB connection with reconnect ---
 let client: Client | null = null
 let reconnectAttempts = 0
@@ -72,8 +82,11 @@ async function connect(): Promise<void> {
     if (recent.rows.length > 0) {
       process.stderr.write(`listener: catching up ${recent.rows.length} recent messages\n`)
       for (const row of recent.rows) {
-        if (row.target && agentPorts[row.target]) {
-          await deliverToBot(row.target, row.id)
+        if (row.target) {
+          const normalized = normalizeAgentId(row.target, agentPorts)
+          if (agentPorts[normalized]) {
+            await deliverToBot(normalized, row.id)
+          }
         }
       }
     }
@@ -87,7 +100,8 @@ async function connect(): Promise<void> {
 
     try {
       const payload = JSON.parse(msg.payload) as { to: string; message_id: string }
-      await deliverToBot(payload.to, payload.message_id)
+      const normalized = normalizeAgentId(payload.to, agentPorts)
+      await deliverToBot(normalized, payload.message_id)
     } catch (err) {
       process.stderr.write(`listener: error processing notification: ${err}\n`)
     }

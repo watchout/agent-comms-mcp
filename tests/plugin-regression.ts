@@ -663,4 +663,17 @@ describe('10. Webhook Channel Push (Phase 4)', () => {
     expect(LISTENER_SOURCE).toContain('scheduleReconnect')
     expect(LISTENER_SOURCE).toContain('reconnectAttempts')
   })
+
+  test('listener has agent ID normalization', () => {
+    expect(LISTENER_SOURCE).toContain('normalizeAgentId')
+  })
+
+  test('listener normalizes agent IDs in notification handler', () => {
+    // normalizeAgentId must be called before deliverToBot in the notification path
+    const notifSection = LISTENER_SOURCE.substring(
+      LISTENER_SOURCE.indexOf("client.on('notification'"),
+      LISTENER_SOURCE.indexOf('function scheduleReconnect')
+    )
+    expect(notifSection).toContain('normalizeAgentId')
+  })
 })
