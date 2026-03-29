@@ -177,6 +177,13 @@ async function deliverToBridge(msg: Message): Promise<void> {
   }
 }
 
+// --- Permission relay ---
+// Matches "yes xxxxx" or "no xxxxx" (5-char request_id)
+const PERMISSION_REPLY_RE = /^(yes|no)\s+([a-z]{5})$/i
+
+// Stores pending permission requests: request_id → { tool_name }
+const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
+
 // --- Runtime (only when executed directly, not imported for tests) ---
 if (IS_MAIN && TOKEN) {
   const client = new Client({
@@ -214,54 +221,108 @@ if (IS_MAIN && TOKEN) {
   }
 
   const outboundServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    if (req.method !== 'POST' || req.url !== '/send') {
-      res.writeHead(404, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'Not found. Use POST /send' }))
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Method not allowed' }))
       return
     }
 
-    try {
-      const body = JSON.parse(await readBody(req))
-      const { chat_id, text, reply_to } = body as { chat_id: string; text: string; reply_to?: string }
+    // --- POST /permission: receive permission request from bridge, DM to allowFrom users ---
+    if (req.url === '/permission') {
+      try {
+        const body = JSON.parse(await readBody(req))
+        const { request_id, tool_name, description, input_preview } = body as {
+          request_id: string; tool_name: string; description: string; input_preview: string
+        }
 
-      if (!chat_id || !text) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'chat_id and text are required' }))
-        return
+        if (!request_id || !tool_name) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'request_id and tool_name are required' }))
+          return
+        }
+
+        pendingPermissions.set(request_id, { tool_name, description, input_preview })
+
+        const access = loadAccess(ACCESS_FILE)
+        const text =
+          `🔐 Permission: **${tool_name}**\n` +
+          `\`${request_id}\`\n\n` +
+          `${description}\n\n` +
+          `Reply **yes ${request_id}** to allow or **no ${request_id}** to deny.`
+
+        let sent = 0
+        for (const userId of access.allowFrom) {
+          void (async () => {
+            try {
+              const user = await client.users.fetch(userId)
+              await user.send(text)
+              sent++
+            } catch (e) {
+              process.stderr.write(`discord-adapter: permission DM to ${userId} failed: ${e}\n`)
+            }
+          })()
+        }
+
+        process.stderr.write(`discord-adapter: permission request ${request_id} (${tool_name}) sent to ${access.allowFrom.length} user(s)\n`)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, request_id }))
+      } catch (err) {
+        process.stderr.write(`discord-adapter: permission endpoint error: ${err}\n`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err) }))
       }
+      return
+    }
 
-      const channel = await client.channels.fetch(chat_id)
-      if (!channel || !('send' in channel)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: `Channel ${chat_id} not found or not text-based` }))
-        return
-      }
+    // --- POST /send: send message to a channel ---
+    if (req.url === '/send') {
+      try {
+        const body = JSON.parse(await readBody(req))
+        const { chat_id, text, reply_to } = body as { chat_id: string; text: string; reply_to?: string }
 
-      const textChannel = channel as TextChannel | ThreadChannel
+        if (!chat_id || !text) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'chat_id and text are required' }))
+          return
+        }
 
-      // Truncate to Discord's 2000 char limit
-      const truncated = text.length > 2000 ? text.slice(0, 1990) + '…(truncated)' : text
+        const channel = await client.channels.fetch(chat_id)
+        if (!channel || !('send' in channel)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `Channel ${chat_id} not found or not text-based` }))
+          return
+        }
 
-      let sentMsg
-      if (reply_to) {
-        try {
-          const refMsg = await textChannel.messages.fetch(reply_to)
-          sentMsg = await refMsg.reply(truncated)
-        } catch {
-          // If reply target not found, send as normal message
+        const textChannel = channel as TextChannel | ThreadChannel
+
+        // Truncate to Discord's 2000 char limit
+        const truncated = text.length > 2000 ? text.slice(0, 1990) + '…(truncated)' : text
+
+        let sentMsg
+        if (reply_to) {
+          try {
+            const refMsg = await textChannel.messages.fetch(reply_to)
+            sentMsg = await refMsg.reply(truncated)
+          } catch {
+            // If reply target not found, send as normal message
+            sentMsg = await textChannel.send(truncated)
+          }
+        } else {
           sentMsg = await textChannel.send(truncated)
         }
-      } else {
-        sentMsg = await textChannel.send(truncated)
-      }
 
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, message_id: sentMsg.id }))
-    } catch (err) {
-      process.stderr.write(`discord-adapter: outbound error: ${err}\n`)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: String(err) }))
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, message_id: sentMsg.id }))
+      } catch (err) {
+        process.stderr.write(`discord-adapter: outbound error: ${err}\n`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err) }))
+      }
+      return
     }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'Not found. Use POST /send or POST /permission' }))
   })
 
   outboundServer.listen(OUTBOUND_PORT, '127.0.0.1', () => {
@@ -307,6 +368,28 @@ async function handleInbound(msg: Message, client: Client): Promise<void> {
   )
 
   if (result.action === 'drop') return
+
+  // Permission-reply intercept: "yes xxxxx" or "no xxxxx" in DMs
+  // from allowlisted users triggers permission response instead of
+  // relaying as a regular chat message.
+  const permMatch = PERMISSION_REPLY_RE.exec(msg.content)
+  if (permMatch) {
+    const request_id = permMatch[2]!.toLowerCase()
+    const behavior = permMatch[1]!.toLowerCase() === 'yes' ? 'allow' : 'deny'
+    try {
+      await fetch(`http://127.0.0.1:${WEBHOOK_PORT}/permission-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id, behavior }),
+      })
+      const emoji = behavior === 'allow' ? '✅' : '❌'
+      await msg.react(emoji).catch(() => {})
+      pendingPermissions.delete(request_id)
+    } catch (err) {
+      process.stderr.write(`discord-adapter: permission response failed: ${err}\n`)
+    }
+    return
+  }
 
   // Show "Bot is typing..." indicator while processing
   await msg.channel.sendTyping()
