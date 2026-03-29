@@ -198,37 +198,48 @@ interface AccessConfig {
 | DBあり | `last_read_at`テーブルで管理 | 本番運用 |
 | DBなし | `.agent-com/last-read/{channel}`ファイル | 最小構成 |
 
-### 4.4 push通知（セッション注入）
+### 4.4 push通知（Webhookチャネル方式）
 
-- channel pluginとして動作し、メッセージ着信時に`<channel>`タグをセッションに注入
-- LLMがツールを呼ぶ必要なし（決定論的）
-- Discordプラグインと同じ仕組みを通信バス層で実現
+Webhookチャネル（Claude Code Channels Reference記載の公式方式）を使用。
+`--dangerously-load-development-channels` でallowlistをバイパスし、
+ローカルHTTPエンドポイントでセッションに直接注入する。
 
-**DBポーリング方式（Phase 3）:**
+**アーキテクチャ:**
+```
+send_message → DB INSERT → pg_notify('agent_inbox', target_agent_id)
+  → リスナー（常駐）がNOTIFY受信
+  → DBから未読メッセージ取得
+  → curl POST http://localhost:{port} -d "メッセージ"
+  → Webhook MCP server（claude/channel capability）
+  → notifications/claude/channel → セッションに自動注入
+```
 
-- ポーリング方式: setIntervalでDBを3秒間隔で監視
-- 対象: agent_messagesテーブルから自分宛（`metadata->>'to' = config.agent_id`）の未読メッセージ
-- 最終読み取り位置: メモリ上のlastPolledAtタイムスタンプ（起動時=現在時刻）
-- MCP通知フォーマット:
-  ```typescript
-  server.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content: messageText,
-      meta: {
-        chat_id: channel,
-        message_id: messageUUID,
-        user: senderAgentId,
-        user_id: senderAgentId,
-        ts: createdAt,  // ISO 8601
-        source: 'agent-comms'
-      }
-    }
-  })
-  ```
-- バッチサイズ: 最大10件/回
-- 重複防止: 注入済みメッセージIDをメモリSet（processedIds）で保持
-- エラー時: stderrログ出力、次回ポーリングで自動リトライ
+**Webhook MCP server（agent-com-bridge）:**
+- 各botに1つ配置
+- claude/channel capabilityを宣言
+- ローカルHTTPポートでPOST受信
+- 受信内容をMCP通知としてセッションに注入
+
+**ポート割当:**
+
+| bot | ポート |
+|-----|-------|
+| CTO | 8789 |
+| Hotel | 8790 |
+| Haishin | 8791 |
+| WBS | 8792 |
+| Nyusatsu | 8793 |
+| ADF | 8794 |
+| agent-com | 8795 |
+| Vice | 8796 |
+| Auditor | 8797 |
+
+**pg_notify:**
+- send_message実行時、DB INSERT後に `pg_notify('agent_inbox', target_agent_id)` を発行
+
+**リスナー:**
+- 1プロセスで全bot分のNOTIFYを監視
+- 対象botのポートにcurl POSTで配送
 
 ---
 
@@ -407,12 +418,13 @@ claude --channels agent-com:slack --env SLACK_BOT_TOKEN=xxx
 claude --channels agent-com:discord agent-com:slack
 ```
 
-### 8.2 現在の起動コマンド（移行期）
+### 8.2 現在の起動コマンド（Phase 4: Webhookチャネル方式）
 
 ```bash
-# channel plugin化前の暫定運用
-claude --channels plugin:discord@claude-plugins-official \
-       --mcp-config .mcp.json
+# Phase 4起動コマンド（Webhookチャネル方式）
+claude --dangerously-load-development-channels server:agent-com-bridge \
+       --channels plugin:discord@claude-plugins-official \
+       --dangerously-skip-permissions
 ```
 
 ---
@@ -487,17 +499,21 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - [ ] テスト追加
 
 ### Phase 3: push型通知（channel plugin化の基盤）
-- [ ] DBポーリング機構の実装（3秒間隔、setInterval）
-- [ ] notifications/claude/channel MCP通知送信
-- [ ] 重複注入防止（processedIds Set）
-- [ ] ポーリングのライフサイクル管理（起動時start、shutdown時clear）
-- [ ] check_inboxツール説明文の更新（補助ツールへ格下げ）
+- [x] DBポーリング機構の実装（3秒間隔、setInterval）
+- [x] notifications/claude/channel MCP通知送信
+- [x] 重複注入防止（processedIds Set）
+- [x] ポーリングのライフサイクル管理（起動時start、shutdown時clear）
+- [x] check_inboxツール説明文の更新（補助ツールへ格下げ）
 - [ ] 実地テスト（CTO↔Dev Bot間push通知確認）
+- **注記:** MCP通知方式はchannel plugin allowlist制約により単独では機能しない。Phase 4でhook方式に移行
 
-### Phase 4: プラグイン統合
-- [ ] Discord plugin機能の取り込み（UIアダプター化）
-- [ ] 1プラグインでの完全動作
-- [ ] DBなしモードの実装・テスト
+### Phase 4: Webhookチャネルによるpush型通知
+- [ ] Webhook MCPサーバー（agent-com-bridge.ts）作成
+- [ ] send_messageにpg_notify追加
+- [ ] リスナースクリプト（listener.ts）作成
+- [ ] 起動コマンド変更（--dangerously-load-development-channels追加）
+- [ ] 実地テスト（CTO↔Dev Bot間push通知確認）
+- [ ] 全botの起動コマンド更新
 
 ### Phase 5: マルチプラットフォーム
 - [ ] Slackアダプター
@@ -657,3 +673,5 @@ bun agent-com check-plugin
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
 | 2026-03-28 | 追記：§5レート制限/ループ検出のDB永続化、§12エージェントID管理、§13 bot間認証、§14退行テスト |
 | 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 check_inbox説明更新 |
+| 2026-03-29 | 更新：§11 Phase 4詳細化（channel plugin化）、§8.2 起動コマンドをPhase 4形式に更新 |
+| 2026-03-29 | 変更：Phase 4をWebhookチャネル方式に変更。§4.4 push通知仕様を全面改訂（LISTEN/NOTIFY + Webhook MCP server）。§8.2 起動コマンド更新 |

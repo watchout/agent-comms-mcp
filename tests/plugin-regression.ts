@@ -533,3 +533,134 @@ describe('9. Push Notification Polling', () => {
     expect(SERVER_SOURCE).toContain('Messages are automatically pushed to your session')
   })
 })
+
+// --- Test 10: Webhook Channel Push (Phase 4) ---
+describe('10. Webhook Channel Push (Phase 4)', () => {
+  const BRIDGE_SOURCE = readFileSync(join(PROJECT_ROOT, 'agent-com-bridge.ts'), 'utf-8')
+  const LISTENER_SOURCE = readFileSync(join(PROJECT_ROOT, 'scripts', 'listener.ts'), 'utf-8')
+
+  let client: Client | null = null
+  const testChannel = `__test_webhook_${Date.now()}`
+
+  beforeAll(async () => {
+    try {
+      const configPath = join(PROJECT_ROOT, 'config.json')
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+      const dbUrl = process.env.DATABASE_URL ?? config.database_url ?? 'postgresql://localhost/agent_comms'
+      client = new Client({ connectionString: dbUrl })
+      await client.connect()
+    } catch {
+      client = null
+    }
+  })
+
+  afterAll(async () => {
+    if (client) {
+      await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [testChannel]).catch(() => {})
+      await client.end().catch(() => {})
+    }
+  })
+
+  // --- agent-com-bridge.ts tests ---
+  test('bridge declares claude/channel capability', () => {
+    expect(BRIDGE_SOURCE).toContain("'claude/channel'")
+  })
+
+  test('bridge uses notifications/claude/channel method', () => {
+    expect(BRIDGE_SOURCE).toContain("method: 'notifications/claude/channel'")
+  })
+
+  test('bridge includes agent-comms as default source in meta', () => {
+    expect(BRIDGE_SOURCE).toContain("'agent-comms'")
+    expect(BRIDGE_SOURCE).toContain('source:')
+  })
+
+  test('bridge listens on 127.0.0.1 only', () => {
+    expect(BRIDGE_SOURCE).toContain("hostname: '127.0.0.1'")
+  })
+
+  test('bridge uses WEBHOOK_PORT env with default 8789', () => {
+    expect(BRIDGE_SOURCE).toContain('WEBHOOK_PORT')
+    expect(BRIDGE_SOURCE).toContain("'8789'")
+  })
+
+  test('bridge handles POST requests with content and meta', () => {
+    expect(BRIDGE_SOURCE).toContain("req.method !== 'POST'")
+    expect(BRIDGE_SOURCE).toContain('body.content')
+    expect(BRIDGE_SOURCE).toContain('body.meta')
+  })
+
+  // --- server.ts pg_notify tests ---
+  test('server.ts calls pg_notify on send_message', () => {
+    expect(SERVER_SOURCE).toContain("pg_notify('agent_inbox'")
+  })
+
+  test('pg_notify payload includes to and message_id', () => {
+    expect(SERVER_SOURCE).toContain('JSON.stringify({ to, message_id: id })')
+  })
+
+  test('pg_notify fires after DB INSERT (non-fatal on error)', () => {
+    // pg_notify should be wrapped in try/catch as non-fatal
+    const pgNotifySection = SERVER_SOURCE.substring(
+      SERVER_SOURCE.indexOf('pg_notify for Webhook'),
+      SERVER_SOURCE.indexOf('Signal + forward')
+    )
+    expect(pgNotifySection).toContain('try')
+    expect(pgNotifySection).toContain('catch')
+    expect(pgNotifySection).toContain('non-fatal')
+  })
+
+  test('pg_notify actually works (DB integration)', async () => {
+    if (!client) return
+
+    // Set up listener
+    const received: string[] = []
+    await client.query('LISTEN agent_inbox')
+    client.on('notification', (msg) => {
+      if (msg.channel === 'agent_inbox' && msg.payload) {
+        received.push(msg.payload)
+      }
+    })
+
+    // Fire pg_notify
+    const testPayload = JSON.stringify({ to: '__test_bot', message_id: '__test_id' })
+    await client.query(`SELECT pg_notify('agent_inbox', $1)`, [testPayload])
+
+    // Wait briefly for async notification delivery
+    await new Promise(r => setTimeout(r, 200))
+
+    expect(received.length).toBeGreaterThanOrEqual(1)
+    const parsed = JSON.parse(received[0])
+    expect(parsed.to).toBe('__test_bot')
+    expect(parsed.message_id).toBe('__test_id')
+
+    // Cleanup
+    await client.query('UNLISTEN agent_inbox')
+  })
+
+  // --- listener.ts tests ---
+  test('listener uses LISTEN agent_inbox', () => {
+    expect(LISTENER_SOURCE).toContain("LISTEN agent_inbox")
+  })
+
+  test('listener has default port mappings per SSOT', () => {
+    expect(LISTENER_SOURCE).toContain('cto: 8789')
+    expect(LISTENER_SOURCE).toContain('hotel: 8790')
+    expect(LISTENER_SOURCE).toContain('vice: 8796')
+    expect(LISTENER_SOURCE).toContain('auditor: 8797')
+  })
+
+  test('listener delivers via HTTP POST to bot port', () => {
+    expect(LISTENER_SOURCE).toContain("method: 'POST'")
+    expect(LISTENER_SOURCE).toContain('http://127.0.0.1:')
+  })
+
+  test('listener includes agent-comms source in delivery payload', () => {
+    expect(LISTENER_SOURCE).toContain("source: 'agent-comms'")
+  })
+
+  test('listener has reconnection logic', () => {
+    expect(LISTENER_SOURCE).toContain('scheduleReconnect')
+    expect(LISTENER_SOURCE).toContain('reconnectAttempts')
+  })
+})

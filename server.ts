@@ -873,6 +873,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       metadata: fullMetadata, depth: msgDepth,
     })
 
+    // pg_notify for Webhook channel push (Phase 4)
+    try {
+      const client = await tryGetDb()
+      if (client) {
+        await client.query(
+          `SELECT pg_notify('agent_inbox', $1)`,
+          [JSON.stringify({ to, message_id: id })]
+        )
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
+    }
+
     // Signal + forward
     sendInboxSignal(to, id, AGENT_ID, channel)
     forwardAll(AGENT_ID, channel, safeContent, message_type ?? 'chat')
