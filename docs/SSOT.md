@@ -543,10 +543,38 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - [ ] webhook bridgeへのHTTP POST配送
 - [ ] 既存Discordプラグインとの互換性テスト
 
-### Phase 5: マルチプラットフォーム
-- [ ] Slackアダプター
+### Phase 5: 統合アーキテクチャ（1プロセス・1接続）
+
+全アダプターとpush機構をagent-comms MCPサーバー1プロセスに統合。
+OSS公開はこのPhase完了時点。
+
+**設計:**
+```
+agent-comms MCP（1プロセス）
+├── core: DB（メッセージストア + ルーティング）
+├── adapters/
+│   ├── discord.ts   ← discord.js（1接続で全agent分）
+│   ├── telegram.ts  ← Telegram Bot API
+│   ├── slack.ts     ← Slack Web API
+│   └── line.ts      ← LINE Messaging API
+└── push: webhook bridge内蔵
+```
+
+**核心の変更:**
+- 1 Discord接続で全agentのメッセージをルーティング
+- channel_id → agent_id のマッピングテーブル
+- 別プロセス（listener, discord-adapter, bridge）を統合
+- npm start 1コマンドで起動
+
+**タスク:**
+- [ ] アダプター層のインターフェース定義
+- [ ] Discordアダプター統合（1接続・全agentルーティング）
+- [ ] webhook bridge内蔵化
+- [ ] listener統合（pg_notify受信をMCPプロセス内で処理）
+- [ ] channel→agentマッピングテーブル
+- [ ] npm start で全機能起動
 - [ ] Telegramアダプター
-- [ ] OSSパッケージとして公開
+- [ ] OSS公開（README + GIF + npm publish）
 
 ---
 
@@ -704,3 +732,4 @@ bun agent-com check-plugin
 | 2026-03-29 | 更新：§11 Phase 4詳細化（channel plugin化）、§8.2 起動コマンドをPhase 4形式に更新 |
 | 2026-03-29 | 変更：Phase 4をWebhookチャネル方式に変更。§4.4 push通知仕様を全面改訂（LISTEN/NOTIFY + Webhook MCP server）。§8.2 起動コマンド更新 |
 | 2026-03-29 | 追記：§3.2 Discordアダプター詳細仕様（受信/送信フロー、access制御）。§11 Phase 4.5追加 |
+| 2026-03-29 | 更新：§11 Phase 5を統合アーキテクチャ（1プロセス・1接続）に書き換え |

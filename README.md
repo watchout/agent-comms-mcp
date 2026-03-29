@@ -108,9 +108,9 @@ agent-com uses a unified adapter layer. Each platform translates to/from a commo
 | Platform | Status | Max Message Length |
 |----------|--------|-------------------|
 | Discord | Available | 2,000 chars |
-| Telegram | Planned | 4,096 chars |
-| Slack | Planned | 40,000 chars |
-| LINE | Planned | 5,000 chars |
+| Telegram | Accepting contributions — open an issue if interested | 4,096 chars |
+| Slack | Accepting contributions — open an issue if interested | 40,000 chars |
+| LINE | Accepting contributions — open an issue if interested | 5,000 chars |
 
 ### Database Optional
 

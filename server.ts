@@ -811,6 +811,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'reply',
+      description: 'Reply to a Discord channel via agent-com Discord adapter. Use this to post messages to Discord.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          chat_id: { type: 'string', description: 'Discord channel or thread ID' },
+          text: { type: 'string', description: 'Message text' },
+          reply_to: { type: 'string', description: 'Discord message ID to reply to (optional)' },
+        },
+        required: ['chat_id', 'text'],
+      },
+    },
+    {
       name: 'list_agents',
       description: 'List registered agents. Requires DB.',
       inputSchema: {
@@ -911,6 +924,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       `[${r.created_at}] ${r.author_id} → #${r.channel_id}: ${r.content}  (id: ${r.id})`
     ).join('\n\n')
     return { content: [{ type: 'text', text: `${rows.length} message(s):\n\n${text}` }] }
+  }
+
+  if (name === 'reply') {
+    const { chat_id, text, reply_to } = args as any
+    const outboundPort = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String((parseInt(process.env.WEBHOOK_PORT ?? '8795', 10)) + 1000), 10)
+
+    try {
+      const resp = await fetch(`http://127.0.0.1:${outboundPort}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id, text: sanitizeContent(text), reply_to }),
+      })
+      const result = await resp.json() as any
+      if (!resp.ok) {
+        return { content: [{ type: 'text', text: `Discord reply failed: ${result.error ?? resp.statusText}` }], isError: true }
+      }
+      return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.message_id})` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Discord reply failed: ${err}. Is discord-adapter running?` }], isError: true }
+    }
   }
 
   if (name === 'list_agents') {

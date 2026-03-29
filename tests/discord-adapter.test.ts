@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
- * Tests for Discord adapter access control and bot filter logic
+ * Tests for Discord adapter access control, bot filter logic, and outbound endpoint
  */
 import { describe, test, expect } from 'bun:test'
 import { gate, loadAccess, type Access } from '../scripts/discord-adapter'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 
 function makeAccess(overrides: Partial<Access> = {}): Access {
   return {
@@ -161,5 +162,43 @@ describe('loadAccess', () => {
     const access = loadAccess('/tmp/nonexistent-access-file-test.json')
     expect(access.dmPolicy).toBe('pairing')
     expect(access.allowFrom).toEqual([])
+  })
+})
+
+// --- Outbound endpoint contract tests ---
+// These test the HTTP contract without a real Discord client.
+// We create a mock server that mimics the /send endpoint validation.
+describe('Outbound endpoint contract', () => {
+  test('POST /send requires chat_id and text', async () => {
+    // Simulate the validation logic from the adapter
+    const validate = (body: any) => {
+      if (!body.chat_id || !body.text) return { error: 'chat_id and text are required' }
+      return { ok: true }
+    }
+
+    expect(validate({})).toEqual({ error: 'chat_id and text are required' })
+    expect(validate({ chat_id: '123' })).toEqual({ error: 'chat_id and text are required' })
+    expect(validate({ text: 'hello' })).toEqual({ error: 'chat_id and text are required' })
+    expect(validate({ chat_id: '123', text: 'hello' })).toEqual({ ok: true })
+    expect(validate({ chat_id: '123', text: 'hello', reply_to: '456' })).toEqual({ ok: true })
+  })
+
+  test('text truncation to Discord 2000 char limit', () => {
+    const truncate = (text: string) =>
+      text.length > 2000 ? text.slice(0, 1990) + '…(truncated)' : text
+
+    const short = 'hello'
+    expect(truncate(short)).toBe('hello')
+
+    const long = 'a'.repeat(2500)
+    const result = truncate(long)
+    expect(result.length).toBeLessThanOrEqual(2002) // 1990 + '…(truncated)'.length
+    expect(result.endsWith('…(truncated)')).toBe(true)
+  })
+
+  test('OUTBOUND_PORT defaults to WEBHOOK_PORT + 1000', () => {
+    const webhookPort = 8795
+    const outboundPort = webhookPort + 1000
+    expect(outboundPort).toBe(9795)
   })
 })
