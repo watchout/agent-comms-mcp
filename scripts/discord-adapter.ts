@@ -244,11 +244,18 @@ if (IS_MAIN && TOKEN) {
         pendingPermissions.set(request_id, { tool_name, description, input_preview })
 
         const access = loadAccess(ACCESS_FILE)
+        let prettyInput: string
+        try {
+          prettyInput = JSON.stringify(JSON.parse(input_preview), null, 2)
+        } catch {
+          prettyInput = input_preview
+        }
         const text =
-          `🔐 Permission: **${tool_name}**\n` +
-          `\`${request_id}\`\n\n` +
-          `${description}\n\n` +
-          `Reply **yes ${request_id}** to allow or **no ${request_id}** to deny.`
+          `🔐 **Permission Request**\n` +
+          `**Tool:** ${tool_name}\n` +
+          `**Description:** ${description}\n` +
+          `**Input:**\n\`\`\`\n${prettyInput}\n\`\`\`\n\n` +
+          `Reply **yes ${request_id}** to allow, **no ${request_id}** to deny.`
 
         let sent = 0
         for (const userId of access.allowFrom) {
