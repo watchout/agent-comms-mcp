@@ -15,6 +15,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 import { Client } from 'pg'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -103,6 +104,8 @@ function loadConfig(): Config {
 const config = loadConfig()
 const AGENT_ID = config.agent_id
 const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
+const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
+const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 const INBOX_SIGNAL_TTL_MS = 5 * 60 * 1000
 const GC_INTERVAL_MS = 5 * 60 * 1000
@@ -764,8 +767,18 @@ setInterval(gc, GC_INTERVAL_MS)
 
 // --- MCP Server ---
 const mcp = new Server(
-  { name: 'agent-comms', version: '1.1.0' },
-  { capabilities: { tools: {} } }
+  { name: 'agent-comms', version: '1.2.0' },
+  {
+    capabilities: {
+      tools: {},
+      experimental: {
+        'claude/channel': {},
+        // Permission-relay opt-in: repliers authenticated via
+        // discord-adapter's access control (allowFrom gate).
+        'claude/channel/permission': {},
+      },
+    },
+  }
 )
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -928,10 +941,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'reply') {
     const { chat_id, text, reply_to } = args as any
-    const outboundPort = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String((parseInt(process.env.WEBHOOK_PORT ?? '8795', 10)) + 1000), 10)
 
     try {
-      const resp = await fetch(`http://127.0.0.1:${outboundPort}/send`, {
+      const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id, text: sanitizeContent(text), reply_to }),
@@ -959,6 +971,120 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
 })
 
+// --- Permission relay: CC → server → discord-adapter → Discord DM ---
+mcp.setNotificationHandler(
+  z.object({
+    method: z.literal('notifications/claude/channel/permission_request'),
+    params: z.object({
+      request_id: z.string(),
+      tool_name: z.string(),
+      description: z.string(),
+      input_preview: z.string(),
+    }),
+  }),
+  async ({ params }) => {
+    const { request_id, tool_name, description, input_preview } = params
+    try {
+      const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/permission`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id, tool_name, description, input_preview }),
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '(no body)')
+        process.stderr.write(`agent-comms: permission forward failed (HTTP ${resp.status}): ${text}\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: permission forward failed: ${err}\n`)
+    }
+  },
+)
+
+// --- Integrated Bridge: HTTP server for push notifications + permission responses ---
+const bridgeServer = Bun.serve({
+  port: WEBHOOK_PORT,
+  hostname: '127.0.0.1',
+  async fetch(req) {
+    if (req.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 })
+    }
+
+    const url = new URL(req.url)
+
+    // Permission response from discord-adapter
+    if (url.pathname === '/permission-response') {
+      try {
+        const body = await req.json() as { request_id: string; behavior: 'allow' | 'deny' }
+        if (!body.request_id || !body.behavior) {
+          return new Response(JSON.stringify({ error: 'request_id and behavior required' }), {
+            status: 400, headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        await mcp.notification({
+          method: 'notifications/claude/channel/permission',
+          params: { request_id: body.request_id, behavior: body.behavior },
+        })
+        process.stderr.write(`agent-comms: permission ${body.behavior} for ${body.request_id}\n`)
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        process.stderr.write(`agent-comms: permission-response error: ${err}\n`)
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // Message injection (from listener or discord-adapter)
+    try {
+      const body = await req.json() as {
+        content: string
+        meta?: {
+          chat_id?: string
+          message_id?: string
+          user?: string
+          user_id?: string
+          ts?: string
+          source?: string
+        }
+      }
+
+      if (!body.content) {
+        return new Response('Missing content', { status: 400 })
+      }
+
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: body.content,
+          meta: {
+            chat_id: body.meta?.chat_id ?? 'agent-comms',
+            message_id: body.meta?.message_id ?? '',
+            user: body.meta?.user ?? 'unknown',
+            user_id: body.meta?.user_id ?? 'unknown',
+            ts: body.meta?.ts ?? new Date().toISOString(),
+            source: body.meta?.source ?? 'agent-comms',
+          },
+        },
+      })
+
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } catch (err) {
+      process.stderr.write(`agent-comms: bridge error: ${err}\n`)
+      return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+  },
+})
+
+process.stderr.write(`agent-comms: bridge listening on http://127.0.0.1:${WEBHOOK_PORT}\n`)
+
 // --- Start ---
 const transport = new StdioServerTransport()
 mcp.connect(transport).then(async () => {
@@ -984,6 +1110,7 @@ mcp.connect(transport).then(async () => {
 
 const shutdown = async () => {
   stopPolling()
+  bridgeServer.stop()
   await unregisterAgent()
   if (db) await db.end().catch(() => {})
   process.exit(0)
