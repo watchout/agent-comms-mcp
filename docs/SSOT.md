@@ -128,11 +128,12 @@ interface PlatformCapabilities {
 }
 ```
 
-### 3.2 Discordアダプター（初期実装）
+### 3.2 Discordアダプター
 
 | 項目 | 仕様 |
 |------|------|
-| 接続方式 | Discord.js WebSocket Gateway |
+| 依存 | discord.js v14 |
+| 接続方式 | Discord Gateway（WebSocket） |
 | 認証 | Bot Token（環境変数 `DISCORD_BOT_TOKEN`） |
 | メッセージ上限 | 2,000文字 |
 | botフィルタ | **自分自身のみ除外**（`msg.author.id === client.user?.id`） |
@@ -140,6 +141,25 @@ interface PlatformCapabilities {
 | スレッド | 対応 |
 | リアクション | 対応 |
 | 添付ファイル | 対応（25MB/件、10件まで） |
+
+**メッセージ受信フロー:**
+```
+Discord Gateway → messageCreate イベント
+  → botフィルタ（自分自身のみ除外）
+  → access制御（allowFrom, requireMention チェック）
+  → webhook bridge に HTTP POST
+  → セッションに自動注入
+```
+
+**メッセージ送信フロー（既存）:**
+```
+send_message → forwarding.discord.webhook_url にPOST
+```
+
+**access制御:**
+- `DISCORD_STATE_DIR` 環境変数でaccess.jsonのパスを指定
+- 既存のDiscordプラグインと同じaccess.json形式を使用
+- チャンネル別のallowFrom、requireMention設定に対応
 
 ### 3.3 プラットフォーム別メッセージ制限
 
@@ -516,6 +536,13 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - [x] Agent ID正規化対応
 - [ ] 全botの起動コマンド更新（docs/operations/discord-bot-config.md）
 
+### Phase 4.5: Discordアダプター（受信機能）
+- [ ] discord.js依存追加
+- [ ] Discord Gateway接続（messageCreateイベント）
+- [ ] access制御（access.json読み込み）
+- [ ] webhook bridgeへのHTTP POST配送
+- [ ] 既存Discordプラグインとの互換性テスト
+
 ### Phase 5: マルチプラットフォーム
 - [ ] Slackアダプター
 - [ ] Telegramアダプター
@@ -676,3 +703,4 @@ bun agent-com check-plugin
 | 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 check_inbox説明更新 |
 | 2026-03-29 | 更新：§11 Phase 4詳細化（channel plugin化）、§8.2 起動コマンドをPhase 4形式に更新 |
 | 2026-03-29 | 変更：Phase 4をWebhookチャネル方式に変更。§4.4 push通知仕様を全面改訂（LISTEN/NOTIFY + Webhook MCP server）。§8.2 起動コマンド更新 |
+| 2026-03-29 | 追記：§3.2 Discordアダプター詳細仕様（受信/送信フロー、access制御）。§11 Phase 4.5追加 |
