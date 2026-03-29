@@ -15,9 +15,13 @@ import {
   Client,
   GatewayIntentBits,
   ChannelType,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder,
   type Message,
   type TextChannel,
   type ThreadChannel,
+  type Interaction,
 } from 'discord.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -204,6 +208,39 @@ if (IS_MAIN && TOKEN) {
     )
   })
 
+  // --- Button-click handler for permission requests ---
+  client.on('interactionCreate', async (interaction: Interaction) => {
+    if (!interaction.isButton()) return
+    const m = /^perm_(allow|deny)_(.+)$/.exec(interaction.customId)
+    if (!m) return
+
+    const [, action, request_id] = m
+    const behavior = action === 'allow' ? 'allow' : 'deny'
+
+    // Verify sender is in allowFrom
+    const access = loadAccess(ACCESS_FILE)
+    if (!access.allowFrom.includes(interaction.user.id)) {
+      await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+      return
+    }
+
+    try {
+      await fetch(`http://127.0.0.1:${WEBHOOK_PORT}/permission-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id, behavior }),
+      })
+      pendingPermissions.delete(request_id)
+      const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
+      await interaction
+        .update({ content: `${interaction.message.content}\n\n${label}`, components: [] })
+        .catch(() => {})
+    } catch (err) {
+      process.stderr.write(`discord-adapter: permission button error: ${err}\n`)
+      await interaction.reply({ content: `Error: ${err}`, ephemeral: true }).catch(() => {})
+    }
+  })
+
   client.once('ready', (c) => {
     process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
     process.stderr.write(`discord-adapter: delivering to bridge on port ${WEBHOOK_PORT}\n`)
@@ -257,12 +294,25 @@ if (IS_MAIN && TOKEN) {
           `**Input:**\n\`\`\`\n${prettyInput}\n\`\`\`\n\n` +
           `Reply **yes ${request_id}** to allow, **no ${request_id}** to deny.`
 
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`perm_allow_${request_id}`)
+            .setLabel('Allow')
+            .setEmoji('✅')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`perm_deny_${request_id}`)
+            .setLabel('Deny')
+            .setEmoji('❌')
+            .setStyle(ButtonStyle.Danger),
+        )
+
         let sent = 0
         for (const userId of access.allowFrom) {
           void (async () => {
             try {
               const user = await client.users.fetch(userId)
-              await user.send(text)
+              await user.send({ content: text, components: [row] })
               sent++
             } catch (e) {
               process.stderr.write(`discord-adapter: permission DM to ${userId} failed: ${e}\n`)
