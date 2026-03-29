@@ -438,12 +438,21 @@ claude --channels agent-com:slack --env SLACK_BOT_TOKEN=xxx
 claude --channels agent-com:discord agent-com:slack
 ```
 
-### 8.2 現在の起動コマンド（Phase 4: Webhookチャネル方式）
+### 8.2 現在の起動コマンド（Phase 5: 統合方式）
 
 ```bash
-# Phase 4起動コマンド（Webhookチャネル方式）
+# Phase 5起動コマンド（bridge統合済み — server.ts 1プロセスで MCP tools + channel + bridge）
+AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
+WEBHOOK_PORT=8789 \
+claude --dangerously-load-development-channels server:server.ts \
+       --mcp-config .mcp.json \
+       --dangerously-skip-permissions
+```
+
+**旧方式（Phase 4 — bridge別プロセス、フォールバック用）:**
+```bash
 claude --dangerously-load-development-channels server:agent-com-bridge \
-       --channels plugin:discord@claude-plugins-official \
+       --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```
 
@@ -569,7 +578,7 @@ agent-comms MCP（1プロセス）
 **タスク:**
 - [ ] アダプター層のインターフェース定義
 - [ ] Discordアダプター統合（1接続・全agentルーティング）
-- [ ] webhook bridge内蔵化
+- [x] webhook bridge内蔵化（PR #12: server.tsにbridge統合）
 - [ ] listener統合（pg_notify受信をMCPプロセス内で処理）
 - [ ] channel→agentマッピングテーブル
 - [ ] npm start で全機能起動
@@ -733,3 +742,4 @@ bun agent-com check-plugin
 | 2026-03-29 | 変更：Phase 4をWebhookチャネル方式に変更。§4.4 push通知仕様を全面改訂（LISTEN/NOTIFY + Webhook MCP server）。§8.2 起動コマンド更新 |
 | 2026-03-29 | 追記：§3.2 Discordアダプター詳細仕様（受信/送信フロー、access制御）。§11 Phase 4.5追加 |
 | 2026-03-29 | 更新：§11 Phase 5を統合アーキテクチャ（1プロセス・1接続）に書き換え |
+| 2026-03-29 | 更新：§8.2 起動コマンドをPhase 5統合方式に更新。§11 webhook bridge内蔵化チェック |
