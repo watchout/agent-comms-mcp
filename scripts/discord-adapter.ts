@@ -16,13 +16,18 @@ import {
   GatewayIntentBits,
   ChannelType,
   type Message,
+  type TextChannel,
+  type ThreadChannel,
 } from 'discord.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 
 // --- Config ---
 const TOKEN = process.env.DISCORD_BOT_TOKEN
-if (!TOKEN) {
+const IS_MAIN = typeof Bun !== 'undefined' && Bun.main === import.meta.path
+
+if (IS_MAIN && !TOKEN) {
   process.stderr.write('discord-adapter: DISCORD_BOT_TOKEN is required\n')
   process.exit(1)
 }
@@ -30,6 +35,7 @@ if (!TOKEN) {
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? ''
 const ACCESS_FILE = STATE_DIR ? join(STATE_DIR, 'access.json') : ''
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
+const OUTBOUND_PORT = WEBHOOK_PORT + 1000  // e.g. 8795 → 9795
 
 // --- Access control types (compatible with Discord plugin's access.json) ---
 interface GroupPolicy {
@@ -171,26 +177,117 @@ async function deliverToBridge(msg: Message): Promise<void> {
   }
 }
 
-// --- Discord client ---
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-  ],
-})
+// --- Runtime (only when executed directly, not imported for tests) ---
+if (IS_MAIN && TOKEN) {
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.DirectMessages,
+    ],
+  })
 
-client.on('messageCreate', (msg) => {
-  // Ignore own messages
-  if (msg.author.id === client.user?.id) return
+  client.on('messageCreate', (msg) => {
+    // Ignore own messages
+    if (msg.author.id === client.user?.id) return
 
-  handleInbound(msg).catch((e) =>
-    process.stderr.write(`discord-adapter: handleInbound error: ${e}\n`),
-  )
-})
+    handleInbound(msg, client).catch((e) =>
+      process.stderr.write(`discord-adapter: handleInbound error: ${e}\n`),
+    )
+  })
 
-async function handleInbound(msg: Message): Promise<void> {
+  client.once('ready', (c) => {
+    process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
+    process.stderr.write(`discord-adapter: delivering to bridge on port ${WEBHOOK_PORT}\n`)
+    process.stderr.write(`discord-adapter: outbound endpoint on port ${OUTBOUND_PORT}\n`)
+  })
+
+  // --- Outbound HTTP server (POST /send) ---
+  function readBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => resolve(Buffer.concat(chunks).toString()))
+      req.on('error', reject)
+    })
+  }
+
+  const outboundServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method !== 'POST' || req.url !== '/send') {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found. Use POST /send' }))
+      return
+    }
+
+    try {
+      const body = JSON.parse(await readBody(req))
+      const { chat_id, text, reply_to } = body as { chat_id: string; text: string; reply_to?: string }
+
+      if (!chat_id || !text) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'chat_id and text are required' }))
+        return
+      }
+
+      const channel = await client.channels.fetch(chat_id)
+      if (!channel || !('send' in channel)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `Channel ${chat_id} not found or not text-based` }))
+        return
+      }
+
+      const textChannel = channel as TextChannel | ThreadChannel
+
+      // Truncate to Discord's 2000 char limit
+      const truncated = text.length > 2000 ? text.slice(0, 1990) + '…(truncated)' : text
+
+      let sentMsg
+      if (reply_to) {
+        try {
+          const refMsg = await textChannel.messages.fetch(reply_to)
+          sentMsg = await refMsg.reply(truncated)
+        } catch {
+          // If reply target not found, send as normal message
+          sentMsg = await textChannel.send(truncated)
+        }
+      } else {
+        sentMsg = await textChannel.send(truncated)
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, message_id: sentMsg.id }))
+    } catch (err) {
+      process.stderr.write(`discord-adapter: outbound error: ${err}\n`)
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: String(err) }))
+    }
+  })
+
+  outboundServer.listen(OUTBOUND_PORT, '127.0.0.1', () => {
+    process.stderr.write(`discord-adapter: outbound server listening on 127.0.0.1:${OUTBOUND_PORT}\n`)
+  })
+
+  // --- Start ---
+  process.stderr.write(`discord-adapter: starting (bridge port: ${WEBHOOK_PORT}, outbound port: ${OUTBOUND_PORT})\n`)
+
+  client.login(TOKEN).catch((err) => {
+    process.stderr.write(`discord-adapter: login failed: ${err}\n`)
+    process.exit(1)
+  })
+
+  const shutdown = () => {
+    process.stderr.write('discord-adapter: shutting down\n')
+    outboundServer.close()
+    client.destroy()
+    process.exit(0)
+  }
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+}
+
+// --- Extracted for testability ---
+async function handleInbound(msg: Message, client: Client): Promise<void> {
   const access = loadAccess(ACCESS_FILE)
   const isDM = msg.channel.type === ChannelType.DM
   const parentChannelId = msg.channel.isThread()
@@ -211,26 +308,8 @@ async function handleInbound(msg: Message): Promise<void> {
 
   if (result.action === 'drop') return
 
+  // Show "Bot is typing..." indicator while processing
+  await msg.channel.sendTyping()
+
   await deliverToBridge(msg)
 }
-
-client.once('ready', (c) => {
-  process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
-  process.stderr.write(`discord-adapter: delivering to bridge on port ${WEBHOOK_PORT}\n`)
-})
-
-// --- Start ---
-process.stderr.write(`discord-adapter: starting (bridge port: ${WEBHOOK_PORT})\n`)
-
-client.login(TOKEN).catch((err) => {
-  process.stderr.write(`discord-adapter: login failed: ${err}\n`)
-  process.exit(1)
-})
-
-const shutdown = () => {
-  process.stderr.write('discord-adapter: shutting down\n')
-  client.destroy()
-  process.exit(0)
-}
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
