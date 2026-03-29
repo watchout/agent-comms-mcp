@@ -128,11 +128,12 @@ interface PlatformCapabilities {
 }
 ```
 
-### 3.2 Discordアダプター（初期実装）
+### 3.2 Discordアダプター
 
 | 項目 | 仕様 |
 |------|------|
-| 接続方式 | Discord.js WebSocket Gateway |
+| 依存 | discord.js v14 |
+| 接続方式 | Discord Gateway（WebSocket） |
 | 認証 | Bot Token（環境変数 `DISCORD_BOT_TOKEN`） |
 | メッセージ上限 | 2,000文字 |
 | botフィルタ | **自分自身のみ除外**（`msg.author.id === client.user?.id`） |
@@ -140,6 +141,25 @@ interface PlatformCapabilities {
 | スレッド | 対応 |
 | リアクション | 対応 |
 | 添付ファイル | 対応（25MB/件、10件まで） |
+
+**メッセージ受信フロー:**
+```
+Discord Gateway → messageCreate イベント
+  → botフィルタ（自分自身のみ除外）
+  → access制御（allowFrom, requireMention チェック）
+  → webhook bridge に HTTP POST
+  → セッションに自動注入
+```
+
+**メッセージ送信フロー（既存）:**
+```
+send_message → forwarding.discord.webhook_url にPOST
+```
+
+**access制御:**
+- `DISCORD_STATE_DIR` 環境変数でaccess.jsonのパスを指定
+- 既存のDiscordプラグインと同じaccess.json形式を使用
+- チャンネル別のallowFrom、requireMention設定に対応
 
 ### 3.3 プラットフォーム別メッセージ制限
 
@@ -363,16 +383,16 @@ DBが設定されていない場合：
 
 ```json
 {
-  "agent_id": "cto",
+  "agent_id": "my-bot",
   "database_url": "postgresql://localhost/agent_comms",
   "channels": {
-    "ceo-cto": {
+    "general": {
       "retention_days": null,
-      "description": "CEO-CTO戦略チャンネル"
+      "description": "General comms (permanent)"
     },
-    "hotel-kanri": {
+    "dev-chat": {
       "retention_days": 30,
-      "description": "Hotel Dev通信"
+      "description": "Dev team comms"
     }
   },
   "rate_limit": { "max_per_minute": 30 },
@@ -508,17 +528,53 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - **注記:** MCP通知方式はchannel plugin allowlist制約により単独では機能しない。Phase 4でhook方式に移行
 
 ### Phase 4: Webhookチャネルによるpush型通知
-- [ ] Webhook MCPサーバー（agent-com-bridge.ts）作成
-- [ ] send_messageにpg_notify追加
-- [ ] リスナースクリプト（listener.ts）作成
-- [ ] 起動コマンド変更（--dangerously-load-development-channels追加）
-- [ ] 実地テスト（CTO↔Dev Bot間push通知確認）
-- [ ] 全botの起動コマンド更新
+- [x] Webhook MCPサーバー（agent-com-bridge.ts）作成
+- [x] send_messageにpg_notify追加
+- [x] リスナースクリプト（listener.ts）作成
+- [x] 起動コマンド変更（--dangerously-load-development-channels追加）
+- [x] 実地テスト（CTO↔Dev Bot間push通知確認）
+- [x] Agent ID正規化対応
+- [ ] 全botの起動コマンド更新（docs/operations/discord-bot-config.md）
 
-### Phase 5: マルチプラットフォーム
-- [ ] Slackアダプター
+### Phase 4.5: Discordアダプター（受信機能）
+- [ ] discord.js依存追加
+- [ ] Discord Gateway接続（messageCreateイベント）
+- [ ] access制御（access.json読み込み）
+- [ ] webhook bridgeへのHTTP POST配送
+- [ ] 既存Discordプラグインとの互換性テスト
+
+### Phase 5: 統合アーキテクチャ（1プロセス・1接続）
+
+全アダプターとpush機構をagent-comms MCPサーバー1プロセスに統合。
+OSS公開はこのPhase完了時点。
+
+**設計:**
+```
+agent-comms MCP（1プロセス）
+├── core: DB（メッセージストア + ルーティング）
+├── adapters/
+│   ├── discord.ts   ← discord.js（1接続で全agent分）
+│   ├── telegram.ts  ← Telegram Bot API
+│   ├── slack.ts     ← Slack Web API
+│   └── line.ts      ← LINE Messaging API
+└── push: webhook bridge内蔵
+```
+
+**核心の変更:**
+- 1 Discord接続で全agentのメッセージをルーティング
+- channel_id → agent_id のマッピングテーブル
+- 別プロセス（listener, discord-adapter, bridge）を統合
+- npm start 1コマンドで起動
+
+**タスク:**
+- [ ] アダプター層のインターフェース定義
+- [ ] Discordアダプター統合（1接続・全agentルーティング）
+- [ ] webhook bridge内蔵化
+- [ ] listener統合（pg_notify受信をMCPプロセス内で処理）
+- [ ] channel→agentマッピングテーブル
+- [ ] npm start で全機能起動
 - [ ] Telegramアダプター
-- [ ] OSSパッケージとして公開
+- [ ] OSS公開（README + GIF + npm publish）
 
 ---
 
@@ -675,3 +731,5 @@ bun agent-com check-plugin
 | 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 check_inbox説明更新 |
 | 2026-03-29 | 更新：§11 Phase 4詳細化（channel plugin化）、§8.2 起動コマンドをPhase 4形式に更新 |
 | 2026-03-29 | 変更：Phase 4をWebhookチャネル方式に変更。§4.4 push通知仕様を全面改訂（LISTEN/NOTIFY + Webhook MCP server）。§8.2 起動コマンド更新 |
+| 2026-03-29 | 追記：§3.2 Discordアダプター詳細仕様（受信/送信フロー、access制御）。§11 Phase 4.5追加 |
+| 2026-03-29 | 更新：§11 Phase 5を統合アーキテクチャ（1プロセス・1接続）に書き換え |

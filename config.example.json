@@ -1,19 +1,10 @@
 {
-  "agent_id": "cto",
+  "agent_id": "my-bot",
   "database_url": "postgresql://localhost/agent_comms",
 
   "channels": {
-    "approvals":         { "retention_days": null, "description": "Approval workflows (permanent)" },
-    "audit-log":         { "retention_days": null, "description": "Audit log (permanent)" },
-    "ceo-cto":           { "retention_days": null, "description": "CEO-CTO strategy (permanent)" },
-    "org-build":         { "retention_days": null, "description": "Org building (permanent)" },
-    "hotel-kanri":       { "retention_days": 30, "description": "Hotel Dev comms" },
-    "haishin-puls-hub":  { "retention_days": 30, "description": "Haishin Dev comms" },
-    "wbs":               { "retention_days": 30, "description": "WBS Dev comms" },
-    "nyusatsu":          { "retention_days": 30, "description": "Nyusatsu Dev comms" },
-    "ai-dev-framework":  { "retention_days": 30, "description": "ADF Dev comms" },
-    "x-marketing-engine":{ "retention_days": 30, "description": "XMarketing Dev comms" },
-    "upwork-automation": { "retention_days": 30, "description": "Upwork Dev comms" }
+    "general":    { "retention_days": null, "description": "General comms (permanent)" },
+    "dev-chat":   { "retention_days": 30, "description": "Dev team comms (30-day retention)" }
   },
 
   "rate_limit": {
@@ -27,7 +18,9 @@
   },
 
   "auth": {
-    "token": null
+    "mode": "warn",
+    "secret_file": "~/.agent-com/secret",
+    "replay_window_seconds": 300
   },
 
   "forwarding": {

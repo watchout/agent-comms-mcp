@@ -11,31 +11,31 @@
  * Env:
  *   DATABASE_URL  — PostgreSQL connection string
  *   AGENT_PORTS   — JSON object mapping agent_id → webhook port
- *                   Default ports per SSOT §4.4:
- *                   cto=8789, hotel=8790, haishin=8791, wbs=8792,
- *                   nyusatsu=8793, adf=8794, agent-com=8795, vice=8796, auditor=8797
+ *                   Example: {"bot-a":8789,"bot-b":8790}
+ *                   See SSOT §4.4 for default port assignments
  */
 
 import { Client } from 'pg'
 
 // --- Port mapping ---
-const DEFAULT_PORTS: Record<string, number> = {
-  cto: 8789,
-  hotel: 8790,
-  haishin: 8791,
-  wbs: 8792,
-  nyusatsu: 8793,
-  adf: 8794,
-  'agent-com': 8795,
-  vice: 8796,
-  auditor: 8797,
-}
+// Override with AGENT_PORTS env. Example: AGENT_PORTS='{"bot-a":8789,"bot-b":8790}'
+const DEFAULT_PORTS: Record<string, number> = {}
 
 const agentPorts: Record<string, number> = process.env.AGENT_PORTS
   ? JSON.parse(process.env.AGENT_PORTS)
   : DEFAULT_PORTS
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+
+// --- Agent ID normalization ---
+export function normalizeAgentId(id: string, ports: Record<string, number>): string {
+  if (ports[id]) return id
+  // prefix match: "agent-com-dev" → "agent-com"
+  for (const key of Object.keys(ports)) {
+    if (id.startsWith(key)) return key
+  }
+  return id
+}
 
 // --- DB connection with reconnect ---
 let client: Client | null = null
@@ -72,8 +72,11 @@ async function connect(): Promise<void> {
     if (recent.rows.length > 0) {
       process.stderr.write(`listener: catching up ${recent.rows.length} recent messages\n`)
       for (const row of recent.rows) {
-        if (row.target && agentPorts[row.target]) {
-          await deliverToBot(row.target, row.id)
+        if (row.target) {
+          const normalized = normalizeAgentId(row.target, agentPorts)
+          if (agentPorts[normalized]) {
+            await deliverToBot(normalized, row.id)
+          }
         }
       }
     }
@@ -87,7 +90,8 @@ async function connect(): Promise<void> {
 
     try {
       const payload = JSON.parse(msg.payload) as { to: string; message_id: string }
-      await deliverToBot(payload.to, payload.message_id)
+      const normalized = normalizeAgentId(payload.to, agentPorts)
+      await deliverToBot(normalized, payload.message_id)
     } catch (err) {
       process.stderr.write(`listener: error processing notification: ${err}\n`)
     }
