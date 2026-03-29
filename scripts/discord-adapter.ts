@@ -5,6 +5,10 @@
  * Connects to Discord Gateway, receives messages, applies access control,
  * and delivers to the webhook bridge for session injection.
  *
+ * Access control logic derived from Anthropic's Claude Code Discord plugin
+ * Copyright Anthropic, PBC. Licensed under Apache 2.0
+ * https://github.com/anthropics/claude-plugins-official
+ *
  * Env:
  *   DISCORD_BOT_TOKEN  — Discord bot token (required)
  *   DISCORD_STATE_DIR  — Directory containing access.json
