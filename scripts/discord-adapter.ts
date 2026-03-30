@@ -192,6 +192,48 @@ const PERMISSION_REPLY_RE = /^(yes|no)\s+([a-z]{5})$/i
 // Stores pending permission requests: request_id → { tool_name }
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
 
+// --- Typing indicator management ---
+// Tracks active typing intervals per channel so they can be cleared on outbound send
+const typingIntervals = new Map<string, NodeJS.Timeout>()
+const TYPING_INTERVAL_MS = 8_000  // Re-send typing every 8s (Discord shows for 10s)
+const TYPING_TIMEOUT_MS = 5 * 60_000  // Safety: auto-stop after 5 minutes
+
+function startTyping(channel: { sendTyping: () => Promise<void>; id: string }): void {
+  // Clear any existing interval for this channel
+  stopTyping(channel.id)
+
+  // Send immediately
+  channel.sendTyping().catch(() => {})
+
+  // Re-send every 8 seconds
+  const interval = setInterval(() => {
+    channel.sendTyping().catch(() => {})
+  }, TYPING_INTERVAL_MS)
+
+  // Safety timeout: stop after 5 minutes
+  const timeout = setTimeout(() => {
+    stopTyping(channel.id)
+  }, TYPING_TIMEOUT_MS)
+
+  // Store interval (attach timeout to clear later)
+  typingIntervals.set(channel.id, interval)
+  // Store timeout separately using a convention
+  typingIntervals.set(`${channel.id}:timeout`, timeout as unknown as NodeJS.Timeout)
+}
+
+function stopTyping(channelId: string): void {
+  const interval = typingIntervals.get(channelId)
+  if (interval) {
+    clearInterval(interval)
+    typingIntervals.delete(channelId)
+  }
+  const timeout = typingIntervals.get(`${channelId}:timeout`)
+  if (timeout) {
+    clearTimeout(timeout)
+    typingIntervals.delete(`${channelId}:timeout`)
+  }
+}
+
 // --- Runtime (only when executed directly, not imported for tests) ---
 if (IS_MAIN && TOKEN) {
   const client = new Client({
@@ -262,6 +304,52 @@ if (IS_MAIN && TOKEN) {
   }
 
   const outboundServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // --- GET /history?channel_id=...&limit=50&before=... ---
+    if (req.url?.startsWith('/history') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://127.0.0.1:${OUTBOUND_PORT}`)
+        const channelId = url.searchParams.get('channel_id')
+        const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 100)
+        const before = url.searchParams.get('before') ?? undefined
+
+        if (!channelId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'channel_id is required' }))
+          return
+        }
+
+        const channel = await client.channels.fetch(channelId)
+        if (!channel || !('messages' in channel)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `Channel ${channelId} not found or not text-based` }))
+          return
+        }
+
+        const textChannel = channel as TextChannel | ThreadChannel
+        const fetchOptions: { limit: number; before?: string } = { limit }
+        if (before) fetchOptions.before = before
+
+        const messages = await textChannel.messages.fetch(fetchOptions)
+        const result = messages.map(m => ({
+          message_id: m.id,
+          author: m.author.username,
+          author_id: m.author.id,
+          is_bot: m.author.bot,
+          content: m.content,
+          timestamp: m.createdAt.toISOString(),
+          reply_to: m.reference?.messageId ?? null,
+        })).reverse()
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, channel_id: channelId, messages: result }))
+      } catch (err) {
+        process.stderr.write(`discord-adapter: history error: ${err}\n`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err) }))
+      }
+      return
+    }
+
     if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Method not allowed' }))
@@ -356,8 +444,17 @@ if (IS_MAIN && TOKEN) {
 
         const textChannel = channel as TextChannel | ThreadChannel
 
-        // Truncate to Discord's 2000 char limit
-        const truncated = text.length > 2000 ? text.slice(0, 1990) + '…(truncated)' : text
+        // Start typing indicator while preparing the message
+        startTyping(textChannel as { sendTyping: () => Promise<void>; id: string })
+
+        // Truncate to Discord's 2000 char limit (code-point safe)
+        const codePoints = Array.from(text)
+        const truncated = codePoints.length > 2000
+          ? codePoints.slice(0, 1990).join('') + '…(truncated)'
+          : text
+
+        // Stop typing indicator (bot is about to send)
+        stopTyping(chat_id)
 
         let sentMsg
         if (reply_to) {
@@ -383,7 +480,7 @@ if (IS_MAIN && TOKEN) {
     }
 
     res.writeHead(404, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Not found. Use POST /send or POST /permission' }))
+    res.end(JSON.stringify({ error: 'Not found. Use POST /send, POST /permission, or GET /history' }))
   })
 
   outboundServer.listen(OUTBOUND_PORT, '127.0.0.1', () => {
@@ -428,7 +525,10 @@ async function handleInbound(msg: Message, client: Client): Promise<void> {
     isMentioned,
   )
 
-  if (result.action === 'drop') return
+  if (result.action === 'drop') {
+    process.stderr.write(`discord-adapter: dropped msg from ${msg.author.username} in ${msg.channelId} (${result.reason})\n`)
+    return
+  }
 
   // Permission-reply intercept: "yes xxxxx" or "no xxxxx" in DMs
   // from allowlisted users triggers permission response instead of
@@ -452,8 +552,8 @@ async function handleInbound(msg: Message, client: Client): Promise<void> {
     return
   }
 
-  // Show "Bot is typing..." indicator while processing
-  await msg.channel.sendTyping()
+  // Show "Bot is typing..." indicator, re-sent every 8s until outbound reply
+  startTyping(msg.channel as { sendTyping: () => Promise<void>; id: string })
 
   await deliverToBridge(msg)
 }
