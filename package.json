@@ -12,8 +12,10 @@
     "dev": "bun --watch server.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "discord.js": "^14.25.1",
+    "openai": "^6.33.0",
     "pg": "^8.13.3"
   },
   "devDependencies": {
