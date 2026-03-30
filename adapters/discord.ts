@@ -233,6 +233,23 @@ export class DiscordAdapter implements UIAdapter {
       process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
     })
 
+    // Connection state logging (discord.js has built-in auto-reconnect)
+    this.client.on('error', (err) => {
+      process.stderr.write(`discord-adapter: error: ${err.message}\n`)
+    })
+    this.client.on('warn', (info) => {
+      process.stderr.write(`discord-adapter: warn: ${info}\n`)
+    })
+    this.client.on('shardDisconnect', (event, shardId) => {
+      process.stderr.write(`discord-adapter: shard ${shardId} disconnected (code=${event.code})\n`)
+    })
+    this.client.on('shardReconnecting', (shardId) => {
+      process.stderr.write(`discord-adapter: shard ${shardId} reconnecting...\n`)
+    })
+    this.client.on('shardResume', (shardId, replayedEvents) => {
+      process.stderr.write(`discord-adapter: shard ${shardId} resumed (replayed=${replayedEvents})\n`)
+    })
+
     await this.client.login(token)
   }
 
