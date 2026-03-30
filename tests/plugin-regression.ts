@@ -534,10 +534,13 @@ describe('9. Push Notification Polling', () => {
   })
 })
 
-// --- Test 10: Webhook Channel Push (Phase 4) ---
-describe('10. Webhook Channel Push (Phase 4)', () => {
-  const BRIDGE_SOURCE = readFileSync(join(PROJECT_ROOT, 'agent-com-bridge.ts'), 'utf-8')
-  const LISTENER_SOURCE = readFileSync(join(PROJECT_ROOT, 'scripts', 'listener.ts'), 'utf-8')
+// --- Shared source files for Phase 4/5 tests ---
+const BRIDGE_SOURCE = readFileSync(join(PROJECT_ROOT, 'agent-com-bridge.ts'), 'utf-8')
+const LISTENER_SOURCE = readFileSync(join(PROJECT_ROOT, 'scripts', 'listener.ts'), 'utf-8')
+const DISCORD_ADAPTER_SOURCE = readFileSync(join(PROJECT_ROOT, 'adapters', 'discord.ts'), 'utf-8')
+
+// --- Test 10: Webhook Channel Push (Phase 4→5 Integrated) ---
+describe('10. Webhook Channel Push (Phase 5 Integrated)', () => {
 
   let client: Client | null = null
   const testChannel = `__test_webhook_${Date.now()}`
@@ -673,5 +676,83 @@ describe('10. Webhook Channel Push (Phase 4)', () => {
       LISTENER_SOURCE.indexOf('function scheduleReconnect')
     )
     expect(notifSection).toContain('normalizeAgentId')
+  })
+})
+
+// --- Test 11: Phase 5 Integration (1-process architecture) ---
+describe('11. Phase 5 Integration', () => {
+  test('server.ts imports DiscordAdapter from adapters/', () => {
+    expect(SERVER_SOURCE).toContain("from './adapters/discord'")
+  })
+
+  test('server.ts creates Discord adapter instance', () => {
+    expect(SERVER_SOURCE).toContain('new DiscordAdapter()')
+  })
+
+  test('server.ts connects Discord adapter when DISCORD_BOT_TOKEN is set', () => {
+    expect(SERVER_SOURCE).toContain('DISCORD_BOT_TOKEN')
+    expect(SERVER_SOURCE).toContain('discord.connect(')
+  })
+
+  test('server.ts has integrated pg_notify LISTEN', () => {
+    expect(SERVER_SOURCE).toContain('startListener')
+    expect(SERVER_SOURCE).toContain('stopListener')
+    expect(SERVER_SOURCE).toContain("LISTEN agent_inbox")
+  })
+
+  test('server.ts listener has reconnection logic', () => {
+    expect(SERVER_SOURCE).toContain('scheduleListenerReconnect')
+    expect(SERVER_SOURCE).toContain('listenReconnectAttempts')
+  })
+
+  test('server.ts reply tool uses Discord adapter directly', () => {
+    expect(SERVER_SOURCE).toContain('discord.sendMessage(')
+  })
+
+  test('server.ts fetch_discord_history uses adapter directly', () => {
+    expect(SERVER_SOURCE).toContain('discord.fetchHistory(')
+  })
+
+  test('server.ts permission relay uses adapter directly', () => {
+    expect(SERVER_SOURCE).toContain('discord.sendPermissionRequest(')
+  })
+
+  test('server.ts shutdown disconnects Discord adapter', () => {
+    expect(SERVER_SOURCE).toContain('discord.disconnect()')
+  })
+
+  test('adapters/discord.ts implements UIAdapter interface', () => {
+    expect(DISCORD_ADAPTER_SOURCE).toContain('class DiscordAdapter')
+    expect(DISCORD_ADAPTER_SOURCE).toContain('implements UIAdapter')
+  })
+
+  test('adapters/discord.ts has gate() and loadAccess() exports', () => {
+    expect(DISCORD_ADAPTER_SOURCE).toContain('export function gate(')
+    expect(DISCORD_ADAPTER_SOURCE).toContain('export function loadAccess(')
+  })
+
+  test('adapters/discord.ts has code-point safe truncation', () => {
+    expect(DISCORD_ADAPTER_SOURCE).toContain('Array.from(text)')
+  })
+
+  test('adapters/discord.ts has typing indicator management', () => {
+    expect(DISCORD_ADAPTER_SOURCE).toContain('startTypingInternal')
+    expect(DISCORD_ADAPTER_SOURCE).toContain('stopTypingInternal')
+  })
+
+  test('server.ts gracefully handles missing DISCORD_BOT_TOKEN', () => {
+    expect(SERVER_SOURCE).toContain('Discord adapter disabled')
+  })
+
+  test('server.ts has HTTP fallback for reply tool', () => {
+    // Fallback to HTTP when adapter not connected
+    expect(SERVER_SOURCE).toContain(`http://127.0.0.1:\${DISCORD_OUTBOUND_PORT}/send`)
+  })
+
+  test('adapters/types.ts exists with UIAdapter interface', () => {
+    const typesSource = readFileSync(join(PROJECT_ROOT, 'adapters', 'types.ts'), 'utf-8')
+    expect(typesSource).toContain('interface UIAdapter')
+    expect(typesSource).toContain('interface UnifiedMessage')
+    expect(typesSource).toContain('interface PlatformCapabilities')
   })
 })

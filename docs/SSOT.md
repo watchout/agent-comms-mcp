@@ -28,26 +28,48 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 
 ## 2. アーキテクチャ
 
-### 2.1 全体構造
+### 2.1 全体構造（Phase 5 統合版）
 
 ```
-統合プラグイン（agent-com）
-├── UIアダプター層（交換可能）
-│   ├── Discord アダプター
-│   ├── Slack アダプター（将来）
-│   ├── Teams アダプター（将来）
-│   └── Telegram アダプター（将来）
+server.ts（1プロセスで全機能）
 │
-├── 通信バス層（共通）
-│   ├── メッセージルーティング
-│   ├── access制御
-│   ├── 未読管理
-│   ├── push通知
-│   └── 安全機構
+├── adapters/                        ← UIアダプター層（交換可能）
+│   ├── types.ts                       UIAdapter インターフェース
+│   ├── discord.ts                     DiscordAdapter（discord.js Gateway）
+│   ├── telegram.ts                    （将来）
+│   ├── slack.ts                       （将来）
+│   └── line.ts                        （将来）
 │
-└── MCP管理ツール（オプション）
-    ├── 通信ログ検索
-    └── 統計・分析
+├── 通信バス層（server.ts 内蔵）
+│   ├── メッセージルーティング          DB INSERT + pg_notify
+│   ├── access制御                     access.json（プラットフォーム共通）
+│   ├── push通知                       webhook bridge + pg_notify LISTEN
+│   ├── DBポーリング                    フォールバック（3秒間隔）
+│   └── 安全機構                       レート制限 / ループ検出 / 重複排除
+│
+├── MCP tools
+│   ├── send_message                   bot間メッセージ送信
+│   ├── reply                          Discord返信
+│   ├── fetch_messages                 DB履歴取得
+│   ├── fetch_discord_history          Discord API履歴取得
+│   ├── check_inbox                    未読確認
+│   └── list_agents                    エージェント一覧
+│
+└── webhook bridge（HTTP POST受信）    Discord adapter / 外部からの注入
+```
+
+**旧構成（Phase 4以前）との対比:**
+```
+旧: 4プロセス構成
+  server.ts              ← MCP + bridge
+  scripts/discord-adapter.ts  ← 別プロセス（Discord Gateway + HTTP API）
+  scripts/listener.ts         ← 別プロセス（pg_notify LISTEN）
+  agent-com-bridge.ts         ← 別プロセス（統合済みで不要に）
+
+新: 1プロセス構成（Phase 5）
+  server.ts              ← MCP + bridge + Discord + pg_notify LISTEN
+  adapters/discord.ts    ← server.tsからimport（別プロセスではない）
+  adapters/types.ts      ← インターフェース定義
 ```
 
 ### 2.2 通信モデル
@@ -441,13 +463,18 @@ claude --channels agent-com:discord agent-com:slack
 ### 8.2 現在の起動コマンド（Phase 5: 統合方式）
 
 ```bash
-# Phase 5起動コマンド（bridge統合済み — server.ts 1プロセスで MCP tools + channel + bridge）
+# Phase 5起動コマンド（全機能統合 — server.ts 1プロセスで MCP tools + channel + Discord + pg_notify）
+# channelサーバー名: "server" — server.tsがclaude/channel capabilityを宣言するMCPサーバー
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
-WEBHOOK_PORT=8789 \
+WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
 claude --dangerously-load-development-channels server:server.ts \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```
+
+> **channelサーバー名について:** `server:server.ts` の `server` はMCPサーバー名（.mcp.jsonで定義）。
+> `server.ts` はそのサーバーのエントリポイント。`--dangerously-load-development-channels server:server.ts`
+> はserver MCPサーバーのserver.tsファイルをchannelサーバーとして読み込むことを意味する。
 
 **旧方式（Phase 4 — bridge別プロセス、フォールバック用）:**
 ```bash
@@ -481,7 +508,20 @@ claude --dangerously-load-development-channels server:agent-com-bridge \
 | limit | number | No | 取得件数（default: 20, max: 100） |
 | since | string | No | この日時以降のメッセージ（ISO 8601） |
 
-### 9.3 check_inbox
+### 9.3 fetch_discord_history
+
+Discord APIを直接呼び出し、チャンネルの過去メッセージを取得する。
+agent_messagesテーブル（DB）ではなく、Discordプラットフォーム上のメッセージを返す。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| channel_id | string | Yes | DiscordチャンネルまたはスレッドID |
+| limit | number | No | 取得件数（default: 50, max: 100） |
+| before | string | No | このメッセージIDより前のメッセージを取得 |
+
+**実装方式:** discord-adapterの `GET /history` エンドポイント経由でDiscord APIの `GET /channels/{id}/messages` を呼び出す。
+
+### 9.4 check_inbox
 
 Messages are automatically pushed to your session. Use this only to re-check history or filter by channel.
 
@@ -543,14 +583,14 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - [x] 起動コマンド変更（--dangerously-load-development-channels追加）
 - [x] 実地テスト（CTO↔Dev Bot間push通知確認）
 - [x] Agent ID正規化対応
-- [ ] 全botの起動コマンド更新（docs/operations/discord-bot-config.md）
+- [x] 全botの起動コマンド更新（Phase 5統合版で全9bot展開完了）
 
 ### Phase 4.5: Discordアダプター（受信機能）
-- [ ] discord.js依存追加
-- [ ] Discord Gateway接続（messageCreateイベント）
-- [ ] access制御（access.json読み込み）
-- [ ] webhook bridgeへのHTTP POST配送
-- [ ] 既存Discordプラグインとの互換性テスト
+- [x] discord.js依存追加
+- [x] Discord Gateway接続（messageCreateイベント）
+- [x] access制御（access.json読み込み）
+- [x] webhook bridgeへのHTTP POST配送
+- [x] 既存Discordプラグインとの互換性テスト
 
 ### Phase 5: 統合アーキテクチャ（1プロセス・1接続）
 
@@ -559,30 +599,130 @@ OSS公開はこのPhase完了時点。
 
 **設計:**
 ```
-agent-comms MCP（1プロセス）
+agent-comms MCP（1プロセス = server.ts）
 ├── core: DB（メッセージストア + ルーティング）
 ├── adapters/
-│   ├── discord.ts   ← discord.js（1接続で全agent分）
-│   ├── telegram.ts  ← Telegram Bot API
-│   ├── slack.ts     ← Slack Web API
-│   └── line.ts      ← LINE Messaging API
-└── push: webhook bridge内蔵
+│   ├── types.ts     ← UIAdapter インターフェース定義
+│   ├── discord.ts   ← discord.js（DiscordAdapter クラス）
+│   ├── telegram.ts  ← Telegram Bot API（将来）
+│   ├── slack.ts     ← Slack Web API（将来）
+│   └── line.ts      ← LINE Messaging API（将来）
+├── push: webhook bridge内蔵 + pg_notify LISTEN内蔵
+└── MCP tools: send_message, reply, fetch_discord_history, etc.
 ```
 
+**5.1 アダプター層インターフェース（adapters/types.ts）:**
+
+```typescript
+interface UIAdapter {
+  platform: string
+  capabilities: PlatformCapabilities
+  connect(config: AdapterConfig): Promise<void>
+  onMessage(callback: (msg: UnifiedMessage) => void): void
+  sendMessage(channel: string, text: string, options?: SendOptions): Promise<{ messageId: string }>
+  fetchHistory(channel: string, limit?: number, before?: string): Promise<UnifiedMessage[]>
+  startTyping(channel: string): void
+  stopTyping(channel: string): void
+  disconnect(): Promise<void>
+}
+
+interface UnifiedMessage {
+  id: string
+  channel: string
+  author: { id: string; name: string; isBot: boolean }
+  content: string
+  replyTo?: string
+  attachments?: Attachment[]
+  timestamp: Date
+  platform: string
+  raw: unknown
+}
+```
+
+全プラットフォームアダプターがこのインターフェースを実装する。
+server.tsはUIAdapterを通じてプラットフォーム固有処理を呼び出す。
+
+**5.2 Discordアダプター統合（adapters/discord.ts）:**
+
+既存のscripts/discord-adapter.tsをUIAdapter実装として再構築:
+- DiscordAdapterクラスがUIAdapterを実装
+- Gateway接続、access制御、typing indicator、権限リクエスト機能を内包
+- server.tsから`new DiscordAdapter()`でインスタンス化し`connect()`で起動
+- 別プロセス（scripts/discord-adapter.ts）の起動が不要に
+- メッセージ受信はコールバック方式（`onMessage(callback)`）
+
+**5.3 listener統合（pg_notify LISTEN）:**
+
+既存のscripts/listener.tsの機能をserver.ts内に統合:
+- DB接続確立後、専用のpg Clientで`LISTEN agent_inbox`を発行
+- NOTIFYペイロード`{to, message_id}`を受信し、bridgeのmcp.notification()で直接配信
+- 再接続ロジック（指数バックオフ）をserver.ts内に実装
+- 別プロセス（scripts/listener.ts）の起動が不要に
+- 既存のポーリング（pollNewMessages）も残す（pg_notify + ポーリングの二重保証）
+
+**5.4 channel→agentマッピング:**
+
+config.jsonに`discord.channel_map`を追加:
+
+```json
+{
+  "discord": {
+    "channel_map": {
+      "1487368919613444156": "agent-com-dev"
+    }
+  }
+}
+```
+
+- Discordチャンネル/スレッドID → agent_id のマッピング
+- access.jsonの`groups`設定と併用（access制御はaccess.json、ルーティングはchannel_map）
+- マッピングがない場合はconfig.jsonの`agent_id`にフォールバック（現在の動作と互換）
+
+**5.5 起動方式:**
+
+```bash
+# Phase 5（統合版）— 1コマンドで全機能起動
+npm start
+# → bun server.ts が以下を全て起動:
+#   1. MCP server（tools + channel capability）
+#   2. Discord Gateway接続（DiscordAdapter）
+#   3. pg_notify LISTEN（リアルタイム配信）
+#   4. webhook bridge（HTTP POST受信）
+#   5. DBポーリング（フォールバック）
+
+# Claude Code起動コマンド
+# channelサーバー名 "server" は .mcp.json で定義されたMCPサーバー名
+AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
+WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
+claude --dangerously-load-development-channels server:server.ts \
+       --mcp-config .mcp.json \
+       --dangerously-skip-permissions
+```
+
+**5.6 削除対象（統合完了後）:**
+
+以下のファイルは統合完了後に不要:
+- `scripts/discord-adapter.ts` → adapters/discord.ts に移行
+- `scripts/listener.ts` → server.ts内に統合
+- `agent-com-bridge.ts` → server.ts内に統合済み（Phase 4で完了）
+
 **核心の変更:**
-- 1 Discord接続で全agentのメッセージをルーティング
-- channel_id → agent_id のマッピングテーブル
-- 別プロセス（listener, discord-adapter, bridge）を統合
+- Discord接続がserver.ts内で直接管理される（HTTP経由の間接通信が不要に）
+- pg_notify受信がserver.ts内で直接処理される
+- 別プロセス3つ（discord-adapter, listener, bridge）が全てserver.ts 1プロセスに統合
 - npm start 1コマンドで起動
 
 **タスク:**
-- [ ] アダプター層のインターフェース定義
-- [ ] Discordアダプター統合（1接続・全agentルーティング）
+- [ ] アダプター層のインターフェース定義（adapters/types.ts）
+- [ ] Discordアダプター統合（adapters/discord.ts — UIAdapter実装）
 - [x] webhook bridge内蔵化（PR #12: server.tsにbridge統合）
-- [ ] listener統合（pg_notify受信をMCPプロセス内で処理）
-- [ ] channel→agentマッピングテーブル
+- [x] 全9bot統合版展開完了（2026-03-30: agent-com, Hotel, Haishin, WBS, Nyusatsu, ADF, Vice, Auditor, CTO）
+- [ ] listener統合（pg_notify LISTEN をserver.ts内に実装）
+- [ ] server.ts統合（Discord adapter + listener をimportし起動）
+- [ ] channel→agentマッピング（config.json拡張）
+- [ ] テスト更新（import先をadapters/に変更、統合テスト追加）
 - [ ] npm start で全機能起動
-- [ ] Telegramアダプター
+- [ ] Telegramアダプター（将来）
 - [ ] OSS公開（README + GIF + npm publish）
 
 ---
@@ -723,7 +863,58 @@ bun agent-com check-plugin
 
 ---
 
-## 15. 残存する設計課題（Phase 2以降）
+## 15. Phase 5 移行手順
+
+### 15.1 現状（Phase 4.5）からPhase 5への移行
+
+**前提:** 現在9bot全てが以下の分離プロセス構成で稼働中:
+- server.ts（MCP + bridge）
+- scripts/discord-adapter.ts（Discord Gateway + outbound HTTP API）
+- scripts/listener.ts（pg_notify LISTEN + 配信）
+
+**移行手順:**
+
+1. **adapters/ 作成**
+   - `adapters/types.ts`: UIAdapterインターフェース定義
+   - `adapters/discord.ts`: DiscordAdapterクラス（scripts/discord-adapter.tsから移植）
+   - gate(), loadAccess() 等の関数はadapters/discord.tsからもexportし、テスト互換性を維持
+
+2. **server.ts統合**
+   - DiscordAdapterをimportし、`DISCORD_BOT_TOKEN`がある場合に自動接続
+   - pg_notify LISTENを専用Client経由で実装（DB接続確立後）
+   - 受信メッセージをmcp.notification()で直接セッションに注入
+   - `reply` / `fetch_discord_history` ツールをHTTP経由からDiscordAdapter直接呼び出しに変更
+   - permission relay をDiscordAdapter.sendPermissionRequest()経由に変更
+
+3. **config.json拡張**
+   - `discord.channel_map`フィールドを追加（§11 Phase 5.4参照）
+   - 既存のconfig.jsonとの後方互換性を維持（フィールド未指定時はフォールバック）
+
+4. **テスト更新**
+   - `tests/discord-adapter.test.ts`: importを`adapters/discord`に変更
+   - `tests/listener-normalize.test.ts`: normalizeAgentId関数をserver.tsまたはutilに移動
+   - `tests/plugin-regression.ts`: Test 10のbridge/listener参照を統合後の構造に更新
+   - 全25テストがパスすることを確認
+
+5. **npm start確認**
+   - `npm start`で MCP + Discord + pg_notify LISTEN + bridge が全て起動することを確認
+   - 環境変数: `DISCORD_BOT_TOKEN`未設定時はDiscord接続をスキップ（graceful degradation）
+
+6. **旧ファイル整理**
+   - `scripts/discord-adapter.ts`: 非推奨マーク or 削除
+   - `scripts/listener.ts`: 非推奨マーク or 削除
+   - `agent-com-bridge.ts`: 削除候補（Phase 4で既にserver.tsに統合済み）
+
+### 15.2 ロールバック方針
+
+統合に問題が発生した場合:
+- scripts/discord-adapter.ts と scripts/listener.ts は削除せず残す
+- config.jsonの`discord.channel_map`未設定時は旧動作（HTTP経由）にフォールバック
+- `DISCORD_BOT_TOKEN`未設定でDiscord機能を無効化可能
+
+---
+
+## 16. 残存する設計課題（Phase 2以降）
 
 1. **マルチプラットフォーム同時運用**: 1 botが複数UIに接続する場合の統合ルール
 2. **マルチマシン運用**: シークレットの安全な配布方法
@@ -743,3 +934,6 @@ bun agent-com check-plugin
 | 2026-03-29 | 追記：§3.2 Discordアダプター詳細仕様（受信/送信フロー、access制御）。§11 Phase 4.5追加 |
 | 2026-03-29 | 更新：§11 Phase 5を統合アーキテクチャ（1プロセス・1接続）に書き換え |
 | 2026-03-29 | 更新：§8.2 起動コマンドをPhase 5統合方式に更新。§11 webhook bridge内蔵化チェック |
+| 2026-03-30 | 更新：§11 Phase 4残項目完了、Phase 4.5全項目完了、Phase 5全9bot統合展開完了 |
+| 2026-03-30 | 追記：§9.3 fetch_discord_history ツール仕様追加（Discord API経由の履歴取得） |
+| 2026-03-30 | 大幅更新：§2.1 全体構造をPhase 5統合版に改訂。§11 Phase 5を5.1〜5.6に詳細化（アダプターIF、Discord統合、listener統合、channel mapping、起動方式、削除対象）。§15 移行手順追加 |
