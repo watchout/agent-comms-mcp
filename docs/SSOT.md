@@ -519,7 +519,7 @@ agent_messagesテーブル（DB）ではなく、Discordプラットフォーム
 | limit | number | No | 取得件数（default: 50, max: 100） |
 | before | string | No | このメッセージIDより前のメッセージを取得 |
 
-**実装方式:** discord-adapterの `GET /history` エンドポイント経由でDiscord APIの `GET /channels/{id}/messages` を呼び出す。
+**実装方式:** 統合版ではDiscordAdapterの `fetchHistory()` メソッドを直接呼び出し、Discord APIの `GET /channels/{id}/messages` で履歴を取得する。
 
 ### 9.4 check_inbox
 
@@ -528,6 +528,12 @@ Messages are automatically pushed to your session. Use this only to re-check his
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|------|------|------|
 | limit | number | No | 取得件数（default: 20） |
+
+**既読管理（カーソルベース）:**
+- エージェントごとに `last_read_id`（最後に読んだメッセージID）をメモリ内で保持
+- `check_inbox` 呼び出し時、`last_read_id` より後のメッセージのみ返す
+- 取得したメッセージの最大IDで `last_read_id` を更新
+- プロセス再起動時はカーソルがリセットされるが、push通知が主経路のため問題なし
 
 ---
 
@@ -937,3 +943,4 @@ bun agent-com check-plugin
 | 2026-03-30 | 更新：§11 Phase 4残項目完了、Phase 4.5全項目完了、Phase 5全9bot統合展開完了 |
 | 2026-03-30 | 追記：§9.3 fetch_discord_history ツール仕様追加（Discord API経由の履歴取得） |
 | 2026-03-30 | 大幅更新：§2.1 全体構造をPhase 5統合版に改訂。§11 Phase 5を5.1〜5.6に詳細化（アダプターIF、Discord統合、listener統合、channel mapping、起動方式、削除対象）。§15 移行手順追加 |
+| 2026-03-30 | 追記：§9.4 check_inbox にカーソルベース既読管理（last_read_id）の仕様追加。重複配信バグ修正 |
