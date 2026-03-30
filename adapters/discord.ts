@@ -269,12 +269,12 @@ export class DiscordAdapter implements UIAdapter {
     if (options?.replyTo) {
       try {
         const refMsg = await textChannel.messages.fetch(options.replyTo)
-        sentMsg = await refMsg.reply(truncated)
+        sentMsg = await refMsg.reply({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
       } catch {
-        sentMsg = await textChannel.send(truncated)
+        sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
       }
     } else {
-      sentMsg = await textChannel.send(truncated)
+      sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
     }
 
     return { messageId: sentMsg.id }
