@@ -515,7 +515,7 @@ const POLL_INTERVAL_MS = 3_000
 const POLL_BATCH_SIZE = 10
 let lastPolledAt = new Date().toISOString()
 const processedIds = new Map<string, number>()  // id -> timestamp
-const PROCESSED_ID_TTL_MS = 60_000  // 1 minute
+const PROCESSED_ID_TTL_MS = 10 * 60_000  // 10 minutes (must outlive any re-fetch window)
 let pollInterval: ReturnType<typeof setInterval> | null = null
 
 async function pollNewMessages(): Promise<void> {
@@ -529,9 +529,12 @@ async function pollNewMessages(): Promise<void> {
   }
 
   try {
+    // Use >= to catch messages at the same timestamp (dedup via processedIds).
+    // Previously used > with JS Date (ms precision), which truncated PG's µs
+    // timestamps, causing the same message to re-match after processedIds expired.
     const r = await client.query(
       `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
-       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at > $2
+       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at >= $2
        ORDER BY created_at ASC LIMIT $3`,
       [AGENT_ID, lastPolledAt, POLL_BATCH_SIZE]
     )
@@ -569,8 +572,12 @@ async function pollNewMessages(): Promise<void> {
         process.stderr.write(`agent-comms: push notification failed: ${err}\n`)
       })
 
-      // Advance lastPolledAt to the latest message's timestamp
-      lastPolledAt = new Date(msg.created_at).toISOString()
+      // Advance lastPolledAt — preserve raw PG timestamp string to avoid
+      // JS Date millisecond truncation of PostgreSQL's microsecond precision
+      const rawTs = msg.created_at instanceof Date
+        ? msg.created_at.toISOString()
+        : String(msg.created_at)
+      lastPolledAt = rawTs
     }
   } catch (err) {
     process.stderr.write(`agent-comms: poll error (will retry): ${err}\n`)
@@ -837,6 +844,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'fetch_discord_history',
+      description: 'Fetch message history from a Discord channel via Discord API (not agent-comms DB). Use this to read past Discord conversations.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          channel_id: { type: 'string', description: 'Discord channel or thread ID' },
+          limit: { type: 'number', description: 'Max messages (default: 50, max: 100)' },
+          before: { type: 'string', description: 'Fetch messages before this message ID (for pagination)' },
+        },
+        required: ['channel_id'],
+      },
+    },
+    {
       name: 'list_agents',
       description: 'List registered agents. Requires DB.',
       inputSchema: {
@@ -958,6 +978,33 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  if (name === 'fetch_discord_history') {
+    const { channel_id, limit, before } = args as any
+    try {
+      const params = new URLSearchParams({ channel_id })
+      if (limit) params.set('limit', String(Math.min(limit, 100)))
+      if (before) params.set('before', before)
+
+      const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/history?${params}`)
+      const result = await resp.json() as any
+      if (!resp.ok) {
+        return { content: [{ type: 'text', text: `Discord history fetch failed: ${result.error ?? resp.statusText}` }], isError: true }
+      }
+
+      const messages = result.messages as any[]
+      if (messages.length === 0) {
+        return { content: [{ type: 'text', text: '(no messages found)' }] }
+      }
+
+      const text = messages.map((m: any) =>
+        `[${m.timestamp}] ${m.author}${m.is_bot ? ' (bot)' : ''}: ${m.content}  (id: ${m.message_id})`
+      ).join('\n')
+      return { content: [{ type: 'text', text: `${messages.length} message(s) from Discord channel ${channel_id}:\n\n${text}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Discord history fetch failed: ${err}. Is discord-adapter running?` }], isError: true }
+    }
+  }
+
   if (name === 'list_agents') {
     const { status, agent_type } = (args ?? {}) as any
     const agents = await listAgents(status, agent_type)
@@ -1053,6 +1100,15 @@ const bridgeServer = Bun.serve({
       if (!body.content) {
         return new Response('Missing content', { status: 400 })
       }
+
+      // Dedup: skip if this message_id was already delivered
+      const msgId = body.meta?.message_id
+      if (msgId && processedIds.has(msgId)) {
+        return new Response(JSON.stringify({ ok: true, dedup: true }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (msgId) processedIds.set(msgId, Date.now())
 
       await mcp.notification({
         method: 'notifications/claude/channel',
