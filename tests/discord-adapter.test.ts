@@ -3,7 +3,7 @@
  * Tests for Discord adapter access control, bot filter logic, and outbound endpoint
  */
 import { describe, test, expect } from 'bun:test'
-import { gate, loadAccess, type Access } from '../scripts/discord-adapter'
+import { gate, loadAccess, type Access } from '../adapters/discord'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 
 function makeAccess(overrides: Partial<Access> = {}): Access {
