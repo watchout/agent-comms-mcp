@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSy
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
+import { DiscordAdapter } from './adapters/discord'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -106,7 +107,12 @@ const AGENT_ID = config.agent_id
 const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? ''
+const DISCORD_STATE_DIR_ENV = process.env.DISCORD_STATE_DIR ?? ''
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
+
+// --- Discord Adapter (Phase 5: integrated into server.ts) ---
+const discord = new DiscordAdapter()
 const INBOX_SIGNAL_TTL_MS = 5 * 60 * 1000
 const GC_INTERVAL_MS = 5 * 60 * 1000
 
@@ -596,6 +602,122 @@ function stopPolling(): void {
   }
 }
 
+// --- pg_notify LISTEN (Phase 5: integrated listener) ---
+let listenClient: Client | null = null
+let listenReconnectAttempts = 0
+const LISTEN_MAX_RECONNECT_DELAY_MS = 30_000
+
+async function startListener(): Promise<void> {
+  if (!config.database_url) return
+
+  try {
+    listenClient = new Client({ connectionString: config.database_url })
+
+    listenClient.on('error', (err) => {
+      process.stderr.write(`agent-comms: listener DB error: ${err.message}\n`)
+      scheduleListenerReconnect()
+    })
+
+    listenClient.on('end', () => {
+      process.stderr.write('agent-comms: listener DB connection closed\n')
+      scheduleListenerReconnect()
+    })
+
+    await listenClient.connect()
+    listenReconnectAttempts = 0
+
+    await listenClient.query('LISTEN agent_inbox')
+    process.stderr.write('agent-comms: pg_notify LISTEN started\n')
+
+    listenClient.on('notification', async (msg) => {
+      if (msg.channel !== 'agent_inbox' || !msg.payload) return
+
+      try {
+        const payload = JSON.parse(msg.payload) as { to: string; message_id: string }
+        // Only process if this message is for us
+        if (payload.to !== AGENT_ID) return
+
+        // Dedup via processedIds
+        if (processedIds.has(payload.message_id)) return
+
+        // Fetch and deliver the message
+        const client = await tryGetDb()
+        if (!client) return
+
+        const r = await client.query(
+          `SELECT id, channel_id, author_id, content, message_type, metadata, depth, created_at
+           FROM agent_messages WHERE id = $1`,
+          [payload.message_id]
+        )
+
+        if (r.rows.length === 0) return
+        const row = r.rows[0]
+
+        processedIds.set(row.id, Date.now())
+
+        // Auth validation
+        const authResult = validateIncomingAuth(
+          row.metadata, row.author_id, row.channel_id, row.content
+        )
+        if (!authResult.valid) {
+          process.stderr.write(`agent-comms: listener rejected (auth ${config.auth.mode}): ${row.id} from ${row.author_id}\n`)
+          return
+        }
+
+        const tag = authResult.tag ? ` ${authResult.tag}` : ''
+        const contentText = `[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
+
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: contentText,
+            meta: {
+              chat_id: row.channel_id,
+              message_id: row.id,
+              user: row.author_id,
+              user_id: row.author_id,
+              ts: new Date(row.created_at).toISOString(),
+              source: 'agent-comms',
+            },
+          },
+        }).catch(err => {
+          process.stderr.write(`agent-comms: listener notification failed: ${err}\n`)
+        })
+      } catch (err) {
+        process.stderr.write(`agent-comms: listener notification error: ${err}\n`)
+      }
+    })
+  } catch (err) {
+    process.stderr.write(`agent-comms: listener start failed: ${err}\n`)
+    scheduleListenerReconnect()
+  }
+}
+
+function scheduleListenerReconnect(): void {
+  const delay = Math.min(1000 * Math.pow(2, listenReconnectAttempts), LISTEN_MAX_RECONNECT_DELAY_MS)
+  listenReconnectAttempts++
+  process.stderr.write(`agent-comms: listener reconnecting in ${delay}ms (attempt ${listenReconnectAttempts})\n`)
+  setTimeout(async () => {
+    try {
+      if (listenClient) {
+        await listenClient.end().catch(() => {})
+        listenClient = null
+      }
+      await startListener()
+    } catch (err) {
+      process.stderr.write(`agent-comms: listener reconnect failed: ${err}\n`)
+      scheduleListenerReconnect()
+    }
+  }, delay)
+}
+
+function stopListener(): void {
+  if (listenClient) {
+    listenClient.end().catch(() => {})
+    listenClient = null
+  }
+}
+
 // --- Access Control (§4.1 - Communication Bus Layer) ---
 interface AccessConfig {
   dmPolicy: 'open' | 'pairing'
@@ -963,45 +1085,60 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { chat_id, text, reply_to } = args as any
 
     try {
-      const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id, text: sanitizeContent(text), reply_to }),
-      })
-      const result = await resp.json() as any
-      if (!resp.ok) {
-        return { content: [{ type: 'text', text: `Discord reply failed: ${result.error ?? resp.statusText}` }], isError: true }
-      }
-      return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.message_id})` }] }
+      const result = await discord.sendMessage(chat_id, sanitizeContent(text), reply_to ? { replyTo: reply_to } : undefined)
+      return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.messageId})` }] }
     } catch (err) {
-      return { content: [{ type: 'text', text: `Discord reply failed: ${err}. Is discord-adapter running?` }], isError: true }
+      // Fallback to HTTP if adapter not connected
+      try {
+        const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id, text: sanitizeContent(text), reply_to }),
+        })
+        const result = await resp.json() as any
+        if (!resp.ok) {
+          return { content: [{ type: 'text', text: `Discord reply failed: ${result.error ?? resp.statusText}` }], isError: true }
+        }
+        return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.message_id})` }] }
+      } catch (fallbackErr) {
+        return { content: [{ type: 'text', text: `Discord reply failed: ${err}` }], isError: true }
+      }
     }
   }
 
   if (name === 'fetch_discord_history') {
     const { channel_id, limit, before } = args as any
     try {
-      const params = new URLSearchParams({ channel_id })
-      if (limit) params.set('limit', String(Math.min(limit, 100)))
-      if (before) params.set('before', before)
-
-      const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/history?${params}`)
-      const result = await resp.json() as any
-      if (!resp.ok) {
-        return { content: [{ type: 'text', text: `Discord history fetch failed: ${result.error ?? resp.statusText}` }], isError: true }
-      }
-
-      const messages = result.messages as any[]
+      const messages = await discord.fetchHistory(channel_id, Math.min(limit ?? 50, 100), before)
       if (messages.length === 0) {
         return { content: [{ type: 'text', text: '(no messages found)' }] }
       }
-
-      const text = messages.map((m: any) =>
-        `[${m.timestamp}] ${m.author}${m.is_bot ? ' (bot)' : ''}: ${m.content}  (id: ${m.message_id})`
+      const text = messages.map(m =>
+        `[${m.timestamp.toISOString()}] ${m.author.name}${m.author.isBot ? ' (bot)' : ''}: ${m.content}  (id: ${m.id})`
       ).join('\n')
       return { content: [{ type: 'text', text: `${messages.length} message(s) from Discord channel ${channel_id}:\n\n${text}` }] }
     } catch (err) {
-      return { content: [{ type: 'text', text: `Discord history fetch failed: ${err}. Is discord-adapter running?` }], isError: true }
+      // Fallback to HTTP if adapter not connected
+      try {
+        const params = new URLSearchParams({ channel_id })
+        if (limit) params.set('limit', String(Math.min(limit, 100)))
+        if (before) params.set('before', before)
+        const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/history?${params}`)
+        const result = await resp.json() as any
+        if (!resp.ok) {
+          return { content: [{ type: 'text', text: `Discord history fetch failed: ${result.error ?? resp.statusText}` }], isError: true }
+        }
+        const messages = result.messages as any[]
+        if (messages.length === 0) {
+          return { content: [{ type: 'text', text: '(no messages found)' }] }
+        }
+        const text = messages.map((m: any) =>
+          `[${m.timestamp}] ${m.author}${m.is_bot ? ' (bot)' : ''}: ${m.content}  (id: ${m.message_id})`
+        ).join('\n')
+        return { content: [{ type: 'text', text: `${messages.length} message(s) from Discord channel ${channel_id}:\n\n${text}` }] }
+      } catch (fallbackErr) {
+        return { content: [{ type: 'text', text: `Discord history fetch failed: ${err}` }], isError: true }
+      }
     }
   }
 
@@ -1018,7 +1155,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
 })
 
-// --- Permission relay: CC → server → discord-adapter → Discord DM ---
+// --- Permission relay: CC → server → Discord DM (Phase 5: integrated) ---
 mcp.setNotificationHandler(
   z.object({
     method: z.literal('notifications/claude/channel/permission_request'),
@@ -1032,17 +1169,22 @@ mcp.setNotificationHandler(
   async ({ params }) => {
     const { request_id, tool_name, description, input_preview } = params
     try {
-      const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/permission`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_id, tool_name, description, input_preview }),
-      })
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '(no body)')
-        process.stderr.write(`agent-comms: permission forward failed (HTTP ${resp.status}): ${text}\n`)
-      }
+      await discord.sendPermissionRequest({ request_id, tool_name, description, input_preview })
     } catch (err) {
-      process.stderr.write(`agent-comms: permission forward failed: ${err}\n`)
+      // Fallback to HTTP if adapter not connected
+      try {
+        const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/permission`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ request_id, tool_name, description, input_preview }),
+        })
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '(no body)')
+          process.stderr.write(`agent-comms: permission forward failed (HTTP ${resp.status}): ${text}\n`)
+        }
+      } catch (fallbackErr) {
+        process.stderr.write(`agent-comms: permission forward failed: ${err}\n`)
+      }
     }
   },
 )
@@ -1159,6 +1301,67 @@ mcp.connect(transport).then(async () => {
   }
   // Start push notification polling (Phase 3)
   startPolling()
+
+  // Phase 5: Start integrated pg_notify listener
+  try {
+    await startListener()
+  } catch (err) {
+    process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+  }
+
+  // Phase 5: Connect Discord adapter (if token provided)
+  if (DISCORD_BOT_TOKEN) {
+    try {
+      discord.onMessage((msg) => {
+        // Dedup via processedIds
+        if (processedIds.has(msg.id)) return
+        processedIds.set(msg.id, Date.now())
+
+        const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
+        const content = msg.content || (atts ? '(attachment)' : '')
+
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content,
+            meta: {
+              chat_id: msg.channel,
+              message_id: msg.id,
+              user: msg.author.name,
+              user_id: msg.author.id,
+              ts: msg.timestamp.toISOString(),
+              source: 'discord',
+              ...(atts ? { attachments: atts } : {}),
+            },
+          },
+        }).catch(err => {
+          process.stderr.write(`agent-comms: discord message injection failed: ${err}\n`)
+        })
+      })
+
+      discord.onPermissionResponse(async (params) => {
+        try {
+          await mcp.notification({
+            method: 'notifications/claude/channel/permission',
+            params: { request_id: params.request_id, behavior: params.behavior },
+          })
+          process.stderr.write(`agent-comms: permission ${params.behavior} for ${params.request_id}\n`)
+        } catch (err) {
+          process.stderr.write(`agent-comms: permission notification failed: ${err}\n`)
+        }
+      })
+
+      await discord.connect({
+        token: DISCORD_BOT_TOKEN,
+        stateDir: DISCORD_STATE_DIR_ENV || undefined,
+      })
+      process.stderr.write('agent-comms: Discord adapter connected (integrated)\n')
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
+    }
+  } else {
+    process.stderr.write('agent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\n')
+  }
 }).catch(err => {
   process.stderr.write(`agent-comms: startup failed: ${err}\n`)
   process.exit(1)
@@ -1166,6 +1369,8 @@ mcp.connect(transport).then(async () => {
 
 const shutdown = async () => {
   stopPolling()
+  stopListener()
+  await discord.disconnect().catch(() => {})
   bridgeServer.stop()
   await unregisterAgent()
   if (db) await db.end().catch(() => {})

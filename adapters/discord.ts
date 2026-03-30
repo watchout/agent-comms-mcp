@@ -1,0 +1,458 @@
+/**
+ * Discord UI Adapter (SSOT §3.2)
+ *
+ * Implements UIAdapter for Discord via discord.js.
+ * Handles Gateway connection, access control, typing indicators,
+ * message send/receive, and history fetching.
+ *
+ * Access control logic derived from Anthropic's Claude Code Discord plugin
+ * Copyright Anthropic, PBC. Licensed under Apache 2.0
+ * https://github.com/anthropics/claude-plugins-official
+ */
+
+import {
+  Client,
+  GatewayIntentBits,
+  ChannelType,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder,
+  type Message,
+  type TextChannel,
+  type ThreadChannel,
+  type Interaction,
+} from 'discord.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { UIAdapter, AdapterConfig, UnifiedMessage, PlatformCapabilities, SendOptions } from './types'
+
+// --- Access control types (compatible with Discord plugin's access.json) ---
+interface GroupPolicy {
+  requireMention: boolean
+  allowFrom: string[]
+}
+
+export interface Access {
+  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
+  allowFrom: string[]
+  groups: Record<string, GroupPolicy>
+  pending: Record<string, unknown>
+  mentionPatterns?: string[]
+}
+
+function defaultAccess(): Access {
+  return {
+    dmPolicy: 'pairing',
+    allowFrom: [],
+    groups: {},
+    pending: {},
+  }
+}
+
+export function loadAccess(filePath: string): Access {
+  if (!filePath) return defaultAccess()
+  try {
+    const raw = readFileSync(filePath, 'utf8')
+    const parsed = JSON.parse(raw) as Partial<Access>
+    return {
+      dmPolicy: parsed.dmPolicy ?? 'pairing',
+      allowFrom: parsed.allowFrom ?? [],
+      groups: parsed.groups ?? {},
+      pending: parsed.pending ?? {},
+      mentionPatterns: parsed.mentionPatterns,
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
+    process.stderr.write(`discord-adapter: access.json parse error, using defaults\n`)
+    return defaultAccess()
+  }
+}
+
+// --- Gate logic (mirrors Discord plugin's gate function) ---
+export type GateResult =
+  | { action: 'deliver' }
+  | { action: 'drop'; reason: string }
+
+export function gate(
+  access: Access,
+  senderId: string,
+  channelId: string,
+  parentChannelId: string | null,
+  isDM: boolean,
+  isMentioned: boolean,
+): GateResult {
+  if (access.dmPolicy === 'disabled') return { action: 'drop', reason: 'dmPolicy disabled' }
+
+  if (isDM) {
+    if (access.allowFrom.includes(senderId)) return { action: 'deliver' }
+    return { action: 'drop', reason: 'DM not in allowFrom' }
+  }
+
+  // Guild messages: look up channel policy (threads inherit parent)
+  const lookupId = parentChannelId ?? channelId
+  const policy = access.groups[lookupId]
+  if (!policy) return { action: 'drop', reason: `channel ${lookupId} not in groups` }
+
+  const groupAllowFrom = policy.allowFrom ?? []
+  if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
+    return { action: 'drop', reason: 'not in channel allowFrom' }
+  }
+
+  if (policy.requireMention && !isMentioned) {
+    return { action: 'drop', reason: 'mention required but not found' }
+  }
+
+  return { action: 'deliver' }
+}
+
+// --- Mention detection ---
+function checkMentioned(
+  msg: Message,
+  botUserId: string,
+  extraPatterns?: string[],
+): boolean {
+  if (msg.mentions.users.has(botUserId)) return true
+  if (extraPatterns) {
+    for (const pat of extraPatterns) {
+      try {
+        if (new RegExp(pat, 'i').test(msg.content)) return true
+      } catch {}
+    }
+  }
+  return false
+}
+
+// --- Typing indicator management ---
+const typingIntervals = new Map<string, NodeJS.Timeout>()
+const TYPING_INTERVAL_MS = 8_000
+const TYPING_TIMEOUT_MS = 5 * 60_000
+
+function startTypingInternal(channel: { sendTyping: () => Promise<void>; id: string }): void {
+  stopTypingInternal(channel.id)
+  channel.sendTyping().catch(() => {})
+  const interval = setInterval(() => {
+    channel.sendTyping().catch(() => {})
+  }, TYPING_INTERVAL_MS)
+  const timeout = setTimeout(() => {
+    stopTypingInternal(channel.id)
+  }, TYPING_TIMEOUT_MS)
+  typingIntervals.set(channel.id, interval)
+  typingIntervals.set(`${channel.id}:timeout`, timeout as unknown as NodeJS.Timeout)
+}
+
+function stopTypingInternal(channelId: string): void {
+  const interval = typingIntervals.get(channelId)
+  if (interval) {
+    clearInterval(interval)
+    typingIntervals.delete(channelId)
+  }
+  const timeout = typingIntervals.get(`${channelId}:timeout`)
+  if (timeout) {
+    clearTimeout(timeout)
+    typingIntervals.delete(`${channelId}:timeout`)
+  }
+}
+
+// --- Permission relay ---
+const PERMISSION_REPLY_RE = /^(yes|no)\s+([a-z]{5})$/i
+const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
+
+// --- Discord Adapter ---
+export class DiscordAdapter implements UIAdapter {
+  platform = 'discord' as const
+
+  capabilities: PlatformCapabilities = {
+    maxMessageLength: 2000,
+    supportsThreads: true,
+    supportsReactions: true,
+    supportsAttachments: true,
+    supportsEdit: true,
+  }
+
+  private client: Client | null = null
+  private accessFile = ''
+  private messageCallback: ((msg: UnifiedMessage) => void) | null = null
+  private permissionRequestCallback: ((params: { request_id: string; behavior: 'allow' | 'deny' }) => void) | null = null
+
+  async connect(config: AdapterConfig): Promise<void> {
+    const token = config.token as string
+    const stateDir = config.stateDir as string | undefined
+
+    if (!token) {
+      process.stderr.write('discord-adapter: DISCORD_BOT_TOKEN is required\n')
+      return
+    }
+
+    if (stateDir) {
+      this.accessFile = join(stateDir, 'access.json')
+    }
+
+    this.client = new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+      ],
+    })
+
+    this.client.on('messageCreate', (msg) => {
+      if (msg.author.id === this.client?.user?.id) return
+      this.handleInbound(msg).catch((e) =>
+        process.stderr.write(`discord-adapter: handleInbound error: ${e}\n`),
+      )
+    })
+
+    this.client.on('interactionCreate', async (interaction: Interaction) => {
+      if (!interaction.isButton()) return
+      const m = /^perm_(allow|deny)_(.+)$/.exec(interaction.customId)
+      if (!m) return
+
+      const [, action, request_id] = m
+      const behavior = action === 'allow' ? 'allow' : 'deny'
+
+      const access = loadAccess(this.accessFile)
+      if (!access.allowFrom.includes(interaction.user.id)) {
+        await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
+        return
+      }
+
+      pendingPermissions.delete(request_id)
+      const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
+
+      if (this.permissionRequestCallback) {
+        this.permissionRequestCallback({ request_id, behavior: behavior as 'allow' | 'deny' })
+      }
+
+      await interaction
+        .update({ content: `${interaction.message.content}\n\n${label}`, components: [] })
+        .catch(() => {})
+    })
+
+    this.client.once('ready', (c) => {
+      process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
+    })
+
+    await this.client.login(token)
+  }
+
+  onMessage(callback: (msg: UnifiedMessage) => void): void {
+    this.messageCallback = callback
+  }
+
+  /** Register handler for permission responses from Discord buttons/text */
+  onPermissionResponse(callback: (params: { request_id: string; behavior: 'allow' | 'deny' }) => void): void {
+    this.permissionRequestCallback = callback
+  }
+
+  async sendMessage(channel: string, text: string, options?: SendOptions): Promise<{ messageId: string }> {
+    if (!this.client) throw new Error('Discord client not connected')
+
+    const ch = await this.client.channels.fetch(channel)
+    if (!ch || !('send' in ch)) throw new Error(`Channel ${channel} not found or not text-based`)
+
+    const textChannel = ch as TextChannel | ThreadChannel
+
+    // Start typing while preparing
+    startTypingInternal(textChannel as { sendTyping: () => Promise<void>; id: string })
+
+    // Truncate to 2000 chars (code-point safe)
+    const codePoints = Array.from(text)
+    const truncated = codePoints.length > 2000
+      ? codePoints.slice(0, 1990).join('') + '…(truncated)'
+      : text
+
+    // Stop typing before sending
+    stopTypingInternal(channel)
+
+    let sentMsg
+    if (options?.replyTo) {
+      try {
+        const refMsg = await textChannel.messages.fetch(options.replyTo)
+        sentMsg = await refMsg.reply(truncated)
+      } catch {
+        sentMsg = await textChannel.send(truncated)
+      }
+    } else {
+      sentMsg = await textChannel.send(truncated)
+    }
+
+    return { messageId: sentMsg.id }
+  }
+
+  async fetchHistory(channel: string, limit = 50, before?: string): Promise<UnifiedMessage[]> {
+    if (!this.client) throw new Error('Discord client not connected')
+
+    const ch = await this.client.channels.fetch(channel)
+    if (!ch || !('messages' in ch)) throw new Error(`Channel ${channel} not found or not text-based`)
+
+    const textChannel = ch as TextChannel | ThreadChannel
+    const fetchOptions: { limit: number; before?: string } = { limit: Math.min(limit, 100) }
+    if (before) fetchOptions.before = before
+
+    const messages = await textChannel.messages.fetch(fetchOptions)
+    return messages.map(m => ({
+      id: m.id,
+      channel: m.channelId,
+      author: {
+        id: m.author.id,
+        name: m.author.username,
+        isBot: m.author.bot,
+      },
+      content: m.content,
+      replyTo: m.reference?.messageId ?? undefined,
+      timestamp: m.createdAt,
+      platform: 'discord',
+      raw: m,
+    })).reverse()
+  }
+
+  startTyping(channel: string): void {
+    if (!this.client) return
+    this.client.channels.fetch(channel).then(ch => {
+      if (ch && 'sendTyping' in ch) {
+        startTypingInternal(ch as { sendTyping: () => Promise<void>; id: string })
+      }
+    }).catch(() => {})
+  }
+
+  stopTyping(channel: string): void {
+    stopTypingInternal(channel)
+  }
+
+  /** Send a permission request to allowFrom users via DM */
+  async sendPermissionRequest(params: {
+    request_id: string
+    tool_name: string
+    description: string
+    input_preview: string
+  }): Promise<void> {
+    if (!this.client) return
+
+    const { request_id, tool_name, description, input_preview } = params
+    pendingPermissions.set(request_id, { tool_name, description, input_preview })
+
+    const access = loadAccess(this.accessFile)
+    let prettyInput: string
+    try {
+      prettyInput = JSON.stringify(JSON.parse(input_preview), null, 2)
+    } catch {
+      prettyInput = input_preview
+    }
+
+    const text =
+      `🔐 **Permission Request**\n` +
+      `**Tool:** ${tool_name}\n` +
+      `**Description:** ${description}\n` +
+      `**Input:**\n\`\`\`\n${prettyInput}\n\`\`\`\n\n` +
+      `Reply **yes ${request_id}** to allow, **no ${request_id}** to deny.`
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`perm_allow_${request_id}`)
+        .setLabel('Allow')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`perm_deny_${request_id}`)
+        .setLabel('Deny')
+        .setEmoji('❌')
+        .setStyle(ButtonStyle.Danger),
+    )
+
+    for (const userId of access.allowFrom) {
+      try {
+        const user = await this.client.users.fetch(userId)
+        await user.send({ content: text, components: [row] })
+      } catch (e) {
+        process.stderr.write(`discord-adapter: permission DM to ${userId} failed: ${e}\n`)
+      }
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    // Clear all typing intervals
+    for (const [key] of typingIntervals) {
+      if (!key.includes(':timeout')) {
+        stopTypingInternal(key)
+      }
+    }
+    if (this.client) {
+      this.client.destroy()
+      this.client = null
+    }
+  }
+
+  // --- Internal: handle inbound message ---
+  private async handleInbound(msg: Message): Promise<void> {
+    const access = loadAccess(this.accessFile)
+    const isDM = msg.channel.type === ChannelType.DM
+    const parentChannelId = msg.channel.isThread()
+      ? msg.channel.parentId
+      : null
+    const isMentioned = this.client?.user
+      ? checkMentioned(msg, this.client.user.id, access.mentionPatterns)
+      : false
+
+    const result = gate(
+      access,
+      msg.author.id,
+      msg.channelId,
+      parentChannelId,
+      isDM,
+      isMentioned,
+    )
+
+    if (result.action === 'drop') {
+      process.stderr.write(`discord-adapter: dropped msg from ${msg.author.username} in ${msg.channelId} (${result.reason})\n`)
+      return
+    }
+
+    // Permission-reply intercept
+    const permMatch = PERMISSION_REPLY_RE.exec(msg.content)
+    if (permMatch) {
+      const request_id = permMatch[2]!.toLowerCase()
+      const behavior = permMatch[1]!.toLowerCase() === 'yes' ? 'allow' : 'deny'
+      if (this.permissionRequestCallback) {
+        this.permissionRequestCallback({ request_id, behavior: behavior as 'allow' | 'deny' })
+      }
+      const emoji = behavior === 'allow' ? '✅' : '❌'
+      await msg.react(emoji).catch(() => {})
+      pendingPermissions.delete(request_id)
+      return
+    }
+
+    // Show typing indicator
+    startTypingInternal(msg.channel as { sendTyping: () => Promise<void>; id: string })
+
+    // Build attachments info
+    const atts: { name: string; contentType: string; size: number }[] = []
+    for (const att of msg.attachments.values()) {
+      atts.push({
+        name: att.name ?? 'file',
+        contentType: att.contentType ?? 'unknown',
+        size: att.size,
+      })
+    }
+
+    // Deliver via callback
+    if (this.messageCallback) {
+      const unified: UnifiedMessage = {
+        id: msg.id,
+        channel: msg.channelId,
+        author: {
+          id: msg.author.id,
+          name: msg.author.username,
+          isBot: msg.author.bot,
+        },
+        content: msg.content || (atts.length > 0 ? '(attachment)' : ''),
+        replyTo: msg.reference?.messageId ?? undefined,
+        attachments: atts.length > 0 ? atts : undefined,
+        timestamp: msg.createdAt,
+        platform: 'discord',
+        raw: msg,
+      }
+      this.messageCallback(unified)
+    }
+  }
+}
