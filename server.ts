@@ -321,15 +321,28 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
   return r.rows.reverse()
 }
 
+// Cursor-based read tracking for check_inbox (SSOT §9.4)
+let lastReadId: string | null = null
+
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
   const client = await tryGetDb()
   if (!client) return [] // DBなしモード: 空配列
+  const params: any[] = [forAgent, limit]
+  let whereClause = `metadata->>'to' = $1 AND author_id != $1`
+  if (lastReadId) {
+    whereClause += ` AND id > $3`
+    params.push(lastReadId)
+  }
   const r = await client.query(
     `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
-     FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1
-     ORDER BY created_at DESC LIMIT $2`,
-    [forAgent, limit])
-  return r.rows.reverse()
+     FROM agent_messages WHERE ${whereClause}
+     ORDER BY created_at ASC LIMIT $2`,
+    params)
+  // Update cursor to the max id returned
+  if (r.rows.length > 0) {
+    lastReadId = r.rows[r.rows.length - 1].id
+  }
+  return r.rows
 }
 
 // --- Rate Limiting (DB-persistent with in-memory fallback) ---
