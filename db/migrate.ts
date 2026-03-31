@@ -27,20 +27,41 @@ async function migrate() {
   await client.query(`
     CREATE TABLE IF NOT EXISTS agent_messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      channel_id TEXT NOT NULL,
+      channel_id TEXT,
       author_id TEXT NOT NULL,
       author_bot BOOLEAN DEFAULT true,
       content TEXT NOT NULL,
-      message_type TEXT,
+      message_type TEXT NOT NULL DEFAULT 'chat',
       reply_to UUID REFERENCES agent_messages(id),
       attachments JSONB,
       metadata JSONB,
       depth INTEGER DEFAULT 0,
+      -- ADR-026: unified schema columns
+      source TEXT NOT NULL DEFAULT 'agent-comms',
+      thread_id TEXT,
+      direction TEXT NOT NULL DEFAULT 'inbound',
+      role TEXT NOT NULL DEFAULT 'agent',
+      session_id TEXT,
+      project TEXT,
       created_at TIMESTAMPTZ DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS idx_agent_messages_channel ON agent_messages(channel_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_agent_messages_author ON agent_messages(author_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_agent_messages_type ON agent_messages(message_type, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_source ON agent_messages(source, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(session_id, created_at DESC) WHERE session_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_project ON agent_messages(project) WHERE project IS NOT NULL;
+
+    -- ADR-026: add new columns to existing tables (safe with IF NOT EXISTS pattern)
+    DO $$ BEGIN
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'agent-comms';
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS thread_id TEXT;
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 'inbound';
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'agent';
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS project TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
 
     CREATE TABLE IF NOT EXISTS channel_settings (
       channel_id TEXT PRIMARY KEY,
