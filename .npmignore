@@ -1,0 +1,34 @@
+# Development & config
+.mcp.json
+.mcp.json.bak
+.env
+.env.*
+config.json
+.claude/
+.claude-plugin/
+
+# Tests & scripts
+tests/
+scripts/
+demo/
+
+# Git & CI
+.github/
+.gitignore
+
+# Docs (README and LICENSE included via files field)
+docs/
+
+# Build artifacts
+dist/
+*.log
+logs/
+
+# State files
+agent-com-dev-state.md
+*.flag
+
+# Media
+demo.gif
+demo.tape
+demo.cast

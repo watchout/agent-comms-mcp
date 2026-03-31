@@ -1,10 +1,39 @@
 {
   "name": "agent-comms-mcp",
-  "version": "0.1.0",
-  "description": "Agent-to-agent communication MCP plugin for Claude Code",
-  "repository": "https://github.com/watchout/agent-comms-mcp.git",
+  "version": "1.0.0",
+  "description": "Push-based agent-to-agent communication MCP server for AI coding assistants",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/watchout/agent-comms-mcp.git"
+  },
+  "homepage": "https://github.com/watchout/agent-comms-mcp",
+  "bugs": "https://github.com/watchout/agent-comms-mcp/issues",
   "author": "IYASAKA Inc.",
   "license": "MIT",
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "codex",
+    "ai-agent",
+    "agent-communication",
+    "discord",
+    "push-notification",
+    "bot-to-bot",
+    "anthropic",
+    "openai"
+  ],
+  "main": "server.ts",
+  "bin": {
+    "agent-comms-mcp": "server.ts"
+  },
+  "files": [
+    "server.ts",
+    "adapters/",
+    "db/",
+    "config.example.json",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "start": "bun install --no-summary && bun server.ts",
     "test": "bun test tests/",
@@ -22,5 +51,9 @@
   "devDependencies": {
     "@types/pg": "^8.11.11",
     "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0"
   }
 }
