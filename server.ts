@@ -1202,7 +1202,32 @@ mcp.setNotificationHandler(
   },
 )
 
+// --- Port conflict resolution ---
+function killProcessOnPort(port: number): boolean {
+  try {
+    const result = Bun.spawnSync(['lsof', '-i', `:${port}`, '-t'])
+    const pids = new TextDecoder().decode(result.stdout).trim()
+    if (!pids) return false
+
+    for (const pid of pids.split('\n')) {
+      const p = pid.trim()
+      if (p && p !== String(process.pid)) {
+        process.stderr.write(`agent-comms: killing stale process on port ${port} (PID ${p})\n`)
+        try { process.kill(parseInt(p), 'SIGTERM') } catch {}
+      }
+    }
+    // Brief wait for process to release port
+    Bun.sleepSync(500)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // --- Integrated Bridge: HTTP server for push notifications + permission responses ---
+// Pre-check: kill any stale process occupying our port
+killProcessOnPort(WEBHOOK_PORT)
+
 const bridgeServer = Bun.serve({
   port: WEBHOOK_PORT,
   hostname: '127.0.0.1',
