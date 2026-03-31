@@ -287,6 +287,9 @@ async function saveMessage(msg: {
   channel_id: string; author_id: string; content: string
   message_type?: string; reply_to?: string
   metadata?: Record<string, unknown>; depth?: number
+  // ADR-026: unified schema fields
+  source?: string; thread_id?: string; direction?: string; role?: string
+  session_id?: string; project?: string
 }): Promise<string> {
   const id = randomUUID()
   const client = await tryGetDb()
@@ -296,10 +299,12 @@ async function saveMessage(msg: {
     return id
   }
   await client.query(
-    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
-     msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0]
+     msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
+     msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
+     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null]
   )
   return id
 }
@@ -1052,6 +1057,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       channel_id: channel, author_id: AGENT_ID, content: safeContent,
       message_type: message_type ?? 'chat', reply_to,
       metadata: fullMetadata, depth: msgDepth,
+      source: 'agent-comms', direction: 'outbound', role: 'agent',
     })
 
     // pg_notify for Webhook channel push (Phase 4)
@@ -1364,10 +1370,12 @@ mcp.connect(transport).then(async () => {
           author_id: msg.author.id,
           content,
           message_type: 'chat',
+          source: 'discord',
+          direction: 'inbound',
+          role: msg.author.isBot ? 'agent' : 'user',
           metadata: {
             discord_message_id: msg.id,
             discord_channel_id: msg.channel,
-            source: 'discord',
             author_name: msg.author.name,
             to: AGENT_ID,
             ...(atts ? { attachments: atts } : {}),
