@@ -406,9 +406,18 @@ export class DiscordAdapter implements UIAdapter {
   private async handleInbound(msg: Message): Promise<void> {
     const access = loadAccess(this.accessFile)
     const isDM = msg.channel.type === ChannelType.DM
-    const parentChannelId = msg.channel.isThread()
-      ? msg.channel.parentId
-      : null
+    // Resolve parent channel for threads (fetch partial if needed)
+    let parentChannelId: string | null = null
+    if (msg.channel.isThread()) {
+      parentChannelId = msg.channel.parentId
+    } else if (msg.channel.partial) {
+      try {
+        const fetched = await msg.channel.fetch()
+        if (fetched.isThread()) {
+          parentChannelId = fetched.parentId
+        }
+      } catch {}
+    }
     const isMentioned = this.client?.user
       ? checkMentioned(msg, this.client.user.id, access.mentionPatterns)
       : false
