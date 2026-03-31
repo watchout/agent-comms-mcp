@@ -267,10 +267,50 @@ export class DiscordAdapter implements UIAdapter {
   async sendMessage(channel: string, text: string, options?: SendOptions): Promise<{ messageId: string }> {
     if (!this.client) throw new Error('Discord client not connected')
 
-    const ch = await this.client.channels.fetch(channel)
-    if (!ch || !('send' in ch)) throw new Error(`Channel ${channel} not found or not text-based`)
+    let textChannel: TextChannel | ThreadChannel
 
-    const textChannel = ch as TextChannel | ThreadChannel
+    // If replyTo is specified, resolve the correct channel from the reference message
+    // This ensures replies land in the same thread as the original message
+    if (options?.replyTo) {
+      try {
+        // Try to find the message in the specified channel first
+        const ch = await this.client.channels.fetch(channel)
+        if (ch && 'messages' in ch) {
+          const refMsg = await (ch as TextChannel | ThreadChannel).messages.fetch(options.replyTo)
+          // Use the channel where the message actually lives (could be a thread)
+          textChannel = refMsg.channel as TextChannel | ThreadChannel
+        } else {
+          throw new Error('channel not text-based')
+        }
+      } catch {
+        // Fallback: search across guild channels for the message
+        try {
+          // The message might be in a thread under the specified channel
+          const ch = await this.client.channels.fetch(channel)
+          if (ch && 'threads' in ch) {
+            const parentChannel = ch as TextChannel
+            const activeThreads = await parentChannel.threads.fetchActive()
+            for (const [, thread] of activeThreads.threads) {
+              try {
+                const refMsg = await thread.messages.fetch(options.replyTo)
+                textChannel = refMsg.channel as ThreadChannel
+                break
+              } catch { /* not in this thread */ }
+            }
+          }
+        } catch { /* ignore */ }
+        // If still not resolved, use the specified channel
+        if (!textChannel!) {
+          const ch = await this.client.channels.fetch(channel)
+          if (!ch || !('send' in ch)) throw new Error(`Channel ${channel} not found or not text-based`)
+          textChannel = ch as TextChannel | ThreadChannel
+        }
+      }
+    } else {
+      const ch = await this.client.channels.fetch(channel)
+      if (!ch || !('send' in ch)) throw new Error(`Channel ${channel} not found or not text-based`)
+      textChannel = ch as TextChannel | ThreadChannel
+    }
 
     // Start typing while preparing
     startTypingInternal(textChannel as { sendTyping: () => Promise<void>; id: string })
@@ -282,7 +322,7 @@ export class DiscordAdapter implements UIAdapter {
       : text
 
     // Stop typing before sending
-    stopTypingInternal(channel)
+    stopTypingInternal(textChannel.id)
 
     let sentMsg
     if (options?.replyTo) {
