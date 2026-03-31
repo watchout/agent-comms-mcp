@@ -1333,6 +1333,24 @@ mcp.connect(transport).then(async () => {
         const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
         const content = msg.content || (atts ? '(attachment)' : '')
 
+        // Persist to DB (non-fatal: INSERT failure does not block notification)
+        saveMessage({
+          channel_id: msg.channel,
+          author_id: msg.author.id,
+          content,
+          message_type: 'chat',
+          metadata: {
+            discord_message_id: msg.id,
+            discord_channel_id: msg.channel,
+            source: 'discord',
+            author_name: msg.author.name,
+            to: AGENT_ID,
+            ...(atts ? { attachments: atts } : {}),
+          },
+        }).catch(err => {
+          process.stderr.write(`agent-comms: discord message DB persist failed (non-fatal): ${err}\n`)
+        })
+
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
