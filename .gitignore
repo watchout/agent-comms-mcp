@@ -1,8 +1,11 @@
 node_modules/
 .env
+.env.*
 config.json
+.mcp.json
+.mcp.json.bak
 logs/
 *.log
-.mcp.json.bak
 .claude/
 agent-com-dev-state.md
+dist/
