@@ -1,6 +1,7 @@
 import type { LLMAdapter, LLMAdapterConfig } from './types.js'
 import { AnthropicAdapter } from './anthropic.js'
 import { OpenAIAdapter } from './openai.js'
+import { GoogleAdapter } from './google.js'
 
 export type { LLMAdapter, LLMAdapterConfig, LLMMessage } from './types.js'
 
@@ -10,6 +11,8 @@ export function createLLMAdapter(config: LLMAdapterConfig): LLMAdapter {
       return new AnthropicAdapter(config.apiKey, config.model)
     case 'openai':
       return new OpenAIAdapter(config.apiKey, config.model)
+    case 'google':
+      return new GoogleAdapter(config.apiKey, config.model)
     default:
       throw new Error(`Unknown LLM provider: ${config.provider}`)
   }
@@ -17,20 +20,29 @@ export function createLLMAdapter(config: LLMAdapterConfig): LLMAdapter {
 
 /**
  * Create an LLM adapter from environment variables.
- * - LLM_PROVIDER: 'anthropic' | 'openai' (default: 'anthropic')
- * - ANTHROPIC_API_KEY / OPENAI_API_KEY
+ * - LLM_PROVIDER: 'anthropic' | 'openai' | 'google' (default: 'anthropic')
+ * - ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY
  * - LLM_MODEL: optional model override
  */
 export function createLLMAdapterFromEnv(): LLMAdapter {
-  const provider = (process.env.LLM_PROVIDER || 'anthropic') as 'anthropic' | 'openai'
+  const provider = (process.env.LLM_PROVIDER || 'anthropic') as 'anthropic' | 'openai' | 'google'
 
   let apiKey: string
-  if (provider === 'anthropic') {
-    apiKey = process.env.ANTHROPIC_API_KEY || ''
-    if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic')
-  } else {
-    apiKey = process.env.OPENAI_API_KEY || ''
-    if (!apiKey) throw new Error('OPENAI_API_KEY is required when LLM_PROVIDER=openai')
+  switch (provider) {
+    case 'anthropic':
+      apiKey = process.env.ANTHROPIC_API_KEY || ''
+      if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic')
+      break
+    case 'openai':
+      apiKey = process.env.OPENAI_API_KEY || ''
+      if (!apiKey) throw new Error('OPENAI_API_KEY is required when LLM_PROVIDER=openai')
+      break
+    case 'google':
+      apiKey = process.env.GOOGLE_API_KEY || ''
+      if (!apiKey) throw new Error('GOOGLE_API_KEY is required when LLM_PROVIDER=google')
+      break
+    default:
+      throw new Error(`Unknown LLM provider: ${provider}`)
   }
 
   return createLLMAdapter({

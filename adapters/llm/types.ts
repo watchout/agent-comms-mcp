@@ -9,7 +9,7 @@ export interface LLMMessage {
 }
 
 export interface LLMAdapterConfig {
-  provider: 'anthropic' | 'openai'
+  provider: 'anthropic' | 'openai' | 'google'
   apiKey: string
   model?: string
 }
