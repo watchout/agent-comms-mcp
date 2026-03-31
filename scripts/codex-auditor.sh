@@ -1,26 +1,60 @@
 #!/usr/bin/env bash
 # codex-auditor.sh — Cron-based deep review of Dev Bot [報告] messages using Codex CLI
-# Usage: DATABASE_URL=postgresql://localhost/agent_comms ./scripts/codex-auditor.sh
-# Cron:  * * * * * DATABASE_URL=postgresql://localhost/agent_comms /path/to/scripts/codex-auditor.sh 2>> /tmp/codex-auditor.log
+# Usage: DATABASE_URL=postgresql://localhost/agent_comms DISCORD_BOT_TOKEN=xxx ./scripts/codex-auditor.sh
+# Cron:  * * * * * DATABASE_URL=postgresql://localhost/agent_comms DISCORD_BOT_TOKEN=xxx /path/to/scripts/codex-auditor.sh 2>> /tmp/codex-auditor.log
 
 set -euo pipefail
 
 DATABASE_URL="${DATABASE_URL:?DATABASE_URL is required}"
+DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
 REVIEWED_FILE="${REVIEWED_FILE:-/tmp/codex-auditor-reviewed.txt}"
 CODEX_TIMEOUT="${CODEX_TIMEOUT:-60}"
+AUDIT_LOG_CHANNEL="1486097726784540813"
+CTO_CHANNEL="1485598480553611357"
 LOG_TAG="[codex-auditor]"
 
 # Ensure reviewed file exists
 touch "$REVIEWED_FILE"
 
+# --- Discord REST API helper ---
+post_to_discord() {
+  local channel_id="$1"
+  local content="$2"
+  local reply_to="${3:-}"
+
+  if [ -z "$DISCORD_BOT_TOKEN" ]; then
+    echo "${LOG_TAG} Would post to ${channel_id}: ${content:0:80}..." >&2
+    return 0
+  fi
+
+  local body
+  if [ -n "$reply_to" ]; then
+    body=$(jq -n \
+      --arg content "$content" \
+      --arg msg_id "$reply_to" \
+      '{content: $content, allowed_mentions: {parse: ["users", "roles"]}, message_reference: {message_id: $msg_id}}')
+  else
+    body=$(jq -n \
+      --arg content "$content" \
+      '{content: $content, allowed_mentions: {parse: ["users", "roles"]}}')
+  fi
+
+  curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "https://discord.com/api/v10/channels/${channel_id}/messages" \
+    -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$body" || echo "000"
+}
+
 # --- Step 1: Fetch recent [報告] messages from DB (last 5 minutes) ---
 REPORTS=$(psql "$DATABASE_URL" -tA -F $'\t' -c "
   SELECT id, author_id, channel_id, content,
-         coalesce(metadata->>'discord_channel_id', channel_id) as discord_channel,
+         coalesce(metadata->>'discord_channel_id', '') as discord_channel,
          coalesce(metadata->>'discord_message_id', '') as discord_message
   FROM agent_messages
   WHERE content ~ '\[報告[:：]?[^\]]*\]'
     AND created_at > now() - interval '5 minutes'
+    AND author_id NOT IN ('codex-auditor', 'api-auditor', 'api-advisor')
   ORDER BY created_at ASC
 " 2>/dev/null || echo "")
 
@@ -66,37 +100,57 @@ REVIEW_EOF
   else
     echo "${LOG_TAG} Codex review failed or timed out for ${MSG_ID}" >&2
     rm -f "$TEMP_FILE"
-    # Record as reviewed to avoid retry loop
     echo "$MSG_ID" >> "$REVIEWED_FILE"
     continue
   fi
 
   rm -f "$TEMP_FILE"
 
-  # --- Step 4: Post review to Discord via agent-comms MCP ---
-  if [ -n "$REVIEW_RESULT" ] && [ -n "$DISCORD_CHANNEL" ]; then
-    # Use psql to insert reply into agent_messages (triggers pg_notify → Discord)
-    REVIEW_CONTENT="[Codex Auditor] ${REVIEW_RESULT}"
-    # Truncate to 2000 chars for Discord
-    REVIEW_CONTENT="${REVIEW_CONTENT:0:2000}"
-
-    psql "$DATABASE_URL" -c "
-      INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
-      VALUES (
-        gen_random_uuid(),
-        '${DISCORD_CHANNEL}',
-        'codex-auditor',
-        \$review\$${REVIEW_CONTENT}\$review\$,
-        'chat',
-        jsonb_build_object(
-          'source', 'codex-auditor',
-          'reviewed_message_id', '${MSG_ID}',
-          'to', '${AUTHOR_ID}'
-        )
-      )
-    " 2>/dev/null && echo "${LOG_TAG} Review posted to ${DISCORD_CHANNEL}" >&2 \
-      || echo "${LOG_TAG} Failed to post review to DB" >&2
+  if [ -z "$REVIEW_RESULT" ]; then
+    echo "$MSG_ID" >> "$REVIEWED_FILE"
+    continue
   fi
+
+  REVIEW_CONTENT="[Codex Auditor] ${REVIEW_RESULT}"
+  REVIEW_CONTENT="${REVIEW_CONTENT:0:2000}"
+
+  # --- Step 4: Post review to source Discord channel (direct reply) ---
+  if [ -n "$DISCORD_CHANNEL" ]; then
+    STATUS=$(post_to_discord "$DISCORD_CHANNEL" "$REVIEW_CONTENT" "$DISCORD_MESSAGE")
+    echo "${LOG_TAG} Posted to source channel ${DISCORD_CHANNEL}: HTTP ${STATUS}" >&2
+  fi
+
+  # --- Step 5: Post to #audit-log ---
+  AUDIT_CONTENT="[Codex Auditor] ${AUTHOR_ID}の報告レビュー (${CHANNEL_ID}):"$'\n'"${REVIEW_RESULT}"
+  AUDIT_CONTENT="${AUDIT_CONTENT:0:2000}"
+  STATUS=$(post_to_discord "$AUDIT_LOG_CHANNEL" "$AUDIT_CONTENT")
+  echo "${LOG_TAG} Posted to #audit-log: HTTP ${STATUS}" >&2
+
+  # --- Step 6: Notify CTO if warning or problem detected ---
+  if echo "$REVIEW_RESULT" | grep -qE '^[⚠️❌]|⚠️|❌'; then
+    CTO_CONTENT="[Codex Auditor 警告] ${AUTHOR_ID}の報告に懸念事項:"$'\n'"${REVIEW_RESULT}"
+    CTO_CONTENT="${CTO_CONTENT:0:2000}"
+    STATUS=$(post_to_discord "$CTO_CHANNEL" "$CTO_CONTENT")
+    echo "${LOG_TAG} CTO notified: HTTP ${STATUS}" >&2
+  fi
+
+  # --- Step 7: Also persist to DB ---
+  psql "$DATABASE_URL" -c "
+    INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
+    VALUES (
+      gen_random_uuid(),
+      '${DISCORD_CHANNEL:-${CHANNEL_ID}}',
+      'codex-auditor',
+      \$review\$${REVIEW_CONTENT}\$review\$,
+      'chat',
+      jsonb_build_object(
+        'source', 'codex-auditor',
+        'reviewed_message_id', '${MSG_ID}',
+        'to', '${AUTHOR_ID}'
+      )
+    )
+  " 2>/dev/null && echo "${LOG_TAG} Review persisted to DB" >&2 \
+    || echo "${LOG_TAG} Failed to persist review to DB" >&2
 
   # Record as reviewed
   echo "$MSG_ID" >> "$REVIEWED_FILE"
