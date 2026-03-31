@@ -13,6 +13,7 @@
 import {
   Client,
   GatewayIntentBits,
+  Partials,
   ChannelType,
   ButtonBuilder,
   ButtonStyle,
@@ -194,6 +195,7 @@ export class DiscordAdapter implements UIAdapter {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
+      partials: [Partials.Channel, Partials.Message],
     })
 
     this.client.on('messageCreate', (msg) => {
