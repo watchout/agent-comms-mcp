@@ -1,10 +1,10 @@
 # agent-com
 
-> Push-based agent-to-agent communication for Claude Code
+> Push-based agent-to-agent communication for AI coding assistants
 
 ![demo](demo.gif)
 
-**agent-com** is a unified communication plugin that enables real-time, push-based messaging between Claude Code sessions. Human-to-bot, bot-to-bot -- all messages flow through the same channel, delivered instantly without polling.
+**agent-com** is an MCP server that enables real-time, push-based messaging between AI coding agent sessions. Works with **Claude Code**, **OpenAI Codex CLI**, and any MCP-compatible client. Human-to-bot, bot-to-bot — all messages flow through the same channel, delivered instantly without polling.
 
 ## Why agent-com?
 
@@ -13,16 +13,22 @@ Existing solutions require LLMs to actively poll for messages. If the LLM doesn'
 | | Pull-based (polling) | agent-com (push) |
 |---|---|---|
 | Message delivery | LLM must call a tool to check | Automatically injected into session |
-| Latency | Depends on poll interval | Near-instant via Webhook channel |
+| Latency | Depends on poll interval | Near-instant via pg_notify + Webhook |
 | Reliability | Messages missed if LLM forgets to check | Every message delivered |
+| Multi-LLM | Single vendor | Claude Code + Codex CLI + any MCP client |
 
-**Built-in safety for production use:**
+## Features
 
-- **HMAC-SHA256 authentication** -- Verify message origin with shared-secret signing
-- **Rate limiting** -- 30 msg/min/agent, persisted in PostgreSQL (survives restarts)
-- **Loop detection** -- Depth limits + exchange counters prevent infinite bot-to-bot loops
-- **Access control** -- Per-channel allowlists and mention requirements
-- **Content sanitization** -- `@everyone` / `@here` automatically stripped
+- **Push notifications** — Messages injected into sessions automatically via pg_notify
+- **Discord integration** — Full send/receive with threads, DMs, typing indicators, and mention notifications
+- **Multi-LLM support** — Verified with Claude Code and OpenAI Codex CLI
+- **LLM Adapter** — Built-in Anthropic, OpenAI, and Google Gemini adapters for API-based agents
+- **All messages persisted** — Every Discord and agent message stored in PostgreSQL
+- **HMAC-SHA256 auth** — Shared-secret signing with replay protection
+- **Rate limiting** — Per-agent limits, DB-persisted (survives restarts)
+- **Loop detection** — Depth limits + exchange counters prevent infinite bot-to-bot loops
+- **Zombie process cleanup** — Auto-kills stale processes on port conflict at startup
+- **Database optional** — Full features with PostgreSQL, file-based fallback without
 
 ## Quick Start
 
@@ -37,34 +43,46 @@ bun install
 ### 2. Configure
 
 ```bash
-export AGENT_ID=my-bot
+# Initialize database (optional but recommended)
 export DATABASE_URL=postgresql://localhost/agent_comms
-
-# Initialize database
 bun run migrate
 ```
 
-Or use `config.json`:
+### 3. Add to Claude Code
+
+Add to your `.mcp.json`:
 
 ```json
 {
-  "agent_id": "my-bot",
-  "database_url": "postgresql://localhost/agent_comms"
+  "mcpServers": {
+    "agent-comms": {
+      "command": "bun",
+      "args": ["run", "server.ts"],
+      "cwd": "/path/to/agent-comms-mcp",
+      "env": {
+        "AGENT_ID": "my-bot",
+        "DATABASE_URL": "postgresql://localhost/agent_comms",
+        "DISCORD_BOT_TOKEN": "your-discord-bot-token"
+      }
+    }
+  }
 }
 ```
 
-### 3. Launch
+### 4. Add to Codex CLI
 
-```bash
-# Start with Claude Code (push notifications enabled)
-claude --dangerously-load-development-channels server:agent-com-bridge \
-       --mcp agent-comms
+Add to `~/.codex/config.toml`:
 
-# In a separate terminal: start the message listener
-bun scripts/listener.ts
+```toml
+[mcp.agent-comms]
+command = "bun"
+args = ["run", "server.ts"]
+cwd = "/path/to/agent-comms-mcp"
+
+[mcp.agent-comms.env]
+AGENT_ID = "codex-bot"
+DATABASE_URL = "postgresql://localhost/agent_comms"
 ```
-
-That's it. Messages sent to your agent are now automatically injected into the session.
 
 ## How It Works
 
@@ -73,70 +91,51 @@ Agent A calls send_message(to: "agent-b", content: "hello")
   → DB INSERT + pg_notify('agent_inbox')
   → Listener receives NOTIFY
   → HTTP POST to Agent B's Webhook bridge
-  → Claude Code session receives <channel> message automatically
+  → Session receives message automatically
   → Agent B sees and responds immediately
 ```
 
-No polling. No tool calls needed to receive. Messages appear instantly.
+Discord messages follow the same path:
 
-## Features
+```
+Discord message received
+  → DB INSERT (with discord metadata) + pg_notify
+  → MCP notification injected into session
+  → Agent processes and replies via Discord adapter
+```
 
-### MCP Tools
+## MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `send_message` | Send a message to another agent |
+| `reply` | Reply to a Discord channel or thread |
 | `fetch_messages` | Retrieve channel history |
-| `check_inbox` | Re-check history (push handles delivery automatically) |
+| `fetch_discord_history` | Fetch Discord channel/thread history |
+| `check_inbox` | Re-check for new messages |
 | `list_agents` | Discover registered agents and their status |
-
-### Security
-
-| Mechanism | Description |
-|-----------|-------------|
-| **HMAC authentication** | Shared-secret signing with replay protection (5-min window) |
-| **Rate limiting** | Configurable per-agent limits, DB-persisted |
-| **Loop detection** | Depth limit (10) + exchange counter (20/5min window) |
-| **Duplicate detection** | Content-hash dedup within 10-second window |
-| **Content sanitization** | Mass-mention patterns automatically removed |
-| **Burst control** | 500ms minimum interval between outbound messages |
-
-### Multi-Platform Adapters
-
-agent-com uses a unified adapter layer. Each platform translates to/from a common message format:
-
-| Platform | Status | Max Message Length |
-|----------|--------|-------------------|
-| Discord | Available | 2,000 chars |
-| Telegram | Accepting contributions — open an issue if interested | 4,096 chars |
-| Slack | Accepting contributions — open an issue if interested | 40,000 chars |
-| LINE | Accepting contributions — open an issue if interested | 5,000 chars |
-
-### Database Optional
-
-| Mode | Features |
-|------|----------|
-| **With PostgreSQL** | Full features: persistent rate limits, loop counters, message history, agent discovery |
-| **Without PostgreSQL** | File-based fallback: in-memory safety, platform history for messages |
 
 ## Architecture
 
 ```
-Unified Plugin (agent-com)
-├── UI Adapter Layer (swappable)
-│   ├── Discord Adapter
-│   ├── Slack Adapter (planned)
-│   ├── Telegram Adapter (planned)
-│   └── LINE Adapter (planned)
+agent-com MCP Server
+├── UI Adapter Layer
+│   ├── Discord Adapter (send/receive, threads, DMs, typing)
+│   └── More adapters planned (Slack, Telegram, LINE)
 │
-├── Communication Bus (shared)
-│   ├── Message Routing
+├── Communication Bus
+│   ├── Message Routing (pg_notify push)
 │   ├── Access Control (allowlists, mention rules)
-│   ├── Push Notifications (Webhook channel)
-│   └── Safety Mechanisms (rate limit, loop detection, HMAC)
+│   ├── Safety (rate limit, loop detection, HMAC auth)
+│   └── DB Persistence (all messages stored)
 │
-└── MCP Management Tools
-    └── send_message / fetch_messages / check_inbox / list_agents
+├── LLM Adapter Layer
+│   ├── Anthropic (Claude)
+│   ├── OpenAI (GPT)
+│   └── Google (Gemini)
+│
+└── MCP Tools
+    └── send_message / reply / fetch_messages / check_inbox / list_agents
 ```
 
 ## Configuration
@@ -163,17 +162,41 @@ Unified Plugin (agent-com)
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `AGENT_ID` | Agent identifier |
-| `DATABASE_URL` | PostgreSQL connection string |
-| `WEBHOOK_PORT` | Webhook bridge port (default: 8789) |
-| `AGENT_COMMS_SECRET` | HMAC shared secret (hex-encoded) |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AGENT_ID` | Yes | Agent identifier |
+| `DATABASE_URL` | No | PostgreSQL connection string |
+| `WEBHOOK_PORT` | No | HTTP bridge port (default: 8789) |
+| `DISCORD_BOT_TOKEN` | No | Discord bot token for Discord integration |
+| `DISCORD_STATE_DIR` | No | Directory for Discord access control state |
+| `AGENT_COMMS_SECRET` | No | HMAC shared secret (hex-encoded) |
+| `LLM_PROVIDER` | No | LLM provider: anthropic, openai, google |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key (for LLM adapter) |
+| `OPENAI_API_KEY` | No | OpenAI API key (for LLM adapter) |
+| `GOOGLE_API_KEY` | No | Google API key (for LLM adapter) |
+
+### Security
+
+| Mechanism | Description |
+|-----------|-------------|
+| **HMAC authentication** | Shared-secret signing with replay protection (5-min window) |
+| **Rate limiting** | Configurable per-agent limits, DB-persisted |
+| **Loop detection** | Depth limit (10) + exchange counter (20/5min window) |
+| **Duplicate detection** | Content-hash dedup within 10-second window |
+| **Content sanitization** | Mass-mention patterns (`@everyone`, `@here`) automatically removed |
+| **Burst control** | 500ms minimum interval between outbound messages |
+
+### Database Optional
+
+| Mode | Features |
+|------|----------|
+| **With PostgreSQL** | Full features: persistent rate limits, loop counters, message history, agent discovery, pg_notify push |
+| **Without PostgreSQL** | File-based fallback: in-memory safety, platform history for messages |
 
 ## Development
 
 ```bash
-# Run all tests
+# Run tests
 bun test tests/
 
 # Run with watch mode
@@ -185,7 +208,7 @@ bun run migrate
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
 
 ---
 
@@ -193,4 +216,4 @@ MIT
 
 詳細な仕様書は [docs/SSOT.md](docs/SSOT.md) を参照してください。
 
-agent-comは、Claude Codeセッション間のpush型エージェント通信を実現する統合プラグインです。Webhookチャネル方式により、ポーリング不要でメッセージがセッションに自動注入されます。
+agent-comは、AIコーディングエージェント間のpush型通信を実現するMCPサーバーです。Claude CodeとOpenAI Codex CLIの両方で動作確認済み。pg_notify + Webhook方式により、ポーリング不要でメッセージがセッションに自動注入されます。
