@@ -1,19 +1,20 @@
 #!/usr/bin/env bun
 /**
- * API Auditor — Listens for [報告] messages and generates LLM review comments.
+ * API Auditor / Advisor — Listens for messages and generates LLM responses.
  *
- * Listens to pg_notify 'agent_inbox' for new messages, filters for [報告] tags,
- * sends them to an LLM for review, and posts the review back to Discord.
+ * Modes:
+ *   auditor — Monitors [報告] messages, generates quality reviews
+ *   advisor — Monitors @mentions, participates in design discussions
  *
  * Environment variables:
  *   DATABASE_URL          — PostgreSQL connection string
- *   DISCORD_BOT_TOKEN     — Discord bot token for posting reviews
- *   DISCORD_AUDIT_CHANNEL — Discord channel ID for audit log
- *   LLM_PROVIDER          — 'anthropic' | 'openai' (default: anthropic)
- *   ANTHROPIC_API_KEY     — Required if LLM_PROVIDER=anthropic
- *   OPENAI_API_KEY        — Required if LLM_PROVIDER=openai
+ *   DISCORD_BOT_TOKEN     — Discord bot token for posting
+ *   DISCORD_AUDIT_CHANNEL — Discord channel ID for audit log (default: 1486097726784540813)
+ *   LLM_PROVIDER          — 'anthropic' | 'openai' | 'google' (default: anthropic)
+ *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY
  *   LLM_MODEL             — Optional model override
- *   AUDITOR_AGENT_ID      — Agent ID for this auditor (default: api-auditor)
+ *   AUDITOR_AGENT_ID      — Agent ID (default: api-auditor / api-advisor)
+ *   AGENT_MODE            — 'auditor' | 'advisor' (default: auditor)
  */
 import pg from 'pg'
 import { createLLMAdapterFromEnv } from '../adapters/llm/index.js'
@@ -24,26 +25,23 @@ const { Client: PgClient } = pg
 // --- Config ---
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
-  console.error('[api-auditor] DATABASE_URL is required')
+  console.error('[api-agent] DATABASE_URL is required')
   process.exit(1)
 }
 
+const AGENT_MODE = (process.env.AGENT_MODE || 'auditor') as 'auditor' | 'advisor'
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN
-const DISCORD_AUDIT_CHANNEL = process.env.DISCORD_AUDIT_CHANNEL
-const AUDITOR_AGENT_ID = process.env.AUDITOR_AGENT_ID || 'api-auditor'
+const DISCORD_AUDIT_CHANNEL = process.env.DISCORD_AUDIT_CHANNEL || '1486097726784540813'
+const AUDITOR_AGENT_ID = process.env.AUDITOR_AGENT_ID || (AGENT_MODE === 'advisor' ? 'api-advisor' : 'api-auditor')
 
-// --- Report detection pattern ---
+const LOG_TAG = `[api-${AGENT_MODE}]`
+
+// --- Detection patterns ---
 const REPORT_PATTERN = /\[報告[:：]?(完了|失敗|進捗|ブロック)?\]/
+const MENTION_PATTERNS = [/advisor/i, /アドバイザー/, /設計者/]
 
-// --- Degradation signals (ADR-018 §10) ---
-const DEGRADATION_SIGNALS = {
-  emptyResponse: (content: string) => content.trim().length < 10,
-  repeatedContent: new Map<string, { content: string; count: number; lastSeen: number }>(),
-  shortMessages: new Map<string, number[]>(), // agent_id -> timestamps of short messages
-}
-
-// --- System prompt (ADR-018 §10 intervention rules embedded) ---
-const SYSTEM_PROMPT = `You are the API Auditor for the IYASAKA development team. Your role is to review [報告] (report) messages from Dev Bots and provide brief quality feedback.
+// --- System prompts ---
+const AUDITOR_PROMPT = `You are the API Auditor for the IYASAKA development team. Your role is to review [報告] (report) messages from Dev Bots and provide brief quality feedback.
 
 ## Review Criteria
 1. **Completeness**: Does the report include what was done, what changed, and what's next?
@@ -66,10 +64,58 @@ const SYSTEM_PROMPT = `You are the API Auditor for the IYASAKA development team.
 - Only flag concerns for the CTO to review.
 - Do not intervene on coding style or preferences.`
 
-// --- Discord REST API (minimal, no full client needed) ---
+const ADVISOR_PROMPT = `You are a Design Advisor for the IYASAKA development team. You participate in architectural and design discussions, offering insights from a broad technical perspective.
+
+## Role
+- Provide technical analysis and alternative approaches
+- Reference established decisions and patterns
+- Flag potential risks or trade-offs
+- Support decision-making with reasoning, not directives
+
+## Response Format
+- Use Japanese
+- Keep responses concise (under 500 characters)
+- Structure: 観点 → 分析 → 提案
+- Be direct and specific, avoid vague generalities
+
+## Important
+- You are an advisor, not a decision-maker. The CTO and CEO make final decisions.
+- Reference past decisions when relevant (they will be provided in context).
+- Do not repeat what others have already said.`
+
+// --- Fetch active decisions from agent-memory ---
+async function fetchActiveDecisions(client: pg.Client): Promise<string> {
+  try {
+    const r = await client.query(
+      `SELECT decision, context, tags FROM decisions
+       WHERE status = 'active' ORDER BY created_at DESC LIMIT 10`
+    )
+    if (r.rows.length === 0) return ''
+
+    const lines = r.rows.map((row: { decision: string; context?: string; tags?: string[] }) => {
+      let line = `• ${row.decision}`
+      if (row.context) line += ` (${row.context})`
+      if (row.tags?.length) line += ` [${row.tags.join(', ')}]`
+      return line
+    })
+    return `\n\n## Active Decisions (from agent-memory)\n${lines.join('\n')}`
+  } catch {
+    // decisions table may not exist if agent-memory not set up
+    return ''
+  }
+}
+
+// --- Build system prompt with decisions ---
+async function buildSystemPrompt(client: pg.Client): Promise<string> {
+  const basePrompt = AGENT_MODE === 'advisor' ? ADVISOR_PROMPT : AUDITOR_PROMPT
+  const decisions = await fetchActiveDecisions(client)
+  return basePrompt + decisions
+}
+
+// --- Discord REST API ---
 async function postToDiscord(channelId: string, content: string, replyTo?: string): Promise<void> {
   if (!DISCORD_BOT_TOKEN) {
-    console.error(`[api-auditor] Would post to ${channelId}: ${content}`)
+    console.error(`${LOG_TAG} Would post to ${channelId}: ${content}`)
     return
   }
 
@@ -92,29 +138,46 @@ async function postToDiscord(channelId: string, content: string, replyTo?: strin
 
   if (!resp.ok) {
     const text = await resp.text()
-    console.error(`[api-auditor] Discord post failed: ${resp.status} ${text}`)
+    console.error(`${LOG_TAG} Discord post failed: ${resp.status} ${text}`)
   }
+}
+
+// --- Check if message should be processed ---
+function shouldProcess(content: string, authorId: string): boolean {
+  if (authorId === AUDITOR_AGENT_ID) return false
+  if (authorId === 'api-auditor' || authorId === 'api-advisor' || authorId === 'codex-auditor') return false
+
+  if (AGENT_MODE === 'auditor') {
+    return REPORT_PATTERN.test(content)
+  }
+  // Advisor mode: respond to mentions
+  return MENTION_PATTERNS.some((p) => p.test(content))
 }
 
 // --- Main listener ---
 async function main() {
   const llm = createLLMAdapterFromEnv()
-  console.error(`[api-auditor] Using LLM provider: ${llm.provider}`)
+  console.error(`${LOG_TAG} Mode: ${AGENT_MODE}, LLM: ${llm.provider}`)
 
-  // DB client for queries
   const queryClient = new PgClient({ connectionString: DATABASE_URL })
   await queryClient.connect()
 
-  // Listener client for pg_notify
   const listenClient = new PgClient({ connectionString: DATABASE_URL })
   await listenClient.connect()
 
   listenClient.on('error', (err) => {
-    console.error(`[api-auditor] Listener error: ${err.message}`)
+    console.error(`${LOG_TAG} Listener error: ${err.message}`)
   })
 
   await listenClient.query('LISTEN agent_inbox')
-  console.error('[api-auditor] Listening for agent_inbox notifications...')
+  console.error(`${LOG_TAG} Listening for agent_inbox notifications...`)
+
+  // Pre-fetch system prompt with decisions
+  let systemPrompt = await buildSystemPrompt(queryClient)
+  // Refresh decisions every 5 minutes
+  setInterval(async () => {
+    systemPrompt = await buildSystemPrompt(queryClient)
+  }, 5 * 60 * 1000)
 
   listenClient.on('notification', async (msg) => {
     if (msg.channel !== 'agent_inbox' || !msg.payload) return
@@ -122,7 +185,6 @@ async function main() {
     try {
       const payload = JSON.parse(msg.payload) as { to: string; message_id: string }
 
-      // Fetch the message
       const r = await queryClient.query(
         `SELECT id, channel_id, author_id, content, message_type, metadata, created_at
          FROM agent_messages WHERE id = $1`,
@@ -135,43 +197,44 @@ async function main() {
       const authorId = row.author_id as string
       const metadata = row.metadata as Record<string, unknown> | null
 
-      // Skip own messages
-      if (authorId === AUDITOR_AGENT_ID) return
+      if (!shouldProcess(content, authorId)) return
 
-      // Check for [報告] pattern
-      if (!REPORT_PATTERN.test(content)) return
+      console.error(`${LOG_TAG} Processing message from ${authorId}: ${content.slice(0, 80)}...`)
 
-      console.error(`[api-auditor] Report detected from ${authorId}: ${content.slice(0, 80)}...`)
-
-      // Get Discord message info for reply
       const discordMessageId = metadata?.discord_message_id as string | undefined
       const discordChannelId = metadata?.discord_channel_id as string | undefined
 
-      // Send to LLM for review
-      const messages: LLMMessage[] = [
-        { role: 'user', content: `以下のDev Botからの報告をレビューしてください:\n\n送信者: ${authorId}\n内容: ${content}` },
-      ]
+      // Build LLM messages
+      const userContent = AGENT_MODE === 'auditor'
+        ? `以下のDev Botからの報告をレビューしてください:\n\n送信者: ${authorId}\n内容: ${content}`
+        : `以下のメッセージに設計アドバイザーとして回答してください:\n\n送信者: ${authorId}\n内容: ${content}`
 
-      const review = await llm.chat(SYSTEM_PROMPT, messages)
+      const messages: LLMMessage[] = [{ role: 'user', content: userContent }]
+      const review = await llm.chat(systemPrompt, messages)
 
       if (review) {
-        // Post review to Discord
         const targetChannel = discordChannelId || DISCORD_AUDIT_CHANNEL
         if (targetChannel) {
+          // Post to source channel
           await postToDiscord(targetChannel, review, discordMessageId)
-          console.error(`[api-auditor] Review posted to ${targetChannel}`)
+          console.error(`${LOG_TAG} Response posted to ${targetChannel}`)
+
+          // Also log to audit channel (if different from target)
+          if (AGENT_MODE === 'auditor' && targetChannel !== DISCORD_AUDIT_CHANNEL) {
+            const auditLog = `[${AGENT_MODE}] ${authorId}の報告レビュー:\n${review}`
+            await postToDiscord(DISCORD_AUDIT_CHANNEL, auditLog.slice(0, 2000))
+          }
         } else {
-          console.error(`[api-auditor] Review (no channel to post): ${review}`)
+          console.error(`${LOG_TAG} Response (no channel): ${review}`)
         }
       }
     } catch (err) {
-      console.error(`[api-auditor] Error processing notification: ${err}`)
+      console.error(`${LOG_TAG} Error processing notification: ${err}`)
     }
   })
 
-  // Graceful shutdown
   const shutdown = async () => {
-    console.error('[api-auditor] Shutting down...')
+    console.error(`${LOG_TAG} Shutting down...`)
     await listenClient.end()
     await queryClient.end()
     process.exit(0)
@@ -179,11 +242,10 @@ async function main() {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  // Keep alive
-  console.error('[api-auditor] API Auditor running. Press Ctrl+C to stop.')
+  console.error(`${LOG_TAG} Running. Press Ctrl+C to stop.`)
 }
 
 main().catch((err) => {
-  console.error(`[api-auditor] Fatal error: ${err}`)
+  console.error(`${LOG_TAG} Fatal error: ${err}`)
   process.exit(1)
 })
