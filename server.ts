@@ -596,12 +596,15 @@ async function pollNewMessages(): Promise<void> {
         process.stderr.write(`agent-comms: push notification failed: ${err}\n`)
       })
 
-      // Advance lastPolledAt — preserve raw PG timestamp string to avoid
-      // JS Date millisecond truncation of PostgreSQL's microsecond precision
+      // Advance cursor past this message to prevent re-fetch after processedIds TTL expires.
+      // Without +1ms, the `>= $2` query re-matches the same timestamp once processedIds
+      // expires (10min), causing infinite re-delivery.
       const rawTs = msg.created_at instanceof Date
         ? msg.created_at.toISOString()
         : String(msg.created_at)
-      lastPolledAt = rawTs
+      const d = new Date(rawTs)
+      d.setTime(d.getTime() + 1)  // +1ms (JS minimum precision)
+      lastPolledAt = d.toISOString()
     }
   } catch (err) {
     process.stderr.write(`agent-comms: poll error (will retry): ${err}\n`)

@@ -346,10 +346,26 @@ export class DiscordAdapter implements UIAdapter {
     // Stop typing before sending
     stopTypingInternal(textChannel.id)
 
-    let sentMsg
-    if (options?.replyTo) {
+    // Auto-reply: if no replyTo specified, reply to the latest message in the channel
+    // This ensures Bot messages always appear as replies, which is required for
+    // mentionPatterns filter to deliver them to other Bots
+    let effectiveReplyTo = options?.replyTo
+    if (!effectiveReplyTo) {
       try {
-        const refMsg = await textChannel.messages.fetch(options.replyTo)
+        const recent = await textChannel.messages.fetch({ limit: 1 })
+        const lastMsg = recent.first()
+        if (lastMsg) {
+          effectiveReplyTo = lastMsg.id
+        }
+      } catch {
+        // If fetching fails, fall back to plain send
+      }
+    }
+
+    let sentMsg
+    if (effectiveReplyTo) {
+      try {
+        const refMsg = await textChannel.messages.fetch(effectiveReplyTo)
         sentMsg = await refMsg.reply({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
       } catch {
         sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
