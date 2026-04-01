@@ -70,9 +70,21 @@ describe('DM access control', () => {
 
 // --- Guild channel access control ---
 describe('Guild channel access control', () => {
-  test('message in unconfigured channel is dropped', () => {
+  test('unconfigured channel with empty allowFrom delivers (open access)', () => {
     const access = makeAccess()
     const result = gate(access, 'user-1', 'unknown-ch', null, false, false)
+    expect(result.action).toBe('deliver')
+  })
+
+  test('unconfigured channel with allowFrom permits listed user', () => {
+    const access = makeAccess({ allowFrom: ['user-1'] })
+    const result = gate(access, 'user-1', 'unknown-ch', null, false, false)
+    expect(result.action).toBe('deliver')
+  })
+
+  test('unconfigured channel with allowFrom blocks unlisted user', () => {
+    const access = makeAccess({ allowFrom: ['user-1'] })
+    const result = gate(access, 'user-2', 'unknown-ch', null, false, false)
     expect(result.action).toBe('drop')
   })
 
@@ -140,12 +152,15 @@ describe('Thread inheritance', () => {
     expect(result.action).toBe('deliver')
   })
 
-  test('thread with unconfigured parent is dropped', () => {
+  test('thread with unconfigured parent falls back to top-level allowFrom', () => {
     const access = makeAccess({
+      allowFrom: ['user-1'],
       groups: { 'other-ch': { requireMention: false, allowFrom: [] } },
     })
-    const result = gate(access, 'user-1', 'thread-ch', 'unknown-parent', false, false)
-    expect(result.action).toBe('drop')
+    // user-1 in allowFrom → deliver
+    expect(gate(access, 'user-1', 'thread-ch', 'unknown-parent', false, false).action).toBe('deliver')
+    // user-2 not in allowFrom → drop
+    expect(gate(access, 'user-2', 'thread-ch', 'unknown-parent', false, false).action).toBe('drop')
   })
 })
 
