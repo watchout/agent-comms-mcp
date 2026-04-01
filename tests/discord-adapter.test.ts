@@ -141,6 +141,43 @@ describe('Guild channel access control', () => {
   })
 })
 
+// --- mentionPatterns filter (ungrouped channels) ---
+describe('mentionPatterns filter', () => {
+  test('ungrouped channel with mentionPatterns requires mention', () => {
+    const access = makeAccess({
+      mentionPatterns: ['bot-id-123', 'MyBot'],
+    })
+    // No mention → drop
+    expect(gate(access, 'user-1', 'any-ch', null, false, false).action).toBe('drop')
+    // With mention → deliver
+    expect(gate(access, 'user-1', 'any-ch', null, false, true).action).toBe('deliver')
+  })
+
+  test('ungrouped channel without mentionPatterns delivers all', () => {
+    const access = makeAccess()
+    // No mentionPatterns → deliver without mention
+    expect(gate(access, 'user-1', 'any-ch', null, false, false).action).toBe('deliver')
+  })
+
+  test('ungrouped channel with empty mentionPatterns delivers all', () => {
+    const access = makeAccess({ mentionPatterns: [] })
+    expect(gate(access, 'user-1', 'any-ch', null, false, false).action).toBe('deliver')
+  })
+
+  test('mentionPatterns + allowFrom: both checks apply', () => {
+    const access = makeAccess({
+      allowFrom: ['user-1'],
+      mentionPatterns: ['bot-id'],
+    })
+    // user-1, no mention → drop (mention required)
+    expect(gate(access, 'user-1', 'any-ch', null, false, false).action).toBe('drop')
+    // user-1, with mention → deliver
+    expect(gate(access, 'user-1', 'any-ch', null, false, true).action).toBe('deliver')
+    // user-2, with mention → drop (not in allowFrom)
+    expect(gate(access, 'user-2', 'any-ch', null, false, true).action).toBe('drop')
+  })
+})
+
 // --- Thread inheritance ---
 describe('Thread inheritance', () => {
   test('thread inherits parent channel policy', () => {

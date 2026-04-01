@@ -97,6 +97,10 @@ export function gate(
     if (access.allowFrom.length > 0 && !access.allowFrom.includes(senderId)) {
       return { action: 'drop', reason: 'not in top-level allowFrom' }
     }
+    // If mentionPatterns defined, require mention (saves tokens for non-lead bots)
+    if (access.mentionPatterns && access.mentionPatterns.length > 0 && !isMentioned) {
+      return { action: 'drop', reason: 'mention required (mentionPatterns set)' }
+    }
     return { action: 'deliver' }
   }
 
