@@ -220,6 +220,7 @@ describe('allowChannels filter', () => {
   })
 })
 
+
 // --- Thread inheritance ---
 describe('Thread inheritance', () => {
   test('thread inherits parent channel policy', () => {

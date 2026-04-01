@@ -62,6 +62,7 @@ export function loadAccess(filePath: string): Access {
       groups: parsed.groups ?? {},
       pending: parsed.pending ?? {},
       mentionPatterns: parsed.mentionPatterns,
+      allowChannels: parsed.allowChannels,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -109,7 +110,7 @@ export function gate(
       }
       return { action: 'deliver' }
     }
-    // No allowChannels: if mentionPatterns defined, require mention
+    // No allowChannels: if mentionPatterns defined, require mention (saves tokens for non-lead bots)
     if (access.mentionPatterns && access.mentionPatterns.length > 0 && !isMentioned) {
       return { action: 'drop', reason: 'mention required (mentionPatterns set)' }
     }
