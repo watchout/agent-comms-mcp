@@ -39,6 +39,7 @@ export interface Access {
   groups: Record<string, GroupPolicy>
   pending: Record<string, unknown>
   mentionPatterns?: string[]
+  allowChannels?: string[]
 }
 
 function defaultAccess(): Access {
@@ -61,6 +62,7 @@ export function loadAccess(filePath: string): Access {
       groups: parsed.groups ?? {},
       pending: parsed.pending ?? {},
       mentionPatterns: parsed.mentionPatterns,
+      allowChannels: parsed.allowChannels,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -97,7 +99,18 @@ export function gate(
     if (access.allowFrom.length > 0 && !access.allowFrom.includes(senderId)) {
       return { action: 'drop', reason: 'not in top-level allowFrom' }
     }
-    // If mentionPatterns defined, require mention (saves tokens for non-lead bots)
+    // allowChannels: if defined, main-lead channels deliver all, others require mention
+    if (access.allowChannels && access.allowChannels.length > 0) {
+      if (access.allowChannels.includes(lookupId)) {
+        return { action: 'deliver' } // Main-lead channel: deliver all
+      }
+      // Not a main-lead channel: require mention
+      if (!isMentioned) {
+        return { action: 'drop', reason: 'not in allowChannels and no mention' }
+      }
+      return { action: 'deliver' }
+    }
+    // No allowChannels: if mentionPatterns defined, require mention (saves tokens for non-lead bots)
     if (access.mentionPatterns && access.mentionPatterns.length > 0 && !isMentioned) {
       return { action: 'drop', reason: 'mention required (mentionPatterns set)' }
     }
@@ -334,10 +347,26 @@ export class DiscordAdapter implements UIAdapter {
     // Stop typing before sending
     stopTypingInternal(textChannel.id)
 
-    let sentMsg
-    if (options?.replyTo) {
+    // Auto-reply: if no replyTo specified, reply to the latest message in the channel
+    // This ensures Bot messages always appear as replies, which is required for
+    // mentionPatterns filter to deliver them to other Bots
+    let effectiveReplyTo = options?.replyTo
+    if (!effectiveReplyTo) {
       try {
-        const refMsg = await textChannel.messages.fetch(options.replyTo)
+        const recent = await textChannel.messages.fetch({ limit: 1 })
+        const lastMsg = recent.first()
+        if (lastMsg) {
+          effectiveReplyTo = lastMsg.id
+        }
+      } catch {
+        // If fetching fails, fall back to plain send
+      }
+    }
+
+    let sentMsg
+    if (effectiveReplyTo) {
+      try {
+        const refMsg = await textChannel.messages.fetch(effectiveReplyTo)
         sentMsg = await refMsg.reply({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
       } catch {
         sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })

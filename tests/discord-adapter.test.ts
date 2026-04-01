@@ -178,6 +178,49 @@ describe('mentionPatterns filter', () => {
   })
 })
 
+// --- allowChannels filter ---
+describe('allowChannels filter', () => {
+  test('message in allowChannels delivers without mention', () => {
+    const access = makeAccess({
+      allowChannels: ['main-ch'],
+      mentionPatterns: ['bot-id'],
+    })
+    expect(gate(access, 'user-1', 'main-ch', null, false, false).action).toBe('deliver')
+  })
+
+  test('message outside allowChannels requires mention', () => {
+    const access = makeAccess({
+      allowChannels: ['main-ch'],
+      mentionPatterns: ['bot-id'],
+    })
+    // No mention → drop
+    expect(gate(access, 'user-1', 'other-ch', null, false, false).action).toBe('drop')
+    // With mention → deliver
+    expect(gate(access, 'user-1', 'other-ch', null, false, true).action).toBe('deliver')
+  })
+
+  test('thread inherits parent for allowChannels check', () => {
+    const access = makeAccess({
+      allowChannels: ['main-ch'],
+      mentionPatterns: ['bot-id'],
+    })
+    // Thread under allowChannels parent → deliver
+    expect(gate(access, 'user-1', 'thread-1', 'main-ch', false, false).action).toBe('deliver')
+    // Thread under non-allowChannels parent → require mention
+    expect(gate(access, 'user-1', 'thread-2', 'other-ch', false, false).action).toBe('drop')
+  })
+
+  test('no allowChannels falls back to mentionPatterns behavior', () => {
+    const access = makeAccess({
+      mentionPatterns: ['bot-id'],
+    })
+    // mentionPatterns without allowChannels → require mention on all channels
+    expect(gate(access, 'user-1', 'any-ch', null, false, false).action).toBe('drop')
+    expect(gate(access, 'user-1', 'any-ch', null, false, true).action).toBe('deliver')
+  })
+})
+
+
 // --- Thread inheritance ---
 describe('Thread inheritance', () => {
   test('thread inherits parent channel policy', () => {
