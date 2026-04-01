@@ -39,6 +39,7 @@ export interface Access {
   groups: Record<string, GroupPolicy>
   pending: Record<string, unknown>
   mentionPatterns?: string[]
+  allowChannels?: string[]
 }
 
 function defaultAccess(): Access {
@@ -97,7 +98,18 @@ export function gate(
     if (access.allowFrom.length > 0 && !access.allowFrom.includes(senderId)) {
       return { action: 'drop', reason: 'not in top-level allowFrom' }
     }
-    // If mentionPatterns defined, require mention (saves tokens for non-lead bots)
+    // allowChannels: if defined, main-lead channels deliver all, others require mention
+    if (access.allowChannels && access.allowChannels.length > 0) {
+      if (access.allowChannels.includes(lookupId)) {
+        return { action: 'deliver' } // Main-lead channel: deliver all
+      }
+      // Not a main-lead channel: require mention
+      if (!isMentioned) {
+        return { action: 'drop', reason: 'not in allowChannels and no mention' }
+      }
+      return { action: 'deliver' }
+    }
+    // No allowChannels: if mentionPatterns defined, require mention
     if (access.mentionPatterns && access.mentionPatterns.length > 0 && !isMentioned) {
       return { action: 'drop', reason: 'mention required (mentionPatterns set)' }
     }
