@@ -92,7 +92,13 @@ export function gate(
   // Guild messages: look up channel policy (threads inherit parent)
   const lookupId = parentChannelId ?? channelId
   const policy = access.groups[lookupId]
-  if (!policy) return { action: 'drop', reason: `channel ${lookupId} not in groups` }
+  if (!policy) {
+    // Channel not in groups: fall back to top-level allowFrom
+    if (access.allowFrom.length > 0 && !access.allowFrom.includes(senderId)) {
+      return { action: 'drop', reason: 'not in top-level allowFrom' }
+    }
+    return { action: 'deliver' }
+  }
 
   const groupAllowFrom = policy.allowFrom ?? []
   if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
