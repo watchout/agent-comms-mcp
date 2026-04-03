@@ -933,13 +933,15 @@ bun agent-com check-plugin
 `scripts/bot-registry.txt` が全botの定義ファイル（SSOT）。
 
 ```
-# SESSION|PROJECT_DIR|AGENT_ID|PORT
-discord-cto|~/Developer/tech-lead|cto|8789
-discord-haishin|~/Developer/haishin-puls-hub|haishin-dev|8792
+# SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND
+discord-cto|~/Developer/tech-lead|cto|8789|claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
 ...
 ```
 
-環境変数 `BOT_REGISTRY` でパスを上書き可能（デフォルト: `scripts/bot-registry.txt`）。
+- 5列目（COMMAND）に各Botの正確な起動コマンドを記載
+- COMMANDが省略された場合はデフォルトコマンドが使用される
+- watchdog.sh / restart-bot.sh / MCP restart_bot ツールはregistryのコマンドをそのまま使用
+- 環境変数 `BOT_REGISTRY` でパスを上書き可能（デフォルト: `scripts/bot-registry.txt`）
 
 ### 16.3 MCP管理ツール
 

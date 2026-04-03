@@ -1380,12 +1380,12 @@ interface BotEntry {
   projectDir: string
   agentId: string
   port: number
+  command: string
 }
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
-const CLAUDE_CMD = process.env.CLAUDE_CMD
-  ?? 'claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_CLAUDE_CMD = 'claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
 
 function loadBotRegistry(): BotEntry[] {
   try {
@@ -1393,8 +1393,10 @@ function loadBotRegistry(): BotEntry[] {
     return content.split('\n')
       .filter(line => line.trim() && !line.startsWith('#'))
       .map(line => {
-        const [session, projectDir, agentId, port] = line.split('|').map(s => s.trim())
-        return { session, projectDir, agentId, port: parseInt(port, 10) }
+        const parts = line.split('|').map(s => s.trim())
+        const [session, projectDir, agentId, portStr, ...cmdParts] = parts
+        const command = cmdParts.join('|').trim() || DEFAULT_CLAUDE_CMD
+        return { session, projectDir, agentId, port: parseInt(portStr, 10), command }
       })
       .filter(e => e.session && !isNaN(e.port))
   } catch {
@@ -1456,8 +1458,8 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   // 3. Create new session and start Claude Code
   tmuxExec(['new-session', '-d', '-s', entry.session, '-c', expandedDir])
   Bun.sleepSync(1000)
-  tmuxExec(['send-keys', '-t', entry.session, CLAUDE_CMD, 'Enter'])
-  log.push(`Started Claude Code in ${expandedDir}`)
+  tmuxExec(['send-keys', '-t', entry.session, entry.command, 'Enter'])
+  log.push(`Started: ${entry.command}`)
 
   // 4. Wait for TUI prompt and auto-confirm
   Bun.sleepSync(3000)
