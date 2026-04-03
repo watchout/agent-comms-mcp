@@ -7,10 +7,16 @@
 
 set -euo pipefail
 
+# Ensure PATH includes homebrew (cron/watchdog environment is minimal)
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
 SESSION="${1:?Usage: restart-bot.sh <session-name> [project-dir] [port] [command]}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REGISTRY="${BOT_REGISTRY:-${SCRIPT_DIR}/bot-registry.txt}"
 DEFAULT_CMD="claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
+
+# Load .mcp.json sync helper (ensures AGENT_ID/PORT/STATE_DIR match registry)
+source "${SCRIPT_DIR}/sync-mcp-config.sh"
 
 # Try to resolve from registry
 if [ -f "$REGISTRY" ]; then
@@ -18,7 +24,7 @@ if [ -f "$REGISTRY" ]; then
 fi
 
 if [ -n "${REGISTRY_LINE:-}" ]; then
-  IFS='|' read -r _SESSION PROJECT_DIR _AGENT_ID PORT CLAUDE_CMD <<< "$REGISTRY_LINE"
+  IFS='|' read -r _SESSION PROJECT_DIR AGENT_ID PORT CLAUDE_CMD <<< "$REGISTRY_LINE"
   CLAUDE_CMD="${CLAUDE_CMD:-$DEFAULT_CMD}"
 else
   # Fallback to positional args
@@ -44,8 +50,13 @@ fi
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 sleep 1
 
-# Step 3: Create new session and start Claude Code
+# Step 3: Sync .mcp.json with registry (SSOT enforcement)
 PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")
+if [ -n "${AGENT_ID:-}" ] && [ -n "${PORT:-}" ]; then
+  sync_mcp_config "$SESSION" "$PROJECT_DIR_EXPANDED" "$AGENT_ID" "$PORT" || true
+fi
+
+# Step 4: Create new session and start Claude Code
 tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR_EXPANDED"
 tmux send-keys -t "$SESSION" "$CLAUDE_CMD" Enter
 
