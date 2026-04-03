@@ -9,10 +9,17 @@
 
 set -euo pipefail
 
-BOT_REGISTRY="${BOT_REGISTRY:-$(dirname "$0")/bot-registry.txt}"
+# Ensure PATH includes homebrew (cron environment is minimal)
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BOT_REGISTRY="${BOT_REGISTRY:-${SCRIPT_DIR}/bot-registry.txt}"
 DEFAULT_CMD="claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
 LOG_TAG="[watchdog]"
 WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-/tmp/watchdog-state}"
+
+# Load .mcp.json sync helper (ensures AGENT_ID/PORT/STATE_DIR match registry)
+source "${SCRIPT_DIR}/sync-mcp-config.sh"
 
 mkdir -p "$WATCHDOG_STATE_DIR"
 
@@ -23,7 +30,14 @@ fi
 
 # --- Restart function ---
 restart_session() {
-  local session="$1" project_dir="$2" port="$3" cmd="$4" reason="$5"
+  local session="$1" project_dir="$2" port="$3" cmd="$4" reason="$5" agent_id="$6"
+
+  # Sync .mcp.json with registry before restart (SSOT enforcement)
+  local dir_exp
+  dir_exp=$(eval echo "$project_dir")
+  if [ -n "${agent_id:-}" ] && [ -n "${port:-}" ]; then
+    sync_mcp_config "$session" "$dir_exp" "$agent_id" "$port" || true
+  fi
 
   tmux kill-session -t "$session" 2>/dev/null || true
   sleep 1
@@ -67,7 +81,7 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   # --- Check 1: tmux session exists ---
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "${LOG_TAG} ${SESSION}: tmux session not found" >&2
-    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "session missing"
+    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "session missing" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
   fi
@@ -78,20 +92,29 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   # --- Check 2: crash pattern detection ---
   if echo "$PANE_OUTPUT" | grep -qiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)'; then
     echo "${LOG_TAG} ${SESSION}: crash detected in output" >&2
-    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "crash detected"
+    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "crash detected" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
   fi
 
   # --- Check 3: channel plugin mode verification ---
-  if echo "$PANE_OUTPUT" | grep -q '❯'; then
-    if ! echo "$PANE_OUTPUT" | grep -q 'Listening for channel messages'; then
-      if ! echo "$PANE_OUTPUT" | grep -q 'dangerously-load-development-channels'; then
-        echo "${LOG_TAG} ${SESSION}: not in channel plugin mode (bare claude)" >&2
-        restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "missing channel plugin flags"
-        RESTARTED=$((RESTARTED + 1))
-        continue
-      fi
+  # Verify registry CMD has channel plugin flags (catches misconfiguration).
+  if ! echo "$CMD" | grep -q 'dangerously-load-development-channels'; then
+    echo "${LOG_TAG} ${SESSION}: registry CMD missing channel plugin flags" >&2
+    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "missing channel plugin flags" "$AGENT_ID"
+    RESTARTED=$((RESTARTED + 1))
+    continue
+  fi
+
+  # --- Check 3b: port liveness verification ---
+  # If a port is assigned, verify it is actually listening. A running tmux session
+  # with no port listener means the MCP server crashed or failed to start.
+  if [ -n "$PORT" ]; then
+    if ! lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "${LOG_TAG} ${SESSION}: port ${PORT} not listening (MCP server down)" >&2
+      restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "port ${PORT} not listening" "$AGENT_ID"
+      RESTARTED=$((RESTARTED + 1))
+      continue
     fi
   fi
 
@@ -99,7 +122,7 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   LAST_LINE=$(echo "$PANE_OUTPUT" | grep -v '^$' | tail -1)
   if echo "$LAST_LINE" | grep -qE '^\S+@\S+ .+ % $|^\$ $'; then
     echo "${LOG_TAG} ${SESSION}: Claude Code exited, at shell prompt" >&2
-    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "claude exited to shell"
+    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "claude exited to shell" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
   fi
