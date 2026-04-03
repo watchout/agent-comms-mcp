@@ -920,7 +920,118 @@ bun agent-com check-plugin
 
 ---
 
-## 16. 残存する設計課題（Phase 2以降）
+## 16. Bot ライフサイクル管理
+
+### 16.1 概要
+
+同一マシン上で稼働する複数botセッション（tmux）のライフサイクルをMCPツールで管理する。
+シェルスクリプト（restart-bot.sh, watchdog.sh）のロジックをMCPツールとして提供し、
+任意のbotからリモート操作可能にする。
+
+### 16.2 Botレジストリ
+
+`scripts/bot-registry.txt` が全botの定義ファイル（SSOT）。
+
+```
+# SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND
+discord-cto|~/Developer/tech-lead|cto|8789|claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
+...
+```
+
+- 5列目（COMMAND）に各Botの正確な起動コマンドを記載
+- COMMANDが省略された場合はデフォルトコマンドが使用される
+- watchdog.sh / restart-bot.sh / MCP restart_bot ツールはregistryのコマンドをそのまま使用
+- 環境変数 `BOT_REGISTRY` でパスを上書き可能（デフォルト: `scripts/bot-registry.txt`）
+
+### 16.3 MCP管理ツール
+
+#### restart_bot
+
+指定botのtmuxセッションを正しいオプション付きで再起動する。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| session | string | Yes | tmuxセッション名（例: discord-wbs） |
+
+**処理フロー:**
+1. bot-registry.txtからセッション情報を検索
+2. 該当ポートの孤立プロセスをkill
+3. tmuxセッションをkill
+4. 新規tmuxセッション作成 → claude起動コマンド送信
+5. 3秒待機 → Enter送信（TUIプロンプト自動確認）
+6. 起動確認（Listening for channel messages の検出）
+
+#### bot_status
+
+全登録botの稼働状態を一覧表示する。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| （なし） | — | — | — |
+
+**返却情報（bot毎）:**
+- セッション名、プロジェクトDir、ポート
+- tmuxセッション有無
+- チャンネルプラグインモード稼働有無
+- ポート使用状態
+
+#### watchdog_check
+
+全botのヘルスチェックを実行し、異常なセッションを自動再起動する。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| dry_run | boolean | No | trueの場合、再起動せずレポートのみ（default: false） |
+
+**チェック項目:**
+1. tmuxセッション存在チェック
+2. クラッシュパターン検出（panic, fatal, SIGKILL等）
+3. チャンネルプラグインモード検証
+4. シェルプロンプト検出（Claude Code終了検知）
+
+#### cleanup_ports
+
+bot-registry.txtに登録されたポートのうち、対応するtmuxセッションが存在しないものの
+孤立プロセスをkillする。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| （なし） | — | — | — |
+
+### 16.4 ポート割当（bot-registry.txt準拠）
+
+| bot | セッション | ポート |
+|-----|-----------|-------|
+| CTO | discord-cto | 8789 |
+| Haishin | discord-haishin | 8792 |
+| Nyusatsu | discord-nyusatsu | 8793 |
+| ADF | discord-adf | 8794 |
+| agent-com | discord-agent-com | 8795 |
+| Vice | discord-vice | 8796 |
+| Auditor | discord-auditor | 8797 |
+| X-Marketing | discord-xmarketing | 8798 |
+| Upwork | discord-upwork | 8799 |
+| Org-Build | discord-orgbuild | 8800 |
+| Research | discord-research | 8801 |
+| ARC | discord-arc | 8803 |
+| WBS | discord-wbs | 8804 |
+| Secretary | discord-secretary | 8805 |
+| Webb | discord-webb | 8806 |
+
+### 16.5 起動コマンド
+
+全botが統一コマンドで起動される：
+```bash
+claude --dangerously-load-development-channels server:agent-comms \
+       --mcp-config .mcp.json \
+       --dangerously-skip-permissions
+```
+
+TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動通過する。
+
+---
+
+## 17. 残存する設計課題（Phase 2以降）
 
 1. **マルチプラットフォーム同時運用**: 1 botが複数UIに接続する場合の統合ルール
 2. **マルチマシン運用**: シークレットの安全な配布方法
@@ -944,3 +1055,4 @@ bun agent-com check-plugin
 | 2026-03-30 | 追記：§9.3 fetch_discord_history ツール仕様追加（Discord API経由の履歴取得） |
 | 2026-03-30 | 大幅更新：§2.1 全体構造をPhase 5統合版に改訂。§11 Phase 5を5.1〜5.6に詳細化（アダプターIF、Discord統合、listener統合、channel mapping、起動方式、削除対象）。§15 移行手順追加 |
 | 2026-03-30 | 追記：§9.4 check_inbox にカーソルベース既読管理（last_read_id）の仕様追加。重複配信バグ修正 |
+| 2026-04-02 | 追記：§16 Botライフサイクル管理。MCPツール4種（restart_bot, bot_status, watchdog_check, cleanup_ports）追加。ポート割当をbot-registry.txt準拠に更新 |

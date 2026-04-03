@@ -626,31 +626,54 @@ function stopPolling(): void {
 // --- pg_notify LISTEN (Phase 5: integrated listener) ---
 let listenClient: Client | null = null
 let listenReconnectAttempts = 0
+let listenReconnecting = false
+let listenKeepaliveTimer: ReturnType<typeof setInterval> | null = null
 const LISTEN_MAX_RECONNECT_DELAY_MS = 30_000
+const LISTEN_KEEPALIVE_INTERVAL_MS = 60_000
 
 async function startListener(): Promise<void> {
   if (!config.database_url) return
 
   try {
-    listenClient = new Client({ connectionString: config.database_url })
+    const client = new Client({ connectionString: config.database_url })
 
-    listenClient.on('error', (err) => {
+    client.on('error', (err) => {
       process.stderr.write(`agent-comms: listener DB error: ${err.message}\n`)
       scheduleListenerReconnect()
     })
 
-    listenClient.on('end', () => {
-      process.stderr.write('agent-comms: listener DB connection closed\n')
-      scheduleListenerReconnect()
+    client.on('end', () => {
+      // Only reconnect if this is still the active client (not a stale one being cleaned up)
+      if (client === listenClient) {
+        process.stderr.write('agent-comms: listener DB connection closed\n')
+        scheduleListenerReconnect()
+      }
     })
 
-    await listenClient.connect()
+    await client.connect()
+    listenClient = client
     listenReconnectAttempts = 0
+    listenReconnecting = false
 
-    await listenClient.query('LISTEN agent_inbox')
+    await client.query('LISTEN agent_inbox')
     process.stderr.write('agent-comms: pg_notify LISTEN started\n')
 
-    listenClient.on('notification', async (msg) => {
+    // Keepalive: periodic lightweight query to detect stale connections
+    stopKeepalive()
+    listenKeepaliveTimer = setInterval(async () => {
+      if (!listenClient || listenClient !== client) {
+        stopKeepalive()
+        return
+      }
+      try {
+        await client.query('SELECT 1')
+      } catch (err) {
+        process.stderr.write(`agent-comms: listener keepalive failed: ${err}\n`)
+        scheduleListenerReconnect()
+      }
+    }, LISTEN_KEEPALIVE_INTERVAL_MS)
+
+    client.on('notification', async (msg) => {
       if (msg.channel !== 'agent_inbox' || !msg.payload) return
 
       try {
@@ -662,10 +685,10 @@ async function startListener(): Promise<void> {
         if (processedIds.has(payload.message_id)) return
 
         // Fetch and deliver the message
-        const client = await tryGetDb()
-        if (!client) return
+        const dbClient = await tryGetDb()
+        if (!dbClient) return
 
-        const r = await client.query(
+        const r = await dbClient.query(
           `SELECT id, channel_id, author_id, content, message_type, metadata, depth, created_at
            FROM agent_messages WHERE id = $1`,
           [payload.message_id]
@@ -714,28 +737,47 @@ async function startListener(): Promise<void> {
   }
 }
 
+function stopKeepalive(): void {
+  if (listenKeepaliveTimer) {
+    clearInterval(listenKeepaliveTimer)
+    listenKeepaliveTimer = null
+  }
+}
+
 function scheduleListenerReconnect(): void {
+  // Guard: prevent duplicate reconnection attempts from error+end firing together
+  if (listenReconnecting) return
+  listenReconnecting = true
+
+  stopKeepalive()
+
   const delay = Math.min(1000 * Math.pow(2, listenReconnectAttempts), LISTEN_MAX_RECONNECT_DELAY_MS)
   listenReconnectAttempts++
   process.stderr.write(`agent-comms: listener reconnecting in ${delay}ms (attempt ${listenReconnectAttempts})\n`)
   setTimeout(async () => {
     try {
-      if (listenClient) {
-        await listenClient.end().catch(() => {})
-        listenClient = null
+      // Detach old client before end() to prevent 'end' event from re-triggering reconnect
+      const oldClient = listenClient
+      listenClient = null
+      if (oldClient) {
+        await oldClient.end().catch(() => {})
       }
       await startListener()
     } catch (err) {
       process.stderr.write(`agent-comms: listener reconnect failed: ${err}\n`)
+      listenReconnecting = false
       scheduleListenerReconnect()
     }
   }, delay)
 }
 
 function stopListener(): void {
-  if (listenClient) {
-    listenClient.end().catch(() => {})
-    listenClient = null
+  stopKeepalive()
+  listenReconnecting = true // prevent reconnect on intentional stop
+  const oldClient = listenClient
+  listenClient = null
+  if (oldClient) {
+    oldClient.end().catch(() => {})
   }
 }
 
@@ -1010,6 +1052,43 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'restart_bot',
+      description: 'Restart a bot tmux session with correct Claude Code flags. Kills orphan port processes, recreates tmux session, auto-confirms TUI prompt.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          session: { type: 'string', description: 'tmux session name from bot-registry.txt (e.g. discord-wbs)' },
+        },
+        required: ['session'],
+      },
+    },
+    {
+      name: 'bot_status',
+      description: 'Show status of all registered bots (tmux session, channel plugin mode, port usage).',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
+      name: 'watchdog_check',
+      description: 'Run health check on all registered bots. Optionally auto-restart unhealthy ones.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          dry_run: { type: 'boolean', description: 'If true, report only without restarting (default: false)' },
+        },
+      },
+    },
+    {
+      name: 'cleanup_ports',
+      description: 'Kill orphaned processes on registered bot ports where the corresponding tmux session no longer exists.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
   ],
 }))
 
@@ -1174,6 +1253,90 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: `${agents.length} agent(s):\n${text}` }] }
   }
 
+  if (name === 'restart_bot') {
+    const { session } = args as any
+    const registry = loadBotRegistry()
+    const entry = registry.find(e => e.session === session)
+    if (!entry) {
+      const available = registry.map(e => e.session).join(', ')
+      return { content: [{ type: 'text', text: `Session "${session}" not found in bot-registry.txt. Available: ${available}` }], isError: true }
+    }
+    const log = await restartBotSession(entry)
+    return { content: [{ type: 'text', text: `[restart_bot] ${session}:\n${log}` }] }
+  }
+
+  if (name === 'bot_status') {
+    const registry = loadBotRegistry()
+    if (registry.length === 0) {
+      return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
+    }
+    const lines = registry.map(entry => {
+      const health = checkBotHealth(entry)
+      const icon = health.status === 'healthy' ? '✅' :
+                   health.status === 'initializing' ? '🔄' :
+                   health.status === 'dead' ? '💀' :
+                   health.status === 'crashed' ? '💥' :
+                   health.status === 'exited' ? '🚪' :
+                   health.status === 'misconfigured' ? '⚠️' : '❓'
+      return `${icon} ${entry.session} (${entry.agentId}) port:${entry.port} — ${health.status}: ${health.details}`
+    })
+    return { content: [{ type: 'text', text: `${registry.length} bot(s):\n${lines.join('\n')}` }] }
+  }
+
+  if (name === 'watchdog_check') {
+    const { dry_run } = (args ?? {}) as any
+    const registry = loadBotRegistry()
+    if (registry.length === 0) {
+      return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
+    }
+    const results: string[] = []
+    let alive = 0, restarted = 0
+    for (const entry of registry) {
+      const health = checkBotHealth(entry)
+      if (health.status === 'healthy' || health.status === 'initializing') {
+        alive++
+        results.push(`✅ ${entry.session}: ${health.status} — ${health.details}`)
+      } else {
+        if (dry_run) {
+          results.push(`⚠️ ${entry.session}: ${health.status} — ${health.details} (would restart)`)
+        } else {
+          const log = await restartBotSession(entry)
+          restarted++
+          results.push(`🔄 ${entry.session}: restarted (was: ${health.status})\n   ${log.split('\n').join('\n   ')}`)
+        }
+      }
+    }
+    const summary = dry_run
+      ? `[watchdog dry-run] ${alive}/${registry.length} healthy`
+      : `[watchdog] ${alive}/${registry.length} alive, ${restarted} restarted`
+    return { content: [{ type: 'text', text: `${summary}\n\n${results.join('\n')}` }] }
+  }
+
+  if (name === 'cleanup_ports') {
+    const registry = loadBotRegistry()
+    if (registry.length === 0) {
+      return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
+    }
+    const results: string[] = []
+    let cleaned = 0
+    for (const entry of registry) {
+      const sessionExists = tmuxHasSession(entry.session)
+      const pids = getProcessOnPort(entry.port)
+      if (!sessionExists && pids.length > 0) {
+        const killed = killPidsOnPort(entry.port, false)
+        cleaned += killed
+        results.push(`🧹 port ${entry.port} (${entry.session}): killed ${killed} orphan process(es) — PID: ${pids.join(',')}`)
+      } else if (sessionExists && pids.length > 0) {
+        results.push(`✅ port ${entry.port} (${entry.session}): in use by active session`)
+      } else if (!sessionExists && pids.length === 0) {
+        results.push(`⬚ port ${entry.port} (${entry.session}): free (session not running)`)
+      } else {
+        results.push(`✅ port ${entry.port} (${entry.session}): clean`)
+      }
+    }
+    return { content: [{ type: 'text', text: `[cleanup_ports] ${cleaned} orphan process(es) killed\n\n${results.join('\n')}` }] }
+  }
+
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
 })
 
@@ -1211,26 +1374,150 @@ mcp.setNotificationHandler(
   },
 )
 
-// --- Port conflict resolution ---
-function killProcessOnPort(port: number): boolean {
+// --- Bot Registry (lifecycle management) ---
+interface BotEntry {
+  session: string
+  projectDir: string
+  agentId: string
+  port: number
+  command: string
+}
+
+const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
+  ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
+const DEFAULT_CLAUDE_CMD = 'claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+
+function loadBotRegistry(): BotEntry[] {
+  try {
+    const content = readFileSync(BOT_REGISTRY_PATH, 'utf-8')
+    return content.split('\n')
+      .filter(line => line.trim() && !line.startsWith('#'))
+      .map(line => {
+        const parts = line.split('|').map(s => s.trim())
+        const [session, projectDir, agentId, portStr, ...cmdParts] = parts
+        const command = cmdParts.join('|').trim() || DEFAULT_CLAUDE_CMD
+        return { session, projectDir, agentId, port: parseInt(portStr, 10), command }
+      })
+      .filter(e => e.session && !isNaN(e.port))
+  } catch {
+    return []
+  }
+}
+
+function tmuxExec(args: string[]): { stdout: string; ok: boolean } {
+  const result = Bun.spawnSync(['tmux', ...args])
+  return {
+    stdout: new TextDecoder().decode(result.stdout).trim(),
+    ok: result.exitCode === 0,
+  }
+}
+
+function tmuxCapture(session: string, lines: number = 30): string {
+  const { stdout, ok } = tmuxExec(['capture-pane', '-t', session, '-p', '-S', `-${lines}`])
+  return ok ? stdout : ''
+}
+
+function tmuxHasSession(session: string): boolean {
+  return tmuxExec(['has-session', '-t', session]).ok
+}
+
+function getProcessOnPort(port: number): string[] {
   try {
     const result = Bun.spawnSync(['lsof', '-i', `:${port}`, '-t'])
     const pids = new TextDecoder().decode(result.stdout).trim()
-    if (!pids) return false
-
-    for (const pid of pids.split('\n')) {
-      const p = pid.trim()
-      if (p && p !== String(process.pid)) {
-        process.stderr.write(`agent-comms: killing stale process on port ${port} (PID ${p})\n`)
-        try { process.kill(parseInt(p), 'SIGTERM') } catch {}
-      }
-    }
-    // Brief wait for process to release port
-    Bun.sleepSync(500)
-    return true
+    return pids ? pids.split('\n').map(p => p.trim()).filter(Boolean) : []
   } catch {
-    return false
+    return []
   }
+}
+
+function killPidsOnPort(port: number, excludeSelf = true): number {
+  const pids = getProcessOnPort(port)
+  let killed = 0
+  for (const pid of pids) {
+    if (excludeSelf && pid === String(process.pid)) continue
+    try { process.kill(parseInt(pid), 'SIGTERM'); killed++ } catch {}
+  }
+  if (killed > 0) Bun.sleepSync(500)
+  return killed
+}
+
+async function restartBotSession(entry: BotEntry): Promise<string> {
+  const log: string[] = []
+  const expandedDir = entry.projectDir.replace(/^~/, homedir())
+
+  // 1. Kill orphan on port
+  const killed = killPidsOnPort(entry.port)
+  if (killed > 0) log.push(`Killed ${killed} orphan process(es) on port ${entry.port}`)
+
+  // 2. Kill existing tmux session
+  tmuxExec(['kill-session', '-t', entry.session])
+  Bun.sleepSync(1000)
+  log.push(`Killed old tmux session (if any)`)
+
+  // 3. Create new session and start Claude Code
+  tmuxExec(['new-session', '-d', '-s', entry.session, '-c', expandedDir])
+  Bun.sleepSync(1000)
+  tmuxExec(['send-keys', '-t', entry.session, entry.command, 'Enter'])
+  log.push(`Started: ${entry.command}`)
+
+  // 4. Wait for TUI prompt and auto-confirm
+  Bun.sleepSync(3000)
+  tmuxExec(['send-keys', '-t', entry.session, 'Enter'])
+  log.push(`Sent Enter to confirm TUI prompt`)
+
+  // 5. Verify startup
+  Bun.sleepSync(5000)
+  const output = tmuxCapture(entry.session, 10)
+  if (output.includes('Listening for channel messages')) {
+    log.push(`✅ Confirmed: Listening for channel messages`)
+  } else {
+    log.push(`⚠️ Not yet confirmed — may still be initializing`)
+  }
+
+  return log.join('\n')
+}
+
+function checkBotHealth(entry: BotEntry): { status: string; details: string } {
+  // Check 1: tmux session
+  if (!tmuxHasSession(entry.session)) {
+    return { status: 'dead', details: 'tmux session not found' }
+  }
+
+  const output = tmuxCapture(entry.session, 30)
+
+  // Check 2: crash patterns
+  if (/panic|fatal|SIGKILL|segmentation fault|killed|out of memory/i.test(output)) {
+    return { status: 'crashed', details: 'crash pattern detected' }
+  }
+
+  // Check 3: channel plugin mode
+  if (output.includes('❯') && !output.includes('Listening for channel messages')) {
+    if (!output.includes('dangerously-load-development-channels')) {
+      return { status: 'misconfigured', details: 'not in channel plugin mode (bare claude)' }
+    }
+  }
+
+  // Check 4: shell prompt (Claude exited)
+  const lastLine = output.split('\n').filter(l => l.trim()).pop() ?? ''
+  if (/^\S+@\S+ .+ % $|^\$ $/.test(lastLine)) {
+    return { status: 'exited', details: 'Claude Code exited to shell prompt' }
+  }
+
+  // Check 5: port status
+  const pids = getProcessOnPort(entry.port)
+  const portInfo = pids.length > 0 ? `port ${entry.port} in use (PID: ${pids.join(',')})` : `port ${entry.port} free`
+
+  if (output.includes('Listening for channel messages')) {
+    return { status: 'healthy', details: `listening + ${portInfo}` }
+  }
+
+  return { status: 'initializing', details: `session exists, ${portInfo}` }
+}
+
+// --- Port conflict resolution (uses shared helpers above) ---
+function killProcessOnPort(port: number): boolean {
+  return killPidsOnPort(port) > 0
 }
 
 // --- Integrated Bridge: HTTP server for push notifications + permission responses ---
