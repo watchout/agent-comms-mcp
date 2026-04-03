@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 # codex-auditor.sh — Cron-based deep review of Dev Bot [報告] messages using Codex CLI
-# Usage: DATABASE_URL=postgresql://localhost/agent_comms ./scripts/codex-auditor.sh
-# Cron:  * * * * * DATABASE_URL=postgresql://localhost/agent_comms /path/to/scripts/codex-auditor.sh 2>> /tmp/codex-auditor.log
+# Usage: ./scripts/codex-auditor.sh
+# Cron:  * * * * * /path/to/scripts/codex-auditor.sh >> /tmp/codex-auditor.log 2>&1
 
 set -euo pipefail
+
+# Ensure PATH includes homebrew (cron environment is minimal)
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+# Load environment variables from .env (keeps secrets out of crontab)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
 
 DATABASE_URL="${DATABASE_URL:?DATABASE_URL is required}"
 REVIEWED_FILE="${REVIEWED_FILE:-/tmp/codex-auditor-reviewed.txt}"
@@ -60,7 +72,6 @@ REVIEW_EOF
   REVIEW_RESULT=""
   if REVIEW_RESULT=$(timeout "${CODEX_TIMEOUT}" codex exec \
     --full-auto \
-    --dangerously-bypass-approvals-and-sandbox \
     "$(cat "$TEMP_FILE")" 2>/dev/null); then
     echo "${LOG_TAG} Review generated for ${MSG_ID}" >&2
   else
@@ -73,14 +84,13 @@ REVIEW_EOF
 
   rm -f "$TEMP_FILE"
 
-  # --- Step 4: Post review to Discord via agent-comms MCP ---
+  # --- Step 4: Post review via DB + Discord REST API ---
   if [ -n "$REVIEW_RESULT" ] && [ -n "$DISCORD_CHANNEL" ]; then
-    # Use psql to insert reply into agent_messages (triggers pg_notify → Discord)
     REVIEW_CONTENT="[Codex Auditor] ${REVIEW_RESULT}"
-    # Truncate to 2000 chars for Discord
     REVIEW_CONTENT="${REVIEW_CONTENT:0:2000}"
 
-    psql "$DATABASE_URL" -c "
+    # Insert to DB
+    MSG_UUID=$(psql "$DATABASE_URL" -tA -c "
       INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
       VALUES (
         gen_random_uuid(),
@@ -93,9 +103,27 @@ REVIEW_EOF
           'reviewed_message_id', '${MSG_ID}',
           'to', '${AUTHOR_ID}'
         )
-      )
-    " 2>/dev/null && echo "${LOG_TAG} Review posted to ${DISCORD_CHANNEL}" >&2 \
-      || echo "${LOG_TAG} Failed to post review to DB" >&2
+      ) RETURNING id
+    " 2>/dev/null)
+
+    if [ -n "$MSG_UUID" ]; then
+      echo "${LOG_TAG} Review saved to DB (${MSG_UUID})" >&2
+      # Post to Discord via REST API using Dev Auditor bot token
+      DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
+      if [ -n "$DISCORD_BOT_TOKEN" ]; then
+        curl -s -X POST "https://discord.com/api/v10/channels/${DISCORD_CHANNEL}/messages" \
+          -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{\"content\": $(echo "$REVIEW_CONTENT" | jq -Rs .)}" \
+          > /dev/null 2>&1 \
+          && echo "${LOG_TAG} Review posted to Discord ${DISCORD_CHANNEL}" >&2 \
+          || echo "${LOG_TAG} Discord post failed (non-fatal)" >&2
+      else
+        echo "${LOG_TAG} No DISCORD_BOT_TOKEN, skipping Discord post" >&2
+      fi
+    else
+      echo "${LOG_TAG} Failed to save review to DB" >&2
+    fi
   fi
 
   # Record as reviewed
