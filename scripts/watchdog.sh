@@ -17,11 +17,26 @@ BOT_REGISTRY="${BOT_REGISTRY:-${SCRIPT_DIR}/bot-registry.txt}"
 DEFAULT_CMD="claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
 LOG_TAG="[watchdog]"
 WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-/tmp/watchdog-state}"
+DISCONNECT_LOG="/tmp/bot-disconnect.log"
 
 # Load .mcp.json sync helper (ensures AGENT_ID/PORT/STATE_DIR match registry)
 source "${SCRIPT_DIR}/sync-mcp-config.sh"
 
 mkdir -p "$WATCHDOG_STATE_DIR"
+
+# --- Log rotation: remove entries older than 7 days ---
+if [ -f "$DISCONNECT_LOG" ]; then
+  CUTOFF=$(date -v-7d '+%Y-%m-%d' 2>/dev/null || date -d '7 days ago' '+%Y-%m-%d' 2>/dev/null || echo "")
+  if [ -n "$CUTOFF" ]; then
+    awk -v cutoff="$CUTOFF" '/^\[/ { d=substr($0,2,10); if (d >= cutoff) print; next } { print }' "$DISCONNECT_LOG" > "${DISCONNECT_LOG}.tmp" && mv "${DISCONNECT_LOG}.tmp" "$DISCONNECT_LOG"
+  fi
+fi
+
+# --- Disconnect event logger ---
+log_disconnect() {
+  local session="$1" reason="$2" action="$3"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${session}: ${reason} (action: ${action})" >> "$DISCONNECT_LOG"
+}
 
 if [ ! -f "$BOT_REGISTRY" ]; then
   echo "${LOG_TAG} Registry not found: ${BOT_REGISTRY}" >&2
@@ -81,6 +96,7 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   # --- Check 1: tmux session exists ---
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "${LOG_TAG} ${SESSION}: tmux session not found" >&2
+    log_disconnect "$SESSION" "crash: session missing" "restarted"
     restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "session missing" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
@@ -91,7 +107,9 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
 
   # --- Check 2: crash pattern detection ---
   if echo "$PANE_OUTPUT" | grep -qiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)'; then
+    CRASH_PATTERN=$(echo "$PANE_OUTPUT" | grep -oiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)' | head -1)
     echo "${LOG_TAG} ${SESSION}: crash detected in output" >&2
+    log_disconnect "$SESSION" "crash: ${CRASH_PATTERN}" "restarted"
     restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "crash detected" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
@@ -101,7 +119,18 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   # Verify registry CMD has channel plugin flags (catches misconfiguration).
   if ! echo "$CMD" | grep -q 'dangerously-load-development-channels'; then
     echo "${LOG_TAG} ${SESSION}: registry CMD missing channel plugin flags" >&2
+    log_disconnect "$SESSION" "bare_claude: Listening but no channel plugin" "restarted"
     restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "missing channel plugin flags" "$AGENT_ID"
+    RESTARTED=$((RESTARTED + 1))
+    continue
+  fi
+
+  # --- Check 3a: channel plugin actually active (pane output verification) ---
+  # CMD has the flag but Claude may have started without channel plugin mode.
+  if ! echo "$PANE_OUTPUT" | grep -q 'Listening for channel messages'; then
+    echo "${LOG_TAG} ${SESSION}: channel plugin flag present but 'Listening for channel messages' not found in output" >&2
+    log_disconnect "$SESSION" "bare_claude: Listening but no channel plugin" "restarted"
+    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "bare claude (no channel plugin output)" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
   fi
@@ -112,6 +141,7 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   if [ -n "$PORT" ]; then
     if ! lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "${LOG_TAG} ${SESSION}: port ${PORT} not listening (MCP server down)" >&2
+      log_disconnect "$SESSION" "port_dead: ${PORT} not listening" "restarted"
       restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "port ${PORT} not listening" "$AGENT_ID"
       RESTARTED=$((RESTARTED + 1))
       continue
@@ -122,6 +152,7 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   LAST_LINE=$(echo "$PANE_OUTPUT" | grep -v '^$' | tail -1)
   if echo "$LAST_LINE" | grep -qE '^\S+@\S+ .+ % $|^\$ $'; then
     echo "${LOG_TAG} ${SESSION}: Claude Code exited, at shell prompt" >&2
+    log_disconnect "$SESSION" "exited: at shell prompt" "restarted"
     restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "claude exited to shell" "$AGENT_ID"
     RESTARTED=$((RESTARTED + 1))
     continue
