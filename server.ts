@@ -22,7 +22,7 @@ import { Client } from 'pg'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
-import { randomUUID, createHash, createHmac } from 'node:crypto'
+import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { DiscordAdapter } from './adapters/discord'
 
 // --- Load Config ---
@@ -1741,7 +1741,10 @@ function authenticateRequest(req: IncomingMessage, res: ServerResponse): boolean
   if (!AUTH_TOKEN) return true
   if (AUTH_SKIP_LOCALHOST && isLocalhost(req)) return true
   const authHeader = req.headers.authorization ?? ''
-  if (authHeader === `Bearer ${AUTH_TOKEN}`) return true
+  const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+  if (provided.length === AUTH_TOKEN.length && provided.length > 0) {
+    if (timingSafeEqual(Buffer.from(provided), Buffer.from(AUTH_TOKEN))) return true
+  }
   res.writeHead(401, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({ error: 'Unauthorized' }))
   return false
@@ -1758,9 +1761,9 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
   let status = 'ok'
   if (EXPECTED_BOTS.length > 0) {
     const missing = EXPECTED_BOTS.filter(b => !connectedBots.has(b))
-    if (missing.length > 0 && missing.length < EXPECTED_BOTS.length) {
-      status = 'degraded'
-    } else if (missing.length === EXPECTED_BOTS.length && EXPECTED_BOTS.length > 0) {
+    if (missing.length === EXPECTED_BOTS.length) {
+      status = 'error'
+    } else if (missing.length > 0) {
       status = 'degraded'
     }
   }
@@ -1786,28 +1789,58 @@ if (TRANSPORT_MODE === 'sse') {
       return
     }
 
-    // SSE endpoint
+    // SSE endpoint — single client only (1 MCP server = 1 transport)
     if (url.pathname === '/sse' && req.method === 'GET') {
       if (!authenticateRequest(req, res)) return
       const botId = url.searchParams.get('bot_id') ?? AGENT_ID
+
+      // If same bot_id reconnects, close old transport first
+      const existing = connectedBots.get(botId)
+      if (existing) {
+        process.stderr.write(`agent-comms: SSE replacing existing connection for bot_id=${botId}\n`)
+        sseTransports.delete(existing.transport.sessionId)
+        await existing.transport.close().catch(() => {})
+        connectedBots.delete(botId)
+      }
+
+      // Guard: only one SSE client at a time (mcp is a singleton)
+      if (sseTransports.size > 0) {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Only one SSE client allowed at a time' }))
+        return
+      }
+
       process.stderr.write(`agent-comms: SSE connection from bot_id=${botId}\n`)
 
-      const transport = new SSEServerTransport('/messages', res)
-      sseTransports.set(transport.sessionId, transport)
-      connectedBots.set(botId, {
-        transport,
-        connected_at: new Date().toISOString(),
-        last_activity: new Date().toISOString(),
-      })
+      try {
+        const transport = new SSEServerTransport('/messages', res)
+        const sessionId = transport.sessionId
+        sseTransports.set(sessionId, transport)
+        connectedBots.set(botId, {
+          transport,
+          connected_at: new Date().toISOString(),
+          last_activity: new Date().toISOString(),
+        })
 
-      res.on('close', () => {
-        process.stderr.write(`agent-comms: SSE disconnected bot_id=${botId} session=${transport.sessionId}\n`)
-        sseTransports.delete(transport.sessionId)
-        connectedBots.delete(botId)
-      })
+        res.on('close', () => {
+          process.stderr.write(`agent-comms: SSE disconnected bot_id=${botId} session=${sessionId}\n`)
+          sseTransports.delete(sessionId)
+          // Only delete if this is still the current entry (not replaced by reconnect)
+          const current = connectedBots.get(botId)
+          if (current && current.transport.sessionId === sessionId) {
+            connectedBots.delete(botId)
+          }
+        })
 
-      await mcp.connect(transport)
-      await postConnect()
+        await mcp.connect(transport)
+        await postConnect()
+      } catch (err) {
+        process.stderr.write(`agent-comms: SSE connection error: ${err}\n`)
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal server error' }))
+        }
+      }
       return
     }
 
@@ -1830,7 +1863,15 @@ if (TRANSPORT_MODE === 'sse') {
         }
       }
 
-      await transport.handlePostMessage(req, res)
+      try {
+        await transport.handlePostMessage(req, res)
+      } catch (err) {
+        process.stderr.write(`agent-comms: SSE message handling error: ${err}\n`)
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal server error' }))
+        }
+      }
       return
     }
 
