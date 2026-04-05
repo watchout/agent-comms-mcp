@@ -11,6 +11,8 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
+import { createServer, IncomingMessage, ServerResponse } from 'node:http'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -110,6 +112,15 @@ const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? Stri
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? ''
 const DISCORD_STATE_DIR_ENV = process.env.DISCORD_STATE_DIR ?? ''
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
+
+// --- SSE Transport (Phase 3) ---
+const TRANSPORT_MODE = process.env.TRANSPORT_MODE ?? 'stdio'
+const SSE_PORT = parseInt(process.env.AGENT_COMMS_PORT ?? '8800', 10)
+const AUTH_TOKEN = process.env.AUTH_TOKEN ?? ''
+const AUTH_SKIP_LOCALHOST = (process.env.AUTH_SKIP_LOCALHOST ?? 'true') === 'true'
+const EXPECTED_BOTS = process.env.EXPECTED_BOTS ? process.env.EXPECTED_BOTS.split(',').map(b => b.trim()) : []
+const sseStartTime = Date.now()
+const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
 // --- Discord Adapter (Phase 5: integrated into server.ts) ---
 const discord = new DiscordAdapter()
@@ -1617,9 +1628,8 @@ const bridgeServer = Bun.serve({
 
 process.stderr.write(`agent-comms: bridge listening on http://127.0.0.1:${WEBHOOK_PORT}\n`)
 
-// --- Start ---
-const transport = new StdioServerTransport()
-mcp.connect(transport).then(async () => {
+// --- Post-connect setup (shared by both stdio and SSE modes) ---
+async function postConnect() {
   // Startup validations
   if (AGENT_ID === 'unknown') {
     process.stderr.write('agent-comms: WARNING — agent_id is "unknown". Set agent_id in config.json or AGENT_ID env var.\n')
@@ -1716,19 +1726,157 @@ mcp.connect(transport).then(async () => {
   } else {
     process.stderr.write('agent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\n')
   }
-}).catch(err => {
-  process.stderr.write(`agent-comms: startup failed: ${err}\n`)
-  process.exit(1)
-})
-
-const shutdown = async () => {
-  stopPolling()
-  stopListener()
-  await discord.disconnect().catch(() => {})
-  bridgeServer.stop()
-  await unregisterAgent()
-  if (db) await db.end().catch(() => {})
-  process.exit(0)
 }
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+
+// --- SSE Transport: Auth middleware ---
+function isLocalhost(req: IncomingMessage): boolean {
+  const addr = req.socket.remoteAddress ?? ''
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+}
+
+function authenticateRequest(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!AUTH_TOKEN) return true
+  if (AUTH_SKIP_LOCALHOST && isLocalhost(req)) return true
+  const authHeader = req.headers.authorization ?? ''
+  if (authHeader === `Bearer ${AUTH_TOKEN}`) return true
+  res.writeHead(401, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ error: 'Unauthorized' }))
+  return false
+}
+
+// --- SSE Transport: Health endpoint ---
+function getHealthStatus(): { status: string; uptime: number; connected_bots: Record<string, { connected_at: string; last_activity: string }>; expected_bots: string[] } {
+  const uptimeSeconds = Math.floor((Date.now() - sseStartTime) / 1000)
+  const bots: Record<string, { connected_at: string; last_activity: string }> = {}
+  for (const [botId, info] of connectedBots) {
+    bots[botId] = { connected_at: info.connected_at, last_activity: info.last_activity }
+  }
+
+  let status = 'ok'
+  if (EXPECTED_BOTS.length > 0) {
+    const missing = EXPECTED_BOTS.filter(b => !connectedBots.has(b))
+    if (missing.length > 0 && missing.length < EXPECTED_BOTS.length) {
+      status = 'degraded'
+    } else if (missing.length === EXPECTED_BOTS.length && EXPECTED_BOTS.length > 0) {
+      status = 'degraded'
+    }
+  }
+
+  return { status, uptime: uptimeSeconds, connected_bots: bots, expected_bots: EXPECTED_BOTS }
+}
+
+// --- Start ---
+if (TRANSPORT_MODE === 'sse') {
+  // SSE HTTP server mode
+  const sseTransports = new Map<string, SSEServerTransport>()
+  let httpServer: ReturnType<typeof createServer>
+
+  httpServer = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+
+    // Health endpoint
+    if (url.pathname === '/health' && req.method === 'GET') {
+      if (!authenticateRequest(req, res)) return
+      const health = getHealthStatus()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(health))
+      return
+    }
+
+    // SSE endpoint
+    if (url.pathname === '/sse' && req.method === 'GET') {
+      if (!authenticateRequest(req, res)) return
+      const botId = url.searchParams.get('bot_id') ?? AGENT_ID
+      process.stderr.write(`agent-comms: SSE connection from bot_id=${botId}\n`)
+
+      const transport = new SSEServerTransport('/messages', res)
+      sseTransports.set(transport.sessionId, transport)
+      connectedBots.set(botId, {
+        transport,
+        connected_at: new Date().toISOString(),
+        last_activity: new Date().toISOString(),
+      })
+
+      res.on('close', () => {
+        process.stderr.write(`agent-comms: SSE disconnected bot_id=${botId} session=${transport.sessionId}\n`)
+        sseTransports.delete(transport.sessionId)
+        connectedBots.delete(botId)
+      })
+
+      await mcp.connect(transport)
+      await postConnect()
+      return
+    }
+
+    // Messages endpoint (POST from SSE clients)
+    if (url.pathname === '/messages' && req.method === 'POST') {
+      if (!authenticateRequest(req, res)) return
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const transport = sseTransports.get(sessionId)
+      if (!transport) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'No transport found for sessionId' }))
+        return
+      }
+
+      // Update last_activity for the bot using this transport
+      for (const [botId, info] of connectedBots) {
+        if (info.transport === transport) {
+          info.last_activity = new Date().toISOString()
+          break
+        }
+      }
+
+      await transport.handlePostMessage(req, res)
+      return
+    }
+
+    // 404 for unknown routes
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'Not found' }))
+  })
+
+  httpServer.listen(SSE_PORT, () => {
+    process.stderr.write(`agent-comms: SSE server listening on http://127.0.0.1:${SSE_PORT}\n`)
+    process.stderr.write(`agent-comms: endpoints: GET /sse, GET /health, POST /messages\n`)
+  })
+
+  const shutdown = async () => {
+    stopPolling()
+    stopListener()
+    await discord.disconnect().catch(() => {})
+    bridgeServer.stop()
+    // Close all SSE transports
+    for (const [, transport] of sseTransports) {
+      await transport.close().catch(() => {})
+    }
+    httpServer.close()
+    await unregisterAgent()
+    if (db) await db.end().catch(() => {})
+    process.exit(0)
+  }
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+
+} else {
+  // Stdio mode (default, unchanged)
+  const transport = new StdioServerTransport()
+  mcp.connect(transport).then(async () => {
+    await postConnect()
+  }).catch(err => {
+    process.stderr.write(`agent-comms: startup failed: ${err}\n`)
+    process.exit(1)
+  })
+
+  const shutdown = async () => {
+    stopPolling()
+    stopListener()
+    await discord.disconnect().catch(() => {})
+    bridgeServer.stop()
+    await unregisterAgent()
+    if (db) await db.end().catch(() => {})
+    process.exit(0)
+  }
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+}
