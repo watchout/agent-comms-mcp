@@ -1629,7 +1629,10 @@ const bridgeServer = Bun.serve({
 process.stderr.write(`agent-comms: bridge listening on http://127.0.0.1:${WEBHOOK_PORT}\n`)
 
 // --- Post-connect setup (shared by both stdio and SSE modes) ---
+let postConnectDone = false
 async function postConnect() {
+  if (postConnectDone) return
+  postConnectDone = true
   // Startup validations
   if (AGENT_ID === 'unknown') {
     process.stderr.write('agent-comms: WARNING — agent_id is "unknown". Set agent_id in config.json or AGENT_ID env var.\n')
