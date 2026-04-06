@@ -732,14 +732,45 @@ async function startListener(): Promise<void> {
           return
         }
 
-        // v0.1.0: active_thread filtering (SSOT-5)
+        // ACP delivery filter: check if this bot should receive push
+        const isEmergency = isEmergencyMessage(row.content, row.message_type ?? 'chat')
+        const isHuman = await isHumanAgent(row.author_id)
+        const isObserver = await isObserverMode(AGENT_ID)
+
+        // Observers only receive emergency + human messages
+        if (isObserver && !isEmergency && !isHuman) {
+          process.stderr.write(`agent-comms: filtered (observer_mode): ${row.id}\n`)
+          return
+        }
+
+        // Non-emergency, non-human: check if mentioned
+        if (!isEmergency && !isHuman) {
+          const mentions = parseMentions(row.content)
+          const isMentioned = mentions.includes(AGENT_ID)
+          // reply_to: check if original author is this bot
+          let isReplyTarget = false
+          if (row.reply_to) {
+            const dbClient = await tryGetDb()
+            if (dbClient) {
+              const origR = await dbClient.query('SELECT author_id FROM agent_messages WHERE id = $1', [row.reply_to])
+              if (origR.rows.length > 0 && origR.rows[0].author_id === AGENT_ID) {
+                isReplyTarget = true
+              }
+            }
+          }
+          if (!isMentioned && !isReplyTarget) {
+            process.stderr.write(`agent-comms: filtered (not mentioned): ${row.id}\n`)
+            return // DB saved but not pushed
+          }
+        }
+
+        // active_thread filtering
         const activeThread = await getActiveThread(AGENT_ID)
         if (activeThread) {
           const msgThreadId = row.thread_id ?? row.channel_id
-          const isEmergency = isEmergencyMessage(row.content, row.message_type ?? 'chat', row.author_id)
-          if (msgThreadId !== activeThread && !isEmergency) {
+          if (msgThreadId !== activeThread && !isEmergency && !isHuman) {
             process.stderr.write(`agent-comms: filtered (active_thread=${activeThread}, msg=${msgThreadId}): ${row.id}\n`)
-            return // DB saved but not pushed — retrievable via inbox
+            return // DB saved but not pushed
           }
         }
 
@@ -901,11 +932,118 @@ async function resolveDestination(to: string, senderId: string): Promise<Resolve
   return { error: `invalid destination format. Use channel:/agent:/thread:`, code: 'INVALID_DESTINATION' }
 }
 
-function isEmergencyMessage(content: string, messageType: string, authorId: string): boolean {
+function isEmergencyMessage(content: string, messageType: string): boolean {
   if (messageType === 'emergency') return true
   if (content.startsWith('!stop')) return true
-  if (authorId === 'ceo') return true
   return false
+}
+
+/** Check if sender is a human agent (agent_type='human') */
+async function isHumanAgent(agentId: string): Promise<boolean> {
+  const client = await tryGetDb()
+  if (!client) return agentId === 'ceo' // fallback
+  const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [agentId])
+  return r.rows.length > 0 && r.rows[0].agent_type === 'human'
+}
+
+/** Check if agent has observer_mode enabled */
+async function isObserverMode(agentId: string): Promise<boolean> {
+  const client = await tryGetDb()
+  if (!client) return false
+  const r = await client.query("SELECT observer_mode FROM agents WHERE agent_id = $1", [agentId])
+  return r.rows.length > 0 && r.rows[0].observer_mode === true
+}
+
+/** Parse @agent_id mentions from message content */
+function parseMentions(content: string): string[] {
+  const mentions: string[] = []
+  const regex = /@([a-zA-Z0-9_-]+)/g
+  let match
+  while ((match = regex.exec(content)) !== null) {
+    mentions.push(match[1])
+  }
+  return [...new Set(mentions)]
+}
+
+/**
+ * ACP 6-step delivery filter (§3.15)
+ * Determines which members should receive a push notification.
+ * Returns the list of agent_ids to push to.
+ */
+async function resolveDeliveryTargets(
+  members: string[],
+  senderId: string,
+  content: string,
+  messageType: string,
+  replyTo: string | undefined,
+  threadId: string | undefined,
+): Promise<string[]> {
+  const candidates = members.filter(m => m !== senderId)
+  if (candidates.length === 0) return []
+
+  // Step 1: Emergency → push all members (including observers)
+  if (isEmergencyMessage(content, messageType)) {
+    return candidates
+  }
+
+  // Step 2: Human sender → push all members (including observers)
+  if (await isHumanAgent(senderId)) {
+    return candidates
+  }
+
+  // Filter out observer_mode agents for Steps 3-6
+  const nonObservers: string[] = []
+  for (const c of candidates) {
+    if (!(await isObserverMode(c))) {
+      nonObservers.push(c)
+    }
+  }
+
+  // Step 3: Mention detection → push only mentioned agents
+  const mentions = parseMentions(content)
+  const pushTargets = new Set<string>()
+
+  for (const mention of mentions) {
+    if (nonObservers.includes(mention)) {
+      pushTargets.add(mention)
+    }
+  }
+
+  // Step 4: reply_to → add original sender to push targets
+  if (replyTo) {
+    const client = await tryGetDb()
+    if (client) {
+      const r = await client.query('SELECT author_id FROM agent_messages WHERE id = $1', [replyTo])
+      if (r.rows.length > 0) {
+        const originalAuthor = r.rows[0].author_id
+        if (nonObservers.includes(originalAuthor) && originalAuthor !== senderId) {
+          pushTargets.add(originalAuthor)
+        }
+      }
+    }
+  }
+
+  // Step 5: No mentions and no reply_to target → DB only (no push)
+  if (pushTargets.size === 0) {
+    return []
+  }
+
+  // Step 6: active_thread filter
+  const finalTargets: string[] = []
+  for (const target of pushTargets) {
+    const activeThread = await getActiveThread(target)
+    if (!activeThread) {
+      finalTargets.push(target) // NULL = receive all
+    } else {
+      const msgThread = threadId ?? 'channel'
+      if (activeThread === msgThread) {
+        finalTargets.push(target)
+      }
+      // else: DB saved but not pushed
+    }
+  }
+
+  return finalTargets
 }
 
 async function getNextSequence(channelId: string): Promise<number> {
@@ -1417,9 +1555,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
     }
 
-    // Deliver to members (excluding sender)
-    const recipients = dest.members.filter(m => m !== agentId)
-    for (const recipient of recipients) {
+    // ACP 6-step delivery filter (§3.15)
+    const pushTargets = await resolveDeliveryTargets(
+      dest.members, agentId, safeContent, message_type ?? 'chat', reply_to, dest.threadId
+    )
+    for (const recipient of pushTargets) {
       sendInboxSignal(recipient, id, agentId, dest.channelId)
     }
 
