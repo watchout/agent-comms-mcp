@@ -25,7 +25,7 @@ import {
 } from 'discord.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { UIAdapter, AdapterConfig, UnifiedMessage, PlatformCapabilities, SendOptions } from './types'
+import type { UIAdapter, Adapter, AdapterConfig, UnifiedMessage, InboundMessage, PlatformCapabilities, SendOptions } from './types'
 
 // --- Access control types (compatible with Discord plugin's access.json) ---
 interface GroupPolicy {
@@ -182,7 +182,7 @@ const PERMISSION_REPLY_RE = /^(yes|no)\s+([a-z]{5})$/i
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
 
 // --- Discord Adapter ---
-export class DiscordAdapter implements UIAdapter {
+export class DiscordAdapter implements UIAdapter, Adapter {
   platform = 'discord' as const
 
   capabilities: PlatformCapabilities = {
@@ -196,7 +196,88 @@ export class DiscordAdapter implements UIAdapter {
   private client: Client | null = null
   private accessFile = ''
   private messageCallback: ((msg: UnifiedMessage) => void) | null = null
+  private adapterMessageCallback: ((msg: InboundMessage) => void) | null = null
   private permissionRequestCallback: ((params: { request_id: string; behavior: 'allow' | 'deny' }) => void) | null = null
+
+  // --- v0.1.0: Adapter interface helpers ---
+
+  /** DB query function — injected by server.ts to avoid circular imports */
+  private dbQuery: ((sql: string, params?: any[]) => Promise<{ rows: any[] }>) | null = null
+
+  /** Set DB query function for mention conversion and thread mapping */
+  setDbQuery(fn: (sql: string, params?: any[]) => Promise<{ rows: any[] }>): void {
+    this.dbQuery = fn
+  }
+
+  isConnected(): boolean {
+    return this.client !== null && this.client.isReady()
+  }
+
+  /** Convert core @agent_id mentions to Discord <@discord_id> */
+  async convertMentionsToDiscord(content: string): Promise<string> {
+    if (!this.dbQuery) return content
+    const mentions = content.match(/@([\w][\w-]*)/g)
+    if (!mentions) return content
+    let result = content
+    for (const mention of mentions) {
+      const agentId = mention.slice(1) // remove @
+      try {
+        const r = await this.dbQuery(
+          "SELECT metadata->>'discord_id' as discord_id FROM agents WHERE agent_id = $1",
+          [agentId]
+        )
+        if (r.rows.length > 0 && r.rows[0].discord_id) {
+          result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
+        }
+      } catch {}
+    }
+    return result
+  }
+
+  /** Convert Discord <@discord_id> mentions to core @agent_id */
+  async convertMentionsFromDiscord(content: string): Promise<string> {
+    if (!this.dbQuery) return content
+    const mentions = content.match(/<@!?(\d+)>/g)
+    if (!mentions) return content
+    let result = content
+    for (const mention of mentions) {
+      const discordId = mention.replace(/<@!?(\d+)>/, '$1')
+      try {
+        const r = await this.dbQuery(
+          "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1",
+          [discordId]
+        )
+        if (r.rows.length > 0) {
+          result = result.replace(mention, `@${r.rows[0].agent_id}`)
+        }
+      } catch {}
+    }
+    return result
+  }
+
+  /** Resolve Discord thread ID → core thread ID via thread_adapters */
+  async resolveThreadFromDiscord(discordThreadId: string): Promise<string | undefined> {
+    if (!this.dbQuery) return undefined
+    try {
+      const r = await this.dbQuery(
+        "SELECT thread_id FROM thread_adapters WHERE platform = 'discord' AND external_id = $1",
+        [discordThreadId]
+      )
+      return r.rows.length > 0 ? r.rows[0].thread_id : undefined
+    } catch { return undefined }
+  }
+
+  /** Resolve core thread ID → Discord thread ID via thread_adapters */
+  async resolveThreadToDiscord(coreThreadId: string): Promise<string | undefined> {
+    if (!this.dbQuery) return undefined
+    try {
+      const r = await this.dbQuery(
+        "SELECT external_id FROM thread_adapters WHERE platform = 'discord' AND thread_id = $1",
+        [coreThreadId]
+      )
+      return r.rows.length > 0 ? r.rows[0].external_id : undefined
+    } catch { return undefined }
+  }
 
   async connect(config: AdapterConfig): Promise<void> {
     const token = config.token as string
@@ -468,6 +549,40 @@ export class DiscordAdapter implements UIAdapter {
     }
   }
 
+  // --- v0.1.0: Adapter interface methods ---
+
+  /** Adapter.sendMessage — core-layer style with mention conversion and thread mapping */
+  async sendAdapterMessage(params: {
+    external_channel_id: string
+    content: string
+    reply_to_external_id?: string
+    thread_external_id?: string
+  }): Promise<{ external_message_id: string }> {
+    // Convert @agent_id mentions to Discord <@id>
+    const convertedContent = await this.convertMentionsToDiscord(params.content)
+
+    // Resolve thread: if thread_external_id is a core thread ID, map to Discord thread ID
+    let targetChannel = params.external_channel_id
+    if (params.thread_external_id) {
+      const discordThreadId = await this.resolveThreadToDiscord(params.thread_external_id)
+      if (discordThreadId) {
+        targetChannel = discordThreadId
+      }
+    }
+
+    const result = await this.sendMessage(
+      targetChannel,
+      convertedContent,
+      params.reply_to_external_id ? { replyTo: params.reply_to_external_id } : undefined
+    )
+    return { external_message_id: result.messageId }
+  }
+
+  /** Register Adapter-style inbound message callback */
+  onAdapterMessage(callback: (msg: InboundMessage) => void): void {
+    this.adapterMessageCallback = callback
+  }
+
   async disconnect(): Promise<void> {
     // Clear all typing intervals
     for (const [key] of typingIntervals) {
@@ -560,6 +675,31 @@ export class DiscordAdapter implements UIAdapter {
         raw: msg,
       }
       this.messageCallback(unified)
+    }
+
+    // v0.1.0: Adapter-style callback with mention conversion + thread mapping
+    if (this.adapterMessageCallback) {
+      const convertedContent = await this.convertMentionsFromDiscord(
+        msg.content || (atts.length > 0 ? '(attachment)' : '')
+      )
+      const threadExternalId = msg.channel.isThread() ? msg.channelId : undefined
+      const coreThreadId = threadExternalId ? await this.resolveThreadFromDiscord(threadExternalId) : undefined
+
+      const inbound: InboundMessage = {
+        external_message_id: msg.id,
+        external_channel_id: parentChannelId ?? msg.channelId,
+        external_thread_id: threadExternalId,
+        author_external_id: msg.author.id,
+        author_name: msg.author.username,
+        author_is_bot: msg.author.bot,
+        content: convertedContent,
+        reply_to_external_id: msg.reference?.messageId ?? undefined,
+        attachments: atts.length > 0 ? atts : undefined,
+        timestamp: msg.createdAt,
+        platform: 'discord',
+        raw: msg,
+      }
+      this.adapterMessageCallback(inbound)
     }
   }
 }

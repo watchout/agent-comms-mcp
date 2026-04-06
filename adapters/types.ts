@@ -55,6 +55,43 @@ export interface PlatformCapabilities {
   supportsEdit: boolean
 }
 
+// --- v0.1.0: Core Adapter Interface (SSOT-5) ---
+
+export interface InboundMessage {
+  external_message_id: string
+  external_channel_id: string
+  external_thread_id?: string
+  author_external_id: string
+  author_name: string
+  author_is_bot: boolean
+  content: string
+  reply_to_external_id?: string
+  attachments?: Attachment[]
+  timestamp: Date
+  platform: string
+  raw: unknown
+}
+
+export interface Adapter {
+  platform: string
+  connect(config: AdapterConfig): Promise<void>
+  disconnect(): Promise<void>
+  isConnected(): boolean
+  sendMessage(params: {
+    external_channel_id: string
+    content: string
+    reply_to_external_id?: string
+    thread_external_id?: string
+  }): Promise<{ external_message_id: string }>
+  onMessage(callback: (msg: InboundMessage) => void): void
+  fetchHistory?(params: {
+    external_channel_id: string
+    limit: number
+  }): Promise<InboundMessage[]>
+}
+
+// --- Legacy UIAdapter (maintained for backward compatibility) ---
+
 export interface UIAdapter {
   /** Platform identifier */
   platform: string
