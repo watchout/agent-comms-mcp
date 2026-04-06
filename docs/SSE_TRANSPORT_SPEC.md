@@ -373,10 +373,11 @@ Map<string, { server: Server, transport: SSEServerTransport, connected_at: strin
 | フェーズ | 内容 | 状態 |
 |---------|------|------|
 | Phase 1 | startup hook cleanup（孤児プロセス事後掃除） | 実装済み |
-| Phase 2 | PIDファイル + watchdog排他制御 | 実装中 |
-| Phase 3 | SSE transport化（本仕様書の範囲） | 設計承認済み |
-| Phase 3b | SSEマルチクライアント対応（ADR-038） | 設計承認済み |
-| Phase 4 | リモート接続対応（TLS + 本格認証 + マルチテナント） | 未着手 |
+| Phase 2 | PIDファイル + watchdog排他制御 | 実装済み |
+| Phase 3 | SSE transport化（本仕様書の範囲） | 実装済み（PR#38） |
+| Phase 3b | SSEマルチクライアント対応（ADR-038） | 設計承認済み、実装中 |
+| Phase 4 | Message Broker + on-demand activation | 未着手 |
+| Phase 5 | リモート接続対応（TLS + 本格認証 + マルチテナント） | 未着手 |
 
 ---
 
