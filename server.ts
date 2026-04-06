@@ -600,8 +600,15 @@ async function pollNewMessages(): Promise<void> {
         continue
       }
 
+      // Build quote block if reply_to is present (§3.10)
+      let pollQuotePrefix = ''
+      if (msg.reply_to) {
+        const quoteData = await buildQuoteBlock(msg.reply_to)
+        if (quoteData) pollQuotePrefix = quoteData.quote
+      }
+
       const tag = authResult.tag ? ` ${authResult.tag}` : ''
-      const contentText = `[${msg.message_type ?? 'chat'}] ${msg.author_id} → #${msg.channel_id}:${tag} ${msg.content}`
+      const contentText = `${pollQuotePrefix}[${msg.message_type ?? 'chat'}] ${msg.author_id} → #${msg.channel_id}:${tag} ${msg.content}`
 
       mcp.notification({
         method: 'notifications/claude/channel',
@@ -749,8 +756,15 @@ async function startListener(): Promise<void> {
           process.stderr.write(`[agent-com] INFO: auto-focused on thread:${row.thread_id} (instruction received)\n`)
         }
 
+        // Build quote block if reply_to is present (§3.10)
+        let quotePrefix = ''
+        if (row.reply_to) {
+          const quoteData = await buildQuoteBlock(row.reply_to)
+          if (quoteData) quotePrefix = quoteData.quote
+        }
+
         const tag = authResult.tag ? ` ${authResult.tag}` : ''
-        const contentText = `[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
+        const contentText = `${quotePrefix}[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
 
         await mcp.notification({
           method: 'notifications/claude/channel',
@@ -921,6 +935,22 @@ async function isObserverMode(agentId: string): Promise<boolean> {
   if (!client) return false
   const r = await client.query("SELECT observer_mode FROM agents WHERE agent_id = $1", [agentId])
   return r.rows.length > 0 && r.rows[0].observer_mode === true
+}
+
+/** Build a quote block from a referenced message (§3.10, max 500 chars) */
+async function buildQuoteBlock(messageId: string): Promise<{ quote: string; authorId: string } | null> {
+  const client = await tryGetDb()
+  if (!client) return null
+  const r = await client.query(
+    'SELECT author_id, content, created_at FROM agent_messages WHERE id = $1',
+    [messageId]
+  )
+  if (r.rows.length === 0) return null
+  const row = r.rows[0]
+  const truncated = row.content.length > 500 ? row.content.slice(0, 497) + '...' : row.content
+  const ts = new Date(row.created_at).toISOString()
+  const quote = `> [${row.author_id} at ${ts}]\n> ${truncated.replace(/\n/g, '\n> ')}\n\n`
+  return { quote, authorId: row.author_id }
 }
 
 /** Parse @agent_id mentions from message content */
@@ -1293,6 +1323,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'quote',
+      description: 'Quote a message and post it to a channel with an optional comment. Automatically mentions the target agent.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          message_id: { type: 'string', description: 'UUID of the message to quote' },
+          to: { type: 'string', description: 'Agent ID to mention (will be @mentioned in the post)' },
+          comment: { type: 'string', description: 'Optional comment to add after the quote' },
+        },
+        required: ['message_id', 'to'],
+      },
+    },
+    {
       name: 'send_message',
       description: '[Deprecated: use send] Send a message to another agent.',
       inputSchema: {
@@ -1603,6 +1646,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'unfocus') {
     await updateActiveThread(agentId, null)
     return { content: [{ type: 'text', text: 'unfocused — receiving all messages' }] }
+  }
+
+  if (name === 'quote') {
+    const { message_id, to: targetAgent, comment } = args as any
+    if (!message_id) return { content: [{ type: 'text', text: 'Error: message_id is required' }], isError: true }
+    if (!targetAgent) return { content: [{ type: 'text', text: 'Error: to (agent_id) is required' }], isError: true }
+
+    // Fetch the original message
+    const quoteData = await buildQuoteBlock(message_id)
+    if (!quoteData) {
+      return { content: [{ type: 'text', text: `Error: message '${message_id}' not found` }], isError: true }
+    }
+
+    // Build content: quote + @mention + optional comment
+    const mentionLine = `@${targetAgent}`
+    const commentLine = comment ? ` ${comment}` : ''
+    const quoteContent = `${quoteData.quote}${mentionLine}${commentLine}`
+
+    // Find the channel of the original message to post in the same channel
+    const client = await tryGetDb()
+    if (!client) return { content: [{ type: 'text', text: 'Error: database unavailable' }], isError: true }
+    const msgR = await client.query('SELECT channel_id FROM agent_messages WHERE id = $1', [message_id])
+    if (msgR.rows.length === 0) return { content: [{ type: 'text', text: `Error: message '${message_id}' not found` }], isError: true }
+    const channelId = msgR.rows[0].channel_id
+
+    // Send via core Router (reuse send logic by setting name/args)
+    name = 'send'
+    args = {
+      to: `channel:${channelId}`,
+      content: quoteContent,
+      reply_to: message_id,
+    }
+    // Fall through to send handler
   }
 
   // ============================================================
