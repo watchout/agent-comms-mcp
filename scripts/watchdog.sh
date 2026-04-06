@@ -125,15 +125,15 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
     continue
   fi
 
-  # --- Check 3a: channel plugin actually active (pane output verification) ---
+  # --- Check 3a: DISABLED (false positive: startup/compaction hides output) ---
   # CMD has the flag but Claude may have started without channel plugin mode.
-  if ! echo "$PANE_OUTPUT" | grep -q 'Listening for channel messages'; then
-    echo "${LOG_TAG} ${SESSION}: channel plugin flag present but 'Listening for channel messages' not found in output" >&2
-    log_disconnect "$SESSION" "bare_claude: Listening but no channel plugin" "restarted"
-    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "bare claude (no channel plugin output)" "$AGENT_ID"
-    RESTARTED=$((RESTARTED + 1))
-    continue
-  fi
+  # if ! echo "$PANE_OUTPUT" | grep -q 'Listening for channel messages'; then
+  #   echo "${LOG_TAG} ${SESSION}: channel plugin flag present but 'Listening for channel messages' not found in output" >&2
+  #   log_disconnect "$SESSION" "bare_claude: Listening but no channel plugin" "restarted"
+  #   restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "bare claude (no channel plugin output)" "$AGENT_ID"
+  #   RESTARTED=$((RESTARTED + 1))
+  #   continue
+  # fi
 
   # --- Check 3b: port liveness verification ---
   # If a port is assigned, verify it is actually listening. A running tmux session
