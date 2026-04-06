@@ -1294,7 +1294,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }))
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params
+  let { name, arguments: args } = request.params
+
+  // --- Deprecated alias redirects (SSOT-3 compliant) ---
+  // reply → send: redirect through core Router for members validation, audit_log, rate limiting
+  if (name === 'reply') {
+    process.stderr.write(`[agent-com] WARN: reply is deprecated, use send(to: "channel:<chat_id>") instead\n`)
+    const { chat_id, text, reply_to } = args as any
+    name = 'send'
+    args = {
+      to: `channel:${chat_id}`,
+      content: text,
+      ...(reply_to ? { reply_to } : {}),
+    }
+  }
 
   // ============================================================
   // v0.1.0 Core Tools: send, focus, unfocus
@@ -1545,30 +1558,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: `${rows.length} message(s):\n\n${text}` }] }
   }
 
-  if (name === 'reply') {
-    const { chat_id, text, reply_to } = args as any
-
-    try {
-      const result = await discord.sendMessage(chat_id, sanitizeContent(text), reply_to ? { replyTo: reply_to } : undefined)
-      return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.messageId})` }] }
-    } catch (err) {
-      // Fallback to HTTP if adapter not connected
-      try {
-        const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/send`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id, text: sanitizeContent(text), reply_to }),
-        })
-        const result = await resp.json() as any
-        if (!resp.ok) {
-          return { content: [{ type: 'text', text: `Discord reply failed: ${result.error ?? resp.statusText}` }], isError: true }
-        }
-        return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.message_id})` }] }
-      } catch (fallbackErr) {
-        return { content: [{ type: 'text', text: `Discord reply failed: ${err}` }], isError: true }
-      }
-    }
-  }
+  // reply is handled above via redirect to send (SSOT-3 compliant)
 
   if (name === 'fetch_discord_history') {
     const { channel_id, limit, before } = args as any
