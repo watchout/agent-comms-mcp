@@ -998,8 +998,8 @@ function sendInboxSignal(targetAgent: string, messageId: string, from: string, c
   }
 }
 
-function countAndClearSignals(): number {
-  const dir = join(STATE_DIR, 'inbox', AGENT_ID)
+function countAndClearSignals(forAgentId?: string): number {
+  const dir = join(STATE_DIR, 'inbox', forAgentId ?? AGENT_ID)
   let count = 0
   try {
     const files = readdirSync(dir).filter(f => f.endsWith('.signal'))
@@ -1117,22 +1117,29 @@ function gc() {
 setInterval(gc, GC_INTERVAL_MS)
 
 // --- MCP Server ---
-const mcp = new Server(
-  { name: 'agent-comms', version: '1.2.0' },
-  {
-    capabilities: {
-      tools: {},
-      experimental: {
-        'claude/channel': {},
-        // Permission-relay opt-in: repliers authenticated via
-        // discord-adapter's access control (allowFrom gate).
-        'claude/channel/permission': {},
+function createMcpServer(): Server {
+  return new Server(
+    { name: 'agent-comms', version: '1.2.0' },
+    {
+      capabilities: {
+        tools: {},
+        experimental: {
+          'claude/channel': {},
+          // Permission-relay opt-in: repliers authenticated via
+          // discord-adapter's access control (allowFrom gate).
+          'claude/channel/permission': {},
+        },
       },
-    },
-  }
-)
+    }
+  )
+}
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+const mcp = createMcpServer()
+
+// --- Tool Registration (extracted for Per-Bot Server Factory) ---
+function registerTools(server: Server, agentId: string) {
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'send',
@@ -1286,7 +1293,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }))
 
-mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params
 
   // ============================================================
@@ -1305,39 +1312,39 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Resolve destination
-    const dest = await resolveDestination(to, AGENT_ID)
+    const dest = await resolveDestination(to, agentId)
     if ('error' in dest) {
-      await writeAuditLog('access.denied', AGENT_ID, to, { error: dest.error, code: dest.code })
+      await writeAuditLog('access.denied', agentId, to, { error: dest.error, code: dest.code })
       return { content: [{ type: 'text', text: `Error [${dest.code}]: ${dest.error}` }], isError: true }
     }
 
     // Membership validation
-    if (!dest.members.includes(AGENT_ID)) {
-      await writeAuditLog('access.denied', AGENT_ID, dest.channelId, { code: 'NOT_A_MEMBER' })
+    if (!dest.members.includes(agentId)) {
+      await writeAuditLog('access.denied', agentId, dest.channelId, { code: 'NOT_A_MEMBER' })
       return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
     }
 
     // Rate limit
-    const rate = await checkRateLimit(AGENT_ID)
+    const rate = await checkRateLimit(agentId)
     if (!rate.allowed) {
-      await writeAuditLog('message.blocked', AGENT_ID, dest.channelId, { code: 'RATE_LIMITED', to })
+      await writeAuditLog('message.blocked', agentId, dest.channelId, { code: 'RATE_LIMITED', to })
       return { content: [{ type: 'text', text: `Error [RATE_LIMITED]: rate limit exceeded (${config.rate_limit.max_per_minute}/min)` }], isError: true }
     }
 
     // Loop detection (for agent: destinations, extract target from DM)
     const msgDepth = 0
     if (dest.type === 'dm') {
-      const target = dest.members.find(m => m !== AGENT_ID) ?? ''
-      const loop = await checkLoop(AGENT_ID, target, msgDepth)
+      const target = dest.members.find(m => m !== agentId) ?? ''
+      const loop = await checkLoop(agentId, target, msgDepth)
       if (loop.blocked) {
-        await writeAuditLog('message.blocked', AGENT_ID, dest.channelId, { code: 'LOOP_DETECTED', to, reason: loop.reason })
+        await writeAuditLog('message.blocked', agentId, dest.channelId, { code: 'LOOP_DETECTED', to, reason: loop.reason })
         return { content: [{ type: 'text', text: `Error [LOOP_DETECTED]: ${loop.reason}` }], isError: true }
       }
     }
 
     // Duplicate check
     if (await checkDuplicate(content, dest.channelId)) {
-      await writeAuditLog('message.blocked', AGENT_ID, dest.channelId, { code: 'DUPLICATE', to })
+      await writeAuditLog('message.blocked', agentId, dest.channelId, { code: 'DUPLICATE', to })
       return { content: [{ type: 'text', text: 'Error [DUPLICATE]: same message sent within 10s, skipped' }], isError: true }
     }
 
@@ -1358,7 +1365,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Save to DB
     const id = await saveMessage({
-      channel_id: dest.channelId, author_id: AGENT_ID, content: safeContent,
+      channel_id: dest.channelId, author_id: agentId, content: safeContent,
       message_type: message_type ?? 'chat', reply_to,
       metadata: fullMetadata, depth: msgDepth,
       source: 'agent-comms', thread_id: dest.threadId ?? null,
@@ -1384,9 +1391,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Deliver to members (excluding sender)
-    const recipients = dest.members.filter(m => m !== AGENT_ID)
+    const recipients = dest.members.filter(m => m !== agentId)
     for (const recipient of recipients) {
-      sendInboxSignal(recipient, id, AGENT_ID, dest.channelId)
+      sendInboxSignal(recipient, id, agentId, dest.channelId)
     }
 
     // Forward to platform adapters via channel_adapters
@@ -1412,16 +1419,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Also forward via legacy forwarding config
-    forwardAll(AGENT_ID, dest.channelId, safeContent, message_type ?? 'chat')
+    forwardAll(agentId, dest.channelId, safeContent, message_type ?? 'chat')
 
     // Auto-unfocus on report
     if (message_type === 'report') {
-      await updateActiveThread(AGENT_ID, null)
+      await updateActiveThread(agentId, null)
       process.stderr.write(`[agent-com] INFO: auto-unfocused after sending report\n`)
     }
 
     // Audit log
-    await writeAuditLog('message.send', AGENT_ID, dest.channelId, { message_id: id, to, message_type: message_type ?? 'chat' })
+    await writeAuditLog('message.send', agentId, dest.channelId, { message_id: id, to, message_type: message_type ?? 'chat' })
 
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
   }
@@ -1431,12 +1438,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!thread_id) {
       return { content: [{ type: 'text', text: 'Error: thread_id is required' }], isError: true }
     }
-    await updateActiveThread(AGENT_ID, thread_id)
+    await updateActiveThread(agentId, thread_id)
     return { content: [{ type: 'text', text: `focused on thread:${thread_id}` }] }
   }
 
   if (name === 'unfocus') {
-    await updateActiveThread(AGENT_ID, null)
+    await updateActiveThread(agentId, null)
     return { content: [{ type: 'text', text: 'unfocused — receiving all messages' }] }
   }
 
@@ -1449,20 +1456,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { to, channel, content, message_type, reply_to, depth, metadata } = args as any
 
     // Access control: check if this agent is allowed to send to the channel
-    const access = checkAccess(AGENT_ID, channel, content)
+    const access = checkAccess(agentId, channel, content)
     if (!access.allowed) {
       return { content: [{ type: 'text', text: `ACCESS DENIED: ${access.reason}` }], isError: true }
     }
 
     // Rate limit
-    const rate = await checkRateLimit(AGENT_ID)
+    const rate = await checkRateLimit(agentId)
     if (!rate.allowed) {
       return { content: [{ type: 'text', text: `RATE LIMITED: ${config.rate_limit.max_per_minute}/min exceeded` }], isError: true }
     }
 
     // Loop detection
     const msgDepth = depth ?? 0
-    const loop = await checkLoop(AGENT_ID, to, msgDepth)
+    const loop = await checkLoop(agentId, to, msgDepth)
     if (loop.blocked) {
       return { content: [{ type: 'text', text: `LOOP BLOCKED: ${loop.reason}` }], isError: true }
     }
@@ -1486,7 +1493,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Save to DB
     const id = await saveMessage({
-      channel_id: channel, author_id: AGENT_ID, content: safeContent,
+      channel_id: channel, author_id: agentId, content: safeContent,
       message_type: message_type ?? 'chat', reply_to,
       metadata: fullMetadata, depth: msgDepth,
       source: 'agent-comms', direction: 'outbound', role: 'agent',
@@ -1506,8 +1513,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Signal + forward
-    sendInboxSignal(to, id, AGENT_ID, channel)
-    forwardAll(AGENT_ID, channel, safeContent, message_type ?? 'chat')
+    sendInboxSignal(to, id, agentId, channel)
+    forwardAll(agentId, channel, safeContent, message_type ?? 'chat')
 
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to} in #${channel}` }] }
   }
@@ -1523,8 +1530,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'check_inbox') {
     const { limit } = (args ?? {}) as any
-    const signals = countAndClearSignals()
-    const rows = await fetchNewMessages(AGENT_ID, Math.min(limit ?? 20, 100))
+    const signals = countAndClearSignals(agentId)
+    const rows = await fetchNewMessages(agentId, Math.min(limit ?? 20, 100))
     if (rows.length === 0) return { content: [{ type: 'text', text: '(no new messages)' }] }
     const text = rows.map((r: any) =>
       `[${r.created_at}] ${r.author_id} → #${r.channel_id}: ${r.content}  (id: ${r.id})`
@@ -1691,7 +1698,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 })
 
 // --- Permission relay: CC → server → Discord DM (Phase 5: integrated) ---
-mcp.setNotificationHandler(
+server.setNotificationHandler(
   z.object({
     method: z.literal('notifications/claude/channel/permission_request'),
     params: z.object({
@@ -1723,6 +1730,36 @@ mcp.setNotificationHandler(
     }
   },
 )
+
+} // end registerTools()
+
+// Register tools on the global MCP server (stdio/sse modes)
+registerTools(mcp, AGENT_ID)
+
+// --- Per-Bot Server Factory (SSE Daemon mode, Phase 3b) ---
+interface BotContext {
+  botId: string
+  server: Server
+  transport: SSEServerTransport | null
+  connectedAt: string
+  lastActivity: string
+}
+
+// Active bot contexts (daemon mode)
+const botContexts = new Map<string, BotContext>()
+
+function createBotServer(botId: string): BotContext {
+  const server = createMcpServer()
+  registerTools(server, botId)
+  const ctx: BotContext = {
+    botId,
+    server,
+    transport: null,
+    connectedAt: new Date().toISOString(),
+    lastActivity: new Date().toISOString(),
+  }
+  return ctx
+}
 
 // --- Bot Registry (lifecycle management) ---
 interface BotEntry {
@@ -2100,13 +2137,22 @@ function authenticateRequest(req: IncomingMessage, res: ServerResponse): boolean
 function getHealthStatus(): { status: string; uptime: number; connected_bots: Record<string, { connected_at: string; last_activity: string }>; expected_bots: string[] } {
   const uptimeSeconds = Math.floor((Date.now() - sseStartTime) / 1000)
   const bots: Record<string, { connected_at: string; last_activity: string }> = {}
-  for (const [botId, info] of connectedBots) {
-    bots[botId] = { connected_at: info.connected_at, last_activity: info.last_activity }
+
+  // Support both legacy connectedBots (sse mode) and botContexts (daemon mode)
+  if (TRANSPORT_MODE === 'daemon') {
+    for (const [botId, ctx] of botContexts) {
+      bots[botId] = { connected_at: ctx.connectedAt, last_activity: ctx.lastActivity }
+    }
+  } else {
+    for (const [botId, info] of connectedBots) {
+      bots[botId] = { connected_at: info.connected_at, last_activity: info.last_activity }
+    }
   }
 
   let status = 'ok'
   if (EXPECTED_BOTS.length > 0) {
-    const missing = EXPECTED_BOTS.filter(b => !connectedBots.has(b))
+    const activeBots = TRANSPORT_MODE === 'daemon' ? botContexts : connectedBots
+    const missing = EXPECTED_BOTS.filter(b => !activeBots.has(b))
     if (missing.length === EXPECTED_BOTS.length) {
       status = 'error'
     } else if (missing.length > 0) {
@@ -2118,7 +2164,193 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
 }
 
 // --- Start ---
-if (TRANSPORT_MODE === 'sse') {
+if (TRANSPORT_MODE === 'daemon') {
+  // Daemon mode: Per-Bot Server Factory (Phase 3b)
+  // Each bot_id gets its own MCP Server instance with bot-specific AGENT_ID
+  const daemonTransports = new Map<string, SSEServerTransport>()
+
+  const httpServer = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+
+    // Health endpoint
+    if (url.pathname === '/health' && req.method === 'GET') {
+      if (!authenticateRequest(req, res)) return
+      const health = getHealthStatus()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(health))
+      return
+    }
+
+    // SSE endpoint — per-bot Server Factory
+    if (url.pathname === '/sse' && req.method === 'GET') {
+      if (!authenticateRequest(req, res)) return
+      const botId = url.searchParams.get('bot_id')
+      if (!botId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'bot_id query parameter is required' }))
+        return
+      }
+
+      // Graceful reconnect: close existing connection for same bot_id
+      const existingCtx = botContexts.get(botId)
+      if (existingCtx && existingCtx.transport) {
+        process.stderr.write(`[SSE] bot reconnecting: ${botId} (closing previous)\n`)
+        const oldSessionId = existingCtx.transport.sessionId
+        daemonTransports.delete(oldSessionId)
+        await existingCtx.transport.close().catch(() => {})
+        botContexts.delete(botId)
+      }
+
+      process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
+
+      try {
+        // Create per-bot Server + Transport
+        const ctx = createBotServer(botId)
+        const transport = new SSEServerTransport('/messages', res)
+        const sessionId = transport.sessionId
+        ctx.transport = transport
+        daemonTransports.set(sessionId, transport)
+        botContexts.set(botId, ctx)
+
+        res.on('close', () => {
+          process.stderr.write(`[SSE] bot disconnected: ${botId}, reason: connection_close\n`)
+          daemonTransports.delete(sessionId)
+          const current = botContexts.get(botId)
+          if (current && current.transport?.sessionId === sessionId) {
+            botContexts.delete(botId)
+          }
+        })
+
+        await ctx.server.connect(transport)
+
+        // Register agent for this bot
+        try {
+          const client = await tryGetDb()
+          if (client) {
+            await client.query(
+              `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, last_seen_at, registered_at)
+               VALUES ($1, 'default', $1, 'dev', 'claude-code', 'online', now(), now())
+               ON CONFLICT (agent_id) DO UPDATE SET status = 'online', last_seen_at = now()`,
+              [botId]
+            )
+            await client.query(
+              `SELECT pg_notify('agent_events', $1)`,
+              [JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' })]
+            ).catch(() => {})
+          }
+        } catch (err) {
+          process.stderr.write(`agent-comms: daemon agent registration failed for ${botId} (non-fatal): ${err}\n`)
+        }
+      } catch (err) {
+        process.stderr.write(`[SSE] bot connection error: ${botId}, reason: ${err}\n`)
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal server error' }))
+        }
+      }
+      return
+    }
+
+    // Messages endpoint (POST from SSE clients)
+    if (url.pathname === '/messages' && req.method === 'POST') {
+      if (!authenticateRequest(req, res)) return
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const transport = daemonTransports.get(sessionId)
+      if (!transport) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'No transport found for sessionId' }))
+        return
+      }
+
+      // Update last_activity
+      for (const [, ctx] of botContexts) {
+        if (ctx.transport === transport) {
+          ctx.lastActivity = new Date().toISOString()
+          break
+        }
+      }
+
+      try {
+        await transport.handlePostMessage(req, res)
+      } catch (err) {
+        process.stderr.write(`agent-comms: daemon message handling error: ${err}\n`)
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal server error' }))
+        }
+      }
+      return
+    }
+
+    // 404 for unknown routes
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'Not found' }))
+  })
+
+  // Daemon-specific postConnect: shared resources only (Discord, listener, polling)
+  ;(async () => {
+    // Start push notification polling
+    startPolling()
+
+    // Start pg_notify listener
+    try {
+      await startListener()
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+    }
+
+    // Connect Discord adapter (shared across all bots)
+    if (DISCORD_BOT_TOKEN) {
+      try {
+        discord.onMessage((msg) => {
+          if (processedIds.has(msg.id)) return
+          processedIds.set(msg.id, Date.now())
+          const content = msg.content || '(attachment)'
+          saveMessage({
+            channel_id: msg.channel, author_id: msg.author.id, content,
+            message_type: 'chat', source: 'discord', direction: 'inbound',
+            role: msg.author.isBot ? 'agent' : 'user',
+            metadata: { discord_message_id: msg.id, discord_author_name: msg.author.name },
+          }).catch(() => {})
+        })
+        await discord.connect({
+          token: DISCORD_BOT_TOKEN,
+          stateDir: DISCORD_STATE_DIR_ENV || undefined,
+        })
+        process.stderr.write(`agent-comms: daemon Discord adapter connected\n`)
+      } catch (err) {
+        process.stderr.write(`agent-comms: WARNING — daemon Discord connection failed (non-fatal): ${err}\n`)
+      }
+    }
+  })()
+
+  httpServer.listen(SSE_PORT, () => {
+    process.stderr.write(`agent-comms: daemon listening on http://127.0.0.1:${SSE_PORT} (Per-Bot Server Factory)\n`)
+    process.stderr.write(`agent-comms: endpoints: GET /sse?bot_id=<id>, GET /health, POST /messages\n`)
+  })
+
+  const shutdown = async () => {
+    stopPolling()
+    stopListener()
+    await discord.disconnect().catch(() => {})
+    bridgeServer.stop()
+    // Close all per-bot transports
+    for (const [, ctx] of botContexts) {
+      if (ctx.transport) await ctx.transport.close().catch(() => {})
+      // Mark bot offline
+      const client = await tryGetDb().catch(() => null)
+      if (client) {
+        await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
+      }
+    }
+    httpServer.close()
+    if (db) await db.end().catch(() => {})
+    process.exit(0)
+  }
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+
+} else if (TRANSPORT_MODE === 'sse') {
   // SSE HTTP server mode
   const sseTransports = new Map<string, SSEServerTransport>()
   let httpServer: ReturnType<typeof createServer>
