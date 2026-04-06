@@ -719,6 +719,23 @@ async function startListener(): Promise<void> {
           return
         }
 
+        // v0.1.0: active_thread filtering (SSOT-5)
+        const activeThread = await getActiveThread(AGENT_ID)
+        if (activeThread) {
+          const msgThreadId = row.thread_id ?? row.channel_id
+          const isEmergency = isEmergencyMessage(row.content, row.message_type ?? 'chat', row.author_id)
+          if (msgThreadId !== activeThread && !isEmergency) {
+            process.stderr.write(`agent-comms: filtered (active_thread=${activeThread}, msg=${msgThreadId}): ${row.id}\n`)
+            return // DB saved but not pushed — retrievable via inbox
+          }
+        }
+
+        // v0.1.0: auto-focus on instruction receipt
+        if (row.message_type === 'instruction' && row.thread_id) {
+          await updateActiveThread(AGENT_ID, row.thread_id)
+          process.stderr.write(`[agent-com] INFO: auto-focused on thread:${row.thread_id} (instruction received)\n`)
+        }
+
         const tag = authResult.tag ? ` ${authResult.tag}` : ''
         const contentText = `[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
 
@@ -790,6 +807,107 @@ function stopListener(): void {
   if (oldClient) {
     oldClient.end().catch(() => {})
   }
+}
+
+// ============================================================
+// Core Router (v0.1.0 — SSOT-3/5 compliant)
+// ============================================================
+
+const CORE_CONTENT_LIMIT = 50_000
+
+interface ResolvedDestination {
+  type: 'channel' | 'dm' | 'thread'
+  channelId: string       // core channel ID (for membership check)
+  threadId?: string       // thread ID if type=thread
+  members: string[]       // channel members
+}
+
+async function resolveDestination(to: string, senderId: string): Promise<ResolvedDestination | { error: string; code: string }> {
+  const match = /^(channel|agent|thread):(.+)$/.exec(to)
+  if (!match) return { error: `invalid destination format. Use channel:/agent:/thread:`, code: 'INVALID_DESTINATION' }
+  const [, prefix, id] = match
+  if (!id) return { error: `${prefix} ID required`, code: 'INVALID_DESTINATION' }
+
+  const client = await tryGetDb()
+  if (!client) return { error: 'database connection failed', code: 'DB_UNAVAILABLE' }
+
+  if (prefix === 'channel') {
+    const r = await client.query('SELECT id, members, type FROM channels WHERE id = $1', [id])
+    if (r.rows.length === 0) return { error: `channel '${id}' not found`, code: 'CHANNEL_NOT_FOUND' }
+    return { type: r.rows[0].type === 'dm' ? 'dm' : 'channel', channelId: id, members: r.rows[0].members ?? [] }
+  }
+
+  if (prefix === 'agent') {
+    if (id === senderId) return { error: `cannot send DM to yourself`, code: 'SELF_SEND' }
+    // Check agent exists
+    const agentR = await client.query('SELECT agent_id FROM agents WHERE agent_id = $1', [id])
+    if (agentR.rows.length === 0) return { error: `agent '${id}' not found`, code: 'AGENT_NOT_FOUND' }
+    // Resolve DM channel (sorted pair)
+    const pair = [senderId, id].sort()
+    const dmId = `dm:${pair[0]}-${pair[1]}`
+    const chR = await client.query('SELECT id, members FROM channels WHERE id = $1', [dmId])
+    if (chR.rows.length > 0) {
+      return { type: 'dm', channelId: dmId, members: chR.rows[0].members ?? [] }
+    }
+    // Auto-create DM channel
+    const members = pair
+    await client.query(
+      `INSERT INTO channels (id, org_id, type, name, members, created_by, created_at, updated_at)
+       VALUES ($1, 'default', 'dm', NULL, $2, $3, now(), now())`,
+      [dmId, members, senderId]
+    )
+    return { type: 'dm', channelId: dmId, members }
+  }
+
+  if (prefix === 'thread') {
+    const r = await client.query('SELECT id, channel_id FROM threads WHERE id = $1', [id])
+    if (r.rows.length === 0) return { error: `thread '${id}' not found`, code: 'THREAD_NOT_FOUND' }
+    const parentChannelId = r.rows[0].channel_id
+    const chR = await client.query('SELECT members FROM channels WHERE id = $1', [parentChannelId])
+    if (chR.rows.length === 0) return { error: `parent channel '${parentChannelId}' not found`, code: 'CHANNEL_NOT_FOUND' }
+    return { type: 'thread', channelId: parentChannelId, threadId: id, members: chR.rows[0].members ?? [] }
+  }
+
+  return { error: `invalid destination format. Use channel:/agent:/thread:`, code: 'INVALID_DESTINATION' }
+}
+
+function isEmergencyMessage(content: string, messageType: string, authorId: string): boolean {
+  if (messageType === 'emergency') return true
+  if (content.startsWith('!stop')) return true
+  if (authorId === 'ceo') return true
+  return false
+}
+
+async function getNextSequence(channelId: string): Promise<number> {
+  const client = await tryGetDb()
+  if (!client) return 0
+  const r = await client.query(
+    'SELECT COALESCE(MAX(sequence), 0) + 1 as next FROM agent_messages WHERE channel_id = $1',
+    [channelId]
+  )
+  return r.rows[0].next
+}
+
+async function updateActiveThread(agentId: string, threadId: string | null): Promise<void> {
+  const client = await tryGetDb()
+  if (!client) return
+  await client.query('UPDATE agents SET active_thread = $1 WHERE agent_id = $2', [threadId, agentId])
+}
+
+async function getActiveThread(agentId: string): Promise<string | null> {
+  const client = await tryGetDb()
+  if (!client) return null
+  const r = await client.query('SELECT active_thread FROM agents WHERE agent_id = $1', [agentId])
+  return r.rows.length > 0 ? r.rows[0].active_thread : null
+}
+
+async function writeAuditLog(eventType: string, agentId: string | null, target: string | null, detail: Record<string, unknown>): Promise<void> {
+  const client = await tryGetDb()
+  if (!client) return
+  await client.query(
+    'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
+    [eventType, agentId, target, JSON.stringify(detail), 'default']
+  ).catch(err => process.stderr.write(`agent-comms: audit_log write failed: ${err}\n`))
 }
 
 // --- Access Control (§4.1 - Communication Bus Layer) ---
@@ -987,8 +1105,43 @@ const mcp = new Server(
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
+      name: 'send',
+      description: 'Unified message send tool. Destination: channel:<id>, agent:<id>, or thread:<id>. Validates membership, rate limits, loop detection.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          to: { type: 'string', description: 'Destination: channel:<id> / agent:<id> / thread:<id>' },
+          content: { type: 'string', description: 'Message content' },
+          reply_to: { type: 'string', description: 'Reply-to message UUID' },
+          thread: { type: 'boolean', description: 'Create new thread' },
+          message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
+          metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
+        },
+        required: ['to', 'content'],
+      },
+    },
+    {
+      name: 'focus',
+      description: 'Set thread focus. Only messages from this thread (+ emergencies) will be pushed to your session.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          thread_id: { type: 'string', description: 'Thread ID to focus on' },
+        },
+        required: ['thread_id'],
+      },
+    },
+    {
+      name: 'unfocus',
+      description: 'Clear thread focus. Resume receiving all messages.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
       name: 'send_message',
-      description: 'Send a message to another agent. Stored in DB, signal sent to target, optionally forwarded to Discord/Telegram/Slack/LINE.',
+      description: '[Deprecated: use send] Send a message to another agent.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1106,7 +1259,156 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params
 
+  // ============================================================
+  // v0.1.0 Core Tools: send, focus, unfocus
+  // ============================================================
+
+  if (name === 'send') {
+    const { to, content, reply_to, thread, message_type, metadata } = args as any
+
+    // Validate content
+    if (!content || content.length === 0) {
+      return { content: [{ type: 'text', text: 'Error [CONTENT_EMPTY]: content must not be empty' }], isError: true }
+    }
+    if (content.length > CORE_CONTENT_LIMIT) {
+      return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
+    }
+
+    // Resolve destination
+    const dest = await resolveDestination(to, AGENT_ID)
+    if ('error' in dest) {
+      await writeAuditLog('access.denied', AGENT_ID, to, { error: dest.error, code: dest.code })
+      return { content: [{ type: 'text', text: `Error [${dest.code}]: ${dest.error}` }], isError: true }
+    }
+
+    // Membership validation
+    if (!dest.members.includes(AGENT_ID)) {
+      await writeAuditLog('access.denied', AGENT_ID, dest.channelId, { code: 'NOT_A_MEMBER' })
+      return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
+    }
+
+    // Rate limit
+    const rate = await checkRateLimit(AGENT_ID)
+    if (!rate.allowed) {
+      return { content: [{ type: 'text', text: `Error [RATE_LIMITED]: rate limit exceeded (${config.rate_limit.max_per_minute}/min)` }], isError: true }
+    }
+
+    // Loop detection (for agent: destinations, extract target from DM)
+    const msgDepth = 0
+    if (dest.type === 'dm') {
+      const target = dest.members.find(m => m !== AGENT_ID) ?? ''
+      const loop = await checkLoop(AGENT_ID, target, msgDepth)
+      if (loop.blocked) {
+        return { content: [{ type: 'text', text: `Error [LOOP_DETECTED]: ${loop.reason}` }], isError: true }
+      }
+    }
+
+    // Duplicate check
+    if (await checkDuplicate(content, dest.channelId)) {
+      return { content: [{ type: 'text', text: 'Error [DUPLICATE]: same message sent within 10s, skipped' }], isError: true }
+    }
+
+    // Burst control
+    if (!checkBurst()) {
+      await new Promise(r => setTimeout(r, BURST_MIN_INTERVAL_MS))
+    }
+
+    // Sanitize
+    const safeContent = sanitizeContent(content)
+
+    // Sequence
+    const sequence = await getNextSequence(dest.channelId)
+
+    // Build metadata with auth
+    const authMeta = createAuthMetadata(dest.channelId, safeContent)
+    const fullMetadata = { ...metadata, ...authMeta }
+
+    // Save to DB
+    const id = await saveMessage({
+      channel_id: dest.channelId, author_id: AGENT_ID, content: safeContent,
+      message_type: message_type ?? 'chat', reply_to,
+      metadata: fullMetadata, depth: msgDepth,
+      source: 'agent-comms', thread_id: dest.threadId ?? null,
+      direction: 'outbound', role: 'agent',
+    })
+
+    // Update sequence
+    const client = await tryGetDb()
+    if (client) {
+      await client.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
+    }
+
+    // pg_notify
+    try {
+      if (client) {
+        await client.query(
+          `SELECT pg_notify('agent_inbox', $1)`,
+          [JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId })]
+        )
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
+    }
+
+    // Deliver to members (excluding sender)
+    const recipients = dest.members.filter(m => m !== AGENT_ID)
+    for (const recipient of recipients) {
+      sendInboxSignal(recipient, id, AGENT_ID, dest.channelId)
+    }
+
+    // Forward to platform adapters via channel_adapters
+    if (client) {
+      const adapters = await client.query(
+        'SELECT platform, external_id FROM channel_adapters WHERE channel_id = $1',
+        [dest.channelId]
+      ).catch(() => ({ rows: [] as any[] }))
+
+      for (const adapter of adapters.rows) {
+        if (adapter.platform === 'discord') {
+          try {
+            await discord.sendMessage(adapter.external_id, truncateForPlatform(safeContent, 'discord'))
+          } catch (err) {
+            process.stderr.write(`agent-comms: discord adapter delivery failed: ${err}\n`)
+          }
+        }
+      }
+    }
+
+    // Also forward via legacy forwarding config
+    forwardAll(AGENT_ID, dest.channelId, safeContent, message_type ?? 'chat')
+
+    // Auto-unfocus on report
+    if (message_type === 'report') {
+      await updateActiveThread(AGENT_ID, null)
+      process.stderr.write(`[agent-com] INFO: auto-unfocused after sending report\n`)
+    }
+
+    // Audit log
+    await writeAuditLog('message.send', AGENT_ID, dest.channelId, { message_id: id, to, message_type: message_type ?? 'chat' })
+
+    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
+  }
+
+  if (name === 'focus') {
+    const { thread_id } = args as any
+    if (!thread_id) {
+      return { content: [{ type: 'text', text: 'Error: thread_id is required' }], isError: true }
+    }
+    await updateActiveThread(AGENT_ID, thread_id)
+    return { content: [{ type: 'text', text: `focused on thread:${thread_id}` }] }
+  }
+
+  if (name === 'unfocus') {
+    await updateActiveThread(AGENT_ID, null)
+    return { content: [{ type: 'text', text: 'unfocused — receiving all messages' }] }
+  }
+
+  // ============================================================
+  // Legacy tools (aliases, maintained for backward compatibility)
+  // ============================================================
+
   if (name === 'send_message') {
+    process.stderr.write(`[agent-com] WARN: send_message is deprecated, use send(to: "agent:<id>") instead\n`)
     const { to, channel, content, message_type, reply_to, depth, metadata } = args as any
 
     // Access control: check if this agent is allowed to send to the channel
