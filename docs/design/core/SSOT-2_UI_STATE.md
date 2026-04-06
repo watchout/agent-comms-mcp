@@ -6,9 +6,8 @@
 
 ## Screens
 
-> **[要記入]** 既存の画面/ページをコードベースから抽出してください。
-> Claude Code で自動抽出: "src/app/ のルートを分析して画面一覧を生成して"
+agent-commsはUI画面を持たない。管理はCLIコマンド（agent-com channel/agent/status）で行う。
 
 ## State Transitions
 
-> **[要記入]** 既存のUI状態遷移ロジックをマッピングしてください。
+agent-commsはUI画面を持たない。管理はCLIコマンド（agent-com channel/agent/status）で行う。

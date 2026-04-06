@@ -113,7 +113,7 @@ Discord API から直接履歴取得。DB移行完了前の補完用。
 | E3 | `{ to: "channel:nonexistent", content: "test" }` | `Error: channel 'nonexistent' not found` | 存在しないチャンネル |
 | E4 | `{ to: "invalid-prefix:foo", content: "test" }` | `Error: invalid destination format. Use channel:/agent:/thread:` | 不正なプレフィックス |
 | E5 | `{ to: "channel:dev-arc", content: "" }` | `Error: content must not be empty` | 空のcontent |
-| E6 | `{ to: "agent:cto", content: "x".repeat(40001) }` | `Error: content exceeds platform limit (40000 chars)` | プラットフォーム文字数超過 |
+| E6 | `{ to: "agent:cto", content: "x".repeat(50001) }` | `Error [CONTENT_TOO_LARGE]: content exceeds core limit (50000 chars)` | コア層文字数超過 |
 
 ### history
 
@@ -143,8 +143,8 @@ Discord API から直接履歴取得。DB移行完了前の補完用。
 | F2 | content | 1文字 `"a"` | 正常送信 |
 | F3 | content | 2000文字（Discord上限） | 正常送信 |
 | F4 | content | 2001文字 | Discord: 分割送信 or エラー、他プラットフォーム: 正常 |
-| F5 | content | 40000文字（Slack上限） | 正常送信（プラットフォーム依存） |
-| F6 | content | 40001文字 | エラー: content exceeds platform limit |
+| F5 | content | 50000文字（コア層上限） | 正常送信 |
+| F6 | content | 50001文字 | エラー [CONTENT_TOO_LARGE]: コア層上限超過 |
 | F7 | to | プレフィックスなし `"cto"` | エラー: invalid destination format |
 | F8 | to | `"channel:"` （IDなし） | エラー: channel ID required |
 | F9 | reply_to | 存在しないUUID | 正常送信（reply_toは参照のみ、FK制約でエラーの可能性） |
