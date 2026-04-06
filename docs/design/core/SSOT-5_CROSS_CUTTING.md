@@ -136,6 +136,36 @@ send(to: "thread:abc123") を実行
 
 ---
 
+## 1.8 データソース原則（CEO方針 2026-04-06）
+
+**Discord APIが唯一の情報源（SSOT）。静的ファイルによる手動管理は廃止。**
+
+### チャンネルID管理
+
+- channels.id = Discord チャンネルID（数字文字列）
+- channels.name = Discord APIから取得したチャンネル名（表示用）
+- channel-routing.json等の静的マッピングファイルは廃止方向（必要なら自動生成）
+
+### メンバー取得
+
+- channels.members = Discord権限データから自動取得
+- `channel.permissionsFor(bot).has('ViewChannel')` で権限チェック
+- ViewChannel許可のBotのみmembersに追加
+- 全チャンネルにceo + arcを必ず追加（CEO承認済み）
+
+### 定期同期
+
+- seedスクリプト = 初期構築 + 定期同期の両方に使える（冪等設計）
+- cron or Bot起動時にseedを再実行 → Discord権限変更が自動反映
+- 手動作成による不一致が原理的に発生しない設計
+
+### SaaS化時の拡張
+
+- 「プラットフォームのアクセス制御を正として取得する」に抽象化
+- 現時点はDiscord専用で実装、将来の抽象化に備えた構造
+
+---
+
 ## 2. アクセス制御
 
 ### v0.1.0: チャンネルメンバーシップベース
@@ -146,6 +176,7 @@ send(to: "thread:abc123") を実行
 
 新（プラットフォーム非依存）:
   channelsテーブル → members（agent_id配列）
+  データソース: Discord権限データから自動取得
 ```
 
 - gate()をリファクタ: allowFrom → channelsテーブルのmembersで判断
