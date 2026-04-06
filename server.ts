@@ -732,15 +732,15 @@ async function startListener(): Promise<void> {
           return
         }
 
-        // v0.1.0: active_thread filtering (SSOT-5)
-        const activeThread = await getActiveThread(AGENT_ID)
-        if (activeThread) {
-          const msgThreadId = row.thread_id ?? row.channel_id
-          const isEmergency = isEmergencyMessage(row.content, row.message_type ?? 'chat', row.author_id)
-          if (msgThreadId !== activeThread && !isEmergency) {
-            process.stderr.write(`agent-comms: filtered (active_thread=${activeThread}, msg=${msgThreadId}): ${row.id}\n`)
-            return // DB saved but not pushed — retrievable via inbox
-          }
+        // ACP delivery filter: use unified resolveDeliveryTargets()
+        const delivery = await resolveDeliveryTargets(
+          [AGENT_ID], // check if this single bot should receive
+          row.author_id, row.content, row.message_type ?? 'chat',
+          row.reply_to ?? undefined, row.thread_id ?? undefined,
+        )
+        if (!delivery.targets.includes(AGENT_ID)) {
+          process.stderr.write(`agent-comms: filtered (${delivery.warning ?? 'no_target'}): ${row.id}\n`)
+          return // DB saved but not pushed
         }
 
         // v0.1.0: auto-focus on instruction receipt
@@ -901,11 +901,127 @@ async function resolveDestination(to: string, senderId: string): Promise<Resolve
   return { error: `invalid destination format. Use channel:/agent:/thread:`, code: 'INVALID_DESTINATION' }
 }
 
-function isEmergencyMessage(content: string, messageType: string, authorId: string): boolean {
+function isEmergencyMessage(content: string, messageType: string): boolean {
   if (messageType === 'emergency') return true
   if (content.startsWith('!stop')) return true
-  if (authorId === 'ceo') return true
   return false
+}
+
+/** Check if sender is a human agent (agent_type='human') */
+async function isHumanAgent(agentId: string): Promise<boolean> {
+  const client = await tryGetDb()
+  if (!client) return false // safe default: don't assume human without DB
+  const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [agentId])
+  return r.rows.length > 0 && r.rows[0].agent_type === 'human'
+}
+
+/** Check if agent has observer_mode enabled */
+async function isObserverMode(agentId: string): Promise<boolean> {
+  const client = await tryGetDb()
+  if (!client) return false
+  const r = await client.query("SELECT observer_mode FROM agents WHERE agent_id = $1", [agentId])
+  return r.rows.length > 0 && r.rows[0].observer_mode === true
+}
+
+/** Parse @agent_id mentions from message content */
+function parseMentions(content: string): string[] {
+  const mentions: string[] = []
+  const regex = /@([a-zA-Z0-9_-]+)/g
+  let match
+  while ((match = regex.exec(content)) !== null) {
+    mentions.push(match[1])
+  }
+  return [...new Set(mentions)]
+}
+
+interface DeliveryResult {
+  targets: string[]
+  warning?: 'NOT_MENTIONED' | 'THREAD_MISMATCH'
+}
+
+/**
+ * ACP 6-step delivery filter (§3.15)
+ * Determines which members should receive a push notification.
+ * Returns targets + warning if no delivery.
+ */
+async function resolveDeliveryTargets(
+  members: string[],
+  senderId: string,
+  content: string,
+  messageType: string,
+  replyTo: string | undefined,
+  threadId: string | undefined,
+): Promise<DeliveryResult> {
+  const candidates = members.filter(m => m !== senderId)
+  if (candidates.length === 0) return { targets: [] }
+
+  // Step 1: Emergency → push all members (including observers)
+  if (isEmergencyMessage(content, messageType)) {
+    return { targets: candidates }
+  }
+
+  // Step 2: Human sender → push all members (including observers)
+  if (await isHumanAgent(senderId)) {
+    return { targets: candidates }
+  }
+
+  // Filter out observer_mode agents for Steps 3-6
+  const nonObservers: string[] = []
+  for (const c of candidates) {
+    if (!(await isObserverMode(c))) {
+      nonObservers.push(c)
+    }
+  }
+
+  // Step 3: Mention detection → push only mentioned agents
+  const mentions = parseMentions(content)
+  const pushTargets = new Set<string>()
+
+  for (const mention of mentions) {
+    if (nonObservers.includes(mention)) {
+      pushTargets.add(mention)
+    }
+  }
+
+  // Step 4: reply_to → add original sender to push targets
+  if (replyTo) {
+    const client = await tryGetDb()
+    if (client) {
+      const r = await client.query('SELECT author_id FROM agent_messages WHERE id = $1', [replyTo])
+      if (r.rows.length > 0) {
+        const originalAuthor = r.rows[0].author_id
+        if (nonObservers.includes(originalAuthor) && originalAuthor !== senderId) {
+          pushTargets.add(originalAuthor)
+        }
+      }
+    }
+  }
+
+  // Step 5: No mentions and no reply_to target → DB only (no push)
+  if (pushTargets.size === 0) {
+    return { targets: [], warning: 'NOT_MENTIONED' }
+  }
+
+  // Step 6: active_thread filter
+  const finalTargets: string[] = []
+  for (const target of pushTargets) {
+    const activeThread = await getActiveThread(target)
+    if (!activeThread) {
+      finalTargets.push(target) // NULL = receive all
+    } else {
+      const msgThread = threadId ?? 'channel'
+      if (activeThread === msgThread) {
+        finalTargets.push(target)
+      }
+      // else: DB saved but not pushed
+    }
+  }
+
+  if (finalTargets.length === 0 && pushTargets.size > 0) {
+    return { targets: [], warning: 'THREAD_MISMATCH' }
+  }
+
+  return { targets: finalTargets }
 }
 
 async function getNextSequence(channelId: string): Promise<number> {
@@ -1417,9 +1533,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
     }
 
-    // Deliver to members (excluding sender)
-    const recipients = dest.members.filter(m => m !== agentId)
-    for (const recipient of recipients) {
+    // ACP 6-step delivery filter (§3.15)
+    const delivery = await resolveDeliveryTargets(
+      dest.members, agentId, safeContent, message_type ?? 'chat', reply_to, dest.threadId
+    )
+    for (const recipient of delivery.targets) {
       sendInboxSignal(recipient, id, agentId, dest.channelId)
     }
 
@@ -1455,8 +1573,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Audit log
-    await writeAuditLog('message.send', agentId, dest.channelId, { message_id: id, to, message_type: message_type ?? 'chat' })
+    await writeAuditLog('message.send', agentId, dest.channelId, {
+      message_id: id, to, message_type: message_type ?? 'chat',
+      recipients: delivery.targets.length, warning: delivery.warning ?? null,
+    })
 
+    // Response with delivery feedback
+    if (delivery.targets.length > 0) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.targets.length} recipient(s)` }] }
+    }
+    if (delivery.warning === 'NOT_MENTIONED') {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください` }] }
+    }
+    if (delivery.warning === 'THREAD_MISMATCH') {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません` }] }
+    }
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
   }
 
