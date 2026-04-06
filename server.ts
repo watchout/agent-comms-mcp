@@ -1297,7 +1297,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
 
   // --- Deprecated alias redirects (SSOT-3 compliant) ---
-  // reply → send: redirect through core Router for members validation, audit_log, rate limiting
+  // All send paths go through core Router for members validation, audit_log, rate limiting
+
   if (name === 'reply') {
     process.stderr.write(`[agent-com] WARN: reply is deprecated, use send(to: "channel:<chat_id>") instead\n`)
     const { chat_id, text, reply_to } = args as any
@@ -1306,6 +1307,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       to: `channel:${chat_id}`,
       content: text,
       ...(reply_to ? { reply_to } : {}),
+    }
+  }
+
+  if (name === 'send_message') {
+    process.stderr.write(`[agent-com] WARN: send_message is deprecated, use send(to: "agent:<id>") instead\n`)
+    const { to, content, message_type, reply_to, metadata } = args as any
+    name = 'send'
+    args = {
+      to: `agent:${to}`,
+      content,
+      ...(message_type ? { message_type } : {}),
+      ...(reply_to ? { reply_to } : {}),
+      ...(metadata ? { metadata } : {}),
     }
   }
 
@@ -1464,73 +1478,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // Legacy tools (aliases, maintained for backward compatibility)
   // ============================================================
 
-  if (name === 'send_message') {
-    process.stderr.write(`[agent-com] WARN: send_message is deprecated, use send(to: "agent:<id>") instead\n`)
-    const { to, channel, content, message_type, reply_to, depth, metadata } = args as any
-
-    // Access control: check if this agent is allowed to send to the channel
-    const access = checkAccess(agentId, channel, content)
-    if (!access.allowed) {
-      return { content: [{ type: 'text', text: `ACCESS DENIED: ${access.reason}` }], isError: true }
-    }
-
-    // Rate limit
-    const rate = await checkRateLimit(agentId)
-    if (!rate.allowed) {
-      return { content: [{ type: 'text', text: `RATE LIMITED: ${config.rate_limit.max_per_minute}/min exceeded` }], isError: true }
-    }
-
-    // Loop detection
-    const msgDepth = depth ?? 0
-    const loop = await checkLoop(agentId, to, msgDepth)
-    if (loop.blocked) {
-      return { content: [{ type: 'text', text: `LOOP BLOCKED: ${loop.reason}` }], isError: true }
-    }
-
-    // Duplicate check
-    if (await checkDuplicate(content, to)) {
-      return { content: [{ type: 'text', text: 'DUPLICATE: same message sent within 10s, skipped' }], isError: true }
-    }
-
-    // Burst control
-    if (!checkBurst()) {
-      await new Promise(r => setTimeout(r, BURST_MIN_INTERVAL_MS))
-    }
-
-    // Sanitize
-    const safeContent = sanitizeContent(content)
-
-    // Build metadata with HMAC auth signature
-    const authMeta = createAuthMetadata(channel, safeContent)
-    const fullMetadata = { ...metadata, to, ...authMeta }
-
-    // Save to DB
-    const id = await saveMessage({
-      channel_id: channel, author_id: agentId, content: safeContent,
-      message_type: message_type ?? 'chat', reply_to,
-      metadata: fullMetadata, depth: msgDepth,
-      source: 'agent-comms', direction: 'outbound', role: 'agent',
-    })
-
-    // pg_notify for Webhook channel push (Phase 4)
-    try {
-      const client = await tryGetDb()
-      if (client) {
-        await client.query(
-          `SELECT pg_notify('agent_inbox', $1)`,
-          [JSON.stringify({ to, message_id: id })]
-        )
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
-    }
-
-    // Signal + forward
-    sendInboxSignal(to, id, agentId, channel)
-    forwardAll(agentId, channel, safeContent, message_type ?? 'chat')
-
-    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to} in #${channel}` }] }
-  }
+  // send_message is handled above via redirect to send (SSOT-3 compliant)
 
   if (name === 'fetch_messages') {
     process.stderr.write(`[agent-com] WARN: fetch_messages is deprecated, use history instead\n`)
