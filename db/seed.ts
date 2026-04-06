@@ -2,20 +2,23 @@
 /**
  * Seed script for core layer channels + channel_adapters.
  *
- * Fetches real Discord guild data via discord.js API, then cross-references
- * with bot-registry.txt and access.json configs to build:
- *   - channels table (with members derived from access configs)
+ * Fetches real Discord guild data via discord.js API, uses
+ * channel.permissionOverwrites to determine per-bot ViewChannel access,
+ * then seeds:
+ *   - channels table (id = Discord channel ID, members from permissions)
  *   - channel_adapters table (Discord channel ID mappings)
+ *
+ * All channels include ceo + arc as members (CEO approved).
  *
  * Usage:
  *   DISCORD_BOT_TOKEN=xxx DATABASE_URL=xxx bun db/seed.ts
  *
- * Safe to run multiple times (ON CONFLICT DO UPDATE).
+ * Idempotent: drops existing channels/channel_adapters and re-inserts.
  */
 
-import { Client, GatewayIntentBits, ChannelType } from 'discord.js'
+import { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, OverwriteType } from 'discord.js'
 import { Client as PgClient } from 'pg'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -75,17 +78,63 @@ function loadBotAccess(session: string): AccessConfig {
   }
 }
 
+// --- Build Discord user ID → agent_id mapping ---
+const CEO_DISCORD_ID = '1227059781265653783'
+const CEO_AGENT_ID = 'ceo'
+const ARC_AGENT_ID = 'arc'
+
+function buildDiscordIdMap(registry: BotEntry[]): Map<string, string> {
+  const map = new Map<string, string>()
+
+  // CEO (human user)
+  map.set(CEO_DISCORD_ID, CEO_AGENT_ID)
+
+  // Build session → agentId lookup from registry
+  const sessionToAgent = new Map<string, string>()
+  for (const bot of registry) {
+    sessionToAgent.set(bot.session, bot.agentId)
+  }
+
+  // Scan ALL discord-* directories in channels/ (not just registry entries)
+  // This catches bots removed from registry but still having Discord permissions
+  if (existsSync(channelsDir)) {
+    const dirs = readdirSync(channelsDir).filter(d => d.startsWith('discord-'))
+    for (const dir of dirs) {
+      const access = loadBotAccess(dir)
+      if (!access.mentionPatterns) continue
+      const discordId = access.mentionPatterns.find(p => /^\d{17,}$/.test(p))
+      if (!discordId) continue
+
+      // Resolve agent_id: prefer registry, fall back to derived name
+      let agentId = sessionToAgent.get(dir)
+      if (!agentId) {
+        // Derive from directory name: discord-hotel → hotel-dev, discord-arc → arc
+        const baseName = dir.replace('discord-', '')
+        // Check common patterns
+        const knownDirectAgents = ['arc', 'vice', 'auditor', 'secretary', 'cto']
+        agentId = knownDirectAgents.includes(baseName) ? baseName : `${baseName}-dev`
+      }
+      map.set(discordId, agentId)
+    }
+  }
+
+  return map
+}
+
 // --- Main ---
 async function seed() {
   const registry = loadBotRegistry()
   console.log(`Loaded ${registry.length} bots from bot-registry.txt`)
 
-  // Collect bot access configs
-  const botAccess = new Map<string, AccessConfig>()
-  for (const bot of registry) {
-    const access = loadBotAccess(bot.session)
-    botAccess.set(bot.agentId, access)
+  // Build Discord user ID → agent_id mapping
+  const discordIdMap = buildDiscordIdMap(registry)
+  console.log(`Built Discord ID mapping for ${discordIdMap.size} users:`)
+  for (const [did, aid] of discordIdMap) {
+    console.log(`  ${did} → ${aid}`)
   }
+
+  // All known agent IDs (for public channels)
+  const allAgentIds = new Set([CEO_AGENT_ID, ...registry.map(b => b.agentId)])
 
   // Connect to Discord and fetch guild channels
   console.log('Connecting to Discord...')
@@ -98,105 +147,100 @@ async function seed() {
   console.log(`Connected as ${client.user?.tag}`)
 
   // Fetch all guilds and their channels
-  interface DiscordChannel {
-    id: string
+  interface SeedChannel {
+    discordId: string
     name: string
-    type: ChannelType
-    parentId: string | null
     guildId: string
     guildName: string
+    members: string[]
   }
 
-  const discordChannels: DiscordChannel[] = []
+  const seedChannels: SeedChannel[] = []
+
   for (const [, guild] of client.guilds.cache) {
     const channels = await guild.channels.fetch()
+
     for (const [, channel] of channels) {
       if (!channel) continue
       if (
-        channel.type === ChannelType.GuildText ||
-        channel.type === ChannelType.GuildForum ||
-        channel.type === ChannelType.GuildAnnouncement
-      ) {
-        discordChannels.push({
-          id: channel.id,
-          name: channel.name,
-          type: channel.type,
-          parentId: channel.parentId,
-          guildId: guild.id,
-          guildName: guild.name,
-        })
+        channel.type !== ChannelType.GuildText &&
+        channel.type !== ChannelType.GuildForum &&
+        channel.type !== ChannelType.GuildAnnouncement
+      ) continue
+
+      // Determine members from permissionOverwrites
+      const members = new Set<string>([CEO_AGENT_ID, ARC_AGENT_ID])
+      const overwrites = channel.permissionOverwrites.cache
+
+      // Check if @everyone has ViewChannel denied (private channel)
+      const everyoneOverwrite = overwrites.get(guild.id)
+      const isPrivate = everyoneOverwrite?.deny.has(PermissionFlagsBits.ViewChannel) ?? false
+
+      if (!isPrivate) {
+        // Public channel: all agents are members
+        for (const agentId of allAgentIds) {
+          members.add(agentId)
+        }
       }
+
+      // Process member-specific overwrites (type = 1)
+      for (const [id, overwrite] of overwrites) {
+        if (overwrite.type !== OverwriteType.Member) continue
+
+        const agentId = discordIdMap.get(id)
+        if (!agentId) {
+          // Unknown Discord user ID - log and skip
+          console.log(`  [WARN] Channel #${channel.name}: unknown Discord user ${id} in permissionOverwrites (skipped)`)
+          continue
+        }
+
+        if (overwrite.allow.has(PermissionFlagsBits.ViewChannel)) {
+          members.add(agentId)
+        }
+        if (overwrite.deny.has(PermissionFlagsBits.ViewChannel)) {
+          members.delete(agentId)
+        }
+      }
+
+      seedChannels.push({
+        discordId: channel.id,
+        name: channel.name,
+        guildId: guild.id,
+        guildName: guild.name,
+        members: [...members],
+      })
     }
   }
 
-  console.log(`Found ${discordChannels.length} text channels across ${client.guilds.cache.size} guild(s)`)
+  console.log(`Found ${seedChannels.length} text channels across ${client.guilds.cache.size} guild(s)`)
   client.destroy()
-
-  // Build channel → members mapping
-  // A bot is a "member" of a channel if:
-  // 1. allowChannels includes the Discord channel ID (main-lead)
-  // 2. The bot has mentionPatterns (can be mentioned in any channel)
-  // For v0.1.0, we include all bots as members of all channels (conservative),
-  // but mark allowChannels bots as primary members.
-
-  // Also add human users: CEO (snsmaster369)
-  const CEO_AGENT_ID = 'ceo'
-
-  // Build core channel records
-  interface CoreChannel {
-    id: string
-    name: string
-    members: string[]
-    discordId: string
-  }
-
-  const coreChannels: CoreChannel[] = []
-
-  for (const dc of discordChannels) {
-    // Determine members: bots whose allowChannels includes this channel,
-    // plus bots that have no allowChannels (they listen to all channels)
-    const members: string[] = [CEO_AGENT_ID]
-
-    for (const bot of registry) {
-      const access = botAccess.get(bot.agentId)
-      if (!access) {
-        members.push(bot.agentId)
-        continue
-      }
-
-      if (!access.allowChannels || access.allowChannels.length === 0) {
-        // No allowChannels restriction = member of all channels
-        members.push(bot.agentId)
-      } else if (access.allowChannels.includes(dc.id)) {
-        // Explicitly allowed in this channel
-        members.push(bot.agentId)
-      } else if (access.mentionPatterns && access.mentionPatterns.length > 0) {
-        // Has mentionPatterns = can be mentioned in any channel
-        members.push(bot.agentId)
-      }
-    }
-
-    // Use Discord channel name as core channel ID (sanitized)
-    const coreId = dc.name.replace(/[^a-z0-9-]/g, '-')
-
-    coreChannels.push({
-      id: coreId,
-      name: dc.name,
-      members: [...new Set(members)],
-      discordId: dc.id,
-    })
-  }
 
   // Connect to DB and seed
   console.log('Connecting to PostgreSQL...')
   const db = new PgClient({ connectionString: databaseUrl })
   await db.connect()
 
+  // Second-pass: supplement mapping from agents table (existing discord_id metadata)
+  const existingAgents = await db.query(
+    "SELECT agent_id, metadata->>'discord_id' as discord_id FROM agents WHERE metadata->>'discord_id' IS NOT NULL"
+  )
+  for (const row of existingAgents.rows) {
+    if (!discordIdMap.has(row.discord_id)) {
+      discordIdMap.set(row.discord_id, row.agent_id)
+      console.log(`  [DB] ${row.discord_id} → ${row.agent_id} (from agents metadata)`)
+    }
+  }
+
+  // Drop existing channels/channel_adapters and re-seed (preserve DM channels)
+  console.log('Clearing existing channel data (preserving DM channels)...')
+  await db.query('DELETE FROM channel_adapters WHERE channel_id IN (SELECT id FROM channels WHERE type != $1)', ['dm'])
+  await db.query("DELETE FROM channels WHERE type != $1", ['dm'])
+
   let channelCount = 0
   let adapterCount = 0
 
-  for (const ch of coreChannels) {
-    // Upsert channel
+  for (const ch of seedChannels) {
+    // Insert channel with Discord ID as primary key
     await db.query(
       `INSERT INTO channels (id, org_id, type, name, members, created_by, created_at, updated_at)
        VALUES ($1, 'default', 'channel', $2, $3, 'seed', now(), now())
@@ -204,50 +248,71 @@ async function seed() {
          name = EXCLUDED.name,
          members = EXCLUDED.members,
          updated_at = now()`,
-      [ch.id, ch.name, ch.members]
+      [ch.discordId, ch.name, ch.members]
     )
     channelCount++
 
-    // Upsert channel_adapter
+    // Insert channel_adapter (channel_id = external_id for Discord)
     await db.query(
       `INSERT INTO channel_adapters (channel_id, platform, external_id, metadata)
        VALUES ($1, 'discord', $2, $3)
        ON CONFLICT (channel_id, platform) DO UPDATE SET
          external_id = EXCLUDED.external_id,
          metadata = EXCLUDED.metadata`,
-      [ch.id, ch.discordId, JSON.stringify({ guild: ch.name })]
+      [ch.discordId, ch.discordId, JSON.stringify({ guild: ch.guildName, name: ch.name })]
     )
     adapterCount++
   }
 
-  // Also register all agents
+  // Also register/update all agents with discord_id in metadata
   for (const bot of registry) {
+    const access = loadBotAccess(bot.session)
+    const discordId = access.mentionPatterns?.find(p => /^\d{17,}$/.test(p))
+    const metadata = discordId ? { discord_id: discordId } : null
+
     await db.query(
-      `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, registered_at)
-       VALUES ($1, 'default', $2, 'dev', 'claude-code', 'offline', now())
+      `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, metadata, registered_at)
+       VALUES ($1, 'default', $2, 'dev', 'claude-code', 'offline', $3, now())
        ON CONFLICT (agent_id) DO UPDATE SET
          org_id = 'default',
-         display_name = EXCLUDED.display_name`,
-      [bot.agentId, bot.agentId]
+         display_name = EXCLUDED.display_name,
+         metadata = COALESCE(
+           jsonb_strip_nulls(COALESCE(agents.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)),
+           agents.metadata
+         )`,
+      [bot.agentId, bot.agentId, metadata ? JSON.stringify(metadata) : null]
     )
   }
 
-  // Register CEO
+  // Register CEO with discord_id
   await db.query(
-    `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, registered_at)
-     VALUES ('ceo', 'default', 'CEO', 'human', 'discord', 'online', now())
-     ON CONFLICT (agent_id) DO UPDATE SET org_id = 'default'`
+    `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, metadata, registered_at)
+     VALUES ('ceo', 'default', 'CEO', 'human', 'discord', 'online', $1, now())
+     ON CONFLICT (agent_id) DO UPDATE SET
+       org_id = 'default',
+       metadata = COALESCE(
+         jsonb_strip_nulls(COALESCE(agents.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)),
+         agents.metadata
+       )`,
+    [JSON.stringify({ discord_id: CEO_DISCORD_ID })]
   )
 
   // Audit log entry
   await db.query(
     `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
      VALUES ('channel.seed', 'seed', 'all', $1, 'default')`,
-    [JSON.stringify({ channels: channelCount, adapters: adapterCount, agents: registry.length + 1 })]
+    [JSON.stringify({ channels: channelCount, adapters: adapterCount, agents: registry.length + 1, id_scheme: 'discord_id' })]
   )
 
-  console.log(`Seeded ${channelCount} channels, ${adapterCount} adapters, ${registry.length + 1} agents`)
-  console.log('Seed complete.')
+  // Print summary
+  console.log(`\nSeed complete:`)
+  console.log(`  ${channelCount} channels (id = Discord channel ID)`)
+  console.log(`  ${adapterCount} channel_adapters`)
+  console.log(`  ${registry.length + 1} agents (with discord_id metadata)`)
+  console.log(`\nChannel details:`)
+  for (const ch of seedChannels) {
+    console.log(`  ${ch.discordId} (#${ch.name}): [${ch.members.join(', ')}]`)
+  }
 
   await db.end()
 }
