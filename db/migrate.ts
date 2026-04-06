@@ -106,9 +106,10 @@ async function migrate() {
       metadata JSONB
     );
 
-    -- v0.1.0: Add org_id to agents
+    -- v0.1.0: Add org_id and active_thread to agents
     DO $$ BEGIN
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS active_thread TEXT;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
 
