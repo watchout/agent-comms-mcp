@@ -174,9 +174,11 @@
 | last_seen_at | TIMESTAMPTZ | 最終アクティブ日時 |
 | registered_at | TIMESTAMPTZ | 登録日時 |
 | metadata | JSONB | カスタムメタデータ |
+| active_thread | TEXT | 現在作業中のスレッドID（NULLは全メッセージ受信） |
 
 **v0.1.0変更:**
 - `org_id` カラム追加（NOT NULL DEFAULT 'default'）。v0.2.0でマルチテナント有効化。
+- `active_thread` カラム追加（TEXT, NULL許容）。現在作業中のスレッドID。NULLは全メッセージ受信（従来動作）。
 
 ### channel_settings（既存、変更なし）
 
