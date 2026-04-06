@@ -1194,7 +1194,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'fetch_messages',
+      name: 'history',
       description: 'Fetch recent messages from a channel.',
       inputSchema: {
         type: 'object' as const,
@@ -1207,7 +1207,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'check_inbox',
+      name: 'inbox',
       description: 'Messages are automatically pushed to your session. Use this only to re-check history or filter by channel.',
       inputSchema: {
         type: 'object' as const,
@@ -1243,7 +1243,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'list_agents',
+      name: 'agents',
       description: 'List registered agents. Requires DB.',
       inputSchema: {
         type: 'object' as const,
@@ -1520,6 +1520,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === 'fetch_messages') {
+    process.stderr.write(`[agent-com] WARN: fetch_messages is deprecated, use history instead\n`)
+  }
+  if (name === 'history' || name === 'fetch_messages') {
     const { channel, limit, since } = args as any
     const rows = await fetchMessages(channel, Math.min(limit ?? 20, 100), since)
     const text = rows.map((r: any) =>
@@ -1529,6 +1532,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === 'check_inbox') {
+    process.stderr.write(`[agent-com] WARN: check_inbox is deprecated, use inbox instead\n`)
+  }
+  if (name === 'inbox' || name === 'check_inbox') {
     const { limit } = (args ?? {}) as any
     const signals = countAndClearSignals(agentId)
     const rows = await fetchNewMessages(agentId, Math.min(limit ?? 20, 100))
@@ -1601,6 +1607,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === 'list_agents') {
+    process.stderr.write(`[agent-com] WARN: list_agents is deprecated, use agents instead\n`)
+  }
+  if (name === 'agents' || name === 'list_agents') {
     const { status, agent_type } = (args ?? {}) as any
     const agents = await listAgents(status, agent_type)
     if (agents.length === 0) return { content: [{ type: 'text', text: '(no agents found — DB may be unavailable)' }] }
@@ -2367,25 +2376,18 @@ if (TRANSPORT_MODE === 'daemon') {
       return
     }
 
-    // SSE endpoint — single client only (1 MCP server = 1 transport)
+    // SSE endpoint — per-bot connection (graceful reconnect)
     if (url.pathname === '/sse' && req.method === 'GET') {
       if (!authenticateRequest(req, res)) return
       const botId = url.searchParams.get('bot_id') ?? AGENT_ID
 
-      // If same bot_id reconnects, close old transport first
+      // Graceful reconnect: if same bot_id reconnects, close old transport first
       const existing = connectedBots.get(botId)
       if (existing) {
         process.stderr.write(`agent-comms: SSE replacing existing connection for bot_id=${botId}\n`)
         sseTransports.delete(existing.transport.sessionId)
         await existing.transport.close().catch(() => {})
         connectedBots.delete(botId)
-      }
-
-      // Guard: only one SSE client at a time (mcp is a singleton)
-      if (sseTransports.size > 0) {
-        res.writeHead(409, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Only one SSE client allowed at a time' }))
-        return
       }
 
       process.stderr.write(`agent-comms: SSE connection from bot_id=${botId}\n`)
