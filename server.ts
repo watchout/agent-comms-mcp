@@ -1399,7 +1399,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const adapter of adapters.rows) {
         if (adapter.platform === 'discord') {
           try {
-            await discord.sendMessage(adapter.external_id, truncateForPlatform(safeContent, 'discord'))
+            await discord.sendAdapterMessage({
+              external_channel_id: adapter.external_id,
+              content: truncateForPlatform(safeContent, 'discord'),
+              thread_external_id: dest.threadId,
+            })
           } catch (err) {
             process.stderr.write(`agent-comms: discord adapter delivery failed: ${err}\n`)
           }
@@ -2051,6 +2055,13 @@ async function postConnect() {
         } catch (err) {
           process.stderr.write(`agent-comms: permission notification failed: ${err}\n`)
         }
+      })
+
+      // Inject DB query function for mention conversion and thread mapping
+      discord.setDbQuery(async (sql: string, params?: any[]) => {
+        const client = await tryGetDb()
+        if (!client) throw new Error('DB unavailable')
+        return client.query(sql, params)
       })
 
       await discord.connect({
