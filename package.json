@@ -38,6 +38,7 @@
     "start": "bun install --no-summary && bun server.ts",
     "test": "bun test tests/",
     "migrate": "bun run db/migrate.ts",
+    "seed": "bun run db/seed.ts",
     "dev": "bun --watch server.ts"
   },
   "dependencies": {

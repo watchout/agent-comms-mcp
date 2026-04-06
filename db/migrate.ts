@@ -105,6 +105,84 @@ async function migrate() {
       registered_at TIMESTAMPTZ DEFAULT now(),
       metadata JSONB
     );
+
+    -- v0.1.0: Add org_id to agents
+    DO $$ BEGIN
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT 'default';
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+
+    -- v0.1.0: Channels (SSOT-4)
+    CREATE TABLE IF NOT EXISTS channels (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      type TEXT NOT NULL DEFAULT 'channel',
+      name TEXT,
+      members TEXT[],
+      created_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_channels_org ON channels(org_id);
+    CREATE INDEX IF NOT EXISTS idx_channels_type ON channels(type);
+    CREATE INDEX IF NOT EXISTS idx_channels_members ON channels USING GIN(members);
+
+    -- v0.1.0: Channel Adapters (SSOT-4)
+    CREATE TABLE IF NOT EXISTS channel_adapters (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      channel_id TEXT NOT NULL REFERENCES channels(id),
+      platform TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      metadata JSONB,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      UNIQUE(channel_id, platform)
+    );
+
+    -- v0.1.0: Threads (SSOT-4)
+    CREATE TABLE IF NOT EXISTS threads (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL REFERENCES channels(id),
+      title TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_threads_channel ON threads(channel_id, status);
+    CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
+
+    -- v0.1.0: Thread Adapters (SSOT-4)
+    CREATE TABLE IF NOT EXISTS thread_adapters (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      thread_id TEXT NOT NULL REFERENCES threads(id),
+      platform TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      metadata JSONB,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      UNIQUE(thread_id, platform)
+    );
+
+    -- v0.1.0: Audit Log (SSOT-4)
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      event_type TEXT NOT NULL,
+      agent_id TEXT,
+      target TEXT,
+      detail JSONB,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_agent ON audit_log(agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
+
+    -- v0.1.0: Add sequence and thread_id to agent_messages
+    DO $$ BEGIN
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS sequence INTEGER;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_thread ON agent_messages(thread_id, sequence) WHERE thread_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_sequence ON agent_messages(channel_id, sequence DESC);
   `)
 
   // Sync channel settings from config.json if available
