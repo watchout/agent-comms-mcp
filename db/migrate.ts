@@ -178,6 +178,7 @@ async function migrate() {
 
     -- v0.1.0: Add sequence and thread_id to agent_messages
     DO $$ BEGIN
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS thread_id TEXT;
       ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS sequence INTEGER;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
