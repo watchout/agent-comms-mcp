@@ -24,11 +24,13 @@
   ],
   "main": "server.ts",
   "bin": {
-    "agent-comms-mcp": "server.ts"
+    "agent-comms-mcp": "server.ts",
+    "agent-com": "cli/index.ts"
   },
   "files": [
     "server.ts",
     "adapters/",
+    "cli/",
     "db/",
     "config.example.json",
     "LICENSE",

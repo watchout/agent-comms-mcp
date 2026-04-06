@@ -510,6 +510,13 @@ async function registerAgent(): Promise<void> {
   )
   process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
 
+  // pg_notify: agent.online + audit_log
+  await client.query(
+    `SELECT pg_notify('agent_events', $1)`,
+    [JSON.stringify({ event: 'agent.online', agent_id: AGENT_ID, org_id: 'default' })]
+  ).catch(() => {})
+  await writeAuditLog('agent.online', AGENT_ID, AGENT_ID, { runtime: config.agent.runtime })
+
   // Heartbeat every 5 minutes
   heartbeatInterval = setInterval(async () => {
     const c = await tryGetDb()
@@ -524,6 +531,12 @@ async function unregisterAgent(): Promise<void> {
   const client = await tryGetDb()
   if (client) {
     await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+    // pg_notify: agent.offline + audit_log
+    await client.query(
+      `SELECT pg_notify('agent_events', $1)`,
+      [JSON.stringify({ event: 'agent.offline', agent_id: AGENT_ID, org_id: 'default' })]
+    ).catch(() => {})
+    await writeAuditLog('agent.offline', AGENT_ID, AGENT_ID, {})
   }
 }
 
@@ -752,8 +765,25 @@ async function startListener(): Promise<void> {
               source: 'agent-comms',
             },
           },
-        }).catch(err => {
+        }).then(async () => {
+          // pg_notify: message.delivered
+          const dbClient = await tryGetDb()
+          if (dbClient) {
+            await dbClient.query(
+              `SELECT pg_notify('agent_inbox', $1)`,
+              [JSON.stringify({ event: 'message.delivered', to: AGENT_ID, message_id: row.id, agent_id: AGENT_ID })]
+            ).catch(() => {})
+          }
+        }).catch(async (err) => {
           process.stderr.write(`agent-comms: listener notification failed: ${err}\n`)
+          // pg_notify: message.failed
+          const dbClient = await tryGetDb()
+          if (dbClient) {
+            await dbClient.query(
+              `SELECT pg_notify('agent_inbox', $1)`,
+              [JSON.stringify({ event: 'message.failed', to: AGENT_ID, message_id: row.id, error: String(err) })]
+            ).catch(() => {})
+          }
         })
       } catch (err) {
         process.stderr.write(`agent-comms: listener notification error: ${err}\n`)
@@ -1290,6 +1320,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Rate limit
     const rate = await checkRateLimit(AGENT_ID)
     if (!rate.allowed) {
+      await writeAuditLog('message.blocked', AGENT_ID, dest.channelId, { code: 'RATE_LIMITED', to })
       return { content: [{ type: 'text', text: `Error [RATE_LIMITED]: rate limit exceeded (${config.rate_limit.max_per_minute}/min)` }], isError: true }
     }
 
@@ -1299,12 +1330,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       const target = dest.members.find(m => m !== AGENT_ID) ?? ''
       const loop = await checkLoop(AGENT_ID, target, msgDepth)
       if (loop.blocked) {
+        await writeAuditLog('message.blocked', AGENT_ID, dest.channelId, { code: 'LOOP_DETECTED', to, reason: loop.reason })
         return { content: [{ type: 'text', text: `Error [LOOP_DETECTED]: ${loop.reason}` }], isError: true }
       }
     }
 
     // Duplicate check
     if (await checkDuplicate(content, dest.channelId)) {
+      await writeAuditLog('message.blocked', AGENT_ID, dest.channelId, { code: 'DUPLICATE', to })
       return { content: [{ type: 'text', text: 'Error [DUPLICATE]: same message sent within 10s, skipped' }], isError: true }
     }
 
