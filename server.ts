@@ -981,6 +981,7 @@ async function resolveDeliveryTargets(
   messageType: string,
   replyTo: string | undefined,
   threadId: string | undefined,
+  explicitMentions?: string[],
 ): Promise<DeliveryResult> {
   const candidates = members.filter(m => m !== senderId)
   if (candidates.length === 0) return { targets: [] }
@@ -1004,7 +1005,8 @@ async function resolveDeliveryTargets(
   }
 
   // Step 3: Mention detection → push only mentioned agents
-  const mentions = parseMentions(content)
+  // Prefer explicit mentions parameter; fall back to content parsing
+  const mentions = (explicitMentions && explicitMentions.length > 0) ? explicitMentions : parseMentions(content)
   const pushTargets = new Set<string>()
 
   for (const mention of mentions) {
@@ -1295,6 +1297,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           to: { type: 'string', description: 'Destination: channel:<id> / agent:<id> / thread:<id>' },
           content: { type: 'string', description: 'Message content' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. Required for channel: destinations without reply_to.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID' },
           thread: { type: 'boolean', description: 'Create new thread' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
@@ -1487,7 +1490,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ============================================================
 
   if (name === 'send') {
-    const { to, content, reply_to, thread, message_type, metadata } = args as any
+    const { to, content, mentions, reply_to, thread, message_type, metadata } = args as any
 
     // Validate content
     if (!content || content.length === 0) {
@@ -1495,6 +1498,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
+    }
+
+    // Validate mentions for channel destinations (§3.9)
+    if (to?.startsWith('channel:') && !reply_to && (!mentions || (Array.isArray(mentions) && mentions.length === 0))) {
+      return { content: [{ type: 'text', text: 'Error [NOT_MENTIONED]: channel messages require mentions parameter (e.g. mentions: ["agent-id"]). Use reply_to to reply without explicit mentions.' }], isError: true }
     }
 
     // Resolve destination
@@ -1578,7 +1586,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // ACP 6-step delivery filter (§3.15)
     const delivery = await resolveDeliveryTargets(
-      dest.members, agentId, safeContent, message_type ?? 'chat', reply_to, dest.threadId
+      dest.members, agentId, safeContent, message_type ?? 'chat', reply_to, dest.threadId,
+      Array.isArray(mentions) ? mentions : undefined,
     )
     for (const recipient of delivery.targets) {
       sendInboxSignal(recipient, id, agentId, dest.channelId)
