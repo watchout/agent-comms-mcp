@@ -84,6 +84,45 @@ Discord API から直接履歴取得。DB移行完了前の補完用。
 | channel_id | string | ✅ | DiscordチャンネルID |
 | limit | number | - | 取得件数（デフォルト: 20） |
 
+### focus
+
+スレッドフォーカスを設定。以降そのスレッドのメッセージのみpush注入される。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|-----|------|------|
+| thread_id | string | ✅ | フォーカスするスレッドID |
+
+**処理フロー:**
+1. agents テーブルの `active_thread` を `thread_id` に更新
+2. 以降、そのスレッド + 緊急メッセージのみpush注入
+3. 他スレッド・チャンネル本文のメッセージはDBに保存のみ（inbox経由で取得）
+
+**レスポンス:**
+```json
+{ "content": [{ "type": "text", "text": "focused on thread:thread-auth-impl" }] }
+```
+
+### unfocus
+
+スレッドフォーカスを解除。全メッセージをpush注入する従来動作に復帰。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|-----|------|------|
+| （なし） | - | - | - |
+
+**処理フロー:**
+1. agents テーブルの `active_thread` を NULL に更新
+2. 以降、全メッセージをpush注入（従来動作）
+
+**レスポンス:**
+```json
+{ "content": [{ "type": "text", "text": "unfocused — receiving all messages" }] }
+```
+
+**自動切り替え:**
+- `message_type = "instruction"` のメッセージ受信時 → 自動的に `focus(thread_id)` が実行される
+- `message_type = "report"` のメッセージ送信時 → 自動的に `unfocus()` が実行される
+
 ### 運用管理ツール（変更なし）
 
 | ツール | 説明 |

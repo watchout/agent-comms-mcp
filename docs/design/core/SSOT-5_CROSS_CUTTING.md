@@ -73,8 +73,49 @@ Bot が send(to: "channel:dev-arc", content: "...") を実行
   → 各メンバーに対して配信判定:
      - 送信者自身 → 配信しない（自己送信除外）
      - members に含まれない → 配信しない
-     - members に含まれる → push通知で配信
+     - members に含まれる → active_threadフィルタ → push通知で配信
 ```
+
+### スレッドフォーカス（active_thread）
+
+コンテキスト汚染防止のため、エージェントが作業中のスレッドのメッセージのみpush注入する。
+
+**agents.active_thread によるpushフィルタリング:**
+
+```
+メッセージ着信（thread_id = "thread-auth-impl"）
+  → 受信者の active_thread を確認
+  → active_thread = "thread-auth-impl" → push注入 ✅
+  → active_thread = "thread-image-upload" → DBに保存のみ（inboxで後から取得）❌
+  → active_thread = NULL → 全メッセージをpush ✅（従来動作）
+```
+
+**緊急メッセージ例外（active_thread設定中でもpush）:**
+
+以下の条件のいずれかを満たすメッセージは、active_thread設定に関わらず常にpush注入する。決定論的（LLM判断不要）:
+
+```
+  - message_type = "emergency"
+  - content が "!stop" で始まる
+  - 送信者が CEO（agent_id = "ceo"）
+```
+
+**自動切り替えロジック:**
+
+```
+[指示]（message_type = "instruction"）受信時:
+  → 受信者の active_thread を、そのメッセージの thread_id に自動設定
+  → 以降そのスレッドのメッセージだけpush注入
+
+[報告]（message_type = "report"）送信時:
+  → 送信者の active_thread を NULL にリセット
+  → 全メッセージをpush注入（従来動作に復帰）
+```
+
+**CTO側の運用:**
+- CTOは active_thread = NULL で全スレッドを受け取る
+- 「複数チャンネルの同時処理禁止。1スレッドを完了してから次」はCLAUDE.mdルール（ベストエフォート）
+- CTOは判断する側なので、全メッセージを受け取っても問題ない
 
 ### スレッド権限継承
 
