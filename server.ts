@@ -1294,7 +1294,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }))
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params
+  let { name, arguments: args } = request.params
+
+  // --- Deprecated alias redirects (SSOT-3 compliant) ---
+  // All send paths go through core Router for members validation, audit_log, rate limiting
+
+  if (name === 'reply') {
+    process.stderr.write(`[agent-com] WARN: reply is deprecated, use send(to: "channel:<chat_id>") instead\n`)
+    const { chat_id, text, reply_to } = args as any
+    name = 'send'
+    args = {
+      to: `channel:${chat_id}`,
+      content: text,
+      ...(reply_to ? { reply_to } : {}),
+    }
+  }
+
+  if (name === 'send_message') {
+    process.stderr.write(`[agent-com] WARN: send_message is deprecated, use send(to: "agent:<id>") instead\n`)
+    const { to, content, message_type, reply_to, metadata } = args as any
+    name = 'send'
+    args = {
+      to: `agent:${to}`,
+      content,
+      ...(message_type ? { message_type } : {}),
+      ...(reply_to ? { reply_to } : {}),
+      ...(metadata ? { metadata } : {}),
+    }
+  }
 
   // ============================================================
   // v0.1.0 Core Tools: send, focus, unfocus
@@ -1451,73 +1478,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // Legacy tools (aliases, maintained for backward compatibility)
   // ============================================================
 
-  if (name === 'send_message') {
-    process.stderr.write(`[agent-com] WARN: send_message is deprecated, use send(to: "agent:<id>") instead\n`)
-    const { to, channel, content, message_type, reply_to, depth, metadata } = args as any
-
-    // Access control: check if this agent is allowed to send to the channel
-    const access = checkAccess(agentId, channel, content)
-    if (!access.allowed) {
-      return { content: [{ type: 'text', text: `ACCESS DENIED: ${access.reason}` }], isError: true }
-    }
-
-    // Rate limit
-    const rate = await checkRateLimit(agentId)
-    if (!rate.allowed) {
-      return { content: [{ type: 'text', text: `RATE LIMITED: ${config.rate_limit.max_per_minute}/min exceeded` }], isError: true }
-    }
-
-    // Loop detection
-    const msgDepth = depth ?? 0
-    const loop = await checkLoop(agentId, to, msgDepth)
-    if (loop.blocked) {
-      return { content: [{ type: 'text', text: `LOOP BLOCKED: ${loop.reason}` }], isError: true }
-    }
-
-    // Duplicate check
-    if (await checkDuplicate(content, to)) {
-      return { content: [{ type: 'text', text: 'DUPLICATE: same message sent within 10s, skipped' }], isError: true }
-    }
-
-    // Burst control
-    if (!checkBurst()) {
-      await new Promise(r => setTimeout(r, BURST_MIN_INTERVAL_MS))
-    }
-
-    // Sanitize
-    const safeContent = sanitizeContent(content)
-
-    // Build metadata with HMAC auth signature
-    const authMeta = createAuthMetadata(channel, safeContent)
-    const fullMetadata = { ...metadata, to, ...authMeta }
-
-    // Save to DB
-    const id = await saveMessage({
-      channel_id: channel, author_id: agentId, content: safeContent,
-      message_type: message_type ?? 'chat', reply_to,
-      metadata: fullMetadata, depth: msgDepth,
-      source: 'agent-comms', direction: 'outbound', role: 'agent',
-    })
-
-    // pg_notify for Webhook channel push (Phase 4)
-    try {
-      const client = await tryGetDb()
-      if (client) {
-        await client.query(
-          `SELECT pg_notify('agent_inbox', $1)`,
-          [JSON.stringify({ to, message_id: id })]
-        )
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
-    }
-
-    // Signal + forward
-    sendInboxSignal(to, id, agentId, channel)
-    forwardAll(agentId, channel, safeContent, message_type ?? 'chat')
-
-    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to} in #${channel}` }] }
-  }
+  // send_message is handled above via redirect to send (SSOT-3 compliant)
 
   if (name === 'fetch_messages') {
     process.stderr.write(`[agent-com] WARN: fetch_messages is deprecated, use history instead\n`)
@@ -1545,30 +1506,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: `${rows.length} message(s):\n\n${text}` }] }
   }
 
-  if (name === 'reply') {
-    const { chat_id, text, reply_to } = args as any
-
-    try {
-      const result = await discord.sendMessage(chat_id, sanitizeContent(text), reply_to ? { replyTo: reply_to } : undefined)
-      return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.messageId})` }] }
-    } catch (err) {
-      // Fallback to HTTP if adapter not connected
-      try {
-        const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/send`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id, text: sanitizeContent(text), reply_to }),
-        })
-        const result = await resp.json() as any
-        if (!resp.ok) {
-          return { content: [{ type: 'text', text: `Discord reply failed: ${result.error ?? resp.statusText}` }], isError: true }
-        }
-        return { content: [{ type: 'text', text: `Sent to Discord (message_id: ${result.message_id})` }] }
-      } catch (fallbackErr) {
-        return { content: [{ type: 'text', text: `Discord reply failed: ${err}` }], isError: true }
-      }
-    }
-  }
+  // reply is handled above via redirect to send (SSOT-3 compliant)
 
   if (name === 'fetch_discord_history') {
     const { channel_id, limit, before } = args as any
