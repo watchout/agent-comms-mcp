@@ -112,6 +112,10 @@ async function migrate() {
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS active_thread TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS observer_mode BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS channel_port INTEGER;
+      -- v0.2.0: channel-thread-control-spec (active_thread→last_received_context)
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_received_channel TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_received_thread TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS default_channel TEXT;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
 
