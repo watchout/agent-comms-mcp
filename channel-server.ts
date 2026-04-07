@@ -37,6 +37,9 @@ const mcp = new Server(
   },
 )
 
+// --- Dedup: prevent duplicate push from shared + per-bot clients ---
+const seenMessages = new Set<string>()
+
 // --- HTTP server for push reception ---
 const httpServer = Bun.serve({
   port: PORT,
@@ -71,6 +74,18 @@ const httpServer = Bun.serve({
 
       if (!payload.content) {
         return new Response('Missing content', { status: 400 })
+      }
+
+      // Dedup: skip if same message_id already pushed (shared + per-bot client overlap)
+      const msgId = payload.message_id ?? payload.meta?.message_id
+      if (msgId && seenMessages.has(msgId)) {
+        return new Response(JSON.stringify({ ok: true, dedup: true }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (msgId) {
+        seenMessages.add(msgId)
+        setTimeout(() => seenMessages.delete(msgId), 60_000)  // TTL 60s
       }
 
       // TODO: sequence順序検証 — §10盲点対策

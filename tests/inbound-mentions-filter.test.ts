@@ -84,8 +84,8 @@ describe('Inbound Mentions Filter — routeInbound step 4', () => {
 
   test('mentions filter runs before last_received_context update', () => {
     const routeIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
-    const routeBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 4000)
-    const mentionsIdx = routeBody.indexOf('NOT_MENTIONED')
+    const routeBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 5000)
+    const mentionsIdx = routeBody.indexOf("reason: 'NOT_MENTIONED'")
     const contextIdx = routeBody.indexOf('updateLastReceivedContext')
     expect(mentionsIdx).toBeGreaterThan(-1)
     expect(contextIdx).toBeGreaterThan(-1)

@@ -127,10 +127,11 @@ describe('Inbound Router — Daemon Mode Source Structure', () => {
     expect(daemonSection).toContain('for (const [botId, ctx] of botContexts)')
   })
 
-  test('daemon mode pushFn uses per-bot server notification for SSE bots', () => {
+  test('daemon mode pushFn uses pushToChannelServer with SSE fallback', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('botServer.notification(')
+    expect(daemonSection).toContain('pushToChannelServer(expectedBot,')
+    expect(daemonSection).toContain('ctx?.transport')
   })
 })
 
