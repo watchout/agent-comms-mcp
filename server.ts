@@ -2598,77 +2598,12 @@ async function postConnect() {
     process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
   }
 
-  // Phase 5: Connect Discord adapter (if token provided)
-  if (DISCORD_BOT_TOKEN) {
-    try {
-      discord.onMessage((msg) => {
-        // Dedup via processedIds
-        if (processedIds.has(msg.id)) return
-        processedIds.set(msg.id, Date.now())
-
-        const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
-        const content = msg.content || (atts ? '(attachment)' : '')
-
-        // Route through core inbound router (PR#56 — SSOT-5 §1 compliant)
-        extractDiscordMentions(content).then(resolvedMentions => {
-          return routeInbound({
-            receiverAgentId: AGENT_ID,
-            externalChannelId: msg.channel,
-            externalMessageId: msg.id,
-            authorExternalId: msg.author.id,
-            authorName: msg.author.name,
-            authorIsBot: msg.author.isBot,
-            content,
-            attachments: atts,
-            timestamp: msg.timestamp,
-            platform: 'discord',
-            mentions: resolvedMentions,
-            replyToMessageId: msg.replyTo,
-            pushFn: async (pushContent, meta) => {
-              await mcp.notification({
-                method: 'notifications/claude/channel',
-                params: { content: pushContent, meta },
-              })
-            },
-          })
-        }).then(result => {
-          if (!result.delivered) {
-            process.stderr.write(`agent-comms: inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
-          }
-        }).catch(err => {
-          process.stderr.write(`agent-comms: inbound routing error: ${err}\n`)
-        })
-      })
-
-      discord.onPermissionResponse(async (params) => {
-        try {
-          await mcp.notification({
-            method: 'notifications/claude/channel/permission',
-            params: { request_id: params.request_id, behavior: params.behavior },
-          })
-          process.stderr.write(`agent-comms: permission ${params.behavior} for ${params.request_id}\n`)
-        } catch (err) {
-          process.stderr.write(`agent-comms: permission notification failed: ${err}\n`)
-        }
-      })
-
-      // Inject DB query function for mention conversion and thread mapping
-      discord.setDbQuery(async (sql: string, params?: any[]) => {
-        const client = await tryGetDb()
-        if (!client) throw new Error('DB unavailable')
-        return client.query(sql, params)
-      })
-
-      await discord.connect({
-        token: DISCORD_BOT_TOKEN,
-        stateDir: DISCORD_STATE_DIR_ENV || undefined,
-      })
-      process.stderr.write('agent-comms: Discord adapter connected (integrated)\n')
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
-    }
-  } else {
-    process.stderr.write('agent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\n')
+  // Phase 5 → Phase 3c: Discord adapter removed from bot-side server.ts
+  // Discord connections are managed exclusively by the SSE daemon (TRANSPORT_MODE=daemon).
+  // Bot-side receives messages only via channel-server.ts (Webhook Channel method).
+  // DISCORD_BOT_TOKEN in bot .mcp.json is ignored — no Discord Gateway connection.
+  if (DISCORD_BOT_TOKEN && TRANSPORT_MODE !== 'daemon') {
+    process.stderr.write('agent-comms: DISCORD_BOT_TOKEN present but ignored — Discord connections are daemon-only (Phase 3c). Use channel-server.ts for push reception.\n')
   }
 }
 

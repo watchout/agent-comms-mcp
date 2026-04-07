@@ -101,12 +101,9 @@ describe('Inbound Mentions Filter — routeInbound step 4', () => {
 })
 
 describe('Inbound Mentions Filter — callsite updates', () => {
-  test('stdio/channel plugin passes mentions to routeInbound', () => {
-    // Find the stdio onMessage
-    const stdioBlock = SERVER_SOURCE.indexOf('// Phase 5: Connect Discord adapter (if token provided)')
-    const stdioSection = SERVER_SOURCE.slice(stdioBlock, stdioBlock + 3000)
-    expect(stdioSection).toContain('extractDiscordMentions(content)')
-    expect(stdioSection).toContain('mentions: resolvedMentions')
+  test('stdio/channel plugin Discord adapter removed (Phase 3c — daemon only)', () => {
+    // Discord connections removed from bot-side server.ts — daemon manages all Discord
+    expect(SERVER_SOURCE).toContain('Discord connections are daemon-only (Phase 3c)')
   })
 
   test('daemon per-bot client passes mentions to routeInbound', () => {
