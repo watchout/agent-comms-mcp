@@ -68,14 +68,13 @@ describe('Inbound Router — Source Structure', () => {
     expect(SERVER_SOURCE).toContain('!resolved.members.includes(receiverAgentId)')
   })
 
-  test('routeInbound checks active_thread', () => {
-    expect(SERVER_SOURCE).toContain('getActiveThread(receiverAgentId)')
+  test('routeInbound updates last_received_context', () => {
+    expect(SERVER_SOURCE).toContain('updateLastReceivedContext(receiverAgentId,')
   })
 
   test('routeInbound has emergency/CEO bypass', () => {
     expect(SERVER_SOURCE).toContain('isEmergencyMessage(content,')
     expect(SERVER_SOURCE).toContain('isHumanAgent(senderAgentId)')
-    expect(SERVER_SOURCE).toContain('bypassActiveThread')
   })
 
   test('routeInbound always saves to DB before delivery check', () => {

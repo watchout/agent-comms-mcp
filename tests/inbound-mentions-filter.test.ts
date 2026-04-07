@@ -89,14 +89,14 @@ describe('Inbound Mentions Filter — routeInbound step 4', () => {
     expect(filterBody).toContain('replyToMessageId')
   })
 
-  test('mentions filter runs before active_thread filter', () => {
+  test('mentions filter runs before last_received_context update', () => {
     const routeIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
     const routeBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 4000)
     const mentionsIdx = routeBody.indexOf('NOT_MENTIONED')
-    const activeIdx = routeBody.indexOf('THREAD_MISMATCH')
+    const contextIdx = routeBody.indexOf('updateLastReceivedContext')
     expect(mentionsIdx).toBeGreaterThan(-1)
-    expect(activeIdx).toBeGreaterThan(-1)
-    expect(mentionsIdx).toBeLessThan(activeIdx)
+    expect(contextIdx).toBeGreaterThan(-1)
+    expect(mentionsIdx).toBeLessThan(contextIdx)
   })
 })
 
