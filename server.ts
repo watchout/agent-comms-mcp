@@ -953,6 +953,58 @@ async function isHumanAgent(agentId: string): Promise<boolean> {
   return r.rows.length > 0 && r.rows[0].agent_type === 'human'
 }
 
+/** Resolve Discord user ID → core agent_id via agents.metadata.discord_id */
+async function resolveAgentFromDiscordId(discordId: string): Promise<string | null> {
+  const client = await tryGetDb()
+  if (!client) return null
+  const r = await client.query(
+    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1",
+    [discordId]
+  )
+  return r.rows.length > 0 ? r.rows[0].agent_id : null
+}
+
+/** Resolve inbound channel: find core channel_id and members from Discord channel/thread ID */
+async function resolveInboundChannel(externalChannelId: string): Promise<{ channelId: string; threadId?: string; members: string[] } | null> {
+  const client = await tryGetDb()
+  if (!client) return null
+
+  // Direct channel match
+  const r = await client.query('SELECT id, members FROM channels WHERE id = $1', [externalChannelId])
+  if (r.rows.length > 0) {
+    return { channelId: externalChannelId, members: r.rows[0].members ?? [] }
+  }
+
+  // Thread match: check thread_adapters → threads → parent channel
+  const tr = await client.query(
+    `SELECT t.id, t.channel_id FROM threads t
+     JOIN thread_adapters ta ON ta.thread_id = t.id
+     WHERE ta.external_id = $1 AND ta.platform = 'discord'`,
+    [externalChannelId]
+  )
+  if (tr.rows.length > 0) {
+    const parentId = tr.rows[0].channel_id
+    const cr = await client.query('SELECT members FROM channels WHERE id = $1', [parentId])
+    if (cr.rows.length > 0) {
+      return { channelId: parentId, threadId: tr.rows[0].id, members: cr.rows[0].members ?? [] }
+    }
+  }
+
+  // Also check if the external_channel_id is registered via channel_adapters
+  const ca = await client.query(
+    `SELECT channel_id FROM channel_adapters WHERE external_id = $1 AND platform = 'discord'`,
+    [externalChannelId]
+  )
+  if (ca.rows.length > 0) {
+    const cr = await client.query('SELECT members FROM channels WHERE id = $1', [ca.rows[0].channel_id])
+    if (cr.rows.length > 0) {
+      return { channelId: ca.rows[0].channel_id, members: cr.rows[0].members ?? [] }
+    }
+  }
+
+  return null // channel not registered in core DB
+}
+
 /** Check if agent has observer_mode enabled */
 async function isObserverMode(agentId: string): Promise<boolean> {
   const client = await tryGetDb()
@@ -1078,6 +1130,115 @@ async function resolveDeliveryTargets(
   }
 
   return { targets: finalTargets }
+}
+
+// ============================================================
+// Inbound Router (PR#56 — SSOT-5 §1 compliant)
+// All inbound messages must pass through this function.
+// Direct adapter→session push is a design violation.
+// ============================================================
+
+interface InboundRouteResult {
+  delivered: boolean
+  messageId?: string
+  reason?: string  // 'NOT_A_MEMBER' | 'THREAD_MISMATCH' | 'CHANNEL_UNKNOWN'
+}
+
+/**
+ * Route an inbound message from a platform adapter through the core router.
+ * 1. Resolve channel membership
+ * 2. Save to DB (always, regardless of delivery)
+ * 3. Check delivery eligibility: members, emergency/CEO bypass, active_thread
+ * 4. Push to session if eligible
+ */
+async function routeInbound(params: {
+  receiverAgentId: string
+  externalChannelId: string
+  externalMessageId: string
+  authorExternalId: string
+  authorName: string
+  authorIsBot: boolean
+  content: string
+  attachments?: string
+  timestamp: Date
+  platform: string
+  pushFn: (content: string, meta: Record<string, unknown>) => Promise<void>
+}): Promise<InboundRouteResult> {
+  const {
+    receiverAgentId, externalChannelId, externalMessageId,
+    authorExternalId, authorName, authorIsBot,
+    content, attachments, timestamp, platform, pushFn,
+  } = params
+
+  // 1. Resolve channel → core channel_id + members
+  const resolved = await resolveInboundChannel(externalChannelId)
+
+  // Save to DB regardless (non-fatal)
+  const messageId = await saveMessage({
+    channel_id: resolved?.channelId ?? externalChannelId,
+    author_id: authorExternalId,
+    content,
+    message_type: 'chat',
+    source: platform,
+    thread_id: resolved?.threadId ?? null,
+    direction: 'inbound',
+    role: authorIsBot ? 'agent' : 'user',
+    metadata: {
+      [`${platform}_message_id`]: externalMessageId,
+      [`${platform}_channel_id`]: externalChannelId,
+      author_name: authorName,
+      to: receiverAgentId,
+      ...(attachments ? { attachments } : {}),
+    },
+  }).catch(err => {
+    process.stderr.write(`agent-comms: inbound DB persist failed (non-fatal): ${err}\n`)
+    return undefined
+  })
+
+  // 2. Channel not registered in core DB → drop (CHANNEL_NOT_FOUND)
+  if (!resolved) {
+    process.stderr.write(`agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`)
+    return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
+  }
+
+  // 3. Members check: receiver must be in channel.members
+  // members=[] means "no members" → no one receives push (DB saved only)
+  if (!resolved.members.includes(receiverAgentId)) {
+    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not a member of ${resolved.channelId}\n`)
+    return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
+  }
+
+  // 4. Emergency / CEO bypass check
+  const senderAgentId = await resolveAgentFromDiscordId(authorExternalId)
+  const isEmergency = isEmergencyMessage(content, 'chat')
+  const isCeo = senderAgentId ? await isHumanAgent(senderAgentId) : !authorIsBot  // fallback: non-bot = human
+
+  const bypassActiveThread = isEmergency || isCeo
+
+  // 5. active_thread filter
+  if (!bypassActiveThread) {
+    const activeThread = await getActiveThread(receiverAgentId)
+    if (activeThread) {
+      const msgThread = resolved.threadId ?? externalChannelId
+      if (activeThread !== msgThread && activeThread !== externalChannelId) {
+        process.stderr.write(`agent-comms: inbound hold — ${receiverAgentId} active_thread=${activeThread} != ${msgThread} (DB saved, not pushed)\n`)
+        return { delivered: false, messageId, reason: 'THREAD_MISMATCH' }
+      }
+    }
+  }
+
+  // 6. Push to session
+  await pushFn(content, {
+    chat_id: externalChannelId,
+    message_id: externalMessageId,
+    user: authorName,
+    user_id: authorExternalId,
+    ts: timestamp.toISOString(),
+    source: platform,
+    ...(attachments ? { attachments } : {}),
+  })
+
+  return { delivered: true, messageId }
 }
 
 async function getNextSequence(channelId: string): Promise<number> {
@@ -2230,42 +2391,30 @@ async function postConnect() {
         const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
         const content = msg.content || (atts ? '(attachment)' : '')
 
-        // Persist to DB (non-fatal: INSERT failure does not block notification)
-        saveMessage({
-          channel_id: msg.channel,
-          author_id: msg.author.id,
+        // Route through core inbound router (PR#56 — SSOT-5 §1 compliant)
+        routeInbound({
+          receiverAgentId: AGENT_ID,
+          externalChannelId: msg.channel,
+          externalMessageId: msg.id,
+          authorExternalId: msg.author.id,
+          authorName: msg.author.name,
+          authorIsBot: msg.author.isBot,
           content,
-          message_type: 'chat',
-          source: 'discord',
-          direction: 'inbound',
-          role: msg.author.isBot ? 'agent' : 'user',
-          metadata: {
-            discord_message_id: msg.id,
-            discord_channel_id: msg.channel,
-            author_name: msg.author.name,
-            to: AGENT_ID,
-            ...(atts ? { attachments: atts } : {}),
+          attachments: atts,
+          timestamp: msg.timestamp,
+          platform: 'discord',
+          pushFn: async (pushContent, meta) => {
+            await mcp.notification({
+              method: 'notifications/claude/channel',
+              params: { content: pushContent, meta },
+            })
           },
+        }).then(result => {
+          if (!result.delivered) {
+            process.stderr.write(`agent-comms: inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
+          }
         }).catch(err => {
-          process.stderr.write(`agent-comms: discord message DB persist failed (non-fatal): ${err}\n`)
-        })
-
-        mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content,
-            meta: {
-              chat_id: msg.channel,
-              message_id: msg.id,
-              user: msg.author.name,
-              user_id: msg.author.id,
-              ts: msg.timestamp.toISOString(),
-              source: 'discord',
-              ...(atts ? { attachments: atts } : {}),
-            },
-          },
-        }).catch(err => {
-          process.stderr.write(`agent-comms: discord message injection failed: ${err}\n`)
+          process.stderr.write(`agent-comms: inbound routing error: ${err}\n`)
         })
       })
 
