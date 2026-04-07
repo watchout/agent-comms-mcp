@@ -115,10 +115,10 @@ describe('Inbound Router — Daemon Mode Source Structure', () => {
     expect(daemonSection).toContain('connectBotDiscord(botId,')
   })
 
-  test('daemon startup per-bot pushFn uses pushToChannelServer', () => {
+  test('daemon startup per-bot calls pushToChannelServer after routeInbound', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('pushToChannelServer(botId, pushContent, meta)')
+    expect(daemonSection).toContain('pushToChannelServer(botId, inboundContent,')
   })
 
   test('daemon shared client iterates over botContexts', () => {
