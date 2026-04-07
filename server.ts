@@ -1745,7 +1745,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ============================================================
 
   if (name === 'send') {
-    const { to, content, mentions, reply_to, thread, message_type, metadata } = args as any
+    let { to, content, mentions, reply_to, thread, message_type, metadata } = args as any
 
     // Validate content
     if (!content || content.length === 0) {
@@ -1753,6 +1753,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
+    }
+
+    // active_thread send redirect: force channel → thread when sender has active_thread set
+    const senderActiveThread = await getActiveThread(agentId)
+    if (senderActiveThread && to?.startsWith('channel:')) {
+      const originalTo = to
+      to = `thread:${senderActiveThread}`
+      process.stderr.write(`agent-comms: send redirect — ${agentId} active_thread=${senderActiveThread}, original=${originalTo} → ${to}\n`)
+      await writeAuditLog('send_redirect', agentId, to, { original_to: originalTo, reason: 'active_thread_override' })
     }
 
     // Validate mentions for channel destinations (§3.9)
