@@ -1400,6 +1400,7 @@ async function routeInbound(params: {
   const senderAgentId = await resolveAgentFromDiscordId(authorExternalId)
   const isEmergency = isEmergencyMessage(content, 'chat')
   const isCeo = senderAgentId ? await isHumanAgent(senderAgentId) : !authorIsBot  // fallback: non-bot = human
+  process.stderr.write(`agent-comms: routeInbound debug — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} isCeo=${isCeo} mentions=[${mentions?.join(',') ?? ''}]\n`)
 
   // 5. Mentions filter (§2 Pattern A-D)
   // DM → always push. Emergency/CEO → always push. Otherwise check mentions.
@@ -3030,15 +3031,13 @@ if (TRANSPORT_MODE === 'daemon') {
           const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
           const content = msg.content || (atts ? '(attachment)' : '')
 
-          // Route through core inbound router for each connected bot WITHOUT a per-bot Discord client
-          // Bots with per-bot clients receive messages via their own Gateway connection
+          // Route through core inbound router for all expected bots
           extractDiscordMentions(content).then(resolvedMentions => {
-            for (const [botId, ctx] of botContexts) {
-              if (!ctx.transport) continue
-              if (discordClients.has(botId)) continue  // per-bot client handles its own inbound
-              const botServer = ctx.server
+            // Route to all EXPECTED_BOTS with channel_port (Webhook Channel)
+            for (const expectedBot of EXPECTED_BOTS) {
+              const ctx = botContexts.get(expectedBot)
               routeInbound({
-                receiverAgentId: botId,
+                receiverAgentId: expectedBot,
                 externalChannelId: msg.channel,
                 externalMessageId: msg.id,
                 authorExternalId: msg.author.id,
@@ -3051,17 +3050,22 @@ if (TRANSPORT_MODE === 'daemon') {
                 mentions: resolvedMentions,
                 replyToMessageId: msg.replyTo,
                 pushFn: async (pushContent, meta) => {
-                  await botServer.notification({
-                    method: 'notifications/claude/channel',
-                    params: { content: pushContent, meta },
-                  })
+                  // Primary: pushToChannelServer (Webhook Channel)
+                  const pushed = await pushToChannelServer(expectedBot, pushContent, meta)
+                  // Fallback: SSE transport notification
+                  if (!pushed && ctx?.transport) {
+                    await ctx.server.notification({
+                      method: 'notifications/claude/channel',
+                      params: { content: pushContent, meta },
+                    })
+                  }
                 },
               }).then(result => {
                 if (!result.delivered) {
-                  process.stderr.write(`agent-comms: daemon inbound not delivered to ${botId} — ${result.reason} (msg: ${msg.id})\n`)
+                  process.stderr.write(`agent-comms: daemon inbound not delivered to ${expectedBot} — ${result.reason} (msg: ${msg.id})\n`)
                 }
               }).catch(err => {
-                process.stderr.write(`agent-comms: daemon inbound routing error for ${botId}: ${err}\n`)
+                process.stderr.write(`agent-comms: daemon inbound routing error for ${expectedBot}: ${err}\n`)
               })
             }
           }).catch(err => {
