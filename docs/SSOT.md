@@ -252,27 +252,36 @@ interface AccessConfig {
 | DBあり | `last_read_at`テーブルで管理 | 本番運用 |
 | DBなし | `.agent-com/last-read/{channel}`ファイル | 最小構成 |
 
-### 4.4 push通知（Webhookチャネル方式）
+### 4.4 push通知（Webhook Channel方式）
 
-Webhookチャネル（Claude Code Channels Reference記載の公式方式）を使用。
-`--dangerously-load-development-channels` でallowlistをバイパスし、
-ローカルHTTPエンドポイントでセッションに直接注入する。
+agent-commsを2つに分離し、push受信とツール提供を独立させる。
+
+**agent-comms-channel（push受信専用）:**
+- claude/channel capabilityを宣言する軽量MCPサーバー（channel-server.ts）
+- ローカルHTTPポートで `POST /push` を受信
+- HMAC-SHA256署名検証
+- 受信内容をMCP通知としてClaude Codeセッションに注入
+- Discord Client無し（メモリ消費≈0）
+- Discord直接監視なし（バイパス不可能）
+
+**agent-comms（ツール提供）:**
+- send, history, inbox, agents, focus, unfocus, quote等のMCPツール
+- SSEまたはstdioでdaemonに接続
 
 **アーキテクチャ:**
 ```
-send_message → DB INSERT → pg_notify('agent_inbox', target_agent_id)
-  → リスナー（常駐）がNOTIFY受信
-  → DBから未読メッセージ取得
-  → curl POST http://localhost:{port} -d "メッセージ"
-  → Webhook MCP server（claude/channel capability）
-  → notifications/claude/channel → セッションに自動注入
+Discord Gateway → SSE daemon → adapter変換 → routeInbound()（5段階フィルタ）
+  → DB INSERT（全メッセージ）
+  → push対象botのみ HTTP POST http://localhost:{port}/push（HMAC署名付き）
+  → channel-server.ts（Bot内軽量HTTPサーバー）
+  → server.notification() → Claude Codeセッションに自動注入
 ```
 
-**Webhook MCP server（agent-com-bridge）:**
-- 各botに1つ配置
+**channel-server.ts:**
+- 各botに1つ配置（`--dangerously-load-development-channels server:agent-comms-channel`で起動）
 - claude/channel capabilityを宣言
-- ローカルHTTPポートでPOST受信
-- 受信内容をMCP通知としてセッションに注入
+- ローカルHTTPポートで`POST /push`受信
+- HMAC署名検証後、notification()でセッションに注入
 
 **ポート割当:**
 
