@@ -46,9 +46,22 @@ describe('Inbound Router — Source Structure', () => {
 
     // Must NOT contain direct mcp.notification in the onMessage callback
     // (mcp.notification should only be called inside pushFn)
-    const directNotificationPattern = /discord\.onMessage\(\(msg\)[\s\S]*?mcp\.notification\(\{[\s\S]*?method:\s*'notifications\/claude\/channel'/
-    // The pattern should NOT match outside of pushFn
     expect(afterOnMessage).not.toContain("mcp.notification({\n          method: 'notifications/claude/channel',")
+  })
+
+  test('routeInbound drops unregistered channels (CHANNEL_UNKNOWN)', () => {
+    expect(SERVER_SOURCE).toContain("reason: 'CHANNEL_UNKNOWN'")
+    expect(SERVER_SOURCE).toContain('not registered in core DB')
+  })
+
+  test('members=[] results in NOT_A_MEMBER (no length>0 guard)', () => {
+    // The members check must NOT have a length > 0 guard
+    const routeInboundIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
+    const body = SERVER_SOURCE.slice(routeInboundIdx, routeInboundIdx + 3000)
+    // Should NOT contain the old guard
+    expect(body).not.toContain('resolved.members.length > 0 &&')
+    // Should contain the direct includes check
+    expect(body).toContain('!resolved.members.includes(receiverAgentId)')
   })
 
   test('routeInbound checks channel members', () => {

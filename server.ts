@@ -1195,23 +1195,15 @@ async function routeInbound(params: {
     return undefined
   })
 
-  // 2. If channel not registered, fall back to legacy behavior (deliver without members check)
+  // 2. Channel not registered in core DB → drop (CHANNEL_NOT_FOUND)
   if (!resolved) {
-    process.stderr.write(`agent-comms: inbound channel ${externalChannelId} not in core DB — delivering without members check\n`)
-    await pushFn(content, {
-      chat_id: externalChannelId,
-      message_id: externalMessageId,
-      user: authorName,
-      user_id: authorExternalId,
-      ts: timestamp.toISOString(),
-      source: platform,
-      ...(attachments ? { attachments } : {}),
-    })
-    return { delivered: true, messageId }
+    process.stderr.write(`agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`)
+    return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
   }
 
-  // 3. Members check: is the receiver a member of this channel?
-  if (resolved.members.length > 0 && !resolved.members.includes(receiverAgentId)) {
+  // 3. Members check: receiver must be in channel.members
+  // members=[] means "no members" → no one receives push (DB saved only)
+  if (!resolved.members.includes(receiverAgentId)) {
     process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not a member of ${resolved.channelId}\n`)
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
   }
