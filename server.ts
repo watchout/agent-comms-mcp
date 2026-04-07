@@ -2787,6 +2787,10 @@ if (TRANSPORT_MODE === 'daemon') {
           process.stderr.write(`agent-comms: staggered connect — waiting ${STAGGERED_CONNECT_DELAY_MS}ms for ${botId} (${botCount} clients already connected)\n`)
           await new Promise(r => setTimeout(r, STAGGERED_CONNECT_DELAY_MS))
         }
+        // Skip if startup already created a per-bot client for this bot
+        if (discordClients.has(botId)) {
+          process.stderr.write(`agent-comms: skipping per-bot Discord for ${botId} (already connected at startup)\n`)
+        } else {
         const tokenResult = await resolveDiscordToken(botId)
         if (tokenResult) {
           const botDiscord = await connectBotDiscord(botId, tokenResult.token)
@@ -2830,6 +2834,7 @@ if (TRANSPORT_MODE === 'daemon') {
             })
           }
         }
+        } // end else (skip if already connected)
       } catch (err) {
         process.stderr.write(`[SSE] bot connection error: ${botId}, reason: ${err}\n`)
         if (!res.headersSent) {
