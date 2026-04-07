@@ -2878,9 +2878,8 @@ if (TRANSPORT_MODE === 'daemon') {
           if (botDiscord) {
             discordClients.set(botId, botDiscord)
             // Register inbound handler for this bot's Discord client
+            // No processedIds check — dedup at channel-server level, shared client also routes
             botDiscord.onMessage((msg) => {
-              if (processedIds.has(msg.id)) return
-              processedIds.set(msg.id, Date.now())
               const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
               const inboundContent = msg.content || (atts ? '(attachment)' : '')
               extractDiscordMentions(inboundContent).then(resolvedMentions => {
@@ -2984,9 +2983,8 @@ if (TRANSPORT_MODE === 'daemon') {
         if (botDiscord) {
           discordClients.set(botId, botDiscord)
           // Register inbound handler — routes through routeInbound + pushToChannelServer
+          // No processedIds check — dedup at channel-server level
           botDiscord.onMessage((msg) => {
-            if (processedIds.has(msg.id)) return
-            processedIds.set(msg.id, Date.now())
             const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
             const inboundContent = msg.content || (atts ? '(attachment)' : '')
             extractDiscordMentions(inboundContent).then(resolvedMentions => {
