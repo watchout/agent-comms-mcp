@@ -91,6 +91,59 @@ describe('Inbound Router — Source Structure', () => {
 })
 
 // ============================================================
+// 1b. Daemon mode source-level regression tests (PR#58)
+// ============================================================
+describe('Inbound Router — Daemon Mode Source Structure', () => {
+  test('daemon mode onMessage uses routeInbound (not direct saveMessage)', () => {
+    // Find the daemon-specific Discord onMessage block
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    expect(daemonBlock).toBeGreaterThan(-1)
+
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 10000)
+    const onMessageIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
+    expect(onMessageIdx).toBeGreaterThan(-1)
+
+    const onMessageBody = daemonSection.slice(onMessageIdx, onMessageIdx + 2000)
+
+    // Must use routeInbound
+    expect(onMessageBody).toContain('routeInbound({')
+
+    // Must NOT contain direct saveMessage (old pattern)
+    expect(onMessageBody).not.toContain('saveMessage({')
+  })
+
+  test('daemon mode iterates over botContexts for delivery', () => {
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 10000)
+    const onMessageIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
+    const onMessageBody = daemonSection.slice(onMessageIdx, onMessageIdx + 2000)
+
+    // Must iterate over botContexts
+    expect(onMessageBody).toContain('for (const [botId, ctx] of botContexts)')
+  })
+
+  test('daemon mode pushFn uses per-bot server notification', () => {
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 10000)
+    const onMessageIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
+    const onMessageBody = daemonSection.slice(onMessageIdx, onMessageIdx + 2000)
+
+    // Push should go through botServer (per-bot MCP server), not a shared mcp instance
+    expect(onMessageBody).toContain('botServer.notification(')
+    expect(onMessageBody).toContain("method: 'notifications/claude/channel'")
+  })
+
+  test('daemon mode checks transport before routing', () => {
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 10000)
+    const onMessageIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
+    const onMessageBody = daemonSection.slice(onMessageIdx, onMessageIdx + 2000)
+
+    expect(onMessageBody).toContain('if (!ctx.transport) continue')
+  })
+})
+
+// ============================================================
 // 2. DB integration tests
 // ============================================================
 describe('Inbound Router — DB Integration', () => {
