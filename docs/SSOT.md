@@ -23,6 +23,7 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 3. **人間もbotも同じ経路** — 発信元の種別で通信経路を分けない
 4. **DB推奨、なくても動く** — 最小構成はファイルベースで動作
 5. **行動規範は守れない前提で設計** — 決定論的な仕組みで制御
+6. **双方向コアRouter必須** — inbound/outbound問わず全メッセージはコアRouterを通過する。adapterからbotへの直接pushは設計違反
 
 ---
 
@@ -226,12 +227,23 @@ interface AccessConfig {
 
 ### 4.2 メッセージルーティング
 
-1. UIアダプターまたはbot送信からUnifiedMessageを受信
-2. access制御チェック（allowFrom, requireMention）
-3. メンションパターンマッチ
-4. 該当するClaude Codeセッションにpush注入
-5. 通信ログ記録（DB or ファイル）
-6. 他のUIアダプターへ可視性投稿（設定による）
+#### Outbound（bot → 外部）
+1. botがsend()ツールで送信
+2. resolveDestination()でチャンネル解決 + membersチェック
+3. レート制限 / ループ検出 / 重複排除
+4. DB INSERT（agent_messages）
+5. resolveDeliveryTargets()で配信対象決定（6ステップフィルタ）
+6. push通知（sendInboxSignal）+ UIアダプター転送
+
+#### Inbound（外部 → bot）
+1. UIアダプターがメッセージ受信（gate()でaccess制御）
+2. routeInbound()でコアRouterに投入
+3. resolveInboundChannel()でチャンネル解決 + members取得
+4. DB INSERT（常に保存、配信判定に関わらず）
+5. membersチェック（受信botがメンバーでなければdrop）
+6. 緊急/CEO例外判定（emergency / !stop / 送信者がhuman → active_thread無視）
+7. active_threadフィルタ（focus中は該当thread以外をpush抑制、DB保存のみ）
+8. pushFn()でセッションに注入
 
 ### 4.3 未読管理
 
