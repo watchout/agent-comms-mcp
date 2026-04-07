@@ -2850,7 +2850,54 @@ if (TRANSPORT_MODE === 'daemon') {
       process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
     }
 
-    // Connect Discord adapter (shared across all bots)
+    // Connect Per-Bot Discord Clients for all expected bots at startup
+    // This ensures bots in stdio mode (not SSE-connected) still have Discord presence
+    for (const botId of EXPECTED_BOTS) {
+      if (discordClients.has(botId)) continue
+      const tokenResult = await resolveDiscordToken(botId)
+      if (tokenResult && tokenResult.source === 'per-bot') {
+        const botDiscord = await connectBotDiscord(botId, tokenResult.token)
+        if (botDiscord) {
+          discordClients.set(botId, botDiscord)
+          // Register inbound handler — routes through routeInbound + pushToChannelServer
+          botDiscord.onMessage((msg) => {
+            if (processedIds.has(msg.id)) return
+            processedIds.set(msg.id, Date.now())
+            const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
+            const inboundContent = msg.content || (atts ? '(attachment)' : '')
+            extractDiscordMentions(inboundContent).then(resolvedMentions => {
+              return routeInbound({
+                receiverAgentId: botId,
+                externalChannelId: msg.channel,
+                externalMessageId: msg.id,
+                authorExternalId: msg.author.id,
+                authorName: msg.author.name,
+                authorIsBot: msg.author.isBot,
+                content: inboundContent,
+                attachments: atts,
+                timestamp: msg.timestamp,
+                platform: 'discord',
+                mentions: resolvedMentions,
+                replyToMessageId: msg.replyTo,
+                pushFn: async (pushContent, meta) => {
+                  // For non-SSE bots, push via channel-server HTTP POST
+                  await pushToChannelServer(botId, pushContent, meta)
+                },
+              })
+            }).catch(err => {
+              process.stderr.write(`agent-comms: startup per-bot inbound error for ${botId}: ${err}\n`)
+            })
+          })
+          process.stderr.write(`agent-comms: startup Discord client for ${botId} (${tokenResult.source})\n`)
+        }
+      }
+      // Staggered connect delay
+      if (EXPECTED_BOTS.indexOf(botId) < EXPECTED_BOTS.length - 1) {
+        await new Promise(r => setTimeout(r, STAGGERED_CONNECT_DELAY_MS))
+      }
+    }
+
+    // Connect Discord adapter (shared fallback for bots without per-bot token)
     if (DISCORD_BOT_TOKEN) {
       try {
         discord.onMessage((msg) => {
