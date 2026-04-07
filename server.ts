@@ -2043,15 +2043,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     })
 
     // Update sequence
-    const client = await tryGetDb()
-    if (client) {
-      await client.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
+    const dbClient = await tryGetDb()
+    if (dbClient) {
+      await dbClient.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
     }
 
     // pg_notify
     try {
-      if (client) {
-        await client.query(
+      if (dbClient) {
+        await dbClient.query(
           `SELECT pg_notify('agent_inbox', $1)`,
           [JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId })]
         )
