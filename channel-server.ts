@@ -19,7 +19,8 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { createHmac } from 'node:crypto'
+import { verifyPayload } from './shared/hmac'
+import type { PushPayload } from './shared/types'
 
 const PORT = parseInt(process.env.CHANNEL_PORT ?? '9001', 10)
 const HMAC_SECRET = process.env.HMAC_SECRET ?? ''
@@ -36,14 +37,6 @@ const mcp = new Server(
   },
 )
 
-// --- HMAC signature verification ---
-function verifyHmac(payload: string, signature: string | null): boolean {
-  if (!HMAC_SECRET) return true // no secret = skip verification (dev mode)
-  if (!signature) return false
-  const expected = `sha256=${createHmac('sha256', HMAC_SECRET).update(payload).digest('hex')}`
-  return signature === expected
-}
-
 // --- HTTP server for push reception ---
 const httpServer = Bun.serve({
   port: PORT,
@@ -56,7 +49,7 @@ const httpServer = Bun.serve({
     const body = await req.text()
 
     // HMAC verification
-    if (!verifyHmac(body, req.headers.get('x-signature'))) {
+    if (!verifyPayload(body, req.headers.get('x-signature'), HMAC_SECRET)) {
       process.stderr.write(`channel-server: HMAC verification failed\n`)
       return new Response('Unauthorized', { status: 401 })
     }

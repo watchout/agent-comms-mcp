@@ -1477,7 +1477,7 @@ async function pushToChannelServer(agentId: string, content: string, meta: Recor
   // HMAC signature
   const hmacSecret = process.env.HMAC_SECRET ?? ''
   const signature = hmacSecret
-    ? `sha256=${(await import('node:crypto')).createHmac('sha256', hmacSecret).update(payload).digest('hex')}`
+    ? `sha256=${createHmac('sha256', hmacSecret).update(payload).digest('hex')}`
     : ''
 
   try {

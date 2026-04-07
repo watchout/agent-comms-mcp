@@ -30,10 +30,9 @@ describe('Webhook Channel — channel-server.ts', () => {
   })
 
   test('verifies HMAC-SHA256 signature', () => {
-    expect(CHANNEL_SOURCE).toContain('verifyHmac')
+    expect(CHANNEL_SOURCE).toContain('verifyPayload')
     expect(CHANNEL_SOURCE).toContain('x-signature')
-    expect(CHANNEL_SOURCE).toContain('createHmac')
-    expect(CHANNEL_SOURCE).toContain('sha256')
+    expect(CHANNEL_SOURCE).toContain("from './shared/hmac'")
   })
 
   test('injects via notifications/claude/channel', () => {
