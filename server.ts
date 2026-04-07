@@ -1062,14 +1062,14 @@ async function resolveAgentFromDiscordId(discordId: string): Promise<string | nu
 }
 
 /** Resolve inbound channel: find core channel_id and members from Discord channel/thread ID */
-async function resolveInboundChannel(externalChannelId: string): Promise<{ channelId: string; threadId?: string; members: string[] } | null> {
+async function resolveInboundChannel(externalChannelId: string): Promise<{ channelId: string; threadId?: string; members: string[]; type?: string } | null> {
   const client = await tryGetDb()
   if (!client) return null
 
   // Direct channel match
-  const r = await client.query('SELECT id, members FROM channels WHERE id = $1', [externalChannelId])
+  const r = await client.query('SELECT id, members, type FROM channels WHERE id = $1', [externalChannelId])
   if (r.rows.length > 0) {
-    return { channelId: externalChannelId, members: r.rows[0].members ?? [] }
+    return { channelId: externalChannelId, members: r.rows[0].members ?? [], type: r.rows[0].type }
   }
 
   // Thread match: check thread_adapters → threads → parent channel
@@ -1322,21 +1322,117 @@ async function resolveDeliveryTargets(
 // Direct adapter→session push is a design violation.
 // ============================================================
 
+// ============================================================
+// §5.1 routeInbound — Pure function (no I/O, no side effects)
+// ============================================================
+
+interface AgentInfo {
+  agentId: string
+  agentType: string
+  observerMode: boolean
+}
+
+interface ChannelInfo {
+  channelId: string
+  threadId?: string | null
+  members: string[]
+  type?: string  // 'dm' etc.
+}
+
+interface RouteResult {
+  pushTargets: string[]
+  dropTargets: Record<string, string>  // agentId → reason
+  senderIsHuman: boolean
+  noMentions: boolean  // true when mentions array is empty (Pattern A)
+}
+
+/**
+ * Pure routing function (§5.1) — no DB reads/writes, no side effects.
+ * Caller is responsible for:
+ *   1. Resolving channel + loading agent info (before)
+ *   2. DB save (before or after, always)
+ *   3. Updating last_received_context for pushTargets (after)
+ *   4. Pushing to pushTargets (after)
+ *   5. Sending human warning if noMentions && senderIsHuman (after)
+ */
+function routeInbound(
+  msg: { authorAgentId: string | null; authorIsBot: boolean; content: string; mentions: string[]; messageType: string },
+  channel: ChannelInfo,
+  agents: AgentInfo[],
+): RouteResult {
+  const pushTargets: string[] = []
+  const dropTargets: Record<string, string> = {}
+  const senderIsHuman = !msg.authorIsBot
+  const noMentions = msg.mentions.length === 0
+  const isEmergency = isEmergencyMessage(msg.content, msg.messageType)
+  const isDm = channel.type === 'dm' || channel.channelId.startsWith('dm:')
+
+  for (const agent of agents) {
+    // Self-send prevention
+    if (agent.agentId === msg.authorAgentId) continue
+
+    // Must be a channel member
+    if (!channel.members.includes(agent.agentId)) {
+      dropTargets[agent.agentId] = 'NOT_A_MEMBER'
+      continue
+    }
+
+    // DM → always push
+    if (isDm) {
+      pushTargets.push(agent.agentId)
+      continue
+    }
+
+    // Emergency → always push (only mentions bypass, §5.1)
+    if (isEmergency) {
+      pushTargets.push(agent.agentId)
+      continue
+    }
+
+    // Observer mode → drop
+    if (agent.observerMode) {
+      dropTargets[agent.agentId] = 'OBSERVER_MODE'
+      continue
+    }
+
+    // Group mentions (@all, @dev, @org)
+    if (msg.mentions.includes('all') ||
+        (msg.mentions.includes('dev') && agent.agentType === 'dev') ||
+        (msg.mentions.includes('org') && agent.agentType === 'org')) {
+      pushTargets.push(agent.agentId)
+      continue
+    }
+
+    // Individual mention
+    if (msg.mentions.includes(agent.agentId)) {
+      pushTargets.push(agent.agentId)
+      continue
+    }
+
+    // Not mentioned → drop
+    dropTargets[agent.agentId] = 'NOT_MENTIONED'
+  }
+
+  return { pushTargets, dropTargets, senderIsHuman, noMentions }
+}
+
+// ============================================================
+// handleInboundMessage — Full flow wrapper (DB + pure route + push)
+// ============================================================
+
 interface InboundRouteResult {
   delivered: boolean
   messageId?: string
   reason?: string  // 'NOT_A_MEMBER' | 'CHANNEL_UNKNOWN' | 'NOT_MENTIONED'
   pushMeta?: Record<string, unknown>  // meta for push (only when delivered=true)
+  humanWarning?: boolean  // true when sender is human and no mentions (§2.2 Pattern A)
 }
 
 /**
- * Route an inbound message from a platform adapter through the core router.
- * 1. Resolve channel membership
- * 2. Save to DB (always, regardless of delivery)
- * 3. Check delivery eligibility: members, emergency/CEO bypass, active_thread
- * 4. Push to session if eligible
+ * Full inbound message handler — wraps pure routeInbound with I/O.
+ * Called per-receiver in stdio mode, per-bot in daemon mode.
  */
-async function routeInbound(params: {
+async function handleInboundMessage(params: {
   receiverAgentId: string
   externalChannelId: string
   externalMessageId: string
@@ -1348,19 +1444,18 @@ async function routeInbound(params: {
   timestamp: Date
   platform: string
   mentions?: string[]  // resolved agent_ids mentioned in content
-  replyToMessageId?: string  // reply-to message ID (conversation continuation)
-  pushFn?: (content: string, meta: Record<string, unknown>) => Promise<void>  // optional legacy
+  replyToMessageId?: string
 }): Promise<InboundRouteResult> {
   const {
     receiverAgentId, externalChannelId, externalMessageId,
     authorExternalId, authorName, authorIsBot,
-    content, attachments, timestamp, platform, mentions, replyToMessageId, pushFn,
+    content, attachments, timestamp, platform, mentions,
   } = params
 
-  // 1. Resolve channel → core channel_id + members
+  // Step 1: Resolve channel → core channel_id + members
   const resolved = await resolveInboundChannel(externalChannelId)
 
-  // Save to DB regardless (non-fatal)
+  // Step 2: DB save (always, regardless of delivery) — non-fatal
   const messageId = await saveMessage({
     channel_id: resolved?.channelId ?? externalChannelId,
     author_id: authorExternalId,
@@ -1382,57 +1477,50 @@ async function routeInbound(params: {
     return undefined
   })
 
-  // 2. Channel not registered in core DB → drop (CHANNEL_NOT_FOUND)
+  // Step 3: Channel not registered → drop
   if (!resolved) {
     process.stderr.write(`agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`)
     return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
   }
 
-  // 3. Members check: receiver must be in channel.members
-  // members=[] means "no members" → no one receives push (DB saved only)
-  if (!resolved.members.includes(receiverAgentId)) {
-    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not a member of ${resolved.channelId}\n`)
+  // Step 4: Load agent info for receiver
+  const agentInfo = await loadAgentInfo(receiverAgentId)
+  if (!agentInfo) {
+    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not found in agents table\n`)
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
   }
 
-  // 4. Emergency / CEO bypass check
+  // Step 5: Resolve sender agent_id
   const senderAgentId = await resolveAgentFromDiscordId(authorExternalId)
-  const isEmergency = isEmergencyMessage(content, 'chat')
-  const isCeo = senderAgentId ? await isHumanAgent(senderAgentId) : !authorIsBot  // fallback: non-bot = human
-  process.stderr.write(`agent-comms: routeInbound debug — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} isCeo=${isCeo} mentions=[${mentions?.join(',') ?? ''}]\n`)
 
-  // 5. Mentions filter (§2 Pattern A-D)
-  // DM → always push. Emergency → always push. CEO follows mentions like everyone else.
-  const isDm = resolved.type === 'dm' || resolved.channelId.startsWith('dm:')
-  if (!isDm && !isEmergency) {
-    // Check group mentions (@all, @dev, @org)
-    const hasGroupMention = mentions?.includes('all') ||
-      (mentions?.includes('dev') && await (async () => {
-        const client = await tryGetDb()
-        if (!client) return false
-        const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [receiverAgentId])
-        return r.rows.length > 0 && r.rows[0].agent_type === 'dev'
-      })()) ||
-      (mentions?.includes('org') && await (async () => {
-        const client = await tryGetDb()
-        if (!client) return false
-        const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [receiverAgentId])
-        return r.rows.length > 0 && r.rows[0].agent_type === 'org'
-      })())
+  // Step 6: Pure routing decision (§5.1)
+  const resolvedMentions = mentions ?? []
+  const result = routeInbound(
+    { authorAgentId: senderAgentId, authorIsBot, content, mentions: resolvedMentions, messageType: 'chat' },
+    { channelId: resolved.channelId, threadId: resolved.threadId, members: resolved.members, type: resolved.type },
+    [agentInfo],
+  )
 
-    const isIndividuallyMentioned = mentions?.includes(receiverAgentId)
+  process.stderr.write(`agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`)
 
-    if (!hasGroupMention && !isIndividuallyMentioned) {
-      process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not mentioned (mentions: [${mentions?.join(', ') ?? ''}])\n`)
-      return { delivered: false, messageId, reason: 'NOT_MENTIONED' }
+  const isDelivered = result.pushTargets.includes(receiverAgentId)
+
+  if (!isDelivered) {
+    const reason = result.dropTargets[receiverAgentId] ?? 'NOT_MENTIONED'
+    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} ${reason}\n`)
+    return {
+      delivered: false,
+      messageId,
+      reason,
+      humanWarning: result.senderIsHuman && result.noMentions,
     }
   }
 
-  // 6. Update last_received_context for push target (§5.2)
+  // Step 7: Update last_received_context (side effect, after pure route)
   await updateLastReceivedContext(receiverAgentId, resolved.channelId, resolved.threadId ?? null)
   process.stderr.write(`agent-comms: last_received_context updated — ${receiverAgentId} channel=${resolved.channelId} thread=${resolved.threadId ?? 'null'}\n`)
 
-  // 8. Push to session (dual path: pushFn for legacy + pushToChannelServer for Webhook Channel)
+  // Step 8: Build push metadata
   const pushMeta = {
     chat_id: externalChannelId,
     message_id: externalMessageId,
@@ -1443,8 +1531,79 @@ async function routeInbound(params: {
     ...(attachments ? { attachments } : {}),
   }
 
-  // 8. Return delivery decision — caller handles push (§5.1 pure function)
   return { delivered: true, messageId, pushMeta }
+}
+
+/** Load agent info for pure routeInbound */
+async function loadAgentInfo(agentId: string): Promise<AgentInfo | null> {
+  const client = await tryGetDb()
+  if (!client) return { agentId, agentType: 'dev', observerMode: false }  // fallback
+  const r = await client.query(
+    'SELECT agent_id, agent_type, observer_mode FROM agents WHERE agent_id = $1',
+    [agentId]
+  )
+  if (r.rows.length === 0) return null
+  return {
+    agentId: r.rows[0].agent_id,
+    agentType: r.rows[0].agent_type ?? 'dev',
+    observerMode: r.rows[0].observer_mode === true,
+  }
+}
+
+// ============================================================
+// §2.2 Pattern A: Human warning (no mentions)
+// ============================================================
+
+const humanWarningsSent = new Map<string, number>()  // msgId → timestamp (in-process dedup)
+
+/**
+ * Send a warning to a human who posted without mentions.
+ * Uses pg_try_advisory_lock for cross-process dedup in stdio mode.
+ */
+async function sendHumanWarning(adapter: DiscordAdapter, channelId: string, discordMessageId: string): Promise<void> {
+  // In-process dedup
+  if (humanWarningsSent.has(discordMessageId)) return
+  humanWarningsSent.set(discordMessageId, Date.now())
+  setTimeout(() => humanWarningsSent.delete(discordMessageId), 60_000)
+
+  // Cross-process dedup via pg_try_advisory_lock
+  const client = await tryGetDb()
+  if (client) {
+    // Use a hash of the message ID as the lock key
+    const lockKey = Math.abs(hashCode(discordMessageId)) % 2147483647  // int4 range
+    const lockResult = await client.query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey])
+    if (!lockResult.rows[0]?.acquired) {
+      process.stderr.write(`agent-comms: human warning skipped (another bot sending) — msg ${discordMessageId}\n`)
+      return
+    }
+    // Release lock after a short delay (let other bots see it's taken)
+    setTimeout(async () => {
+      try { await client.query('SELECT pg_advisory_unlock($1)', [lockKey]) } catch {}
+    }, 5_000)
+  }
+
+  const warningText =
+    '⚠️ メンションがないためbotには通知されていません。\n' +
+    '特定のbotに通知: @cto @arc 等を付けてください。\n' +
+    '全員に通知: @all を使ってください。'
+
+  try {
+    await adapter.sendMessage(channelId, warningText, { replyTo: discordMessageId })
+    process.stderr.write(`agent-comms: human warning sent — msg ${discordMessageId}\n`)
+  } catch (err) {
+    process.stderr.write(`agent-comms: human warning send failed: ${err}\n`)
+  }
+}
+
+/** Simple string hash for advisory lock keys */
+function hashCode(str: string): number {
+  let hash = 0
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash |= 0  // Convert to 32bit integer
+  }
+  return hash
 }
 
 async function getNextSequence(channelId: string): Promise<number> {
@@ -2660,7 +2819,7 @@ async function postConnect() {
         const content = msg.content || (atts ? '(attachment)' : '')
 
         extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
-          return routeInbound({
+          return handleInboundMessage({
             receiverAgentId: AGENT_ID,
             externalChannelId: msg.channel,
             externalMessageId: msg.id,
@@ -2682,6 +2841,10 @@ async function postConnect() {
             })
           } else if (!result.delivered) {
             process.stderr.write(`agent-comms: inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
+          }
+          // §2.2 Pattern A: human warning (no mentions)
+          if (result.humanWarning) {
+            sendHumanWarning(discord, msg.channel, msg.id)
           }
         }).catch(err => {
           process.stderr.write(`agent-comms: inbound routing error: ${err}\n`)
@@ -2921,7 +3084,7 @@ if (TRANSPORT_MODE === 'daemon') {
               const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
               const inboundContent = msg.content || (atts ? '(attachment)' : '')
               extractDiscordMentions(inboundContent, msg.mentionUserIds).then(resolvedMentions => {
-                return routeInbound({
+                return handleInboundMessage({
                   receiverAgentId: botId,
                   externalChannelId: msg.channel,
                   externalMessageId: msg.id,
@@ -3019,13 +3182,13 @@ if (TRANSPORT_MODE === 'daemon') {
         const botDiscord = await connectBotDiscord(botId, tokenResult.token)
         if (botDiscord) {
           discordClients.set(botId, botDiscord)
-          // Register inbound handler — routes through routeInbound + pushToChannelServer
+          // Register inbound handler — routes through handleInboundMessage + pushToChannelServer
           // No processedIds check — dedup at channel-server level
           botDiscord.onMessage((msg) => {
             const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
             const inboundContent = msg.content || (atts ? '(attachment)' : '')
             extractDiscordMentions(inboundContent, msg.mentionUserIds).then(resolvedMentions => {
-              return routeInbound({
+              return handleInboundMessage({
                 receiverAgentId: botId,
                 externalChannelId: msg.channel,
                 externalMessageId: msg.id,
@@ -3069,9 +3232,10 @@ if (TRANSPORT_MODE === 'daemon') {
           // Route through core inbound router for all expected bots
           extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
             // Route to all EXPECTED_BOTS with channel_port (Webhook Channel)
+            let humanWarningSent = false
             for (const expectedBot of EXPECTED_BOTS) {
               const ctx = botContexts.get(expectedBot)
-              routeInbound({
+              handleInboundMessage({
                 receiverAgentId: expectedBot,
                 externalChannelId: msg.channel,
                 externalMessageId: msg.id,
@@ -3087,6 +3251,11 @@ if (TRANSPORT_MODE === 'daemon') {
               }).then(async result => {
                 if (!result.delivered) {
                   process.stderr.write(`agent-comms: daemon inbound not delivered to ${expectedBot} — ${result.reason} (msg: ${msg.id})\n`)
+                  // §2.2 Pattern A: human warning (daemon mode — send once)
+                  if (result.humanWarning && !humanWarningSent) {
+                    humanWarningSent = true
+                    sendHumanWarning(discord, msg.channel, msg.id)
+                  }
                   return
                 }
                 // Push: caller handles (§5.1 pure function)
