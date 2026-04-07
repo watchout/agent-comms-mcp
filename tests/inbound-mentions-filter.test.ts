@@ -58,35 +58,28 @@ describe('Inbound Mentions Filter — routeInbound step 4', () => {
     expect(fnSig).toContain('replyToMessageId?: string')
   })
 
-  test('mentions filter checks receiverAgentId inclusion', () => {
-    expect(SERVER_SOURCE).toContain('!mentions.includes(receiverAgentId)')
+  test('mentions filter checks individual and group mentions', () => {
+    expect(SERVER_SOURCE).toContain("mentions?.includes(receiverAgentId)")
+    expect(SERVER_SOURCE).toContain("mentions?.includes('all')")
+    expect(SERVER_SOURCE).toContain("mentions?.includes('dev')")
+    expect(SERVER_SOURCE).toContain("mentions?.includes('org')")
   })
 
   test('NOT_MENTIONED reason is returned when not mentioned', () => {
     expect(SERVER_SOURCE).toContain("reason: 'NOT_MENTIONED'")
   })
 
-  test('mentions=undefined/empty skips filter (backward compat)', () => {
-    expect(SERVER_SOURCE).toContain('mentions && mentions.length > 0')
+  test('DM bypass: DM messages always push', () => {
+    const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
+    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 800)
+    expect(filterBody).toContain('isDm')
   })
 
-  test('CEO bypass: human sender always delivers', () => {
+  test('CEO/emergency bypass: human/emergency always push', () => {
     const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
-    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 500)
-    expect(filterBody).toContain('!isCeo')
-  })
-
-  test('emergency bypass', () => {
-    const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
-    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 500)
+    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 800)
     expect(filterBody).toContain('!isEmergency')
-  })
-
-  test('reply bypass: conversation continuation', () => {
-    const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
-    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 500)
-    expect(filterBody).toContain('!isReply')
-    expect(filterBody).toContain('replyToMessageId')
+    expect(filterBody).toContain('!isCeo')
   })
 
   test('mentions filter runs before last_received_context update', () => {
