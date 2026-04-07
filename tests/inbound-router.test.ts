@@ -124,13 +124,11 @@ describe('Inbound Router — Daemon Mode Source Structure', () => {
 
   test('daemon mode pushFn uses per-bot server notification', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 10000)
-    const onMessageIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
-    const onMessageBody = daemonSection.slice(onMessageIdx, onMessageIdx + 2000)
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
 
     // Push should go through botServer (per-bot MCP server), not a shared mcp instance
-    expect(onMessageBody).toContain('botServer.notification(')
-    expect(onMessageBody).toContain("method: 'notifications/claude/channel'")
+    expect(daemonSection).toContain('botServer.notification(')
+    expect(daemonSection).toContain("method: 'notifications/claude/channel'")
   })
 
   test('daemon mode checks transport before routing', () => {

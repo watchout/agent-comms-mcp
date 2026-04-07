@@ -1023,6 +1023,24 @@ async function isHumanAgent(agentId: string): Promise<boolean> {
   return r.rows.length > 0 && r.rows[0].agent_type === 'human'
 }
 
+/** Extract Discord mentions from content and resolve to core agent_ids */
+async function extractDiscordMentions(content: string): Promise<string[]> {
+  const discordMentions = content.match(/<@!?(\d+)>/g)
+  if (!discordMentions || discordMentions.length === 0) return []
+
+  const agentIds: string[] = []
+  for (const mention of discordMentions) {
+    const discordId = mention.replace(/<@!?(\d+)>/, '$1')
+    const agentId = await resolveAgentFromDiscordId(discordId)
+    if (agentId) {
+      agentIds.push(agentId)
+    }
+  }
+  // Also parse @agent_id style mentions (agent-comms native format)
+  const nativeMentions = parseMentions(content)
+  return [...new Set([...agentIds, ...nativeMentions])]
+}
+
 /** Resolve Discord user ID → core agent_id via agents.metadata.discord_id */
 async function resolveAgentFromDiscordId(discordId: string): Promise<string | null> {
   const client = await tryGetDb()
@@ -1229,7 +1247,7 @@ async function resolveDeliveryTargets(
 interface InboundRouteResult {
   delivered: boolean
   messageId?: string
-  reason?: string  // 'NOT_A_MEMBER' | 'THREAD_MISMATCH' | 'CHANNEL_UNKNOWN'
+  reason?: string  // 'NOT_A_MEMBER' | 'THREAD_MISMATCH' | 'CHANNEL_UNKNOWN' | 'NOT_MENTIONED'
 }
 
 /**
@@ -1250,12 +1268,14 @@ async function routeInbound(params: {
   attachments?: string
   timestamp: Date
   platform: string
+  mentions?: string[]  // resolved agent_ids mentioned in content
+  replyToMessageId?: string  // reply-to message ID (conversation continuation)
   pushFn: (content: string, meta: Record<string, unknown>) => Promise<void>
 }): Promise<InboundRouteResult> {
   const {
     receiverAgentId, externalChannelId, externalMessageId,
     authorExternalId, authorName, authorIsBot,
-    content, attachments, timestamp, platform, pushFn,
+    content, attachments, timestamp, platform, mentions, replyToMessageId, pushFn,
   } = params
 
   // 1. Resolve channel → core channel_id + members
@@ -1301,9 +1321,21 @@ async function routeInbound(params: {
   const isEmergency = isEmergencyMessage(content, 'chat')
   const isCeo = senderAgentId ? await isHumanAgent(senderAgentId) : !authorIsBot  // fallback: non-bot = human
 
+  // 5. Mentions filter: only push to mentioned agents (§3.15 step 4)
+  // mentions=undefined/empty → no filter (backward compat, e.g. agent-comms internal messages)
+  if (mentions && mentions.length > 0) {
+    if (!mentions.includes(receiverAgentId)) {
+      const isReply = !!replyToMessageId
+      if (!isEmergency && !isCeo && !isReply) {
+        process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not mentioned (mentions: [${mentions.join(', ')}])\n`)
+        return { delivered: false, messageId, reason: 'NOT_MENTIONED' }
+      }
+    }
+  }
+
   const bypassActiveThread = isEmergency || isCeo
 
-  // 5. active_thread filter
+  // 6. active_thread filter
   if (!bypassActiveThread) {
     const activeThread = await getActiveThread(receiverAgentId)
     if (activeThread) {
@@ -2509,23 +2541,27 @@ async function postConnect() {
         const content = msg.content || (atts ? '(attachment)' : '')
 
         // Route through core inbound router (PR#56 — SSOT-5 §1 compliant)
-        routeInbound({
-          receiverAgentId: AGENT_ID,
-          externalChannelId: msg.channel,
-          externalMessageId: msg.id,
-          authorExternalId: msg.author.id,
-          authorName: msg.author.name,
-          authorIsBot: msg.author.isBot,
-          content,
-          attachments: atts,
-          timestamp: msg.timestamp,
-          platform: 'discord',
-          pushFn: async (pushContent, meta) => {
-            await mcp.notification({
-              method: 'notifications/claude/channel',
-              params: { content: pushContent, meta },
-            })
-          },
+        extractDiscordMentions(content).then(resolvedMentions => {
+          return routeInbound({
+            receiverAgentId: AGENT_ID,
+            externalChannelId: msg.channel,
+            externalMessageId: msg.id,
+            authorExternalId: msg.author.id,
+            authorName: msg.author.name,
+            authorIsBot: msg.author.isBot,
+            content,
+            attachments: atts,
+            timestamp: msg.timestamp,
+            platform: 'discord',
+            mentions: resolvedMentions,
+            replyToMessageId: msg.replyTo,
+            pushFn: async (pushContent, meta) => {
+              await mcp.notification({
+                method: 'notifications/claude/channel',
+                params: { content: pushContent, meta },
+              })
+            },
+          })
         }).then(result => {
           if (!result.delivered) {
             process.stderr.write(`agent-comms: inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
@@ -2726,23 +2762,27 @@ if (TRANSPORT_MODE === 'daemon') {
               processedIds.set(msg.id, Date.now())
               const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
               const inboundContent = msg.content || (atts ? '(attachment)' : '')
-              routeInbound({
-                receiverAgentId: botId,
-                externalChannelId: msg.channel,
-                externalMessageId: msg.id,
-                authorExternalId: msg.author.id,
-                authorName: msg.author.name,
-                authorIsBot: msg.author.isBot,
-                content: inboundContent,
-                attachments: atts,
-                timestamp: msg.timestamp,
-                platform: 'discord',
-                pushFn: async (pushContent, meta) => {
-                  await ctx.server.notification({
-                    method: 'notifications/claude/channel',
-                    params: { content: pushContent, meta },
-                  })
-                },
+              extractDiscordMentions(inboundContent).then(resolvedMentions => {
+                return routeInbound({
+                  receiverAgentId: botId,
+                  externalChannelId: msg.channel,
+                  externalMessageId: msg.id,
+                  authorExternalId: msg.author.id,
+                  authorName: msg.author.name,
+                  authorIsBot: msg.author.isBot,
+                  content: inboundContent,
+                  attachments: atts,
+                  timestamp: msg.timestamp,
+                  platform: 'discord',
+                  mentions: resolvedMentions,
+                  replyToMessageId: msg.replyTo,
+                  pushFn: async (pushContent, meta) => {
+                    await ctx.server.notification({
+                      method: 'notifications/claude/channel',
+                      params: { content: pushContent, meta },
+                    })
+                  },
+                })
               }).catch(err => {
                 process.stderr.write(`agent-comms: per-bot inbound routing error for ${botId}: ${err}\n`)
               })
@@ -2819,35 +2859,41 @@ if (TRANSPORT_MODE === 'daemon') {
 
           // Route through core inbound router for each connected bot WITHOUT a per-bot Discord client
           // Bots with per-bot clients receive messages via their own Gateway connection
-          for (const [botId, ctx] of botContexts) {
-            if (!ctx.transport) continue
-            if (discordClients.has(botId)) continue  // per-bot client handles its own inbound
-            const botServer = ctx.server
-            routeInbound({
-              receiverAgentId: botId,
-              externalChannelId: msg.channel,
-              externalMessageId: msg.id,
-              authorExternalId: msg.author.id,
-              authorName: msg.author.name,
-              authorIsBot: msg.author.isBot,
-              content,
-              attachments: atts,
-              timestamp: msg.timestamp,
-              platform: 'discord',
-              pushFn: async (pushContent, meta) => {
-                await botServer.notification({
-                  method: 'notifications/claude/channel',
-                  params: { content: pushContent, meta },
-                })
-              },
-            }).then(result => {
-              if (!result.delivered) {
-                process.stderr.write(`agent-comms: daemon inbound not delivered to ${botId} — ${result.reason} (msg: ${msg.id})\n`)
-              }
-            }).catch(err => {
-              process.stderr.write(`agent-comms: daemon inbound routing error for ${botId}: ${err}\n`)
-            })
-          }
+          extractDiscordMentions(content).then(resolvedMentions => {
+            for (const [botId, ctx] of botContexts) {
+              if (!ctx.transport) continue
+              if (discordClients.has(botId)) continue  // per-bot client handles its own inbound
+              const botServer = ctx.server
+              routeInbound({
+                receiverAgentId: botId,
+                externalChannelId: msg.channel,
+                externalMessageId: msg.id,
+                authorExternalId: msg.author.id,
+                authorName: msg.author.name,
+                authorIsBot: msg.author.isBot,
+                content,
+                attachments: atts,
+                timestamp: msg.timestamp,
+                platform: 'discord',
+                mentions: resolvedMentions,
+                replyToMessageId: msg.replyTo,
+                pushFn: async (pushContent, meta) => {
+                  await botServer.notification({
+                    method: 'notifications/claude/channel',
+                    params: { content: pushContent, meta },
+                  })
+                },
+              }).then(result => {
+                if (!result.delivered) {
+                  process.stderr.write(`agent-comms: daemon inbound not delivered to ${botId} — ${result.reason} (msg: ${msg.id})\n`)
+                }
+              }).catch(err => {
+                process.stderr.write(`agent-comms: daemon inbound routing error for ${botId}: ${err}\n`)
+              })
+            }
+          }).catch(err => {
+            process.stderr.write(`agent-comms: daemon mention extraction error: ${err}\n`)
+          })
         })
         await discord.connect({
           token: DISCORD_BOT_TOKEN,
