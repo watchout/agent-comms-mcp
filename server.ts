@@ -172,11 +172,10 @@ async function connectBotDiscord(botId: string, token: string): Promise<DiscordA
         if (!client) throw new Error('DB unavailable')
         return client.query(sql, params)
       })
-      await adapter.connect({
-        token,
-        stateDir: DISCORD_STATE_DIR_ENV || undefined,
-      })
-      process.stderr.write(`agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt})\n`)
+      // No stateDir → no access.json → gate() passes all messages through
+      // Filtering is handled by routeInbound() (daemon-only, Phase 3c)
+      await adapter.connect({ token })
+      process.stderr.write(`agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt}, no access.json — routeInbound filters)\n`)
       return adapter
     } catch (err) {
       process.stderr.write(`agent-comms: per-bot Discord connect failed for ${botId} (attempt ${attempt}/${5}): ${err}\n`)
@@ -2899,10 +2898,8 @@ if (TRANSPORT_MODE === 'daemon') {
             process.stderr.write(`agent-comms: daemon mention extraction error: ${err}\n`)
           })
         })
-        await discord.connect({
-          token: DISCORD_BOT_TOKEN,
-          stateDir: DISCORD_STATE_DIR_ENV || undefined,
-        })
+        // No stateDir for daemon shared client — gate() passes all, routeInbound() filters
+        await discord.connect({ token: DISCORD_BOT_TOKEN })
         process.stderr.write(`agent-comms: daemon Discord adapter connected\n`)
       } catch (err) {
         process.stderr.write(`agent-comms: WARNING — daemon Discord connection failed (non-fatal): ${err}\n`)
