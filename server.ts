@@ -1412,9 +1412,9 @@ async function routeInbound(params: {
   process.stderr.write(`agent-comms: routeInbound debug — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} isCeo=${isCeo} mentions=[${mentions?.join(',') ?? ''}]\n`)
 
   // 5. Mentions filter (§2 Pattern A-D)
-  // DM → always push. Emergency/CEO → always push. Otherwise check mentions.
+  // DM → always push. Emergency → always push. CEO follows mentions like everyone else.
   const isDm = resolved.type === 'dm' || resolved.channelId.startsWith('dm:')
-  if (!isDm && !isEmergency && !isCeo) {
+  if (!isDm && !isEmergency) {
     // Check group mentions (@all, @dev, @org)
     const hasGroupMention = mentions?.includes('all') ||
       (mentions?.includes('dev') && await (async () => {

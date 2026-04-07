@@ -75,11 +75,11 @@ describe('Inbound Mentions Filter — routeInbound step 4', () => {
     expect(filterBody).toContain('isDm')
   })
 
-  test('CEO/emergency bypass: human/emergency always push', () => {
+  test('emergency bypass only (CEO follows mentions like everyone else)', () => {
     const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
     const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 800)
     expect(filterBody).toContain('!isEmergency')
-    expect(filterBody).toContain('!isCeo')
+    expect(filterBody).not.toContain('!isCeo')  // CEO no longer bypasses mentions
   })
 
   test('mentions filter runs before last_received_context update', () => {
