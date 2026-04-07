@@ -30,8 +30,8 @@ LLMの判断は一切介在しない。
 ─────────────────────────────────────────────────────────────────────
 A. メンションなし投稿       自動（受信場所）   なし（DB保存のみ）  ゼロ
 B. メンション付き投稿       自動（受信場所）   メンション対象のみ  ゼロ
-C. リプライ（第三者なし）   自動（元msg場所）  元送信者（自動）    ゼロ
-D. リプライ + 第三者メンション 自動（元msg場所） 元送信者 + 第三者  ゼロ
+C. リプライ（第三者なし）   自動（元msg場所）  mentions対象のみ    ゼロ
+D. リプライ + 第三者メンション 自動（元msg場所） mentions対象のみ   ゼロ
 E. 自発的発言（cron等）     CLI指定（必須）   メンション対象のみ  ゼロ
 ```
 
@@ -673,11 +673,18 @@ async function handleSend(sender: Agent, params: SendParams) {
     return error("NOT_A_MEMBER", `あなたはチャンネル '${dest.channel_id}' のメンバーではありません`);
   }
 
-  // Step 3: mentions全員が投稿先チャンネルのmembersか検証
+  // Step 3: mentions対象の存在確認 + 配信先分類
+  const inChannelTargets = [];
+  const outChannelTargets = [];
   for (const mention of params.mentions) {
-    if (!channel.members.includes(mention)) {
-      return error("MENTION_NOT_MEMBER",
-        `メンション先 '${mention}' はチャンネル '${dest.channel_id}' のメンバーではありません`);
+    const agent = await db.getAgent(mention);
+    if (!agent) {
+      return error("AGENT_NOT_FOUND", `'${mention}' は登録されていません`);
+    }
+    if (channel.members.includes(mention)) {
+      inChannelTargets.push(mention);  // チャンネル内push
+    } else {
+      outChannelTargets.push(mention); // DM経由push
     }
   }
 
@@ -1077,7 +1084,7 @@ ALTER TABLE agents ADD COLUMN default_channel TEXT REFERENCES channels(id);
 CHANNEL_NOT_FOUND       チャンネルが存在しない
 THREAD_NOT_FOUND        スレッドが存在しない
 NOT_A_MEMBER            送信者がメンバーでない
-MENTION_NOT_MEMBER      メンション先がチャンネルメンバーでない
+AGENT_NOT_FOUND         メンション先がagentsテーブルに存在しない
 NOT_MENTIONED           メンション配列が空
 NOT_MENTIONED_IN_ORIGINAL  reply_to元メッセージでメンションされていない
 MESSAGE_NOT_FOUND       reply_toのメッセージIDが存在しない
@@ -1131,7 +1138,7 @@ THREAD_ARCHIVED         スレッドがアーカイブ済み
 ✅ daemon起動通知（last_received_context初期化）
 ✅ routeInbound()の純粋関数化（pushTargetsを返すだけ）
 ✅ NO_CONTEXT エラーコード
-✅ MENTION_NOT_MEMBER エラーコード
+✅ チャンネル外メンション → DM経由push分岐
 ✅ THREAD_ARCHIVED エラーコード
 ✅ MESSAGE_NOT_FOUND エラーコード
 ✅ NOT_MENTIONED_IN_ORIGINAL エラーコード
@@ -1195,7 +1202,7 @@ daemon → channel-server 間:
 - [ ] resolveSendDestination() 実装（§2.2）
 - [ ] reply_to メンション検証（NOT_MENTIONED_IN_ORIGINAL）
 - [ ] reply_to thread_id 自動解決
-- [ ] mentions 全員の members チェック（MENTION_NOT_MEMBER）
+- [ ] mentions 対象の存在確認 + チャンネル内/外分類（DM経由push分岐）
 - [ ] NO_CONTEXT エラー追加
 - [ ] THREAD_ARCHIVED エラー追加
 - [ ] MESSAGE_NOT_FOUND エラー追加
@@ -1251,7 +1258,7 @@ daemon → channel-server 間:
 ### 異常系
 - [ ] mentions空配列 → NOT_MENTIONED エラー
 - [ ] 非メンバーチャンネルに送信 → NOT_A_MEMBER エラー
-- [ ] mentionsにチャンネル非メンバー → MENTION_NOT_MEMBER エラー
+- [ ] mentionsにチャンネル外メンバー → DM経由push（AGENT_NOT_FOUND if不存在）
 - [ ] reply_to元でメンションされていない → NOT_MENTIONED_IN_ORIGINAL エラー
 - [ ] 存在しないreply_to → MESSAGE_NOT_FOUND エラー
 - [ ] 起動直後にsend → NO_CONTEXT エラー
