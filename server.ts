@@ -1401,19 +1401,32 @@ async function routeInbound(params: {
   const isEmergency = isEmergencyMessage(content, 'chat')
   const isCeo = senderAgentId ? await isHumanAgent(senderAgentId) : !authorIsBot  // fallback: non-bot = human
 
-  // 5. Mentions filter: only push to mentioned agents (§3.15 step 4)
-  // mentions=undefined/empty → no filter (backward compat, e.g. agent-comms internal messages)
-  if (mentions && mentions.length > 0) {
-    if (!mentions.includes(receiverAgentId)) {
-      const isReply = !!replyToMessageId
-      if (!isEmergency && !isCeo && !isReply) {
-        process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not mentioned (mentions: [${mentions.join(', ')}])\n`)
-        return { delivered: false, messageId, reason: 'NOT_MENTIONED' }
-      }
+  // 5. Mentions filter (§2 Pattern A-D)
+  // DM → always push. Emergency/CEO → always push. Otherwise check mentions.
+  const isDm = resolved.type === 'dm' || resolved.channelId.startsWith('dm:')
+  if (!isDm && !isEmergency && !isCeo) {
+    // Check group mentions (@all, @dev, @org)
+    const hasGroupMention = mentions?.includes('all') ||
+      (mentions?.includes('dev') && await (async () => {
+        const client = await tryGetDb()
+        if (!client) return false
+        const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [receiverAgentId])
+        return r.rows.length > 0 && r.rows[0].agent_type === 'dev'
+      })()) ||
+      (mentions?.includes('org') && await (async () => {
+        const client = await tryGetDb()
+        if (!client) return false
+        const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [receiverAgentId])
+        return r.rows.length > 0 && r.rows[0].agent_type === 'org'
+      })())
+
+    const isIndividuallyMentioned = mentions?.includes(receiverAgentId)
+
+    if (!hasGroupMention && !isIndividuallyMentioned) {
+      process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not mentioned (mentions: [${mentions?.join(', ') ?? ''}])\n`)
+      return { delivered: false, messageId, reason: 'NOT_MENTIONED' }
     }
   }
-
-  const bypassActiveThread = isEmergency || isCeo
 
   // 6. Update last_received_context for push target (§5.2)
   await updateLastReceivedContext(receiverAgentId, resolved.channelId, resolved.threadId ?? null)
@@ -1948,6 +1961,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!dest.members.includes(agentId)) {
       await writeAuditLog('access.denied', agentId, dest.channelId, { code: 'NOT_A_MEMBER' })
       return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
+    }
+
+    // Mentions validation: existence check + channel in/out classification (§4.3 Step 3)
+    const inChannelTargets: string[] = []
+    const outChannelTargets: string[] = []
+    const client = await tryGetDb()
+    for (const mention of mentions) {
+      if (mention === 'all' || mention === 'dev' || mention === 'org') continue // group mentions
+      if (client) {
+        const r = await client.query('SELECT agent_id FROM agents WHERE agent_id = $1', [mention])
+        if (r.rows.length === 0) {
+          return { content: [{ type: 'text', text: `Error [AGENT_NOT_FOUND]: '${mention}' は登録されていません` }], isError: true }
+        }
+      }
+      if (dest.members.includes(mention)) {
+        inChannelTargets.push(mention)
+      } else {
+        outChannelTargets.push(mention)
+      }
     }
 
     // Rate limit
