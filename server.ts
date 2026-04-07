@@ -2813,10 +2813,15 @@ if (TRANSPORT_MODE === 'daemon') {
                   mentions: resolvedMentions,
                   replyToMessageId: msg.replyTo,
                   pushFn: async (pushContent, meta) => {
-                    await ctx.server.notification({
-                      method: 'notifications/claude/channel',
-                      params: { content: pushContent, meta },
-                    })
+                    // Primary: pushToChannelServer (Webhook Channel)
+                    // Fallback: ctx.server.notification (SSE direct)
+                    const pushed = await pushToChannelServer(botId, pushContent, meta)
+                    if (!pushed && ctx.transport) {
+                      await ctx.server.notification({
+                        method: 'notifications/claude/channel',
+                        params: { content: pushContent, meta },
+                      })
+                    }
                   },
                 })
               }).catch(err => {
