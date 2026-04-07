@@ -24,6 +24,7 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { DiscordAdapter } from './adapters/discord'
+import { signPayload } from './shared/hmac'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -1474,11 +1475,9 @@ async function pushToChannelServer(agentId: string, content: string, meta: Recor
   const port = r.rows[0].channel_port
   const payload = JSON.stringify({ content, meta })
 
-  // HMAC signature
+  // HMAC signature (using shared/hmac)
   const hmacSecret = process.env.HMAC_SECRET ?? ''
-  const signature = hmacSecret
-    ? `sha256=${createHmac('sha256', hmacSecret).update(payload).digest('hex')}`
-    : ''
+  const signature = hmacSecret ? signPayload(payload, hmacSecret) : ''
 
   try {
     const res = await fetch(`http://127.0.0.1:${port}/push`, {

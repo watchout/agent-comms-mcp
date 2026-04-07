@@ -55,7 +55,8 @@ const httpServer = Bun.serve({
     }
 
     try {
-      const payload = JSON.parse(body) as {
+      // Accept both PushPayload (full) and simplified format (backward compat)
+      const payload = JSON.parse(body) as Partial<PushPayload> & {
         content: string
         meta?: {
           chat_id?: string
@@ -72,17 +73,22 @@ const httpServer = Bun.serve({
         return new Response('Missing content', { status: 400 })
       }
 
+      // TODO: sequence順序検証 — §10盲点対策
+      // HTTP POSTは順序保証なし。初期実装ではsequence検証はスコープ外。
+      // 将来: PushPayload.sequenceでバッファリング+並べ替えを実装
+
       // Inject into Claude Code session via MCP notification
+      // Supports both PushPayload (full) and meta-based (simplified) formats
       await mcp.notification({
         method: 'notifications/claude/channel',
         params: {
           content: payload.content,
           meta: {
-            chat_id: payload.meta?.chat_id ?? 'agent-comms',
-            message_id: payload.meta?.message_id ?? '',
-            user: payload.meta?.user ?? 'unknown',
+            chat_id: payload.channel_id ?? payload.meta?.chat_id ?? 'agent-comms',
+            message_id: payload.message_id ?? payload.meta?.message_id ?? '',
+            user: payload.author_id ?? payload.meta?.user ?? 'unknown',
             user_id: payload.meta?.user_id ?? 'unknown',
-            ts: payload.meta?.ts ?? new Date().toISOString(),
+            ts: payload.timestamp ?? payload.meta?.ts ?? new Date().toISOString(),
             source: payload.meta?.source ?? 'agent-comms',
             ...(payload.meta?.attachments ? { attachments: payload.meta.attachments } : {}),
           },
