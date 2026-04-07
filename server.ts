@@ -877,8 +877,32 @@ async function resolveDestination(to: string, senderId: string): Promise<Resolve
 
   if (prefix === 'channel') {
     const r = await client.query('SELECT id, members, type FROM channels WHERE id = $1', [id])
-    if (r.rows.length === 0) return { error: `channel '${id}' not found`, code: 'CHANNEL_NOT_FOUND' }
-    return { type: r.rows[0].type === 'dm' ? 'dm' : 'channel', channelId: id, members: r.rows[0].members ?? [] }
+    if (r.rows.length > 0) {
+      return { type: r.rows[0].type === 'dm' ? 'dm' : 'channel', channelId: id, members: r.rows[0].members ?? [] }
+    }
+    // Fallback: check if this Discord ID is a thread and auto-register it
+    const threadInfo = await discord.fetchThreadInfo(id)
+    if (threadInfo) {
+      const parentR = await client.query('SELECT id, members FROM channels WHERE id = $1', [threadInfo.parentId])
+      if (parentR.rows.length > 0) {
+        const threadId = id // use Discord thread ID as core thread ID
+        await client.query(
+          `INSERT INTO threads (id, channel_id, title, status, created_by, created_at, updated_at)
+           VALUES ($1, $2, $3, 'open', $4, now(), now())
+           ON CONFLICT (id) DO NOTHING`,
+          [threadId, threadInfo.parentId, threadInfo.name, senderId]
+        )
+        await client.query(
+          `INSERT INTO thread_adapters (thread_id, platform, external_id)
+           VALUES ($1, 'discord', $2)
+           ON CONFLICT (thread_id, platform) DO NOTHING`,
+          [threadId, id]
+        )
+        process.stderr.write(`agent-comms: auto-registered Discord thread ${id} (parent: ${threadInfo.parentId})\n`)
+        return { type: 'thread', channelId: threadInfo.parentId, threadId, members: parentR.rows[0].members ?? [] }
+      }
+    }
+    return { error: `channel '${id}' not found`, code: 'CHANNEL_NOT_FOUND' }
   }
 
   if (prefix === 'agent') {

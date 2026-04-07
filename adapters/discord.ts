@@ -267,6 +267,18 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     } catch { return undefined }
   }
 
+  /** Fetch thread info from Discord API — returns parent channel ID if the given ID is a thread */
+  async fetchThreadInfo(discordId: string): Promise<{ parentId: string; name: string } | null> {
+    if (!this.client) return null
+    try {
+      const ch = await this.client.channels.fetch(discordId)
+      if (!ch || !ch.isThread()) return null
+      const parentId = ch.parentId
+      if (!parentId) return null
+      return { parentId, name: ch.name ?? '' }
+    } catch { return null }
+  }
+
   /** Resolve core thread ID → Discord thread ID via thread_adapters */
   async resolveThreadToDiscord(coreThreadId: string): Promise<string | undefined> {
     if (!this.dbQuery) return undefined
