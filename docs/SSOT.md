@@ -227,23 +227,43 @@ interface AccessConfig {
 
 ### 4.2 メッセージルーティング
 
+> 詳細仕様: docs/channel-thread-control-spec.md
+
+#### 設計原則
+1. botが宛先を選択する手段を物理的に持たない
+2. 受信した場所に返信する（Discordのデフォルト動作）
+3. 自発的発言（cron等）はCLIでchannel/thread必須指定
+4. 全制御はコード側で強制。CLAUDE.mdルールに依存しない
+
 #### Outbound（bot → 外部）
-1. botがsend()ツールで送信
-2. resolveDestination()でチャンネル解決 + membersチェック
-3. レート制限 / ループ検出 / 重複排除
-4. DB INSERT（agent_messages）
-5. resolveDeliveryTargets()で配信対象決定（6ステップフィルタ）
-6. push通知（sendInboxSignal）+ UIアダプター転送
+1. botがsend(mentions, content, reply_to?)で送信 — **toパラメータなし**
+2. 宛先自動決定:
+   - reply_toあり → 元メッセージのchannel_id/thread_idに送信
+   - reply_toなし → last_received_channel/threadに送信（警告付き）
+   - コンテキストなし → NO_CONTEXTエラー
+3. reply_toメンション検証（NOT_MENTIONED_IN_ORIGINAL）
+4. mentions全員のmembersチェック（MENTION_NOT_MEMBER）
+5. レート制限 / ループ検出
+6. DB INSERT + pg_notify + Discord投稿 + push配信
 
 #### Inbound（外部 → bot）
-1. UIアダプターがメッセージ受信（gate()でaccess制御）
-2. routeInbound()でコアRouterに投入
-3. resolveInboundChannel()でチャンネル解決 + members取得
-4. DB INSERT（常に保存、配信判定に関わらず）
-5. membersチェック（受信botがメンバーでなければdrop）
-6. 緊急/CEO例外判定（emergency / !stop / 送信者がhuman → active_thread無視）
-7. active_threadフィルタ（focus中は該当thread以外をpush抑制、DB保存のみ）
-8. pushFn()でセッションに注入
+1. daemon Per-Bot Discord ClientがDiscord Gatewayで受信
+2. Discord形式→UnifiedMessage変換（メンション解決含む）
+3. routeInbound()（純粋関数）で配信判定:
+   - DM → 無条件push
+   - 緊急/CEO → 全員push
+   - observer_mode → drop
+   - グループメンション（@all, @dev, @org）→ 該当push
+   - 個別メンション or reply_to元送信者 → push
+   - それ以外 → drop（DB保存のみ）
+4. DB INSERT（全メッセージ、フィルタ結果に関わらず）
+5. push対象botのlast_received_channel/thread更新
+6. push対象botにのみpushToChannelServer()で配信
+
+#### 廃止された機能
+- ~~active_thread~~ → last_received_contextに置き換え
+- ~~focus/unfocusツール~~ → 不要（宛先自動決定）
+- ~~sendのtoパラメータ~~ → 不要（宛先自動決定）
 
 ### 4.3 未読管理
 
@@ -506,20 +526,24 @@ claude --dangerously-load-development-channels server:agent-com-bridge \
 
 ---
 
-## 9. MCP管理ツール（オプション）
+## 9. MCPツール
 
-統合プラグインに同梱するMCPツール。通信ではなく管理用途。
+### 9.1 send（旧send_message）
 
-### 9.1 send_message
+> botが宛先を選択する手段を持たない。宛先はコアRouterが自動決定。
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|------|------|------|
-| to | string | Yes | 宛先エージェントID |
-| channel | string | Yes | チャンネル名 |
-| content | string | Yes | メッセージ本文 |
-| message_type | enum | No | instruction / report / approval / chat |
-| reply_to | string | No | 返信先メッセージID |
-| depth | number | No | メッセージチェーン深度 |
+| mentions | string[] | Yes | push通知先agent_id配列（空配列は拒否） |
+| content | string | Yes | メッセージ本文（50,000文字上限） |
+| reply_to | string | No | 返信先メッセージID（UUID） |
+
+**宛先決定ロジック（コアRouter内部）:**
+1. reply_toあり → 元メッセージのchannel_id/thread_idに送信
+2. reply_toなし → last_received_channel/threadに送信（警告記録）
+3. コンテキストなし → NO_CONTEXTエラー
+
+**~~toパラメータは廃止~~** — botは宛先を指定できない。受信した場所に返す。
 
 ### 9.2 fetch_messages
 
