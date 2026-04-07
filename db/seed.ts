@@ -261,8 +261,11 @@ async function seed() {
     }
   }
 
-  // Drop existing channels/channel_adapters and re-seed (preserve DM channels)
-  console.log('Clearing existing channel data (preserving DM channels)...')
+  // Drop existing data and re-seed (preserve DM channels)
+  // Order: thread_adapters → threads → channel_adapters → channels (FK dependency)
+  console.log('Clearing existing channel/thread data (preserving DM channels)...')
+  await db.query('DELETE FROM thread_adapters')
+  await db.query('DELETE FROM threads')
   await db.query('DELETE FROM channel_adapters WHERE channel_id IN (SELECT id FROM channels WHERE type != $1)', ['dm'])
   await db.query("DELETE FROM channels WHERE type != $1", ['dm'])
 
@@ -296,8 +299,6 @@ async function seed() {
 
   // Seed threads and thread_adapters
   let threadCount = 0
-  await db.query('DELETE FROM thread_adapters')
-  await db.query('DELETE FROM threads')
 
   for (const th of seedThreads) {
     await db.query(
