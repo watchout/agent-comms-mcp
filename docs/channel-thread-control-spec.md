@@ -17,20 +17,580 @@
 
 ---
 
-## 2. sendツール仕様
+## 2. メッセージパターン別制御仕様
 
-### 2.1 パラメータ定義
+### 2.1 パターン一覧
+
+```
+全メッセージは以下の5パターンに分類される。
+各パターンでコード制御の方法が異なる。
+LLMの判断は一切介在しない。
+
+パターン                   宛先決定          push対象           LLM判断
+─────────────────────────────────────────────────────────────────────
+A. メンションなし投稿       自動（受信場所）   なし（DB保存のみ）  ゼロ
+B. メンション付き投稿       自動（受信場所）   メンション対象のみ  ゼロ
+C. リプライ（第三者なし）   自動（元msg場所）  mentions対象のみ    ゼロ
+D. リプライ + 第三者メンション 自動（元msg場所） mentions対象のみ   ゼロ
+E. 自発的発言（cron等）     CLI指定（必須）   メンション対象のみ  ゼロ
+```
+
+### 2.2 パターンA: メンションなし投稿
+
+```
+Discord/Telegramの標準動作:
+  チャンネルに投稿 → 全メンバーに「表示」される → ただし「通知」は飛ばない
+
+agent-comの動作:
+  「表示」= DB保存（全員がhistoryで見える）
+  「通知」= push注入（botのセッションに届く）
+  → メンションなし = DB保存のみ。pushしない
+
+理由:
+  botにpush = 必ず反応する = コンテキスト消費 + 不要な行動
+  人間なら「スクロールして見る」ができるが、botにはその概念がない
+  push = 存在を知る = 反応する → 不要なpushは害
+
+処理:
+  1. DB INSERT（メッセージは永続化される）
+  2. pushしない（どのbotにも通知されない）
+  3. 送信者がhumanの場合 → システム警告を返す:
+     「⚠️ メンションがないためbotには通知されていません。
+      特定のbotに通知: @cto 等を付けてください。
+      全員に通知: @all を使ってください」
+  4. 送信者がbotの場合 → 発生しない
+     （sendツールのmentions必須パラメータで構造的に防止）
+```
+
+```typescript
+// インバウンド処理（daemon onMessage内）
+// routeInbound()のStep 4でdrop
+if (!isMentioned && !isReplyTarget) {
+  dropTargets[memberId] = "NOT_MENTIONED";
+  continue;
+}
+
+// human送信者への警告（routeInbound完了後）
+if (result.pushTargets.length === 0 && senderAgent.agent_type === "human") {
+  await pushSystemWarning(msg.author_id, 
+    "⚠️ メンションがないためbotには通知されていません。\n" +
+    "特定のbotに通知: @cto 等を付けてください。\n" +
+    "全員に通知: @all を使ってください"
+  );
+}
+```
+
+### 2.3 パターンB: メンション付き投稿
+
+```
+Discord/Telegramの標準動作:
+  @user付きで投稿 → その人に通知が飛ぶ → 他の人にも表示はされる
+
+agent-comの動作:
+  @agent_id付き → メンションされたbotにだけpush
+  他のメンバー → DB保存のみ（historyで取得可能）
+
+処理:
+  1. DB INSERT（全メンバー共通、1行）
+  2. メンションされたbotにだけpush
+  3. 他のメンバーにはpushしない
+  4. グループメンション対応:
+     @all → チャンネル全メンバーにpush
+     @dev → agent_type="dev" の全メンバーにpush
+     @org → agent_type="org" の全メンバーにpush
+```
+
+```typescript
+// インバウンド処理（routeInbound内）
+
+// グループメンション
+if (hasGroupMention(msg.mentions, agent)) {
+  pushTargets.push(memberId);
+  continue;
+}
+
+// 個別メンション
+if (msg.mentions.includes(memberId)) {
+  pushTargets.push(memberId);
+  continue;
+}
+
+// メンションされていない → DB保存のみ
+dropTargets[memberId] = "NOT_MENTIONED";
+```
+
+### 2.4 パターンC: リプライ（第三者なし）
+
+```
+Discord/Telegramの標準動作:
+  メッセージに返信 → 元送信者に通知 → 元メッセージの引用が表示される
+
+agent-comの動作:
+  reply_to指定 → 「どこに送るか」を決める（元メッセージの場所）
+  mentions指定 → 「誰に送るか」を決める（常に必須）
+  引用テキスト → push注入時に自動付与（500文字まで）
+  → システムが勝手にpush対象を追加しない
+
+処理:
+  1. mentions配列の対象にのみpush（元送信者の自動追加なし）
+  2. 元メッセージの場所（channel_id/thread_id）を宛先に自動設定
+  3. 引用テキストをpush注入時に先頭に付与
+  4. mentions空配列は常に拒否（reply_toの有無に関わらず）
+
+例:
+  Hotel Dev「JWT実装完了しました」(msg-001, スレッドA)
+  CTO → send(reply_to: "msg-001", mentions: ["hotel-dev"], content: "了解")
+  → mentions必須: ["hotel-dev"]
+  → push対象 = ["hotel-dev"]（明示された対象のみ）
+  → 宛先 = スレッドA（自動）
+
+  Hotel Devに届くもの:
+    > [引用 from:hotel-dev at:2026-04-08T10:30:00]
+    > JWT実装完了しました
+    
+    了解
+```
+
+```typescript
+// mentions は常に必須。例外なし。
+if (params.mentions.length === 0) {
+  return error("NOT_MENTIONED", 
+    "mentions配列にagent_idを1つ以上指定してください");
+}
+// reply_to は「どこに送るか」を決めるだけ
+// 「誰に送るか」は常にmentionsで明示
+```
+
+### 2.5 パターンD: リプライ + 第三者メンション
+
+```
+Discord/Telegramの標準動作:
+  返信しつつ@別の人 → 元送信者に通知 + 第三者にも通知
+  ただしDiscordでは第三者に元メッセージの引用が届かない（文脈が切れる）
+
+agent-comの動作（Discordより優れている）:
+  reply_to + mentions → mentionsに指定された対象のみpush
+  全員に引用テキストが付く → 第三者にも文脈が明確に届く
+  → 元送信者の自動追加はしない
+  → 元送信者にも通知したければmentionsに含める
+
+処理:
+  1. mentions配列の対象にのみpush（元送信者の自動追加なし）
+  2. 全push対象に引用テキスト付きでpush注入
+  3. 宛先 = 元メッセージの場所（自動）
+
+例1: 第三者だけに聞く（元送信者には通知しない）
+  Hotel Dev「JWT実装完了しました」(msg-001, スレッドA)
+  CTO → send(reply_to: "msg-001", mentions: ["arc"], content: "レビューして")
+  → push対象 = ["arc"]（明示された対象のみ）
+  → Hotel Devにはpushされない（DB保存のみ）
+  → 会話が分岐しない ✅
+
+  ARCに届くもの:
+    > [引用 from:hotel-dev at:2026-04-08T10:30:00]
+    > JWT実装完了しました
+    
+    レビューして
+    → 何のレビューか文脈が明確 ✅
+
+例2: 元送信者にも第三者にも通知する（明示的に指定）
+  CTO → send(reply_to: "msg-001", mentions: ["arc", "hotel-dev"], content: "レビューして。結果待ってて")
+  → push対象 = ["arc", "hotel-dev"]（両方明示）
+  → 意図が明確 ✅
+```
+
+```
+設計判断の理由:
+
+  元送信者を自動追加すると:
+    Hotel Dev → 「修正必要ですか？」（会話1）
+    ARC → 「セキュリティに問題あり」（会話2）
+    → 2つの会話が同時発生 → コンテキスト消費2倍
+    → 会話が混在して管理不能
+
+  mentionsで明示すると:
+    「誰に送るか」はLLMが判断
+    「システムが勝手に追加しない」
+    → 意図した相手にだけ届く
+    → 会話が制御可能
+```
+
+### 2.6 パターンE: 自発的発言（cron/定期タスク）
+
+```
+Discord/Telegramの標準動作:
+  botが自発的にチャンネルに投稿 → そのチャンネルに表示される
+
+agent-comの動作:
+  sendツールでは送信できない（受信コンテキストがないためNO_CONTEXTエラー）
+  agent-com notify CLI で channel/thread を必須指定して送信
+  → botのLLMが宛先を選ぶ手段が物理的にない
+
+処理:
+  1. CLIで --channel, --mentions 必須（--thread は任意）
+  2. 全バリデーション実行（members, mentions全員のmembersチェック等）
+  3. DB INSERT + Discord投稿 + push対象にHTTP POST
+
+例:
+  毎朝9時にCTOに日次レポート:
+    agent-com notify \
+      --agent-id "daily-reporter" \
+      --channel "hotel-kanri" \
+      --thread "daily-reports" \
+      --mentions "cto" \
+      --content "日次レポート: テスト全件パス"
+```
+
+### 2.7 パターン比較まとめ
+
+```
+パターン       mentions    reply_to   宛先決定        push対象
+──────────────────────────────────────────────────────────────────
+A. メンションなし  なし       なし      —              なし（DB保存のみ）
+B. メンション付き  あり       なし      受信場所（自動） mentions対象
+C. リプライのみ   あり（必須） あり      元msg場所（自動） mentions対象（自動追加なし）
+D. リプライ+第三者 あり（必須） あり      元msg場所（自動） mentions対象（自動追加なし）
+E. cron/CLI      あり       なし      CLI指定（必須）  mentions対象
+
+全パターン共通:
+  ✅ botが宛先を選択する手段がない
+  ✅ mentionsは常に必須。例外なし
+  ✅ reply_toは「どこに送るか」だけ。「誰に送るか」はmentionsで明示
+  ✅ システムが勝手にpush対象を追加しない
+  ✅ LLM判断ゼロ（宛先・配信制御）
+  ✅ DB保存は全パターンで実行（監査ログ）
+```
+
+### 2.8 引用テキスト付与仕様
+
+```typescript
+// push注入時に引用を先頭に付与（reply_toがある場合のみ）
+function formatPushContent(msg: UnifiedMessage, original?: Message): string {
+  let content = "";
+  
+  if (original) {
+    // 引用テキスト（500文字でtruncate）
+    const quote = original.content.length > 500 
+      ? original.content.substring(0, 497) + "..." 
+      : original.content;
+    content += `> [引用 from:${original.author_id} at:${original.created_at}]\n`;
+    content += `> ${quote.split("\n").join("\n> ")}\n\n`;
+  }
+  
+  content += msg.content;
+  
+  // 添付ファイルがあれば末尾に追加
+  if (msg.attachments && msg.attachments.length > 0) {
+    content += "\n\n📎 添付ファイル:\n";
+    for (const att of msg.attachments) {
+      content += `- ${att.filename} (${formatBytes(att.size_bytes)}): ${att.path}\n`;
+    }
+  }
+  
+  return content;
+}
+```
+
+```
+引用付与の効果:
+  Discord標準: 第三者には元メッセージの引用が届かない → 文脈断絶
+  agent-com:   全push対象に引用テキストが届く → 文脈が完全に保持される
+
+  これはDiscordより優れた動作。
+  複数の話題が流れていても、引用付きなら「何についての返信か」が明確。
+```
+
+---
+
+## 3. メンション制御仕様
+
+> このセクションはメンション固有のルールを定義する。
+> チャンネル/スレッド制御は§2（パターン別）と§4（sendツール）に記載。
+> 重複を避けるため、ここではメンションの「形式・解決・配信判定」のみ扱う。
+
+### 3.1 agent_idをLLMが知るスクリプト制御
+
+```
+問題:
+  botが "cto", "arc" というagent_idを知らなければメンションできない
+  CLAUDE.mdに書く → ベストエフォート → 忘れる → 間違える
+
+解決: 2つの仕組みで確実に知らせる
+
+  仕組み1: sendツールのdescriptionに動的注入
+    → MCP server起動時にagentsテーブルから一覧取得
+    → sendツールのdescriptionに埋め込み
+    → LLMがツールスキーマを読んだ時点で必ず知る
+    → CLAUDE.md依存ではなくツールスキーマで強制
+
+  仕組み2: agentsツールで最新一覧を取得
+    → Session Boot時に agents() を呼ぶ
+    → agent-memoryのSessionStart hookで自動実行
+    → 起動後にbotが追加された場合もこちらで取得
+```
+
+```typescript
+// sendツール定義時にagent_id一覧を動的注入
+const agentList = await db.query(
+  "SELECT agent_id, display_name FROM agents WHERE status != 'offline'"
+);
+const agentListStr = agentList
+  .map(a => `${a.agent_id} (${a.display_name})`)
+  .join(", ");
+
+server.tool("send", {
+  description:
+    `メッセージを送信します。\n` +
+    `mentions には以下のagent_idを指定してください:\n` +
+    `${agentListStr}\n` +
+    `グループ: all（全員）, dev（開発者全員）, org（組織層全員）\n` +
+    `最新一覧は agents() ツールで確認できます`,
+  params: {
+    mentions: { type: "array", items: { type: "string" } },
+    content: { type: "string" },
+    reply_to: { type: "string", optional: true },
+  }
+});
+```
+
+### 3.2 メンション形式の変換（コア層全自動）
+
+```
+原則:
+  botは agent_id 形式のみ使用（"cto", "arc", "hotel-dev"）
+  プラットフォーム固有形式を知る必要がない
+  変換はコア層（adapter）が全自動で実行
+
+送信時（outbound: bot → Discord）:
+  bot: send(mentions: ["cto"], content: "@cto レビューして")
+    → adapter:
+      1. "cto" → agent_adapters で mention_format 取得
+         → "<@1485599598259994635>"
+      2. content内の "@cto" を "<@1485599598259994635>" に変換
+      3. Discord APIに送信
+    → botは agent_id だけ知っていればいい
+
+受信時（inbound: Discord → bot）:
+  Discord: "<@1485599598259994635>" を含むメッセージ
+    → adapter:
+      1. 正規表現 /<@!?(\d+)>/g で全Discord IDを抽出
+      2. agent_adapters で external_id → agent_id に変換
+         → "1485599598259994635" → "cto"
+      3. UnifiedMessage.mentions = ["cto"]
+    → botには agent_id 形式でしか届かない
+
+テキストメンションの検出（@all等）:
+  content内の "@all", "@dev", "@org" も検出してmentionsに追加
+```
+
+```typescript
+// 受信時のメンション抽出（daemon内）
+async function extractMentions(msg: DiscordMessage): Promise<string[]> {
+  const mentions: string[] = [];
+  
+  // Discord <@userId> パターンを全て抽出
+  const discordMentions = msg.content.matchAll(/<@!?(\d+)>/g);
+  for (const match of discordMentions) {
+    const discordUserId = match[1];
+    const agent = await db.query(
+      "SELECT agent_id FROM agents WHERE discord_user_id = $1",
+      [discordUserId]
+    );
+    if (agent) {
+      mentions.push(agent.agent_id);
+    }
+    // 解決できないIDはスキップ（未登録bot/ユーザー）
+  }
+  
+  // グループメンション検出
+  if (msg.content.includes("@all")) mentions.push("all");
+  if (msg.content.includes("@dev")) mentions.push("dev");
+  if (msg.content.includes("@org")) mentions.push("org");
+  
+  return mentions;
+}
+```
+
+### 3.3 古い形式の拒否（fuzzy解決を廃止）
+
+```
+原則:
+  正しいagent_id形式（完全一致）のみ許可
+  古い形式・誤った形式は自動修正しない
+  エラーで拒否 + 正しいagent_id一覧を返す + 修正送信を促す
+
+理由:
+  fuzzy解決（自動修正）→ LLMが間違った形式を使い続ける
+  エラー通知 → LLMが正しい形式を学習する
+  初回だけ1往復余計にかかるが、2回目以降は発生しない
+
+拒否される形式の例:
+  "&arc"           → INVALID_MENTION_FORMAT（旧内部タグ）
+  "@IYASAKA ARC"   → INVALID_MENTION_FORMAT（表示名）
+  "@IYASAKA CTO"   → INVALID_MENTION_FORMAT（表示名）
+  "<@148836...>"   → INVALID_MENTION_FORMAT（Discord形式を直接使用）
+
+許可される形式:
+  "arc"            → OK（agent_id完全一致）
+  "cto"            → OK
+  "hotel-dev"      → OK
+  "all"            → OK（グループメンション予約語）
+  "dev"            → OK（グループメンション予約語）
+  "org"            → OK（グループメンション予約語）
+```
+
+```typescript
+// メンションバリデーション（sendツール内）
+async function validateMentions(mentions: string[]): Promise<string[] | Error> {
+  const groupMentions = ["all", "dev", "org"];
+  const resolved: string[] = [];
+  
+  for (const mention of mentions) {
+    // グループメンションは予約語として許可
+    if (groupMentions.includes(mention)) {
+      resolved.push(mention);
+      continue;
+    }
+    
+    // agent_idとして完全一致のみ許可（fuzzy解決しない）
+    const agent = await db.getAgent(mention);
+    
+    if (!agent) {
+      const agentList = await db.query(
+        "SELECT agent_id, display_name FROM agents"
+      );
+      return error("INVALID_MENTION_FORMAT",
+        `'${mention}' は正しいagent_id形式ではありません。\n` +
+        `正しいagent_id一覧:\n` +
+        agentList.map(a => `  ${a.agent_id} (${a.display_name})`).join("\n") +
+        `\n正しいagent_idで再送してください`
+      );
+    }
+    
+    resolved.push(agent.agent_id);
+  }
+  
+  return resolved;
+}
+```
+
+### 3.4 グループメンション
+
+```
+予約語:
+  @all → チャンネル全メンバーにpush
+  @dev → agent_type="dev" の全メンバーにpush
+  @org → agent_type="org" の全メンバーにpush
+
+処理（routeInbound内）:
+  mentions配列に "all", "dev", "org" が含まれるか判定
+  → 該当するagent_typeのメンバーをpush対象に追加
+```
+
+```typescript
+function hasGroupMention(mentions: string[], agent: Agent): boolean {
+  if (mentions.includes("all")) return true;
+  if (mentions.includes("dev") && agent.agent_type === "dev") return true;
+  if (mentions.includes("org") && agent.agent_type === "org") return true;
+  return false;
+}
+```
+
+### 3.5 チャンネル外メンバーへのメンション
+
+```
+原則:
+  agentsテーブルに存在すればメンション可能
+  チャンネルのmembersに限定しない
+
+処理:
+  mentions対象がチャンネルメンバーの場合 → チャンネル内でpush（通常動作）
+  mentions対象がチャンネル外の場合 → DM経由でpush（チャンネル情報 + 引用付き）
+
+DM経由push時に届く内容:
+  📨 #dev-arc でメンションされました（from: cto）
+  > マーケ観点の意見ほしい
+  → reply_to: 元メッセージID
+  → 返信先: #dev-arc（自動）
+
+チャンネル外メンバーの返信:
+  reply_to経由の一時投稿許可
+  → メンションされた場合のみ元チャンネルに返信可能
+  → 自発的にそのチャンネルに送信することはできない
+```
+
+### 3.6 botのメンションなし送信
+
+```
+原則:
+  botからのメンションなし送信 → sendツールが拒否（DB保存もしない）
+  humanからのメンションなし投稿 → DB保存のみ + 警告
+
+理由:
+  sendツールのmentionsパラメータが必須なので
+  botのメンションなし送信は構造的に発生しない
+  humanはDiscord UIから直接投稿するためsendツールを通らない
+  → inbound経由でDB保存 + human送信者に警告返却
+```
+
+### 3.7 メンション方式 決定事項まとめ
+
+```
+1. agent_idをLLMが知るスクリプト制御
+   → sendツールのdescriptionに動的注入（agentsテーブルから一覧取得）
+   → Session Boot時にagents()で取得
+   → CLAUDE.md依存ではなくツールスキーマで強制
+
+2. 変換はコア層が全自動
+   → agent_id ↔ プラットフォーム形式
+
+3. 古い形式はエラーで拒否（fuzzy解決を廃止）
+   → INVALID_MENTION_FORMAT エラー
+   → 正しいagent_id一覧を返して修正送信を促す
+   → LLMが正しい形式を学習する
+
+4. mentions必須
+   → 空配列 + reply_toなし → NOT_MENTIONED エラー
+   → 空配列 + reply_toあり → NOT_MENTIONED エラー（例外なし）
+
+5. リプライ時は元送信者を自動追加しない
+   → mentionsで明示した対象のみpush
+   → システムが勝手にpush対象を追加しない
+
+6. botのメンションなし送信は基本NG
+   → sendツールが拒否（DB保存もしない）
+   → humanのメンションなし → DB保存 + 警告
+
+7. チャンネル外メンバーへのメンション → 許可
+   → agentsテーブルに存在すればOK
+   → DM経由でpush
+
+8. グループメンション
+   → @all / @dev / @org
+```
+
+---
+
+## 4. sendツール仕様
+
+### 4.1 パラメータ定義
 
 ```typescript
 // toパラメータは存在しない。botが宛先を指定できない
 send({
-  mentions: string[],      // 必須。空配列は拒否（NOT_MENTIONED）
+  mentions: string[],      // 必須。空配列は常に拒否。例外なし
   content: string,         // 必須。50,000文字上限
-  reply_to?: string,       // 任意。元メッセージID
+  reply_to?: string,       // 任意。元メッセージID（「どこに送るか」を決めるだけ）
 })
+
+// ルール:
+//   mentions は常に必須。例外なし。
+//   reply_to は「どこに送るか」を決めるだけ。
+//   「誰に送るか」は常に mentions で明示。
+//   システムが勝手にpush対象を追加しない。
 ```
 
-### 2.2 宛先決定ロジック（コアRouter内部）
+### 4.2 宛先決定ロジック（コアRouter内部）
 
 ```typescript
 async function resolveSendDestination(
@@ -87,10 +647,16 @@ async function resolveSendDestination(
 }
 ```
 
-### 2.3 送信実行（バリデーション付き）
+### 4.3 送信実行（バリデーション付き）
 
 ```typescript
 async function handleSend(sender: Agent, params: SendParams) {
+  // Step 0: mentions必須チェック（常に必須。例外なし）
+  if (!params.mentions || params.mentions.length === 0) {
+    return error("NOT_MENTIONED",
+      "mentions配列にagent_idを1つ以上指定してください。例外なし。");
+  }
+
   // Step 1: 宛先決定（LLM判断なし）
   const dest = await resolveSendDestination(sender, params);
   if (dest.error) return dest; // エラーフィードバックをpush
@@ -107,11 +673,18 @@ async function handleSend(sender: Agent, params: SendParams) {
     return error("NOT_A_MEMBER", `あなたはチャンネル '${dest.channel_id}' のメンバーではありません`);
   }
 
-  // Step 3: mentions全員が投稿先チャンネルのmembersか検証
+  // Step 3: mentions対象の存在確認 + 配信先分類
+  const inChannelTargets = [];
+  const outChannelTargets = [];
   for (const mention of params.mentions) {
-    if (!channel.members.includes(mention)) {
-      return error("MENTION_NOT_MEMBER",
-        `メンション先 '${mention}' はチャンネル '${dest.channel_id}' のメンバーではありません`);
+    const agent = await db.getAgent(mention);
+    if (!agent) {
+      return error("AGENT_NOT_FOUND", `'${mention}' は登録されていません`);
+    }
+    if (channel.members.includes(mention)) {
+      inChannelTargets.push(mention);  // チャンネル内push
+    } else {
+      outChannelTargets.push(mention); // DM経由push
     }
   }
 
@@ -183,9 +756,9 @@ async function handleSend(sender: Agent, params: SendParams) {
 
 ---
 
-## 3. 受信制御（routeInbound）
+## 5. 受信制御（routeInbound）
 
-### 3.1 routeInbound()は純粋関数（副作用なし）
+### 5.1 routeInbound()は純粋関数（副作用なし）
 
 ```typescript
 interface RouteResult {
@@ -246,7 +819,7 @@ function routeInbound(msg: UnifiedMessage, channel: Channel, agents: Agent[]): R
 }
 ```
 
-### 3.2 緊急メッセージの判定（決定論的）
+### 5.2 緊急メッセージの判定（決定論的）
 
 ```typescript
 function isEmergency(msg: UnifiedMessage): boolean {
@@ -256,7 +829,7 @@ function isEmergency(msg: UnifiedMessage): boolean {
 }
 ```
 
-### 3.3 グループメンションの判定
+### 5.3 グループメンションの判定
 
 ```typescript
 function hasGroupMention(mentions: string[], agent: Agent): boolean {
@@ -267,7 +840,7 @@ function hasGroupMention(mentions: string[], agent: Agent): boolean {
 }
 ```
 
-### 3.4 呼び出し元（daemon onMessage）
+### 5.4 呼び出し元（daemon onMessage）
 
 ```typescript
 // daemon側: フィルタ完了前にpushしない
@@ -325,9 +898,9 @@ client.on("messageCreate", async (msg) => {
 
 ---
 
-## 4. agent-com notify CLI（cron/自発的発言用）
+## 6. agent-com notify CLI（cron/自発的発言用）
 
-### 4.1 コマンド定義
+### 6.1 コマンド定義
 
 ```typescript
 program
@@ -431,7 +1004,7 @@ program
   });
 ```
 
-### 4.2 cron使用例
+### 6.2 cron使用例
 
 ```bash
 # 毎朝9時にCTOに日次レポート
@@ -452,9 +1025,9 @@ program
 
 ---
 
-## 5. last_received_context管理
+## 7. last_received_context管理
 
-### 5.1 DBスキーマ
+### 7.1 DBスキーマ
 
 ```sql
 ALTER TABLE agents ADD COLUMN last_received_channel TEXT;
@@ -463,7 +1036,7 @@ ALTER TABLE agents ADD COLUMN last_received_thread TEXT;
 -- daemon再起動でも消失しない（DB永続化）
 ```
 
-### 5.2 更新タイミング
+### 7.2 更新タイミング
 
 ```
 push対象として選ばれた時のみ更新:
@@ -475,7 +1048,7 @@ pushされなかった場合は更新しない:
   → 最後にpushされた場所が保持される
 ```
 
-### 5.3 起動直後の対策
+### 7.3 起動直後の対策
 
 ```
 botが起動直後、last_received_channel = NULL の場合:
@@ -503,15 +1076,15 @@ ALTER TABLE agents ADD COLUMN default_channel TEXT REFERENCES channels(id);
 
 ---
 
-## 6. エラーフィードバック仕様
+## 8. エラーフィードバック仕様
 
-### 6.1 全エラーコード（sendツール用）
+### 8.1 全エラーコード（sendツール用）
 
 ```
 CHANNEL_NOT_FOUND       チャンネルが存在しない
 THREAD_NOT_FOUND        スレッドが存在しない
 NOT_A_MEMBER            送信者がメンバーでない
-MENTION_NOT_MEMBER      メンション先がチャンネルメンバーでない
+AGENT_NOT_FOUND         メンション先がagentsテーブルに存在しない
 NOT_MENTIONED           メンション配列が空
 NOT_MENTIONED_IN_ORIGINAL  reply_to元メッセージでメンションされていない
 MESSAGE_NOT_FOUND       reply_toのメッセージIDが存在しない
@@ -524,7 +1097,7 @@ NO_CONTEXT              受信コンテキストなし（cron用CLIを使え）
 THREAD_ARCHIVED         スレッドがアーカイブ済み
 ```
 
-### 6.2 フィードバック配信
+### 8.2 フィードバック配信
 
 ```
 全エラーで送信者にフィードバックをpush注入:
@@ -536,7 +1109,7 @@ THREAD_ARCHIVED         スレッドがアーカイブ済み
 
 ---
 
-## 7. 削除する機能（不要になったもの）
+## 9. 削除する機能（不要になったもの）
 
 ```
 ❌ agents.active_thread カラム → 削除
@@ -551,7 +1124,7 @@ THREAD_ARCHIVED         スレッドがアーカイブ済み
 
 ---
 
-## 8. 追加する機能
+## 10. 追加する機能
 
 ```
 ✅ agents.last_received_channel カラム
@@ -565,7 +1138,7 @@ THREAD_ARCHIVED         スレッドがアーカイブ済み
 ✅ daemon起動通知（last_received_context初期化）
 ✅ routeInbound()の純粋関数化（pushTargetsを返すだけ）
 ✅ NO_CONTEXT エラーコード
-✅ MENTION_NOT_MEMBER エラーコード
+✅ チャンネル外メンション → DM経由push分岐
 ✅ THREAD_ARCHIVED エラーコード
 ✅ MESSAGE_NOT_FOUND エラーコード
 ✅ NOT_MENTIONED_IN_ORIGINAL エラーコード
@@ -573,9 +1146,9 @@ THREAD_ARCHIVED         スレッドがアーカイブ済み
 
 ---
 
-## 9. セキュリティ対策
+## 11. セキュリティ対策
 
-### 9.1 CLI bashバイパス防止
+### 11.1 CLI bashバイパス防止
 
 ```
 botがbash経由で agent-com notify を実行する場合:
@@ -585,7 +1158,7 @@ botがbash経由で agent-com notify を実行する場合:
   → sendツールと同じ安全性
 ```
 
-### 9.2 .envファイル保護
+### 11.2 .envファイル保護
 
 ```bash
 # .envのパーミッションをowner onlyに設定
@@ -603,7 +1176,7 @@ chmod 600 .env
 }
 ```
 
-### 9.3 channel-server HMAC認証
+### 11.3 channel-server HMAC認証
 
 ```
 daemon → channel-server 間:
@@ -615,7 +1188,7 @@ daemon → channel-server 間:
 
 ---
 
-## 10. 実装チェックリスト
+## 12. 実装チェックリスト
 
 ### DB変更
 - [ ] agents に last_received_channel カラム追加
@@ -629,7 +1202,7 @@ daemon → channel-server 間:
 - [ ] resolveSendDestination() 実装（§2.2）
 - [ ] reply_to メンション検証（NOT_MENTIONED_IN_ORIGINAL）
 - [ ] reply_to thread_id 自動解決
-- [ ] mentions 全員の members チェック（MENTION_NOT_MEMBER）
+- [ ] mentions 対象の存在確認 + チャンネル内/外分類（DM経由push分岐）
 - [ ] NO_CONTEXT エラー追加
 - [ ] THREAD_ARCHIVED エラー追加
 - [ ] MESSAGE_NOT_FOUND エラー追加
@@ -668,7 +1241,7 @@ daemon → channel-server 間:
 
 ---
 
-## 11. テストケース
+## 13. テストケース
 
 ### 正常系
 - [ ] スレッド内受信 → sendで同じスレッドに送信される
@@ -685,7 +1258,7 @@ daemon → channel-server 間:
 ### 異常系
 - [ ] mentions空配列 → NOT_MENTIONED エラー
 - [ ] 非メンバーチャンネルに送信 → NOT_A_MEMBER エラー
-- [ ] mentionsにチャンネル非メンバー → MENTION_NOT_MEMBER エラー
+- [ ] mentionsにチャンネル外メンバー → DM経由push（AGENT_NOT_FOUND if不存在）
 - [ ] reply_to元でメンションされていない → NOT_MENTIONED_IN_ORIGINAL エラー
 - [ ] 存在しないreply_to → MESSAGE_NOT_FOUND エラー
 - [ ] 起動直後にsend → NO_CONTEXT エラー
@@ -711,3 +1284,6 @@ daemon → channel-server 間:
 | 日付・時刻 | 内容 |
 |-----------|------|
 | 2026-04-08 | 初版: チャンネル・スレッド制御仕様（active_thread廃止、sendのto廃止、宛先自動決定、notify CLI、全テストケース） |
+| 2026-04-08 | 追記: メッセージパターン別制御仕様 §2（5パターン、引用テキスト付与） |
+| 2026-04-08 | 改訂: パターンC/Dの元送信者自動追加を廃止。mentions常に必須・例外なし。reply_toは「どこに送るか」だけ。システムがpush対象を勝手に追加しない |
+| 2026-04-08 | 追記: メンション制御仕様 §3（agent_idスクリプト制御、変換、fuzzy廃止、グループ、チャンネル外メンション、決定事項まとめ8項目）統合完了 |
