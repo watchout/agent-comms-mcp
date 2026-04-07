@@ -2641,13 +2641,39 @@ if (TRANSPORT_MODE === 'daemon') {
         discord.onMessage((msg) => {
           if (processedIds.has(msg.id)) return
           processedIds.set(msg.id, Date.now())
-          const content = msg.content || '(attachment)'
-          saveMessage({
-            channel_id: msg.channel, author_id: msg.author.id, content,
-            message_type: 'chat', source: 'discord', direction: 'inbound',
-            role: msg.author.isBot ? 'agent' : 'user',
-            metadata: { discord_message_id: msg.id, discord_author_name: msg.author.name },
-          }).catch(() => {})
+
+          const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
+          const content = msg.content || (atts ? '(attachment)' : '')
+
+          // Route through core inbound router for each connected bot (PR#58 — SSOT-5 §1 compliant)
+          for (const [botId, ctx] of botContexts) {
+            if (!ctx.transport) continue
+            const botServer = ctx.server
+            routeInbound({
+              receiverAgentId: botId,
+              externalChannelId: msg.channel,
+              externalMessageId: msg.id,
+              authorExternalId: msg.author.id,
+              authorName: msg.author.name,
+              authorIsBot: msg.author.isBot,
+              content,
+              attachments: atts,
+              timestamp: msg.timestamp,
+              platform: 'discord',
+              pushFn: async (pushContent, meta) => {
+                await botServer.notification({
+                  method: 'notifications/claude/channel',
+                  params: { content: pushContent, meta },
+                })
+              },
+            }).then(result => {
+              if (!result.delivered) {
+                process.stderr.write(`agent-comms: daemon inbound not delivered to ${botId} — ${result.reason} (msg: ${msg.id})\n`)
+              }
+            }).catch(err => {
+              process.stderr.write(`agent-comms: daemon inbound routing error for ${botId}: ${err}\n`)
+            })
+          }
         })
         await discord.connect({
           token: DISCORD_BOT_TOKEN,
