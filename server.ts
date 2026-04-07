@@ -1083,6 +1083,24 @@ async function isObserverMode(agentId: string): Promise<boolean> {
   return r.rows.length > 0 && r.rows[0].observer_mode === true
 }
 
+/** Get a message by ID from agent_messages */
+async function getMessageById(messageId: string): Promise<{ author_id: string; content: string; message_type: string; metadata: Record<string, unknown> | null } | null> {
+  const client = await tryGetDb()
+  if (!client) return null
+  const r = await client.query(
+    'SELECT author_id, content, message_type, metadata FROM agent_messages WHERE id = $1',
+    [messageId]
+  )
+  if (r.rows.length === 0) return null
+  const row = r.rows[0]
+  return {
+    author_id: row.author_id,
+    content: row.content,
+    message_type: row.message_type ?? 'chat',
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
+  }
+}
+
 /** Build a quote block from a referenced message (§3.10, max 500 chars) */
 async function buildQuoteBlock(messageId: string): Promise<{ quote: string; authorId: string } | null> {
   const client = await tryGetDb()
@@ -1762,6 +1780,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       to = `thread:${senderActiveThread}`
       process.stderr.write(`agent-comms: send redirect — ${agentId} active_thread=${senderActiveThread}, original=${originalTo} → ${to}\n`)
       await writeAuditLog('send_redirect', agentId, to, { original_to: originalTo, reason: 'active_thread_override' })
+    }
+
+    // Layer 2: reply_to mention guard — verify sender was mentioned in original message
+    if (reply_to) {
+      const originalMsg = await getMessageById(reply_to)
+      if (originalMsg) {
+        const contentMentions = parseMentions(originalMsg.content)
+        const metaMentions: string[] = (originalMsg.metadata as any)?.mentions ?? []
+        const allMentions = [...contentMentions, ...metaMentions]
+        const mentionedInOriginal = allMentions.includes(agentId)
+        const isOwnMessage = originalMsg.author_id === agentId
+        const isEmergencyMsg = originalMsg.message_type === 'emergency' || originalMsg.content.startsWith('!stop')
+        const originalSenderIsHuman = await isHumanAgent(originalMsg.author_id)
+
+        if (!mentionedInOriginal && !isOwnMessage && !isEmergencyMsg && !originalSenderIsHuman) {
+          await writeAuditLog('access.denied', agentId, to, { code: 'NOT_MENTIONED_IN_ORIGINAL', reply_to, original_author: originalMsg.author_id })
+          return { content: [{ type: 'text', text: 'Error [NOT_MENTIONED_IN_ORIGINAL]: 元メッセージであなたはメンションされていません。応答権限がありません' }], isError: true }
+        }
+      }
+      // originalMsg not found (legacy/external) → fallback: allow
     }
 
     // Validate mentions for channel destinations (§3.9)

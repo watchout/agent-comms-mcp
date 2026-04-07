@@ -20,7 +20,7 @@ describe('active_thread send redirect — Source Structure', () => {
   test('send handler checks active_thread before resolveDestination', () => {
     const sendIdx = SERVER_SOURCE.indexOf("if (name === 'send')")
     expect(sendIdx).toBeGreaterThan(-1)
-    const sendBody = SERVER_SOURCE.slice(sendIdx, sendIdx + 2000)
+    const sendBody = SERVER_SOURCE.slice(sendIdx, sendIdx + 3000)
 
     // getActiveThread must appear before resolveDestination
     const activeThreadIdx = sendBody.indexOf('getActiveThread(agentId)')
