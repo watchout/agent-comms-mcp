@@ -94,9 +94,9 @@ describe('Inbound Mentions Filter — routeInbound step 4', () => {
 })
 
 describe('Inbound Mentions Filter — callsite updates', () => {
-  test('stdio/channel plugin Discord adapter removed (Phase 3c — daemon only)', () => {
-    // Discord connections removed from bot-side server.ts — daemon manages all Discord
-    expect(SERVER_SOURCE).toContain('Discord connections are daemon-only (Phase 3c)')
+  test('stdio/channel plugin Discord adapter connects and uses routeInbound', () => {
+    expect(SERVER_SOURCE).toContain('Discord adapter connected (channel plugin mode)')
+    expect(SERVER_SOURCE).toContain('extractDiscordMentions(content, msg.mentionUserIds)')
   })
 
   test('daemon per-bot client passes mentions to routeInbound', () => {
