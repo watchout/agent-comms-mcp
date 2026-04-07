@@ -29,49 +29,31 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 
 ## 2. アーキテクチャ
 
-### 2.1 全体構造（Phase 5 統合版）
+### 2.1 全体構造（Phase 3c Webhook Channel版）
 
 ```
-server.ts（1プロセスで全機能）
+Bot側（各Claude Codeセッション内）:
+├── channel-server.ts              ← push受信専用（claude/channel capability）
+│   └── HTTP POST /push 受信 → HMAC検証 → notification()でセッション注入
+│   └── Discord Client なし（メモリ消費≈0、バイパス不可能）
 │
-├── adapters/                        ← UIアダプター層（交換可能）
-│   ├── types.ts                       UIAdapter インターフェース
-│   ├── discord.ts                     DiscordAdapter（discord.js Gateway）
-│   ├── telegram.ts                    （将来）
-│   ├── slack.ts                       （将来）
-│   └── line.ts                        （将来）
-│
-├── 通信バス層（server.ts 内蔵）
-│   ├── メッセージルーティング          DB INSERT + pg_notify
-│   ├── access制御                     access.json（プラットフォーム共通）
-│   ├── push通知                       webhook bridge + pg_notify LISTEN
-│   ├── DBポーリング                    フォールバック（3秒間隔）
-│   └── 安全機構                       レート制限 / ループ検出 / 重複排除
-│
-├── MCP tools
-│   ├── send_message                   bot間メッセージ送信
-│   ├── reply                          Discord返信
-│   ├── fetch_messages                 DB履歴取得
-│   ├── fetch_discord_history          Discord API履歴取得
-│   ├── check_inbox                    未読確認
-│   └── list_agents                    エージェント一覧
-│
-└── webhook bridge（HTTP POST受信）    Discord adapter / 外部からの注入
+└── server.ts（MCP tools のみ）    ← ツール提供（Discord接続なし）
+    ├── send, history, inbox, agents, focus, unfocus, quote
+    └── コアRouter経由でdaemonにリクエスト
+
+SSE daemon（1プロセス、インフラ側）:
+├── adapters/discord.ts            ← 全botのDiscord Gateway接続を管理
+├── routeInbound()                 ← 5段階フィルタ（唯一のフィルタ箇所）
+├── pushToChannelServer()          ← 対象botにHTTP POST（HMAC署名付き）
+├── DB管理                         ← PostgreSQL接続、agent_messages保存
+└── 安全機構                       ← レート制限 / ループ検出 / 重複排除
 ```
 
-**旧構成（Phase 4以前）との対比:**
-```
-旧: 4プロセス構成
-  server.ts              ← MCP + bridge
-  scripts/discord-adapter.ts  ← 別プロセス（Discord Gateway + HTTP API）
-  scripts/listener.ts         ← 別プロセス（pg_notify LISTEN）
-  agent-com-bridge.ts         ← 別プロセス（統合済みで不要に）
-
-新: 1プロセス構成（Phase 5）
-  server.ts              ← MCP + bridge + Discord + pg_notify LISTEN
-  adapters/discord.ts    ← server.tsからimport（別プロセスではない）
-  adapters/types.ts      ← インターフェース定義
-```
+**設計原則:**
+- bot側のserver.tsはDiscordに接続しない（コードレベルで強制）
+- DISCORD_BOT_TOKENはdaemon側の.envにのみ存在
+- push受信はchannel-server.ts（Webhook）経由のみ — 経路一本化
+- フィルタはdaemonのrouteInbound()に一元化
 
 ### 2.2 通信モデル
 
@@ -94,7 +76,7 @@ Claude Codeセッション → 通信バス → UIアダプター → 外部（D
 | ランタイム | Bun v1.0+ |
 | 言語 | TypeScript 5.x |
 | DB（オプション） | PostgreSQL 14+ |
-| プラグイン形式 | Claude Code channel plugin + MCP tools |
+| プラグイン形式 | Webhook Channel（channel-server.ts）+ MCP tools（server.ts） |
 | プラットフォーム連携 | Discord.js / Slack Bolt / Telegram Bot API |
 
 ---
@@ -283,26 +265,30 @@ Discord Gateway → SSE daemon → adapter変換 → routeInbound()（5段階フ
 - ローカルHTTPポートで`POST /push`受信
 - HMAC署名検証後、notification()でセッションに注入
 
-**ポート割当:**
+**channel_port割当（agents.channel_port）:**
 
-| bot | ポート |
-|-----|-------|
-| CTO | 8789 |
-| Hotel | 8790 |
-| Haishin | 8791 |
-| WBS | 8792 |
-| Nyusatsu | 8793 |
-| ADF | 8794 |
-| agent-com | 8795 |
-| Vice | 8796 |
-| Auditor | 8797 |
+| bot | channel_port |
+|-----|-------------|
+| CTO | 9001 |
+| Arc | 9002 |
+| Hotel | 9003 |
+| Haishin | 9004 |
+| WBS | 9005 |
+| Nyusatsu | 9006 |
+| ADF | 9007 |
+| agent-com | 9008 |
+| Vice | 9009 |
+| Auditor | 9010 |
+| XMarketing | 9011 |
+| Upwork | 9012 |
+| OrgBuild | 9013 |
+| Research | 9014 |
+| Secretary | 9015 |
+| Webb | 9016 |
+| agent-mem | 9017 |
 
 **pg_notify:**
 - send_message実行時、DB INSERT後に `pg_notify('agent_inbox', target_agent_id)` を発行
-
-**リスナー:**
-- 1プロセスで全bot分のNOTIFYを監視
-- 対象botのポートにcurl POSTで配送
 
 ---
 
@@ -460,37 +446,49 @@ DBが設定されていない場合：
 |------|------|
 | `AGENT_ID` | エージェント識別子 |
 | `DATABASE_URL` | PostgreSQL接続文字列 |
-| `DISCORD_BOT_TOKEN` | Discord Bot認証 |
-| `DISCORD_STATE_DIR` | access.json等の状態ディレクトリ |
+| `CHANNEL_PORT` | channel-server.tsのHTTP listenポート |
+| `HMAC_SECRET` | daemon↔channel間のHMAC署名シークレット |
 | `AUTH_TOKEN` | エージェント間認証トークン |
+
+> **注**: `DISCORD_BOT_TOKEN`はbot側に不要。daemon側の.envにのみ設定。
 
 ---
 
 ## 8. 利用方法
 
-### 8.1 起動コマンド（目標形）
+### 8.1 起動コマンド（Phase 3c: Webhook Channel方式）
 
 ```bash
-# Discord組織
-claude --channels agent-com:discord --env DISCORD_BOT_TOKEN=xxx
-
-# Slack組織（将来）
-claude --channels agent-com:slack --env SLACK_BOT_TOKEN=xxx
-
-# 複数プラットフォーム（将来）
-claude --channels agent-com:discord agent-com:slack
-```
-
-### 8.2 現在の起動コマンド（Phase 5: 統合方式）
-
-```bash
-# Phase 5起動コマンド（全機能統合 — server.ts 1プロセスで MCP tools + channel + Discord + pg_notify）
-# channelサーバー名: "server" — server.tsがclaude/channel capabilityを宣言するMCPサーバー
-AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
-WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
-claude --dangerously-load-development-channels server:server.ts \
+# Bot側起動コマンド
+# channel-server.tsがpush受信、agent-commsがMCPツール提供
+CHANNEL_PORT=9001 \
+claude --dangerously-load-development-channels server:channel-server \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
+```
+
+```json
+// .mcp.json（bot側）
+{
+  "mcpServers": {
+    "channel-server": {
+      "command": "bun",
+      "args": ["run", "/path/to/channel-server.ts"],
+      "env": { "CHANNEL_PORT": "9001" }
+    },
+    "agent-comms": {
+      "command": "bun",
+      "args": ["run", "/path/to/server.ts"],
+      "env": {
+        "AGENT_ID": "bot-name",
+        "DATABASE_URL": "postgresql://localhost/agent_comms"
+      }
+    }
+  }
+}
+```
+
+> **重要**: bot側の.mcp.jsonにDISCORD_BOT_TOKENは不要。server.tsはDiscordに接続しない。
 ```
 
 > **channelサーバー名について:** `server:server.ts` の `server` はMCPサーバー名（.mcp.jsonで定義）。
