@@ -1459,6 +1459,47 @@ function sendInboxSignal(targetAgent: string, messageId: string, from: string, c
   }
 }
 
+/** Push message to bot's channel-server via HTTP POST (Webhook Channel method) */
+async function pushToChannelServer(agentId: string, content: string, meta: Record<string, unknown>): Promise<boolean> {
+  const client = await tryGetDb()
+  if (!client) return false
+
+  // Get channel_port from agents table
+  const r = await client.query('SELECT channel_port FROM agents WHERE agent_id = $1', [agentId])
+  if (r.rows.length === 0 || !r.rows[0].channel_port) {
+    process.stderr.write(`agent-comms: pushToChannelServer — no channel_port for ${agentId}\n`)
+    return false
+  }
+
+  const port = r.rows[0].channel_port
+  const payload = JSON.stringify({ content, meta })
+
+  // HMAC signature
+  const hmacSecret = process.env.HMAC_SECRET ?? ''
+  const signature = hmacSecret
+    ? `sha256=${(await import('node:crypto')).createHmac('sha256', hmacSecret).update(payload).digest('hex')}`
+    : ''
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/push`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(signature ? { 'X-Signature': signature } : {}),
+      },
+      body: payload,
+    })
+    if (!res.ok) {
+      process.stderr.write(`agent-comms: pushToChannelServer — ${agentId}:${port} returned ${res.status}\n`)
+      return false
+    }
+    return true
+  } catch (err) {
+    process.stderr.write(`agent-comms: pushToChannelServer — ${agentId}:${port} failed: ${err}\n`)
+    return false
+  }
+}
+
 function countAndClearSignals(forAgentId?: string): number {
   const dir = join(STATE_DIR, 'inbox', forAgentId ?? AGENT_ID)
   let count = 0
