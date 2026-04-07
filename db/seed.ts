@@ -213,6 +213,36 @@ async function seed() {
   }
 
   console.log(`Found ${seedChannels.length} text channels across ${client.guilds.cache.size} guild(s)`)
+
+  // Fetch active threads for each guild
+  interface SeedThread {
+    discordId: string
+    parentChannelId: string
+    name: string
+  }
+
+  const seedThreads: SeedThread[] = []
+
+  for (const [, guild] of client.guilds.cache) {
+    try {
+      const active = await guild.channels.fetchActiveThreads()
+      for (const [, thread] of active.threads) {
+        if (!thread.parentId) continue
+        // Only include threads whose parent channel we're seeding
+        if (seedChannels.some(ch => ch.discordId === thread.parentId)) {
+          seedThreads.push({
+            discordId: thread.id,
+            parentChannelId: thread.parentId!,
+            name: thread.name,
+          })
+        }
+      }
+    } catch (err) {
+      console.log(`  [WARN] Failed to fetch threads for guild ${guild.name}: ${err}`)
+    }
+  }
+
+  console.log(`Found ${seedThreads.length} active threads`)
   client.destroy()
 
   // Connect to DB and seed
@@ -264,6 +294,29 @@ async function seed() {
     adapterCount++
   }
 
+  // Seed threads and thread_adapters
+  let threadCount = 0
+  await db.query('DELETE FROM thread_adapters')
+  await db.query('DELETE FROM threads')
+
+  for (const th of seedThreads) {
+    await db.query(
+      `INSERT INTO threads (id, channel_id, title, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, 'open', 'seed', now(), now())
+       ON CONFLICT (id) DO UPDATE SET
+         title = EXCLUDED.title,
+         updated_at = now()`,
+      [th.discordId, th.parentChannelId, th.name]
+    )
+    await db.query(
+      `INSERT INTO thread_adapters (thread_id, platform, external_id)
+       VALUES ($1, 'discord', $2)
+       ON CONFLICT (thread_id, platform) DO NOTHING`,
+      [th.discordId, th.discordId]
+    )
+    threadCount++
+  }
+
   // Also register/update all agents with discord_id in metadata
   for (const bot of registry) {
     const access = loadBotAccess(bot.session)
@@ -301,13 +354,14 @@ async function seed() {
   await db.query(
     `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
      VALUES ('channel.seed', 'seed', 'all', $1, 'default')`,
-    [JSON.stringify({ channels: channelCount, adapters: adapterCount, agents: registry.length + 1, id_scheme: 'discord_id' })]
+    [JSON.stringify({ channels: channelCount, adapters: adapterCount, threads: threadCount, agents: registry.length + 1, id_scheme: 'discord_id' })]
   )
 
   // Print summary
   console.log(`\nSeed complete:`)
   console.log(`  ${channelCount} channels (id = Discord channel ID)`)
   console.log(`  ${adapterCount} channel_adapters`)
+  console.log(`  ${threadCount} threads + thread_adapters`)
   console.log(`  ${registry.length + 1} agents (with discord_id metadata)`)
   console.log(`\nChannel details:`)
   for (const ch of seedChannels) {
