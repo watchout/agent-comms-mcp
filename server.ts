@@ -1356,8 +1356,8 @@ async function routeInbound(params: {
     process.stderr.write(`agent-comms: auto-focus — ${receiverAgentId} active_thread set to ${messageThreadId}\n`)
   }
 
-  // 8. Push to session
-  await pushFn(content, {
+  // 8. Push to session (dual path: pushFn for legacy + pushToChannelServer for Webhook Channel)
+  const pushMeta = {
     chat_id: externalChannelId,
     message_id: externalMessageId,
     user: authorName,
@@ -1365,6 +1365,17 @@ async function routeInbound(params: {
     ts: timestamp.toISOString(),
     source: platform,
     ...(attachments ? { attachments } : {}),
+  }
+
+  // 8a. Legacy pushFn (channel plugin / SSE transport)
+  await pushFn(content, pushMeta)
+
+  // 8b. Webhook Channel push (HTTP POST to channel-server, if channel_port configured)
+  pushToChannelServer(receiverAgentId, content, pushMeta).catch(err => {
+    process.stderr.write(`agent-comms: webhook push failed for ${receiverAgentId} (non-fatal): ${err}\n`)
+    writeAuditLog('push.failed', receiverAgentId, externalChannelId, {
+      message_id: externalMessageId, error: String(err), method: 'webhook_channel',
+    }).catch(() => {})
   })
 
   return { delivered: true, messageId }
