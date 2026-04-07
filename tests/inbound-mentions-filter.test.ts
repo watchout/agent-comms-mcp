@@ -18,8 +18,8 @@ const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
 const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
 
 describe('Inbound Mentions Filter — extractDiscordMentions', () => {
-  test('extractDiscordMentions function exists', () => {
-    expect(SERVER_SOURCE).toContain('async function extractDiscordMentions(content: string)')
+  test('extractDiscordMentions function exists with rawDiscordUserIds param', () => {
+    expect(SERVER_SOURCE).toContain('async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[])')
   })
 
   test('parses Discord <@id> mentions', () => {
@@ -34,13 +34,13 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 
   test('also parses @agent_id native mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 800)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1200)
     expect(fnBody).toContain('parseMentions(content)')
   })
 
   test('deduplicates mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 800)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1200)
     expect(fnBody).toContain('new Set(')
   })
 })

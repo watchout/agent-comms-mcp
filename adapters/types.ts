@@ -37,6 +37,8 @@ export interface UnifiedMessage {
   content: string
   /** Reply-to message ID */
   replyTo?: string
+  /** Mentioned user IDs (platform-native, e.g. Discord user IDs) */
+  mentionUserIds?: string[]
   /** Attachments */
   attachments?: Attachment[]
   /** Sent timestamp */

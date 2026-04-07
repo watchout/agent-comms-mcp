@@ -681,6 +681,7 @@ export class DiscordAdapter implements UIAdapter, Adapter {
         },
         content: msg.content || (atts.length > 0 ? '(attachment)' : ''),
         replyTo: msg.reference?.messageId ?? undefined,
+        mentionUserIds: msg.mentions.users.map(u => u.id),
         attachments: atts.length > 0 ? atts : undefined,
         timestamp: msg.createdAt,
         platform: 'discord',

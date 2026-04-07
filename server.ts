@@ -1024,19 +1024,28 @@ async function isHumanAgent(agentId: string): Promise<boolean> {
 }
 
 /** Extract Discord mentions from content and resolve to core agent_ids */
-async function extractDiscordMentions(content: string): Promise<string[]> {
-  const discordMentions = content.match(/<@!?(\d+)>/g)
-  if (!discordMentions || discordMentions.length === 0) return []
-
+async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[]): Promise<string[]> {
   const agentIds: string[] = []
-  for (const mention of discordMentions) {
-    const discordId = mention.replace(/<@!?(\d+)>/, '$1')
-    const agentId = await resolveAgentFromDiscordId(discordId)
-    if (agentId) {
-      agentIds.push(agentId)
+
+  // 1. Parse <@discord_id> from content text
+  const contentMentions = content.match(/<@!?(\d+)>/g)
+  if (contentMentions) {
+    for (const mention of contentMentions) {
+      const discordId = mention.replace(/<@!?(\d+)>/, '$1')
+      const agentId = await resolveAgentFromDiscordId(discordId)
+      if (agentId) agentIds.push(agentId)
     }
   }
-  // Also parse @agent_id style mentions (agent-comms native format)
+
+  // 2. Include raw Discord mention user IDs (from msg.mentions.users — covers replies)
+  if (rawDiscordUserIds) {
+    for (const discordId of rawDiscordUserIds) {
+      const agentId = await resolveAgentFromDiscordId(discordId)
+      if (agentId) agentIds.push(agentId)
+    }
+  }
+
+  // 3. Parse @agent_id style mentions (agent-comms native format)
   const nativeMentions = parseMentions(content)
   return [...new Set([...agentIds, ...nativeMentions])]
 }
@@ -2882,7 +2891,7 @@ if (TRANSPORT_MODE === 'daemon') {
             botDiscord.onMessage((msg) => {
               const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
               const inboundContent = msg.content || (atts ? '(attachment)' : '')
-              extractDiscordMentions(inboundContent).then(resolvedMentions => {
+              extractDiscordMentions(inboundContent, msg.mentionUserIds).then(resolvedMentions => {
                 return routeInbound({
                   receiverAgentId: botId,
                   externalChannelId: msg.channel,
@@ -2987,7 +2996,7 @@ if (TRANSPORT_MODE === 'daemon') {
           botDiscord.onMessage((msg) => {
             const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
             const inboundContent = msg.content || (atts ? '(attachment)' : '')
-            extractDiscordMentions(inboundContent).then(resolvedMentions => {
+            extractDiscordMentions(inboundContent, msg.mentionUserIds).then(resolvedMentions => {
               return routeInbound({
                 receiverAgentId: botId,
                 externalChannelId: msg.channel,
@@ -3030,7 +3039,7 @@ if (TRANSPORT_MODE === 'daemon') {
           const content = msg.content || (atts ? '(attachment)' : '')
 
           // Route through core inbound router for all expected bots
-          extractDiscordMentions(content).then(resolvedMentions => {
+          extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
             // Route to all EXPECTED_BOTS with channel_port (Webhook Channel)
             for (const expectedBot of EXPECTED_BOTS) {
               const ctx = botContexts.get(expectedBot)
