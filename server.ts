@@ -1547,6 +1547,9 @@ function sendInboxSignal(targetAgent: string, messageId: string, from: string, c
   }
 }
 
+// Track push failures to suppress repeated warnings for offline bots
+const pushFailureWarned = new Set<string>()
+
 /** Push message to bot's channel-server via HTTP POST (Webhook Channel method) */
 async function pushToChannelServer(agentId: string, content: string, meta: Record<string, unknown>): Promise<boolean> {
   const client = await tryGetDb()
@@ -1581,9 +1584,18 @@ async function pushToChannelServer(agentId: string, content: string, meta: Recor
     }
     return true
   } catch (err) {
-    process.stderr.write(`agent-comms: pushToChannelServer — ${agentId}:${port} failed: ${err}\n`)
+    // Suppress repeated warnings for offline bots (warn once per agent)
+    if (!pushFailureWarned.has(agentId)) {
+      process.stderr.write(`agent-comms: pushToChannelServer — ${agentId}:${port} unreachable (warning once, subsequent failures silent)\n`)
+      pushFailureWarned.add(agentId)
+    }
     return false
   }
+}
+
+// Clear push failure warning when bot reconnects (call on SSE connect)
+function clearPushFailureWarning(agentId: string): void {
+  pushFailureWarned.delete(agentId)
 }
 
 function countAndClearSignals(forAgentId?: string): number {
@@ -2795,6 +2807,7 @@ if (TRANSPORT_MODE === 'daemon') {
       }
 
       process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
+      clearPushFailureWarning(botId)
 
       try {
         // Create per-bot Server + Transport
