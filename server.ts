@@ -123,7 +123,77 @@ const sseStartTime = Date.now()
 const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
 // --- Discord Adapter (Phase 5: integrated into server.ts) ---
-const discord = new DiscordAdapter()
+const discord = new DiscordAdapter()  // shared client (stdio/sse modes + daemon fallback)
+const discordClients = new Map<string, DiscordAdapter>()  // per-bot clients (daemon mode, Phase 3c)
+const STAGGERED_CONNECT_DELAY_MS = 5_000
+const DISCORD_BACKOFF_MAX_MS = 30_000
+
+/** Resolve Discord Bot Token for a specific bot (Phase 3c) */
+async function resolveDiscordToken(botId: string): Promise<{ token: string; source: 'per-bot' | 'fallback' } | null> {
+  // 1. Check per-bot env var: DISCORD_TOKEN_{AGENT_ID} (uppercase, hyphens → underscores)
+  const envKey = `DISCORD_TOKEN_${botId.toUpperCase().replace(/-/g, '_')}`
+  const perBotToken = process.env[envKey]
+  if (perBotToken) {
+    // Validate token via Discord REST API
+    try {
+      const res = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: `Bot ${perBotToken}` },
+      })
+      if (res.ok) {
+        process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token valid (${envKey})\n`)
+        return { token: perBotToken, source: 'per-bot' }
+      }
+      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token invalid (${envKey}, status: ${res.status})\n`)
+    } catch (err) {
+      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token check failed: ${err}\n`)
+    }
+  }
+
+  // 2. Fallback to shared DISCORD_BOT_TOKEN
+  if (DISCORD_BOT_TOKEN) {
+    process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — fallback to shared DISCORD_BOT_TOKEN\n`)
+    return { token: DISCORD_BOT_TOKEN, source: 'fallback' }
+  }
+
+  process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — no token available\n`)
+  return null
+}
+
+/** Connect a per-bot Discord client with exponential backoff */
+async function connectBotDiscord(botId: string, token: string): Promise<DiscordAdapter | null> {
+  let delay = 1000
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const adapter = new DiscordAdapter()
+      // Inject DB query function
+      adapter.setDbQuery(async (sql: string, params?: any[]) => {
+        const client = await tryGetDb()
+        if (!client) throw new Error('DB unavailable')
+        return client.query(sql, params)
+      })
+      await adapter.connect({
+        token,
+        stateDir: DISCORD_STATE_DIR_ENV || undefined,
+      })
+      process.stderr.write(`agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt})\n`)
+      return adapter
+    } catch (err) {
+      process.stderr.write(`agent-comms: per-bot Discord connect failed for ${botId} (attempt ${attempt}/${5}): ${err}\n`)
+      if (attempt < 5) {
+        await new Promise(r => setTimeout(r, delay))
+        delay = Math.min(delay * 2, DISCORD_BACKOFF_MAX_MS)
+      }
+    }
+  }
+  process.stderr.write(`agent-comms: ALERT — per-bot Discord connect failed for ${botId} after 5 attempts\n`)
+  return null
+}
+
+/** Get the Discord client for a specific bot (per-bot or shared fallback) */
+function getDiscordClient(botId: string): DiscordAdapter {
+  return discordClients.get(botId) ?? discord
+}
+
 const INBOX_SIGNAL_TTL_MS = 5 * 60 * 1000
 const GC_INTERVAL_MS = 5 * 60 * 1000
 
@@ -1788,7 +1858,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const adapter of adapters.rows) {
         if (adapter.platform === 'discord') {
           try {
-            await discord.sendAdapterMessage({
+            await getDiscordClient(agentId).sendAdapterMessage({
               external_channel_id: adapter.external_id,
               content: truncateForPlatform(safeContent, 'discord'),
               thread_external_id: dest.threadId,
@@ -2535,6 +2605,12 @@ if (TRANSPORT_MODE === 'daemon') {
         daemonTransports.delete(oldSessionId)
         await existingCtx.transport.close().catch(() => {})
         botContexts.delete(botId)
+        // Cleanup per-bot Discord client
+        const oldClient = discordClients.get(botId)
+        if (oldClient) {
+          await oldClient.disconnect().catch(() => {})
+          discordClients.delete(botId)
+        }
       }
 
       process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
@@ -2554,6 +2630,13 @@ if (TRANSPORT_MODE === 'daemon') {
           const current = botContexts.get(botId)
           if (current && current.transport?.sessionId === sessionId) {
             botContexts.delete(botId)
+          }
+          // Cleanup per-bot Discord client (On-Demand teardown)
+          const botClient = discordClients.get(botId)
+          if (botClient) {
+            botClient.disconnect().catch(() => {})
+            discordClients.delete(botId)
+            process.stderr.write(`agent-comms: per-bot Discord disconnected for ${botId}\n`)
           }
         })
 
@@ -2576,6 +2659,48 @@ if (TRANSPORT_MODE === 'daemon') {
           }
         } catch (err) {
           process.stderr.write(`agent-comms: daemon agent registration failed for ${botId} (non-fatal): ${err}\n`)
+        }
+
+        // Phase 3c: Per-Bot Discord Client (On-Demand)
+        // Staggered connect: wait before creating Discord Gateway connection
+        const botCount = discordClients.size
+        if (botCount > 0) {
+          process.stderr.write(`agent-comms: staggered connect — waiting ${STAGGERED_CONNECT_DELAY_MS}ms for ${botId} (${botCount} clients already connected)\n`)
+          await new Promise(r => setTimeout(r, STAGGERED_CONNECT_DELAY_MS))
+        }
+        const tokenResult = await resolveDiscordToken(botId)
+        if (tokenResult) {
+          const botDiscord = await connectBotDiscord(botId, tokenResult.token)
+          if (botDiscord) {
+            discordClients.set(botId, botDiscord)
+            // Register inbound handler for this bot's Discord client
+            botDiscord.onMessage((msg) => {
+              if (processedIds.has(msg.id)) return
+              processedIds.set(msg.id, Date.now())
+              const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
+              const inboundContent = msg.content || (atts ? '(attachment)' : '')
+              routeInbound({
+                receiverAgentId: botId,
+                externalChannelId: msg.channel,
+                externalMessageId: msg.id,
+                authorExternalId: msg.author.id,
+                authorName: msg.author.name,
+                authorIsBot: msg.author.isBot,
+                content: inboundContent,
+                attachments: atts,
+                timestamp: msg.timestamp,
+                platform: 'discord',
+                pushFn: async (pushContent, meta) => {
+                  await ctx.server.notification({
+                    method: 'notifications/claude/channel',
+                    params: { content: pushContent, meta },
+                  })
+                },
+              }).catch(err => {
+                process.stderr.write(`agent-comms: per-bot inbound routing error for ${botId}: ${err}\n`)
+              })
+            })
+          }
         }
       } catch (err) {
         process.stderr.write(`[SSE] bot connection error: ${botId}, reason: ${err}\n`)
@@ -2645,9 +2770,11 @@ if (TRANSPORT_MODE === 'daemon') {
           const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
           const content = msg.content || (atts ? '(attachment)' : '')
 
-          // Route through core inbound router for each connected bot (PR#58 — SSOT-5 §1 compliant)
+          // Route through core inbound router for each connected bot WITHOUT a per-bot Discord client
+          // Bots with per-bot clients receive messages via their own Gateway connection
           for (const [botId, ctx] of botContexts) {
             if (!ctx.transport) continue
+            if (discordClients.has(botId)) continue  // per-bot client handles its own inbound
             const botServer = ctx.server
             routeInbound({
               receiverAgentId: botId,
@@ -2695,6 +2822,12 @@ if (TRANSPORT_MODE === 'daemon') {
     stopPolling()
     stopListener()
     await discord.disconnect().catch(() => {})
+    // Disconnect all per-bot Discord clients
+    for (const [botId, client] of discordClients) {
+      await client.disconnect().catch(() => {})
+      process.stderr.write(`agent-comms: per-bot Discord disconnected for ${botId} (shutdown)\n`)
+    }
+    discordClients.clear()
     bridgeServer.stop()
     // Close all per-bot transports
     for (const [, ctx] of botContexts) {
