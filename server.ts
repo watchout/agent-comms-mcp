@@ -2664,6 +2664,39 @@ if (TRANSPORT_MODE === 'daemon') {
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
 
+    // OAuth bypass endpoints (Claude Code SSE MCP workaround)
+    // Claude Code forces OAuth discovery on SSE connections. These dummy
+    // endpoints satisfy the OAuth flow without actual authentication.
+    if (url.pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        issuer: `http://localhost:${SSE_PORT}`,
+        authorization_endpoint: `http://localhost:${SSE_PORT}/oauth/authorize`,
+        token_endpoint: `http://localhost:${SSE_PORT}/oauth/token`,
+        response_types_supported: ['code'],
+        grant_types_supported: ['authorization_code'],
+      }))
+      return
+    }
+
+    if (url.pathname === '/oauth/authorize' && req.method === 'GET') {
+      const redirectUri = url.searchParams.get('redirect_uri') ?? ''
+      const state = url.searchParams.get('state') ?? ''
+      res.writeHead(302, { Location: `${redirectUri}?code=local-no-auth&state=${state}` })
+      res.end()
+      return
+    }
+
+    if (url.pathname === '/oauth/token' && req.method === 'POST') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        access_token: 'local-no-auth',
+        token_type: 'Bearer',
+        expires_in: 999999999,
+      }))
+      return
+    }
+
     // Health endpoint
     if (url.pathname === '/health' && req.method === 'GET') {
       if (!authenticateRequest(req, res)) return
