@@ -1102,11 +1102,11 @@ async function isObserverMode(agentId: string): Promise<boolean> {
 }
 
 /** Get a message by ID from agent_messages */
-async function getMessageById(messageId: string): Promise<{ author_id: string; content: string; message_type: string; metadata: Record<string, unknown> | null } | null> {
+async function getMessageById(messageId: string): Promise<{ author_id: string; content: string; message_type: string; metadata: Record<string, unknown> | null; thread_id: string | null } | null> {
   const client = await tryGetDb()
   if (!client) return null
   const r = await client.query(
-    'SELECT author_id, content, message_type, metadata FROM agent_messages WHERE id = $1',
+    'SELECT author_id, content, message_type, metadata, thread_id FROM agent_messages WHERE id = $1',
     [messageId]
   )
   if (r.rows.length === 0) return null
@@ -1116,6 +1116,7 @@ async function getMessageById(messageId: string): Promise<{ author_id: string; c
     content: row.content,
     message_type: row.message_type ?? 'chat',
     metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
+    thread_id: row.thread_id ?? null,
   }
 }
 
@@ -1347,7 +1348,14 @@ async function routeInbound(params: {
     }
   }
 
-  // 6. Push to session
+  // 7. Auto-set active_thread when receiving a thread message
+  const messageThreadId = resolved.threadId ?? null
+  if (messageThreadId) {
+    await updateActiveThread(receiverAgentId, messageThreadId)
+    process.stderr.write(`agent-comms: auto-focus — ${receiverAgentId} active_thread set to ${messageThreadId}\n`)
+  }
+
+  // 8. Push to session
   await pushFn(content, {
     chat_id: externalChannelId,
     message_id: externalMessageId,
@@ -1803,6 +1811,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
+    }
+
+    // reply_to thread resolution: force destination to original message's thread
+    if (reply_to) {
+      const originalMsg = await getMessageById(reply_to)
+      if (originalMsg?.thread_id) {
+        const originalTo = to
+        to = `thread:${originalMsg.thread_id}`
+        process.stderr.write(`agent-comms: reply thread resolve — ${agentId} reply_to=${reply_to}, thread_id=${originalMsg.thread_id}, original=${originalTo} → ${to}\n`)
+      }
     }
 
     // active_thread send redirect: force channel → thread when sender has active_thread set

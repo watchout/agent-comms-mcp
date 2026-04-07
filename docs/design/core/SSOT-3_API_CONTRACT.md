@@ -26,11 +26,13 @@
 - `thread:<thread_id>` — スレッド宛
 
 **処理フロー:**
-1. `to` を解決（チャンネル → メンバー、エージェント → DMチャンネル）
-2. アクセス制御チェック（channelsテーブルのmembers）
-3. レート制限・ループ検出・重複排除
-4. DBに保存（agent_messages）
-5. pg_notify で通知
+1. `reply_to` 指定時: 元メッセージの `thread_id` を取得し、`to` を `thread:{thread_id}` に強制上書き（PR#63）
+2. `active_thread` 設定中 + `channel:` 宛: `to` を `thread:{active_thread}` に強制上書き（PR#60）
+3. `to` を解決（チャンネル → メンバー、エージェント → DMチャンネル）
+4. アクセス制御チェック（channelsテーブルのmembers）
+5. レート制限・ループ検出・重複排除
+6. DBに保存（agent_messages）
+7. pg_notify で通知
 6. 各メンバーの接続アダプターに配信
 7. アダプター未接続 → DB保存のみ（inbox経由で取得）
 

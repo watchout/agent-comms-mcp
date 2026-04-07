@@ -55,6 +55,20 @@ interface Adapter {
 
 コア層のメッセージルーティングにおけるバリデーション規則。全送受信がこのRouterを通過する。
 
+### 設計原則: 双方向コアRouter必須
+
+全メッセージは方向に関わらずコアRouterを通過すること。アダプターは薄いブリッジであり、ルーティング判断をしない。
+
+```
+outbound: bot → sendツール → コアRouter → DB → adapter → Discord
+inbound:  Discord → adapter → UnifiedMessage変換 → コアRouter → DB → push注入
+
+コアRouterを通る = 5段階フィルタ（members/active_thread/emergency/loop/rate）が適用される
+コアRouterを通らない = フィルタなし = 設計違反
+```
+
+この原則に違反する実装（adapterからbotへの直接push等）は許可しない。
+
 ### 送信時バリデーション
 
 ```
@@ -100,12 +114,14 @@ Bot が send(to: "channel:dev-arc", content: "...") を実行
   - 送信者が CEO（agent_id = "ceo"）
 ```
 
-**自動切り替えロジック:**
+**自動切り替えロジック（PR#63実装済み）:**
 
 ```
-[指示]（message_type = "instruction"）受信時:
+[スレッドメッセージ受信時]（thread_idがある全メッセージ）:
+  → routeInbound()がpush配信する直前に
   → 受信者の active_thread を、そのメッセージの thread_id に自動設定
   → 以降そのスレッドのメッセージだけpush注入
+  → focusコマンドの手動実行は不要
 
 [報告]（message_type = "report"）送信時:
   → 送信者の active_thread を NULL にリセット

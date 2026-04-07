@@ -20,7 +20,7 @@ describe('active_thread send redirect — Source Structure', () => {
   test('send handler checks active_thread before resolveDestination', () => {
     const sendIdx = SERVER_SOURCE.indexOf("if (name === 'send')")
     expect(sendIdx).toBeGreaterThan(-1)
-    const sendBody = SERVER_SOURCE.slice(sendIdx, sendIdx + 3000)
+    const sendBody = SERVER_SOURCE.slice(sendIdx, sendIdx + 4000)
 
     // getActiveThread must appear before resolveDestination
     const activeThreadIdx = sendBody.indexOf('getActiveThread(agentId)')
@@ -38,7 +38,7 @@ describe('active_thread send redirect — Source Structure', () => {
   test('does not redirect thread: destinations', () => {
     // The condition only matches channel: prefix
     const sendIdx = SERVER_SOURCE.indexOf("if (name === 'send')")
-    const sendBody = SERVER_SOURCE.slice(sendIdx, sendIdx + 1500)
+    const sendBody = SERVER_SOURCE.slice(sendIdx, sendIdx + 4000)
     const redirectBlock = sendBody.slice(
       sendBody.indexOf('senderActiveThread && to?.startsWith'),
       sendBody.indexOf('active_thread_override') + 30
