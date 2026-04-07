@@ -1286,19 +1286,8 @@ async function resolveDeliveryTargets(
     }
   }
 
-  // Step 4: reply_to → add original sender to push targets
-  if (replyTo) {
-    const client = await tryGetDb()
-    if (client) {
-      const r = await client.query('SELECT author_id FROM agent_messages WHERE id = $1', [replyTo])
-      if (r.rows.length > 0) {
-        const originalAuthor = r.rows[0].author_id
-        if (nonObservers.includes(originalAuthor) && originalAuthor !== senderId) {
-          pushTargets.add(originalAuthor)
-        }
-      }
-    }
-  }
+  // Step 4: reply_to — NO auto-add of original sender (§2.5)
+  // "元送信者の自動追加はしない" — mentions対象のみがpush対象
 
   // Step 5: No mentions and no reply_to target → DB only (no push)
   if (pushTargets.size === 0) {
@@ -1336,7 +1325,8 @@ async function resolveDeliveryTargets(
 interface InboundRouteResult {
   delivered: boolean
   messageId?: string
-  reason?: string  // 'NOT_A_MEMBER' | 'THREAD_MISMATCH' | 'CHANNEL_UNKNOWN' | 'NOT_MENTIONED'
+  reason?: string  // 'NOT_A_MEMBER' | 'CHANNEL_UNKNOWN' | 'NOT_MENTIONED'
+  pushMeta?: Record<string, unknown>  // meta for push (only when delivered=true)
 }
 
 /**
@@ -1359,7 +1349,7 @@ async function routeInbound(params: {
   platform: string
   mentions?: string[]  // resolved agent_ids mentioned in content
   replyToMessageId?: string  // reply-to message ID (conversation continuation)
-  pushFn: (content: string, meta: Record<string, unknown>) => Promise<void>
+  pushFn?: (content: string, meta: Record<string, unknown>) => Promise<void>  // optional legacy
 }): Promise<InboundRouteResult> {
   const {
     receiverAgentId, externalChannelId, externalMessageId,
@@ -1453,18 +1443,8 @@ async function routeInbound(params: {
     ...(attachments ? { attachments } : {}),
   }
 
-  // 8a. Legacy pushFn (channel plugin / SSE transport)
-  await pushFn(content, pushMeta)
-
-  // 8b. Webhook Channel push (HTTP POST to channel-server, if channel_port configured)
-  pushToChannelServer(receiverAgentId, content, pushMeta).catch(err => {
-    process.stderr.write(`agent-comms: webhook push failed for ${receiverAgentId} (non-fatal): ${err}\n`)
-    writeAuditLog('push.failed', receiverAgentId, externalChannelId, {
-      message_id: externalMessageId, error: String(err), method: 'webhook_channel',
-    }).catch(() => {})
-  })
-
-  return { delivered: true, messageId }
+  // 8. Return delivery decision — caller handles push (§5.1 pure function)
+  return { delivered: true, messageId, pushMeta }
 }
 
 async function getNextSequence(channelId: string): Promise<number> {
@@ -2129,19 +2109,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
   }
 
-  if (name === 'focus') {
-    const { thread_id } = args as any
-    if (!thread_id) {
-      return { content: [{ type: 'text', text: 'Error: thread_id is required' }], isError: true }
-    }
-    await updateActiveThread(agentId, thread_id)
-    return { content: [{ type: 'text', text: `focused on thread:${thread_id}` }] }
-  }
-
-  if (name === 'unfocus') {
-    await updateActiveThread(agentId, null)
-    return { content: [{ type: 'text', text: 'unfocused — receiving all messages' }] }
-  }
+  // focus/unfocus removed — replaced by last_received_context (channel-thread-control-spec §9)
 
   if (name === 'quote') {
     const { message_id, to: targetAgent, comment } = args as any
@@ -2905,18 +2873,17 @@ if (TRANSPORT_MODE === 'daemon') {
                   platform: 'discord',
                   mentions: resolvedMentions,
                   replyToMessageId: msg.replyTo,
-                  pushFn: async (pushContent, meta) => {
-                    // Primary: pushToChannelServer (Webhook Channel)
-                    // Fallback: ctx.server.notification (SSE direct)
-                    const pushed = await pushToChannelServer(botId, pushContent, meta)
-                    if (!pushed && ctx.transport) {
-                      await ctx.server.notification({
-                        method: 'notifications/claude/channel',
-                        params: { content: pushContent, meta },
-                      })
-                    }
-                  },
                 })
+              }).then(async result => {
+                if (result.delivered) {
+                  const pushed = await pushToChannelServer(botId, inboundContent, result.pushMeta ?? {})
+                  if (!pushed && ctx.transport) {
+                    await ctx.server.notification({
+                      method: 'notifications/claude/channel',
+                      params: { content: inboundContent, meta: result.pushMeta ?? {} },
+                    })
+                  }
+                }
               }).catch(err => {
                 process.stderr.write(`agent-comms: per-bot inbound routing error for ${botId}: ${err}\n`)
               })
@@ -3010,11 +2977,11 @@ if (TRANSPORT_MODE === 'daemon') {
                 platform: 'discord',
                 mentions: resolvedMentions,
                 replyToMessageId: msg.replyTo,
-                pushFn: async (pushContent, meta) => {
-                  // For non-SSE bots, push via channel-server HTTP POST
-                  await pushToChannelServer(botId, pushContent, meta)
-                },
               })
+            }).then(async result => {
+              if (result.delivered) {
+                await pushToChannelServer(botId, inboundContent, result.pushMeta ?? {})
+              }
             }).catch(err => {
               process.stderr.write(`agent-comms: startup per-bot inbound error for ${botId}: ${err}\n`)
             })
@@ -3056,20 +3023,18 @@ if (TRANSPORT_MODE === 'daemon') {
                 platform: 'discord',
                 mentions: resolvedMentions,
                 replyToMessageId: msg.replyTo,
-                pushFn: async (pushContent, meta) => {
-                  // Primary: pushToChannelServer (Webhook Channel)
-                  const pushed = await pushToChannelServer(expectedBot, pushContent, meta)
-                  // Fallback: SSE transport notification
-                  if (!pushed && ctx?.transport) {
-                    await ctx.server.notification({
-                      method: 'notifications/claude/channel',
-                      params: { content: pushContent, meta },
-                    })
-                  }
-                },
-              }).then(result => {
+              }).then(async result => {
                 if (!result.delivered) {
                   process.stderr.write(`agent-comms: daemon inbound not delivered to ${expectedBot} — ${result.reason} (msg: ${msg.id})\n`)
+                  return
+                }
+                // Push: caller handles (§5.1 pure function)
+                const pushed = await pushToChannelServer(expectedBot, content, result.pushMeta ?? {})
+                if (!pushed && ctx?.transport) {
+                  await ctx.server.notification({
+                    method: 'notifications/claude/channel',
+                    params: { content, meta: result.pushMeta ?? {} },
+                  })
                 }
               }).catch(err => {
                 process.stderr.write(`agent-comms: daemon inbound routing error for ${expectedBot}: ${err}\n`)
