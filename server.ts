@@ -2862,10 +2862,15 @@ if (TRANSPORT_MODE === 'daemon') {
           process.stderr.write(`agent-comms: staggered connect — waiting ${STAGGERED_CONNECT_DELAY_MS}ms for ${botId} (${botCount} clients already connected)\n`)
           await new Promise(r => setTimeout(r, STAGGERED_CONNECT_DELAY_MS))
         }
-        // Skip if startup already created a per-bot client for this bot
-        if (discordClients.has(botId)) {
-          process.stderr.write(`agent-comms: skipping per-bot Discord for ${botId} (already connected at startup)\n`)
+        // Check if startup client is still connected; if not, recreate
+        const existingClient = discordClients.get(botId)
+        if (existingClient?.isConnected()) {
+          process.stderr.write(`agent-comms: skipping per-bot Discord for ${botId} (already connected)\n`)
         } else {
+        if (existingClient) {
+          await existingClient.disconnect().catch(() => {})
+          discordClients.delete(botId)
+        }
         const tokenResult = await resolveDiscordToken(botId)
         if (tokenResult) {
           const botDiscord = await connectBotDiscord(botId, tokenResult.token)
