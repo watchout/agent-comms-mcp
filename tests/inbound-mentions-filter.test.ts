@@ -124,14 +124,10 @@ describe('handleInboundMessage — Full flow wrapper', () => {
     expect(dbSaveIdx).toBeLessThan(routeIdx)
   })
 
-  test('last_received_context update happens after routing', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
-    const routeIdx = fnBody.indexOf('routeInbound(')
-    const contextIdx = fnBody.indexOf('updateLastReceivedContext')
-    expect(routeIdx).toBeGreaterThan(-1)
-    expect(contextIdx).toBeGreaterThan(-1)
-    expect(routeIdx).toBeLessThan(contextIdx)
+  test('last_received_context abolished (reply_to required, §4.2)', () => {
+    // updateLastReceivedContext should no longer exist
+    expect(SERVER_SOURCE).not.toContain('async function updateLastReceivedContext')
+    expect(SERVER_SOURCE).not.toContain('async function getLastReceivedContext')
   })
 
   test('returns humanWarning flag for Pattern A', () => {

@@ -56,8 +56,9 @@ describe('Inbound Router — Source Structure', () => {
     expect(body).toContain('loadAgentInfo(receiverAgentId)')
   })
 
-  test('handleInboundMessage updates last_received_context after routing', () => {
-    expect(SERVER_SOURCE).toContain('updateLastReceivedContext(receiverAgentId,')
+  test('last_received_context abolished (reply_to required, §4.2)', () => {
+    expect(SERVER_SOURCE).not.toContain('updateLastReceivedContext')
+    expect(SERVER_SOURCE).not.toContain('getLastReceivedContext')
   })
 
   test('handleInboundMessage always saves to DB before routing', () => {

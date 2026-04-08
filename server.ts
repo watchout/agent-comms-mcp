@@ -1130,83 +1130,50 @@ async function isObserverMode(agentId: string): Promise<boolean> {
   return r.rows.length > 0 && r.rows[0].observer_mode === true
 }
 
-/** Get sender's last received context from agents table */
-async function getLastReceivedContext(agentId: string): Promise<{ channel_id: string; thread_id: string | null } | null> {
-  const client = await tryGetDb()
-  if (!client) return null
-  const r = await client.query(
-    'SELECT last_received_channel, last_received_thread FROM agents WHERE agent_id = $1',
-    [agentId]
-  )
-  if (r.rows.length === 0 || !r.rows[0].last_received_channel) return null
-  return { channel_id: r.rows[0].last_received_channel, thread_id: r.rows[0].last_received_thread ?? null }
-}
-
-/** Update sender's last received context */
-async function updateLastReceivedContext(agentId: string, channelId: string, threadId: string | null): Promise<void> {
-  const client = await tryGetDb()
-  if (!client) return
-  await client.query(
-    'UPDATE agents SET last_received_channel = $1, last_received_thread = $2 WHERE agent_id = $3',
-    [channelId, threadId, agentId]
-  )
-}
+// last_received_context functions DELETED — reply_to is now required (§4.2)
 
 /**
- * Resolve send destination (§2.2 — bot cannot choose destination)
- * 1. reply_to → original message's location
- * 2. no reply_to → last_received_context
- * 3. no context → NO_CONTEXT error
+ * Resolve send destination (§4.2 — reply_to required, fully deterministic)
+ * reply_to → original message's location (only path)
+ * no reply_to → NO_REPLY_TO error
  */
 async function resolveSendDestination(
   agentId: string,
   replyTo: string | undefined,
 ): Promise<{ channelId: string; threadId: string | null } | { error: string; code: string }> {
-  // Case 1: reply_to → send to original message's location
-  if (replyTo) {
-    const original = await getMessageById(replyTo)
-    if (!original) {
-      return { error: `reply_to '${replyTo}' が見つかりません`, code: 'MESSAGE_NOT_FOUND' }
-    }
-
-    // reply_to mention guard
-    const contentMentions = parseMentions(original.content)
-    const metaMentions: string[] = (original.metadata as any)?.mentions ?? []
-    const allMentions = [...contentMentions, ...metaMentions]
-    const mentionedInOriginal = allMentions.includes(agentId)
-    const isOwnMessage = original.author_id === agentId
-    const isEmergencyMsg = original.message_type === 'emergency' || original.content.startsWith('!stop')
-    const originalSenderIsHuman = await isHumanAgent(original.author_id)
-
-    if (!mentionedInOriginal && !isOwnMessage && !isEmergencyMsg && !originalSenderIsHuman) {
-      return { error: '元メッセージであなたはメンションされていません。応答権限がありません', code: 'NOT_MENTIONED_IN_ORIGINAL' }
-    }
-
-    return {
-      channelId: original.thread_id
-        ? (await (async () => {
-            const client = await tryGetDb()
-            if (!client) return original.thread_id!
-            const r = await client.query('SELECT channel_id FROM threads WHERE id = $1', [original.thread_id])
-            return r.rows.length > 0 ? r.rows[0].channel_id : original.thread_id!
-          })())
-        : (original.metadata as any)?.channel_id ?? original.thread_id ?? '',
-      threadId: original.thread_id,
-    }
+  if (!replyTo) {
+    return { error: 'reply_toは必須です。返信先メッセージIDを指定してください。定期タスクの場合は agent-com notify --channel <id> を使用してください', code: 'NO_REPLY_TO' }
   }
 
-  // Case 2: no reply_to → last_received_context
-  const ctx = await getLastReceivedContext(agentId)
-  if (ctx) {
-    await writeAuditLog('send.no_reply_to', agentId, ctx.channel_id, {
-      fallback_channel: ctx.channel_id,
-      fallback_thread: ctx.thread_id,
-    })
-    return { channelId: ctx.channel_id, threadId: ctx.thread_id }
+  const original = await getMessageById(replyTo)
+  if (!original) {
+    return { error: `reply_to '${replyTo}' が見つかりません`, code: 'MESSAGE_NOT_FOUND' }
   }
 
-  // Case 3: no context
-  return { error: '送信先を決定できません。受信メッセージがありません。定期タスクの場合は agent-com notify --channel <id> を使用してください', code: 'NO_CONTEXT' }
+  // reply_to mention guard
+  const contentMentions = parseMentions(original.content)
+  const metaMentions: string[] = (original.metadata as any)?.mentions ?? []
+  const allMentions = [...contentMentions, ...metaMentions]
+  const mentionedInOriginal = allMentions.includes(agentId)
+  const isOwnMessage = original.author_id === agentId
+  const isEmergencyMsg = original.message_type === 'emergency' || original.content.startsWith('!stop')
+  const originalSenderIsHuman = await isHumanAgent(original.author_id)
+
+  if (!mentionedInOriginal && !isOwnMessage && !isEmergencyMsg && !originalSenderIsHuman) {
+    return { error: '元メッセージであなたはメンションされていません。応答権限がありません', code: 'NOT_MENTIONED_IN_ORIGINAL' }
+  }
+
+  return {
+    channelId: original.thread_id
+      ? (await (async () => {
+          const client = await tryGetDb()
+          if (!client) return original.thread_id!
+          const r = await client.query('SELECT channel_id FROM threads WHERE id = $1', [original.thread_id])
+          return r.rows.length > 0 ? r.rows[0].channel_id : original.thread_id!
+        })())
+      : (original.metadata as any)?.channel_id ?? original.thread_id ?? '',
+    threadId: original.thread_id,
+  }
 }
 
 /** Get a message by ID from agent_messages */
@@ -1293,7 +1260,7 @@ interface RouteResult {
  * Caller is responsible for:
  *   1. Resolving channel + loading agent info (before)
  *   2. DB save (before or after, always)
- *   3. Updating last_received_context for pushTargets (after)
+ *   3. Pushing to pushTargets (after)
  *   4. Pushing to pushTargets (after)
  *   5. Sending human warning if noMentions && senderIsHuman (after)
  */
@@ -1459,9 +1426,6 @@ async function handleInboundMessage(params: {
     }
   }
 
-  // Step 7: Update last_received_context (side effect, after pure route)
-  await updateLastReceivedContext(receiverAgentId, resolved.channelId, resolved.threadId ?? null)
-  process.stderr.write(`agent-comms: last_received_context updated — ${receiverAgentId} channel=${resolved.channelId} thread=${resolved.threadId ?? 'null'}\n`)
 
   // Step 7b: Set metadata.to ONLY for delivered messages (prevents poll bypass of mentions filter)
   if (messageId) {
@@ -1846,21 +1810,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'send',
-      description: 'Send a message. Destination is auto-determined: reply_to → original message location, no reply_to → last received location. You cannot choose the destination.',
+      description: 'Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. Required (empty array is rejected).' },
-          reply_to: { type: 'string', description: 'Reply-to message UUID. Determines send destination.' },
-          to: { type: 'string', description: 'DEPRECATED — ignored. Destination is auto-determined.' },
+          reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['content', 'mentions'],
+        required: ['content', 'mentions', 'reply_to'],
       },
     },
-    // focus/unfocus removed — replaced by last_received_context (channel-thread-control-spec)
+    // focus/unfocus removed — reply_to is required (channel-thread-control-spec §4.2)
     {
       name: 'unfocus',
       description: 'DEPRECATED — no longer needed. Destination is auto-determined.',
