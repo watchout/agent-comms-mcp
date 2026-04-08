@@ -1,0 +1,27 @@
+[2026-04-08T08:08:50.278Z] SSE listener on http://127.0.0.1:9101/sse, token=SPIKE-MNPRO21H-QLHBTZ, pid=36489
+[2026-04-08T08:09:07.705Z] /sse client connected from ::ffff:127.0.0.1
+[2026-04-08T08:09:07.714Z] SSE transport connected, token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:07.780Z] ListTools called, emitting tick
+[2026-04-08T08:09:07.780Z] emit notifications/message: [spike-notify-sse] tick #1 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:07.915Z] emit notifications/message: [spike-notify-sse] tick #2 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:08.717Z] emit notifications/message: [spike-notify-sse] tick #3 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:09.520Z] emit notifications/message: [spike-notify-sse] tick #4 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:10.323Z] emit notifications/message: [spike-notify-sse] tick #5 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:11.124Z] emit notifications/message: [spike-notify-sse] tick #6 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:11.925Z] emit notifications/message: [spike-notify-sse] tick #7 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:12.727Z] emit notifications/message: [spike-notify-sse] tick #8 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:13.528Z] emit notifications/message: [spike-notify-sse] tick #9 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:14.331Z] emit notifications/message: [spike-notify-sse] tick #10 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:15.131Z] emit notifications/message: [spike-notify-sse] tick #11 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:15.933Z] emit notifications/message: [spike-notify-sse] tick #12 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:16.735Z] emit notifications/message: [spike-notify-sse] tick #13 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:17.538Z] emit notifications/message: [spike-notify-sse] tick #14 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:18.340Z] emit notifications/message: [spike-notify-sse] tick #15 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:19.143Z] emit notifications/message: [spike-notify-sse] tick #16 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:19.944Z] emit notifications/message: [spike-notify-sse] tick #17 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:20.746Z] emit notifications/message: [spike-notify-sse] tick #18 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:21.548Z] emit notifications/message: [spike-notify-sse] tick #19 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:22.349Z] emit notifications/message: [spike-notify-sse] tick #20 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:23.150Z] emit notifications/message: [spike-notify-sse] tick #21 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:23.951Z] emit notifications/message: [spike-notify-sse] tick #22 token=SPIKE-MNPRO21H-QLHBTZ
+[2026-04-08T08:09:24.754Z] emit notifications/message: [spike-notify-sse] tick #23 token=SPIKE-MNPRO21H-QLHBTZ
