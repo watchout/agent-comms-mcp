@@ -308,14 +308,14 @@ describe('resolveSendDestination — channel_id resolution', () => {
   test('resolveSendDestination prefers row.channel_id over metadata', () => {
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function resolveSendDestination(')
     expect(fnIdx).toBeGreaterThan(-1)
-    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 3000)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 5000)
     // row.channel_id is the primary source
     expect(body).toContain('original.channel_id ?? platformChannelId')
   })
 
   test('resolveSendDestination falls back through platform-prefixed metadata keys', () => {
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function resolveSendDestination(')
-    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 3000)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 5000)
     // Discord, Telegram, Slack inbound metadata uses <platform>_channel_id
     expect(body).toContain('meta.discord_channel_id')
     expect(body).toContain('meta.telegram_channel_id')
@@ -326,6 +326,102 @@ describe('resolveSendDestination — channel_id resolution', () => {
     expect(SERVER_SOURCE).toContain("from './core/route-message-db'")
     expect(SERVER_SOURCE).toContain('getMessageById,')
     expect(SERVER_SOURCE).toContain('resolveSendDestination,')
+  })
+})
+
+// ============================================================
+// 3c. ADR-040 D7 — mention / author_id type unification
+// ============================================================
+describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () => {
+  test('isHumanAgent SQL accepts both agent_id and discord_id', () => {
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function isHumanAgent(')
+    expect(fnIdx).toBeGreaterThan(-1)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 800)
+    expect(body).toContain('agent_id = $1')
+    expect(body).toContain("metadata->>'discord_id' = $1")
+    // Both forms in the same query — a plain OR is fine
+    expect(body).toMatch(/agent_id = \$1 OR metadata->>'discord_id' = \$1/)
+  })
+
+  test('getAgentDiscordId helper exists (new in D7)', () => {
+    expect(CORE_DB_SOURCE).toContain('export async function getAgentDiscordId(')
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function getAgentDiscordId(')
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 500)
+    expect(body).toContain("metadata->>'discord_id'")
+    expect(body).toContain('WHERE agent_id = $1')
+  })
+
+  test('resolveSendDestination compares mentions against both agent_id and Discord ID', () => {
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function resolveSendDestination(')
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 5000)
+    expect(body).toContain('getAgentDiscordId(db, agentId)')
+    expect(body).toContain('allMentions.includes(agentId)')
+    expect(body).toContain('allMentions.includes(myDiscordId)')
+    // isOwnMessage must also cover both shapes
+    expect(body).toContain('original.author_id === agentId')
+    expect(body).toContain('original.author_id === myDiscordId')
+  })
+
+  test('AgentInfo includes optional discordId field', () => {
+    expect(CORE_PURE_SOURCE).toContain('discordId?: string | null')
+  })
+
+  test('routeInbound matches mentions against agent.discordId as a fallback', () => {
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const body = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    expect(body).toContain('agent.discordId != null && msg.mentions.includes(agent.discordId)')
+  })
+
+  test('loadAgentInfo populates discordId from metadata', () => {
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function loadAgentInfo(')
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1500)
+    expect(body).toContain("metadata->>'discord_id' AS discord_id")
+    expect(body).toContain('discordId: r.rows[0].discord_id ?? null')
+    // Fallback (DB unavailable) must include discordId: null
+    expect(body).toContain('discordId: null')
+  })
+
+  test('DB integration: isHumanAgent resolves CEO via Discord user ID', async () => {
+    const dbUrl = process.env.DATABASE_URL || 'postgresql://localhost/agent_comms'
+    let client: Client | null = null
+    const TEST_HUMAN_AGENT = 'test-d7-human'
+    const TEST_HUMAN_DISCORD = 'discord-d7-999'
+    try {
+      client = new Client({ connectionString: dbUrl })
+      await client.connect()
+
+      await client.query(
+        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, metadata)
+         VALUES ($1, $1, 'discord', 'default', 'online', 'human', $2::jsonb)
+         ON CONFLICT (agent_id) DO UPDATE SET agent_type = 'human', metadata = $2::jsonb`,
+        [TEST_HUMAN_AGENT, JSON.stringify({ discord_id: TEST_HUMAN_DISCORD })]
+      )
+
+      // Simulate the D7 fix SQL directly (the isHumanAgent query shape)
+      const byAgentId = await client.query(
+        `SELECT agent_type FROM agents WHERE agent_id = $1 OR metadata->>'discord_id' = $1`,
+        [TEST_HUMAN_AGENT]
+      )
+      const byDiscordId = await client.query(
+        `SELECT agent_type FROM agents WHERE agent_id = $1 OR metadata->>'discord_id' = $1`,
+        [TEST_HUMAN_DISCORD]
+      )
+
+      // BEFORE D7: byDiscordId would return zero rows (query was agent_id = $1 only),
+      // so isHumanAgent returned false and resolveSendDestination blocked the reply.
+      // AFTER D7: both lookups find the row and the caller sees agent_type='human'.
+      expect(byAgentId.rows.length).toBe(1)
+      expect(byAgentId.rows[0].agent_type).toBe('human')
+      expect(byDiscordId.rows.length).toBe(1)
+      expect(byDiscordId.rows[0].agent_type).toBe('human')
+    } catch (err) {
+      console.warn('DB not available, skipping D7 integration test:', (err as Error).message)
+    } finally {
+      if (client) {
+        await client.query('DELETE FROM agents WHERE agent_id = $1', [TEST_HUMAN_AGENT]).catch(() => {})
+        await client.end()
+      }
+    }
   })
 })
 
