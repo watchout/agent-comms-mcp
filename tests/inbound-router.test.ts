@@ -145,29 +145,29 @@ describe('Inbound Router — DB Integration', () => {
 
       // Setup CEO agent (human type with discord_id)
       await client.query(
-        `INSERT INTO agents (agent_id, org_id, status, agent_type, metadata, created_at, updated_at)
-         VALUES ($1, 'default', 'online', 'human', $2, now(), now())
+        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, metadata)
+         VALUES ($1, $1, 'discord', 'default', 'online', 'human', $2)
          ON CONFLICT (agent_id) DO UPDATE SET agent_type = 'human', metadata = $2`,
         [CEO_AGENT, JSON.stringify({ discord_id: CEO_DISCORD_ID })]
       )
 
       // Setup test bot agent
       await client.query(
-        `INSERT INTO agents (agent_id, org_id, status, agent_type, active_thread, created_at, updated_at)
-         VALUES ($1, 'default', 'online', 'bot', NULL, now(), now())
+        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, active_thread)
+         VALUES ($1, $1, 'claude-code', 'default', 'online', 'bot', NULL)
          ON CONFLICT (agent_id) DO UPDATE SET active_thread = NULL, agent_type = 'bot'`,
         [TEST_AGENT]
       )
 
       // Setup non-member agent
       await client.query(
-        `INSERT INTO agents (agent_id, org_id, status, agent_type, created_at, updated_at)
-         VALUES ($1, 'default', 'online', 'bot', now(), now())
+        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type)
+         VALUES ($1, $1, 'claude-code', 'default', 'online', 'bot')
          ON CONFLICT (agent_id) DO NOTHING`,
         [NON_MEMBER_AGENT]
       )
     } catch (err) {
-      console.warn('DB not available, integration tests will be skipped')
+      console.warn('DB not available, integration tests will be skipped:', (err as Error).message)
       client = null
     }
   })
@@ -228,5 +228,82 @@ describe('Inbound Router — DB Integration', () => {
   test('isEmergencyMessage detects emergency type and !stop prefix', () => {
     expect(SERVER_SOURCE).toContain("if (messageType === 'emergency') return true")
     expect(SERVER_SOURCE).toContain("if (content.startsWith('!stop')) return true")
+  })
+
+  // ============================================================
+  // resolveSendDestination — channel_id resolution regression
+  // (CEO Discord inbound → bot reply, fixes INVALID_DESTINATION)
+  // ============================================================
+  test('CEO Discord inbound row exposes channel_id for resolveSendDestination', async () => {
+    if (!client) return
+
+    // Insert a synthetic inbound message that mirrors how the Discord adapter saves it:
+    // - channel_id column is set
+    // - metadata uses discord_channel_id (NOT plain channel_id) — this is the bug shape
+    const msgId = '00000000-0000-4000-8000-00000abcd001'
+    await client.query(
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, direction, source, created_at)
+       VALUES ($1, $2, $3, $4, 'chat', $5::jsonb, 'inbound', 'discord', now())
+       ON CONFLICT (id) DO UPDATE SET channel_id = $2, metadata = $5::jsonb`,
+      [
+        msgId,
+        TEST_CHANNEL,
+        CEO_DISCORD_ID,
+        `<@bot> reply test`,
+        JSON.stringify({
+          discord_channel_id: TEST_CHANNEL,
+          discord_message_id: 'snowflake-123',
+          mentions: [TEST_AGENT],
+          author_name: 'ceo',
+        }),
+      ]
+    )
+
+    // Verify both channel_id column and metadata key shape match the production bug
+    const r = await client.query(
+      'SELECT channel_id, metadata FROM agent_messages WHERE id = $1',
+      [msgId]
+    )
+    expect(r.rows.length).toBe(1)
+    expect(r.rows[0].channel_id).toBe(TEST_CHANNEL)
+    const meta = typeof r.rows[0].metadata === 'string' ? JSON.parse(r.rows[0].metadata) : r.rows[0].metadata
+    expect(meta.discord_channel_id).toBe(TEST_CHANNEL)
+    expect(meta.channel_id).toBeUndefined() // proves the bug scenario: metadata.channel_id is missing
+
+    // Cleanup
+    await client.query('DELETE FROM agent_messages WHERE id = $1', [msgId])
+  })
+})
+
+// ============================================================
+// 3. resolveSendDestination — source-level regression
+// ============================================================
+describe('resolveSendDestination — channel_id resolution', () => {
+  test('getMessageById SELECTs channel_id column', () => {
+    // Per SSOT §4.2, channel_id must be read directly from agent_messages
+    expect(SERVER_SOURCE).toContain('SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages')
+  })
+
+  test('getMessageById returns channel_id field', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function getMessageById(')
+    expect(fnIdx).toBeGreaterThan(-1)
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 1000)
+    expect(body).toContain('channel_id: row.channel_id ?? null')
+  })
+
+  test('resolveSendDestination prefers row.channel_id over metadata', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function resolveSendDestination(')
+    expect(fnIdx).toBeGreaterThan(-1)
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
+    // row.channel_id is the primary source
+    expect(body).toContain('original.channel_id ?? platformChannelId')
+  })
+
+  test('resolveSendDestination falls back through platform-prefixed metadata keys', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function resolveSendDestination(')
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
+    // Discord, Telegram, Slack inbound metadata uses <platform>_channel_id
+    expect(body).toContain('meta.discord_channel_id')
+    expect(body).toContain('meta.telegram_channel_id')
   })
 })
