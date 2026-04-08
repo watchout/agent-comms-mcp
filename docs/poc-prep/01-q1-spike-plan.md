@@ -30,6 +30,23 @@ If the answer is **yes**, the v0.2.0 receiver+MessageBus design works as designe
 
 ## Setup (10 min)
 
+### Step 0 — Backup `.mcp.json` (mandatory)
+
+Before adding the spike server entry, snapshot the current `.mcp.json` so the spike can be reverted with one command. This is the same pattern CTO used for `plist` files during today's incident response.
+
+```bash
+cp -p .mcp.json .mcp.json.bak.$(date +%Y%m%d-%H%M%S)
+```
+
+After the spike completes:
+
+```bash
+# Confirm the backup is intact
+diff -u .mcp.json.bak.* .mcp.json   # review intentional spike additions
+# Restore
+cp -p .mcp.json.bak.<timestamp> .mcp.json
+```
+
 ### Step 1 — Minimal MCP server skeleton
 
 A single TypeScript file using `@modelcontextprotocol/sdk` (already a project dependency at `node_modules/@modelcontextprotocol/sdk`).
@@ -64,7 +81,14 @@ setInterval(async () => {
 }, 30_000)
 ```
 
-> Note: the exact `notifications/message` schema may differ between MCP SDK versions. If the SDK rejects this method, fall back to `notifications/log` or another server-initiated notification method documented in the SDK.
+> **SDK version compatibility — verify on the very first attempt** (CTO spot-check):
+> The exact notification method name may differ between MCP SDK versions. The first action of the spike is to call `server.notification({ method: 'notifications/message', ... })`; if the SDK throws (unknown method, invalid params, etc.), immediately retry with `notifications/log` as the fallback. Both attempts should be made within the first 2-3 minutes of the spike so the rest of the time budget is spent on probes 2-5, not on debugging the notification method itself.
+>
+> Concrete sequence:
+> 1. Try `notifications/message` — if it dispatches without throwing, continue
+> 2. If it throws, log the exact error, switch to `notifications/log`, retry
+> 3. Whichever works, document the chosen method in the Result section so ADR-041 records the SDK constraint
+> 4. If both throw, abort the spike and ping CTO before consuming more budget
 
 ### Step 2 — Wire into Claude Code
 
@@ -139,15 +163,62 @@ The crucial probes are **3** and **5**. Probe 3 confirms the content actually la
 
 ## Recording template
 
-After spike completion, append a "Result" section to this file with:
+After spike completion, append a "Result" section to this file with **per-probe observation logs** (CTO spot-check requirement — these become the evidence base for ADR-041 Accepted/Retreat decision).
 
-- Transport: stdio / SSE (one section each)
-- Each probe: ☑ pass / ☒ fail / ⚠ partial — with one-line evidence
-- Latency observation (probe 4): rough p50 in seconds
-- Final verdict: OK / OK-with-constraint / NG
-- Any unexpected behavior
+Format per transport:
 
-Then post a 5-line summary to `#agent-com` and ping `@cto`.
+```markdown
+## Result — stdio transport
+
+**Date**: 2026-04-XX HH:MM JST
+**SDK version**: <output of `bun pm ls @modelcontextprotocol/sdk`>
+**Notification method used**: notifications/message | notifications/log
+**MCP client**: Claude Code <version>
+
+### Probe 1 — Server emits notification
+- Status: ☑ / ☒ / ⚠
+- Evidence:
+  ```
+  <paste 3-5 lines of stderr from spike-mcp-notify-server.ts>
+  ```
+
+### Probe 2 — MCP client receives notification
+- Status: ☑ / ☒ / ⚠
+- Evidence:
+  ```
+  <paste relevant Claude Code client log lines, or note "no client log available">
+  ```
+
+### Probe 3 — Model context contains notification (CRUCIAL)
+- Status: ☑ / ☒ / ⚠
+- Test prompt: "What was the most recent spike-notify tick number?"
+- Model response (verbatim):
+  > <paste model reply>
+- Verdict: model knew the latest counter / model did not know / model knew an outdated counter
+
+### Probe 4 — Latency
+- Tick → first model reference (rough p50): <N> seconds
+- Sample size: <N> ticks observed
+
+### Probe 5 — Push without prompting (CRUCIAL)
+- Status: ☑ / ☒ / ⚠
+- Procedure: idle for 60+ seconds, then ask any unrelated question
+- Model behavior: <describe whether the model surfaced the latest tick spontaneously, or only when explicitly asked>
+
+### Unexpected observations
+- <free-form notes>
+
+## Result — SSE transport
+
+<repeat the same five probe sections>
+
+## Final verdict
+- stdio: OK | OK-with-constraint | NG
+- SSE: OK | OK-with-constraint | NG
+- Combined: <which retreat path / continuation applies per spec §Q1>
+```
+
+Then post a 5-line summary to `#agent-com` and ping `@cto`. Link this file (with the Result section filled in) so ADR-041 can cite specific probe evidence rather than a vague "spike OK".
 
 ---
 
