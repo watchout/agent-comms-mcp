@@ -16,26 +16,37 @@ import { Client } from 'pg'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
 const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// PR-A: routing helpers extracted to core/. Source-level regression tests
+// look in core/route-message{,-db}.ts for the moved functions, and in
+// server.ts for the call sites + imports.
+const CORE_PURE_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message.ts'), 'utf-8')
+const CORE_DB_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message-db.ts'), 'utf-8')
+const CORE_COMBINED = CORE_PURE_SOURCE + '\n' + CORE_DB_SOURCE
 
 // ============================================================
 // 1. Source-level regression tests
 // ============================================================
 describe('Inbound Router — Source Structure', () => {
-  test('server.ts has pure routeInbound function (not async)', () => {
-    expect(SERVER_SOURCE).toContain('function routeInbound(')
-    expect(SERVER_SOURCE).not.toContain('async function routeInbound(')
+  test('routeInbound is a pure (non-async) function in core/route-message.ts', () => {
+    // PR-A: moved from server.ts to core/route-message.ts. server.ts still imports it.
+    expect(CORE_PURE_SOURCE).toContain('export function routeInbound(')
+    expect(CORE_PURE_SOURCE).not.toContain('export async function routeInbound(')
+    expect(SERVER_SOURCE).toContain("from './core/route-message'")
+    expect(SERVER_SOURCE).toContain('routeInbound,')
   })
 
   test('server.ts has handleInboundMessage async wrapper', () => {
     expect(SERVER_SOURCE).toContain('async function handleInboundMessage(')
   })
 
-  test('server.ts has resolveInboundChannel function', () => {
-    expect(SERVER_SOURCE).toContain('async function resolveInboundChannel(')
+  test('resolveInboundChannel lives in core/route-message-db.ts', () => {
+    expect(CORE_DB_SOURCE).toContain('export async function resolveInboundChannel(')
+    expect(SERVER_SOURCE).toContain('resolveInboundChannel,')
   })
 
-  test('server.ts has resolveAgentFromDiscordId function', () => {
-    expect(SERVER_SOURCE).toContain('async function resolveAgentFromDiscordId(')
+  test('resolveAgentFromDiscordId lives in core/route-message-db.ts', () => {
+    expect(CORE_DB_SOURCE).toContain('export async function resolveAgentFromDiscordId(')
+    expect(SERVER_SOURCE).toContain('resolveAgentFromDiscordId,')
   })
 
   test('Discord onMessage uses handleInboundMessage (not direct routeInbound)', () => {
@@ -53,7 +64,8 @@ describe('Inbound Router — Source Structure', () => {
   test('handleInboundMessage checks channel members via loadAgentInfo', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
     const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
-    expect(body).toContain('loadAgentInfo(receiverAgentId)')
+    // PR-A: loadAgentInfo now takes a DbAdapter as the first argument
+    expect(body).toContain('loadAgentInfo(coreDb, receiverAgentId)')
   })
 
   test('last_received_context abolished (reply_to required, §4.2)', () => {
@@ -226,8 +238,9 @@ describe('Inbound Router — DB Integration', () => {
   })
 
   test('isEmergencyMessage detects emergency type and !stop prefix', () => {
-    expect(SERVER_SOURCE).toContain("if (messageType === 'emergency') return true")
-    expect(SERVER_SOURCE).toContain("if (content.startsWith('!stop')) return true")
+    // PR-A: moved to core/route-message.ts
+    expect(CORE_PURE_SOURCE).toContain("if (messageType === 'emergency') return true")
+    expect(CORE_PURE_SOURCE).toContain("if (content.startsWith('!stop')) return true")
   })
 
   // ============================================================
@@ -280,31 +293,39 @@ describe('Inbound Router — DB Integration', () => {
 // ============================================================
 describe('resolveSendDestination — channel_id resolution', () => {
   test('getMessageById SELECTs channel_id column', () => {
-    // Per SSOT §4.2, channel_id must be read directly from agent_messages
-    expect(SERVER_SOURCE).toContain('SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages')
+    // PR-A: moved to core/route-message-db.ts. Per SSOT §4.2, channel_id is read
+    // directly from the agent_messages row.
+    expect(CORE_DB_SOURCE).toContain('SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages')
   })
 
   test('getMessageById returns channel_id field', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function getMessageById(')
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function getMessageById(')
     expect(fnIdx).toBeGreaterThan(-1)
-    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 1000)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1500)
     expect(body).toContain('channel_id: row.channel_id ?? null')
   })
 
   test('resolveSendDestination prefers row.channel_id over metadata', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function resolveSendDestination(')
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function resolveSendDestination(')
     expect(fnIdx).toBeGreaterThan(-1)
-    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 3000)
     // row.channel_id is the primary source
     expect(body).toContain('original.channel_id ?? platformChannelId')
   })
 
   test('resolveSendDestination falls back through platform-prefixed metadata keys', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function resolveSendDestination(')
-    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
+    const fnIdx = CORE_DB_SOURCE.indexOf('export async function resolveSendDestination(')
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 3000)
     // Discord, Telegram, Slack inbound metadata uses <platform>_channel_id
     expect(body).toContain('meta.discord_channel_id')
     expect(body).toContain('meta.telegram_channel_id')
+  })
+
+  // PR-A: server.ts must import the moved helpers from core/
+  test('server.ts imports getMessageById and resolveSendDestination from core', () => {
+    expect(SERVER_SOURCE).toContain("from './core/route-message-db'")
+    expect(SERVER_SOURCE).toContain('getMessageById,')
+    expect(SERVER_SOURCE).toContain('resolveSendDestination,')
   })
 })
 
