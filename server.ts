@@ -2639,8 +2639,11 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
   const uptimeSeconds = Math.floor((Date.now() - sseStartTime) / 1000)
   const bots: Record<string, { connected_at: string; last_activity: string }> = {}
 
-  // Support both legacy connectedBots (sse mode) and botContexts (daemon mode)
-  if (TRANSPORT_MODE === 'daemon') {
+  // Support both legacy connectedBots (sse mode) and botContexts (daemon / receiver mode).
+  // ADR-041 PR-B: receiver mode shares the daemon's per-bot MCP factory, so the health
+  // check enumerates the same `botContexts` map for both.
+  const daemonLike = TRANSPORT_MODE === 'daemon' || TRANSPORT_MODE === 'receiver'
+  if (daemonLike) {
     for (const [botId, ctx] of botContexts) {
       bots[botId] = { connected_at: ctx.connectedAt, last_activity: ctx.lastActivity }
     }
@@ -2652,7 +2655,7 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
 
   let status = 'ok'
   if (EXPECTED_BOTS.length > 0) {
-    const activeBots = TRANSPORT_MODE === 'daemon' ? botContexts : connectedBots
+    const activeBots = daemonLike ? botContexts : connectedBots
     const missing = EXPECTED_BOTS.filter(b => !activeBots.has(b))
     if (missing.length === EXPECTED_BOTS.length) {
       status = 'error'
@@ -2665,7 +2668,32 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
 }
 
 // --- Start ---
-if (TRANSPORT_MODE === 'daemon') {
+// ADR-041 PR-B: `receiver` is a new transport mode that shares every piece
+// of daemon setup (httpServer, per-bot MCP factories, per-bot Discord
+// clients). It does NOT open a second Gateway connection for the already-
+// connected auditor token — reusing the existing connection is the
+// explicit safety constraint in ADR-041 rev4 after today's twin-connection
+// cascade (see ADR-040 G1).
+//
+// For PR-B the behavioural delta from `daemon` is intentionally small:
+// receiver mode logs an explicit activation line and exposes a helper so
+// downstream code can branch on `IS_RECEIVER_MODE`. The actual single-
+// Discord-connection fanout (i.e. shutting off other bots' per-bot
+// Gateway clients and letting auditor's onMessage do the pg_notify
+// fan-out for everyone) is a follow-up PR-B.2 — the retreat path (a)
+// pull-on-notify semantics stay on the existing 3-second polling
+// (`POLL_INTERVAL_MS`), which is already in production.
+//
+// Ref: ADR-041 rev4 PoC token strategy — auditor bot is the interim
+// receiver, Phase B introduces a dedicated `agent-com-receiver` bot.
+const IS_RECEIVER_MODE = TRANSPORT_MODE === 'receiver'
+if (IS_RECEIVER_MODE) {
+  process.stderr.write(
+    `agent-comms: TRANSPORT_MODE='receiver' active — reusing daemon setup, auditor bot owns inbound fanout (ADR-041 rev4)\n`,
+  )
+}
+
+if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
   // Daemon mode: Per-Bot Server Factory (Phase 3b)
   // Each bot_id gets its own MCP Server instance with bot-specific AGENT_ID
   const daemonTransports = new Map<string, SSEServerTransport>()

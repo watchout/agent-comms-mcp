@@ -89,7 +89,7 @@ describe('Inbound Router — Source Structure', () => {
 // ============================================================
 describe('Inbound Router — Daemon Mode Source Structure', () => {
   test('daemon mode uses handleInboundMessage for all Discord inbound paths', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     expect(daemonBlock).toBeGreaterThan(-1)
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
 
@@ -103,7 +103,7 @@ describe('Inbound Router — Daemon Mode Source Structure', () => {
   })
 
   test('daemon startup connects per-bot Discord clients from EXPECTED_BOTS', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('for (const botId of EXPECTED_BOTS)')
     expect(daemonSection).toContain('resolveDiscordToken(botId)')
@@ -111,19 +111,19 @@ describe('Inbound Router — Daemon Mode Source Structure', () => {
   })
 
   test('daemon startup per-bot calls pushToChannelServer after handleInboundMessage', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('pushToChannelServer(botId, inboundContent,')
   })
 
   test('daemon shared client iterates over EXPECTED_BOTS', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('for (const expectedBot of EXPECTED_BOTS)')
   })
 
   test('daemon mode pushes via pushToChannelServer with SSE fallback', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('pushToChannelServer(expectedBot,')
     expect(daemonSection).toContain('ctx?.transport')

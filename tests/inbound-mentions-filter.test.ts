@@ -52,31 +52,41 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 })
 
 describe('routeInbound — Pure function (§5.1)', () => {
-  // PR-A: routeInbound is now in core/route-message.ts. All source-level
-  // checks against it look in CORE_PURE_SOURCE, not SERVER_SOURCE.
-  test('routeInbound is a pure function (no async, no DB calls)', () => {
+  // PR-A: extracted to core/route-message.ts
+  // PR-B: renamed to `routeMessage` with a `sourceType` discriminator (§C2).
+  // `routeInbound` is kept as a backwards-compat alias that forwards to
+  // `routeMessage({sourceType: 'inbound'})`.
+  test('routeInbound alias still exists and routeMessage is the pure implementation', () => {
     expect(CORE_PURE_SOURCE).toContain('export function routeInbound(')
-    expect(CORE_PURE_SOURCE).not.toContain('export async function routeInbound(')
+    expect(CORE_PURE_SOURCE).toContain('export function routeMessage(')
+    expect(CORE_PURE_SOURCE).not.toContain('export async function routeMessage(')
+    // The alias body is a one-line forwarder
+    const aliasIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    expect(CORE_PURE_SOURCE.slice(aliasIdx, aliasIdx + 400)).toContain("routeMessage(msg, channel, agents, 'inbound')")
   })
 
-  test('routeInbound takes msg, channel, agents params', () => {
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const fnSig = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 400)
+  test('routeMessage takes msg, channel, agents, sourceType params', () => {
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnSig = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 500)
     expect(fnSig).toContain('msg:')
     expect(fnSig).toContain('channel: ChannelInfo')
     expect(fnSig).toContain('agents: AgentInfo[]')
+    expect(fnSig).toContain('sourceType: RouteSourceType')
   })
 
-  test('routeInbound returns RouteResult with pushTargets and dropTargets', () => {
+  test('routeMessage returns RouteResult with pushTargets and dropTargets', () => {
     expect(CORE_PURE_SOURCE).toContain('pushTargets: string[]')
     expect(CORE_PURE_SOURCE).toContain('dropTargets: Record<string, string>')
     expect(CORE_PURE_SOURCE).toContain('senderIsHuman: boolean')
     expect(CORE_PURE_SOURCE).toContain('noMentions: boolean')
+    // PR-B §C2: senderViolation is set for send-tool / cli callers whose own
+    // agentId is not a channel member
+    expect(CORE_PURE_SOURCE).toContain('senderViolation?: string')
   })
 
   test('mentions filter checks individual and group mentions', () => {
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
     expect(fnBody).toContain("msg.mentions.includes(agent.agentId)")
     expect(fnBody).toContain("msg.mentions.includes('all')")
     expect(fnBody).toContain("msg.mentions.includes('dev')")
@@ -84,32 +94,39 @@ describe('routeInbound — Pure function (§5.1)', () => {
   })
 
   test('NOT_MENTIONED is set in dropTargets', () => {
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
     expect(fnBody).toContain("'NOT_MENTIONED'")
   })
 
   test('DM bypass: DM messages always push', () => {
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
     expect(fnBody).toContain('isDm')
   })
 
   test('emergency bypass only (no CEO bypass)', () => {
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
     expect(fnBody).toContain('isEmergency')
     expect(fnBody).not.toContain('isCeo')
     // senderIsHuman exists in RouteResult but is NOT used as a bypass condition in the filter logic
-    // It's only computed and returned, not checked in the push/drop decision
     expect(fnBody).not.toContain('if (senderIsHuman)')  // not used as bypass condition
   })
 
   test('observer mode agents are dropped', () => {
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
     expect(fnBody).toContain('agent.observerMode')
     expect(fnBody).toContain("'OBSERVER_MODE'")
+  })
+
+  // PR-B §C2: sender-side guard for send-tool / cli callers
+  test('routeMessage rejects non-member senders for send-tool / cli sourceType', () => {
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    expect(fnBody).toContain("sourceType !== 'inbound'")
+    expect(fnBody).toContain("SENDER_NOT_A_MEMBER")
   })
 })
 
@@ -167,7 +184,7 @@ describe('§2.2 Pattern A — Human warning', () => {
   })
 
   test('daemon mode caller sends human warning (once)', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain('humanWarningSent')
     expect(daemonSection).toContain('sendHumanWarning')
@@ -181,7 +198,7 @@ describe('Inbound Mentions Filter — callsite updates', () => {
   })
 
   test('daemon per-bot client passes mentions to handleInboundMessage', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     const perBotIdx = daemonSection.indexOf('botDiscord.onMessage')
     expect(perBotIdx).toBeGreaterThan(-1)
@@ -191,7 +208,7 @@ describe('Inbound Mentions Filter — callsite updates', () => {
   })
 
   test('daemon shared client passes mentions to handleInboundMessage', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     const sharedIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
     expect(sharedIdx).toBeGreaterThan(-1)

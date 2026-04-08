@@ -26,7 +26,7 @@ describe('Webhook Channel push — handleInboundMessage + caller push', () => {
   })
 
   test('daemon shared client handles push after handleInboundMessage', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const section = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(section).toContain('if (result.delivered)')
     expect(section).toContain('pushToChannelServer(expectedBot,')
