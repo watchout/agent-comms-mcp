@@ -204,9 +204,17 @@ export class DiscordAdapter implements UIAdapter, Adapter {
   /** DB query function — injected by server.ts to avoid circular imports */
   private dbQuery: ((sql: string, params?: any[]) => Promise<{ rows: any[] }>) | null = null
 
+  /** Owning agent_id — used by D1 self-registration in the ready handler */
+  private agentId: string | null = null
+
   /** Set DB query function for mention conversion and thread mapping */
   setDbQuery(fn: (sql: string, params?: any[]) => Promise<{ rows: any[] }>): void {
     this.dbQuery = fn
+  }
+
+  /** Identify which agent_id this adapter belongs to (D1 self-register) */
+  setAgentId(agentId: string): void {
+    this.agentId = agentId
   }
 
   isConnected(): boolean {
@@ -347,8 +355,33 @@ export class DiscordAdapter implements UIAdapter, Adapter {
         .catch(() => {})
     })
 
-    this.client.once('ready', (c) => {
+    this.client.once('ready', async (c) => {
       process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
+
+      // ADR-040 D1: self-register Discord identity into agents.metadata.discord_id
+      // so the mention resolver can map <@discord_user_id> back to this agent_id.
+      // Without this, every restart leaves the bot invisible to humans (D8 was the
+      // interim fix that prevented registerAgent from wiping the column; D1 is the
+      // robust fix that always re-asserts the right value at connection time).
+      if (this.agentId && this.dbQuery) {
+        try {
+          await this.dbQuery(
+            `UPDATE agents
+                SET metadata = COALESCE(metadata, '{}'::jsonb)
+                             || jsonb_build_object('discord_id', $1::text)
+              WHERE agent_id = $2
+                AND COALESCE(metadata->>'discord_id', '') <> $1::text`,
+            [c.user.id, this.agentId],
+          )
+          process.stderr.write(
+            `discord-adapter: D1 self-registered discord_id=${c.user.id} for agent=${this.agentId}\n`,
+          )
+        } catch (err) {
+          process.stderr.write(
+            `discord-adapter: D1 self-register failed for agent=${this.agentId} (non-fatal): ${err}\n`,
+          )
+        }
+      }
     })
 
     // Connection state logging (discord.js has built-in auto-reconnect)

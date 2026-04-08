@@ -309,6 +309,45 @@ describe('resolveSendDestination — channel_id resolution', () => {
 })
 
 // ============================================================
+// 3b. DiscordAdapter D1 self-registration (ADR-040 D1)
+// ============================================================
+describe('DiscordAdapter — D1 self-registration', () => {
+  const ADAPTER_SOURCE = readFileSync(join(PROJECT_ROOT, 'adapters/discord.ts'), 'utf-8')
+
+  test('DiscordAdapter has setAgentId method', () => {
+    expect(ADAPTER_SOURCE).toContain('setAgentId(agentId: string): void')
+    expect(ADAPTER_SOURCE).toContain('private agentId: string | null = null')
+  })
+
+  test('ready handler self-registers discord_id when agentId + dbQuery are set', () => {
+    const readyIdx = ADAPTER_SOURCE.indexOf("this.client.once('ready'")
+    expect(readyIdx).toBeGreaterThan(-1)
+    const body = ADAPTER_SOURCE.slice(readyIdx, readyIdx + 2000)
+    expect(body).toContain('this.agentId && this.dbQuery')
+    expect(body).toContain('UPDATE agents')
+    expect(body).toContain("jsonb_build_object('discord_id', $1::text)")
+    // Idempotency guard so we do not write the same value on every reconnect
+    expect(body).toContain("COALESCE(metadata->>'discord_id', '') <> $1::text")
+  })
+
+  test('per-bot connectBotDiscord calls setAgentId(botId) before connect', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function connectBotDiscord(')
+    expect(fnIdx).toBeGreaterThan(-1)
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 1500)
+    const setAgentIdx = body.indexOf('adapter.setAgentId(botId)')
+    const connectIdx = body.indexOf('adapter.connect({')
+    expect(setAgentIdx).toBeGreaterThan(-1)
+    expect(connectIdx).toBeGreaterThan(-1)
+    expect(setAgentIdx).toBeLessThan(connectIdx)
+  })
+
+  test('stdio/sse shared discord adapter calls setAgentId(AGENT_ID) before connect', () => {
+    // The path that runs in non-daemon transport modes binds the adapter to AGENT_ID
+    expect(SERVER_SOURCE).toContain('discord.setAgentId(AGENT_ID)')
+  })
+})
+
+// ============================================================
 // 4. registerAgent UPSERT — metadata merge regression (D8)
 // ============================================================
 describe('registerAgent — metadata merge (ADR-040 D8)', () => {

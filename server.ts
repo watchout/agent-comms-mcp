@@ -183,6 +183,9 @@ async function connectBotDiscord(botId: string, token: string): Promise<DiscordA
         if (!client) throw new Error('DB unavailable')
         return client.query(sql, params)
       })
+      // ADR-040 D1: tell the adapter which agent it belongs to so the
+      // ready handler can self-register discord_id into the agents row.
+      adapter.setAgentId(botId)
       // No stateDir → no access.json → gate() passes all messages through
       // Filtering is handled by routeInbound() (daemon-only, Phase 3c)
       await adapter.connect({ token })
@@ -2819,6 +2822,10 @@ async function postConnect() {
         if (!client) throw new Error('DB unavailable')
         return client.query(sql, params)
       })
+
+      // ADR-040 D1: stdio/sse mode owns one adapter for AGENT_ID, so the ready
+      // handler can self-register discord_id for this agent on every connect.
+      discord.setAgentId(AGENT_ID)
 
       await discord.connect({
         token: DISCORD_BOT_TOKEN,
