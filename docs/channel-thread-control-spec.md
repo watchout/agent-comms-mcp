@@ -244,18 +244,20 @@ agent-comの動作:
 ### 2.7 パターン比較まとめ
 
 ```
-パターン       mentions    reply_to   宛先決定        push対象
+パターン       mentions    reply_to   宛先決定           push対象
 ──────────────────────────────────────────────────────────────────
-A. メンションなし  なし       なし      —              なし（DB保存のみ）
-B. メンション付き  あり       なし      受信場所（自動） mentions対象
-C. リプライのみ   あり（必須） あり      元msg場所（自動） mentions対象（自動追加なし）
-D. リプライ+第三者 あり（必須） あり      元msg場所（自動） mentions対象（自動追加なし）
-E. cron/CLI      あり       なし      CLI指定（必須）  mentions対象
+A. メンションなし  なし       —         —                なし（DB保存のみ + human警告）
+B. メンション付き  あり       必須      元msg場所（自動）  mentions対象
+C. リプライのみ   あり（必須） 必須      元msg場所（自動）  mentions対象（自動追加なし）
+D. リプライ+第三者 あり（必須） 必須      元msg場所（自動）  mentions対象（自動追加なし）
+E. cron/CLI      あり       —         CLI指定（必須）    mentions対象
 
 全パターン共通:
   ✅ botが宛先を選択する手段がない
   ✅ mentionsは常に必須。例外なし
-  ✅ reply_toは「どこに送るか」だけ。「誰に送るか」はmentionsで明示
+  ✅ reply_toは常に必須（パターンB/C/D）。例外なし
+  ✅ 宛先は完全に決定論的（last_received_contextフォールバック廃止）
+  ✅ 「誰に送るか」はmentionsで明示。「どこに送るか」はreply_toで決定
   ✅ システムが勝手にpush対象を追加しない
   ✅ LLM判断ゼロ（宛先・配信制御）
   ✅ DB保存は全パターンで実行（監査ログ）
@@ -580,14 +582,16 @@ DM経由push時に届く内容:
 send({
   mentions: string[],      // 必須。空配列は常に拒否。例外なし
   content: string,         // 必須。50,000文字上限
-  reply_to?: string,       // 任意。元メッセージID（「どこに送るか」を決めるだけ）
+  reply_to: string,        // 必須。元メッセージID（「どこに送るか」を決定論的に決める）
 })
 
 // ルール:
 //   mentions は常に必須。例外なし。
-//   reply_to は「どこに送るか」を決めるだけ。
+//   reply_to は常に必須。例外なし。宛先は完全に決定論的。
 //   「誰に送るか」は常に mentions で明示。
+//   「どこに送るか」は常に reply_to で決定。
 //   システムが勝手にpush対象を追加しない。
+//   last_received_contextフォールバックは廃止（非決定論的であるため）。
 ```
 
 ### 4.2 宛先決定ロジック（コアRouter内部）
@@ -598,52 +602,37 @@ async function resolveSendDestination(
   params: SendParams
 ): Promise<Destination | ErrorResult> {
 
-  // ケース1: reply_toあり → 元メッセージの場所に送信
-  if (params.reply_to) {
-    const original = await db.query(
-      "SELECT channel_id, thread_id, author_id, mentions FROM agent_messages WHERE id = $1",
-      [params.reply_to]
-    );
-    
-    if (!original) {
-      return error("MESSAGE_NOT_FOUND", `reply_to '${params.reply_to}' が見つかりません`);
-    }
-    
-    // reply_toメンション検証: 元メッセージで自分がメンションされているか
-    const isMentioned = original.mentions.includes(sender.agent_id);
-    const isAuthor = original.author_id === sender.agent_id;
-    const isHuman = sender.agent_type === "human";
-    
-    if (!isMentioned && !isAuthor && !isHuman) {
-      return error("NOT_MENTIONED_IN_ORIGINAL",
-        "元メッセージであなたはメンションされていません。応答権限がありません");
-    }
-    
-    return {
-      channel_id: original.channel_id,
-      thread_id: original.thread_id || null,
-    };
+  // reply_to必須チェック
+  if (!params.reply_to) {
+    return error("NO_REPLY_TO",
+      "reply_toは必須です。返信先メッセージIDを指定してください。" +
+      "定期タスクの場合は agent-com notify --channel <id> を使用してください");
   }
 
-  // ケース2: reply_toなし → 直前受信メッセージの場所に送信
-  if (sender.last_received_channel) {
-    // 警告: reply_toなしは推奨されない（同時受信で混乱の可能性）
-    await auditLog("send.no_reply_to", {
-      agent_id: sender.agent_id,
-      fallback_channel: sender.last_received_channel,
-      fallback_thread: sender.last_received_thread,
-    });
-    
-    return {
-      channel_id: sender.last_received_channel,
-      thread_id: sender.last_received_thread || null,
-    };
+  // reply_toあり → 元メッセージの場所に送信（唯一の宛先決定パス）
+  const original = await db.query(
+    "SELECT channel_id, thread_id, author_id, mentions FROM agent_messages WHERE id = $1",
+    [params.reply_to]
+  );
+  
+  if (!original) {
+    return error("MESSAGE_NOT_FOUND", `reply_to '${params.reply_to}' が見つかりません`);
   }
-
-  // ケース3: 受信コンテキストなし → エラー
-  return error("NO_CONTEXT",
-    "送信先を決定できません。受信メッセージがありません。" +
-    "定期タスクの場合は agent-com notify --channel <id> を使用してください");
+  
+  // reply_toメンション検証: 元メッセージで自分がメンションされているか
+  const isMentioned = original.mentions.includes(sender.agent_id);
+  const isAuthor = original.author_id === sender.agent_id;
+  const isHuman = sender.agent_type === "human";
+  
+  if (!isMentioned && !isAuthor && !isHuman) {
+    return error("NOT_MENTIONED_IN_ORIGINAL",
+      "元メッセージであなたはメンションされていません。応答権限がありません");
+  }
+  
+  return {
+    channel_id: original.channel_id,
+    thread_id: original.thread_id || null,
+  };
 }
 ```
 
