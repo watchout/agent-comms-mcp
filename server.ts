@@ -1523,7 +1523,7 @@ async function handleInboundMessage(params: {
       delivered: false,
       messageId,
       reason,
-      humanWarning: result.senderIsHuman && result.noMentions,
+      humanWarning: result.senderIsHuman && result.noMentions && !params.replyToMessageId,
     }
   }
 
