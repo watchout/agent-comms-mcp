@@ -1380,6 +1380,7 @@ async function handleInboundMessage(params: {
       [`${platform}_message_id`]: externalMessageId,
       [`${platform}_channel_id`]: externalChannelId,
       author_name: authorName,
+      mentions: mentions ?? [],
       ...(attachments ? { attachments } : {}),
     },
   }).catch(err => {
