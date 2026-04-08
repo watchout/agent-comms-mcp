@@ -2186,20 +2186,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       process.stderr.write(`[agent-com] INFO: auto-unfocused after sending report\n`)
     }
 
+    // Derive a single warning code from dropTargets (RouteResult uses pushTargets/dropTargets,
+    // not targets/warning — the older shape was never produced by routeInbound).
+    const dropReasons = Object.values(delivery.dropTargets)
+    const deliveryWarning = delivery.pushTargets.length === 0
+      ? (dropReasons.includes('NOT_MENTIONED') ? 'NOT_MENTIONED'
+        : dropReasons.includes('THREAD_MISMATCH') ? 'THREAD_MISMATCH'
+        : null)
+      : null
+
     // Audit log
     await writeAuditLog('message.send', agentId, dest.channelId, {
       message_id: id, to, message_type: message_type ?? 'chat',
-      recipients: delivery.targets.length, warning: delivery.warning ?? null,
+      recipients: delivery.pushTargets.length, warning: deliveryWarning,
     })
 
     // Response with delivery feedback
-    if (delivery.targets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.targets.length} recipient(s)` }] }
+    if (delivery.pushTargets.length > 0) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)` }] }
     }
-    if (delivery.warning === 'NOT_MENTIONED') {
+    if (deliveryWarning === 'NOT_MENTIONED') {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください` }] }
     }
-    if (delivery.warning === 'THREAD_MISMATCH') {
+    if (deliveryWarning === 'THREAD_MISMATCH') {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません` }] }
     }
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
