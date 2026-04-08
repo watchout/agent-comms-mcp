@@ -1,6 +1,6 @@
 # agent-com チャンネル・スレッド制御仕様（実装レベル）
 
-> CEO承認待ち: 2026-04-08
+> CEO承認: 2026-04-08（§5.1 human bypass削除承認済み）
 > 原則: LLM判断ゼロ。全制御をコード（スクリプト）で強制
 > Discordのデフォルト動作を再現: 発言した場所に返る
 
@@ -784,8 +784,10 @@ function routeInbound(msg: UnifiedMessage, channel: Channel, agents: Agent[]): R
       continue;
     }
 
-    // 1. 緊急メッセージ or 送信者がhuman → 全員push
-    if (isEmergency(msg) || getAgent(msg.author_id)?.agent_type === "human") {
+    // 1. 緊急メッセージ → 全員push（唯一のmentionsバイパス）
+    // humanもbotも同一ルール。メンションベースでフィルタ。
+    // humanがメンションなしで投稿 → DB保存のみ + 警告返信（パターンA）
+    if (isEmergency(msg)) {
       pushTargets.push(memberId);
       continue;
     }
@@ -1251,7 +1253,7 @@ daemon → channel-server 間:
 - [ ] DM受信 → DMに返信される
 - [ ] cron CLI → 指定チャンネル/スレッドに送信される
 - [ ] 緊急メッセージ → 全員にpushされる
-- [ ] human送信 → 全員にpushされる
+- [ ] humanメンションなし送信 → DB保存のみ + 警告返信（パターンA）
 - [ ] グループメンション → 該当グループ全員にpush
 - [ ] observer_mode → pushされない
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 /**
- * Tests for inbound mentions filter (PR#62 — §3.15 step 4)
+ * Tests for inbound mentions filter (PR#62 — §3.15 step 4, updated for §5.1 pure routeInbound)
  *
  * Verifies:
  * 1. extractDiscordMentions helper
- * 2. routeInbound() mentions filter
- * 3. Bypass conditions (CEO, emergency, reply)
- * 4. All callsites pass mentions
+ * 2. routeInbound() pure function — mentions filter logic
+ * 3. handleInboundMessage() wrapper — DB + routing + push
+ * 4. Bypass conditions (emergency only, CEO follows mentions)
+ * 5. All callsites pass mentions
+ * 6. §2.2 Pattern A: human warning (no mentions)
  *
  * Usage: bun test tests/inbound-mentions-filter.test.ts
  */
@@ -45,64 +47,142 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   })
 })
 
-describe('Inbound Mentions Filter — routeInbound step 4', () => {
-  test('routeInbound accepts mentions parameter', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
-    const fnSig = SERVER_SOURCE.slice(fnIdx, fnIdx + 600)
-    expect(fnSig).toContain('mentions?: string[]')
+describe('routeInbound — Pure function (§5.1)', () => {
+  test('routeInbound is a pure function (no async, no DB calls)', () => {
+    // routeInbound should be a regular function, not async
+    expect(SERVER_SOURCE).toContain('function routeInbound(')
+    // Must NOT contain 'async function routeInbound'
+    expect(SERVER_SOURCE).not.toContain('async function routeInbound(')
   })
 
-  test('routeInbound accepts replyToMessageId parameter', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
-    const fnSig = SERVER_SOURCE.slice(fnIdx, fnIdx + 600)
-    expect(fnSig).toContain('replyToMessageId?: string')
+  test('routeInbound takes msg, channel, agents params', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
+    const fnSig = SERVER_SOURCE.slice(fnIdx, fnIdx + 300)
+    expect(fnSig).toContain('msg:')
+    expect(fnSig).toContain('channel: ChannelInfo')
+    expect(fnSig).toContain('agents: AgentInfo[]')
+  })
+
+  test('routeInbound returns RouteResult with pushTargets and dropTargets', () => {
+    expect(SERVER_SOURCE).toContain('pushTargets: string[]')
+    expect(SERVER_SOURCE).toContain('dropTargets: Record<string, string>')
+    expect(SERVER_SOURCE).toContain('senderIsHuman: boolean')
+    expect(SERVER_SOURCE).toContain('noMentions: boolean')
   })
 
   test('mentions filter checks individual and group mentions', () => {
-    expect(SERVER_SOURCE).toContain("mentions?.includes(receiverAgentId)")
-    expect(SERVER_SOURCE).toContain("mentions?.includes('all')")
-    expect(SERVER_SOURCE).toContain("mentions?.includes('dev')")
-    expect(SERVER_SOURCE).toContain("mentions?.includes('org')")
+    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain("msg.mentions.includes(agent.agentId)")
+    expect(fnBody).toContain("msg.mentions.includes('all')")
+    expect(fnBody).toContain("msg.mentions.includes('dev')")
+    expect(fnBody).toContain("msg.mentions.includes('org')")
   })
 
-  test('NOT_MENTIONED reason is returned when not mentioned', () => {
-    expect(SERVER_SOURCE).toContain("reason: 'NOT_MENTIONED'")
+  test('NOT_MENTIONED is set in dropTargets', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain("'NOT_MENTIONED'")
   })
 
   test('DM bypass: DM messages always push', () => {
-    const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
-    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 800)
-    expect(filterBody).toContain('isDm')
+    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain('isDm')
   })
 
-  test('emergency bypass only (CEO follows mentions like everyone else)', () => {
-    const routeIdx = SERVER_SOURCE.indexOf('Mentions filter')
-    const filterBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 800)
-    expect(filterBody).toContain('!isEmergency')
-    expect(filterBody).not.toContain('!isCeo')  // CEO no longer bypasses mentions
+  test('emergency bypass only (no CEO bypass)', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain('isEmergency')
+    expect(fnBody).not.toContain('isCeo')
+    // senderIsHuman exists in RouteResult but is NOT used as a bypass condition in the filter logic
+    // It's only computed and returned, not checked in the push/drop decision
+    expect(fnBody).not.toContain('if (senderIsHuman)')  // not used as bypass condition
   })
 
-  test('mentions filter runs before last_received_context update', () => {
-    const routeIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
-    const routeBody = SERVER_SOURCE.slice(routeIdx, routeIdx + 5000)
-    const mentionsIdx = routeBody.indexOf("reason: 'NOT_MENTIONED'")
-    const contextIdx = routeBody.indexOf('updateLastReceivedContext')
-    expect(mentionsIdx).toBeGreaterThan(-1)
+  test('observer mode agents are dropped', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain('agent.observerMode')
+    expect(fnBody).toContain("'OBSERVER_MODE'")
+  })
+})
+
+describe('handleInboundMessage — Full flow wrapper', () => {
+  test('handleInboundMessage is async and wraps routeInbound', () => {
+    expect(SERVER_SOURCE).toContain('async function handleInboundMessage(')
+  })
+
+  test('DB save happens before routing', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    const dbSaveIdx = fnBody.indexOf('saveMessage(')
+    const routeIdx = fnBody.indexOf('routeInbound(')
+    expect(dbSaveIdx).toBeGreaterThan(-1)
+    expect(routeIdx).toBeGreaterThan(-1)
+    expect(dbSaveIdx).toBeLessThan(routeIdx)
+  })
+
+  test('last_received_context update happens after routing', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    const routeIdx = fnBody.indexOf('routeInbound(')
+    const contextIdx = fnBody.indexOf('updateLastReceivedContext')
+    expect(routeIdx).toBeGreaterThan(-1)
     expect(contextIdx).toBeGreaterThan(-1)
-    expect(mentionsIdx).toBeLessThan(contextIdx)
+    expect(routeIdx).toBeLessThan(contextIdx)
+  })
+
+  test('returns humanWarning flag for Pattern A', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    expect(fnBody).toContain('humanWarning:')
+    expect(fnBody).toContain('result.senderIsHuman && result.noMentions')
+  })
+})
+
+describe('§2.2 Pattern A — Human warning', () => {
+  test('sendHumanWarning function exists', () => {
+    expect(SERVER_SOURCE).toContain('async function sendHumanWarning(')
+  })
+
+  test('warning includes mentions guidance', () => {
+    expect(SERVER_SOURCE).toContain('メンションがないためbotには通知されていません')
+    expect(SERVER_SOURCE).toContain('@all')
+  })
+
+  test('cross-process dedup via pg_try_advisory_lock', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function sendHumanWarning(')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain('pg_try_advisory_lock')
+  })
+
+  test('stdio mode caller sends human warning', () => {
+    // In the stdio onMessage handler, check for humanWarning
+    const stdioBlock = SERVER_SOURCE.indexOf("TRANSPORT_MODE !== 'daemon'")
+    const stdioSection = SERVER_SOURCE.slice(stdioBlock, stdioBlock + 3000)
+    expect(stdioSection).toContain('result.humanWarning')
+    expect(stdioSection).toContain('sendHumanWarning')
+  })
+
+  test('daemon mode caller sends human warning (once)', () => {
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
+    expect(daemonSection).toContain('humanWarningSent')
+    expect(daemonSection).toContain('sendHumanWarning')
   })
 })
 
 describe('Inbound Mentions Filter — callsite updates', () => {
-  test('stdio/channel plugin Discord adapter connects and uses routeInbound', () => {
+  test('stdio/channel plugin Discord adapter connects and uses handleInboundMessage', () => {
     expect(SERVER_SOURCE).toContain('Discord adapter connected (channel plugin mode)')
     expect(SERVER_SOURCE).toContain('extractDiscordMentions(content, msg.mentionUserIds)')
   })
 
-  test('daemon per-bot client passes mentions to routeInbound', () => {
+  test('daemon per-bot client passes mentions to handleInboundMessage', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    // Find per-bot onMessage (botDiscord.onMessage)
     const perBotIdx = daemonSection.indexOf('botDiscord.onMessage')
     expect(perBotIdx).toBeGreaterThan(-1)
     const perBotBody = daemonSection.slice(perBotIdx, perBotIdx + 2000)
@@ -110,14 +190,20 @@ describe('Inbound Mentions Filter — callsite updates', () => {
     expect(perBotBody).toContain('mentions: resolvedMentions')
   })
 
-  test('daemon shared client passes mentions to routeInbound', () => {
+  test('daemon shared client passes mentions to handleInboundMessage', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    // Find shared onMessage (discord.onMessage in daemon)
     const sharedIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
     expect(sharedIdx).toBeGreaterThan(-1)
     const sharedBody = daemonSection.slice(sharedIdx, sharedIdx + 3000)
     expect(sharedBody).toContain('extractDiscordMentions')
     expect(sharedBody).toContain('mentions: resolvedMentions')
+  })
+
+  test('all callsites use handleInboundMessage (not old routeInbound)', () => {
+    // routeInbound should NOT be called with { receiverAgentId: ... } directly
+    // Only handleInboundMessage should be called from message handlers
+    const callsites = SERVER_SOURCE.match(/routeInbound\(\{/g)
+    expect(callsites).toBeNull()  // No direct calls to routeInbound with object literal
   })
 })

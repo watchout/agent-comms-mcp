@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 /**
- * Tests for inbound router (PR#56 — SSOT-5 §1 compliant)
+ * Tests for inbound router (updated for §5.1 pure routeInbound + handleInboundMessage)
  *
  * Verifies:
- * 1. Source-level: routeInbound exists and is used for Discord inbound
- * 2. Source-level: direct mcp.notification push is removed from onMessage
- * 3. DB integration: members check, active_thread filter, CEO bypass
+ * 1. Source-level: routeInbound is pure, handleInboundMessage wraps it
+ * 2. Source-level: Discord onMessage uses handleInboundMessage
+ * 3. DB integration: members check, active_thread filter
  *
  * Usage: bun test tests/inbound-router.test.ts
  */
@@ -21,8 +21,13 @@ const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
 // 1. Source-level regression tests
 // ============================================================
 describe('Inbound Router — Source Structure', () => {
-  test('server.ts has routeInbound function', () => {
-    expect(SERVER_SOURCE).toContain('async function routeInbound(')
+  test('server.ts has pure routeInbound function (not async)', () => {
+    expect(SERVER_SOURCE).toContain('function routeInbound(')
+    expect(SERVER_SOURCE).not.toContain('async function routeInbound(')
+  })
+
+  test('server.ts has handleInboundMessage async wrapper', () => {
+    expect(SERVER_SOURCE).toContain('async function handleInboundMessage(')
   })
 
   test('server.ts has resolveInboundChannel function', () => {
@@ -33,20 +38,11 @@ describe('Inbound Router — Source Structure', () => {
     expect(SERVER_SOURCE).toContain('async function resolveAgentFromDiscordId(')
   })
 
-  test('Discord onMessage uses routeInbound (not direct mcp.notification)', () => {
-    // Find the discord.onMessage block in the channel plugin section
+  test('Discord onMessage uses handleInboundMessage (not direct routeInbound)', () => {
     const onMessageIdx = SERVER_SOURCE.indexOf('discord.onMessage((msg) => {')
     expect(onMessageIdx).toBeGreaterThan(-1)
-
-    // Get the onMessage callback body (up to closing })
     const afterOnMessage = SERVER_SOURCE.slice(onMessageIdx, onMessageIdx + 2000)
-
-    // Must use routeInbound
-    expect(afterOnMessage).toContain('routeInbound({')
-
-    // Must NOT contain direct mcp.notification in the onMessage callback
-    // (mcp.notification should only be called inside pushFn)
-    expect(afterOnMessage).not.toContain("mcp.notification({\n          method: 'notifications/claude/channel',")
+    expect(afterOnMessage).toContain('handleInboundMessage({')
   })
 
   test('routeInbound drops unregistered channels (CHANNEL_UNKNOWN)', () => {
@@ -54,52 +50,38 @@ describe('Inbound Router — Source Structure', () => {
     expect(SERVER_SOURCE).toContain('not registered in core DB')
   })
 
-  test('members=[] results in NOT_A_MEMBER (no length>0 guard)', () => {
-    // The members check must NOT have a length > 0 guard
-    const routeInboundIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
-    const body = SERVER_SOURCE.slice(routeInboundIdx, routeInboundIdx + 3000)
-    // Should NOT contain the old guard
-    expect(body).not.toContain('resolved.members.length > 0 &&')
-    // Should contain the direct includes check
-    expect(body).toContain('!resolved.members.includes(receiverAgentId)')
+  test('handleInboundMessage checks channel members via loadAgentInfo', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    expect(body).toContain('loadAgentInfo(receiverAgentId)')
   })
 
-  test('routeInbound checks channel members', () => {
-    expect(SERVER_SOURCE).toContain('!resolved.members.includes(receiverAgentId)')
-  })
-
-  test('routeInbound updates last_received_context', () => {
+  test('handleInboundMessage updates last_received_context after routing', () => {
     expect(SERVER_SOURCE).toContain('updateLastReceivedContext(receiverAgentId,')
   })
 
-  test('routeInbound has emergency/CEO bypass', () => {
-    expect(SERVER_SOURCE).toContain('isEmergencyMessage(content,')
-    expect(SERVER_SOURCE).toContain('isHumanAgent(senderAgentId)')
-  })
-
-  test('routeInbound always saves to DB before delivery check', () => {
-    // saveMessage should appear before members check
-    const routeInboundIdx = SERVER_SOURCE.indexOf('async function routeInbound(')
-    const body = SERVER_SOURCE.slice(routeInboundIdx, routeInboundIdx + 3000)
-    const saveIdx = body.indexOf('await saveMessage(')
-    const membersCheckIdx = body.indexOf('!resolved.members.includes(receiverAgentId)')
+  test('handleInboundMessage always saves to DB before routing', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    const saveIdx = body.indexOf('saveMessage(')
+    const routeIdx = body.indexOf('routeInbound(')
     expect(saveIdx).toBeGreaterThan(-1)
-    expect(membersCheckIdx).toBeGreaterThan(-1)
-    expect(saveIdx).toBeLessThan(membersCheckIdx)
+    expect(routeIdx).toBeGreaterThan(-1)
+    expect(saveIdx).toBeLessThan(routeIdx)
   })
 })
 
 // ============================================================
-// 1b. Daemon mode source-level regression tests (PR#58)
+// 1b. Daemon mode source-level regression tests
 // ============================================================
 describe('Inbound Router — Daemon Mode Source Structure', () => {
-  test('daemon mode uses routeInbound for all Discord inbound paths', () => {
+  test('daemon mode uses handleInboundMessage for all Discord inbound paths', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     expect(daemonBlock).toBeGreaterThan(-1)
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
 
-    // Both startup per-bot and shared client use routeInbound
-    expect(daemonSection).toContain('routeInbound({')
+    // Both startup per-bot and shared client use handleInboundMessage
+    expect(daemonSection).toContain('handleInboundMessage({')
     // No direct saveMessage in any onMessage handler
     const sharedOnMsg = daemonSection.indexOf('discord.onMessage((msg) => {')
     expect(sharedOnMsg).toBeGreaterThan(-1)
@@ -115,19 +97,19 @@ describe('Inbound Router — Daemon Mode Source Structure', () => {
     expect(daemonSection).toContain('connectBotDiscord(botId,')
   })
 
-  test('daemon startup per-bot calls pushToChannelServer after routeInbound', () => {
+  test('daemon startup per-bot calls pushToChannelServer after handleInboundMessage', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('pushToChannelServer(botId, inboundContent,')
   })
 
-  test('daemon shared client iterates over botContexts', () => {
+  test('daemon shared client iterates over EXPECTED_BOTS', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('for (const [botId, ctx] of botContexts)')
+    expect(daemonSection).toContain('for (const expectedBot of EXPECTED_BOTS)')
   })
 
-  test('daemon mode pushFn uses pushToChannelServer with SSE fallback', () => {
+  test('daemon mode pushes via pushToChannelServer with SSE fallback', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('pushToChannelServer(expectedBot,')
@@ -243,8 +225,6 @@ describe('Inbound Router — DB Integration', () => {
   })
 
   test('isEmergencyMessage detects emergency type and !stop prefix', () => {
-    // These are source-level tests for the function logic
-    // (function is not exported, so we verify source patterns)
     expect(SERVER_SOURCE).toContain("if (messageType === 'emergency') return true")
     expect(SERVER_SOURCE).toContain("if (content.startsWith('!stop')) return true")
   })
