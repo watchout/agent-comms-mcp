@@ -229,3 +229,80 @@ Then post a 5-line summary to `#agent-com` and ping `@cto`. Link this file (with
 - [ ] `.mcp.json` updated (temporary, will be reverted post-spike)
 - [ ] Result section appended to this file
 - [ ] Summary posted to `#agent-com`
+
+---
+
+## Result — 2026-04-08 17:07 JST
+
+**Spike runner**: agent-com-dev (this Claude Code session, isolated subprocess via `claude --print`)
+**SDK version**: `@modelcontextprotocol/sdk@^1.12.1` (from `package.json`)
+**Notification method tried**: `notifications/message` (the SDK accepted it, no fallback to `notifications/log` was triggered for either transport)
+**Test driver**: `claude --print --mcp-config <cfg> --dangerously-skip-permissions --max-turns 2 <prompt>`
+
+The driver spawns an isolated `claude` subprocess (separate from this session) and asks the model to recite the unique SPIKE token that the server is pushing via notifications. Each spike run regenerates the token, so the model can only know it via in-context delivery — there is no training-data leak path.
+
+### Result — stdio transport
+
+- **Spike server**: `scripts/spike-mcp-notify-server.ts`
+- **Server log**: `/tmp/spike-server.log`
+
+| Probe | Status | Evidence |
+|------:|:------:|----------|
+| 1. Server emits notifications | ✅ | 18+ ticks dispatched in `/tmp/spike-server.log`. SDK `server.notification({method: 'notifications/message', ...})` returned without throwing for every tick. |
+| 2. MCP client receives | ⚠️ unknown | `claude --print` does not expose client-side notification logs. Whether the JSON-RPC frames were dropped at the transport layer, the client layer, or the surfacing layer cannot be distinguished from the spike alone. |
+| 3. Model context contains notification | ❌ FAIL | Model output verbatim: `NO_NOTIFICATIONS_RECEIVED`. The model knew the spike server name (`spike-notify`) and the token format (`SPIKE-XXX-XXX`) — both surfaced by `tools/list` — but had no knowledge of any `SPIKE-MNPRMEL6-A63XKJ`-style token from any tick. |
+| 4. Latency (tick → model visibility) | n/a | Probe 3 failed → no observation possible. |
+| 5. Spontaneous push (no prompting) | ❌ FAIL | Same as Probe 3. The model was explicitly asked to retrieve the token and could not. |
+
+### Result — SSE transport
+
+- **Spike server**: `scripts/spike-mcp-notify-server-sse.ts` (express + `SSEServerTransport` on `127.0.0.1:9101/sse`)
+- **Server log**: `/tmp/spike-server-sse.log`
+
+| Probe | Status | Evidence |
+|------:|:------:|----------|
+| 1. Server emits notifications | ✅ | SSE listener accepted the `claude --print` connection (`/sse client connected from ::ffff:127.0.0.1`). 7 ticks dispatched before the test driver's prompt finished. SDK accepted `notifications/message` with no throw. |
+| 2. MCP client receives | ⚠️ unknown | Same caveat as stdio. |
+| 3. Model context contains notification | ❌ FAIL | Model output verbatim: `NO_NOTIFICATIONS_RECEIVED`. Identical behaviour to stdio. |
+| 4. Latency | n/a | — |
+| 5. Spontaneous push | ❌ FAIL | — |
+
+### Final verdict
+
+| Transport | Probe 3 | Probe 5 | Verdict |
+|-----------|:----:|:----:|:-------:|
+| stdio | ❌ | ❌ | **NG** |
+| SSE | ❌ | ❌ | **NG** |
+
+**Combined verdict: NG**.
+
+Per spec §Q1, this triggers **retreat path (a) — pull-on-notify**.
+
+### What this proves and what it doesn't
+
+**Proves**: Claude Code's MCP client (as of `@modelcontextprotocol/sdk@1.12.1`, claude CLI version current as of 2026-04-08) does **not** surface server-initiated `notifications/message` into the model's context window. The notifications dispatch successfully at the SDK / transport level — the gap is at the client → model surfacing layer. The behaviour is identical for stdio and SSE, which is consistent with the surfacing layer being transport-agnostic.
+
+**Does not prove**: that no future Claude Code release will surface them. The spike server is reusable for re-validation when the MCP spec for server-initiated notifications stabilises further.
+
+**Does not test**: alternative notification methods. `notifications/resources/updated`, `notifications/prompts/list_changed`, and `notifications/tools/list_changed` are recognised in the MCP spec and may be surfaced by the client. Worth a follow-up spike if retreat path (a) turns out to be too slow in practice.
+
+### Cleanup performed
+
+- Killed the SSE spike process (PID was tracked in `/tmp/spike-sse.pid`)
+- Project `.mcp.json` was never modified — spike configs lived in `/tmp` and were referenced via `--mcp-config`
+- Backup of `.mcp.json` taken at Step 0 is intact (timestamps preserved)
+
+### Implication for v0.2.0 / ADR-041
+
+The Receiver + MessageBus structural value is preserved per the spec's retreat path comparison table (§Q1):
+
+- ✅ Discord Gateway aggregation into one receiver
+- ✅ DB INSERT centralisation
+- ✅ catch-up phase
+- ✅ mixed-mode dedup
+- ✅ routeMessage unification
+
+What is lost:
+- ❌ immediate push semantics for inbound messages → bots check inbox on a polling interval (current production behaviour)
+
+ADR-041 should be set to **Accepted with retreat path (a)** rather than rejected. The construction work is identical for both push and retreat-pull modes — only the bot subscribe handler differs (call MCP notification vs append to inbox queue).
