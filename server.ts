@@ -26,6 +26,26 @@ import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto
 import { execSync } from 'node:child_process'
 import { DiscordAdapter } from './adapters/discord'
 import { signPayload } from './shared/hmac'
+// PR-A: pure routing functions extracted to core/ so the future receiver
+// (PR-B) and this server share a single implementation. Behavioural
+// contract is unchanged — see ADR-041 implementation step 1/2.
+import {
+  routeInbound,
+  parseMentions,
+  isEmergencyMessage,
+  type AgentInfo,
+  type ChannelInfo,
+  type RouteResult,
+} from './core/route-message'
+import {
+  getMessageById,
+  isHumanAgent,
+  resolveAgentFromDiscordId,
+  resolveInboundChannel,
+  loadAgentInfo,
+  resolveSendDestination,
+  type DbAdapter,
+} from './core/route-message-db'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -375,6 +395,16 @@ async function tryGetDb(): Promise<Client | null> {
     dbAvailable = false
     process.stderr.write('agent-comms: DB unavailable, falling back to in-memory mode\n')
     return null
+  }
+}
+
+// PR-A helper: build a `DbAdapter` for core/ helpers from the lazy `tryGetDb()`.
+// Returns null when the DB is unavailable, matching the existing fallback semantics.
+async function coreDbAdapter(): Promise<DbAdapter | null> {
+  const client = await tryGetDb()
+  if (!client) return null
+  return {
+    query: <T = any>(sql: string, params?: any[]) => client.query<T>(sql, params),
   }
 }
 
@@ -829,15 +859,16 @@ async function startListener(): Promise<void> {
         }
 
         // §5.1: Use pure routeInbound() for delivery filter (unified with all push paths)
-        const agentInfo = await loadAgentInfo(AGENT_ID)
+        const coreDb = await coreDbAdapter()
+        const agentInfo = await loadAgentInfo(coreDb, AGENT_ID)
         if (!agentInfo) {
           process.stderr.write(`agent-comms: listener — agent ${AGENT_ID} not found, skipping\n`)
           return
         }
-        const senderAgentId = await resolveAgentFromDiscordId(row.author_id) ?? row.author_id
-        const senderIsBot = !(await isHumanAgent(senderAgentId))
+        const senderAgentId = await resolveAgentFromDiscordId(coreDb, row.author_id) ?? row.author_id
+        const senderIsBot = !(await isHumanAgent(coreDb, senderAgentId))
         const resolvedMentions = (row.metadata as any)?.mentions ?? parseMentions(row.content)
-        const channelInfo = await resolveInboundChannel(row.channel_id)
+        const channelInfo = await resolveInboundChannel(coreDb, row.channel_id)
         const routeResult = routeInbound(
           { authorAgentId: senderAgentId, authorIsBot: senderIsBot, content: row.content, mentions: resolvedMentions, messageType: row.message_type ?? 'chat' },
           { channelId: channelInfo?.channelId ?? row.channel_id, threadId: channelInfo?.threadId, members: channelInfo?.members ?? [], type: channelInfo?.type },
@@ -1037,22 +1068,12 @@ async function resolveDestination(to: string, senderId: string): Promise<Resolve
   return { error: `invalid destination format. Use channel:/agent:/thread:`, code: 'INVALID_DESTINATION' }
 }
 
-function isEmergencyMessage(content: string, messageType: string): boolean {
-  if (messageType === 'emergency') return true
-  if (content.startsWith('!stop')) return true
-  return false
-}
-
-/** Check if sender is a human agent (agent_type='human') */
-async function isHumanAgent(agentId: string): Promise<boolean> {
-  const client = await tryGetDb()
-  if (!client) return false // safe default: don't assume human without DB
-  const r = await client.query("SELECT agent_type FROM agents WHERE agent_id = $1", [agentId])
-  return r.rows.length > 0 && r.rows[0].agent_type === 'human'
-}
-
-/** Extract Discord mentions from content and resolve to core agent_ids */
+// PR-A: isEmergencyMessage / isHumanAgent / resolveAgentFromDiscordId /
+// resolveInboundChannel moved to core/route-message{,-db}.ts.
+// extractDiscordMentions stays here because it composes those helpers
+// and is a server-side concern; it now goes through coreDbAdapter().
 async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[]): Promise<string[]> {
+  const db = await coreDbAdapter()
   const agentIds: string[] = []
 
   // 1. Parse <@discord_id> from content text
@@ -1060,7 +1081,7 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
   if (contentMentions) {
     for (const mention of contentMentions) {
       const discordId = mention.replace(/<@!?(\d+)>/, '$1')
-      const agentId = await resolveAgentFromDiscordId(discordId)
+      const agentId = await resolveAgentFromDiscordId(db, discordId)
       if (agentId) agentIds.push(agentId)
     }
   }
@@ -1068,7 +1089,7 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
   // 2. Include raw Discord mention user IDs (from msg.mentions.users — covers replies)
   if (rawDiscordUserIds) {
     for (const discordId of rawDiscordUserIds) {
-      const agentId = await resolveAgentFromDiscordId(discordId)
+      const agentId = await resolveAgentFromDiscordId(db, discordId)
       if (agentId) agentIds.push(agentId)
     }
   }
@@ -1078,59 +1099,7 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
   return [...new Set([...agentIds, ...nativeMentions])]
 }
 
-/** Resolve Discord user ID → core agent_id via agents.metadata.discord_id */
-async function resolveAgentFromDiscordId(discordId: string): Promise<string | null> {
-  const client = await tryGetDb()
-  if (!client) return null
-  const r = await client.query(
-    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1",
-    [discordId]
-  )
-  return r.rows.length > 0 ? r.rows[0].agent_id : null
-}
-
-/** Resolve inbound channel: find core channel_id and members from Discord channel/thread ID */
-async function resolveInboundChannel(externalChannelId: string): Promise<{ channelId: string; threadId?: string; members: string[]; type?: string } | null> {
-  const client = await tryGetDb()
-  if (!client) return null
-
-  // Direct channel match
-  const r = await client.query('SELECT id, members, type FROM channels WHERE id = $1', [externalChannelId])
-  if (r.rows.length > 0) {
-    return { channelId: externalChannelId, members: r.rows[0].members ?? [], type: r.rows[0].type }
-  }
-
-  // Thread match: check thread_adapters → threads → parent channel
-  const tr = await client.query(
-    `SELECT t.id, t.channel_id FROM threads t
-     JOIN thread_adapters ta ON ta.thread_id = t.id
-     WHERE ta.external_id = $1 AND ta.platform = 'discord'`,
-    [externalChannelId]
-  )
-  if (tr.rows.length > 0) {
-    const parentId = tr.rows[0].channel_id
-    const cr = await client.query('SELECT members FROM channels WHERE id = $1', [parentId])
-    if (cr.rows.length > 0) {
-      return { channelId: parentId, threadId: tr.rows[0].id, members: cr.rows[0].members ?? [] }
-    }
-  }
-
-  // Also check if the external_channel_id is registered via channel_adapters
-  const ca = await client.query(
-    `SELECT channel_id FROM channel_adapters WHERE external_id = $1 AND platform = 'discord'`,
-    [externalChannelId]
-  )
-  if (ca.rows.length > 0) {
-    const cr = await client.query('SELECT members FROM channels WHERE id = $1', [ca.rows[0].channel_id])
-    if (cr.rows.length > 0) {
-      return { channelId: ca.rows[0].channel_id, members: cr.rows[0].members ?? [] }
-    }
-  }
-
-  return null // channel not registered in core DB
-}
-
-/** Check if agent has observer_mode enabled */
+/** Check if agent has observer_mode enabled (server-only helper, kept here for now) */
 async function isObserverMode(agentId: string): Promise<boolean> {
   const client = await tryGetDb()
   if (!client) return false
@@ -1138,81 +1107,8 @@ async function isObserverMode(agentId: string): Promise<boolean> {
   return r.rows.length > 0 && r.rows[0].observer_mode === true
 }
 
-// last_received_context functions DELETED — reply_to is now required (§4.2)
-
-/**
- * Resolve send destination (§4.2 — reply_to required, fully deterministic)
- * reply_to → original message's location (only path)
- * no reply_to → NO_REPLY_TO error
- */
-async function resolveSendDestination(
-  agentId: string,
-  replyTo: string | undefined,
-): Promise<{ channelId: string; threadId: string | null } | { error: string; code: string }> {
-  if (!replyTo) {
-    return { error: 'reply_toは必須です。返信先メッセージIDを指定してください。定期タスクの場合は agent-com notify --channel <id> を使用してください', code: 'NO_REPLY_TO' }
-  }
-
-  const original = await getMessageById(replyTo)
-  if (!original) {
-    return { error: `reply_to '${replyTo}' が見つかりません`, code: 'MESSAGE_NOT_FOUND' }
-  }
-
-  // reply_to mention guard
-  const contentMentions = parseMentions(original.content)
-  const metaMentions: string[] = (original.metadata as any)?.mentions ?? []
-  const allMentions = [...contentMentions, ...metaMentions]
-  const mentionedInOriginal = allMentions.includes(agentId)
-  const isOwnMessage = original.author_id === agentId
-  const isEmergencyMsg = original.message_type === 'emergency' || original.content.startsWith('!stop')
-  const originalSenderIsHuman = await isHumanAgent(original.author_id)
-
-  if (!mentionedInOriginal && !isOwnMessage && !isEmergencyMsg && !originalSenderIsHuman) {
-    return { error: '元メッセージであなたはメンションされていません。応答権限がありません', code: 'NOT_MENTIONED_IN_ORIGINAL' }
-  }
-
-  // Per SSOT §4.2: channel_id is read directly from the agent_messages row.
-  // Inbound messages save metadata under platform-prefixed keys (discord_channel_id,
-  // telegram_channel_id, ...), so falling back to metadata.channel_id alone is brittle.
-  // Priority: row.channel_id → metadata.channel_id → metadata.<platform>_channel_id → thread_id → ''
-  const meta = (original.metadata ?? {}) as Record<string, unknown>
-  const platformChannelId =
-    (meta.channel_id as string | undefined) ??
-    (meta.discord_channel_id as string | undefined) ??
-    (meta.telegram_channel_id as string | undefined) ??
-    (meta.slack_channel_id as string | undefined)
-  return {
-    channelId: original.thread_id
-      ? (await (async () => {
-          const client = await tryGetDb()
-          if (!client) return original.thread_id!
-          const r = await client.query('SELECT channel_id FROM threads WHERE id = $1', [original.thread_id])
-          return r.rows.length > 0 ? r.rows[0].channel_id : original.thread_id!
-        })())
-      : original.channel_id ?? platformChannelId ?? original.thread_id ?? '',
-    threadId: original.thread_id,
-  }
-}
-
-/** Get a message by ID from agent_messages */
-async function getMessageById(messageId: string): Promise<{ author_id: string; content: string; message_type: string; metadata: Record<string, unknown> | null; thread_id: string | null; channel_id: string | null } | null> {
-  const client = await tryGetDb()
-  if (!client) return null
-  const r = await client.query(
-    'SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages WHERE id = $1',
-    [messageId]
-  )
-  if (r.rows.length === 0) return null
-  const row = r.rows[0]
-  return {
-    author_id: row.author_id,
-    content: row.content,
-    message_type: row.message_type ?? 'chat',
-    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
-    thread_id: row.thread_id ?? null,
-    channel_id: row.channel_id ?? null,
-  }
-}
+// PR-A: getMessageById / isHumanAgent / resolveSendDestination moved to
+// core/route-message-db.ts. Call sites in this file go through `coreDbAdapter()`.
 
 /** Build a quote block from a referenced message (§3.10, max 500 chars) */
 async function buildQuoteBlock(messageId: string): Promise<{ quote: string; authorId: string } | null> {
@@ -1230,119 +1126,10 @@ async function buildQuoteBlock(messageId: string): Promise<{ quote: string; auth
   return { quote, authorId: row.author_id }
 }
 
-/** Parse @agent_id mentions from message content */
-function parseMentions(content: string): string[] {
-  const mentions: string[] = []
-  const regex = /@([a-zA-Z0-9_-]+)/g
-  let match
-  while ((match = regex.exec(content)) !== null) {
-    mentions.push(match[1])
-  }
-  return [...new Set(mentions)]
-}
-
-// resolveDeliveryTargets() DELETED — replaced by routeInbound() (§5.1 unified filter)
-// All push paths now use the single pure routeInbound() function.
-
-// ============================================================
-// Inbound Router (PR#56 — SSOT-5 §1 compliant)
-// All inbound messages must pass through this function.
-// Direct adapter→session push is a design violation.
-// ============================================================
-
-// ============================================================
-// §5.1 routeInbound — Pure function (no I/O, no side effects)
-// ============================================================
-
-interface AgentInfo {
-  agentId: string
-  agentType: string
-  observerMode: boolean
-}
-
-interface ChannelInfo {
-  channelId: string
-  threadId?: string | null
-  members: string[]
-  type?: string  // 'dm' etc.
-}
-
-interface RouteResult {
-  pushTargets: string[]
-  dropTargets: Record<string, string>  // agentId → reason
-  senderIsHuman: boolean
-  noMentions: boolean  // true when mentions array is empty (Pattern A)
-}
-
-/**
- * Pure routing function (§5.1) — no DB reads/writes, no side effects.
- * Caller is responsible for:
- *   1. Resolving channel + loading agent info (before)
- *   2. DB save (before or after, always)
- *   3. Pushing to pushTargets (after)
- *   4. Pushing to pushTargets (after)
- *   5. Sending human warning if noMentions && senderIsHuman (after)
- */
-function routeInbound(
-  msg: { authorAgentId: string | null; authorIsBot: boolean; content: string; mentions: string[]; messageType: string },
-  channel: ChannelInfo,
-  agents: AgentInfo[],
-): RouteResult {
-  const pushTargets: string[] = []
-  const dropTargets: Record<string, string> = {}
-  const senderIsHuman = !msg.authorIsBot
-  const noMentions = msg.mentions.length === 0
-  const isEmergency = isEmergencyMessage(msg.content, msg.messageType)
-  const isDm = channel.type === 'dm' || channel.channelId.startsWith('dm:')
-
-  for (const agent of agents) {
-    // Self-send prevention
-    if (agent.agentId === msg.authorAgentId) continue
-
-    // Must be a channel member
-    if (!channel.members.includes(agent.agentId)) {
-      dropTargets[agent.agentId] = 'NOT_A_MEMBER'
-      continue
-    }
-
-    // DM → always push
-    if (isDm) {
-      pushTargets.push(agent.agentId)
-      continue
-    }
-
-    // Emergency → always push (only mentions bypass, §5.1)
-    if (isEmergency) {
-      pushTargets.push(agent.agentId)
-      continue
-    }
-
-    // Observer mode → drop
-    if (agent.observerMode) {
-      dropTargets[agent.agentId] = 'OBSERVER_MODE'
-      continue
-    }
-
-    // Group mentions (@all, @dev, @org)
-    if (msg.mentions.includes('all') ||
-        (msg.mentions.includes('dev') && agent.agentType === 'dev') ||
-        (msg.mentions.includes('org') && agent.agentType === 'org')) {
-      pushTargets.push(agent.agentId)
-      continue
-    }
-
-    // Individual mention
-    if (msg.mentions.includes(agent.agentId)) {
-      pushTargets.push(agent.agentId)
-      continue
-    }
-
-    // Not mentioned → drop
-    dropTargets[agent.agentId] = 'NOT_MENTIONED'
-  }
-
-  return { pushTargets, dropTargets, senderIsHuman, noMentions }
-}
+// PR-A: parseMentions / routeInbound / AgentInfo / ChannelInfo / RouteResult
+// moved to core/route-message.ts. They are imported at the top of this file.
+// resolveDeliveryTargets() was deleted earlier — all push paths now go
+// through the single pure routeInbound() in core/route-message.ts.
 
 // ============================================================
 // handleInboundMessage — Full flow wrapper (DB + pure route + push)
@@ -1381,7 +1168,8 @@ async function handleInboundMessage(params: {
   } = params
 
   // Step 1: Resolve channel → core channel_id + members
-  const resolved = await resolveInboundChannel(externalChannelId)
+  const coreDb = await coreDbAdapter()
+  const resolved = await resolveInboundChannel(coreDb, externalChannelId)
 
   // Step 2: DB save (always, regardless of delivery) — non-fatal
   // NOTE: 'to' is NOT set here. It is set ONLY after routeInbound confirms delivery.
@@ -1414,14 +1202,14 @@ async function handleInboundMessage(params: {
   }
 
   // Step 4: Load agent info for receiver
-  const agentInfo = await loadAgentInfo(receiverAgentId)
+  const agentInfo = await loadAgentInfo(coreDb, receiverAgentId)
   if (!agentInfo) {
     process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not found in agents table\n`)
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
   }
 
   // Step 5: Resolve sender agent_id
-  const senderAgentId = await resolveAgentFromDiscordId(authorExternalId)
+  const senderAgentId = await resolveAgentFromDiscordId(coreDb, authorExternalId)
 
   // Step 6: Pure routing decision (§5.1)
   const resolvedMentions = mentions ?? []
@@ -1472,21 +1260,7 @@ async function handleInboundMessage(params: {
   return { delivered: true, messageId, pushMeta }
 }
 
-/** Load agent info for pure routeInbound */
-async function loadAgentInfo(agentId: string): Promise<AgentInfo | null> {
-  const client = await tryGetDb()
-  if (!client) return { agentId, agentType: 'dev', observerMode: false }  // fallback
-  const r = await client.query(
-    'SELECT agent_id, agent_type, observer_mode FROM agents WHERE agent_id = $1',
-    [agentId]
-  )
-  if (r.rows.length === 0) return null
-  return {
-    agentId: r.rows[0].agent_id,
-    agentType: r.rows[0].agent_type ?? 'dev',
-    observerMode: r.rows[0].observer_mode === true,
-  }
-}
+// PR-A: loadAgentInfo moved to core/route-message-db.ts.
 
 // ============================================================
 // §2.2 Pattern A: Human warning (no mentions)
@@ -2038,7 +1812,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Resolve destination (§2.2 — bot cannot choose destination)
-    const sendDest = await resolveSendDestination(agentId, reply_to)
+    const sendDest = await resolveSendDestination(await coreDbAdapter(), agentId, reply_to)
     if ('error' in sendDest) {
       await writeAuditLog('access.denied', agentId, null, { error: sendDest.error, code: sendDest.code })
       return { content: [{ type: 'text', text: `Error [${sendDest.code}]: ${sendDest.error}` }], isError: true }
@@ -2148,10 +1922,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
     const sendMentions = Array.isArray(mentions) ? mentions : parseMentions(safeContent)
-    const senderIsBot = !(await isHumanAgent(agentId))
+    const sendCoreDb = await coreDbAdapter()
+    const senderIsBot = !(await isHumanAgent(sendCoreDb, agentId))
     const allAgentInfos: AgentInfo[] = []
     for (const member of dest.members) {
-      const info = await loadAgentInfo(member)
+      const info = await loadAgentInfo(sendCoreDb, member)
       if (info) allAgentInfos.push(info)
     }
     const delivery = routeInbound(

@@ -18,6 +18,9 @@ import { join, dirname } from 'node:path'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
 const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// PR-A: routeInbound + helpers extracted to core/route-message{,-db}.ts
+const CORE_PURE_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message.ts'), 'utf-8')
+const CORE_DB_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message-db.ts'), 'utf-8')
 
 describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   test('extractDiscordMentions function exists with rawDiscordUserIds param', () => {
@@ -30,8 +33,9 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 
   test('resolves Discord IDs to agent_ids via resolveAgentFromDiscordId', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 800)
-    expect(fnBody).toContain('resolveAgentFromDiscordId(discordId)')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1000)
+    // PR-A: resolveAgentFromDiscordId now takes (db, discordId) — extracted to core/
+    expect(fnBody).toContain('resolveAgentFromDiscordId(db, discordId)')
   })
 
   test('also parses @agent_id native mentions', () => {
@@ -48,31 +52,31 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 })
 
 describe('routeInbound — Pure function (§5.1)', () => {
+  // PR-A: routeInbound is now in core/route-message.ts. All source-level
+  // checks against it look in CORE_PURE_SOURCE, not SERVER_SOURCE.
   test('routeInbound is a pure function (no async, no DB calls)', () => {
-    // routeInbound should be a regular function, not async
-    expect(SERVER_SOURCE).toContain('function routeInbound(')
-    // Must NOT contain 'async function routeInbound'
-    expect(SERVER_SOURCE).not.toContain('async function routeInbound(')
+    expect(CORE_PURE_SOURCE).toContain('export function routeInbound(')
+    expect(CORE_PURE_SOURCE).not.toContain('export async function routeInbound(')
   })
 
   test('routeInbound takes msg, channel, agents params', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
-    const fnSig = SERVER_SOURCE.slice(fnIdx, fnIdx + 300)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const fnSig = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 400)
     expect(fnSig).toContain('msg:')
     expect(fnSig).toContain('channel: ChannelInfo')
     expect(fnSig).toContain('agents: AgentInfo[]')
   })
 
   test('routeInbound returns RouteResult with pushTargets and dropTargets', () => {
-    expect(SERVER_SOURCE).toContain('pushTargets: string[]')
-    expect(SERVER_SOURCE).toContain('dropTargets: Record<string, string>')
-    expect(SERVER_SOURCE).toContain('senderIsHuman: boolean')
-    expect(SERVER_SOURCE).toContain('noMentions: boolean')
+    expect(CORE_PURE_SOURCE).toContain('pushTargets: string[]')
+    expect(CORE_PURE_SOURCE).toContain('dropTargets: Record<string, string>')
+    expect(CORE_PURE_SOURCE).toContain('senderIsHuman: boolean')
+    expect(CORE_PURE_SOURCE).toContain('noMentions: boolean')
   })
 
   test('mentions filter checks individual and group mentions', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
     expect(fnBody).toContain("msg.mentions.includes(agent.agentId)")
     expect(fnBody).toContain("msg.mentions.includes('all')")
     expect(fnBody).toContain("msg.mentions.includes('dev')")
@@ -80,20 +84,20 @@ describe('routeInbound — Pure function (§5.1)', () => {
   })
 
   test('NOT_MENTIONED is set in dropTargets', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
     expect(fnBody).toContain("'NOT_MENTIONED'")
   })
 
   test('DM bypass: DM messages always push', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
     expect(fnBody).toContain('isDm')
   })
 
   test('emergency bypass only (no CEO bypass)', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
     expect(fnBody).toContain('isEmergency')
     expect(fnBody).not.toContain('isCeo')
     // senderIsHuman exists in RouteResult but is NOT used as a bypass condition in the filter logic
@@ -102,8 +106,8 @@ describe('routeInbound — Pure function (§5.1)', () => {
   })
 
   test('observer mode agents are dropped', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('function routeInbound(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 2500)
     expect(fnBody).toContain('agent.observerMode')
     expect(fnBody).toContain("'OBSERVER_MODE'")
   })
