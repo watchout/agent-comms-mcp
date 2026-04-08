@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSy
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
+import { execSync } from 'node:child_process'
 import { DiscordAdapter } from './adapters/discord'
 import { signPayload } from './shared/hmac'
 
@@ -109,6 +110,16 @@ const config = loadConfig()
 const AGENT_ID = config.agent_id
 const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
+
+// Kill orphan process on WEBHOOK_PORT (zombie survival prevention)
+try {
+  const orphanPid = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
+  if (orphanPid && orphanPid !== String(process.pid)) {
+    process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT}\n`)
+    process.kill(parseInt(orphanPid), 'SIGKILL')
+  }
+} catch {} // no process on port — expected
+
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? ''
 const DISCORD_STATE_DIR_ENV = process.env.DISCORD_STATE_DIR ?? ''
