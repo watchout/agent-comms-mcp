@@ -36,11 +36,9 @@ if (existsSync(configPath)) {
   } catch {}
 }
 
-const discordToken = process.env.DISCORD_BOT_TOKEN
-if (!discordToken) {
-  console.error('DISCORD_BOT_TOKEN is required')
-  process.exit(1)
-}
+// DISCORD_BOT_TOKEN is read inside seed() (not at module load) so importing
+// helpers like supplementDiscordIdMapFromDb from this file does not require
+// the token to be set — tests can call those helpers without spawning Discord.
 
 // --- Parse bot-registry.txt ---
 interface BotEntry {
@@ -121,6 +119,37 @@ function buildDiscordIdMap(registry: BotEntry[]): Map<string, string> {
   return map
 }
 
+/**
+ * Second-pass: supplement the Discord ID → agent_id map from the agents
+ * table's metadata.discord_id field. This catches bots that have been
+ * registered in the DB (via stdio/sse runtime registration) but whose
+ * `~/.claude/channels/discord-XYZ/access.json` file is not yet populated
+ * (XYZ = bot session name) — exactly the case for newly-added Phase 0
+ * bots like lead-ama, lead-tuk, lead-sus, secretary on 2026-04-09.
+ *
+ * MUST be called BEFORE iterating client.guilds.cache to compute channel
+ * members, otherwise the new bots are dropped with [WARN] unknown Discord
+ * user. See `tests/spec-enforcement/seed-membership.test.ts` for the
+ * regression guard.
+ *
+ * Exported for direct unit testing — the function is pure aside from the
+ * one DB query and the console.log of supplemental hits.
+ */
+export async function supplementDiscordIdMapFromDb(
+  db: PgClient,
+  map: Map<string, string>,
+): Promise<void> {
+  const existingAgents = await db.query(
+    "SELECT agent_id, metadata->>'discord_id' as discord_id FROM agents WHERE metadata->>'discord_id' IS NOT NULL"
+  )
+  for (const row of existingAgents.rows) {
+    if (!map.has(row.discord_id)) {
+      map.set(row.discord_id, row.agent_id)
+      console.log(`  [DB] ${row.discord_id} → ${row.agent_id} (from agents metadata)`)
+    }
+  }
+}
+
 // --- Main ---
 async function seed() {
   const registry = loadBotRegistry()
@@ -137,6 +166,14 @@ async function seed() {
   const allAgentIds = new Set([CEO_AGENT_ID, ...registry.map(b => b.agentId)])
 
   // Connect to Discord and fetch guild channels
+  // DISCORD_BOT_TOKEN is read here (not at module load) so importing helpers
+  // from this file does not require the token to be set.
+  const discordToken = process.env.DISCORD_BOT_TOKEN
+  if (!discordToken) {
+    console.error('DISCORD_BOT_TOKEN is required to run seed()')
+    process.exit(1)
+  }
+
   console.log('Connecting to Discord...')
   const client = new Client({
     intents: [GatewayIntentBits.Guilds],
@@ -145,6 +182,18 @@ async function seed() {
   await client.login(discordToken)
   await new Promise<void>(resolve => client.once('ready', () => resolve()))
   console.log(`Connected as ${client.user?.tag}`)
+
+  // Connect to DB BEFORE iterating Discord guilds, so the second-pass map
+  // supplement (from agents.metadata.discord_id) runs before channel.members
+  // are computed. Without this, bots whose access.json is not yet populated
+  // (e.g. fresh Phase 0 bots) get dropped with [WARN] unknown Discord user.
+  // See tests/spec-enforcement/seed-membership.test.ts for the regression guard.
+  console.log('Connecting to PostgreSQL...')
+  const db = new PgClient({ connectionString: databaseUrl })
+  await db.connect()
+
+  // Second-pass: supplement mapping from agents table BEFORE channel calc.
+  await supplementDiscordIdMapFromDb(db, discordIdMap)
 
   // Fetch all guilds and their channels
   interface SeedChannel {
@@ -245,21 +294,8 @@ async function seed() {
   console.log(`Found ${seedThreads.length} active threads`)
   client.destroy()
 
-  // Connect to DB and seed
-  console.log('Connecting to PostgreSQL...')
-  const db = new PgClient({ connectionString: databaseUrl })
-  await db.connect()
-
-  // Second-pass: supplement mapping from agents table (existing discord_id metadata)
-  const existingAgents = await db.query(
-    "SELECT agent_id, metadata->>'discord_id' as discord_id FROM agents WHERE metadata->>'discord_id' IS NOT NULL"
-  )
-  for (const row of existingAgents.rows) {
-    if (!discordIdMap.has(row.discord_id)) {
-      discordIdMap.set(row.discord_id, row.agent_id)
-      console.log(`  [DB] ${row.discord_id} → ${row.agent_id} (from agents metadata)`)
-    }
-  }
+  // (DB connection + supplementDiscordIdMapFromDb were moved above the
+  //  channel members loop — see the comment near `Connecting to PostgreSQL`.)
 
   // Drop existing data and re-seed (preserve DM channels)
   // Order: thread_adapters → threads → channel_adapters → channels (FK dependency)
@@ -372,4 +408,12 @@ async function seed() {
   await db.end()
 }
 
-seed().catch(e => { console.error(e); process.exit(1) })
+// Only run seed() when this file is invoked as the main script. This lets
+// tests `import { supplementDiscordIdMapFromDb } from '../../db/seed'` without
+// triggering Discord login. Bun + Node both expose `import.meta.main` (Bun)
+// or `import.meta.url === url.pathToFileURL(process.argv[1]).href` (Node).
+// We use the Bun shape because this script is bun-only (`#!/usr/bin/env bun`).
+// @ts-ignore — import.meta.main is a Bun runtime extension
+if (import.meta.main) {
+  seed().catch(e => { console.error(e); process.exit(1) })
+}
