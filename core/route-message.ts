@@ -15,6 +15,11 @@ export interface AgentInfo {
   agentId: string
   agentType: string
   observerMode: boolean
+  // ADR-040 D7: the Discord user ID this agent owns, if any. routeInbound
+  // matches mentions against both `agentId` and `discordId` so a human
+  // writing `<@1487367645933211699>` (raw Discord) still reaches the bot
+  // whose agent_id is `agent-com-dev`. Populated by `loadAgentInfo`.
+  discordId?: string | null
 }
 
 export interface ChannelInfo {
@@ -106,7 +111,16 @@ export function routeInbound(
     }
 
     // Individual mention
-    if (msg.mentions.includes(agent.agentId)) {
+    // ADR-040 D7: match mentions against BOTH the agent_id and the Discord
+    // user ID. extractDiscordMentions normally resolves `<@discord_id>` →
+    // `agent_id` before we get here, but if the resolver ever returns null
+    // (e.g. because metadata.discord_id was briefly wiped by the D8 bug
+    // and not yet self-registered), the raw Discord user ID is still in
+    // `msg.mentions` and the bot should still count as mentioned.
+    if (
+      msg.mentions.includes(agent.agentId) ||
+      (agent.discordId != null && msg.mentions.includes(agent.discordId))
+    ) {
       pushTargets.push(agent.agentId)
       continue
     }

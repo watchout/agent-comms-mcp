@@ -54,10 +54,23 @@ export async function getMessageById(
   }
 }
 
-/** Check if sender is a human agent (agent_type='human') */
-export async function isHumanAgent(db: DbAdapter | null, agentId: string): Promise<boolean> {
+/**
+ * Check if sender is a human agent (agent_type='human').
+ *
+ * ADR-040 D7 fix: the caller can pass either a core agent_id (e.g. 'ceo')
+ * or a raw Discord user ID (e.g. '1227059781265653783'). Inbound messages
+ * saved by the receiver store the *Discord* user ID in `agent_messages.author_id`,
+ * so `resolveSendDestination`'s human bypass check would always fail when
+ * trying to look up CEO by `agent_id = '1227...'`. Accepting both forms
+ * closes the type-mismatch that caused today's multi-hop cascade.
+ */
+export async function isHumanAgent(db: DbAdapter | null, authorId: string): Promise<boolean> {
   if (!db) return false // safe default: don't assume human without DB
-  const r = await db.query("SELECT agent_type FROM agents WHERE agent_id = $1", [agentId])
+  const r = await db.query(
+    `SELECT agent_type FROM agents
+     WHERE agent_id = $1 OR metadata->>'discord_id' = $1`,
+    [authorId],
+  )
   return r.rows.length > 0 && r.rows[0].agent_type === 'human'
 }
 
@@ -69,6 +82,21 @@ export async function resolveAgentFromDiscordId(db: DbAdapter | null, discordId:
     [discordId],
   )
   return r.rows.length > 0 ? r.rows[0].agent_id : null
+}
+
+/**
+ * ADR-040 D7: fetch `agents.metadata.discord_id` for a given agent_id.
+ * Used by `resolveSendDestination` to compare a bot's own Discord user ID
+ * against `<@discord_user_id>` mentions in the original message. Without
+ * this the bot can't see that it was mentioned by its Discord identity.
+ */
+export async function getAgentDiscordId(db: DbAdapter | null, agentId: string): Promise<string | null> {
+  if (!db) return null
+  const r = await db.query(
+    "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
+    [agentId],
+  )
+  return r.rows.length > 0 ? r.rows[0].discord_id ?? null : null
 }
 
 /** Resolve inbound channel: find core channel_id and members from Discord channel/thread ID */
@@ -114,11 +142,17 @@ export async function resolveInboundChannel(
   return null // channel not registered in core DB
 }
 
-/** Load agent info for pure routeInbound */
+/**
+ * Load agent info for pure routeInbound.
+ * ADR-040 D7: also read `metadata->>'discord_id'` so routeInbound can match
+ * raw Discord user IDs in `msg.mentions` when extractDiscordMentions failed
+ * to resolve them ahead of time.
+ */
 export async function loadAgentInfo(db: DbAdapter | null, agentId: string): Promise<AgentInfo | null> {
-  if (!db) return { agentId, agentType: 'dev', observerMode: false }  // fallback
+  if (!db) return { agentId, agentType: 'dev', observerMode: false, discordId: null }  // fallback
   const r = await db.query(
-    'SELECT agent_id, agent_type, observer_mode FROM agents WHERE agent_id = $1',
+    `SELECT agent_id, agent_type, observer_mode, metadata->>'discord_id' AS discord_id
+       FROM agents WHERE agent_id = $1`,
     [agentId],
   )
   if (r.rows.length === 0) return null
@@ -126,6 +160,7 @@ export async function loadAgentInfo(db: DbAdapter | null, agentId: string): Prom
     agentId: r.rows[0].agent_id,
     agentType: r.rows[0].agent_type ?? 'dev',
     observerMode: r.rows[0].observer_mode === true,
+    discordId: r.rows[0].discord_id ?? null,
   }
 }
 
@@ -149,12 +184,27 @@ export async function resolveSendDestination(
   }
 
   // reply_to mention guard
+  // ADR-040 D7: `allMentions` may contain core agent_ids (from parseMentions)
+  // AND raw Discord user IDs (from metadata.mentions written by the receiver).
+  // We must compare against BOTH the caller's agent_id and its Discord user ID
+  // so a human who writes `<@1487367645933211699>` (raw Discord ID) still
+  // counts as mentioning the bot whose agent_id is `agent-com-dev`.
   const contentMentions = parseMentions(original.content)
   const metaMentions: string[] = (original.metadata as any)?.mentions ?? []
   const allMentions = [...contentMentions, ...metaMentions]
-  const mentionedInOriginal = allMentions.includes(agentId)
-  const isOwnMessage = original.author_id === agentId
+  const myDiscordId = await getAgentDiscordId(db, agentId)
+  const mentionedInOriginal =
+    allMentions.includes(agentId) ||
+    (myDiscordId != null && allMentions.includes(myDiscordId))
+  // `isOwnMessage` has to cover both author_id shapes too (agent_id for
+  // self-saved outbound rows, Discord user ID for inbound rows that the
+  // receiver saved with the raw Discord author).
+  const isOwnMessage =
+    original.author_id === agentId ||
+    (myDiscordId != null && original.author_id === myDiscordId)
   const isEmergencyMsg = original.message_type === 'emergency' || original.content.startsWith('!stop')
+  // `isHumanAgent` now accepts either form, so passing the raw author_id
+  // (which is a Discord user ID for inbound rows) correctly identifies CEO.
   const originalSenderIsHuman = await isHumanAgent(db, original.author_id)
 
   if (!mentionedInOriginal && !isOwnMessage && !isEmergencyMsg && !originalSenderIsHuman) {
