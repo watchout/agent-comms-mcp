@@ -579,13 +579,18 @@ async function registerAgent(): Promise<void> {
     process.stderr.write(`agent-comms: WARNING — agent '${AGENT_ID}' is already online (last seen: ${existing.rows[0].last_seen_at})\n`)
   }
 
-  // UPSERT
+  // UPSERT — merge metadata instead of overwriting so DB-only keys
+  // (e.g. discord_id self-registered by D1) survive process restarts.
+  // jsonb || does a shallow merge: $5's keys override existing ones, but
+  // existing keys not in $5 are preserved. This is what protects discord_id
+  // when a bot's local config does not include it.
   await client.query(
     `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
-     VALUES ($1, $2, $3, $4, 'online', now(), $5)
+     VALUES ($1, $2, $3, $4, 'online', now(), COALESCE($5::jsonb, '{}'::jsonb))
      ON CONFLICT (agent_id) DO UPDATE SET
        display_name = $2, agent_type = $3, runtime = $4,
-       status = 'online', last_seen_at = now(), metadata = $5`,
+       status = 'online', last_seen_at = now(),
+       metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)`,
     [AGENT_ID, config.agent.display_name, config.agent.agent_type, config.agent.runtime,
      config.agent.metadata ? JSON.stringify(config.agent.metadata) : null]
   )
