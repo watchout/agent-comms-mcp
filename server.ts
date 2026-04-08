@@ -151,6 +151,17 @@ const SSE_PORT = parseInt(process.env.AGENT_COMMS_PORT ?? '8800', 10)
 const AUTH_TOKEN = process.env.AUTH_TOKEN ?? ''
 const AUTH_SKIP_LOCALHOST = (process.env.AUTH_SKIP_LOCALHOST ?? 'true') === 'true'
 const EXPECTED_BOTS = process.env.EXPECTED_BOTS ? process.env.EXPECTED_BOTS.split(',').map(b => b.trim()) : []
+
+// PR-B.2 mixed-mode receiver pipeline canary set.
+// Bots in this set get an ADDITIONAL pg_notify('agent_inbox') fanout from
+// handleInboundMessage on top of the existing pushToChannelServer path. The
+// existing per-bot Discord client + handler are NOT changed (= "additive").
+// PR-B.2 starts with auditor only; expand in PR-B.3+ after 24-48h passive observation.
+// Override at runtime via env: RECEIVER_PIPELINE_BOTS=auditor,arc (comma-separated).
+const RECEIVER_PIPELINE_BOTS = new Set<string>(
+  (process.env.RECEIVER_PIPELINE_BOTS ?? 'auditor').split(',').map(b => b.trim()).filter(Boolean)
+)
+
 const sseStartTime = Date.now()
 const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
@@ -423,14 +434,61 @@ async function saveMessage(msg: {
     process.stderr.write(`agent-comms: DB unavailable, message not persisted (id: ${id})\n`)
     return id
   }
-  await client.query(
-    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+
+  // PR-B.2 §H2: extract discord_message_id from metadata for the dedup column.
+  // For inbound rows where the platform is Discord, metadata['discord_message_id'] is
+  // already populated by handleInboundMessage. Lifting it to a dedicated column lets
+  // the partial unique index dedup mixed-mode race inserts.
+  const discordMessageId = (msg.metadata as Record<string, unknown> | undefined)?.discord_message_id as string | undefined ?? null
+
+  // Path A — outbound or no-discord-id row: plain INSERT (no dedup column).
+  if (!discordMessageId) {
+    await client.query(
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
+       msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
+       msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
+       msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null]
+    )
+    return id
+  }
+
+  // Path B — inbound Discord row with discord_message_id: INSERT ON CONFLICT for §H2 dedup.
+  // NOTE: ON CONFLICT must REPEAT the partial-index predicate so the planner matches
+  //       uq_agent_messages_discord_id (Spike 2 finding, code 42P10 otherwise).
+  const insertResult = await client.query(
+    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, discord_message_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     ON CONFLICT (discord_message_id) WHERE discord_message_id IS NOT NULL DO NOTHING
+     RETURNING id`,
     [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
      msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
      msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
-     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null]
+     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, discordMessageId]
   )
+
+  if (insertResult.rows.length > 0) {
+    // We won the race (or there was no race) — return our generated id.
+    return insertResult.rows[0].id
+  }
+
+  // Lost the race: another inbound writer already INSERTed this discord_message_id.
+  // SELECT the surviving row's id so the caller can continue with downstream work
+  // (metadata.to UPDATE, push, etc.) against the same row.
+  const selectResult = await client.query(
+    `SELECT id FROM agent_messages WHERE discord_message_id = $1`,
+    [discordMessageId]
+  )
+  if (selectResult.rows.length > 0) {
+    process.stderr.write(`agent-comms: saveMessage dedup — discord_message_id=${discordMessageId} existed, using id=${selectResult.rows[0].id}\n`)
+    return selectResult.rows[0].id
+  }
+
+  // §H2 exceptional path: INSERT no-op + SELECT empty. Fall back to the generated id
+  // and let the caller log / handle. In practice this should not happen because
+  // ON CONFLICT only fires when a matching row exists.
+  process.stderr.write(`agent-comms: saveMessage dedup ERROR — INSERT no-op but SELECT empty for discord_message_id=${discordMessageId}\n`)
   return id
 }
 
@@ -1243,6 +1301,29 @@ async function handleInboundMessage(params: {
         `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $1) WHERE id = $2`,
         [receiverAgentId, messageId]
       ).catch(() => {})
+    }
+  }
+
+  // Step 7c: PR-B.2 mixed-mode receiver pipeline fanout (additive).
+  // For bots in RECEIVER_PIPELINE_BOTS, ALSO fire pg_notify('agent_inbox', ...) so
+  // future LISTEN-based subscribers receive the message via the new path. The
+  // existing pushToChannelServer path keeps running for current subscribers — this
+  // is purely additive. Subscribers' processedIds dedup handles double-delivery.
+  if (messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
+    const client = await tryGetDb()
+    if (client) {
+      await client.query(
+        `SELECT pg_notify('agent_inbox', $1)`,
+        [JSON.stringify({
+          event: 'message.created',
+          to: receiverAgentId,
+          message_id: messageId,
+          channel_id: resolved.channelId,
+          source: 'receiver-pipeline',
+        })]
+      ).catch(err => {
+        process.stderr.write(`agent-comms: receiver pipeline pg_notify failed for ${receiverAgentId} (non-fatal): ${err}\n`)
+      })
     }
   }
 
