@@ -1,14 +1,24 @@
 /**
  * core/route-message.ts — pure routing functions
  *
- * Extracted from server.ts as part of ADR-041 implementation step 1/2 (PR-A).
- * No DB calls, no side effects. The receiver process (PR-B) and the existing
- * daemon both import from this module so the channel-membership / mention
- * decisions are computed by a single implementation.
+ * PR-A (step 1/2): extracted pure functions from server.ts.
+ * PR-B (step 2/2): renamed `routeInbound` → `routeMessage` and added a
+ * `sourceType: 'inbound' | 'send-tool' | 'cli'` discriminator so the same
+ * pure function can be called from all push paths (receiver inbound, bot
+ * `send` tool, CLI `notify`). Unifying the call sites was §C2 of the
+ * v0.2.0 spec — without the discriminator each caller had to duplicate
+ * the channel-membership and mention checks.
  *
- * Behavioural contract: identical to the in-server.ts function before this
- * extraction. PR-A is a pure refactor — see tests/inbound-router.test.ts
- * for the source-level regression checks that protect against drift.
+ * Behavioural contract for the `inbound` branch is byte-for-byte
+ * identical to PR-A's `routeInbound`. The `send-tool` and `cli` branches
+ * add a sender-side guard (`SENDER_NOT_A_MEMBER`) so bots cannot fanout
+ * into channels they don't belong to. See tests/inbound-router.test.ts
+ * and tests/inbound-mentions-filter.test.ts for the source-level
+ * regression checks that protect against drift.
+ *
+ * Backwards compat: `routeInbound` is still exported as an alias that
+ * forwards to `routeMessage({sourceType: 'inbound'})`. Planned removal
+ * after PR-B consumers migrate.
  */
 
 export interface AgentInfo {
@@ -34,7 +44,11 @@ export interface RouteResult {
   dropTargets: Record<string, string>  // agentId → reason
   senderIsHuman: boolean
   noMentions: boolean  // true when mentions array is empty (Pattern A)
+  senderViolation?: string  // set when the sender itself is blocked (send-tool / cli only)
 }
+
+/** Call-site discriminator for `routeMessage`. */
+export type RouteSourceType = 'inbound' | 'send-tool' | 'cli'
 
 /** Parse @agent_id mentions from message content */
 export function parseMentions(content: string): string[] {
@@ -55,17 +69,29 @@ export function isEmergencyMessage(content: string, messageType: string): boolea
 }
 
 /**
- * Pure routing function (§5.1) — no DB reads/writes, no side effects.
+ * Unified routing function (§C2) — no DB reads/writes, no side effects.
+ *
+ * `sourceType` selects the guards:
+ *   - `'inbound'` (default): called by the receiver when a message arrives
+ *     from the Gateway.  Matches the old `routeInbound` behaviour exactly.
+ *   - `'send-tool'`: called by the MCP `send` tool before it does any DB
+ *     writes.  Adds a sender-side `SENDER_NOT_A_MEMBER` check so a bot
+ *     cannot fanout into channels it does not belong to.
+ *   - `'cli'`: called by the CLI `notify` command.  Same sender guard as
+ *     `send-tool`.
+ *
  * Caller is responsible for:
  *   1. Resolving channel + loading agent info (before)
  *   2. DB save (before or after, always)
  *   3. Pushing to pushTargets (after)
  *   4. Sending human warning if noMentions && senderIsHuman (after)
+ *   5. Returning an error to the sender if `senderViolation` is set
  */
-export function routeInbound(
+export function routeMessage(
   msg: { authorAgentId: string | null; authorIsBot: boolean; content: string; mentions: string[]; messageType: string },
   channel: ChannelInfo,
   agents: AgentInfo[],
+  sourceType: RouteSourceType = 'inbound',
 ): RouteResult {
   const pushTargets: string[] = []
   const dropTargets: Record<string, string> = {}
@@ -73,6 +99,22 @@ export function routeInbound(
   const noMentions = msg.mentions.length === 0
   const isEmergency = isEmergencyMessage(msg.content, msg.messageType)
   const isDm = channel.type === 'dm' || channel.channelId.startsWith('dm:')
+
+  // §C2 sender-side guard: only applies to send-tool / cli. Inbound senders
+  // are untrusted external parties (humans or other bots) and cannot be
+  // blocked by this check — the receiver still accepts and records the
+  // message, it just never gets pushed to any subscriber.
+  if (sourceType !== 'inbound' && msg.authorAgentId) {
+    if (!channel.members.includes(msg.authorAgentId)) {
+      return {
+        pushTargets: [],
+        dropTargets: {},
+        senderIsHuman,
+        noMentions,
+        senderViolation: 'SENDER_NOT_A_MEMBER',
+      }
+    }
+  }
 
   for (const agent of agents) {
     // Self-send prevention
@@ -130,4 +172,17 @@ export function routeInbound(
   }
 
   return { pushTargets, dropTargets, senderIsHuman, noMentions }
+}
+
+/**
+ * Backwards-compatibility alias for the PR-A name. Forwards to
+ * `routeMessage` with `sourceType: 'inbound'`. Scheduled for removal
+ * after all callers migrate to `routeMessage` directly.
+ */
+export function routeInbound(
+  msg: { authorAgentId: string | null; authorIsBot: boolean; content: string; mentions: string[]; messageType: string },
+  channel: ChannelInfo,
+  agents: AgentInfo[],
+): RouteResult {
+  return routeMessage(msg, channel, agents, 'inbound')
 }

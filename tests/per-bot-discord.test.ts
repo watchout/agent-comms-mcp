@@ -69,7 +69,7 @@ describe('Phase 3c — Per-Bot Discord Client', () => {
   })
 
   test('daemon mode creates per-bot Discord client on SSE connect', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain('resolveDiscordToken(botId)')
     expect(daemonSection).toContain('connectBotDiscord(botId,')
@@ -77,14 +77,14 @@ describe('Phase 3c — Per-Bot Discord Client', () => {
   })
 
   test('daemon mode cleans up per-bot Discord on SSE disconnect', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain("per-bot Discord disconnected for ${botId}")
     expect(daemonSection).toContain('discordClients.delete(botId)')
   })
 
   test('daemon mode cleans up per-bot Discord on reconnect', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain('oldClient.disconnect()')
   })
@@ -123,13 +123,13 @@ describe('Phase 3c — Staggered Connect + Backoff', () => {
 // ============================================================
 describe('Phase 3c — Shared Client Routing', () => {
   test('shared Discord onMessage skips bots with per-bot clients', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain('discordClients.has(botId)) continue')
   })
 
   test('per-bot client registers its own onMessage handler', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon')")
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain('botDiscord.onMessage((msg)')
   })
