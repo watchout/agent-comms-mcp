@@ -1163,6 +1163,16 @@ async function resolveSendDestination(
     return { error: '元メッセージであなたはメンションされていません。応答権限がありません', code: 'NOT_MENTIONED_IN_ORIGINAL' }
   }
 
+  // Per SSOT §4.2: channel_id is read directly from the agent_messages row.
+  // Inbound messages save metadata under platform-prefixed keys (discord_channel_id,
+  // telegram_channel_id, ...), so falling back to metadata.channel_id alone is brittle.
+  // Priority: row.channel_id → metadata.channel_id → metadata.<platform>_channel_id → thread_id → ''
+  const meta = (original.metadata ?? {}) as Record<string, unknown>
+  const platformChannelId =
+    (meta.channel_id as string | undefined) ??
+    (meta.discord_channel_id as string | undefined) ??
+    (meta.telegram_channel_id as string | undefined) ??
+    (meta.slack_channel_id as string | undefined)
   return {
     channelId: original.thread_id
       ? (await (async () => {
@@ -1171,17 +1181,17 @@ async function resolveSendDestination(
           const r = await client.query('SELECT channel_id FROM threads WHERE id = $1', [original.thread_id])
           return r.rows.length > 0 ? r.rows[0].channel_id : original.thread_id!
         })())
-      : (original.metadata as any)?.channel_id ?? original.thread_id ?? '',
+      : original.channel_id ?? platformChannelId ?? original.thread_id ?? '',
     threadId: original.thread_id,
   }
 }
 
 /** Get a message by ID from agent_messages */
-async function getMessageById(messageId: string): Promise<{ author_id: string; content: string; message_type: string; metadata: Record<string, unknown> | null; thread_id: string | null } | null> {
+async function getMessageById(messageId: string): Promise<{ author_id: string; content: string; message_type: string; metadata: Record<string, unknown> | null; thread_id: string | null; channel_id: string | null } | null> {
   const client = await tryGetDb()
   if (!client) return null
   const r = await client.query(
-    'SELECT author_id, content, message_type, metadata, thread_id FROM agent_messages WHERE id = $1',
+    'SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages WHERE id = $1',
     [messageId]
   )
   if (r.rows.length === 0) return null
@@ -1192,6 +1202,7 @@ async function getMessageById(messageId: string): Promise<{ author_id: string; c
     message_type: row.message_type ?? 'chat',
     metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
     thread_id: row.thread_id ?? null,
+    channel_id: row.channel_id ?? null,
   }
 }
 
@@ -2175,20 +2186,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       process.stderr.write(`[agent-com] INFO: auto-unfocused after sending report\n`)
     }
 
+    // Derive a single warning code from dropTargets (RouteResult uses pushTargets/dropTargets,
+    // not targets/warning — the older shape was never produced by routeInbound).
+    const dropReasons = Object.values(delivery.dropTargets)
+    const deliveryWarning = delivery.pushTargets.length === 0
+      ? (dropReasons.includes('NOT_MENTIONED') ? 'NOT_MENTIONED'
+        : dropReasons.includes('THREAD_MISMATCH') ? 'THREAD_MISMATCH'
+        : null)
+      : null
+
     // Audit log
     await writeAuditLog('message.send', agentId, dest.channelId, {
       message_id: id, to, message_type: message_type ?? 'chat',
-      recipients: delivery.targets.length, warning: delivery.warning ?? null,
+      recipients: delivery.pushTargets.length, warning: deliveryWarning,
     })
 
     // Response with delivery feedback
-    if (delivery.targets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.targets.length} recipient(s)` }] }
+    if (delivery.pushTargets.length > 0) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)` }] }
     }
-    if (delivery.warning === 'NOT_MENTIONED') {
+    if (deliveryWarning === 'NOT_MENTIONED') {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください` }] }
     }
-    if (delivery.warning === 'THREAD_MISMATCH') {
+    if (deliveryWarning === 'THREAD_MISMATCH') {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません` }] }
     }
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
