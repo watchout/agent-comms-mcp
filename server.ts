@@ -46,6 +46,7 @@ import {
   resolveSendDestination,
   type DbAdapter,
 } from './core/route-message-db'
+import { splitMessage } from './core/message-split'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -151,6 +152,17 @@ const SSE_PORT = parseInt(process.env.AGENT_COMMS_PORT ?? '8800', 10)
 const AUTH_TOKEN = process.env.AUTH_TOKEN ?? ''
 const AUTH_SKIP_LOCALHOST = (process.env.AUTH_SKIP_LOCALHOST ?? 'true') === 'true'
 const EXPECTED_BOTS = process.env.EXPECTED_BOTS ? process.env.EXPECTED_BOTS.split(',').map(b => b.trim()) : []
+
+// PR-B.2 mixed-mode receiver pipeline canary set.
+// Bots in this set get an ADDITIONAL pg_notify('agent_inbox') fanout from
+// handleInboundMessage on top of the existing pushToChannelServer path. The
+// existing per-bot Discord client + handler are NOT changed (= "additive").
+// PR-B.2 starts with auditor only; expand in PR-B.3+ after 24-48h passive observation.
+// Override at runtime via env: RECEIVER_PIPELINE_BOTS=auditor,arc (comma-separated).
+const RECEIVER_PIPELINE_BOTS = new Set<string>(
+  (process.env.RECEIVER_PIPELINE_BOTS ?? 'auditor').split(',').map(b => b.trim()).filter(Boolean)
+)
+
 const sseStartTime = Date.now()
 const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
@@ -423,14 +435,61 @@ async function saveMessage(msg: {
     process.stderr.write(`agent-comms: DB unavailable, message not persisted (id: ${id})\n`)
     return id
   }
-  await client.query(
-    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+
+  // PR-B.2 §H2: extract discord_message_id from metadata for the dedup column.
+  // For inbound rows where the platform is Discord, metadata['discord_message_id'] is
+  // already populated by handleInboundMessage. Lifting it to a dedicated column lets
+  // the partial unique index dedup mixed-mode race inserts.
+  const discordMessageId = (msg.metadata as Record<string, unknown> | undefined)?.discord_message_id as string | undefined ?? null
+
+  // Path A — outbound or no-discord-id row: plain INSERT (no dedup column).
+  if (!discordMessageId) {
+    await client.query(
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
+       msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
+       msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
+       msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null]
+    )
+    return id
+  }
+
+  // Path B — inbound Discord row with discord_message_id: INSERT ON CONFLICT for §H2 dedup.
+  // NOTE: ON CONFLICT must REPEAT the partial-index predicate so the planner matches
+  //       uq_agent_messages_discord_id (Spike 2 finding, code 42P10 otherwise).
+  const insertResult = await client.query(
+    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, discord_message_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     ON CONFLICT (discord_message_id) WHERE discord_message_id IS NOT NULL DO NOTHING
+     RETURNING id`,
     [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
      msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
      msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
-     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null]
+     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, discordMessageId]
   )
+
+  if (insertResult.rows.length > 0) {
+    // We won the race (or there was no race) — return our generated id.
+    return insertResult.rows[0].id
+  }
+
+  // Lost the race: another inbound writer already INSERTed this discord_message_id.
+  // SELECT the surviving row's id so the caller can continue with downstream work
+  // (metadata.to UPDATE, push, etc.) against the same row.
+  const selectResult = await client.query(
+    `SELECT id FROM agent_messages WHERE discord_message_id = $1`,
+    [discordMessageId]
+  )
+  if (selectResult.rows.length > 0) {
+    process.stderr.write(`agent-comms: saveMessage dedup — discord_message_id=${discordMessageId} existed, using id=${selectResult.rows[0].id}\n`)
+    return selectResult.rows[0].id
+  }
+
+  // §H2 exceptional path: INSERT no-op + SELECT empty. Fall back to the generated id
+  // and let the caller log / handle. In practice this should not happen because
+  // ON CONFLICT only fires when a matching row exists.
+  process.stderr.write(`agent-comms: saveMessage dedup ERROR — INSERT no-op but SELECT empty for discord_message_id=${discordMessageId}\n`)
   return id
 }
 
@@ -1246,6 +1305,29 @@ async function handleInboundMessage(params: {
     }
   }
 
+  // Step 7c: PR-B.2 mixed-mode receiver pipeline fanout (additive).
+  // For bots in RECEIVER_PIPELINE_BOTS, ALSO fire pg_notify('agent_inbox', ...) so
+  // future LISTEN-based subscribers receive the message via the new path. The
+  // existing pushToChannelServer path keeps running for current subscribers — this
+  // is purely additive. Subscribers' processedIds dedup handles double-delivery.
+  if (messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
+    const client = await tryGetDb()
+    if (client) {
+      await client.query(
+        `SELECT pg_notify('agent_inbox', $1)`,
+        [JSON.stringify({
+          event: 'message.created',
+          to: receiverAgentId,
+          message_id: messageId,
+          channel_id: resolved.channelId,
+          source: 'receiver-pipeline',
+        })]
+      ).catch(err => {
+        process.stderr.write(`agent-comms: receiver pipeline pg_notify failed for ${receiverAgentId} (non-fatal): ${err}\n`)
+      })
+    }
+  }
+
   // Step 8: Build push metadata
   const pushMeta = {
     chat_id: externalChannelId,
@@ -1886,42 +1968,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Sanitize
     const safeContent = sanitizeContent(content)
 
-    // Sequence
-    const sequence = await getNextSequence(dest.channelId)
+    // CEO-driven (2026-04-08 × 3): enforce platform limits server-side.
+    // Split long content into multiple parts, each ≤ platform limit (Discord 1900).
+    // The split function is pure and codepoint-safe; each part gets an (N/M) prefix.
+    // If the content already fits, this returns [safeContent] unchanged.
+    // NOTE: 'discord' is used as the split target because Discord has the tightest
+    // limit among our active adapters. Parts that fit Discord also fit everywhere else.
+    const parts = splitMessage(safeContent, 'discord')
 
-    // Build metadata with auth
-    const authMeta = createAuthMetadata(dest.channelId, safeContent)
-    const fullMetadata = { ...metadata, ...authMeta }
-
-    // Save to DB
-    const id = await saveMessage({
-      channel_id: dest.channelId, author_id: agentId, content: safeContent,
-      message_type: message_type ?? 'chat', reply_to,
-      metadata: fullMetadata, depth: msgDepth,
-      source: 'agent-comms', thread_id: dest.threadId ?? null,
-      direction: 'outbound', role: 'agent',
-    })
-
-    // Update sequence
-    const dbClient = await tryGetDb()
-    if (dbClient) {
-      await dbClient.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
-    }
-
-    // pg_notify
-    try {
-      if (dbClient) {
-        await dbClient.query(
-          `SELECT pg_notify('agent_inbox', $1)`,
-          [JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId })]
-        )
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
-    }
-
-    // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
-    const sendMentions = Array.isArray(mentions) ? mentions : parseMentions(safeContent)
+    // Loop variables shared across parts for the response summary.
+    const partIds: string[] = []
+    let lastDelivery: ReturnType<typeof routeInbound> | null = null
+    let dbClient = await tryGetDb()
     const sendCoreDb = await coreDbAdapter()
     const senderIsBot = !(await isHumanAgent(sendCoreDb, agentId))
     const allAgentInfos: AgentInfo[] = []
@@ -1929,39 +1987,97 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const info = await loadAgentInfo(sendCoreDb, member)
       if (info) allAgentInfos.push(info)
     }
-    const delivery = routeInbound(
-      { authorAgentId: agentId, authorIsBot: senderIsBot, content: safeContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
-      { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
-      allAgentInfos,
-    )
-    for (const recipient of delivery.pushTargets) {
-      sendInboxSignal(recipient, id, agentId, dest.channelId)
-    }
 
-    // Forward to platform adapters via channel_adapters
-    if (client) {
-      const adapters = await client.query(
-        'SELECT platform, external_id FROM channel_adapters WHERE channel_id = $1',
-        [dest.channelId]
-      ).catch(() => ({ rows: [] as any[] }))
+    for (let partIdx = 0; partIdx < parts.length; partIdx++) {
+      const partContent = parts[partIdx]
 
-      for (const adapter of adapters.rows) {
-        if (adapter.platform === 'discord') {
-          try {
-            await getDiscordClient(agentId).sendAdapterMessage({
-              external_channel_id: adapter.external_id,
-              content: truncateForPlatform(safeContent, 'discord'),
-              thread_external_id: dest.threadId,
-            })
-          } catch (err) {
-            process.stderr.write(`agent-comms: discord adapter delivery failed: ${err}\n`)
+      // Sequence — one per part so thread ordering is preserved.
+      const sequence = await getNextSequence(dest.channelId)
+
+      // Build metadata with auth (per-part — auth hash is content-dependent).
+      const authMeta = createAuthMetadata(dest.channelId, partContent)
+      // Stamp part-of-N metadata on every split piece so downstream consumers
+      // can reassemble or recognise the relationship.
+      const partMeta = parts.length > 1
+        ? { split_part: partIdx + 1, split_total: parts.length }
+        : {}
+      const fullMetadata = { ...metadata, ...authMeta, ...partMeta }
+
+      // Save to DB
+      const id = await saveMessage({
+        channel_id: dest.channelId, author_id: agentId, content: partContent,
+        message_type: message_type ?? 'chat', reply_to,
+        metadata: fullMetadata, depth: msgDepth,
+        source: 'agent-comms', thread_id: dest.threadId ?? null,
+        direction: 'outbound', role: 'agent',
+      })
+      partIds.push(id)
+
+      // Update sequence
+      if (dbClient) {
+        await dbClient.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
+      }
+
+      // pg_notify (per part)
+      try {
+        if (dbClient) {
+          await dbClient.query(
+            `SELECT pg_notify('agent_inbox', $1)`,
+            [JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId })]
+          )
+        }
+      } catch (err) {
+        process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
+      }
+
+      // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
+      const sendMentions = Array.isArray(mentions) ? mentions : parseMentions(partContent)
+      const delivery = routeInbound(
+        { authorAgentId: agentId, authorIsBot: senderIsBot, content: partContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
+        { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
+        allAgentInfos,
+      )
+      lastDelivery = delivery
+      for (const recipient of delivery.pushTargets) {
+        sendInboxSignal(recipient, id, agentId, dest.channelId)
+      }
+
+      // Forward to platform adapters via channel_adapters
+      if (client) {
+        const adapters = await client.query(
+          'SELECT platform, external_id FROM channel_adapters WHERE channel_id = $1',
+          [dest.channelId]
+        ).catch(() => ({ rows: [] as any[] }))
+
+        for (const adapter of adapters.rows) {
+          if (adapter.platform === 'discord') {
+            try {
+              await getDiscordClient(agentId).sendAdapterMessage({
+                external_channel_id: adapter.external_id,
+                content: truncateForPlatform(partContent, 'discord'),
+                thread_external_id: dest.threadId,
+              })
+            } catch (err) {
+              process.stderr.write(`agent-comms: discord adapter delivery failed: ${err}\n`)
+            }
           }
         }
       }
+
+      // Also forward via legacy forwarding config
+      forwardAll(agentId, dest.channelId, partContent, message_type ?? 'chat')
+
+      // Inter-part delay: keep the Discord client from burst-hitting the
+      // outbound rate limit and preserve the visual ordering in the UI.
+      // Skip after the last part.
+      if (partIdx < parts.length - 1) {
+        await new Promise(r => setTimeout(r, 150))
+      }
     }
 
-    // Also forward via legacy forwarding config
-    forwardAll(agentId, dest.channelId, safeContent, message_type ?? 'chat')
+    // Pick a representative id for the summary response (part 1).
+    const id = partIds[0]
+    const delivery = lastDelivery!
 
     // Auto-unfocus on report
     if (message_type === 'report') {
@@ -1984,20 +2100,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       recipients: delivery.pushTargets.length, warning: deliveryWarning,
     })
 
+    // Part suffix appended to every success response when a split occurred,
+    // so callers know their message was divided.
+    const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
+
     // Response with delivery feedback
     if (delivery.pushTargets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}` }] }
     }
     if (deliveryWarning === 'NOT_MENTIONED') {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}` }] }
     }
     if (deliveryWarning === 'THREAD_MISMATCH') {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}` }] }
     }
-    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}` }] }
+    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}` }] }
   }
 
-  // focus/unfocus removed — replaced by last_received_context (channel-thread-control-spec §9)
+  // focus/unfocus removed — destination is derived deterministically from reply_to.
+  // last_received_context fallback was also abolished on 2026-04-08 (PR#89) for the same reason.
 
   if (name === 'quote') {
     const { message_id, to: targetAgent, comment } = args as any

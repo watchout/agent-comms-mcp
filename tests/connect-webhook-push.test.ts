@@ -12,7 +12,8 @@ const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
 describe('Webhook Channel push — handleInboundMessage + caller push', () => {
   test('handleInboundMessage returns pushMeta when delivered', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    // Slice grew with PR-B.2 §H2 receiver-pipeline fanout block (Step 7c).
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 7000)
     expect(fnBody).toContain('delivered: true, messageId, pushMeta')
   })
 

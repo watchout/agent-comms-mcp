@@ -191,6 +191,28 @@ async function migrate() {
     END $$;
     CREATE INDEX IF NOT EXISTS idx_agent_messages_thread ON agent_messages(thread_id, sequence) WHERE thread_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_agent_messages_sequence ON agent_messages(channel_id, sequence DESC);
+
+    -- v0.2.0 PR-B.2 §H2: discord_message_id column + partial unique index for mixed-mode dedup.
+    --
+    -- BACKFILL POLICY (divergence from spec §C1):
+    --   spec §C1 recommends backfilling discord_message_id from metadata for inbound rows.
+    --   In agent-comms-mcp the legacy per-bot architecture inserts ONE row PER BOT for each
+    --   inbound Discord message (22-23 dups/discord_message_id observed in production data),
+    --   so a backfill would block the partial unique index creation.
+    --   PR-B.2 leaves legacy rows with discord_message_id = NULL; the partial unique index
+    --   only enforces uniqueness for non-NULL values. New mixed-mode inserts populate the
+    --   column going forward. The metadata copy stays intact for backwards-compat reads.
+    --   spec §C1 backfill is intended for SQLite mode (full UNIQUE) and does not apply here.
+    DO $$ BEGIN
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS discord_message_id TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_discord_id
+      ON agent_messages(discord_message_id)
+      WHERE discord_message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_messages_discord_id
+      ON agent_messages(discord_message_id)
+      WHERE discord_message_id IS NOT NULL;
   `)
 
   // Sync channel settings from config.json if available
