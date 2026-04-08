@@ -820,14 +820,23 @@ async function startListener(): Promise<void> {
           return
         }
 
-        // ACP delivery filter: use unified resolveDeliveryTargets()
-        const delivery = await resolveDeliveryTargets(
-          [AGENT_ID], // check if this single bot should receive
-          row.author_id, row.content, row.message_type ?? 'chat',
-          row.reply_to ?? undefined, row.thread_id ?? undefined,
+        // §5.1: Use pure routeInbound() for delivery filter (unified with all push paths)
+        const agentInfo = await loadAgentInfo(AGENT_ID)
+        if (!agentInfo) {
+          process.stderr.write(`agent-comms: listener — agent ${AGENT_ID} not found, skipping\n`)
+          return
+        }
+        const senderAgentId = await resolveAgentFromDiscordId(row.author_id) ?? row.author_id
+        const senderIsBot = !(await isHumanAgent(senderAgentId))
+        const resolvedMentions = (row.metadata as any)?.mentions ?? parseMentions(row.content)
+        const channelInfo = await resolveInboundChannel(row.channel_id)
+        const routeResult = routeInbound(
+          { authorAgentId: senderAgentId, authorIsBot: senderIsBot, content: row.content, mentions: resolvedMentions, messageType: row.message_type ?? 'chat' },
+          { channelId: channelInfo?.channelId ?? row.channel_id, threadId: channelInfo?.threadId, members: channelInfo?.members ?? [], type: channelInfo?.type },
+          [agentInfo],
         )
-        if (!delivery.targets.includes(AGENT_ID)) {
-          process.stderr.write(`agent-comms: filtered (${delivery.warning ?? 'no_target'}): ${row.id}\n`)
+        if (!routeResult.pushTargets.includes(AGENT_ID)) {
+          process.stderr.write(`agent-comms: listener filtered — ${AGENT_ID} ${routeResult.dropTargets[AGENT_ID] ?? 'no_target'}: ${row.id}\n`)
           return // DB saved but not pushed
         }
 
@@ -1246,86 +1255,8 @@ function parseMentions(content: string): string[] {
   return [...new Set(mentions)]
 }
 
-interface DeliveryResult {
-  targets: string[]
-  warning?: 'NOT_MENTIONED' | 'THREAD_MISMATCH'
-}
-
-/**
- * ACP 6-step delivery filter (§3.15)
- * Determines which members should receive a push notification.
- * Returns targets + warning if no delivery.
- */
-async function resolveDeliveryTargets(
-  members: string[],
-  senderId: string,
-  content: string,
-  messageType: string,
-  replyTo: string | undefined,
-  threadId: string | undefined,
-  explicitMentions?: string[],
-): Promise<DeliveryResult> {
-  const candidates = members.filter(m => m !== senderId)
-  if (candidates.length === 0) return { targets: [] }
-
-  // Step 1: Emergency → push all members (including observers)
-  if (isEmergencyMessage(content, messageType)) {
-    return { targets: candidates }
-  }
-
-  // Step 2: Human sender → push all members (including observers)
-  if (await isHumanAgent(senderId)) {
-    return { targets: candidates }
-  }
-
-  // Filter out observer_mode agents for Steps 3-6
-  const nonObservers: string[] = []
-  for (const c of candidates) {
-    if (!(await isObserverMode(c))) {
-      nonObservers.push(c)
-    }
-  }
-
-  // Step 3: Mention detection → push only mentioned agents
-  // Prefer explicit mentions parameter; fall back to content parsing
-  const mentions = (explicitMentions && explicitMentions.length > 0) ? explicitMentions : parseMentions(content)
-  const pushTargets = new Set<string>()
-
-  for (const mention of mentions) {
-    if (nonObservers.includes(mention)) {
-      pushTargets.add(mention)
-    }
-  }
-
-  // Step 4: reply_to — NO auto-add of original sender (§2.5)
-  // "元送信者の自動追加はしない" — mentions対象のみがpush対象
-
-  // Step 5: No mentions and no reply_to target → DB only (no push)
-  if (pushTargets.size === 0) {
-    return { targets: [], warning: 'NOT_MENTIONED' }
-  }
-
-  // Step 6: active_thread filter
-  const finalTargets: string[] = []
-  for (const target of pushTargets) {
-    const activeThread = await getActiveThread(target)
-    if (!activeThread) {
-      finalTargets.push(target) // NULL = receive all
-    } else {
-      const msgThread = threadId ?? 'channel'
-      if (activeThread === msgThread) {
-        finalTargets.push(target)
-      }
-      // else: DB saved but not pushed
-    }
-  }
-
-  if (finalTargets.length === 0 && pushTargets.size > 0) {
-    return { targets: [], warning: 'THREAD_MISMATCH' }
-  }
-
-  return { targets: finalTargets }
-}
+// resolveDeliveryTargets() DELETED — replaced by routeInbound() (§5.1 unified filter)
+// All push paths now use the single pure routeInbound() function.
 
 // ============================================================
 // Inbound Router (PR#56 — SSOT-5 §1 compliant)
@@ -1467,6 +1398,8 @@ async function handleInboundMessage(params: {
   const resolved = await resolveInboundChannel(externalChannelId)
 
   // Step 2: DB save (always, regardless of delivery) — non-fatal
+  // NOTE: 'to' is NOT set here. It is set ONLY after routeInbound confirms delivery.
+  // This prevents pollNewMessages() from bypassing the mentions filter (§5.1).
   const messageId = await saveMessage({
     channel_id: resolved?.channelId ?? externalChannelId,
     author_id: authorExternalId,
@@ -1480,7 +1413,6 @@ async function handleInboundMessage(params: {
       [`${platform}_message_id`]: externalMessageId,
       [`${platform}_channel_id`]: externalChannelId,
       author_name: authorName,
-      to: receiverAgentId,
       ...(attachments ? { attachments } : {}),
     },
   }).catch(err => {
@@ -1530,6 +1462,17 @@ async function handleInboundMessage(params: {
   // Step 7: Update last_received_context (side effect, after pure route)
   await updateLastReceivedContext(receiverAgentId, resolved.channelId, resolved.threadId ?? null)
   process.stderr.write(`agent-comms: last_received_context updated — ${receiverAgentId} channel=${resolved.channelId} thread=${resolved.threadId ?? 'null'}\n`)
+
+  // Step 7b: Set metadata.to ONLY for delivered messages (prevents poll bypass of mentions filter)
+  if (messageId) {
+    const client = await tryGetDb()
+    if (client) {
+      await client.query(
+        `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $1) WHERE id = $2`,
+        [receiverAgentId, messageId]
+      ).catch(() => {})
+    }
+  }
 
   // Step 8: Build push metadata
   const pushMeta = {
@@ -2220,12 +2163,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
     }
 
-    // ACP 6-step delivery filter (§3.15)
-    const delivery = await resolveDeliveryTargets(
-      dest.members, agentId, safeContent, message_type ?? 'chat', reply_to, dest.threadId,
-      Array.isArray(mentions) ? mentions : undefined,
+    // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
+    const sendMentions = Array.isArray(mentions) ? mentions : parseMentions(safeContent)
+    const senderIsBot = !(await isHumanAgent(agentId))
+    const allAgentInfos: AgentInfo[] = []
+    for (const member of dest.members) {
+      const info = await loadAgentInfo(member)
+      if (info) allAgentInfos.push(info)
+    }
+    const delivery = routeInbound(
+      { authorAgentId: agentId, authorIsBot: senderIsBot, content: safeContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
+      { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
+      allAgentInfos,
     )
-    for (const recipient of delivery.targets) {
+    for (const recipient of delivery.pushTargets) {
       sendInboxSignal(recipient, id, agentId, dest.channelId)
     }
 
