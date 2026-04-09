@@ -2056,6 +2056,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       lastDelivery = delivery
       for (const recipient of delivery.pushTargets) {
         sendInboxSignal(recipient, id, agentId, dest.channelId)
+        // Issue #123: push via channel-server (same as Discord inbound path).
+        // sendInboxSignal is file-based and only wakes polling; pushToChannelServer
+        // delivers the actual notification to the recipient's Claude Code session.
+        const pushMeta = {
+          chat_id: dest.channelId,
+          message_id: id,
+          user: agentId,
+          user_id: agentId,
+          ts: new Date().toISOString(),
+          source: 'agent-comms',
+        }
+        const pushed = await pushToChannelServer(recipient, partContent, pushMeta)
+        if (!pushed) {
+          // SSE fallback: if channel-server unreachable, notify via recipient's active transport
+          const recipCtx = botContexts.get(recipient)
+          if (recipCtx?.transport) {
+            recipCtx.server.notification({
+              method: 'notifications/claude/channel',
+              params: { content: partContent, meta: pushMeta },
+            }).catch((err: unknown) => {
+              process.stderr.write(`agent-comms: SSE fallback failed for ${recipient}: ${err}\n`)
+            })
+          }
+        }
       }
 
       // Forward to platform adapters via channel_adapters
