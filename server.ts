@@ -44,6 +44,7 @@ import {
   resolveInboundChannel,
   loadAgentInfo,
   resolveSendDestination,
+  getAgentDiscordId,
   type DbAdapter,
 } from './core/route-message-db'
 import { splitMessage } from './core/message-split'
@@ -1974,13 +1975,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // If the content already fits, this returns [safeContent] unchanged.
     // NOTE: 'discord' is used as the split target because Discord has the tightest
     // limit among our active adapters. Parts that fit Discord also fit everywhere else.
-    const parts = splitMessage(safeContent, 'discord')
+    //
+    // CEO directive 2026-04-09 (msg 1491598010574962709) + ARC Option B + lead-ama
+    // delegation file ~/Developer/lead-ama/DELEGATE-splitmessage-2026-04-09.md:
+    // when a split occurs, every part must carry the original Discord-native
+    // mention syntax so the recipient's Discord client fires push notifications
+    // on every part, not just Part 1. We resolve the agent_id mentions to
+    // `<@DISCORD_ID>` strings via the existing D7 helper (PR#95 commit 56271c9)
+    // and pass them to splitMessage. Unknown / unresolved agent_ids are dropped.
+    const sendCoreDb = await coreDbAdapter()
+    const resolvedMentionStrings = (
+      await Promise.all(
+        (mentions as string[]).map(async (agentId) => {
+          const did = await getAgentDiscordId(sendCoreDb, agentId).catch(() => null)
+          return did ? `<@${did}>` : null
+        }),
+      )
+    ).filter((s): s is string => s !== null)
+    const parts = splitMessage(safeContent, 'discord', resolvedMentionStrings)
 
     // Loop variables shared across parts for the response summary.
     const partIds: string[] = []
     let lastDelivery: ReturnType<typeof routeInbound> | null = null
     let dbClient = await tryGetDb()
-    const sendCoreDb = await coreDbAdapter()
     const senderIsBot = !(await isHumanAgent(sendCoreDb, agentId))
     const allAgentInfos: AgentInfo[] = []
     for (const member of dest.members) {

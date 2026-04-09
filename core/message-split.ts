@@ -22,66 +22,208 @@ export const PLATFORM_LIMITS: Record<string, number> = {
   slack: 3000,
 }
 
-// Max prefix length we ever emit: `(99/99) ` = 8 chars. Reserve 10 for safety.
+// Max prefix length we ever emit in the legacy (no-mentions) path:
+// `(99/99) ` = 8 chars. Reserve 10 for safety.
 const PREFIX_BUDGET = 10
+
+// Continuation-marker overhead reserve for the new (with-mentions) path.
+// Markers in use: `(N/M)` (Part 1), `(N/M ↳ 続き)` (middle), `(N/M ↳ 続き、最後)` (last).
+// `(99/99 ↳ 続き、最後)` is the longest, ~16 codepoints. Reserve 20 for safety.
+const CONTINUATION_MARKER_BUDGET = 20
 
 /**
  * Split `content` into an ordered list of parts, each ≤ platform limit.
  *
  * Contract:
  *  - If content (in codepoints) ≤ limit, returns `[content]` as-is (no prefix).
- *  - Otherwise, returns `N` parts, each prefixed with `(i/N) `.
- *  - Each returned part (prefix + body) fits within the platform limit.
+ *  - Otherwise, returns `N` parts. Format depends on whether `mentions` is set.
+ *
+ *  Legacy path (no `mentions` arg, or empty array):
+ *    - Each part prefixed with `(i/N) `.
+ *
+ *  Mentions path (CEO directive 2026-04-09, ARC Option B + subject_line rule):
+ *    - Each part prefixed with `${mention_block} ${marker}` where:
+ *        - mention_block = `mentions.join(' ')` (caller pre-resolves to `<@DISCORD_ID>`)
+ *        - marker = `(1/N)` for Part 1, `(N/M ↳ 続き)` for middle parts,
+ *          `(M/M ↳ 続き、最後)` for the final part.
+ *    - For Part 2..M, the subject_line of the original content is appended after
+ *      the marker (so a reader who sees only one part still knows what topic).
+ *    - Part 1 omits the subject_line because the original content's natural
+ *      subject is the first line of the body.
+ *    - The leading mention block is stripped from the input content before
+ *      splitting, so the same mentions are not duplicated inside Part 1's body.
+ *
+ * Common to both paths:
+ *  - Each returned part (prefix + body) fits within the platform limit (codepoints).
  *  - Splits prefer, in order: paragraph break (\n\n) → line break (\n) →
  *    Japanese sentence end (。！？) → Latin sentence end (. ! ?) →
  *    whitespace → hard codepoint boundary.
- *  - Trailing whitespace on each part is stripped; leading whitespace on the
- *    next part is stripped (avoids leading spaces/newlines after a split).
- *  - Content is never reflowed — only divided.
+ *  - Trailing whitespace per part is stripped; leading whitespace on the next
+ *    part is stripped.
  *  - Empty parts are never produced.
+ *  - Content is never reflowed — only divided.
  *
  * @param content  Original message content (UTF-8, may include multi-byte)
  * @param platform Key into PLATFORM_LIMITS. Unknown → defaults to Discord.
+ * @param mentions Optional array of pre-resolved Discord mention strings
+ *                 (e.g. `["<@1485599598259994635>", "<@1227059781265653783>"]`).
+ *                 When provided AND a split occurs, every part is prefixed with
+ *                 the mention block + continuation marker + subject_line.
+ *                 When omitted or empty, the legacy `(N/M) `-only path runs.
  */
-export function splitMessage(content: string, platform: string = 'discord'): string[] {
+export function splitMessage(
+  content: string,
+  platform: string = 'discord',
+  mentions?: string[],
+): string[] {
   const limit = PLATFORM_LIMITS[platform] ?? PLATFORM_LIMITS.discord
   const codepoints = Array.from(content)
 
+  // Single-part: never modify the input. This holds for both paths and
+  // preserves the original PR-B.2 message-split behavior for short messages.
   if (codepoints.length <= limit) {
     return [content]
   }
 
-  // Budget for one part's body (before the prefix is added).
-  const budget = limit - PREFIX_BUDGET
-  if (budget <= 0) {
-    // Pathological platform limit — fall back to raw chunking.
-    return hardChunk(codepoints, limit)
+  const hasMentions = Array.isArray(mentions) && mentions.length > 0
+
+  // ─── Legacy path: no mentions argument ─────────────────────────────────
+  if (!hasMentions) {
+    const budget = limit - PREFIX_BUDGET
+    if (budget <= 0) {
+      return hardChunk(codepoints, limit)
+    }
+
+    const parts: string[] = []
+    let remaining = codepoints
+    while (remaining.length > budget) {
+      const splitAt = findBestSplit(remaining, budget)
+      const head = trimEnd(remaining.slice(0, splitAt))
+      if (head.length === 0) {
+        parts.push(remaining.slice(0, 1).join(''))
+        remaining = dropLeadingWhitespace(remaining.slice(1))
+        continue
+      }
+      parts.push(head.join(''))
+      remaining = dropLeadingWhitespace(remaining.slice(splitAt))
+    }
+    if (remaining.length > 0) {
+      parts.push(remaining.join(''))
+    }
+
+    const total = parts.length
+    return parts.map((p, i) => `(${i + 1}/${total}) ${p}`)
   }
 
-  // Iteratively peel off parts from the front until remaining fits.
-  const parts: string[] = []
-  let remaining = codepoints
+  // ─── Mentions path (CEO directive 2026-04-09 + ARC Option B) ───────────
+  // Build the mention block and pre-strip any leading mentions from the
+  // input content so the same mentions don't appear twice in Part 1.
+  const mentionBlock = (mentions as string[]).join(' ')
+  const mentionBlockLen = Array.from(mentionBlock).length
+  const strippedContent = stripLeadingMentions(content)
+  const strippedCp = Array.from(strippedContent)
 
+  // Extract the subject line for Parts 2..M.
+  const subjectLine = extractSubjectLine(strippedContent)
+  const subjectLineLen = Array.from(subjectLine).length
+
+  // Per-part overhead = mention_block + space + marker + (space + subject)? + newline
+  // We use the worst-case overhead so the body never overflows the platform limit.
+  const overhead =
+    mentionBlockLen +
+    1 + // space between mention block and marker
+    CONTINUATION_MARKER_BUDGET +
+    (subjectLineLen > 0 ? subjectLineLen + 1 : 0) + // space + subject (Part 2..M only — worst case)
+    1 // newline between header and body
+  const budget = limit - overhead
+  if (budget <= 0) {
+    // Pathological case: mention block + subject + marker already exceeds the
+    // platform limit. Fall back to the legacy path so we still produce
+    // something rather than hanging.
+    return splitMessage(content, platform)
+  }
+
+  // Iteratively peel off body parts from the (mention-stripped) content.
+  const bodies: string[] = []
+  let remaining = strippedCp
   while (remaining.length > budget) {
     const splitAt = findBestSplit(remaining, budget)
     const head = trimEnd(remaining.slice(0, splitAt))
     if (head.length === 0) {
-      // Avoid infinite loop on pathological inputs (e.g. budget=1 all spaces):
-      // take one codepoint and move on.
-      parts.push(remaining.slice(0, 1).join(''))
+      bodies.push(remaining.slice(0, 1).join(''))
       remaining = dropLeadingWhitespace(remaining.slice(1))
       continue
     }
-    parts.push(head.join(''))
+    bodies.push(head.join(''))
     remaining = dropLeadingWhitespace(remaining.slice(splitAt))
   }
-
   if (remaining.length > 0) {
-    parts.push(remaining.join(''))
+    bodies.push(remaining.join(''))
   }
 
-  const total = parts.length
-  return parts.map((p, i) => `(${i + 1}/${total}) ${p}`)
+  const total = bodies.length
+  return bodies.map((body, i) => {
+    const partNum = i + 1
+    let marker: string
+    if (i === 0) {
+      marker = `(${partNum}/${total})`
+    } else if (i === total - 1) {
+      marker = `(${partNum}/${total} ↳ 続き、最後)`
+    } else {
+      marker = `(${partNum}/${total} ↳ 続き)`
+    }
+
+    if (i === 0) {
+      // Part 1 — mention_block + marker + body. The body still starts with
+      // the original content's subject (since we stripped only the mentions),
+      // so there's no need for an extra subject_line on Part 1.
+      return `${mentionBlock} ${marker}\n${body}`
+    }
+    // Part 2..M — mention_block + marker + subject_line + body, so a reader
+    // who only sees this single part still knows what topic it continues.
+    if (subjectLine.length === 0) {
+      return `${mentionBlock} ${marker}\n${body}`
+    }
+    return `${mentionBlock} ${marker} ${subjectLine}\n${body}`
+  })
+}
+
+/**
+ * Strip a leading run of `<@DISCORD_ID>` mention tokens (and the whitespace
+ * between/after them) from the start of `content`. Mention tokens elsewhere
+ * in the body are preserved.
+ *
+ * Used in the mentions-aware split path to avoid duplicating the mention
+ * block on Part 1 when the caller's content already starts with the same
+ * mentions that they passed via the `mentions` argument.
+ */
+function stripLeadingMentions(content: string): string {
+  return content.replace(/^(?:<@\d{17,}>\s*)+/, '')
+}
+
+/**
+ * Extract a subject line from the (already mention-stripped) content per
+ * the ARC Option B rules from the splitMessage delegation file:
+ *
+ *   1. Take everything up to the first newline (or the entire string if no
+ *      newline exists).
+ *   2. Strip a leading markdown header marker (`#`, `##`, `###` etc.) +
+ *      the following whitespace.
+ *   3. If longer than 80 codepoints, slice to 80 and append `…`.
+ *
+ * Returns an empty string when the input has no usable subject (i.e. it
+ * begins with a newline). Callers must handle the empty case.
+ */
+function extractSubjectLine(strippedContent: string): string {
+  const firstNl = strippedContent.indexOf('\n')
+  let raw = firstNl >= 0 ? strippedContent.slice(0, firstNl) : strippedContent
+  raw = raw.replace(/^#{1,6}\s+/, '').trim()
+  if (raw.length === 0) return ''
+  const cp = Array.from(raw)
+  if (cp.length > 80) {
+    return cp.slice(0, 80).join('') + '…'
+  }
+  return raw
 }
 
 /**
