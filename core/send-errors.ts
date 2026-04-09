@@ -35,7 +35,10 @@ export function validateMentionOrError(
   knownAgents: string[],
 ): string | null {
   if (GROUP_KEYWORDS.has(mention)) return null
-  if (knownAgents.length > 0 && !knownAgents.includes(mention)) {
+  if (knownAgents.length === 0) {
+    return `Error [MENTION_VALIDATION_UNAVAILABLE]: agent一覧を取得できません。しばらく待ってから再送してください`
+  }
+  if (!knownAgents.includes(mention)) {
     return `Error [INVALID_MENTION_FORMAT]: '${mention}' は登録されていません。Known agents: [${knownAgents.join(', ')}]`
   }
   return null

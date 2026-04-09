@@ -182,6 +182,26 @@ describe('T4 — NOT_MENTIONED without reply_to has no author hint', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// T6: DB 不達時 (knownAgents 空) → MENTION_VALIDATION_UNAVAILABLE (silent pass しない)
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: when DB is down, knownAgents is empty. Previous code
+// silently returned null (pass) for any mention — unknown agents got through.
+// Fail-loud: return MENTION_VALIDATION_UNAVAILABLE so callers know to retry.
+describe('T6 — DB unavailable causes MENTION_VALIDATION_UNAVAILABLE (no silent pass)', () => {
+  test('empty knownAgents returns MENTION_VALIDATION_UNAVAILABLE error', () => {
+    const err = validateMentionOrError('any-agent', [])
+    expect(err).not.toBeNull()
+    expect(err).toContain('MENTION_VALIDATION_UNAVAILABLE')
+  })
+
+  test('group keywords still pass even when knownAgents is empty', () => {
+    for (const kw of ['all', 'dev', 'org']) {
+      expect(validateMentionOrError(kw, [])).toBeNull()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // T5: DB 不達時 → エラーに一覧なしだがエラー自体は返る（silent pass しない）
 // ─────────────────────────────────────────────────────────────────────────────
 // REGRESSION CLASS: DB being unavailable must NOT cause a silent pass where an
