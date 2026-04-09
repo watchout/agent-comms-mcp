@@ -39,6 +39,11 @@ import {
   type RouteResult,
 } from './core/route-message'
 import {
+  buildNotMentionedErrorMsg,
+  validateMentionOrError,
+  buildReplyContextSuffix,
+} from './core/send-errors'
+import {
   getMessageById,
   isHumanAgent,
   resolveAgentFromDiscordId,
@@ -1829,8 +1834,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Validate mentions (required, non-empty)
+    // Issue #118 ①: suggestive error — include original message author + known agent IDs.
+    // DB is queried directly here (cache comes in PR-B). DB unavailable → no hints, but error is always returned.
     if (!mentions || !Array.isArray(mentions) || mentions.length === 0) {
-      return { content: [{ type: 'text', text: 'Error [NOT_MENTIONED]: mentions parameter is required and must not be empty.' }], isError: true }
+      let authorId: string | null = null
+      let knownAgents: string[] = []
+      const hintDb = await tryGetDb()
+      if (hintDb) {
+        if (reply_to) {
+          const orig = await getMessageById(await coreDbAdapter(), reply_to)
+          if (orig?.author_id) authorId = orig.author_id
+        }
+        const r = await hintDb.query("SELECT agent_id FROM agents WHERE status != 'disabled' ORDER BY agent_id").catch(() => ({ rows: [] as any[] }))
+        knownAgents = r.rows.map((row: any) => row.agent_id as string)
+      }
+      return { content: [{ type: 'text', text: buildNotMentionedErrorMsg(authorId, knownAgents) }], isError: true }
     }
 
     // Self-send prevention
@@ -1863,20 +1881,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Mentions validation: existence check + channel in/out classification (§4.3 Step 3)
+    // Issue #118 ②: replace AGENT_NOT_FOUND with INVALID_MENTION_FORMAT; fetch all agents once.
     const inChannelTargets: string[] = []
     const outChannelTargets: string[] = []
     const client = await tryGetDb()
+    const validAgentsR = client
+      ? await client.query("SELECT agent_id FROM agents WHERE status != 'disabled'").catch(() => ({ rows: [] as any[] }))
+      : { rows: [] as any[] }
+    const validAgentIds: string[] = validAgentsR.rows.map((row: any) => row.agent_id as string)
     for (const mention of mentions) {
-      if (mention === 'all' || mention === 'dev' || mention === 'org') continue // group mentions
-      if (client) {
-        const r = await client.query('SELECT agent_id FROM agents WHERE agent_id = $1', [mention])
-        if (r.rows.length === 0) {
-          return { content: [{ type: 'text', text: `Error [AGENT_NOT_FOUND]: '${mention}' は登録されていません` }], isError: true }
-        }
+      const mentionErr = validateMentionOrError(mention, validAgentIds)
+      if (mentionErr) {
+        return { content: [{ type: 'text', text: mentionErr }], isError: true }
       }
       if (dest.members.includes(mention)) {
         inChannelTargets.push(mention)
-      } else {
+      } else if (mention !== 'all' && mention !== 'dev' && mention !== 'org') {
         outChannelTargets.push(mention)
       }
     }
@@ -2072,8 +2092,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
 
     // Response with delivery feedback
+    // Issue #118 ③: include reply_context (original author + channel + content snippet)
+    const replyCtxSuffix = buildReplyContextSuffix(
+      reply_to ? await getMessageById(sendCoreDb, reply_to) : null,
+      dest.channelId,
+    )
     if (delivery.pushTargets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}` }] }
     }
     if (deliveryWarning === 'NOT_MENTIONED') {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}` }] }
