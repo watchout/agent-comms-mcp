@@ -44,6 +44,11 @@ import {
   buildReplyContextSuffix,
 } from './core/send-errors'
 import {
+  refreshAgentCacheWith,
+  applyMentionsAutoFill,
+  type AgentCacheEntry,
+} from './core/agent-cache'
+import {
   getMessageById,
   isHumanAgent,
   resolveAgentFromDiscordId,
@@ -178,6 +183,25 @@ const discord = new DiscordAdapter()  // shared client (stdio/sse modes + daemon
 const discordClients = new Map<string, DiscordAdapter>()  // per-bot clients (daemon mode, Phase 3c)
 const STAGGERED_CONNECT_DELAY_MS = 5_000
 const DISCORD_BACKOFF_MAX_MS = 30_000
+
+// Issue #118 PR-B ①: agent_id cache (TTL 60s)
+let agentCacheEntry: AgentCacheEntry | null = null
+const AGENT_CACHE_TTL_MS = 60_000
+
+async function refreshAgentCache(): Promise<string[]> {
+  const db = await tryGetDb()
+  const queryFn = db
+    ? async () => {
+        const r = await db.query(
+          "SELECT agent_id FROM agents WHERE status != 'disabled' ORDER BY agent_id",
+        ).catch(() => ({ rows: [] as any[] }))
+        return r.rows.map((row: any) => row.agent_id as string)
+      }
+    : null
+  const { updated, ids } = await refreshAgentCacheWith(agentCacheEntry, AGENT_CACHE_TTL_MS, queryFn)
+  if (updated) agentCacheEntry = updated
+  return ids
+}
 
 /** Resolve Discord Bot Token for a specific bot (Phase 3c) */
 async function resolveDiscordToken(botId: string): Promise<{ token: string; source: 'per-bot' | 'fallback' } | null> {
@@ -1689,11 +1713,14 @@ const mcp = createMcpServer()
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---
 function registerTools(server: Server, agentId: string) {
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  // Issue #118 PR-B ②: inject current agent_id list into description via cache
+  const knownAgents = await refreshAgentCache()
+  const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
+  return { tools: [
     {
       name: 'send',
-      description: 'Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.',
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1813,7 +1840,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
   ],
-}))
+  }
+})
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
@@ -1823,7 +1851,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ============================================================
 
   if (name === 'send') {
-    const { content, mentions, reply_to, message_type, metadata } = args as any
+    const { content, reply_to, message_type, metadata } = args as any
+    // Issue #118 PR-B ③: mentions may be auto-filled below; use let
+    let mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
 
     // Validate content
     if (!content || content.length === 0) {
@@ -1833,20 +1863,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
     }
 
+    // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
+    // This avoids NOT_MENTIONED errors when LLM forgets mentions but reply_to context is present.
+    if (mentions.length === 0 && reply_to) {
+      const orig = await getMessageById(await coreDbAdapter(), reply_to)
+      const autoFilled = applyMentionsAutoFill(mentions, reply_to, orig?.author_id)
+      if (autoFilled) mentions = autoFilled
+    }
+
     // Validate mentions (required, non-empty)
-    // Issue #118 ①: suggestive error — include original message author + known agent IDs.
-    // DB is queried directly here (cache comes in PR-B). DB unavailable → no hints, but error is always returned.
-    if (!mentions || !Array.isArray(mentions) || mentions.length === 0) {
+    // Issue #118 PR-A ①: suggestive error — include original message author + known agent IDs from cache.
+    if (mentions.length === 0) {
       let authorId: string | null = null
-      let knownAgents: string[] = []
-      const hintDb = await tryGetDb()
-      if (hintDb) {
-        if (reply_to) {
-          const orig = await getMessageById(await coreDbAdapter(), reply_to)
-          if (orig?.author_id) authorId = orig.author_id
-        }
-        const r = await hintDb.query("SELECT agent_id FROM agents WHERE status != 'disabled' ORDER BY agent_id").catch(() => ({ rows: [] as any[] }))
-        knownAgents = r.rows.map((row: any) => row.agent_id as string)
+      const knownAgents = await refreshAgentCache()
+      if (reply_to) {
+        const orig = await getMessageById(await coreDbAdapter(), reply_to)
+        if (orig?.author_id) authorId = orig.author_id
       }
       return { content: [{ type: 'text', text: buildNotMentionedErrorMsg(authorId, knownAgents) }], isError: true }
     }
@@ -1881,14 +1913,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Mentions validation: existence check + channel in/out classification (§4.3 Step 3)
-    // Issue #118 ②: replace AGENT_NOT_FOUND with INVALID_MENTION_FORMAT; fetch all agents once.
+    // Issue #118 PR-B: use cache instead of direct DB query (PR-A's direct query replaced here)
     const inChannelTargets: string[] = []
     const outChannelTargets: string[] = []
     const client = await tryGetDb()
-    const validAgentsR = client
-      ? await client.query("SELECT agent_id FROM agents WHERE status != 'disabled'").catch(() => ({ rows: [] as any[] }))
-      : { rows: [] as any[] }
-    const validAgentIds: string[] = validAgentsR.rows.map((row: any) => row.agent_id as string)
+    const validAgentIds = await refreshAgentCache()
     for (const mention of mentions) {
       const mentionErr = validateMentionOrError(mention, validAgentIds)
       if (mentionErr) {
