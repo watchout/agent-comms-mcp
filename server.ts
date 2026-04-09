@@ -174,6 +174,20 @@ const discordClients = new Map<string, DiscordAdapter>()  // per-bot clients (da
 const STAGGERED_CONNECT_DELAY_MS = 5_000
 const DISCORD_BACKOFF_MAX_MS = 30_000
 
+// Issue #118 ④: agent_id cache (TTL 60s) — used in send tool description + validation
+let agentCache: { ids: string[]; ts: number } | null = null
+const AGENT_CACHE_TTL_MS = 60_000
+
+async function refreshAgentCache(): Promise<string[]> {
+  if (agentCache && Date.now() - agentCache.ts < AGENT_CACHE_TTL_MS) return agentCache.ids
+  const db = await tryGetDb()
+  if (!db) return agentCache?.ids ?? []
+  const r = await db.query('SELECT agent_id FROM agents ORDER BY agent_id').catch(() => ({ rows: [] as any[] }))
+  const ids: string[] = r.rows.map((row: any) => row.agent_id as string)
+  agentCache = { ids, ts: Date.now() }
+  return ids
+}
+
 /** Resolve Discord Bot Token for a specific bot (Phase 3c) */
 async function resolveDiscordToken(botId: string): Promise<{ token: string; source: 'per-bot' | 'fallback' } | null> {
   // 1. Check per-bot env var: DISCORD_TOKEN_{AGENT_ID} (uppercase, hyphens → underscores)
@@ -1684,11 +1698,14 @@ const mcp = createMcpServer()
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---
 function registerTools(server: Server, agentId: string) {
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  // Issue #118: inject known agents into description so callers see valid IDs immediately
+  const knownAgents = await refreshAgentCache()
+  const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
+  return { tools: [
     {
       name: 'send',
-      description: 'Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.',
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1808,7 +1825,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
   ],
-}))
+  }
+})
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
@@ -1829,8 +1847,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Validate mentions (required, non-empty)
+    // Issue #118 ①: suggestive error — include known agent IDs and original message author
     if (!mentions || !Array.isArray(mentions) || mentions.length === 0) {
-      return { content: [{ type: 'text', text: 'Error [NOT_MENTIONED]: mentions parameter is required and must not be empty.' }], isError: true }
+      const knownAgents = await refreshAgentCache()
+      const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
+      let authorHint = ''
+      if (reply_to) {
+        const orig = await getMessageById(await coreDbAdapter(), reply_to)
+        if (orig?.author_id) authorHint = ` Original message author: ${orig.author_id}.`
+      }
+      return { content: [{ type: 'text', text: `Error [NOT_MENTIONED]: mentions is required and must not be empty.${authorHint}${agentListStr}` }], isError: true }
     }
 
     // Self-send prevention
@@ -1866,13 +1892,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const inChannelTargets: string[] = []
     const outChannelTargets: string[] = []
     const client = await tryGetDb()
+    // Issue #118 ②: INVALID_MENTION_FORMAT replacing AGENT_NOT_FOUND; use cache not per-mention DB query
+    const knownAgentIds = await refreshAgentCache()
     for (const mention of mentions) {
       if (mention === 'all' || mention === 'dev' || mention === 'org') continue // group mentions
-      if (client) {
-        const r = await client.query('SELECT agent_id FROM agents WHERE agent_id = $1', [mention])
-        if (r.rows.length === 0) {
-          return { content: [{ type: 'text', text: `Error [AGENT_NOT_FOUND]: '${mention}' は登録されていません` }], isError: true }
-        }
+      if (knownAgentIds.length > 0 && !knownAgentIds.includes(mention)) {
+        return { content: [{ type: 'text', text: `Error [INVALID_MENTION_FORMAT]: '${mention}' は登録されていません。Known agents: [${knownAgentIds.join(', ')}]` }], isError: true }
       }
       if (dest.members.includes(mention)) {
         inChannelTargets.push(mention)
@@ -2072,8 +2097,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
 
     // Response with delivery feedback
+    // Issue #118 ③: include reply_context (original author + channel + content snippet)
+    let replyCtxStr = ''
+    if (reply_to) {
+      const origMsg = await getMessageById(sendCoreDb, reply_to)
+      if (origMsg) {
+        const snippet = origMsg.content.length > 60 ? origMsg.content.slice(0, 60) + '…' : origMsg.content
+        replyCtxStr = ` | reply_context: {author: ${origMsg.author_id}, channel: ${dest.channelId}, snippet: "${snippet}"}`
+      }
+    }
     if (delivery.pushTargets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxStr}` }] }
     }
     if (deliveryWarning === 'NOT_MENTIONED') {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}` }] }
