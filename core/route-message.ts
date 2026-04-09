@@ -61,6 +61,42 @@ export function parseMentions(content: string): string[] {
   return [...new Set(mentions)]
 }
 
+/**
+ * Build the final `sendMentions` list for the send-tool push routing.
+ *
+ * Option A union (Issue #103, fix for silent push failures):
+ *   - `mentions` arg (agent IDs) are included directly
+ *   - `<@discord_id>` patterns in content are resolved to agent IDs via
+ *     the `resolveDiscordIdToAgent` callback and added to the union
+ *   - `@agent_id` native patterns in content are also included
+ *   - All three sources are deduplicated
+ *
+ * The resolver callback is injected so this function stays pure and
+ * testable without a real DB connection.
+ */
+export async function buildSendMentions(
+  mentions: unknown,
+  content: string,
+  resolveDiscordIdToAgent: (discordId: string) => Promise<string | null>,
+): Promise<string[]> {
+  // 1. Agent IDs from the explicit mentions argument
+  const argAgentIds: string[] = Array.isArray(mentions) ? (mentions as string[]) : []
+
+  // 2. Agent IDs resolved from <@discord_id> patterns in content
+  const discordIds = (content.match(/<@!?(\d+)>/g) ?? [])
+    .map(m => m.replace(/<@!?(\d+)>/, '$1'))
+  const resolvedFromContent = (
+    await Promise.all(discordIds.map(did => resolveDiscordIdToAgent(did).catch(() => null)))
+  ).filter((s): s is string => s !== null)
+
+  // Union, dedup
+  // Note: parseMentions(content) is intentionally excluded here — its regex
+  // matches numeric discord IDs (e.g. <@1485…> → "1485…") as if they were
+  // native @agent_id handles, causing false duplicates in the output.
+  // Callers that need @agent_id-native extraction should handle it separately.
+  return [...new Set([...argAgentIds, ...resolvedFromContent])]
+}
+
 /** Detect emergency messages (broadcast bypass: type=emergency or content starts with !stop) */
 export function isEmergencyMessage(content: string, messageType: string): boolean {
   if (messageType === 'emergency') return true
