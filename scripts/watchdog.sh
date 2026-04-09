@@ -77,6 +77,9 @@ restart_session() {
   sleep 3
   tmux send-keys -t "$session" Enter
 
+  # Write grace file to skip port check for 60 seconds after restart
+  date +%s > "${WATCHDOG_STATE_DIR}/${session}.grace"
+
   echo "${LOG_TAG} ${session}: restarted (${reason}) cmd: ${cmd}" >&2
   echo "$(date -Iseconds) restarted (${reason})" >> "${WATCHDOG_STATE_DIR}/${session}.log"
 }
@@ -105,15 +108,15 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
   # Capture pane output for checks
   PANE_OUTPUT=$(tmux capture-pane -t "$SESSION" -p -S -30 2>/dev/null || echo "")
 
-  # --- Check 2: crash pattern detection ---
-  if echo "$PANE_OUTPUT" | grep -qiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)'; then
-    CRASH_PATTERN=$(echo "$PANE_OUTPUT" | grep -oiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)' | head -1)
-    echo "${LOG_TAG} ${SESSION}: crash detected in output" >&2
-    log_disconnect "$SESSION" "crash: ${CRASH_PATTERN}" "restarted"
-    restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "crash detected" "$AGENT_ID"
-    RESTARTED=$((RESTARTED + 1))
-    continue
-  fi
+  # --- Check 2: crash pattern detection (DISABLED — false positives from npm/build output) ---
+  # if echo "$PANE_OUTPUT" | grep -qiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)'; then
+  #   CRASH_PATTERN=$(echo "$PANE_OUTPUT" | grep -oiE '(panic|fatal|SIGKILL|segmentation fault|killed|out of memory)' | head -1)
+  #   echo "${LOG_TAG} ${SESSION}: crash detected in output" >&2
+  #   log_disconnect "$SESSION" "crash: ${CRASH_PATTERN}" "restarted"
+  #   restart_session "$SESSION" "$PROJECT_DIR" "$PORT" "$CMD" "crash detected" "$AGENT_ID"
+  #   RESTARTED=$((RESTARTED + 1))
+  #   continue
+  # fi
 
   # --- Check 3: channel plugin mode verification ---
   # Verify registry CMD has channel plugin flags (catches misconfiguration).
@@ -125,10 +128,22 @@ while IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT CMD; do
     continue
   fi
 
-  # --- Check 3b: port liveness verification ---
+  # --- Check 3b: port liveness verification (with grace period) ---
   # If a port is assigned, verify it is actually listening. A running tmux session
   # with no port listener means the MCP server crashed or failed to start.
+  # Grace period: skip check for 60 seconds after a restart to allow startup completion.
   if [ -n "$PORT" ]; then
+    GRACE_FILE="${WATCHDOG_STATE_DIR}/${SESSION}.grace"
+    if [ -f "$GRACE_FILE" ]; then
+      grace_time=$(cat "$GRACE_FILE")
+      now=$(date +%s)
+      if [ $((now - grace_time)) -lt 60 ]; then
+        echo "${LOG_TAG} ${SESSION}: grace period active ($(( 60 - (now - grace_time) ))s remaining), skipping port check" >&2
+        ALIVE=$((ALIVE + 1))
+        continue
+      fi
+      rm -f "$GRACE_FILE"
+    fi
     if ! lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "${LOG_TAG} ${SESSION}: port ${PORT} not listening (MCP server down)" >&2
       log_disconnect "$SESSION" "port_dead: ${PORT} not listening" "restarted"
