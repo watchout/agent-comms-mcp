@@ -32,6 +32,7 @@ import { signPayload } from './shared/hmac'
 import {
   routeInbound,
   parseMentions,
+  buildSendMentions,
   isEmergencyMessage,
   type AgentInfo,
   type ChannelInfo,
@@ -2048,7 +2049,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
-      const sendMentions = Array.isArray(mentions) ? mentions : parseMentions(partContent)
+      // Issue #103 Option A union: merge mentions arg + <@discord_id> tokens in content
+      // so push routing is LLM-independent (works even when only one source is provided).
+      const sendMentions = await buildSendMentions(
+        mentions,
+        partContent,
+        (did) => resolveAgentFromDiscordId(sendCoreDb, did),
+      )
       const delivery = routeInbound(
         { authorAgentId: agentId, authorIsBot: senderIsBot, content: partContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
         { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
