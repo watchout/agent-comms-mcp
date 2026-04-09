@@ -1688,7 +1688,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'send',
-      description: 'Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination.',
+      description: 'Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1724,23 +1724,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'send_message',
-      description: '[Deprecated: use send] Send a message to another agent.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          to: { type: 'string', description: 'Target agent ID' },
-          channel: { type: 'string', description: 'Logical channel name' },
-          content: { type: 'string', description: 'Message content' },
-          message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat'], description: 'Default: chat' },
-          reply_to: { type: 'string', description: 'Message ID to reply to' },
-          depth: { type: 'number', description: 'Conversation depth (loop detection)' },
-          metadata: { type: 'object', description: 'Additional metadata' },
-        },
-        required: ['to', 'channel', 'content'],
-      },
-    },
-    {
       name: 'history',
       description: 'Fetch recent messages from a channel.',
       inputSchema: {
@@ -1761,19 +1744,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           limit: { type: 'number', description: 'Max messages (default: 20)' },
         },
-      },
-    },
-    {
-      name: 'reply',
-      description: 'Reply to a Discord channel via agent-com Discord adapter. Use this to post messages to Discord.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          chat_id: { type: 'string', description: 'Discord channel or thread ID' },
-          text: { type: 'string', description: 'Message text' },
-          reply_to: { type: 'string', description: 'Discord message ID to reply to (optional)' },
-        },
-        required: ['chat_id', 'text'],
       },
     },
     {
@@ -1842,33 +1812,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
-
-  // --- Deprecated alias redirects (SSOT-3 compliant) ---
-  // All send paths go through core Router for members validation, audit_log, rate limiting
-
-  if (name === 'reply') {
-    process.stderr.write(`[agent-com] WARN: reply is deprecated, use send(to: "channel:<chat_id>") instead\n`)
-    const { chat_id, text, reply_to } = args as any
-    name = 'send'
-    args = {
-      to: `channel:${chat_id}`,
-      content: text,
-      ...(reply_to ? { reply_to } : {}),
-    }
-  }
-
-  if (name === 'send_message') {
-    process.stderr.write(`[agent-com] WARN: send_message is deprecated, use send(to: "agent:<id>") instead\n`)
-    const { to, content, message_type, reply_to, metadata } = args as any
-    name = 'send'
-    args = {
-      to: `agent:${to}`,
-      content,
-      ...(message_type ? { message_type } : {}),
-      ...(reply_to ? { reply_to } : {}),
-      ...(metadata ? { metadata } : {}),
-    }
-  }
 
   // ============================================================
   // v0.1.0 Core Tools: send, focus, unfocus
@@ -2180,8 +2123,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ============================================================
   // Legacy tools (aliases, maintained for backward compatibility)
   // ============================================================
-
-  // send_message is handled above via redirect to send (SSOT-3 compliant)
 
   if (name === 'fetch_messages') {
     process.stderr.write(`[agent-com] WARN: fetch_messages is deprecated, use history instead\n`)
