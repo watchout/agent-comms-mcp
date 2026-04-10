@@ -323,77 +323,125 @@ async function deliverToDiscord(
 }
 
 /**
- * `agent-com next` — pop one unread inbox signal, hydrate the row from
- * agent_messages, and stash the in-flight state for the eventual `send`.
+ * `agent-com next` — pop one pending message_queue row and stamp it as the
+ * agent's current_message_id (Issue #128 Phase 2 / message-queue-spec §4.1).
+ *
+ * Internal flow (spec §4.1 step list, mapped to this implementation):
+ *   1. If agents.current_message_id is set → implicit-skip the prior row
+ *      (UPDATE message_queue SET status='skipped' WHERE id=current
+ *       AND status='read'). The spec wording leaves status='read' on
+ *       implicit skip, but we use 'skipped' so operators can distinguish
+ *       bypassed messages from in-progress ones. The CHECK constraint
+ *       added in db/migrate.ts allows both values.
+ *   2. SELECT the oldest pending row (priority DESC, created_at ASC).
+ *   3. UPDATE status='read', read_at=NOW(), agents.current_message_id=row.id.
+ *   4. Hydrate channel/content from message_queue.payload (the receiver
+ *      already enriched it on INSERT) — no second query into agent_messages
+ *      is required for the canonical fields.
+ *   5. Emit JSON with §4.1 shape (waiting count, content, channel_id, ...).
+ *
+ * Mixed Mode (spec §21): if the queue is empty for this agent, fall back to
+ * the legacy filesystem-signal path so existing bots that haven't migrated
+ * to the receiver-with-message_queue path still work. Operators can opt out
+ * of the fallback by setting AGENT_COMMS_LEGACY_QUEUE=0.
  *
  * Output (stdout, single JSON object):
- *   { waiting: true }                                       — nothing pending
- *   { waiting: false, message_id, channel_id, from, content, message_type, created_at, reply_to }
- *
- * The signal file is NOT deleted here — `send` deletes it on successful
- * reply, and a future `agent-com ack` (out of MVP scope) can clear it without
- * sending. This keeps the queue conservative: a crash between next and send
- * leaves the signal in place for the next attempt.
+ *   { waiting: 0 }                                                — empty
+ *   { waiting: <N>, queue_id, message_id, channel_id, thread_id, from,
+ *     content, message_type, source, mode: 'queue' | 'signal' }
  */
 async function nextMessage() {
   const agentId = requireAgentId('next')
-  const signals = listSignals(agentId)
-  if (signals.length === 0) {
-    process.stdout.write(JSON.stringify({ waiting: true }) + '\n')
-    return
-  }
-  const signalPath = signals[0]
-  let messageId: string
-  let signalFrom: string | null = null
-  let signalChannel: string | null = null
-  try {
-    const sig = JSON.parse(readFileSync(signalPath, 'utf-8'))
-    messageId = sig.id
-    signalFrom = sig.from ?? null
-    signalChannel = sig.channel ?? null
-  } catch (err) {
-    console.error(`Error: failed to read signal file ${signalPath}: ${err}`)
-    process.exit(1)
-  }
-
   const db = await getDb()
   try {
-    const r = await db.query(
-      `SELECT id, channel_id, author_id, content, message_type, reply_to, thread_id, created_at
-       FROM agent_messages WHERE id = $1`,
-      [messageId],
+    // Step 1: implicit-skip the prior current_message_id (Issue #128 §4.1).
+    const prevRow = await db.query(
+      `SELECT current_message_id FROM agents WHERE agent_id = $1`,
+      [agentId],
     )
-    if (r.rows.length === 0) {
-      // Stale signal — the message was deleted. Drop the signal and report empty.
-      try { unlinkSync(signalPath) } catch {}
-      process.stdout.write(JSON.stringify({ waiting: true, dropped_stale: messageId }) + '\n')
+    const priorId: number | null = prevRow.rows[0]?.current_message_id ?? null
+    if (priorId !== null) {
+      await db.query(
+        `UPDATE message_queue SET status = 'skipped'
+         WHERE id = $1 AND status = 'read'`,
+        [priorId],
+      )
+    }
+
+    // Step 2: pop the oldest pending row.
+    const pop = await db.query(
+      `SELECT id, message_id, payload, priority, created_at
+       FROM message_queue
+       WHERE agent_id = $1 AND status = 'pending'
+       ORDER BY priority DESC, created_at ASC
+       LIMIT 1`,
+      [agentId],
+    )
+
+    if (pop.rows.length === 0) {
+      // Mixed Mode (§21): fall back to filesystem signals for any inbox
+      // signals that the receiver wrote without going through message_queue
+      // (e.g. bots not yet migrated). Skip when explicitly disabled.
+      if (process.env.AGENT_COMMS_LEGACY_QUEUE !== '0') {
+        const fallback = await nextMessageFromSignal(db, agentId)
+        if (fallback) {
+          process.stdout.write(JSON.stringify(fallback) + '\n')
+          return
+        }
+      }
+      // Empty + clear current_message_id so a stale value doesn't trigger
+      // a phantom implicit-skip on the next call.
+      if (priorId !== null) {
+        await db.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
+      }
+      process.stdout.write(JSON.stringify({ waiting: 0 }) + '\n')
       return
     }
-    const row = r.rows[0]
-    // Persist in-flight state for `send` to consume. ARC codex audit
-    // (2026-04-10): thread_id MUST be captured here so the reply lands in the
-    // same thread, not the parent channel.
-    writeFileSync(
-      currentStatePath(agentId),
-      JSON.stringify({
-        message_id: row.id,
-        channel_id: row.channel_id,
-        thread_id: row.thread_id ?? null,
-        signal_path: signalPath,
-      }),
-      { mode: 0o600 },
+
+    const row = pop.rows[0]
+    let payload: Record<string, unknown> = {}
+    try {
+      payload = JSON.parse(row.payload)
+    } catch (err) {
+      console.error(`Error: failed to parse message_queue payload for id=${row.id}: ${err}`)
+      process.exit(1)
+    }
+
+    // Step 3: mark read + stamp current_message_id atomically (best-effort —
+    // these are two statements but on the same connection, so a crash leaves
+    // the row at 'read' and current_message_id NULL, which a re-run can heal).
+    await db.query(
+      `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
+      [row.id],
     )
+    await db.query(
+      `UPDATE agents SET current_message_id = $1 WHERE agent_id = $2`,
+      [row.id, agentId],
+    )
+
+    // Remaining count for the response.
+    const waitingRow = await db.query(
+      `SELECT count(*)::int AS n FROM message_queue
+       WHERE agent_id = $1 AND status = 'pending'`,
+      [agentId],
+    )
+    const waiting: number = waitingRow.rows[0]?.n ?? 0
+
+    // Spec §4.1 output shape — channel_id / content / etc come from the
+    // payload the receiver enriched on INSERT.
     process.stdout.write(JSON.stringify({
-      waiting: false,
-      message_id: row.id,
-      channel_id: row.channel_id,
-      thread_id: row.thread_id,
-      from: row.author_id ?? signalFrom,
-      content: row.content,
-      message_type: row.message_type,
-      reply_to: row.reply_to,
+      waiting,
+      mode: 'queue',
+      queue_id: row.id,
+      message_id: row.message_id ?? payload.message_id ?? null,
+      channel_id: payload.channel_id,
+      thread_id: payload.thread_id ?? null,
+      from: payload.author_id,
+      from_name: payload.author_name ?? null,
+      content: payload.content,
+      message_type: payload.message_type ?? 'chat',
+      source: payload.source ?? null,
       created_at: row.created_at,
-      signal_channel: signalChannel,
     }) + '\n')
   } finally {
     await db.end()
@@ -401,18 +449,91 @@ async function nextMessage() {
 }
 
 /**
- * `agent-com send` — reply to the message captured by the most recent `next`.
+ * Mixed-Mode legacy fallback: if message_queue is empty for this agent, scan
+ * the filesystem signal directory and synthesize a queue-shaped response.
+ * Returns null when there is no signal either. Writes the legacy state file
+ * so `sendMessage` can recover the reply target via either path.
+ */
+async function nextMessageFromSignal(db: Client, agentId: string): Promise<Record<string, unknown> | null> {
+  const signals = listSignals(agentId)
+  if (signals.length === 0) return null
+  const signalPath = signals[0]
+  let messageId: string
+  let signalFrom: string | null = null
+  try {
+    const sig = JSON.parse(readFileSync(signalPath, 'utf-8'))
+    messageId = sig.id
+    signalFrom = sig.from ?? null
+  } catch {
+    return null
+  }
+
+  const r = await db.query(
+    `SELECT id, channel_id, author_id, content, message_type, reply_to, thread_id, created_at
+     FROM agent_messages WHERE id = $1`,
+    [messageId],
+  )
+  if (r.rows.length === 0) {
+    // Stale signal — drop and report empty. Caller will surface waiting:0.
+    try { unlinkSync(signalPath) } catch {}
+    return { waiting: 0, dropped_stale: messageId }
+  }
+  const row = r.rows[0]
+
+  // Write the legacy state file so the existing send-path branch can pick it up.
+  writeFileSync(
+    currentStatePath(agentId),
+    JSON.stringify({
+      message_id: row.id,
+      channel_id: row.channel_id,
+      thread_id: row.thread_id ?? null,
+      signal_path: signalPath,
+    }),
+    { mode: 0o600 },
+  )
+
+  return {
+    waiting: signals.length,
+    mode: 'signal',
+    queue_id: null,
+    message_id: row.id,
+    channel_id: row.channel_id,
+    thread_id: row.thread_id ?? null,
+    from: row.author_id ?? signalFrom,
+    content: row.content,
+    message_type: row.message_type,
+    source: 'legacy-signal',
+    created_at: row.created_at,
+  }
+}
+
+/**
+ * `agent-com send` — reply to the message captured by the most recent `next`
+ * (Issue #128 Phase 2 / message-queue-spec §4.2).
+ *
+ * Internal flow (spec §4.2):
+ *   1. Resolve in-flight target. Prefer agents.current_message_id (the new
+ *      Phase 2 path). Fall back to /tmp state file (legacy / Mixed Mode §21).
+ *   2. Validate mentions, channel membership.
+ *   3. INSERT reply into agent_messages with reply_to = original message_id,
+ *      thread_id from the queue payload.
+ *   4. pg_notify per recipient (per PR#133 fan-out fix).
+ *   5. UPDATE message_queue: status='replied', replied_at=NOW(),
+ *      replied_with=<new id>. Clear agents.current_message_id.
+ *   6. Outbound Discord delivery (per PR#133 ARC fix).
+ *   7. On Discord failure, leave the queue row in 'replied' but report
+ *      ok:false + db_saved:true so the operator can retry the outbound side.
  *
  * Flags:
  *   --content "<text>"        required
  *   --mentions a,b,c          required (comma-separated agent IDs)
  *   --message-type chat|...   default: chat
  *
- * MVP scope: this is a thin INSERT + pg_notify path. The full server.ts send
- * handler (rate limit / dup check / message split / channel-server push /
- * SSE fallback) is intentionally NOT duplicated here — the receiver picks up
- * the row via pg_notify and runs its own routing. Adding the heavy validation
- * is the next iteration once we have a shared core module to import from.
+ * MVP scope (Phase 2): this is a thin INSERT + pg_notify path. The full
+ * server.ts send handler (rate limit / dup check / message split / channel-
+ * server push / SSE fallback) is intentionally NOT duplicated here — the
+ * receiver picks up the row via pg_notify + message_queue and runs its own
+ * routing. Phase 3 will extract a shared core module that both paths import.
  */
 async function sendMessage(args: string[]) {
   const agentId = requireAgentId('send')
@@ -435,26 +556,86 @@ async function sendMessage(args: string[]) {
     process.exit(2)
   }
 
-  const statePath = currentStatePath(agentId)
-  if (!existsSync(statePath)) {
-    console.error(`Error: no in-flight message — run 'agent-com next' first (state file ${statePath} missing)`)
-    process.exit(1)
-  }
-  let state: { message_id: string; channel_id: string; thread_id?: string | null; signal_path: string }
-  try {
-    state = JSON.parse(readFileSync(statePath, 'utf-8'))
-  } catch (err) {
-    console.error(`Error: failed to read state file ${statePath}: ${err}`)
-    process.exit(1)
-  }
-  // ARC codex audit (2026-04-10): thread_id from `next` must flow through to
-  // the INSERT and to the outbound delivery so the reply lands in the same
-  // thread, not the parent channel. Tolerate older state files (no thread_id
-  // key) by defaulting to null.
-  const threadId: string | null = state.thread_id ?? null
-
   const db = await getDb()
   try {
+    // ─────────────────────────────────────────────────────────────────────
+    // Step 1: resolve the in-flight target (queue path → legacy fallback)
+    // ─────────────────────────────────────────────────────────────────────
+    type Target = {
+      mode: 'queue' | 'signal'
+      reply_to: string         // agent_messages.id of the original
+      channel_id: string
+      thread_id: string | null
+      queue_id: number | null  // message_queue.id (queue mode only)
+      signal_path: string | null
+      state_path: string | null
+    }
+    let target: Target | null = null
+
+    // Queue path: read agents.current_message_id, hydrate the message_queue row.
+    const cur = await db.query(
+      `SELECT current_message_id FROM agents WHERE agent_id = $1`,
+      [agentId],
+    )
+    const currentId: number | null = cur.rows[0]?.current_message_id ?? null
+    if (currentId !== null) {
+      const q = await db.query(
+        `SELECT id, message_id, payload FROM message_queue WHERE id = $1`,
+        [currentId],
+      )
+      if (q.rows.length > 0) {
+        const qrow = q.rows[0]
+        let payload: Record<string, any> = {}
+        try { payload = JSON.parse(qrow.payload) } catch {}
+        target = {
+          mode: 'queue',
+          reply_to: qrow.message_id ?? payload.message_id,
+          channel_id: payload.channel_id,
+          thread_id: payload.thread_id ?? null,
+          queue_id: qrow.id,
+          signal_path: null,
+          state_path: null,
+        }
+      }
+    }
+
+    // Mixed-Mode fallback: legacy /tmp state file (set by signal-mode `next`).
+    const statePath = currentStatePath(agentId)
+    if (target === null && existsSync(statePath)) {
+      try {
+        const state = JSON.parse(readFileSync(statePath, 'utf-8'))
+        target = {
+          mode: 'signal',
+          reply_to: state.message_id,
+          channel_id: state.channel_id,
+          thread_id: state.thread_id ?? null,
+          queue_id: null,
+          signal_path: state.signal_path ?? null,
+          state_path: statePath,
+        }
+      } catch (err) {
+        console.error(`Error: failed to read legacy state file ${statePath}: ${err}`)
+        process.exit(1)
+      }
+    }
+
+    if (target === null) {
+      // Spec §4.2 step 1: no current message → NO_CURRENT_MESSAGE error.
+      console.error(`Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — run 'agent-com next' first`)
+      process.exit(1)
+    }
+
+    // ARC codex audit (2026-04-10): thread_id must flow through to the INSERT
+    // and the outbound delivery so the reply lands in the same thread.
+    const threadId: string | null = target.thread_id
+
+    // Re-bind state alias for the legacy code paths below that referenced
+    // `state.channel_id` etc. — keeps the diff localised.
+    const state = {
+      message_id: target.reply_to,
+      channel_id: target.channel_id,
+      signal_path: target.signal_path,
+    }
     // Membership check — bot can only reply in channels it belongs to.
     const ch = await db.query('SELECT members FROM channels WHERE id = $1', [state.channel_id])
     if (ch.rows.length === 0) {
@@ -527,6 +708,7 @@ async function sendMessage(args: string[]) {
     if (!deliveryResult.delivered) {
       process.stdout.write(JSON.stringify({
         ok: false,
+        mode: target.mode,
         message_id: id,
         channel_id: state.channel_id,
         thread_id: threadId,
@@ -541,12 +723,29 @@ async function sendMessage(args: string[]) {
       process.exit(1)
     }
 
-    // Discord 配信成功 — clear in-flight state and the consumed inbox signal.
-    try { unlinkSync(statePath) } catch {}
-    try { unlinkSync(state.signal_path) } catch {}
+    // ─────────────────────────────────────────────────────────────────────
+    // Discord 配信成功 — finalize in-flight state.
+    // ─────────────────────────────────────────────────────────────────────
+    if (target.mode === 'queue' && target.queue_id !== null) {
+      // Spec §4.2 step 9-11: replied + clear current_message_id.
+      await db.query(
+        `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+         WHERE id = $2`,
+        [id, target.queue_id],
+      )
+      await db.query(
+        `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+        [agentId],
+      )
+    } else {
+      // Mixed-Mode legacy path: clear filesystem state.
+      if (target.state_path) { try { unlinkSync(target.state_path) } catch {} }
+      if (target.signal_path) { try { unlinkSync(target.signal_path) } catch {} }
+    }
 
     process.stdout.write(JSON.stringify({
       ok: true,
+      mode: target.mode,
       message_id: id,
       channel_id: state.channel_id,
       thread_id: threadId,
