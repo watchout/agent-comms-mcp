@@ -161,6 +161,23 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
     const sendBody = SERVER_SRC.slice(sendStart, nextTool === -1 ? undefined : nextTool)
     expect(sendBody).not.toMatch(/getDiscordClient\([^)]*\)\.sendAdapterMessage/)
   })
+  // PR#135 ARC follow-up (lead-ama msg 1492293367835660500): outbound_queue
+  // INSERT failure must surface as an OUTBOUND_ENQUEUE_FAILED error so the
+  // caller knows the Discord reply is permanently lost (the consumer never
+  // sees the row). The CLI rolls back its transaction on the same failure;
+  // the send tool must mirror that durability contract.
+  test('send-tool surfaces OUTBOUND_ENQUEUE_FAILED on outbound_queue INSERT failure', () => {
+    const sendStart = SERVER_SRC.indexOf("if (name === 'send')")
+    expect(sendStart).toBeGreaterThan(-1)
+    const nextTool = SERVER_SRC.indexOf("if (name === '", sendStart + 1)
+    const sendBody = SERVER_SRC.slice(sendStart, nextTool === -1 ? undefined : nextTool)
+    // The catch must NOT silently swallow the error.
+    expect(sendBody).not.toMatch(/outbound_queue INSERT failed \(non-fatal\)/)
+    // Positive: error code, audit log call, and isError result are all present.
+    expect(sendBody).toMatch(/OUTBOUND_ENQUEUE_FAILED/)
+    expect(sendBody).toMatch(/writeAuditLog\(\s*['"]outbound\.enqueue_failed['"]/)
+    expect(sendBody).toMatch(/isError:\s*true/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

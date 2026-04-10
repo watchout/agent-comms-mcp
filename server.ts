@@ -2313,6 +2313,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (cr.rows.length > 0) externalId = cr.rows[0].external_id
         }
         if (externalId) {
+          // ARC codex audit (PR#135, lead-ama msg 1492293367835660500): the
+          // outbound_queue INSERT must NOT be silently swallowed. Phase 3
+          // makes the queue the sole outbound delivery path, so a failed
+          // INSERT means the Discord reply is permanently lost (the
+          // consumer never sees the row). The CLI rolls back its
+          // transaction on the same failure; the send tool must mirror
+          // that durability contract by surfacing the failure as an error
+          // result so the caller knows their message was DB-saved but
+          // never queued for delivery.
           try {
             await client.query(
               `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
@@ -2320,7 +2329,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               [id, agentId, externalId, truncateForPlatform(partContent, 'discord')],
             )
           } catch (err) {
-            process.stderr.write(`agent-comms: outbound_queue INSERT failed (non-fatal): ${err}\n`)
+            process.stderr.write(`agent-comms: outbound_queue INSERT failed: ${err}\n`)
+            await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
+              code: 'OUTBOUND_ENQUEUE_FAILED',
+              message_id: id,
+              channel_external_id: externalId,
+              error: String(err).slice(0, 500),
+            })
+            return {
+              content: [{
+                type: 'text',
+                text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました。メッセージはDB保存済み (message_id: ${id}) ですが、Discordには配信されません。原因: ${String(err).slice(0, 200)}`,
+              }],
+              isError: true,
+            }
           }
         }
       }
