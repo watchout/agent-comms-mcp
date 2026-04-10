@@ -2056,6 +2056,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       lastDelivery = delivery
       for (const recipient of delivery.pushTargets) {
         sendInboxSignal(recipient, id, agentId, dest.channelId)
+        // Issue #127: send tool must mirror Discord inbound push path so that
+        // bot→bot messages reach recipients without waiting for poll. Try
+        // channel-server first, fall back to in-process SSE notification.
+        const pushMeta = {
+          from: agentId,
+          channel_id: dest.channelId,
+          message_id: id,
+          thread_id: dest.threadId ?? null,
+        }
+        const pushed = await pushToChannelServer(recipient, partContent, pushMeta)
+        if (!pushed) {
+          const recipCtx = botContexts.get(recipient)
+          if (recipCtx?.transport) {
+            try {
+              await recipCtx.server.notification({
+                method: 'notifications/claude/channel',
+                params: { content: partContent, meta: pushMeta },
+              })
+            } catch (err) {
+              process.stderr.write(`agent-comms: send-path SSE fallback failed for ${recipient}: ${err}\n`)
+            }
+          }
+        }
       }
 
       // Forward to platform adapters via channel_adapters
