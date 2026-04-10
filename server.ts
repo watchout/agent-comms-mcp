@@ -2054,8 +2054,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         allAgentInfos,
       )
       lastDelivery = delivery
+      // Issue #127 / lead-ama follow-up: pushMeta MUST match the inbound contract
+      // (handleInboundMessage L1363-1371) so SSE consumers can treat both push
+      // sources uniformly. The inbound builder uses external Discord IDs; here in
+      // the outbound send path we use the agent's internal channel UUID + the
+      // sender's agent_id, but the field names (chat_id / message_id / user /
+      // user_id / ts / source) must align. The legacy from / channel_id /
+      // thread_id fields are preserved for any consumer still reading the old
+      // shape until the cutover is complete.
+      const sendPushMeta = {
+        chat_id: dest.channelId,
+        message_id: id,
+        user: agentId,
+        user_id: agentId,
+        ts: new Date().toISOString(),
+        // Internal MCP-originated push, not platform-relayed. ARC codex audit
+        // (2026-04-10) flagged that the previous 'discord' source mislabeled
+        // bot→bot send-tool messages as platform-originated.
+        source: 'agent-comms' as const,
+        from: agentId,
+        channel_id: dest.channelId,
+        thread_id: dest.threadId ?? null,
+      }
       for (const recipient of delivery.pushTargets) {
         sendInboxSignal(recipient, id, agentId, dest.channelId)
+        // Issue #127: send tool must mirror Discord inbound push path so that
+        // bot→bot messages reach recipients without waiting for poll. Try
+        // channel-server first, fall back to in-process SSE notification.
+        const pushed = await pushToChannelServer(recipient, partContent, sendPushMeta)
+        if (!pushed) {
+          const recipCtx = botContexts.get(recipient)
+          if (recipCtx?.transport) {
+            try {
+              await recipCtx.server.notification({
+                method: 'notifications/claude/channel',
+                params: { content: partContent, meta: sendPushMeta },
+              })
+            } catch (err) {
+              process.stderr.write(`agent-comms: send-path SSE fallback failed for ${recipient}: ${err}\n`)
+            }
+          }
+        }
       }
 
       // Forward to platform adapters via channel_adapters
