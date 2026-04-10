@@ -3,8 +3,7 @@
 > この文書がagent-comの唯一の正（Single Source of Truth）。
 > 実装はこの仕様に従うこと。仕様変更はこの文書を先に更新すること。
 >
-> 移行先アーキテクチャ: `docs/agent-com-message-queue-spec.md` (ACCEPTED ARCHITECTURE, implementation pending)
-> 本文書は現行実装の SSOT です。移行完了時に段階的に更新されます。
+> **詳細仕様は `docs/agent-com-message-queue-spec.md` (SSOT) を参照。**
 
 ## 1. プロダクト概要
 
@@ -21,13 +20,16 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 - Discord/Slack/Teams/Telegram等のUIプラットフォームに対応
 
 ### 1.4 設計原則
-1. **1プラグインで完結** — 追加のMCPやプラグインは不要
-2. **push型通信** — LLMの「チェックしよう」判断に依存しない
-3. **人間もbotも同じ経路** — 発信元の種別で通信経路を分けない
-4. **DB推奨、なくても動く** — 最小構成はファイルベースで動作
-5. **行動規範は守れない前提で設計** — 決定論的な仕組みで制御
-6. **双方向コアRouter必須** — inbound/outbound問わず全メッセージはコアRouterを通過する。adapterからbotへの直接pushは設計違反
-7. **pushされたメッセージ=応答対象** — daemonのrouteInbound()でフィルタ済みのメッセージだけがbotに届く。bot側のCLAUDE.md/メモリによる独自フィルタは設計違反
+
+（`docs/agent-com-message-queue-spec.md` §1 準拠）
+
+1. **CLIコマンドが正のインターフェース** — MCP toolsはラッパー
+2. **受信は1プロセス（receiver）だけが行う** — INSERT競合が構造的に不可能
+3. **配信はDBキューで行う** — HTTP POST / SSE / pg_notify直接配信を排除
+4. **LLMにUUID・チャンネルID・宛先選択を触らせない**
+5. **全メッセージがDBに記録される** — 例外経路ゼロ
+6. **bashが実行できれば、どのLLM CLIでも接続可能**
+7. **PostgreSQLでもSQLiteでも同じCLIコマンドが動く**
 
 ---
 
@@ -80,17 +82,25 @@ server.ts（1プロセスで全機能）
 
 ### 2.2 通信モデル
 
+（`docs/agent-com-message-queue-spec.md` §2 準拠）
+
 ```
-外部（Discord等） → UIアダプター → 通信バス → Claude Codeセッション（push注入）
-                                       ↑
-エージェント（bot） → 通信バス ─────────┘
-                                       ↓
-Claude Codeセッション → 通信バス → UIアダプター → 外部（Discord等）表示
+外部（Discord等）
+      ↓ inbound
+  receiver（1プロセス）
+      → routeInbound() → agent_messages INSERT
+                       → message_queue INSERT（push対象bot分）
+                       → pg_notify / ファイルシグナル（新着通知のみ）
+  agent-com next       ← bot が message_queue から1件取得
+  agent-com send/notify → outbound_queue INSERT
+  outbound_queue消費   → Discord REST API送信（bot固有token）
+      ↑ outbound
+外部（Discord等）
 ```
 
-- 受信: channel pluginとしてセッションに`<channel>`タグを自動注入（push型）
-- 送信: sendツールでプラットフォームに投稿
-- bot間: 通信バスが直接相手セッションにpush注入。プラットフォームには可視性のためにも投稿
+- 受信: receiver が message_queue に積む → bot が `next` で取得
+- 送信: `send` / `notify` コマンドで outbound_queue に積む → receiver が消費
+- bot間: 同一経路（message_queue）。例外経路ゼロ
 
 ### 2.3 技術スタック
 
@@ -156,7 +166,6 @@ interface PlatformCapabilities {
 }
 ```
 
-<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ### 3.2 Discordアダプター
 
 | 項目 | 仕様 |
@@ -231,10 +240,9 @@ interface AccessConfig {
 - プラットフォーム非依存（Discord/Slack/Telegram共通のaccess制御）
 - エージェント別に独立した設定
 
-<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ### 4.2 メッセージルーティング
 
-> 詳細仕様: docs/archive/channel-thread-control-spec.md (archived)
+> 詳細仕様: docs/channel-thread-control-spec.md
 
 #### 設計原則
 1. botが宛先を選択する手段を物理的に持たない
@@ -279,7 +287,6 @@ interface AccessConfig {
 | DBあり | `last_read_at`テーブルで管理 | 本番運用 |
 | DBなし | `.agent-com/last-read/{channel}`ファイル | 最小構成 |
 
-<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ### 4.4 push通知（Webhook Channel方式）
 
 agent-commsを2つに分離し、push受信とツール提供を独立させる。
@@ -829,7 +836,6 @@ list_agents — 登録済みエージェント一覧を返す
 
 ---
 
-<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ## 13. bot間認証
 
 ### 13.1 方式: HMAC共有シークレット
