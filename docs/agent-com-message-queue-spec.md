@@ -1262,7 +1262,7 @@ message_queue INSERT前に、受信者のチャンネル別直近発言・会話
 
 routeInbound()とmessage_queue INSERT間に挟み、メッセージを仕分け。
 direct / delegate / summarize の3択。ルールベース + Haikuフォールバック。
-詳細は別文書（receiver-architecture §19.2）を参照。
+詳細は将来仕様（v0.2.0 で詳細化予定）。
 
 ### 19.3 チャンネルtopic表示
 

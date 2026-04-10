@@ -62,8 +62,6 @@ server.ts（1プロセスで全機能）
 │   ├── heartbeat                      ハートビート送信
 │   ├── fetch_discord_history          Discord API履歴取得
 │   └── list_agents / agents           エージェント一覧
-│
-└── webhook bridge（HTTP POST受信）    Discord adapter / 外部からの注入
 ```
 
 **旧構成（Phase 4以前）との対比:**
