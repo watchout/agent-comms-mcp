@@ -136,3 +136,95 @@ describe('T5 — `agent-com send` pg_notify fans out per recipient', () => {
     expect(body).not.toMatch(/to:\s*state\.channel_id/)
   })
 })
+
+// Helper: extract the body of sendMessage so T6/T7/T8 don't match unrelated text.
+function sendMessageBody(): string {
+  const fnStart = CLI_SRC.indexOf('async function sendMessage')
+  const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
+  return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T6: outbound Discord delivery is invoked after the INSERT (ARC codex audit)
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: ARC codex audit (2026-04-10) flagged that the first cut
+// committed the row + pg_notify but never relayed the message to Discord, so
+// the reply only existed in the DB and was invisible to humans. The MVP fix
+// is a direct Discord REST API call via deliverToDiscord. Pin that
+// sendMessage actually awaits the helper, and that the helper is defined.
+describe('T6 — `agent-com send` calls outbound Discord delivery', () => {
+  test('deliverToDiscord helper is defined', () => {
+    expect(CLI_SRC).toMatch(/async function deliverToDiscord\s*\(/)
+  })
+  test('sendMessage awaits deliverToDiscord with channel_id + threadId + content', () => {
+    const body = sendMessageBody()
+    expect(body).toMatch(/await deliverToDiscord\s*\(\s*db\s*,\s*state\.channel_id\s*,\s*threadId\s*,\s*content\s*\)/)
+  })
+  test('deliverToDiscord uses Discord REST API v10 channels endpoint', () => {
+    expect(CLI_SRC).toMatch(/discord\.com\/api\/v10\/channels\/\$\{externalId\}\/messages/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T7: HMAC auth metadata is built and stamped into the INSERT
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: ARC codex audit (2026-04-10) flagged that CLI-originated
+// rows had no metadata.auth, so receivers running with auth.mode === 'enforce'
+// dropped them as [UNVERIFIED]. The fix mirrors server.ts:createAuthMetadata
+// and folds the result into the INSERT metadata. Pin both the helper and
+// the fold-in.
+describe('T7 — `agent-com send` builds and stamps HMAC auth metadata', () => {
+  test('buildAuthMetadata helper is defined and uses createHmac', () => {
+    expect(CLI_SRC).toMatch(/function buildAuthMetadata\s*\(/)
+    expect(CLI_SRC).toMatch(/createHmac\s*\(\s*'sha256'/)
+  })
+  test('sendMessage merges authMeta into the INSERT metadata', () => {
+    const body = sendMessageBody()
+    expect(body).toMatch(/const authMeta\s*=\s*buildAuthMetadata\(/)
+    // The fold can be `...(authMeta ?? {})` or equivalent — assert authMeta
+    // is referenced inside the metadata literal.
+    expect(body).toMatch(/metadata[\s\S]{0,100}authMeta/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T8: thread_id flows from `next` → state file → INSERT → outbound delivery
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: ARC codex audit (2026-04-10) flagged that replies landed
+// in the parent channel even when the original message was in a thread,
+// because the in-flight state never carried thread_id. Pin the entire chain:
+//   (a) `nextMessage` SELECTs thread_id and writes it into the state file
+//   (b) `sendMessage` reads thread_id from state and passes it to INSERT
+//   (c) `sendMessage` passes the same threadId to deliverToDiscord
+function nextMessageBody(): string {
+  const fnStart = CLI_SRC.indexOf('async function nextMessage')
+  const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
+  return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
+}
+
+describe('T8 — thread_id flows from next → state → send → outbound', () => {
+  test('nextMessage SELECTs thread_id from agent_messages', () => {
+    const body = nextMessageBody()
+    expect(body).toMatch(/SELECT[^;]*thread_id[^;]*FROM agent_messages/)
+  })
+  test('nextMessage writes thread_id into the state file', () => {
+    const body = nextMessageBody()
+    expect(body).toMatch(/thread_id:\s*row\.thread_id/)
+  })
+  test('sendMessage reads thread_id from state with null fallback', () => {
+    const body = sendMessageBody()
+    expect(body).toMatch(/threadId[^=]*=\s*state\.thread_id\s*\?\?\s*null/)
+  })
+  test('sendMessage INSERTs thread_id (not the literal NULL)', () => {
+    const body = sendMessageBody()
+    // The INSERT must bind threadId rather than the previous hardcoded NULL.
+    expect(body).toMatch(/'agent-comms',\s*\$8,\s*'outbound'/)
+    expect(body).toMatch(/JSON\.stringify\(metadata\),\s*threadId/)
+    // Negative: the previous shape hardcoded NULL between 'agent-comms' and 'outbound'.
+    expect(body).not.toMatch(/'agent-comms',\s*NULL,\s*'outbound'/)
+  })
+  test('sendMessage passes threadId to deliverToDiscord', () => {
+    const body = sendMessageBody()
+    expect(body).toMatch(/deliverToDiscord\([^)]*threadId[^)]*\)/)
+  })
+})

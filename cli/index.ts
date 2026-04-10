@@ -23,7 +23,7 @@ import { Client } from 'pg'
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash, createHmac } from 'node:crypto'
 
 // --- DB connection ---
 function getDatabaseUrl(): string {
@@ -213,6 +213,115 @@ function listSignals(agentId: string): string[] {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HMAC auth metadata (mirrors server.ts:createAuthMetadata L665-671)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ARC codex audit (2026-04-10): the CLI INSERT must carry the same
+// metadata.auth shape as the MCP send tool, otherwise downstream verifiers
+// (validateIncomingAuth) will tag CLI-originated rows as [UNVERIFIED] and
+// receivers in `enforce` mode will drop them.
+//
+// We avoid pulling in the whole config loader: the secret resolution mirrors
+// server.ts:loadSecret L635-646 (env var → secret_file fallback), and we read
+// the auth mode from $AGENT_COMMS_AUTH_MODE / $AGENT_COMMS_SECRET. If neither
+// is set, the helper returns undefined and the INSERT proceeds without auth
+// metadata (matching server.ts behavior when config.auth.mode === 'off').
+function loadAuthSecret(): string | null {
+  const envSecret = process.env.AGENT_COMMS_SECRET
+  if (envSecret) return envSecret
+  const secretFile = process.env.AGENT_COMMS_SECRET_FILE
+  if (secretFile) {
+    try {
+      return readFileSync(secretFile.replace(/^~/, homedir()), 'utf-8').trim()
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function buildAuthMetadata(agentId: string, channel: string, content: string): Record<string, unknown> | undefined {
+  const mode = process.env.AGENT_COMMS_AUTH_MODE ?? 'off'
+  if (mode === 'off') return undefined
+  const secret = loadAuthSecret()
+  if (!secret) return undefined
+  const timestamp = Math.floor(Date.now() / 1000)
+  const contentHash = createHash('sha256').update(content).digest('hex')
+  const payload = `${agentId}:${timestamp}:${channel}:${contentHash}`
+  const signature = createHmac('sha256', secret).update(payload).digest('hex')
+  return { auth: { signature, timestamp } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Outbound platform delivery (Discord REST API direct call)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ARC codex audit (2026-04-10): after the INSERT + pg_notify, the CLI must
+// also relay the message to the originating platform (Discord first), or the
+// reply only exists in the DB and never reaches human users in the channel.
+//
+// Phase 1 minimum: call Discord REST API directly using $DISCORD_BOT_TOKEN.
+// Phase 3 will replace this with an `outbound_queue` INSERT consumed by a
+// dedicated outbound worker — see message-queue-spec §7.2.
+//
+// Resolution order:
+//   1. If `thread_id` is set on the in-flight state, prefer thread_adapters
+//      (so the reply lands in the same thread, not the parent).
+//   2. Otherwise, fall back to channel_adapters for the parent channel.
+async function deliverToDiscord(
+  db: Client,
+  channelId: string,
+  threadId: string | null,
+  content: string,
+): Promise<{ delivered: boolean; reason?: string }> {
+  const token = process.env.DISCORD_BOT_TOKEN
+  if (!token) return { delivered: false, reason: 'DISCORD_BOT_TOKEN not set' }
+
+  // Resolve external Discord channel/thread ID.
+  let externalId: string | null = null
+  if (threadId) {
+    const r = await db.query(
+      `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
+      [threadId],
+    )
+    if (r.rows.length > 0) externalId = r.rows[0].external_id
+  }
+  if (!externalId) {
+    const r = await db.query(
+      `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
+      [channelId],
+    )
+    if (r.rows.length > 0) externalId = r.rows[0].external_id
+  }
+  if (!externalId) return { delivered: false, reason: 'no discord adapter mapping' }
+
+  // Discord 2,000 char limit — codepoint-safe truncation.
+  const DISCORD_LIMIT = 2000
+  let body = content
+  if ([...body].length > DISCORD_LIMIT) {
+    body = [...body].slice(0, DISCORD_LIMIT - 1).join('') + '…'
+  }
+
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${externalId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ content: body }),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return { delivered: false, reason: `discord ${res.status}: ${text.slice(0, 200)}` }
+    }
+    return { delivered: true }
+  } catch (err) {
+    return { delivered: false, reason: `discord fetch failed: ${err}` }
+  }
+}
+
 /**
  * `agent-com next` — pop one unread inbox signal, hydrate the row from
  * agent_messages, and stash the in-flight state for the eventual `send`.
@@ -250,7 +359,7 @@ async function nextMessage() {
   const db = await getDb()
   try {
     const r = await db.query(
-      `SELECT id, channel_id, author_id, content, message_type, reply_to, created_at
+      `SELECT id, channel_id, author_id, content, message_type, reply_to, thread_id, created_at
        FROM agent_messages WHERE id = $1`,
       [messageId],
     )
@@ -261,16 +370,24 @@ async function nextMessage() {
       return
     }
     const row = r.rows[0]
-    // Persist in-flight state for `send` to consume.
+    // Persist in-flight state for `send` to consume. ARC codex audit
+    // (2026-04-10): thread_id MUST be captured here so the reply lands in the
+    // same thread, not the parent channel.
     writeFileSync(
       currentStatePath(agentId),
-      JSON.stringify({ message_id: row.id, channel_id: row.channel_id, signal_path: signalPath }),
+      JSON.stringify({
+        message_id: row.id,
+        channel_id: row.channel_id,
+        thread_id: row.thread_id ?? null,
+        signal_path: signalPath,
+      }),
       { mode: 0o600 },
     )
     process.stdout.write(JSON.stringify({
       waiting: false,
       message_id: row.id,
       channel_id: row.channel_id,
+      thread_id: row.thread_id,
       from: row.author_id ?? signalFrom,
       content: row.content,
       message_type: row.message_type,
@@ -323,13 +440,18 @@ async function sendMessage(args: string[]) {
     console.error(`Error: no in-flight message — run 'agent-com next' first (state file ${statePath} missing)`)
     process.exit(1)
   }
-  let state: { message_id: string; channel_id: string; signal_path: string }
+  let state: { message_id: string; channel_id: string; thread_id?: string | null; signal_path: string }
   try {
     state = JSON.parse(readFileSync(statePath, 'utf-8'))
   } catch (err) {
     console.error(`Error: failed to read state file ${statePath}: ${err}`)
     process.exit(1)
   }
+  // ARC codex audit (2026-04-10): thread_id from `next` must flow through to
+  // the INSERT and to the outbound delivery so the reply lands in the same
+  // thread, not the parent channel. Tolerate older state files (no thread_id
+  // key) by defaulting to null.
+  const threadId: string | null = state.thread_id ?? null
 
   const db = await getDb()
   try {
@@ -346,13 +468,22 @@ async function sendMessage(args: string[]) {
     }
 
     const id = randomUUID()
-    const metadata = { mentions, cli: 'agent-com next/send (MVP)' }
+    // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
+    // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
+    // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
+    // secret, matching server.ts:createAuthMetadata behavior.
+    const authMeta = buildAuthMetadata(agentId, state.channel_id, content)
+    const metadata: Record<string, unknown> = {
+      mentions,
+      cli: 'agent-com next/send (MVP)',
+      ...(authMeta ?? {}),
+    }
     await db.query(
       `INSERT INTO agent_messages
          (id, channel_id, author_id, content, message_type, reply_to, metadata,
           depth, source, thread_id, direction, role)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'agent-comms', NULL, 'outbound', 'agent')`,
-      [id, state.channel_id, agentId, content, messageType, state.message_id, JSON.stringify(metadata)],
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'agent-comms', $8, 'outbound', 'agent')`,
+      [id, state.channel_id, agentId, content, messageType, state.message_id, JSON.stringify(metadata), threadId],
     )
 
     // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
@@ -376,6 +507,14 @@ async function sendMessage(args: string[]) {
       )
     }
 
+    // ARC codex audit (2026-04-10): after the DB row is committed, also relay
+    // the message to the originating platform. Phase 1 minimum is a direct
+    // Discord REST API call (Phase 3 will replace this with outbound_queue).
+    // Failure here is non-fatal — the row + pg_notify already happened, so
+    // server-side consumers will pick it up; we just report deliver=false
+    // and let the operator decide what to do.
+    const deliveryResult = await deliverToDiscord(db, state.channel_id, threadId, content)
+
     // Clear in-flight state and the consumed inbox signal.
     try { unlinkSync(statePath) } catch {}
     try { unlinkSync(state.signal_path) } catch {}
@@ -384,8 +523,12 @@ async function sendMessage(args: string[]) {
       ok: true,
       message_id: id,
       channel_id: state.channel_id,
+      thread_id: threadId,
       reply_to: state.message_id,
       mentions,
+      auth_signed: authMeta !== undefined,
+      discord_delivered: deliveryResult.delivered,
+      ...(deliveryResult.delivered ? {} : { discord_skip_reason: deliveryResult.reason }),
     }) + '\n')
   } finally {
     await db.end()
