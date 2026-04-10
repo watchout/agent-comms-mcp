@@ -357,10 +357,24 @@ async function sendMessage(args: string[]) {
 
     // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
     // full receiver-side routing (channel-server push, SSE fallback, …).
-    await db.query(
-      `SELECT pg_notify('agent_inbox', $1)`,
-      [JSON.stringify({ event: 'message.created', to: state.channel_id, message_id: id, channel_id: state.channel_id })],
-    )
+    //
+    // The agent_inbox LISTEN handler routes per-recipient: `to` MUST be a
+    // recipient agent_id, NOT the channel id. Fan out one notify per mention so
+    // every push target gets its own routing pass — matches the inbound
+    // pipeline's `to: receiverAgentId` shape (server.ts handleInboundMessage
+    // L1349-1355). lead-ama follow-up to PR#133 first cut.
+    for (const recipient of mentions) {
+      await db.query(
+        `SELECT pg_notify('agent_inbox', $1)`,
+        [JSON.stringify({
+          event: 'message.created',
+          to: recipient,
+          message_id: id,
+          channel_id: state.channel_id,
+          source: 'cli-send',
+        })],
+      )
+    }
 
     // Clear in-flight state and the consumed inbox signal.
     try { unlinkSync(statePath) } catch {}
