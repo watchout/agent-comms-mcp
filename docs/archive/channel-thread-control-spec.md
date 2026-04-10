@@ -1,3 +1,5 @@
+<!-- ARCHIVED: message-queue-spec v1.0.0 に統合 (2026-04-10) -->
+
 # agent-com チャンネル・スレッド制御仕様（実装レベル）
 
 > CEO承認: 2026-04-08（§5.1 human bypass削除承認済み）
