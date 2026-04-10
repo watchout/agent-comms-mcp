@@ -355,30 +355,74 @@ async function nextMessage() {
   const db = await getDb()
   try {
     // Step 1: implicit-skip the prior current_message_id (Issue #128 §4.1).
-    const prevRow = await db.query(
-      `SELECT current_message_id FROM agents WHERE agent_id = $1`,
-      [agentId],
-    )
-    const priorId: number | null = prevRow.rows[0]?.current_message_id ?? null
-    if (priorId !== null) {
-      await db.query(
-        `UPDATE message_queue SET status = 'skipped'
-         WHERE id = $1 AND status = 'read'`,
-        [priorId],
+    // ARC codex audit (PR#134, lead-ama msg 1492279341898272849): wrap the
+    // SELECT + UPDATEs in BEGIN/COMMIT with FOR UPDATE SKIP LOCKED so two
+    // concurrent `agent-com next` invocations for the same agent never pop
+    // the same row. SKIP LOCKED makes a parallel call see the next pending
+    // row instead of blocking.
+    //
+    // The implicit-skip of the prior current_message_id is part of the same
+    // transaction so a crash midway through cannot leave us with a popped
+    // 'read' row and an unsynchronised agents.current_message_id.
+    let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date } | null = null
+    let priorId: number | null = null
+    await db.query('BEGIN')
+    try {
+      const prevRow = await db.query(
+        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
+        [agentId],
       )
+      priorId = prevRow.rows[0]?.current_message_id ?? null
+      if (priorId !== null) {
+        await db.query(
+          `UPDATE message_queue SET status = 'skipped'
+           WHERE id = $1 AND status = 'read'`,
+          [priorId],
+        )
+      }
+
+      // Step 2: pop the oldest pending row with an exclusive lock so a
+      // concurrent next() never picks the same row.
+      const pop = await db.query(
+        `SELECT id, message_id, payload, priority, created_at
+         FROM message_queue
+         WHERE status = 'pending' AND agent_id = $1
+         ORDER BY priority DESC, created_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`,
+        [agentId],
+      )
+
+      if (pop.rows.length === 0) {
+        // Empty queue under lock — clear current_message_id so a stale value
+        // doesn't trigger a phantom implicit-skip on the next call. Commit
+        // before falling through to the (read-only) signal fallback.
+        if (priorId !== null) {
+          await db.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
+        }
+        await db.query('COMMIT')
+      } else {
+        // Step 3: mark read + stamp current_message_id inside the same txn.
+        // Both UPDATEs run before COMMIT so a crash mid-step leaves a clean
+        // state (PostgreSQL aborts the txn).
+        const popped = pop.rows[0]
+        await db.query(
+          `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
+          [popped.id],
+        )
+        await db.query(
+          `UPDATE agents SET current_message_id = $1 WHERE agent_id = $2`,
+          [popped.id, agentId],
+        )
+        await db.query('COMMIT')
+        row = popped
+      }
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {})
+      throw err
     }
 
-    // Step 2: pop the oldest pending row.
-    const pop = await db.query(
-      `SELECT id, message_id, payload, priority, created_at
-       FROM message_queue
-       WHERE agent_id = $1 AND status = 'pending'
-       ORDER BY priority DESC, created_at ASC
-       LIMIT 1`,
-      [agentId],
-    )
-
-    if (pop.rows.length === 0) {
+    if (row === null) {
       // Mixed Mode (§21): fall back to filesystem signals for any inbox
       // signals that the receiver wrote without going through message_queue
       // (e.g. bots not yet migrated). Skip when explicitly disabled.
@@ -389,16 +433,10 @@ async function nextMessage() {
           return
         }
       }
-      // Empty + clear current_message_id so a stale value doesn't trigger
-      // a phantom implicit-skip on the next call.
-      if (priorId !== null) {
-        await db.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
-      }
       process.stdout.write(JSON.stringify({ waiting: 0 }) + '\n')
       return
     }
 
-    const row = pop.rows[0]
     let payload: Record<string, unknown> = {}
     try {
       payload = JSON.parse(row.payload)
@@ -406,18 +444,6 @@ async function nextMessage() {
       console.error(`Error: failed to parse message_queue payload for id=${row.id}: ${err}`)
       process.exit(1)
     }
-
-    // Step 3: mark read + stamp current_message_id atomically (best-effort —
-    // these are two statements but on the same connection, so a crash leaves
-    // the row at 'read' and current_message_id NULL, which a re-run can heal).
-    await db.query(
-      `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
-      [row.id],
-    )
-    await db.query(
-      `UPDATE agents SET current_message_id = $1 WHERE agent_id = $2`,
-      [row.id, agentId],
-    )
 
     // Remaining count for the response.
     const waitingRow = await db.query(
@@ -693,19 +719,37 @@ async function sendMessage(args: string[]) {
     // REST API call (Phase 3 will replace this with outbound_queue).
     const deliveryResult = await deliverToDiscord(db, state.channel_id, threadId, content)
 
-    // ARC codex audit follow-up (2026-04-10, msg 1492266518673887262):
-    // when Discord delivery fails, DO NOT delete the in-flight state file or
-    // the inbox signal — leaving them in place lets the operator (or a
-    // future retry loop) resend the same logical reply. We exit non-zero with
-    // an `ok: false` payload so the caller can branch on the failure.
+    // ARC codex audit follow-ups for the failure branch (PR#133 → PR#134):
     //
-    // Caveat: the DB row was already INSERTed before the delivery attempt, so
-    // a naive `agent-com send` retry will create a second row with a fresh
-    // UUID. The operator is expected to either (a) clean up the duplicate
-    // manually after a successful retry, or (b) skip retry and post the row's
-    // content to Discord by hand. Phase 3 (outbound_queue) will eliminate
-    // this gap by deferring INSERT until after delivery succeeds.
+    // Phase 1.5 (signal mode, ARC msg 1492266518673887262): the legacy
+    // filesystem state file + inbox signal MUST stay in place on failure so
+    // the operator can resend by re-running `agent-com send`. The DB row is
+    // already INSERTed; a naive retry creates a duplicate row but preserves
+    // delivery semantics.
+    //
+    // Phase 2 (queue mode, ARC msg 1492279341898272849): the DB row is the
+    // queue's source of truth. Leaving the queue at 'read' would let a
+    // re-run pop the same logical message and INSERT a SECOND reply through
+    // the spec'd flow — the very double-reply class the queue was meant to
+    // prevent. So in queue mode we mark the row 'replied' and clear
+    // current_message_id even on Discord failure. The agent_messages row is
+    // intact; outbound retry is delegated to Phase 3 outbound_queue.
+    //
+    // Both modes still report ok:false + db_saved:true so callers can detect
+    // the Discord-side failure and decide whether to surface it to humans.
     if (!deliveryResult.delivered) {
+      if (target.mode === 'queue' && target.queue_id !== null) {
+        await db.query(
+          `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+           WHERE id = $2`,
+          [id, target.queue_id],
+        )
+        await db.query(
+          `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+          [agentId],
+        )
+      }
+      // Signal mode: leave target.state_path / target.signal_path in place.
       process.stdout.write(JSON.stringify({
         ok: false,
         mode: target.mode,
@@ -718,7 +762,10 @@ async function sendMessage(args: string[]) {
         db_saved: true,
         discord_delivered: false,
         discord_skip_reason: deliveryResult.reason,
-        retry: 'run agent-com send again to retry Discord delivery (will create a duplicate DB row — clean up manually after success)',
+        // Mode-specific retry guidance.
+        retry: target.mode === 'queue'
+          ? 'queue marked replied to prevent double-reply through next/send. Outbound retry must wait for Phase 3 outbound_queue, OR post the agent_messages row to Discord manually.'
+          : 'run agent-com send again to retry Discord delivery (will create a duplicate DB row — clean up manually after success)',
       }) + '\n')
       process.exit(1)
     }

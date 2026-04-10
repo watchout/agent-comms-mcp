@@ -139,12 +139,29 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
   })
   test('SELECTs the oldest pending row with priority/created_at ordering', () => {
     const body = nextMessageBody()
-    expect(body).toMatch(/FROM message_queue\s*\n?\s*WHERE agent_id = \$1 AND status = 'pending'\s*\n?\s*ORDER BY priority DESC, created_at ASC/)
+    // PR#134 ARC follow-up: status condition first, then agent_id (matches
+    // lead-ama's prescribed snippet) and FOR UPDATE SKIP LOCKED appended.
+    expect(body).toMatch(/FROM message_queue\s*\n?\s*WHERE status = 'pending' AND agent_id = \$1\s*\n?\s*ORDER BY priority DESC, created_at ASC/)
   })
   test('marks read + stamps current_message_id atomically (per row)', () => {
     const body = nextMessageBody()
     expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'read',\s*read_at\s*=\s*now\(\)/)
     expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1\s*WHERE agent_id/)
+  })
+  // PR#134 ARC follow-up (lead-ama msg 1492279341898272849) — concurrency.
+  test('SELECT + UPDATEs are wrapped in BEGIN/COMMIT with FOR UPDATE SKIP LOCKED', () => {
+    const body = nextMessageBody()
+    // Transaction wrapping
+    expect(body).toMatch(/db\.query\(['"]BEGIN['"]\)/)
+    expect(body).toMatch(/db\.query\(['"]COMMIT['"]\)/)
+    // ROLLBACK on error so a partial state never leaks
+    expect(body).toMatch(/db\.query\(['"]ROLLBACK['"]\)/)
+    // FOR UPDATE SKIP LOCKED on the pending-row pop so concurrent next() calls
+    // never pick the same row.
+    expect(body).toMatch(/FOR UPDATE SKIP LOCKED/)
+    // The agents row read also takes a row lock so the implicit-skip and the
+    // current_message_id stamp can't race with another session.
+    expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id\s*=\s*\$1\s*FOR UPDATE/)
   })
   test('Mixed-Mode legacy fallback is gated on AGENT_COMMS_LEGACY_QUEUE != 0', () => {
     const body = nextMessageBody()
@@ -203,5 +220,34 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
   test('failure response carries mode so callers can branch on queue vs signal', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/ok:\s*false[\s\S]{0,200}mode:\s*target\.mode/)
+  })
+  // PR#134 ARC follow-up (lead-ama msg 1492279341898272849) — double-reply
+  // prevention. In queue mode, even on Discord delivery failure the queue row
+  // MUST be marked 'replied' and current_message_id MUST be cleared, so a
+  // second `next/send` cycle can't generate a duplicate reply through the
+  // spec'd flow. Outbound retry is delegated to Phase 3 outbound_queue.
+  test('queue-mode failure branch marks message_queue replied + clears current_message_id', () => {
+    const body = sendMessageBody()
+    // Slice the failure branch out (from the !deliveryResult.delivered guard
+    // to its process.exit). The success branch lives below.
+    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
+    expect(guardIdx).toBeGreaterThan(-1)
+    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    expect(exitIdx).toBeGreaterThan(guardIdx)
+    const failureBranch = body.slice(guardIdx, exitIdx)
+    // The replied UPDATE is gated on queue mode (target.mode === 'queue').
+    expect(failureBranch).toMatch(/target\.mode\s*===\s*'queue'/)
+    expect(failureBranch).toMatch(/UPDATE message_queue SET status\s*=\s*'replied'/)
+    expect(failureBranch).toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
+  })
+  test('signal-mode failure branch does NOT touch the legacy filesystem state', () => {
+    const body = sendMessageBody()
+    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
+    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    const failureBranch = body.slice(guardIdx, exitIdx)
+    // The Phase 1.5 invariant is preserved: signal mode leaves both files in
+    // place so a re-run can retry. The failure branch must NOT contain any
+    // unlinkSync calls.
+    expect(failureBranch).not.toMatch(/unlinkSync/)
   })
 })
