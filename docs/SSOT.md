@@ -156,6 +156,7 @@ interface PlatformCapabilities {
 }
 ```
 
+<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ### 3.2 Discordアダプター
 
 | 項目 | 仕様 |
@@ -230,9 +231,10 @@ interface AccessConfig {
 - プラットフォーム非依存（Discord/Slack/Telegram共通のaccess制御）
 - エージェント別に独立した設定
 
+<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ### 4.2 メッセージルーティング
 
-> 詳細仕様: docs/channel-thread-control-spec.md
+> 詳細仕様: docs/archive/channel-thread-control-spec.md (archived)
 
 #### 設計原則
 1. botが宛先を選択する手段を物理的に持たない
@@ -277,6 +279,7 @@ interface AccessConfig {
 | DBあり | `last_read_at`テーブルで管理 | 本番運用 |
 | DBなし | `.agent-com/last-read/{channel}`ファイル | 最小構成 |
 
+<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ### 4.4 push通知（Webhook Channel方式）
 
 agent-commsを2つに分離し、push受信とツール提供を独立させる。
@@ -826,6 +829,7 @@ list_agents — 登録済みエージェント一覧を返す
 
 ---
 
+<!-- 将来 message-queue-spec で置換予定。現時点ではこの記述が現行実装の正 -->
 ## 13. bot間認証
 
 ### 13.1 方式: HMAC共有シークレット
