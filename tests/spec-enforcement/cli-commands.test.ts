@@ -182,8 +182,9 @@ describe('T7 — `agent-com send` builds and stamps HMAC auth metadata', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/const authMeta\s*=\s*buildAuthMetadata\(/)
     // The fold can be `...(authMeta ?? {})` or equivalent — assert authMeta
-    // is referenced inside the metadata literal.
-    expect(body).toMatch(/metadata[\s\S]{0,100}authMeta/)
+    // is referenced inside the metadata literal. Distance grew with the
+    // PR#134 transaction wrapper so the lookahead window is loose.
+    expect(body).toMatch(/metadata[\s\S]{0,300}authMeta/)
   })
 })
 
@@ -279,10 +280,12 @@ describe('T9 — Discord delivery failure preserves state file and inbox signal'
 
   test('failure branch reports ok:false, db_saved:true, and a retry hint', () => {
     const body = sendMessageBody()
-    // Slice from the guard to the closing process.exit so the regex doesn't
-    // accidentally match the success branch's response payload.
+    // Slice from the guard to the failure-branch exit. PR#134 wrapped the
+    // body in a transaction; early exits are now `throw new CliSendExit(1)`
+    // (process.exit bypasses finally and would skip ROLLBACK). Use the throw
+    // as the failure-branch end marker.
     const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
     expect(guardIdx).toBeGreaterThan(-1)
     expect(exitIdx).toBeGreaterThan(guardIdx)
     const failureBranch = body.slice(guardIdx, exitIdx)
@@ -296,8 +299,10 @@ describe('T9 — Discord delivery failure preserves state file and inbox signal'
   test('failure branch exits non-zero (does not fall through to success)', () => {
     const body = sendMessageBody()
     const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    // The very next process.exit after the guard must be exit(1).
+    // PR#134 transaction wrapper: the failure branch throws CliSendExit(1)
+    // which is caught by the outer wrapper and translated to process.exit(1)
+    // after ROLLBACK + db.end() run via the finally chain.
     const tail = body.slice(guardIdx)
-    expect(tail).toMatch(/process\.exit\(1\)/)
+    expect(tail).toMatch(/throw new CliSendExit\(1\)/)
   })
 })

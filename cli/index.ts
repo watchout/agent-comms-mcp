@@ -582,163 +582,239 @@ async function sendMessage(args: string[]) {
     process.exit(2)
   }
 
+  // ARC codex audit follow-up (PR#134, lead-ama msg 1492283029933133874):
+  // wrap the entire DB-touching flow in BEGIN/COMMIT with FOR UPDATE on the
+  // agents row. Two concurrent `agent-com send` calls now serialise on the
+  // agents row lock — the second caller blocks until the first commits, then
+  // sees current_message_id = NULL (cleared by the first) and exits with
+  // NO_CURRENT_MESSAGE instead of double-replying.
+  //
+  // Side effects to note:
+  //   - The Discord HTTP call happens INSIDE the transaction (lead-ama's
+  //     prescribed shape). The lock is held for the duration of the HTTP
+  //     request. This is a deliberate trade-off for the simpler concurrency
+  //     model; Phase 3 (outbound_queue) will move outbound delivery off the
+  //     critical path.
+  //   - process.exit() bypasses `finally` blocks, so the inner code MUST
+  //     throw `CliSendExit` instead of calling process.exit() directly.
+  //     The outer wrapper catches the exit class, runs ROLLBACK if needed,
+  //     closes the db handle, and only then calls process.exit().
+  class CliSendExit extends Error {
+    constructor(public code: number) {
+      super('cli send exit')
+    }
+  }
+
   const db = await getDb()
+  let exitCode = 0
+  let committed = false
   try {
-    // ─────────────────────────────────────────────────────────────────────
-    // Step 1: resolve the in-flight target (queue path → legacy fallback)
-    // ─────────────────────────────────────────────────────────────────────
-    type Target = {
-      mode: 'queue' | 'signal'
-      reply_to: string         // agent_messages.id of the original
-      channel_id: string
-      thread_id: string | null
-      queue_id: number | null  // message_queue.id (queue mode only)
-      signal_path: string | null
-      state_path: string | null
-    }
-    let target: Target | null = null
+    await db.query('BEGIN')
+    try {
+      // ─────────────────────────────────────────────────────────────────
+      // Step 1: lock the agents row + read current_message_id
+      // ─────────────────────────────────────────────────────────────────
+      // FOR UPDATE blocks any other session that takes the same row lock,
+      // so concurrent `next`/`send` calls for this agent serialise on this
+      // line. The first caller wins; the second blocks here until the first
+      // commits, then reads the post-commit state (current_message_id = NULL
+      // after a successful send).
+      type Target = {
+        mode: 'queue' | 'signal'
+        reply_to: string         // agent_messages.id of the original
+        channel_id: string
+        thread_id: string | null
+        queue_id: number | null  // message_queue.id (queue mode only)
+        signal_path: string | null
+        state_path: string | null
+      }
+      let target: Target | null = null
 
-    // Queue path: read agents.current_message_id, hydrate the message_queue row.
-    const cur = await db.query(
-      `SELECT current_message_id FROM agents WHERE agent_id = $1`,
-      [agentId],
-    )
-    const currentId: number | null = cur.rows[0]?.current_message_id ?? null
-    if (currentId !== null) {
-      const q = await db.query(
-        `SELECT id, message_id, payload FROM message_queue WHERE id = $1`,
-        [currentId],
+      const cur = await db.query(
+        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
+        [agentId],
       )
-      if (q.rows.length > 0) {
-        const qrow = q.rows[0]
-        let payload: Record<string, any> = {}
-        try { payload = JSON.parse(qrow.payload) } catch {}
-        target = {
-          mode: 'queue',
-          reply_to: qrow.message_id ?? payload.message_id,
-          channel_id: payload.channel_id,
-          thread_id: payload.thread_id ?? null,
-          queue_id: qrow.id,
-          signal_path: null,
-          state_path: null,
+      const currentId: number | null = cur.rows[0]?.current_message_id ?? null
+      if (currentId !== null) {
+        const q = await db.query(
+          `SELECT id, message_id, payload FROM message_queue WHERE id = $1`,
+          [currentId],
+        )
+        if (q.rows.length > 0) {
+          const qrow = q.rows[0]
+          let payload: Record<string, any> = {}
+          try { payload = JSON.parse(qrow.payload) } catch {}
+          target = {
+            mode: 'queue',
+            reply_to: qrow.message_id ?? payload.message_id,
+            channel_id: payload.channel_id,
+            thread_id: payload.thread_id ?? null,
+            queue_id: qrow.id,
+            signal_path: null,
+            state_path: null,
+          }
         }
       }
-    }
 
-    // Mixed-Mode fallback: legacy /tmp state file (set by signal-mode `next`).
-    const statePath = currentStatePath(agentId)
-    if (target === null && existsSync(statePath)) {
-      try {
-        const state = JSON.parse(readFileSync(statePath, 'utf-8'))
-        target = {
-          mode: 'signal',
-          reply_to: state.message_id,
-          channel_id: state.channel_id,
-          thread_id: state.thread_id ?? null,
-          queue_id: null,
-          signal_path: state.signal_path ?? null,
-          state_path: statePath,
+      // Mixed-Mode fallback: legacy /tmp state file (set by signal-mode `next`).
+      const statePath = currentStatePath(agentId)
+      if (target === null && existsSync(statePath)) {
+        try {
+          const state = JSON.parse(readFileSync(statePath, 'utf-8'))
+          target = {
+            mode: 'signal',
+            reply_to: state.message_id,
+            channel_id: state.channel_id,
+            thread_id: state.thread_id ?? null,
+            queue_id: null,
+            signal_path: state.signal_path ?? null,
+            state_path: statePath,
+          }
+        } catch (err) {
+          console.error(`Error: failed to read legacy state file ${statePath}: ${err}`)
+          throw new CliSendExit(1)
         }
-      } catch (err) {
-        console.error(`Error: failed to read legacy state file ${statePath}: ${err}`)
-        process.exit(1)
       }
-    }
 
-    if (target === null) {
-      // Spec §4.2 step 1: no current message → NO_CURRENT_MESSAGE error.
-      console.error(`Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — run 'agent-com next' first`)
-      process.exit(1)
-    }
+      if (target === null) {
+        // Spec §4.2 step 1: no current message → NO_CURRENT_MESSAGE error.
+        // This branch ALSO catches the "concurrent send raced and won" case:
+        // the first caller has already committed and cleared current_message_id,
+        // so the second caller wakes up here with NO_CURRENT_MESSAGE.
+        console.error(`Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — run 'agent-com next' first`)
+        throw new CliSendExit(1)
+      }
 
-    // ARC codex audit (2026-04-10): thread_id must flow through to the INSERT
-    // and the outbound delivery so the reply lands in the same thread.
-    const threadId: string | null = target.thread_id
+      // ARC codex audit (2026-04-10): thread_id must flow through to the INSERT
+      // and the outbound delivery so the reply lands in the same thread.
+      const threadId: string | null = target.thread_id
 
-    // Re-bind state alias for the legacy code paths below that referenced
-    // `state.channel_id` etc. — keeps the diff localised.
-    const state = {
-      message_id: target.reply_to,
-      channel_id: target.channel_id,
-      signal_path: target.signal_path,
-    }
-    // Membership check — bot can only reply in channels it belongs to.
-    const ch = await db.query('SELECT members FROM channels WHERE id = $1', [state.channel_id])
-    if (ch.rows.length === 0) {
-      console.error(`Error: channel ${state.channel_id} not found`)
-      process.exit(1)
-    }
-    const members: string[] = ch.rows[0].members ?? []
-    if (!members.includes(agentId)) {
-      console.error(`Error: ${agentId} is not a member of channel ${state.channel_id}`)
-      process.exit(1)
-    }
+      // Re-bind state alias for the legacy code paths below that referenced
+      // `state.channel_id` etc. — keeps the diff localised.
+      const state = {
+        message_id: target.reply_to,
+        channel_id: target.channel_id,
+        signal_path: target.signal_path,
+      }
+      // Membership check — bot can only reply in channels it belongs to.
+      const ch = await db.query('SELECT members FROM channels WHERE id = $1', [state.channel_id])
+      if (ch.rows.length === 0) {
+        console.error(`Error: channel ${state.channel_id} not found`)
+        throw new CliSendExit(1)
+      }
+      const members: string[] = ch.rows[0].members ?? []
+      if (!members.includes(agentId)) {
+        console.error(`Error: ${agentId} is not a member of channel ${state.channel_id}`)
+        throw new CliSendExit(1)
+      }
 
-    const id = randomUUID()
-    // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
-    // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
-    // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
-    // secret, matching server.ts:createAuthMetadata behavior.
-    const authMeta = buildAuthMetadata(agentId, state.channel_id, content)
-    const metadata: Record<string, unknown> = {
-      mentions,
-      cli: 'agent-com next/send (MVP)',
-      ...(authMeta ?? {}),
-    }
-    await db.query(
-      `INSERT INTO agent_messages
-         (id, channel_id, author_id, content, message_type, reply_to, metadata,
-          depth, source, thread_id, direction, role)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'agent-comms', $8, 'outbound', 'agent')`,
-      [id, state.channel_id, agentId, content, messageType, state.message_id, JSON.stringify(metadata), threadId],
-    )
-
-    // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
-    // full receiver-side routing (channel-server push, SSE fallback, …).
-    //
-    // The agent_inbox LISTEN handler routes per-recipient: `to` MUST be a
-    // recipient agent_id, NOT the channel id. Fan out one notify per mention so
-    // every push target gets its own routing pass — matches the inbound
-    // pipeline's `to: receiverAgentId` shape (server.ts handleInboundMessage
-    // L1349-1355). lead-ama follow-up to PR#133 first cut.
-    for (const recipient of mentions) {
+      const id = randomUUID()
+      // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
+      // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
+      // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
+      // secret, matching server.ts:createAuthMetadata behavior.
+      const authMeta = buildAuthMetadata(agentId, state.channel_id, content)
+      const metadata: Record<string, unknown> = {
+        mentions,
+        cli: 'agent-com next/send (MVP)',
+        ...(authMeta ?? {}),
+      }
       await db.query(
-        `SELECT pg_notify('agent_inbox', $1)`,
-        [JSON.stringify({
-          event: 'message.created',
-          to: recipient,
+        `INSERT INTO agent_messages
+           (id, channel_id, author_id, content, message_type, reply_to, metadata,
+            depth, source, thread_id, direction, role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'agent-comms', $8, 'outbound', 'agent')`,
+        [id, state.channel_id, agentId, content, messageType, state.message_id, JSON.stringify(metadata), threadId],
+      )
+
+      // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
+      // full receiver-side routing (channel-server push, SSE fallback, …).
+      //
+      // The agent_inbox LISTEN handler routes per-recipient: `to` MUST be a
+      // recipient agent_id, NOT the channel id. Fan out one notify per mention so
+      // every push target gets its own routing pass — matches the inbound
+      // pipeline's `to: receiverAgentId` shape (server.ts handleInboundMessage
+      // L1349-1355). lead-ama follow-up to PR#133 first cut.
+      for (const recipient of mentions) {
+        await db.query(
+          `SELECT pg_notify('agent_inbox', $1)`,
+          [JSON.stringify({
+            event: 'message.created',
+            to: recipient,
+            message_id: id,
+            channel_id: state.channel_id,
+            source: 'cli-send',
+          })],
+        )
+      }
+
+      // ARC codex audit (2026-04-10): after the DB row is committed, relay the
+      // message to the originating platform. Phase 1 minimum is a direct Discord
+      // REST API call (Phase 3 will replace this with outbound_queue).
+      // NOTE: this HTTP call happens INSIDE the transaction (PR#134 ARC
+      // follow-up). The agents row lock is held for the duration of the call.
+      const deliveryResult = await deliverToDiscord(db, state.channel_id, threadId, content)
+
+      // ARC codex audit follow-ups for the failure branch (PR#133 → PR#134):
+      //
+      // Phase 1.5 (signal mode, ARC msg 1492266518673887262): the legacy
+      // filesystem state file + inbox signal MUST stay in place on failure so
+      // the operator can resend by re-running `agent-com send`. The DB row is
+      // already INSERTed; a naive retry creates a duplicate row but preserves
+      // delivery semantics.
+      //
+      // Phase 2 (queue mode, ARC msg 1492279341898272849): the DB row is the
+      // queue's source of truth. Leaving the queue at 'read' would let a
+      // re-run pop the same logical message and INSERT a SECOND reply through
+      // the spec'd flow — the very double-reply class the queue was meant to
+      // prevent. So in queue mode we mark the row 'replied' and clear
+      // current_message_id even on Discord failure. The agent_messages row is
+      // intact; outbound retry is delegated to Phase 3 outbound_queue.
+      //
+      // Both modes still report ok:false + db_saved:true so callers can detect
+      // the Discord-side failure and decide whether to surface it to humans.
+      if (!deliveryResult.delivered) {
+        if (target.mode === 'queue' && target.queue_id !== null) {
+          await db.query(
+            `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+             WHERE id = $2`,
+            [id, target.queue_id],
+          )
+          await db.query(
+            `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+            [agentId],
+          )
+        }
+        // Signal mode: leave target.state_path / target.signal_path in place.
+        // COMMIT the INSERT + (queue UPDATEs if any) so the failure response's
+        // db_saved:true claim is honoured even when we exit non-zero.
+        await db.query('COMMIT')
+        committed = true
+        process.stdout.write(JSON.stringify({
+          ok: false,
+          mode: target.mode,
           message_id: id,
           channel_id: state.channel_id,
-          source: 'cli-send',
-        })],
-      )
-    }
+          thread_id: threadId,
+          reply_to: state.message_id,
+          mentions,
+          auth_signed: authMeta !== undefined,
+          db_saved: true,
+          discord_delivered: false,
+          discord_skip_reason: deliveryResult.reason,
+          // Mode-specific retry guidance.
+          retry: target.mode === 'queue'
+            ? 'queue marked replied to prevent double-reply through next/send. Outbound retry must wait for Phase 3 outbound_queue, OR post the agent_messages row to Discord manually.'
+            : 'run agent-com send again to retry Discord delivery (will create a duplicate DB row — clean up manually after success)',
+        }) + '\n')
+        throw new CliSendExit(1)
+      }
 
-    // ARC codex audit (2026-04-10): after the DB row is committed, relay the
-    // message to the originating platform. Phase 1 minimum is a direct Discord
-    // REST API call (Phase 3 will replace this with outbound_queue).
-    const deliveryResult = await deliverToDiscord(db, state.channel_id, threadId, content)
-
-    // ARC codex audit follow-ups for the failure branch (PR#133 → PR#134):
-    //
-    // Phase 1.5 (signal mode, ARC msg 1492266518673887262): the legacy
-    // filesystem state file + inbox signal MUST stay in place on failure so
-    // the operator can resend by re-running `agent-com send`. The DB row is
-    // already INSERTed; a naive retry creates a duplicate row but preserves
-    // delivery semantics.
-    //
-    // Phase 2 (queue mode, ARC msg 1492279341898272849): the DB row is the
-    // queue's source of truth. Leaving the queue at 'read' would let a
-    // re-run pop the same logical message and INSERT a SECOND reply through
-    // the spec'd flow — the very double-reply class the queue was meant to
-    // prevent. So in queue mode we mark the row 'replied' and clear
-    // current_message_id even on Discord failure. The agent_messages row is
-    // intact; outbound retry is delegated to Phase 3 outbound_queue.
-    //
-    // Both modes still report ok:false + db_saved:true so callers can detect
-    // the Discord-side failure and decide whether to surface it to humans.
-    if (!deliveryResult.delivered) {
+      // ─────────────────────────────────────────────────────────────────
+      // Discord 配信成功 — finalize in-flight state.
+      // ─────────────────────────────────────────────────────────────────
       if (target.mode === 'queue' && target.queue_id !== null) {
+        // Spec §4.2 step 9-11: replied + clear current_message_id.
         await db.query(
           `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
            WHERE id = $2`,
@@ -749,9 +825,19 @@ async function sendMessage(args: string[]) {
           [agentId],
         )
       }
-      // Signal mode: leave target.state_path / target.signal_path in place.
+      // COMMIT the success path before touching the filesystem (the
+      // unlinkSync calls below are non-transactional and must run after
+      // the DB state is durable).
+      await db.query('COMMIT')
+      committed = true
+      if (target.mode === 'signal') {
+        // Mixed-Mode legacy path: clear filesystem state after COMMIT.
+        if (target.state_path) { try { unlinkSync(target.state_path) } catch {} }
+        if (target.signal_path) { try { unlinkSync(target.signal_path) } catch {} }
+      }
+
       process.stdout.write(JSON.stringify({
-        ok: false,
+        ok: true,
         mode: target.mode,
         message_id: id,
         channel_id: state.channel_id,
@@ -759,51 +845,27 @@ async function sendMessage(args: string[]) {
         reply_to: state.message_id,
         mentions,
         auth_signed: authMeta !== undefined,
-        db_saved: true,
-        discord_delivered: false,
-        discord_skip_reason: deliveryResult.reason,
-        // Mode-specific retry guidance.
-        retry: target.mode === 'queue'
-          ? 'queue marked replied to prevent double-reply through next/send. Outbound retry must wait for Phase 3 outbound_queue, OR post the agent_messages row to Discord manually.'
-          : 'run agent-com send again to retry Discord delivery (will create a duplicate DB row — clean up manually after success)',
+        discord_delivered: true,
       }) + '\n')
-      process.exit(1)
+    } finally {
+      // If we threw without committing (validation error, NO_CURRENT_MESSAGE,
+      // unexpected exception), roll the transaction back. The committed flag
+      // is set right after each successful COMMIT above so this is a no-op
+      // on the success and queue-failure paths.
+      if (!committed) {
+        await db.query('ROLLBACK').catch(() => {})
+      }
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Discord 配信成功 — finalize in-flight state.
-    // ─────────────────────────────────────────────────────────────────────
-    if (target.mode === 'queue' && target.queue_id !== null) {
-      // Spec §4.2 step 9-11: replied + clear current_message_id.
-      await db.query(
-        `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
-         WHERE id = $2`,
-        [id, target.queue_id],
-      )
-      await db.query(
-        `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
-        [agentId],
-      )
+  } catch (err) {
+    if (err instanceof CliSendExit) {
+      exitCode = err.code
     } else {
-      // Mixed-Mode legacy path: clear filesystem state.
-      if (target.state_path) { try { unlinkSync(target.state_path) } catch {} }
-      if (target.signal_path) { try { unlinkSync(target.signal_path) } catch {} }
+      throw err
     }
-
-    process.stdout.write(JSON.stringify({
-      ok: true,
-      mode: target.mode,
-      message_id: id,
-      channel_id: state.channel_id,
-      thread_id: threadId,
-      reply_to: state.message_id,
-      mentions,
-      auth_signed: authMeta !== undefined,
-      discord_delivered: true,
-    }) + '\n')
   } finally {
     await db.end()
   }
+  if (exitCode !== 0) process.exit(exitCode)
 }
 
 /**

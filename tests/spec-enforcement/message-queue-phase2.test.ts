@@ -228,11 +228,11 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
   // spec'd flow. Outbound retry is delegated to Phase 3 outbound_queue.
   test('queue-mode failure branch marks message_queue replied + clears current_message_id', () => {
     const body = sendMessageBody()
-    // Slice the failure branch out (from the !deliveryResult.delivered guard
-    // to its process.exit). The success branch lives below.
+    // PR#134 transaction wrapper: slice from the guard to the
+    // `throw new CliSendExit(1)` that ends the failure branch.
     const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
     expect(guardIdx).toBeGreaterThan(-1)
-    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
     expect(exitIdx).toBeGreaterThan(guardIdx)
     const failureBranch = body.slice(guardIdx, exitIdx)
     // The replied UPDATE is gated on queue mode (target.mode === 'queue').
@@ -243,11 +243,27 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
   test('signal-mode failure branch does NOT touch the legacy filesystem state', () => {
     const body = sendMessageBody()
     const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
     const failureBranch = body.slice(guardIdx, exitIdx)
     // The Phase 1.5 invariant is preserved: signal mode leaves both files in
     // place so a re-run can retry. The failure branch must NOT contain any
     // unlinkSync calls.
     expect(failureBranch).not.toMatch(/unlinkSync/)
+  })
+  // PR#134 ARC follow-up (lead-ama msg 1492283029933133874) — concurrent send
+  // race prevention. The entire body must run inside BEGIN/COMMIT with
+  // FOR UPDATE on the agents row, so two parallel `agent-com send` calls
+  // serialise on the lock and the second sees current_message_id = NULL.
+  test('sendMessage wraps the body in BEGIN/COMMIT with FOR UPDATE on agents', () => {
+    const body = sendMessageBody()
+    expect(body).toMatch(/db\.query\(['"]BEGIN['"]\)/)
+    expect(body).toMatch(/db\.query\(['"]COMMIT['"]\)/)
+    expect(body).toMatch(/db\.query\(['"]ROLLBACK['"]\)/)
+    // The agents row read takes the row lock so concurrent sends serialise.
+    expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id\s*=\s*\$1\s*FOR UPDATE/)
+    // Early exits inside the transaction throw CliSendExit instead of calling
+    // process.exit (which would bypass the ROLLBACK / db.end() finally chain).
+    expect(body).toMatch(/class CliSendExit extends Error/)
+    expect(body).toMatch(/throw new CliSendExit\(1\)/)
   })
 })
