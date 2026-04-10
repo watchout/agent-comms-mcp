@@ -98,3 +98,42 @@ describe('T2 — send pushTargets loop falls back to SSE notification on push fa
     expect(body).toContain("'notifications/claude/channel'")
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T3: pushMeta on the send path matches the inbound contract
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: lead-ama follow-up after PR#131 first cut. The send path
+// originally built `{ from, channel_id, message_id, thread_id }` only, which
+// diverged from the inbound contract (handleInboundMessage L~1363) and forced
+// SSE consumers to special-case the source. The send pushMeta MUST now carry
+// the same field names as inbound (`chat_id / message_id / user / user_id /
+// ts / source`) so consumers can read both push sources uniformly. The legacy
+// from / channel_id / thread_id fields are kept for backward compatibility
+// during the cutover.
+describe('T3 — send pushMeta matches the inbound pushMeta contract', () => {
+  test('send-path pushMeta literal contains all inbound contract fields', () => {
+    // sendPushMeta is hoisted just above the recipient loop so it can be reused
+    // across the SSE fallback. Locate the literal by its variable declaration
+    // and assert each contract field is present.
+    const declMatch = SERVER_SRC.match(/const sendPushMeta\s*=\s*\{[\s\S]*?\n\s*\}/)
+    expect(declMatch).not.toBeNull()
+    const decl = declMatch![0]
+    // Inbound contract fields
+    expect(decl).toMatch(/chat_id:\s*dest\.channelId/)
+    expect(decl).toMatch(/message_id:\s*id/)
+    expect(decl).toMatch(/user:\s*agentId/)
+    expect(decl).toMatch(/user_id:\s*agentId/)
+    expect(decl).toMatch(/ts:\s*new Date\(\)\.toISOString\(\)/)
+    expect(decl).toMatch(/source:\s*'discord'/)
+    // Legacy fields preserved for backward compat during cutover
+    expect(decl).toMatch(/from:\s*agentId/)
+    expect(decl).toMatch(/channel_id:\s*dest\.channelId/)
+    expect(decl).toMatch(/thread_id:\s*dest\.threadId/)
+  })
+
+  test('the recipient loop and SSE fallback both reference sendPushMeta', () => {
+    const body = extractSendPushLoopBody()
+    expect(body).toContain('pushToChannelServer(recipient, partContent, sendPushMeta)')
+    expect(body).toContain('meta: sendPushMeta')
+  })
+})
