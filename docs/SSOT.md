@@ -3,7 +3,7 @@
 > この文書がagent-comの唯一の正（Single Source of Truth）。
 > 実装はこの仕様に従うこと。仕様変更はこの文書を先に更新すること。
 >
-> **詳細仕様は `docs/agent-com-message-queue-spec.md` を参照。**
+> **本 SSOT.md に従属する詳細仕様** として `docs/agent-com-message-queue-spec.md` を参照。message-queue-spec は本 SSOT.md の権威下に置かれる詳細実装仕様であり、本文書と矛盾する場合は本 SSOT.md が優先する。
 
 ## 1. プロダクト概要
 
@@ -21,7 +21,7 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 
 ### 1.4 設計原則
 
-（`docs/agent-com-message-queue-spec.md` §1 準拠）
+（`docs/agent-com-message-queue-spec.md` §1 と整合 (本 SSOT.md の権威下)）
 
 1. **CLIコマンドが正のインターフェース** — MCP toolsはラッパー
 2. **受信は1プロセス（receiver）だけが行う** — INSERT競合が構造的に不可能
@@ -80,7 +80,7 @@ server.ts（1プロセスで全機能）
 
 ### 2.2 通信モデル
 
-（`docs/agent-com-message-queue-spec.md` §2 準拠）
+（`docs/agent-com-message-queue-spec.md` §2 と整合 (本 SSOT.md の権威下)）
 
 ```
 外部（Discord等）

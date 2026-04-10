@@ -1,6 +1,7 @@
 # agent-com 統合メッセージキュー仕様 v1.0.0
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
+> **本仕様は `docs/SSOT.md` に従属する詳細仕様である。** 本仕様と SSOT.md が矛盾する場合は SSOT.md が優先する。
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
 > 全CLI対応（Claude Code / Codex CLI / Gemini CLI / 将来の任意CLI）
 
