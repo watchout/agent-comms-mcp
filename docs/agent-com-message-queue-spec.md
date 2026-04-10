@@ -1,5 +1,9 @@
 # agent-com 統合メッセージキュー仕様 v1.0.0
 
+> Status: ACCEPTED ARCHITECTURE (implementation pending)
+> 本文書は承認済みアーキテクチャ設計です。現行実装の SSOT は docs/SSOT.md を参照してください。
+> 実装は Phase 別に移行予定。各 Phase 完了時に SSOT.md の該当箇所を本 spec と同期します。
+>
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
 > 全CLI対応（Claude Code / Codex CLI / Gemini CLI / 将来の任意CLI）
