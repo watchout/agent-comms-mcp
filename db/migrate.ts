@@ -240,6 +240,32 @@ async function migrate() {
     -- DB-backed (not process-memory) so it survives CLI restarts. ADD COLUMN IF NOT
     -- EXISTS is idempotent on its own; no DO block needed.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id BIGINT;
+
+    -- Issue #129 Phase 3: outbound_queue (Discord send queue, message-queue-spec 3.3)
+    -- Receiver-side consumer dequeues pending rows on a 1-second tick and posts
+    -- them to Discord. Decouples DB INSERT from outbound HTTP so the send-tool
+    -- and CLI no longer hold their transactions / agents row lock during the
+    -- (potentially slow) Discord REST call.
+    CREATE TABLE IF NOT EXISTS outbound_queue (
+      id BIGSERIAL PRIMARY KEY,
+      message_id TEXT NOT NULL,            -- agent_messages.id of the row to deliver
+      agent_id TEXT NOT NULL,              -- sender agent_id (selects bot token / client)
+      channel_external_id TEXT NOT NULL,   -- Discord channel or thread snowflake
+      content TEXT NOT NULL,
+      mentions_display TEXT DEFAULT '[]',  -- pre-rendered Discord mentions (JSON)
+      attachments TEXT DEFAULT '[]',       -- attachment paths (JSON, Phase 3 leaves empty)
+      reply_to_discord_id TEXT,            -- Discord native reply id (Phase 3 leaves NULL)
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'sent', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 5,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      sent_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_oq_pending
+      ON outbound_queue(status, created_at ASC)
+      WHERE status = 'pending';
   `)
 
   // Sync channel settings from config.json if available
