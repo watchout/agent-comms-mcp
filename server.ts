@@ -2068,7 +2068,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         user: agentId,
         user_id: agentId,
         ts: new Date().toISOString(),
-        source: 'discord' as const,
+        // Internal MCP-originated push, not platform-relayed. ARC codex audit
+        // (2026-04-10) flagged that the previous 'discord' source mislabeled
+        // bot→bot send-tool messages as platform-originated.
+        source: 'agent-comms' as const,
         from: agentId,
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,

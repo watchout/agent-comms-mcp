@@ -124,7 +124,10 @@ describe('T3 — send pushMeta matches the inbound pushMeta contract', () => {
     expect(decl).toMatch(/user:\s*agentId/)
     expect(decl).toMatch(/user_id:\s*agentId/)
     expect(decl).toMatch(/ts:\s*new Date\(\)\.toISOString\(\)/)
-    expect(decl).toMatch(/source:\s*'discord'/)
+    // ARC codex audit (2026-04-10): the source MUST be 'agent-comms', not
+    // 'discord' — these are internal MCP-originated pushes, not platform-relayed.
+    expect(decl).toMatch(/source:\s*'agent-comms'/)
+    expect(decl).not.toMatch(/source:\s*'discord'/)
     // Legacy fields preserved for backward compat during cutover
     expect(decl).toMatch(/from:\s*agentId/)
     expect(decl).toMatch(/channel_id:\s*dest\.channelId/)
