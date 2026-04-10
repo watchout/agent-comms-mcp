@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * agent-com CLI — Channel, agent, and status management.
+ * agent-com CLI — Channel, agent, and status management + message I/O.
  *
  * Usage:
  *   agent-com channel create <id> --name "Name" --members cto,dev-a
@@ -9,11 +9,21 @@
  *   agent-com channel members <channel_id>
  *   agent-com agent register <agent_id> --display-name "Dev A" --type dev --runtime claude-code
  *   agent-com status
+ *
+ * Issue #132 — message-queue-spec §4-6 CLI commands (MVP):
+ *   agent-com next                                          — fetch one unread message (oldest first)
+ *   agent-com send --content "..." --mentions cto,ceo       — reply to last next-fetched message
+ *   agent-com agents                                        — list registered agents (JSON)
+ *
+ * `next` and `send` track the in-flight reply target via a per-agent state file
+ * at `/tmp/agent-com-{AGENT_ID}.current`. AGENT_ID env var is required for both.
  */
 
 import { Client } from 'pg'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 
 // --- DB connection ---
 function getDatabaseUrl(): string {
@@ -158,6 +168,234 @@ async function agentRegister(args: string[]) {
   await db.end()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #132 — message-queue-spec §4-6 commands (MVP: next / send / agents)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the runtime AGENT_ID. Required for next/send because the CLI must
+ * know which inbox to read and which author to stamp on outbound rows.
+ */
+function requireAgentId(command: string): string {
+  const id = process.env.AGENT_ID
+  if (!id) {
+    console.error(`Error: AGENT_ID env var is required for 'agent-com ${command}'`)
+    process.exit(2)
+  }
+  return id
+}
+
+/**
+ * Inbox signal directory shared with server.ts (`sendInboxSignal`). routeInbound
+ * already filters recipients on push, so reading these signals == reading the
+ * agent's authoritative pending queue. Each `.signal` file is named with a
+ * Date.now() prefix so lexical sort == chronological order.
+ */
+function inboxDir(agentId: string): string {
+  const stateDir = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
+  return join(stateDir, 'inbox', agentId)
+}
+
+function currentStatePath(agentId: string): string {
+  return join(tmpdir(), `agent-com-${agentId}.current`)
+}
+
+/** Return signal file paths sorted oldest-first, or [] if none / dir missing. */
+function listSignals(agentId: string): string[] {
+  const dir = inboxDir(agentId)
+  try {
+    return readdirSync(dir)
+      .filter(f => f.endsWith('.signal'))
+      .sort()
+      .map(f => join(dir, f))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * `agent-com next` — pop one unread inbox signal, hydrate the row from
+ * agent_messages, and stash the in-flight state for the eventual `send`.
+ *
+ * Output (stdout, single JSON object):
+ *   { waiting: true }                                       — nothing pending
+ *   { waiting: false, message_id, channel_id, from, content, message_type, created_at, reply_to }
+ *
+ * The signal file is NOT deleted here — `send` deletes it on successful
+ * reply, and a future `agent-com ack` (out of MVP scope) can clear it without
+ * sending. This keeps the queue conservative: a crash between next and send
+ * leaves the signal in place for the next attempt.
+ */
+async function nextMessage() {
+  const agentId = requireAgentId('next')
+  const signals = listSignals(agentId)
+  if (signals.length === 0) {
+    process.stdout.write(JSON.stringify({ waiting: true }) + '\n')
+    return
+  }
+  const signalPath = signals[0]
+  let messageId: string
+  let signalFrom: string | null = null
+  let signalChannel: string | null = null
+  try {
+    const sig = JSON.parse(readFileSync(signalPath, 'utf-8'))
+    messageId = sig.id
+    signalFrom = sig.from ?? null
+    signalChannel = sig.channel ?? null
+  } catch (err) {
+    console.error(`Error: failed to read signal file ${signalPath}: ${err}`)
+    process.exit(1)
+  }
+
+  const db = await getDb()
+  try {
+    const r = await db.query(
+      `SELECT id, channel_id, author_id, content, message_type, reply_to, created_at
+       FROM agent_messages WHERE id = $1`,
+      [messageId],
+    )
+    if (r.rows.length === 0) {
+      // Stale signal — the message was deleted. Drop the signal and report empty.
+      try { unlinkSync(signalPath) } catch {}
+      process.stdout.write(JSON.stringify({ waiting: true, dropped_stale: messageId }) + '\n')
+      return
+    }
+    const row = r.rows[0]
+    // Persist in-flight state for `send` to consume.
+    writeFileSync(
+      currentStatePath(agentId),
+      JSON.stringify({ message_id: row.id, channel_id: row.channel_id, signal_path: signalPath }),
+      { mode: 0o600 },
+    )
+    process.stdout.write(JSON.stringify({
+      waiting: false,
+      message_id: row.id,
+      channel_id: row.channel_id,
+      from: row.author_id ?? signalFrom,
+      content: row.content,
+      message_type: row.message_type,
+      reply_to: row.reply_to,
+      created_at: row.created_at,
+      signal_channel: signalChannel,
+    }) + '\n')
+  } finally {
+    await db.end()
+  }
+}
+
+/**
+ * `agent-com send` — reply to the message captured by the most recent `next`.
+ *
+ * Flags:
+ *   --content "<text>"        required
+ *   --mentions a,b,c          required (comma-separated agent IDs)
+ *   --message-type chat|...   default: chat
+ *
+ * MVP scope: this is a thin INSERT + pg_notify path. The full server.ts send
+ * handler (rate limit / dup check / message split / channel-server push /
+ * SSE fallback) is intentionally NOT duplicated here — the receiver picks up
+ * the row via pg_notify and runs its own routing. Adding the heavy validation
+ * is the next iteration once we have a shared core module to import from.
+ */
+async function sendMessage(args: string[]) {
+  const agentId = requireAgentId('send')
+  const { flags } = parseArgs(args)
+  const content = flags.content
+  const mentionsRaw = flags.mentions
+  const messageType = flags['message-type'] ?? 'chat'
+
+  if (!content) {
+    console.error('Error: --content is required')
+    process.exit(2)
+  }
+  if (!mentionsRaw) {
+    console.error('Error: --mentions is required (comma-separated agent IDs)')
+    process.exit(2)
+  }
+  const mentions = mentionsRaw.split(',').map(m => m.trim()).filter(Boolean)
+  if (mentions.length === 0) {
+    console.error('Error: --mentions must contain at least one agent ID')
+    process.exit(2)
+  }
+
+  const statePath = currentStatePath(agentId)
+  if (!existsSync(statePath)) {
+    console.error(`Error: no in-flight message — run 'agent-com next' first (state file ${statePath} missing)`)
+    process.exit(1)
+  }
+  let state: { message_id: string; channel_id: string; signal_path: string }
+  try {
+    state = JSON.parse(readFileSync(statePath, 'utf-8'))
+  } catch (err) {
+    console.error(`Error: failed to read state file ${statePath}: ${err}`)
+    process.exit(1)
+  }
+
+  const db = await getDb()
+  try {
+    // Membership check — bot can only reply in channels it belongs to.
+    const ch = await db.query('SELECT members FROM channels WHERE id = $1', [state.channel_id])
+    if (ch.rows.length === 0) {
+      console.error(`Error: channel ${state.channel_id} not found`)
+      process.exit(1)
+    }
+    const members: string[] = ch.rows[0].members ?? []
+    if (!members.includes(agentId)) {
+      console.error(`Error: ${agentId} is not a member of channel ${state.channel_id}`)
+      process.exit(1)
+    }
+
+    const id = randomUUID()
+    const metadata = { mentions, cli: 'agent-com next/send (MVP)' }
+    await db.query(
+      `INSERT INTO agent_messages
+         (id, channel_id, author_id, content, message_type, reply_to, metadata,
+          depth, source, thread_id, direction, role)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'agent-comms', NULL, 'outbound', 'agent')`,
+      [id, state.channel_id, agentId, content, messageType, state.message_id, JSON.stringify(metadata)],
+    )
+
+    // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
+    // full receiver-side routing (channel-server push, SSE fallback, …).
+    await db.query(
+      `SELECT pg_notify('agent_inbox', $1)`,
+      [JSON.stringify({ event: 'message.created', to: state.channel_id, message_id: id, channel_id: state.channel_id })],
+    )
+
+    // Clear in-flight state and the consumed inbox signal.
+    try { unlinkSync(statePath) } catch {}
+    try { unlinkSync(state.signal_path) } catch {}
+
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      message_id: id,
+      channel_id: state.channel_id,
+      reply_to: state.message_id,
+      mentions,
+    }) + '\n')
+  } finally {
+    await db.end()
+  }
+}
+
+/**
+ * `agent-com agents` — list registered agents as JSON.
+ * MVP: no filters; reads the agents table verbatim.
+ */
+async function listAgents() {
+  const db = await getDb()
+  try {
+    const r = await db.query(
+      `SELECT agent_id, display_name, agent_type, runtime, status, channel_port, registered_at
+       FROM agents
+       ORDER BY agent_id`,
+    )
+    process.stdout.write(JSON.stringify(r.rows, null, 2) + '\n')
+  } finally {
+    await db.end()
+  }
+}
+
 async function status() {
   const db = await getDb()
 
@@ -196,8 +434,16 @@ if (command === 'channel') {
   }
 } else if (command === 'status') {
   await status()
+} else if (command === 'next') {
+  await nextMessage()
+} else if (command === 'send') {
+  // Issue #132: rest of argv is flag-style (--content / --mentions / ...).
+  // subcommand here is the first positional after `send`, which doesn't apply.
+  await sendMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'agents') {
+  await listAgents()
 } else {
-  console.error(`agent-com CLI v0.1.0
+  console.error(`agent-com CLI v0.2.0
 
 Commands:
   channel create <id> [--name "Name"] [--members cto,dev-a]
@@ -205,6 +451,11 @@ Commands:
   channel remove-member <channel_id> <agent_id>
   channel members <channel_id>
   agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code]
-  status`)
+  status
+
+Message I/O (Issue #132, MVP — requires AGENT_ID env var):
+  next                                                — fetch one unread message (oldest first)
+  send --content "..." --mentions cto,ceo [--message-type chat]
+  agents                                              — list registered agents (JSON)`)
   if (command) process.exit(1)
 }
