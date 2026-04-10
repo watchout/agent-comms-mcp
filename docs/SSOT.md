@@ -3,7 +3,7 @@
 > この文書がagent-comの唯一の正（Single Source of Truth）。
 > 実装はこの仕様に従うこと。仕様変更はこの文書を先に更新すること。
 >
-> **詳細仕様は `docs/agent-com-message-queue-spec.md` (SSOT) を参照。**
+> **詳細仕様は `docs/agent-com-message-queue-spec.md` を参照。**
 
 ## 1. プロダクト概要
 
