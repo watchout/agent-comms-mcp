@@ -1359,6 +1359,35 @@ async function handleInboundMessage(params: {
     }
   }
 
+  // Step 7d: Issue #128 Phase 2 — INSERT into message_queue for the receiver.
+  // Symmetric with the send-tool pushTargets loop. Non-fatal: the existing
+  // pushToChannelServer / SSE paths in the per-bot onMessage handler still
+  // deliver even if this INSERT fails. The payload mirrors the shape used by
+  // the send path so `agent-com next` returns one canonical schema.
+  if (messageId) {
+    const client = await tryGetDb()
+    if (client) {
+      const mqPayload = JSON.stringify({
+        channel_id: resolved.channelId,
+        thread_id: resolved.threadId ?? null,
+        author_id: senderAgentId ?? authorExternalId,
+        author_name: authorName,
+        content,
+        message_id: messageId,
+        message_type: 'chat',
+        source: platform,
+        ts: timestamp.toISOString(),
+        ...(attachments ? { attachments } : {}),
+      })
+      await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3)`,
+        [receiverAgentId, messageId, mqPayload],
+      ).catch(err => {
+        process.stderr.write(`agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`)
+      })
+    }
+  }
+
   // Step 8: Build push metadata
   const pushMeta = {
     chat_id: externalChannelId,
@@ -2076,6 +2105,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
       }
+      // Issue #128 Phase 2: pre-build the message_queue payload once per part.
+      // The same shape is INSERTed for every recipient in the loop below.
+      // message-queue-spec §3.2: payload is the enriched JSON the recipient's
+      // `agent-com next` will return. Phase 2 minimum is the core shape; Phase
+      // 2.x will add my_recent / channel_recent / topic / hint enrichment.
+      const mqPayload = JSON.stringify({
+        channel_id: dest.channelId,
+        thread_id: dest.threadId ?? null,
+        author_id: agentId,
+        content: partContent,
+        message_id: id,
+        message_type: message_type ?? 'chat',
+        source: 'agent-comms',
+        ts: new Date().toISOString(),
+      })
       for (const recipient of delivery.pushTargets) {
         sendInboxSignal(recipient, id, agentId, dest.channelId)
         // Issue #127: send tool must mirror Discord inbound push path so that
@@ -2093,6 +2137,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             } catch (err) {
               process.stderr.write(`agent-comms: send-path SSE fallback failed for ${recipient}: ${err}\n`)
             }
+          }
+        }
+        // Issue #128 Phase 2: also INSERT the row into message_queue so the
+        // recipient's `agent-com next` can pop it. Non-fatal — the legacy
+        // signal/SSE paths above still deliver if this fails.
+        if (dbClient) {
+          try {
+            await dbClient.query(
+              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3)`,
+              [recipient, id, mqPayload],
+            )
+          } catch (err) {
+            process.stderr.write(`agent-comms: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
           }
         }
       }

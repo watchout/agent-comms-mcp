@@ -213,6 +213,33 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_messages_discord_id
       ON agent_messages(discord_message_id)
       WHERE discord_message_id IS NOT NULL;
+
+    -- Issue #128 Phase 2: message_queue (per-agent delivery queue, message-queue-spec 3.2)
+    -- Receiver writes one row per pushTarget when a message is delivered. CLI/MCP next
+    -- pops the oldest pending row, marks it read, and stamps agents.current_message_id.
+    -- send updates the row to replied and clears agents.current_message_id.
+    CREATE TABLE IF NOT EXISTS message_queue (
+      id BIGSERIAL PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      message_id TEXT,                       -- agent_messages.id (NULL for system messages)
+      payload TEXT NOT NULL,                 -- enriched JSON payload
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'read', 'replied', 'skipped')),
+      priority INTEGER NOT NULL DEFAULT 0,   -- higher = more urgent
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      read_at TIMESTAMPTZ,
+      replied_at TIMESTAMPTZ,
+      replied_with TEXT                      -- reply message id
+    );
+    CREATE INDEX IF NOT EXISTS idx_mq_agent_pending
+      ON message_queue(agent_id, status, priority DESC, created_at ASC)
+      WHERE status = 'pending';
+
+    -- Issue #128 Phase 2: agents.current_message_id (BIGINT, references message_queue.id)
+    -- Tracks the in-flight next result so send can resolve reply_to/dest automatically.
+    -- DB-backed (not process-memory) so it survives CLI restarts. ADD COLUMN IF NOT
+    -- EXISTS is idempotent on its own; no DO block needed.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id BIGINT;
   `)
 
   // Sync channel settings from config.json if available

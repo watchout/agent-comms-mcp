@@ -182,8 +182,9 @@ describe('T7 — `agent-com send` builds and stamps HMAC auth metadata', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/const authMeta\s*=\s*buildAuthMetadata\(/)
     // The fold can be `...(authMeta ?? {})` or equivalent — assert authMeta
-    // is referenced inside the metadata literal.
-    expect(body).toMatch(/metadata[\s\S]{0,100}authMeta/)
+    // is referenced inside the metadata literal. Distance grew with the
+    // PR#134 transaction wrapper so the lookahead window is loose.
+    expect(body).toMatch(/metadata[\s\S]{0,300}authMeta/)
   })
 })
 
@@ -203,17 +204,35 @@ function nextMessageBody(): string {
 }
 
 describe('T8 — thread_id flows from next → state → send → outbound', () => {
-  test('nextMessage SELECTs thread_id from agent_messages', () => {
-    const body = nextMessageBody()
-    expect(body).toMatch(/SELECT[^;]*thread_id[^;]*FROM agent_messages/)
+  // Phase 2 (Issue #128) routes thread_id through the message_queue payload
+  // for queue mode and through the legacy /tmp state file (written by
+  // `nextMessageFromSignal`) for Mixed-Mode signal mode. The intent is the
+  // same as Phase 1: the reply must land in the same thread as the original.
+  test('next path threads thread_id through queue payload OR signal-mode state file', () => {
+    const queueBody = nextMessageBody()
+    // Queue mode: payload.thread_id is surfaced on the response.
+    expect(queueBody).toMatch(/thread_id:\s*payload\.thread_id\s*\?\?\s*null/)
+    // Signal-mode helper still SELECTs thread_id from agent_messages and
+    // writes it into the legacy /tmp state file.
+    const helperStart = CLI_SRC.indexOf('async function nextMessageFromSignal')
+    expect(helperStart).toBeGreaterThan(-1)
+    const helperEnd = CLI_SRC.indexOf('\nasync function ', helperStart + 1)
+    const helperBody = CLI_SRC.slice(helperStart, helperEnd === -1 ? undefined : helperEnd)
+    expect(helperBody).toMatch(/SELECT[^;]*thread_id[^;]*FROM agent_messages/)
+    expect(helperBody).toMatch(/thread_id:\s*row\.thread_id/)
   })
-  test('nextMessage writes thread_id into the state file', () => {
-    const body = nextMessageBody()
-    expect(body).toMatch(/thread_id:\s*row\.thread_id/)
-  })
-  test('sendMessage reads thread_id from state with null fallback', () => {
+  test('sendMessage resolves threadId from target.thread_id (queue or signal)', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/threadId[^=]*=\s*state\.thread_id\s*\?\?\s*null/)
+    // Phase 2: the target object carries thread_id from whichever path
+    // resolved (queue payload or legacy state file). threadId is bound off
+    // target.thread_id, which is itself populated via `?? null` in both
+    // resolution branches.
+    expect(body).toMatch(/const threadId:\s*string \| null\s*=\s*target\.thread_id/)
+    // Both resolution branches MUST default null:
+    //   queue:  thread_id: payload.thread_id ?? null
+    //   signal: thread_id: state.thread_id ?? null
+    expect(body).toMatch(/thread_id:\s*payload\.thread_id\s*\?\?\s*null/)
+    expect(body).toMatch(/thread_id:\s*state\.thread_id\s*\?\?\s*null/)
   })
   test('sendMessage INSERTs thread_id (not the literal NULL)', () => {
     const body = sendMessageBody()
@@ -248,18 +267,25 @@ describe('T9 — Discord delivery failure preserves state file and inbox signal'
     // Find the failure branch start.
     const guardIdx = body.search(/if\s*\(\s*!deliveryResult\.delivered\s*\)/)
     expect(guardIdx).toBeGreaterThan(-1)
-    // Find the FIRST unlinkSync(statePath) — it must be AFTER the guard.
-    // (The success branch lives below the guard's `process.exit(1)` return.)
-    const unlinkIdx = body.indexOf('unlinkSync(statePath)')
-    expect(unlinkIdx).toBeGreaterThan(guardIdx)
+    // Phase 2 (Issue #128) renamed the unlink call sites: queue mode no longer
+    // touches the filesystem at all (it UPDATEs message_queue + clears
+    // current_message_id), and signal-mode unlinks `target.signal_path` /
+    // `target.state_path`. Both finalisation paths must live AFTER the guard.
+    const finalIdx = body.indexOf('unlinkSync(target.signal_path)')
+    expect(finalIdx).toBeGreaterThan(guardIdx)
+    // The replied-status UPDATE (queue mode finalisation) must also be after.
+    const repliedIdx = body.indexOf("status = 'replied'")
+    expect(repliedIdx).toBeGreaterThan(guardIdx)
   })
 
   test('failure branch reports ok:false, db_saved:true, and a retry hint', () => {
     const body = sendMessageBody()
-    // Slice from the guard to the closing process.exit so the regex doesn't
-    // accidentally match the success branch's response payload.
+    // Slice from the guard to the failure-branch exit. PR#134 wrapped the
+    // body in a transaction; early exits are now `throw new CliSendExit(1)`
+    // (process.exit bypasses finally and would skip ROLLBACK). Use the throw
+    // as the failure-branch end marker.
     const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
     expect(guardIdx).toBeGreaterThan(-1)
     expect(exitIdx).toBeGreaterThan(guardIdx)
     const failureBranch = body.slice(guardIdx, exitIdx)
@@ -273,8 +299,10 @@ describe('T9 — Discord delivery failure preserves state file and inbox signal'
   test('failure branch exits non-zero (does not fall through to success)', () => {
     const body = sendMessageBody()
     const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    // The very next process.exit after the guard must be exit(1).
+    // PR#134 transaction wrapper: the failure branch throws CliSendExit(1)
+    // which is caught by the outer wrapper and translated to process.exit(1)
+    // after ROLLBACK + db.end() run via the finally chain.
     const tail = body.slice(guardIdx)
-    expect(tail).toMatch(/process\.exit\(1\)/)
+    expect(tail).toMatch(/throw new CliSendExit\(1\)/)
   })
 })
