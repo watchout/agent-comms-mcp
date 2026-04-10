@@ -507,15 +507,41 @@ async function sendMessage(args: string[]) {
       )
     }
 
-    // ARC codex audit (2026-04-10): after the DB row is committed, also relay
-    // the message to the originating platform. Phase 1 minimum is a direct
-    // Discord REST API call (Phase 3 will replace this with outbound_queue).
-    // Failure here is non-fatal — the row + pg_notify already happened, so
-    // server-side consumers will pick it up; we just report deliver=false
-    // and let the operator decide what to do.
+    // ARC codex audit (2026-04-10): after the DB row is committed, relay the
+    // message to the originating platform. Phase 1 minimum is a direct Discord
+    // REST API call (Phase 3 will replace this with outbound_queue).
     const deliveryResult = await deliverToDiscord(db, state.channel_id, threadId, content)
 
-    // Clear in-flight state and the consumed inbox signal.
+    // ARC codex audit follow-up (2026-04-10, msg 1492266518673887262):
+    // when Discord delivery fails, DO NOT delete the in-flight state file or
+    // the inbox signal — leaving them in place lets the operator (or a
+    // future retry loop) resend the same logical reply. We exit non-zero with
+    // an `ok: false` payload so the caller can branch on the failure.
+    //
+    // Caveat: the DB row was already INSERTed before the delivery attempt, so
+    // a naive `agent-com send` retry will create a second row with a fresh
+    // UUID. The operator is expected to either (a) clean up the duplicate
+    // manually after a successful retry, or (b) skip retry and post the row's
+    // content to Discord by hand. Phase 3 (outbound_queue) will eliminate
+    // this gap by deferring INSERT until after delivery succeeds.
+    if (!deliveryResult.delivered) {
+      process.stdout.write(JSON.stringify({
+        ok: false,
+        message_id: id,
+        channel_id: state.channel_id,
+        thread_id: threadId,
+        reply_to: state.message_id,
+        mentions,
+        auth_signed: authMeta !== undefined,
+        db_saved: true,
+        discord_delivered: false,
+        discord_skip_reason: deliveryResult.reason,
+        retry: 'run agent-com send again to retry Discord delivery (will create a duplicate DB row — clean up manually after success)',
+      }) + '\n')
+      process.exit(1)
+    }
+
+    // Discord 配信成功 — clear in-flight state and the consumed inbox signal.
     try { unlinkSync(statePath) } catch {}
     try { unlinkSync(state.signal_path) } catch {}
 
@@ -527,8 +553,7 @@ async function sendMessage(args: string[]) {
       reply_to: state.message_id,
       mentions,
       auth_signed: authMeta !== undefined,
-      discord_delivered: deliveryResult.delivered,
-      ...(deliveryResult.delivered ? {} : { discord_skip_reason: deliveryResult.reason }),
+      discord_delivered: true,
     }) + '\n')
   } finally {
     await db.end()

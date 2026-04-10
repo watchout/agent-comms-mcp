@@ -228,3 +228,53 @@ describe('T8 — thread_id flows from next → state → send → outbound', () 
     expect(body).toMatch(/deliverToDiscord\([^)]*threadId[^)]*\)/)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T9: Discord delivery failure preserves the in-flight state and signal
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: ARC codex audit follow-up (2026-04-10, msg
+// 1492266518673887262) — the previous behavior unconditionally deleted the
+// state file and inbox signal after the deliverToDiscord call, so a Discord
+// failure left the operator with an orphan DB row and no recoverable handle.
+// Fix invariants:
+//   (a) failure branch returns BEFORE the unlinkSync calls
+//   (b) failure response carries `ok: false`, `db_saved: true`, and a `retry`
+//       hint so the caller can branch on the failure
+//   (c) the success branch (which DOES unlink) is gated on
+//       `deliveryResult.delivered === true`
+describe('T9 — Discord delivery failure preserves state file and inbox signal', () => {
+  test('sendMessage branches on !deliveryResult.delivered before any unlinkSync', () => {
+    const body = sendMessageBody()
+    // Find the failure branch start.
+    const guardIdx = body.search(/if\s*\(\s*!deliveryResult\.delivered\s*\)/)
+    expect(guardIdx).toBeGreaterThan(-1)
+    // Find the FIRST unlinkSync(statePath) — it must be AFTER the guard.
+    // (The success branch lives below the guard's `process.exit(1)` return.)
+    const unlinkIdx = body.indexOf('unlinkSync(statePath)')
+    expect(unlinkIdx).toBeGreaterThan(guardIdx)
+  })
+
+  test('failure branch reports ok:false, db_saved:true, and a retry hint', () => {
+    const body = sendMessageBody()
+    // Slice from the guard to the closing process.exit so the regex doesn't
+    // accidentally match the success branch's response payload.
+    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
+    const exitIdx = body.indexOf('process.exit(1)', guardIdx)
+    expect(guardIdx).toBeGreaterThan(-1)
+    expect(exitIdx).toBeGreaterThan(guardIdx)
+    const failureBranch = body.slice(guardIdx, exitIdx)
+    expect(failureBranch).toMatch(/ok:\s*false/)
+    expect(failureBranch).toMatch(/db_saved:\s*true/)
+    expect(failureBranch).toMatch(/discord_delivered:\s*false/)
+    expect(failureBranch).toMatch(/discord_skip_reason:/)
+    expect(failureBranch).toMatch(/retry:/)
+  })
+
+  test('failure branch exits non-zero (does not fall through to success)', () => {
+    const body = sendMessageBody()
+    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
+    // The very next process.exit after the guard must be exit(1).
+    const tail = body.slice(guardIdx)
+    expect(tail).toMatch(/process\.exit\(1\)/)
+  })
+})
