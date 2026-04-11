@@ -711,7 +711,9 @@ async function listAgents() {
 async function status(args: string[]) {
   const { flags } = parseArgs(args)
   const format = flags.format ?? 'text'
-  const agentId = process.env.AGENT_ID ?? flags['agent-id']
+  // --agent-id flag takes priority over env var (ARC codex audit follow-up).
+  // Neither is required — omitting both gives system-wide status.
+  const agentId = flags['agent-id'] ?? process.env.AGENT_ID
 
   const db = await getDb()
   try {
