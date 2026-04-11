@@ -163,11 +163,7 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // current_message_id stamp can't race with another session.
     expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id\s*=\s*\$1\s*FOR UPDATE/)
   })
-  test('Mixed-Mode legacy fallback is gated on AGENT_COMMS_LEGACY_QUEUE != 0', () => {
-    const body = nextMessageBody()
-    expect(body).toMatch(/AGENT_COMMS_LEGACY_QUEUE\s*!==\s*'0'/)
-    expect(body).toMatch(/nextMessageFromSignal\(/)
-  })
+  // Issue #130 Phase 4: Mixed-Mode fallback test removed — signal path abolished.
   test('output payload includes the §4.1 fields (waiting, mode, queue_id)', () => {
     const body = nextMessageBody()
     expect(body).toMatch(/waiting:/)
@@ -197,11 +193,7 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
     // Hydrate from message_queue.payload after we have a non-null id.
     expect(body).toMatch(/SELECT id, message_id, payload FROM message_queue WHERE id/)
   })
-  test('falls back to legacy /tmp state file only when queue resolution misses', () => {
-    const body = sendMessageBody()
-    // The legacy branch runs only when target is still null after the queue lookup.
-    expect(body).toMatch(/target === null && existsSync\(statePath\)/)
-  })
+  // Issue #130 Phase 4: signal-mode fallback test removed — queue-only now.
   test('NO_CURRENT_MESSAGE error when neither path resolves a target', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/NO_CURRENT_MESSAGE/)
@@ -211,12 +203,7 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
     expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'replied',\s*replied_at\s*=\s*now\(\),\s*replied_with/)
     expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
   })
-  test('signal-mode success path still unlinks the legacy state + signal files', () => {
-    const body = sendMessageBody()
-    // The legacy branch is gated on target.mode !== 'queue' / target.state_path / target.signal_path.
-    expect(body).toMatch(/target\.state_path/)
-    expect(body).toMatch(/unlinkSync\(target\.signal_path\)/)
-  })
+  // Issue #130 Phase 4: signal-mode unlink test removed — queue-only now.
   // The PR#134 failure-response and queue/signal failure-branch tests were
   // removed in Phase 3 (Issue #129). Phase 3 has no synchronous Discord-
   // delivery failure branch in sendMessage — outbound delivery is async via

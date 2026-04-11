@@ -167,8 +167,8 @@ const EXPECTED_BOTS = process.env.EXPECTED_BOTS ? process.env.EXPECTED_BOTS.spli
 
 // PR-B.2 mixed-mode receiver pipeline canary set.
 // Bots in this set get an ADDITIONAL pg_notify('agent_inbox') fanout from
-// handleInboundMessage on top of the existing pushToChannelServer path. The
-// existing per-bot Discord client + handler are NOT changed (= "additive").
+// handleInboundMessage. Phase 4 (Issue #130) removed pushToChannelServer;
+// delivery is now fully via message_queue + outbound_queue.
 // PR-B.2 starts with auditor only; expand in PR-B.3+ after 24-48h passive observation.
 // Override at runtime via env: RECEIVER_PIPELINE_BOTS=auditor,arc (comma-separated).
 const RECEIVER_PIPELINE_BOTS = new Set<string>(
@@ -1470,8 +1470,8 @@ async function handleInboundMessage(params: {
   // Step 7c: PR-B.2 mixed-mode receiver pipeline fanout (additive).
   // For bots in RECEIVER_PIPELINE_BOTS, ALSO fire pg_notify('agent_inbox', ...) so
   // future LISTEN-based subscribers receive the message via the new path. The
-  // existing pushToChannelServer path keeps running for current subscribers — this
-  // is purely additive. Subscribers' processedIds dedup handles double-delivery.
+  // Phase 4: pushToChannelServer was removed; this pg_notify remains as an
+  // additional signal for any future LISTEN-based consumers.
   if (messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
     const client = await tryGetDb()
     if (client) {
@@ -1491,9 +1491,8 @@ async function handleInboundMessage(params: {
   }
 
   // Step 7d: Issue #128 Phase 2 — INSERT into message_queue for the receiver.
-  // Symmetric with the send-tool pushTargets loop. Non-fatal: the existing
-  // pushToChannelServer / SSE paths in the per-bot onMessage handler still
-  // deliver even if this INSERT fails. The payload mirrors the shape used by
+  // Symmetric with the send-tool pushTargets loop. The payload mirrors the
+  // shape used by the send path so both paths produce one canonical schema for
   // the send path so `agent-com next` returns one canonical schema.
   if (messageId) {
     const client = await tryGetDb()
@@ -1669,79 +1668,15 @@ function checkAccess(authorId: string, channelId: string, content: string): { al
   return { allowed: true }
 }
 
-// --- Inbox Signals ---
-function sendInboxSignal(targetAgent: string, messageId: string, from: string, channel: string) {
-  const dir = join(STATE_DIR, 'inbox', targetAgent)
-  try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    writeFileSync(join(dir, `${Date.now()}-${messageId.slice(0, 8)}.signal`),
-      JSON.stringify({ id: messageId, from, channel }))
-  } catch (e) {
-    process.stderr.write(`agent-comms: signal failed for ${targetAgent}: ${e}\n`)
-  }
-}
+// Issue #130 Phase 4: sendInboxSignal (filesystem .signal files) was removed.
+// Delivery to recipient bots is now fully queue-based (message_queue table,
+// Phase 2). The old .signal directory at STATE_DIR/inbox/{agent}/ is no
+// longer written to; cleanup of existing files is left to the operator.
 
-// Track push failures to suppress repeated warnings for offline bots
-const pushFailureWarned = new Set<string>()
-
-/** Push message to bot's channel-server via HTTP POST (Webhook Channel method) */
-async function pushToChannelServer(agentId: string, content: string, meta: Record<string, unknown>): Promise<boolean> {
-  const client = await tryGetDb()
-  if (!client) return false
-
-  // Get channel_port from agents table
-  const r = await client.query('SELECT channel_port FROM agents WHERE agent_id = $1', [agentId])
-  if (r.rows.length === 0 || !r.rows[0].channel_port) {
-    process.stderr.write(`agent-comms: pushToChannelServer — no channel_port for ${agentId}\n`)
-    return false
-  }
-
-  const port = r.rows[0].channel_port
-  const payload = JSON.stringify({ content, meta })
-
-  // HMAC signature (using shared/hmac)
-  const hmacSecret = process.env.HMAC_SECRET ?? ''
-  const signature = hmacSecret ? signPayload(payload, hmacSecret) : ''
-
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/push`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(signature ? { 'X-Signature': signature } : {}),
-      },
-      body: payload,
-    })
-    if (!res.ok) {
-      process.stderr.write(`agent-comms: pushToChannelServer — ${agentId}:${port} returned ${res.status}\n`)
-      return false
-    }
-    return true
-  } catch (err) {
-    // Suppress repeated warnings for offline bots (warn once per agent)
-    if (!pushFailureWarned.has(agentId)) {
-      process.stderr.write(`agent-comms: pushToChannelServer — ${agentId}:${port} unreachable (warning once, subsequent failures silent)\n`)
-      pushFailureWarned.add(agentId)
-    }
-    return false
-  }
-}
-
-// Clear push failure warning when bot reconnects (call on SSE connect)
-function clearPushFailureWarning(agentId: string): void {
-  pushFailureWarned.delete(agentId)
-}
-
-function countAndClearSignals(forAgentId?: string): number {
-  const dir = join(STATE_DIR, 'inbox', forAgentId ?? AGENT_ID)
-  let count = 0
-  try {
-    const files = readdirSync(dir).filter(f => f.endsWith('.signal'))
-    count = files.length
-    for (const f of files) unlinkSync(join(dir, f))
-  } catch {}
-  return count
-}
+// Issue #130 Phase 4: pushToChannelServer + pushFailureWarned +
+// clearPushFailureWarning + countAndClearSignals were all removed.
+// Outbound delivery now goes exclusively through outbound_queue (Phase 3).
+// agents.channel_port column is soft-deprecated per spec §3.7 (not DROPped).
 
 // ============================================================
 // Forwarding (Platform-Friendly)
@@ -1879,6 +1814,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
   return { tools: [
     {
+      // Issue #130 Phase 4: MCP next tool (message-queue-spec §4.1).
+      // Pops the oldest pending message_queue row for the calling agent.
+      // Used by bots to receive messages via the MCP tool interface instead
+      // of polling the CLI. The internal flow mirrors cli/index.ts nextMessage.
+      name: 'next',
+      description: 'Pop the next pending message from the queue. Returns the message content, channel, and sender info. Call send to reply.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
       name: 'send',
       description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.${agentListStr}`,
       inputSchema: {
@@ -2005,6 +1952,85 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
+
+  // ============================================================
+  // Issue #130 Phase 4: MCP next tool (§4.1)
+  // ============================================================
+  if (name === 'next') {
+    const client = await tryGetDb()
+    if (!client) {
+      return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for next' }], isError: true }
+    }
+    try {
+      await client.query('BEGIN')
+      // Lock agents row + implicit-skip prior current
+      const prevRow = await client.query(
+        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
+        [agentId],
+      )
+      const priorId: number | null = prevRow.rows[0]?.current_message_id ?? null
+      if (priorId !== null) {
+        await client.query(
+          `UPDATE message_queue SET status = 'skipped' WHERE id = $1 AND status = 'read'`,
+          [priorId],
+        )
+      }
+      // Pop oldest pending with exclusive lock
+      const pop = await client.query(
+        `SELECT id, message_id, payload, priority, created_at
+         FROM message_queue
+         WHERE status = 'pending' AND agent_id = $1
+         ORDER BY priority DESC, created_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`,
+        [agentId],
+      )
+      if (pop.rows.length === 0) {
+        if (priorId !== null) {
+          await client.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
+        }
+        await client.query('COMMIT')
+        return { content: [{ type: 'text', text: JSON.stringify({ waiting: 0 }) }] }
+      }
+      const row = pop.rows[0]
+      await client.query(
+        `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
+        [row.id],
+      )
+      await client.query(
+        `UPDATE agents SET current_message_id = $1 WHERE agent_id = $2`,
+        [row.id, agentId],
+      )
+      await client.query('COMMIT')
+
+      let payload: Record<string, unknown> = {}
+      try { payload = JSON.parse(row.payload) } catch {}
+
+      const waitingRow = await client.query(
+        `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+        [agentId],
+      )
+      const waiting: number = waitingRow.rows[0]?.n ?? 0
+
+      const result = {
+        waiting,
+        queue_id: row.id,
+        message_id: row.message_id ?? payload.message_id ?? null,
+        channel_id: payload.channel_id,
+        thread_id: payload.thread_id ?? null,
+        from: payload.author_id,
+        from_name: payload.author_name ?? null,
+        content: payload.content,
+        message_type: payload.message_type ?? 'chat',
+        source: payload.source ?? null,
+        created_at: row.created_at,
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] }
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      return { content: [{ type: 'text', text: `Error [NEXT_FAILED]: ${err}` }], isError: true }
+    }
+  }
 
   // ============================================================
   // v0.1.0 Core Tools: send, focus, unfocus
@@ -2214,33 +2240,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         allAgentInfos,
       )
       lastDelivery = delivery
-      // Issue #127 / lead-ama follow-up: pushMeta MUST match the inbound contract
-      // (handleInboundMessage L1363-1371) so SSE consumers can treat both push
-      // sources uniformly. The inbound builder uses external Discord IDs; here in
-      // the outbound send path we use the agent's internal channel UUID + the
-      // sender's agent_id, but the field names (chat_id / message_id / user /
-      // user_id / ts / source) must align. The legacy from / channel_id /
-      // thread_id fields are preserved for any consumer still reading the old
-      // shape until the cutover is complete.
-      const sendPushMeta = {
-        chat_id: dest.channelId,
-        message_id: id,
-        user: agentId,
-        user_id: agentId,
-        ts: new Date().toISOString(),
-        // Internal MCP-originated push, not platform-relayed. ARC codex audit
-        // (2026-04-10) flagged that the previous 'discord' source mislabeled
-        // bot→bot send-tool messages as platform-originated.
-        source: 'agent-comms' as const,
-        from: agentId,
-        channel_id: dest.channelId,
-        thread_id: dest.threadId ?? null,
-      }
-      // Issue #128 Phase 2: pre-build the message_queue payload once per part.
-      // The same shape is INSERTed for every recipient in the loop below.
-      // message-queue-spec §3.2: payload is the enriched JSON the recipient's
-      // `agent-com next` will return. Phase 2 minimum is the core shape; Phase
-      // 2.x will add my_recent / channel_recent / topic / hint enrichment.
+      // Issue #130 Phase 4: the pushTargets loop now writes only to
+      // message_queue (Phase 2). The legacy sendInboxSignal / pushToChannelServer /
+      // SSE fallback paths have been removed — delivery to recipient bots is
+      // fully queue-based. Outbound to Discord goes through outbound_queue
+      // (Phase 3) below.
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
@@ -2252,27 +2256,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ts: new Date().toISOString(),
       })
       for (const recipient of delivery.pushTargets) {
-        sendInboxSignal(recipient, id, agentId, dest.channelId)
-        // Issue #127: send tool must mirror Discord inbound push path so that
-        // bot→bot messages reach recipients without waiting for poll. Try
-        // channel-server first, fall back to in-process SSE notification.
-        const pushed = await pushToChannelServer(recipient, partContent, sendPushMeta)
-        if (!pushed) {
-          const recipCtx = botContexts.get(recipient)
-          if (recipCtx?.transport) {
-            try {
-              await recipCtx.server.notification({
-                method: 'notifications/claude/channel',
-                params: { content: partContent, meta: sendPushMeta },
-              })
-            } catch (err) {
-              process.stderr.write(`agent-comms: send-path SSE fallback failed for ${recipient}: ${err}\n`)
-            }
-          }
-        }
-        // Issue #128 Phase 2: also INSERT the row into message_queue so the
-        // recipient's `agent-com next` can pop it. Non-fatal — the legacy
-        // signal/SSE paths above still deliver if this fails.
         if (dbClient) {
           try {
             await dbClient.query(
@@ -2462,7 +2445,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   if (name === 'inbox' || name === 'check_inbox') {
     const { limit } = (args ?? {}) as any
-    const signals = countAndClearSignals(agentId)
+    // Issue #130 Phase 4: countAndClearSignals removed (filesystem signals abolished).
     const rows = await fetchNewMessages(agentId, Math.min(limit ?? 20, 100))
     if (rows.length === 0) return { content: [{ type: 'text', text: '(no new messages)' }] }
     const text = rows.map((r: any) =>
@@ -3177,7 +3160,7 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
       }
 
       process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
-      clearPushFailureWarning(botId)
+      // Issue #130 Phase 4: clearPushFailureWarning(botId) removed.
 
       try {
         // Create per-bot Server + Transport
@@ -3266,16 +3249,11 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
                   mentions: resolvedMentions,
                   replyToMessageId: msg.replyTo,
                 })
-              }).then(async result => {
-                if (result.delivered) {
-                  const pushed = await pushToChannelServer(botId, inboundContent, result.pushMeta ?? {})
-                  if (!pushed && ctx.transport) {
-                    await ctx.server.notification({
-                      method: 'notifications/claude/channel',
-                      params: { content: inboundContent, meta: result.pushMeta ?? {} },
-                    })
-                  }
-                }
+              }).then(async _result => {
+                // Issue #130 Phase 4: pushToChannelServer + SSE fallback removed.
+                // Delivery to the recipient is now handled by:
+                //   (a) message_queue INSERT inside handleInboundMessage (Phase 2)
+                //   (b) pollNewMessages 3-second loop for backward-compatible push
               }).catch(err => {
                 process.stderr.write(`agent-comms: per-bot inbound routing error for ${botId}: ${err}\n`)
               })
@@ -3350,8 +3328,7 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
         const botDiscord = await connectBotDiscord(botId, tokenResult.token)
         if (botDiscord) {
           discordClients.set(botId, botDiscord)
-          // Register inbound handler — routes through handleInboundMessage + pushToChannelServer
-          // No processedIds check — dedup at channel-server level
+          // Register inbound handler — routes through handleInboundMessage + message_queue
           botDiscord.onMessage((msg) => {
             const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
             const inboundContent = msg.content || (atts ? '(attachment)' : '')
@@ -3370,10 +3347,9 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
                 mentions: resolvedMentions,
                 replyToMessageId: msg.replyTo,
               })
-            }).then(async result => {
-              if (result.delivered) {
-                await pushToChannelServer(botId, inboundContent, result.pushMeta ?? {})
-              }
+            }).then(async _result => {
+              // Issue #130 Phase 4: pushToChannelServer removed. message_queue
+              // INSERT inside handleInboundMessage handles delivery.
             }).catch(err => {
               process.stderr.write(`agent-comms: startup per-bot inbound error for ${botId}: ${err}\n`)
             })
@@ -3426,14 +3402,8 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
                   }
                   return
                 }
-                // Push: caller handles (§5.1 pure function)
-                const pushed = await pushToChannelServer(expectedBot, content, result.pushMeta ?? {})
-                if (!pushed && ctx?.transport) {
-                  await ctx.server.notification({
-                    method: 'notifications/claude/channel',
-                    params: { content, meta: result.pushMeta ?? {} },
-                  })
-                }
+                // Issue #130 Phase 4: pushToChannelServer + SSE fallback removed.
+                // message_queue INSERT inside handleInboundMessage handles delivery.
               }).catch(err => {
                 process.stderr.write(`agent-comms: daemon inbound routing error for ${expectedBot}: ${err}\n`)
               })

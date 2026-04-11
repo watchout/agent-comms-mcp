@@ -50,7 +50,8 @@ server.ts（1プロセスで全機能）
 ├── 通信バス層（server.ts 内蔵）
 │   ├── メッセージルーティング          DB INSERT + pg_notify
 │   ├── access制御                     access.json（プラットフォーム共通）
-│   ├── push通知                       webhook bridge + pg_notify LISTEN
+│   ├── message_queue                  per-agent 配信キュー（Phase 2）
+│   ├── outbound_queue + consumer      Discord 送信キュー + 1秒 polling（Phase 3）
 │   ├── DBポーリング                    フォールバック（3秒間隔）
 │   └── 安全機構                       レート制限 / ループ検出 / 重複排除
 │
@@ -285,57 +286,33 @@ interface AccessConfig {
 | DBあり | `last_read_at`テーブルで管理 | 本番運用 |
 | DBなし | `.agent-com/last-read/{channel}`ファイル | 最小構成 |
 
-### 4.4 push通知（Webhook Channel方式）
+### 4.4 配信アーキテクチャ（Phase 4: message_queue + outbound_queue）
 
-agent-commsを2つに分離し、push受信とツール提供を独立させる。
+Phase 4 (Issue #130) で旧 Webhook Channel 方式（pushToChannelServer / channel-server.ts / SSE fallback / filesystem signal）を全廃。全配信がキューベースに移行。
 
-**agent-comms-channel（push受信専用）:**
-- claude/channel capabilityを宣言する軽量MCPサーバー（channel-server.ts）
-- ローカルHTTPポートで `POST /push` を受信
-- HMAC-SHA256署名検証
-- 受信内容をMCP通知としてClaude Codeセッションに注入
-- Discord Client無し（メモリ消費≈0）
-- Discord直接監視なし（バイパス不可能）
-
-**agent-comms（ツール提供）:**
-- send, history, inbox, agents, focus, unfocus, quote等のMCPツール
-- SSEまたはstdioでdaemonに接続
-
-**アーキテクチャ:**
+**inbound (Discord → bot):**
 ```
-Discord Gateway → SSE daemon → adapter変換 → routeInbound()（5段階フィルタ）
-  → DB INSERT（全メッセージ）
-  → push対象botのみ HTTP POST http://localhost:{port}/push（HMAC署名付き）
-  → channel-server.ts（Bot内軽量HTTPサーバー）
-  → server.notification() → Claude Codeセッションに自動注入
+Discord Gateway → adapter変換 → routeInbound() → DB INSERT (agent_messages)
+  → message_queue INSERT (per-pushTarget)
+  → bot は MCP next tool または agent-com next CLI でキューから取得
+  → 3秒ポーリング (pollNewMessages) が後方互換 push を提供
 ```
 
-**channel-server.ts:**
-- 各botに1つ配置（`--dangerously-load-development-channels server:agent-comms-channel`で起動）
-- claude/channel capabilityを宣言
-- ローカルHTTPポートで`POST /push`受信
-- HMAC署名検証後、notification()でセッションに注入
-
-**ポート割当:**
-
-| bot | ポート |
-|-----|-------|
-| CTO | 8789 |
-| Hotel | 8790 |
-| Haishin | 8791 |
-| WBS | 8792 |
-| Nyusatsu | 8793 |
-| ADF | 8794 |
-| agent-com | 8795 |
-| Vice | 8796 |
-| Auditor | 8797 |
+**outbound (bot → Discord):**
+```
+send tool / CLI send → agent_messages INSERT + outbound_queue INSERT
+  → outbound consumer (1秒 polling) → Discord REST API 送信
+  → 成功: status='sent' / 失敗: retry (max 5回) → status='failed'
+```
 
 **pg_notify:**
-- send_message実行時、DB INSERT後に `pg_notify('agent_inbox', target_agent_id)` を発行
+- send / inbound 時に `pg_notify('agent_inbox', { to: <agent_id>, ... })` を発行
+- LISTEN ハンドラが受信して追加ルーティング (Phase 5 receiver pipeline canary)
 
-**リスナー:**
-- 1プロセスで全bot分のNOTIFYを監視
-- 対象botのポートにcurl POSTで配送
+**廃止済み (Phase 4で削除):**
+- pushToChannelServer / channel-server.ts / agents.channel_port (soft-deprecated)
+- sendInboxSignal / filesystem .signal files
+- SSE fallback (botContexts.get → server.notification) in send tool
 
 ---
 
