@@ -9,7 +9,7 @@
 
 | ファイル | バージョン | 内容 | 最終更新 |
 |----------|-----------|------|----------|
-| agent-com-message-queue-spec.md | v1.0.0 | 統合メッセージキュー仕様（コア） | 2026-04-10 |
+| agent-com-message-queue-spec.md | v1.0.2 | 統合メッセージキュー仕様（コア）— PollingDriver 内蔵化 / cron 廃止 | 2026-04-12 |
 | agent-com-attachment-spec.md | v0.1.0 | ファイル添付の送受信仕様 | 2026-04-08 |
 | agent-com-chat-ui-sync-spec.md | v0.1.0 | Discord↔DB同期仕様 | 2026-04-07 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-04-10 |

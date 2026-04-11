@@ -58,7 +58,7 @@ server.ts（1プロセスで全機能）
 ├── MCP tools（agent-com CLIのラッパー）
 │   ├── next                           未処理メッセージ1件取得
 │   ├── send                           返信・自発送信
-│   ├── notify                         自発送信（cron/watchdog用）
+│   ├── notify                         自発送信（watchdog/定期レポート用）
 │   ├── status                         自分の状態・キュー件数確認
 │   ├── heartbeat                      ハートビート送信
 │   ├── fetch_discord_history          Discord API履歴取得
@@ -427,6 +427,27 @@ DBが設定されていない場合：
 - 未読管理はファイルベース
 - 通信ログ検索は利用不可
 - ループ検出・レート制限はインメモリで動作（再起動でリセット）
+
+### 6.5 Non-push CLI Polling Driver（message-queue-spec v1.0.2 §6.5）
+
+MCP server 内蔵の PollingDriver クラスが message_queue を自動監視する。
+cron・外部スクリプトは不要。
+
+**MCP 対応 CLI (Claude Code / Codex / Gemini):**
+- MCP server 起動時に PollingDriver が自動開始
+- heartbeat: 30 秒間隔で agents.last_seen_at を更新
+- polling: AGENT_COM_POLL_INTERVAL_MS (default 3000ms) 間隔で message_queue を確認
+- 受信メッセージはバッファに保持、next 呼び出し時に即返却
+- Claude Code は push シグナルがあるため polling は補助的
+
+**MCP 未対応環境:**
+- `agent-com daemon` CLI コマンドで同等の機能を提供
+- tmux セッション内で起動し、stdin 経由で LLM に指示を投入
+
+**負荷:**
+- 1 bot あたり ~0.37 qps (1/30 heartbeat + 1/3 poll = 0.033 + 0.333)
+- ~50 bot: ~18 qps (PostgreSQL で問題なし)
+- ~100+ bot: polling 間隔延長 or pg_notify ハイブリッドに切替推奨 (§14.5)
 
 ---
 

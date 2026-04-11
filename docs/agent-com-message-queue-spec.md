@@ -1,7 +1,6 @@
-# agent-com 統合メッセージキュー仕様 v1.0.0
+# agent-com 統合メッセージキュー仕様 v1.0.2
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
-> **本仕様は `docs/SSOT.md` に従属する詳細仕様である。** 本仕様と SSOT.md が矛盾する場合は SSOT.md が優先する。
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
 > 全CLI対応（Claude Code / Codex CLI / Gemini CLI / 将来の任意CLI）
 
@@ -15,7 +14,7 @@
 3. 配信はDBキューで行う。HTTP POST / SSE / pg_notify直接配信を排除
 4. LLMにUUID・チャンネルID・宛先選択を触らせない
 5. 全メッセージがDBに記録される。例外経路ゼロ
-6. bashが実行できれば、どのLLM CLIでも接続可能
+6. MCP設定だけで接続完了。cron・外部スクリプト不要
 7. PostgreSQLでもSQLiteでも同じCLIコマンドが動く
 ```
 
@@ -58,18 +57,18 @@
 │                                                                      │
 │  agent-com next     未処理メッセージ1件取得                            │
 │  agent-com send     返信送信                                          │
-│  agent-com notify   自発送信（cron/watchdog用）                       │
+│  agent-com notify   自発送信（watchdog / 起動通知 / 定期レポート用）    │
 │  agent-com status   自分の状態・キュー件数確認                         │
 │  agent-com heartbeat ハートビート送信                                  │
 │  agent-com agents   エージェント一覧取得                               │
 │  agent-com history  チャンネル履歴取得                                 │
 │  agent-com inbox    未読メッセージ一覧取得                             │
 ├──────────────────────────────────────────────────────────────────────┤
-│       │               │               │              │               │
+│      │                 │               │               │               │
 │   MCP tools        bash直接         bash直接       bash直接          │
-│   (CLIラッパー)                                                       │
-│       │               │               │              │               │
-│   Claude           Codex            Gemini         将来の             │
+│  (CLIラッパー)                                                        │
+│      │                 │               │               │               │
+│   Claude             Codex            Gemini         将来の             │
 │   Code             CLI              CLI            任意CLI            │
 └──────────────────────────────────────────────────────────────────────┘
 
@@ -170,7 +169,7 @@ CREATE TABLE agents (
     CHECK (status IN ('idle', 'busy', 'disconnected', 'offline')),
   status_detail TEXT,                  -- "PRレビュー中" 等
   status_updated_at TIMESTAMPTZ,
-  heartbeat_at TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ,
   heartbeat_interval INTEGER DEFAULT 30, -- 秒
   observer_mode BOOLEAN NOT NULL DEFAULT FALSE,
   dispatch_enabled BOOLEAN NOT NULL DEFAULT FALSE, -- v0.2.0
@@ -233,7 +232,7 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
   "channel": "#agent-mem",
   "thread": "v0.2.0-test",
   "topic": "agent-memoryの記憶管理開発",
-  "content": "テスト結果どう？",
+  "content": "テスト結果�d���",
   "attachments": [],
   "reply_context": null,
   "my_recent": [
@@ -305,9 +304,9 @@ agent-com send --agent-id cto \
 4. reply_to = currentMessageId（自動設定）
 5. 宛先 = currentMessageのchannel_id/thread_id（自動設定）
 6. agent_messages INSERT
-7. push対象のmessage_queue INSERT（mentions対象分）
-   → 対象botのstatusに応じて送信者にフィードバック（§9）
-8. outbound_queue INSERT（Discord送信用）
+7. push対象のmessage_queue INSERT​（mentions対象分）
+   → 対象botのstatusに応じて senderにフィードバック（§9）
+8. outbound_queue INSERT​（Discord送信用）
 9. currentMessageのstatus='replied', replied_with=message_id
 10. currentMessageId = null
 11. agents.status='idle' に更新
@@ -316,7 +315,8 @@ agent-com send --agent-id cto \
 
 ### 4.3 agent-com notify
 
-自発送信（cron / watchdog / 起動通知）。reply_to不要。
+自発送信（watchdog / 起動通知 / 定期レポート）。reply_to不要。
+polling driver内のスケジューラや、MCP server内のsetIntervalから呼び出す。
 
 ```bash
 agent-com notify --agent-id daily-reporter \
@@ -360,7 +360,7 @@ agent-com status --agent-id cto
 
 ### 4.5 agent-com heartbeat
 
-生存報告。cron / setInterval から定期実行。
+生存報告。polling driver内のsetIntervalで自動実行（§6.5）。CLIコマンドとしても手動実行可能。
 
 ```bash
 agent-com heartbeat --agent-id codex-auditor
@@ -370,7 +370,7 @@ agent-com heartbeat --agent-id codex-auditor
 {
   "ok": true,
   "agent_id": "codex-auditor",
-  "heartbeat_at": "2026-04-08T15:00:00Z"
+  "last_seen_at": "2026-04-08T15:00:00Z"
 }
 ```
 
@@ -520,72 +520,146 @@ async function refreshAgentCache(): Promise<Agent[]> {
 ```
 
 LLMはMCPツール（next_message, send, agents等）を使用。
-ハートビートはMCP server内のsetIntervalで自動実行。
+ハートビートとpolling driverはMCP server内のsetIntervalで自動実行（§6.5参照）。
+cron・外部スクリプト不要。MCP設定のみで完結。
 
-### 6.2 Codex CLI（cron + bash）
+### 6.2 Codex CLI（MCP経由）
 
-```bash
-# crontab
-# メッセージ確認: 5分ごと
-*/5 * * * * /path/to/codex-poll.sh
+```json
+// .codex/config.toml 相当
+[mcp]
+agent-comms = { command = "node", args = ["src/mcp-server.js"] }
 
-# ハートビート: 1分ごと
-* * * * * agent-com heartbeat --agent-id codex-auditor
+[mcp.agent-comms.env]
+AGENT_ID = "codex-auditor"
+AGENT_COM_DB = "postgres"
+DATABASE_URL = "postgres://..."
 ```
+
+Claude Codeと同一のMCP serverを使用。polling driver（§6.5）がMCP server内で自動実行されるため、crontab設定は不要。
+
+Codexはpush受信（channel plugin）が使えないため、LLMがタスク完了後に`next_message`を自発的に呼ぶことで受信する。CLAUDE.md相当の指示で以下を記載：
+
+```
+タスク完了後、次のタスクに着手する前に必ず
+mcp__agent_comms__next を実行してメッセージを確認してください。
+メッセージがあれば対応してから次のタスクに進んでください。
+```
+
+polling driverはnext呼び出し間のメッセージをバッファし、next実行時に即返却する。
+
+### 6.3 Gemini CLI（MCP経由）
+
+Gemini CLIもMCP serverに接続可能な場合は§6.1/6.2と同一構成。
+MCP未対応の場合のみbash直接実行にフォールバック：
 
 ```bash
 #!/bin/bash
-# codex-poll.sh
+# gemini-fallback.sh（MCP未対応時のみ使用）
 
-MSG=$(agent-com next --agent-id codex-auditor --format json)
-WAITING=$(echo "$MSG" | jq -r '.waiting')
+# agent-com CLIを直接呼び出し
+# heartbeatはバックグラウンドで自動実行
+agent-com daemon --agent-id spec-auditor &
+DAEMON_PID=$!
+trap "kill $DAEMON_PID" EXIT
 
-if [ "$WAITING" = "0" ]; then
-  exit 0
-fi
-
-# Codex CLIでメッセージを処理
-codex -p "以下のメッセージを処理してください。
-返信にはコマンド agent-com send --agent-id codex-auditor --mentions <宛先> --content <内容> を使ってください。
-
-メッセージ:
-$(echo "$MSG" | jq -r '.content')
-送信者: $(echo "$MSG" | jq -r '.from')
-チャンネル: $(echo "$MSG" | jq -r '.channel')"
-```
-
-### 6.3 Gemini CLI（bash直接）
-
-```bash
-#!/bin/bash
-# gemini-spec-auditor.sh
-
-# ハートビートをバックグラウンドで開始
-while true; do
-  agent-com heartbeat --agent-id spec-auditor
-  sleep 30
-done &
-HEARTBEAT_PID=$!
-trap "kill $HEARTBEAT_PID" EXIT
-
-# Gemini CLIでメッセージ処理ループ
 gemini -p "あなたはspec-auditor（仕様監査役）です。
-
-メッセージ確認コマンド:
-  agent-com next --agent-id spec-auditor --format json
-
-返信コマンド:
-  agent-com send --agent-id spec-auditor --mentions <宛先> --content <内容>
-
-まずメッセージを確認してください。
-メッセージがなければ、以下の仕様書を全て読み込んで矛盾を検出してください:
-$(cat docs/*.md)"
+メッセージ確認: agent-com next --agent-id spec-auditor --format json
+返信: agent-com send --agent-id spec-auditor --mentions <宛先> --content <内容>
+まずメッセージを確認してください。"
 ```
+
+`agent-com daemon`はheartbeat + polling driverを内蔵した常駐プロセス（§6.5のCLI版）。
 
 ### 6.4 将来の任意CLI
 
-bashが実行できれば、どのLLM CLIでも同じagent-comコマンドで接続可能。
-設定ファイルやアダプター開発は不要。
+MCP対応CLI → MCP設定のみで接続完了。cron不要。
+MCP未対応CLI → `agent-com daemon` + bash呼び出しで接続。cron不要。
+
+いずれの場合もcrontab・外部スクリプト・追加セットアップは不要。
+
+### 6.5 Polling Driver（MCP server内蔵）
+
+全CLIで共通のメッセージ受信基盤。MCP serverプロセス内で自動実行される。
+
+```typescript
+// MCP server起動時に自動開始
+class PollingDriver {
+  private buffer: QueueRow[] = [];
+  private interval: NodeJS.Timeout;
+
+  constructor(
+    private agentId: string,
+    private db: DbAdapter,
+    private intervalMs: number  // AGENT_COM_POLL_INTERVAL_MS（デフォルト: 3000）
+  ) {
+    // 1. heartbeat（30秒ごと）
+    setInterval(() => this.heartbeat(), 30_000);
+
+    // 2. polling（AGENT_COM_POLL_INTERVAL_MS ごどと）
+    this.interval = setInterval(() => this.poll(), this.intervalMs);
+  }
+
+  private async poll(): Promise<void> {
+    const pending = await this.db.getNextPending(this.agentId);
+    if (pending) {
+      this.buffer.push(pending);
+      // ログ出力（デバッグ用）
+      console.error(`[agent-com] new message from ${pending.author_id}`);
+    }
+  }
+
+  // next_message ツール呼び出し時にバッファから返却
+  async getNext(): Promise<QueueRow | null> {
+    if (this.buffer.length > 0) {
+      return this.buffer.shift()!;
+    }
+    // バッファ空の場合、即時DBチェック
+    return this.db.getNextPending(this.agentId);
+  }
+
+  private async heartbeat(): Promise<void> {
+    await this.db.query(
+      `UPDATE agents SET last_seen_at = NOW(), status = 
+       CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
+       WHERE agent_id = $1`,
+      [this.agentId]
+    );
+  }
+
+  stop(): void {
+    clearInterval(this.interval);
+  }
+}
+```
+
+```
+動作フロー:
+
+  MCP server起動
+    → PollingDriver開始（heartbeat + polling自動実行）
+    → LLMがnext_messageツールを呶ぶ
+    → PollingDriver.getNext()がバッファから即返却
+    → バッファ空ならDB直接チェック
+
+  cron不要。外部スクリプト不要。MCP設定だけで動く。
+```
+
+```
+CLI版（MCP未対応環境用）:
+
+  agent-com daemon --agent-id <id>
+    → 同一のPollingDriverをCLIプロセスとして実行
+    → heartbeat + polling自動実行
+    → LLMはagent-com next CLIコマンドで受信
+```
+
+```
+環境変数:
+  AGENT_COM_POLL_INTERVAL_MS=3000  # デフォルト3秒
+```
+
+スケーラビリティについては§14.5を参照。
 
 ---
 
@@ -709,7 +783,7 @@ setInterval(async () => {
   await db.query(`
     UPDATE agents
     SET status = 'disconnected', status_detail = 'heartbeat timeout'
-    WHERE heartbeat_at < NOW() - (heartbeat_interval * 3 || ' seconds')::INTERVAL
+    WHERE last_seen_at < NOW() - (heartbeat_interval * 3 || ' seconds')::INTERVAL
       AND status NOT IN ('disconnected', 'offline')
   `);
 }, 30_000);
@@ -970,7 +1044,7 @@ B. 自発送信    notify CLI     なし        必須        CLI引数で指定
 C. ビジー通知  system自動     —           自動        送信者のキュー
 D. エラー通知  system自動     —           自動        送信者のキュー
 
-全パターン共通:
+全パターン共逛:
   ✅ agent_messages に記録される
   ✅ message_queue 経由で配信される
   ✅ outbound_queue 経由でDiscordに投稿される
@@ -1055,11 +1129,12 @@ v0.2.0: 環境変数（DISCORD_TOKEN_{AGENT_ID}）に移行
 ### 13.3 bash curl直叩き検出
 
 ```
-agent_messagesに記録がないDiscord投稿を定期検出:
-  → receiver起動時 + 1時間ごと
+agent_messagesに記録がないDiscord投稿を定期検出（receiver内蔵setInterval）:
+  → receiver起動時 + 1時間ごと（receiver内のsetIntervalで自動実行）
   → Discord REST GET /channels/{id}/messages?after=...
   → agent_messages に対応するdiscord_message_idがない投稿 = bypass
   → audit_log記録 + CEO通知
+  → cron不要。receiverプロセスが生きている限り自動実行
 ```
 
 ### 13.4 .env保護
@@ -1118,7 +1193,7 @@ AGENT_COM_DB=sqlite      # polling（1-2秒遅延）
 DATABASE_URL=postgres://user:pass@localhost:5432/agent_com
 AGENT_COM_SQLITE_PATH=./data/agent-com.db
 
-AGENT_COM_POLL_INTERVAL_MS=1000  # SQLite polling間隔
+AGENT_COM_POLL_INTERVAL_MS=3000  # polling間隔（§6.5参照）
 ```
 
 ### 14.4 比較
@@ -1134,9 +1209,40 @@ agent-memory連携   pgvector使用可        別途対応必要
 推奨用途           本番・大規模         開発・小規模
 ```
 
----
+### 14.5 スケーラビリティ（polling driver）
 
-## 15. Presence Client（オプション）
+bot数に応じたpolling driverの推奨設定。
+
+```
+bot数         推奨間隔                     負荷
+────────────────────────────────────────────────────────
+~10 bot       3秒（デフォルト）              ~3 qps、問題なし
+~50 bot       5-10秒に延長                  ~5-10 qps、問題なし
+~100 bot      polling非効率                 pg_notifyハイブリッドに切替
+```
+
+```
+~10 bot（デフォルト）:
+  AGENT_COM_POLL_INTERVAL_MS=3000
+  クエリ: SELECT ... WHERE delivered = false AND target = $1
+  インデックス付き単納SELECT、1クエリ < 1ms
+  PostgreSQL/SQLite共に問題なし
+
+~50 bot:
+  AGENT_COM_POLL_INTERVAL_MS=5000 〜 10000
+  環境変数で調整するだけ。コード変更不要
+
+~100 bot以上:
+  PollingDriverをpg_notifyハイブリッドモードに切替:
+    PostgreSQL: pg_notify受信 → 即座にgetNext()
+    SQLite: 従来のpolling（間隔延長）
+  将来Claude CodeがMCP notificationのコンテキスト注入を
+  サポートした時点でpush方式に完全移行可能
+```
+
+OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分。
+
+---
 
 ```typescript
 // intents空 → イベント一切受信しない
@@ -1200,7 +1306,7 @@ PostgreSQL環境:
   CREATE TABLE IF NOT EXISTS パターンで共存
 
 SQLite環境:
-  agent-com用とagent-memory用で別ファイル
+  agent-com用とagent-memory㔨で別ファイル
   agent-memoryのpgvector依存はSQLiteでは使えない → テキスト検索fallback
 ```
 
@@ -1238,16 +1344,21 @@ SQLite環境:
 
 ```
 全仕様書を一括読み込み → 矛盾検出レポート
-cron 1日1回 or PRマージ後に実行
-結果をCEOのキューに投入
+spec-auditor botがpolling driver（§6.5）で常駐。
+CLAUDE.md相当の指示で24時間ごとに全spec監査を自発実行。
+PRマージ後のトリガーはagent-com notify経由でbot宛にメッセージ送信。
+結果をCEOのキューに投入。
+cron不要。
 ```
 
-### 18.3 bash curl直叩き検出（1時間ごと）
+### 18.3 bash curl直叩き検出（receiver内蔵、1時間ごと）
 
 ```
+receiver内のsetIntervalで自動実行（§13.3と同一実装）。
 Discord REST APIで最新メッセージ取得
 → agent_messages.discord_message_idと突合
 → 未記録のメッセージ = bypass → audit_log + CEO通知
+cron不要。receiverプロセスに内蔵。
 ```
 
 ---
@@ -1263,7 +1374,7 @@ message_queue INSERT前に、受信者のチャンネル別直近発言・会話
 
 routeInbound()とmessage_queue INSERT間に挟み、メッセージを仕分け。
 direct / delegate / summarize の3択。ルールベース + Haikuフォールバック。
-詳細は将来仕様（v0.2.0 で詳細化予定）。
+詳細は別文書（receiver-architecture §19.2）を参照。
 
 ### 19.3 チャンネルtopic表示
 
@@ -1281,7 +1392,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_SQLITE_PATH` | `./data/agent-com.db` | SQLiteファイルパス |
 | `AGENT_COM_RECEIVER_TOKEN` | — | 専用receiver bot token |
 | `DISCORD_TOKEN_{AGENT_ID}` | — | 各botのDiscord token |
-| `AGENT_COM_POLL_INTERVAL_MS` | `1000` | polling間隔 |
+| `AGENT_COM_POLL_INTERVAL_MS` | `3000` | polling間隔（§6.5、§14.5参照） |
 | `AGENT_COM_HEALTH_PORT` | `9000` | healthcheckポート |
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
 | `AGENT_COM_ENRICH_PUSH` | `false` | Push Enrichment(v0.2.0) |
@@ -1337,4 +1448,5 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-12 | v1.0.2: §6.1-6.5 全CLIをMCP内蔵polling driverに統一、§14.5 スケーラビリティ追加、§4.3/4.5/13.3/18.2/18.3 cron依存を全廃止（全てMCP server/receiver内蔵に統一） |
 | 2026-04-10 | v1.0.0: 統合メッセージキュー仕様（旧receiver-architecture + channel-thread-control統合、全22セクション） |
