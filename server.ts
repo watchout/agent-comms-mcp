@@ -733,10 +733,141 @@ async function registerAgent(): Promise<void> {
       await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
     }
   }, 5 * 60 * 1000)
+
+  // Issue #129 Phase 3: start the outbound_queue consumer alongside the
+  // heartbeat. Disable with OUTBOUND_QUEUE_CONSUMER=0 (tests / dev).
+  startOutboundConsumer()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #129 Phase 3 — outbound_queue consumer (message-queue-spec §7)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Polls outbound_queue on a 1-second tick. Claims one pending row at a time
+// using FOR UPDATE SKIP LOCKED + RETURNING so two server instances (or two
+// concurrent ticks) never deliver the same row twice. Claim/release runs in
+// a single SQL statement so the row lock is released as soon as the SELECT
+// returns; the Discord HTTP call happens OUTSIDE the lock so a slow request
+// doesn't stall other tick iterations.
+//
+// Lifecycle:
+//   - startOutboundConsumer() is called from registerAgent() so it boots
+//     alongside the heartbeat once the DB is reachable.
+//   - stopOutboundConsumer() runs from unregisterAgent() so SIGINT/exit
+//     paths cleanly stop the timer and let in-flight ticks drain.
+//
+// Failure handling (spec §3.3):
+//   - Each attempt increments `attempts`. If attempts ≥ max_attempts,
+//     status flips to 'failed' and last_error is recorded.
+//   - Otherwise the row stays at 'pending' so the next tick retries.
+//
+// Disable with `OUTBOUND_QUEUE_CONSUMER=0` for tests / dev that don't want
+// background DB polling.
+const OUTBOUND_POLL_INTERVAL_MS = 1000
+let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
+let outboundConsumerInFlight = false
+
+async function consumeOneOutboundRow(): Promise<void> {
+  // Re-entrancy guard: if a previous tick is still running (slow Discord
+  // call, DB lock contention), skip this tick instead of stacking work.
+  if (outboundConsumerInFlight) return
+  outboundConsumerInFlight = true
+  try {
+    const client = await tryGetDb()
+    if (!client) return
+
+    // Claim one pending row in a single statement: SELECT ... FOR UPDATE
+    // SKIP LOCKED nested inside an UPDATE that bumps attempts and RETURNs
+    // the full row. The row lock is released as soon as the UPDATE commits
+    // (single-statement = implicit txn) so the Discord HTTP call below runs
+    // unlocked.
+    const claimed = await client.query(
+      `UPDATE outbound_queue SET attempts = attempts + 1
+       WHERE id = (
+         SELECT id FROM outbound_queue
+         WHERE status = 'pending'
+         ORDER BY created_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id, message_id, agent_id, channel_external_id, content,
+                 mentions_display, attachments, reply_to_discord_id,
+                 attempts, max_attempts`,
+    ).catch(err => {
+      process.stderr.write(`agent-comms: outbound consumer claim failed: ${err}\n`)
+      return null
+    })
+    if (!claimed || claimed.rows.length === 0) return
+
+    const row = claimed.rows[0]
+    let deliveryError: string | null = null
+    try {
+      // Use the bot's existing discord.js client (loaded with that bot's
+      // token) to post. This matches the legacy adapter path and means we
+      // don't have to load tokens here.
+      await getDiscordClient(row.agent_id).sendAdapterMessage({
+        external_channel_id: row.channel_external_id,
+        content: truncateForPlatform(row.content, 'discord'),
+        // Phase 3 leaves thread/reply context implicit in the
+        // channel_external_id (threads ARE channels in Discord's API).
+      })
+    } catch (err) {
+      deliveryError = String(err).slice(0, 500)
+    }
+
+    if (deliveryError === null) {
+      await client.query(
+        `UPDATE outbound_queue SET status = 'sent', sent_at = now() WHERE id = $1`,
+        [row.id],
+      ).catch(err => {
+        process.stderr.write(`agent-comms: outbound consumer mark-sent failed for id=${row.id}: ${err}\n`)
+      })
+    } else if (row.attempts >= row.max_attempts) {
+      await client.query(
+        `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
+        [deliveryError, row.id],
+      ).catch(err => {
+        process.stderr.write(`agent-comms: outbound consumer mark-failed failed for id=${row.id}: ${err}\n`)
+      })
+      process.stderr.write(`agent-comms: outbound delivery permanently failed (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}): ${deliveryError}\n`)
+    } else {
+      // Leave at status='pending'. record the latest error so operators can
+      // grep without waiting for max_attempts exhaustion.
+      await client.query(
+        `UPDATE outbound_queue SET last_error = $1 WHERE id = $2`,
+        [deliveryError, row.id],
+      ).catch(() => {})
+      process.stderr.write(`agent-comms: outbound delivery transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}): ${deliveryError}\n`)
+    }
+  } finally {
+    outboundConsumerInFlight = false
+  }
+}
+
+function startOutboundConsumer(): void {
+  if (process.env.OUTBOUND_QUEUE_CONSUMER === '0') {
+    process.stderr.write('agent-comms: outbound queue consumer disabled via env\n')
+    return
+  }
+  if (outboundConsumerInterval !== null) return // already running
+  outboundConsumerInterval = setInterval(() => {
+    consumeOneOutboundRow().catch(err => {
+      process.stderr.write(`agent-comms: outbound consumer tick error: ${err}\n`)
+    })
+  }, OUTBOUND_POLL_INTERVAL_MS)
+  process.stderr.write(`agent-comms: outbound queue consumer started (tick=${OUTBOUND_POLL_INTERVAL_MS}ms)\n`)
+}
+
+function stopOutboundConsumer(): void {
+  if (outboundConsumerInterval !== null) {
+    clearInterval(outboundConsumerInterval)
+    outboundConsumerInterval = null
+  }
 }
 
 async function unregisterAgent(): Promise<void> {
   if (heartbeatInterval) clearInterval(heartbeatInterval)
+  stopOutboundConsumer()
   const client = await tryGetDb()
   if (client) {
     await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
@@ -2154,23 +2285,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      // Forward to platform adapters via channel_adapters
+      // Issue #129 Phase 3: outbound_queue INSERT (replaces direct
+      // sendAdapterMessage call). The receiver-side outbound consumer
+      // (startOutboundConsumer / consumeOneOutboundRow above) picks the row
+      // up on its 1-second tick and posts to Discord. This decouples the
+      // send-tool from the (potentially slow) outbound HTTP call so the
+      // tool returns as soon as the DB is durable.
+      //
+      // Resolution order for channel_external_id:
+      //   1. If dest.threadId is set, prefer thread_adapters so the post
+      //      lands in the same thread (threads are channels in Discord's API).
+      //   2. Otherwise fall back to channel_adapters for the parent channel.
       if (client) {
-        const adapters = await client.query(
-          'SELECT platform, external_id FROM channel_adapters WHERE channel_id = $1',
-          [dest.channelId]
-        ).catch(() => ({ rows: [] as any[] }))
-
-        for (const adapter of adapters.rows) {
-          if (adapter.platform === 'discord') {
-            try {
-              await getDiscordClient(agentId).sendAdapterMessage({
-                external_channel_id: adapter.external_id,
-                content: truncateForPlatform(partContent, 'discord'),
-                thread_external_id: dest.threadId,
-              })
-            } catch (err) {
-              process.stderr.write(`agent-comms: discord adapter delivery failed: ${err}\n`)
+        let externalId: string | null = null
+        if (dest.threadId) {
+          const tr = await client.query(
+            `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
+            [dest.threadId],
+          ).catch(() => ({ rows: [] as any[] }))
+          if (tr.rows.length > 0) externalId = tr.rows[0].external_id
+        }
+        if (!externalId) {
+          const cr = await client.query(
+            `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
+            [dest.channelId],
+          ).catch(() => ({ rows: [] as any[] }))
+          if (cr.rows.length > 0) externalId = cr.rows[0].external_id
+        }
+        if (externalId) {
+          // ARC codex audit (PR#135, lead-ama msg 1492293367835660500): the
+          // outbound_queue INSERT must NOT be silently swallowed. Phase 3
+          // makes the queue the sole outbound delivery path, so a failed
+          // INSERT means the Discord reply is permanently lost (the
+          // consumer never sees the row). The CLI rolls back its
+          // transaction on the same failure; the send tool must mirror
+          // that durability contract by surfacing the failure as an error
+          // result so the caller knows their message was DB-saved but
+          // never queued for delivery.
+          try {
+            await client.query(
+              `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
+               VALUES ($1, $2, $3, $4)`,
+              [id, agentId, externalId, truncateForPlatform(partContent, 'discord')],
+            )
+          } catch (err) {
+            process.stderr.write(`agent-comms: outbound_queue INSERT failed: ${err}\n`)
+            await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
+              code: 'OUTBOUND_ENQUEUE_FAILED',
+              message_id: id,
+              channel_external_id: externalId,
+              error: String(err).slice(0, 500),
+            })
+            return {
+              content: [{
+                type: 'text',
+                text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました。メッセージはDB保存済み (message_id: ${id}) ですが、Discordには配信されません。原因: ${String(err).slice(0, 200)}`,
+              }],
+              isError: true,
             }
           }
         }

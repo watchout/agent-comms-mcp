@@ -145,23 +145,23 @@ function sendMessageBody(): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T6: outbound Discord delivery is invoked after the INSERT (ARC codex audit)
+// T6: cli `send` queues outbound delivery via outbound_queue (Phase 3)
 // ─────────────────────────────────────────────────────────────────────────────
-// REGRESSION CLASS: ARC codex audit (2026-04-10) flagged that the first cut
-// committed the row + pg_notify but never relayed the message to Discord, so
-// the reply only existed in the DB and was invisible to humans. The MVP fix
-// is a direct Discord REST API call via deliverToDiscord. Pin that
-// sendMessage actually awaits the helper, and that the helper is defined.
-describe('T6 — `agent-com send` calls outbound Discord delivery', () => {
-  test('deliverToDiscord helper is defined', () => {
-    expect(CLI_SRC).toMatch(/async function deliverToDiscord\s*\(/)
+// REGRESSION CLASS: Phase 1.5 used a local `deliverToDiscord` REST helper
+// that ran inside the transaction and failed synchronously. Phase 3 (Issue
+// #129) replaces it with an outbound_queue INSERT — the receiver consumer
+// dequeues and posts asynchronously. The legacy helper MUST be gone.
+// Detailed Phase 3 invariants live in
+// tests/spec-enforcement/outbound-queue-phase3.test.ts; this test only pins
+// the legacy helper's removal so a future revert is caught here too.
+describe('T6 — `agent-com send` no longer calls deliverToDiscord (Phase 3)', () => {
+  test('legacy deliverToDiscord helper is removed', () => {
+    expect(CLI_SRC).not.toMatch(/async function deliverToDiscord\s*\(/)
   })
-  test('sendMessage awaits deliverToDiscord with channel_id + threadId + content', () => {
+  test('sendMessage no longer references deliverToDiscord or discord.com REST API', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/await deliverToDiscord\s*\(\s*db\s*,\s*state\.channel_id\s*,\s*threadId\s*,\s*content\s*\)/)
-  })
-  test('deliverToDiscord uses Discord REST API v10 channels endpoint', () => {
-    expect(CLI_SRC).toMatch(/discord\.com\/api\/v10\/channels\/\$\{externalId\}\/messages/)
+    expect(body).not.toMatch(/deliverToDiscord\(/)
+    expect(body).not.toMatch(/discord\.com\/api\//)
   })
 })
 
@@ -242,67 +242,20 @@ describe('T8 — thread_id flows from next → state → send → outbound', () 
     // Negative: the previous shape hardcoded NULL between 'agent-comms' and 'outbound'.
     expect(body).not.toMatch(/'agent-comms',\s*NULL,\s*'outbound'/)
   })
-  test('sendMessage passes threadId to deliverToDiscord', () => {
+  // Phase 3 (Issue #129): outbound delivery is async via outbound_queue.
+  // The thread_id flow continues — the queued row's channel_external_id is
+  // resolved through thread_adapters first (so the post lands in the thread,
+  // not the parent channel). Pin both the resolution lookup and the fact
+  // that threadId still flows into the lookup.
+  test('sendMessage resolves channel_external_id via thread_adapters when threadId is set', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/deliverToDiscord\([^)]*threadId[^)]*\)/)
+    expect(body).toMatch(/if\s*\(\s*threadId\s*\)\s*\{[\s\S]{0,300}thread_adapters/)
   })
 })
 
-// ─────────────────────────────────────────────────────────────────────────────
-// T9: Discord delivery failure preserves the in-flight state and signal
-// ─────────────────────────────────────────────────────────────────────────────
-// REGRESSION CLASS: ARC codex audit follow-up (2026-04-10, msg
-// 1492266518673887262) — the previous behavior unconditionally deleted the
-// state file and inbox signal after the deliverToDiscord call, so a Discord
-// failure left the operator with an orphan DB row and no recoverable handle.
-// Fix invariants:
-//   (a) failure branch returns BEFORE the unlinkSync calls
-//   (b) failure response carries `ok: false`, `db_saved: true`, and a `retry`
-//       hint so the caller can branch on the failure
-//   (c) the success branch (which DOES unlink) is gated on
-//       `deliveryResult.delivered === true`
-describe('T9 — Discord delivery failure preserves state file and inbox signal', () => {
-  test('sendMessage branches on !deliveryResult.delivered before any unlinkSync', () => {
-    const body = sendMessageBody()
-    // Find the failure branch start.
-    const guardIdx = body.search(/if\s*\(\s*!deliveryResult\.delivered\s*\)/)
-    expect(guardIdx).toBeGreaterThan(-1)
-    // Phase 2 (Issue #128) renamed the unlink call sites: queue mode no longer
-    // touches the filesystem at all (it UPDATEs message_queue + clears
-    // current_message_id), and signal-mode unlinks `target.signal_path` /
-    // `target.state_path`. Both finalisation paths must live AFTER the guard.
-    const finalIdx = body.indexOf('unlinkSync(target.signal_path)')
-    expect(finalIdx).toBeGreaterThan(guardIdx)
-    // The replied-status UPDATE (queue mode finalisation) must also be after.
-    const repliedIdx = body.indexOf("status = 'replied'")
-    expect(repliedIdx).toBeGreaterThan(guardIdx)
-  })
-
-  test('failure branch reports ok:false, db_saved:true, and a retry hint', () => {
-    const body = sendMessageBody()
-    // Slice from the guard to the failure-branch exit. PR#134 wrapped the
-    // body in a transaction; early exits are now `throw new CliSendExit(1)`
-    // (process.exit bypasses finally and would skip ROLLBACK). Use the throw
-    // as the failure-branch end marker.
-    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
-    expect(guardIdx).toBeGreaterThan(-1)
-    expect(exitIdx).toBeGreaterThan(guardIdx)
-    const failureBranch = body.slice(guardIdx, exitIdx)
-    expect(failureBranch).toMatch(/ok:\s*false/)
-    expect(failureBranch).toMatch(/db_saved:\s*true/)
-    expect(failureBranch).toMatch(/discord_delivered:\s*false/)
-    expect(failureBranch).toMatch(/discord_skip_reason:/)
-    expect(failureBranch).toMatch(/retry:/)
-  })
-
-  test('failure branch exits non-zero (does not fall through to success)', () => {
-    const body = sendMessageBody()
-    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    // PR#134 transaction wrapper: the failure branch throws CliSendExit(1)
-    // which is caught by the outer wrapper and translated to process.exit(1)
-    // after ROLLBACK + db.end() run via the finally chain.
-    const tail = body.slice(guardIdx)
-    expect(tail).toMatch(/throw new CliSendExit\(1\)/)
-  })
-})
+// T9 (Phase 1.5/2 Discord-failure preservation) was removed in Phase 3
+// (Issue #129). The CLI no longer has a synchronous Discord-delivery
+// failure branch — `deliverToDiscord` is gone, and the outbound HTTP call
+// is now done by the receiver consumer (server.ts) on its 1-second tick.
+// The consumer handles retries via attempts/max_attempts, covered by
+// tests/spec-enforcement/outbound-queue-phase3.test.ts T2.

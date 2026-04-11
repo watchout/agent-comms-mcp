@@ -217,39 +217,12 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
     expect(body).toMatch(/target\.state_path/)
     expect(body).toMatch(/unlinkSync\(target\.signal_path\)/)
   })
-  test('failure response carries mode so callers can branch on queue vs signal', () => {
-    const body = sendMessageBody()
-    expect(body).toMatch(/ok:\s*false[\s\S]{0,200}mode:\s*target\.mode/)
-  })
-  // PR#134 ARC follow-up (lead-ama msg 1492279341898272849) — double-reply
-  // prevention. In queue mode, even on Discord delivery failure the queue row
-  // MUST be marked 'replied' and current_message_id MUST be cleared, so a
-  // second `next/send` cycle can't generate a duplicate reply through the
-  // spec'd flow. Outbound retry is delegated to Phase 3 outbound_queue.
-  test('queue-mode failure branch marks message_queue replied + clears current_message_id', () => {
-    const body = sendMessageBody()
-    // PR#134 transaction wrapper: slice from the guard to the
-    // `throw new CliSendExit(1)` that ends the failure branch.
-    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    expect(guardIdx).toBeGreaterThan(-1)
-    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
-    expect(exitIdx).toBeGreaterThan(guardIdx)
-    const failureBranch = body.slice(guardIdx, exitIdx)
-    // The replied UPDATE is gated on queue mode (target.mode === 'queue').
-    expect(failureBranch).toMatch(/target\.mode\s*===\s*'queue'/)
-    expect(failureBranch).toMatch(/UPDATE message_queue SET status\s*=\s*'replied'/)
-    expect(failureBranch).toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
-  })
-  test('signal-mode failure branch does NOT touch the legacy filesystem state', () => {
-    const body = sendMessageBody()
-    const guardIdx = body.indexOf('if (!deliveryResult.delivered)')
-    const exitIdx = body.indexOf('throw new CliSendExit(1)', guardIdx)
-    const failureBranch = body.slice(guardIdx, exitIdx)
-    // The Phase 1.5 invariant is preserved: signal mode leaves both files in
-    // place so a re-run can retry. The failure branch must NOT contain any
-    // unlinkSync calls.
-    expect(failureBranch).not.toMatch(/unlinkSync/)
-  })
+  // The PR#134 failure-response and queue/signal failure-branch tests were
+  // removed in Phase 3 (Issue #129). Phase 3 has no synchronous Discord-
+  // delivery failure branch in sendMessage — outbound delivery is async via
+  // outbound_queue + the receiver consumer. The consumer's retry logic
+  // (attempts/max_attempts → status='failed') is covered by
+  // tests/spec-enforcement/outbound-queue-phase3.test.ts T2.
   // PR#134 ARC follow-up (lead-ama msg 1492283029933133874) — concurrent send
   // race prevention. The entire body must run inside BEGIN/COMMIT with
   // FOR UPDATE on the agents row, so two parallel `agent-com send` calls

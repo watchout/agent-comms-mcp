@@ -253,74 +253,11 @@ function buildAuthMetadata(agentId: string, channel: string, content: string): R
   return { auth: { signature, timestamp } }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Outbound platform delivery (Discord REST API direct call)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// ARC codex audit (2026-04-10): after the INSERT + pg_notify, the CLI must
-// also relay the message to the originating platform (Discord first), or the
-// reply only exists in the DB and never reaches human users in the channel.
-//
-// Phase 1 minimum: call Discord REST API directly using $DISCORD_BOT_TOKEN.
-// Phase 3 will replace this with an `outbound_queue` INSERT consumed by a
-// dedicated outbound worker — see message-queue-spec §7.2.
-//
-// Resolution order:
-//   1. If `thread_id` is set on the in-flight state, prefer thread_adapters
-//      (so the reply lands in the same thread, not the parent).
-//   2. Otherwise, fall back to channel_adapters for the parent channel.
-async function deliverToDiscord(
-  db: Client,
-  channelId: string,
-  threadId: string | null,
-  content: string,
-): Promise<{ delivered: boolean; reason?: string }> {
-  const token = process.env.DISCORD_BOT_TOKEN
-  if (!token) return { delivered: false, reason: 'DISCORD_BOT_TOKEN not set' }
-
-  // Resolve external Discord channel/thread ID.
-  let externalId: string | null = null
-  if (threadId) {
-    const r = await db.query(
-      `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
-      [threadId],
-    )
-    if (r.rows.length > 0) externalId = r.rows[0].external_id
-  }
-  if (!externalId) {
-    const r = await db.query(
-      `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-      [channelId],
-    )
-    if (r.rows.length > 0) externalId = r.rows[0].external_id
-  }
-  if (!externalId) return { delivered: false, reason: 'no discord adapter mapping' }
-
-  // Discord 2,000 char limit — codepoint-safe truncation.
-  const DISCORD_LIMIT = 2000
-  let body = content
-  if ([...body].length > DISCORD_LIMIT) {
-    body = [...body].slice(0, DISCORD_LIMIT - 1).join('') + '…'
-  }
-
-  try {
-    const res = await fetch(`https://discord.com/api/v10/channels/${externalId}/messages`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bot ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ content: body }),
-    })
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      return { delivered: false, reason: `discord ${res.status}: ${text.slice(0, 200)}` }
-    }
-    return { delivered: true }
-  } catch (err) {
-    return { delivered: false, reason: `discord fetch failed: ${err}` }
-  }
-}
+// Issue #129 Phase 3: deliverToDiscord (Phase 1.5 direct REST helper) was
+// removed. Outbound delivery is now an outbound_queue INSERT inside
+// sendMessage, with the receiver-side consumer
+// (server.ts:startOutboundConsumer) doing the actual Discord post on a
+// 1-second tick.
 
 /**
  * `agent-com next` — pop one pending message_queue row and stamp it as the
@@ -748,70 +685,72 @@ async function sendMessage(args: string[]) {
         )
       }
 
-      // ARC codex audit (2026-04-10): after the DB row is committed, relay the
-      // message to the originating platform. Phase 1 minimum is a direct Discord
-      // REST API call (Phase 3 will replace this with outbound_queue).
-      // NOTE: this HTTP call happens INSIDE the transaction (PR#134 ARC
-      // follow-up). The agents row lock is held for the duration of the call.
-      const deliveryResult = await deliverToDiscord(db, state.channel_id, threadId, content)
+      // ─────────────────────────────────────────────────────────────────
+      // Issue #129 Phase 3: outbound_queue INSERT (replaces deliverToDiscord)
+      // ─────────────────────────────────────────────────────────────────
+      // The Phase 1.5 cut called Discord REST API directly inside the
+      // transaction, holding the agents row lock for the duration of the
+      // HTTP call. Phase 3 replaces that with an outbound_queue row INSERT
+      // — the receiver-side consumer (server.ts:startOutboundConsumer)
+      // dequeues and posts on its 1-second tick.
+      //
+      // Benefits:
+      //   - Lock holding time drops from ~Discord-RTT to ~1ms (DB only).
+      //   - Retries are centralised in the consumer (attempts/max_attempts).
+      //   - Outbound failures no longer fail the send tool synchronously.
+      //
+      // Resolution order for channel_external_id mirrors deliverToDiscord:
+      //   1. thread_adapters (when threadId is set, so the post lands in
+      //      the thread, not the parent)
+      //   2. channel_adapters fallback
+      //
+      // If no Discord adapter exists for this channel, the row never gets
+      // queued. The receiver pipeline still picks up the agent_messages row
+      // via pg_notify, so other bots see the message; only the human-facing
+      // Discord display is skipped. We surface this in the response.
+      let discordExternalId: string | null = null
+      if (threadId) {
+        const tr = await db.query(
+          `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
+          [threadId],
+        )
+        if (tr.rows.length > 0) discordExternalId = tr.rows[0].external_id
+      }
+      if (!discordExternalId) {
+        const cr = await db.query(
+          `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
+          [state.channel_id],
+        )
+        if (cr.rows.length > 0) discordExternalId = cr.rows[0].external_id
+      }
 
-      // ARC codex audit follow-ups for the failure branch (PR#133 → PR#134):
-      //
-      // Phase 1.5 (signal mode, ARC msg 1492266518673887262): the legacy
-      // filesystem state file + inbox signal MUST stay in place on failure so
-      // the operator can resend by re-running `agent-com send`. The DB row is
-      // already INSERTed; a naive retry creates a duplicate row but preserves
-      // delivery semantics.
-      //
-      // Phase 2 (queue mode, ARC msg 1492279341898272849): the DB row is the
-      // queue's source of truth. Leaving the queue at 'read' would let a
-      // re-run pop the same logical message and INSERT a SECOND reply through
-      // the spec'd flow — the very double-reply class the queue was meant to
-      // prevent. So in queue mode we mark the row 'replied' and clear
-      // current_message_id even on Discord failure. The agent_messages row is
-      // intact; outbound retry is delegated to Phase 3 outbound_queue.
-      //
-      // Both modes still report ok:false + db_saved:true so callers can detect
-      // the Discord-side failure and decide whether to surface it to humans.
-      if (!deliveryResult.delivered) {
-        if (target.mode === 'queue' && target.queue_id !== null) {
+      let outboundQueued = false
+      let outboundSkipReason: string | null = null
+      if (discordExternalId) {
+        try {
           await db.query(
-            `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
-             WHERE id = $2`,
-            [id, target.queue_id],
+            `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
+             VALUES ($1, $2, $3, $4)`,
+            [id, agentId, discordExternalId, content],
           )
-          await db.query(
-            `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
-            [agentId],
-          )
+          outboundQueued = true
+        } catch (err) {
+          // INSERT into outbound_queue failed — this is a DB error, not a
+          // Discord error. Roll back the entire transaction so the caller
+          // gets a clean retry path. The throw is caught by the inner finally
+          // (which ROLLBACKs because committed=false) and the outer catch
+          // (which exits non-zero).
+          throw err
         }
-        // Signal mode: leave target.state_path / target.signal_path in place.
-        // COMMIT the INSERT + (queue UPDATEs if any) so the failure response's
-        // db_saved:true claim is honoured even when we exit non-zero.
-        await db.query('COMMIT')
-        committed = true
-        process.stdout.write(JSON.stringify({
-          ok: false,
-          mode: target.mode,
-          message_id: id,
-          channel_id: state.channel_id,
-          thread_id: threadId,
-          reply_to: state.message_id,
-          mentions,
-          auth_signed: authMeta !== undefined,
-          db_saved: true,
-          discord_delivered: false,
-          discord_skip_reason: deliveryResult.reason,
-          // Mode-specific retry guidance.
-          retry: target.mode === 'queue'
-            ? 'queue marked replied to prevent double-reply through next/send. Outbound retry must wait for Phase 3 outbound_queue, OR post the agent_messages row to Discord manually.'
-            : 'run agent-com send again to retry Discord delivery (will create a duplicate DB row — clean up manually after success)',
-        }) + '\n')
-        throw new CliSendExit(1)
+      } else {
+        outboundSkipReason = 'no discord adapter mapping for this channel'
       }
 
       // ─────────────────────────────────────────────────────────────────
-      // Discord 配信成功 — finalize in-flight state.
+      // Finalize in-flight state. Runs unconditionally now: in Phase 3 the
+      // Discord post is async, so the CLI's job is "queue the reply" not
+      // "deliver the reply". The queue row is replied / current_message_id
+      // is cleared regardless of whether outbound_queue actually got a row.
       // ─────────────────────────────────────────────────────────────────
       if (target.mode === 'queue' && target.queue_id !== null) {
         // Spec §4.2 step 9-11: replied + clear current_message_id.
@@ -845,7 +784,13 @@ async function sendMessage(args: string[]) {
         reply_to: state.message_id,
         mentions,
         auth_signed: authMeta !== undefined,
-        discord_delivered: true,
+        // Phase 3: outbound delivery is async via the receiver consumer.
+        // `outbound_queued` is true when a row was INSERTed into
+        // outbound_queue. When false, no Discord adapter exists for this
+        // channel — the agent_messages row is still committed and reaches
+        // other bots via pg_notify, but no Discord post will happen.
+        outbound_queued: outboundQueued,
+        ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
     } finally {
       // If we threw without committing (validation error, NO_CURRENT_MESSAGE,
