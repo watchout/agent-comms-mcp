@@ -20,9 +20,9 @@
  */
 
 import { Client } from 'pg'
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { homedir, tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 
 // --- DB connection ---
@@ -185,33 +185,11 @@ function requireAgentId(command: string): string {
   return id
 }
 
-/**
- * Inbox signal directory shared with server.ts (`sendInboxSignal`). routeInbound
- * already filters recipients on push, so reading these signals == reading the
- * agent's authoritative pending queue. Each `.signal` file is named with a
- * Date.now() prefix so lexical sort == chronological order.
- */
-function inboxDir(agentId: string): string {
-  const stateDir = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
-  return join(stateDir, 'inbox', agentId)
-}
-
-function currentStatePath(agentId: string): string {
-  return join(tmpdir(), `agent-com-${agentId}.current`)
-}
-
-/** Return signal file paths sorted oldest-first, or [] if none / dir missing. */
-function listSignals(agentId: string): string[] {
-  const dir = inboxDir(agentId)
-  try {
-    return readdirSync(dir)
-      .filter(f => f.endsWith('.signal'))
-      .sort()
-      .map(f => join(dir, f))
-  } catch {
-    return []
-  }
-}
+// Issue #130 Phase 4: inboxDir, listSignals, currentStatePath (filesystem
+// signal helpers) were removed. Delivery is fully queue-based — `nextMessage`
+// reads from message_queue, `sendMessage` reads agents.current_message_id.
+// The legacy /tmp/agent-com-$AGENT_ID.current state file and the
+// $AGENT_COMMS_STATE_DIR/inbox/{agent}/*.signal files are no longer used.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HMAC auth metadata (mirrors server.ts:createAuthMetadata L665-671)
@@ -276,11 +254,6 @@ function buildAuthMetadata(agentId: string, channel: string, content: string): R
  *      already enriched it on INSERT) — no second query into agent_messages
  *      is required for the canonical fields.
  *   5. Emit JSON with §4.1 shape (waiting count, content, channel_id, ...).
- *
- * Mixed Mode (spec §21): if the queue is empty for this agent, fall back to
- * the legacy filesystem-signal path so existing bots that haven't migrated
- * to the receiver-with-message_queue path still work. Operators can opt out
- * of the fallback by setting AGENT_COMMS_LEGACY_QUEUE=0.
  *
  * Output (stdout, single JSON object):
  *   { waiting: 0 }                                                — empty
@@ -360,16 +333,8 @@ async function nextMessage() {
     }
 
     if (row === null) {
-      // Mixed Mode (§21): fall back to filesystem signals for any inbox
-      // signals that the receiver wrote without going through message_queue
-      // (e.g. bots not yet migrated). Skip when explicitly disabled.
-      if (process.env.AGENT_COMMS_LEGACY_QUEUE !== '0') {
-        const fallback = await nextMessageFromSignal(db, agentId)
-        if (fallback) {
-          process.stdout.write(JSON.stringify(fallback) + '\n')
-          return
-        }
-      }
+      // Issue #130 Phase 4: Mixed Mode signal fallback removed. The queue
+      // is the sole source. If it's empty, report waiting: 0.
       process.stdout.write(JSON.stringify({ waiting: 0 }) + '\n')
       return
     }
@@ -411,64 +376,8 @@ async function nextMessage() {
   }
 }
 
-/**
- * Mixed-Mode legacy fallback: if message_queue is empty for this agent, scan
- * the filesystem signal directory and synthesize a queue-shaped response.
- * Returns null when there is no signal either. Writes the legacy state file
- * so `sendMessage` can recover the reply target via either path.
- */
-async function nextMessageFromSignal(db: Client, agentId: string): Promise<Record<string, unknown> | null> {
-  const signals = listSignals(agentId)
-  if (signals.length === 0) return null
-  const signalPath = signals[0]
-  let messageId: string
-  let signalFrom: string | null = null
-  try {
-    const sig = JSON.parse(readFileSync(signalPath, 'utf-8'))
-    messageId = sig.id
-    signalFrom = sig.from ?? null
-  } catch {
-    return null
-  }
-
-  const r = await db.query(
-    `SELECT id, channel_id, author_id, content, message_type, reply_to, thread_id, created_at
-     FROM agent_messages WHERE id = $1`,
-    [messageId],
-  )
-  if (r.rows.length === 0) {
-    // Stale signal — drop and report empty. Caller will surface waiting:0.
-    try { unlinkSync(signalPath) } catch {}
-    return { waiting: 0, dropped_stale: messageId }
-  }
-  const row = r.rows[0]
-
-  // Write the legacy state file so the existing send-path branch can pick it up.
-  writeFileSync(
-    currentStatePath(agentId),
-    JSON.stringify({
-      message_id: row.id,
-      channel_id: row.channel_id,
-      thread_id: row.thread_id ?? null,
-      signal_path: signalPath,
-    }),
-    { mode: 0o600 },
-  )
-
-  return {
-    waiting: signals.length,
-    mode: 'signal',
-    queue_id: null,
-    message_id: row.id,
-    channel_id: row.channel_id,
-    thread_id: row.thread_id ?? null,
-    from: row.author_id ?? signalFrom,
-    content: row.content,
-    message_type: row.message_type,
-    source: 'legacy-signal',
-    created_at: row.created_at,
-  }
-}
+// Issue #130 Phase 4: nextMessageFromSignal (Mixed-Mode legacy fallback) was
+// removed. The queue (message_queue table) is the sole message source.
 
 /**
  * `agent-com send` — reply to the message captured by the most recent `next`
@@ -556,14 +465,13 @@ async function sendMessage(args: string[]) {
       // line. The first caller wins; the second blocks here until the first
       // commits, then reads the post-commit state (current_message_id = NULL
       // after a successful send).
+      // Issue #130 Phase 4: target resolution is queue-only. The Mixed-Mode
+      // signal fallback (Phase 2-3) has been removed.
       type Target = {
-        mode: 'queue' | 'signal'
         reply_to: string         // agent_messages.id of the original
         channel_id: string
         thread_id: string | null
-        queue_id: number | null  // message_queue.id (queue mode only)
-        signal_path: string | null
-        state_path: string | null
+        queue_id: number         // message_queue.id
       }
       let target: Target | null = null
 
@@ -582,34 +490,11 @@ async function sendMessage(args: string[]) {
           let payload: Record<string, any> = {}
           try { payload = JSON.parse(qrow.payload) } catch {}
           target = {
-            mode: 'queue',
             reply_to: qrow.message_id ?? payload.message_id,
             channel_id: payload.channel_id,
             thread_id: payload.thread_id ?? null,
             queue_id: qrow.id,
-            signal_path: null,
-            state_path: null,
           }
-        }
-      }
-
-      // Mixed-Mode fallback: legacy /tmp state file (set by signal-mode `next`).
-      const statePath = currentStatePath(agentId)
-      if (target === null && existsSync(statePath)) {
-        try {
-          const state = JSON.parse(readFileSync(statePath, 'utf-8'))
-          target = {
-            mode: 'signal',
-            reply_to: state.message_id,
-            channel_id: state.channel_id,
-            thread_id: state.thread_id ?? null,
-            queue_id: null,
-            signal_path: state.signal_path ?? null,
-            state_path: statePath,
-          }
-        } catch (err) {
-          console.error(`Error: failed to read legacy state file ${statePath}: ${err}`)
-          throw new CliSendExit(1)
         }
       }
 
@@ -622,26 +507,18 @@ async function sendMessage(args: string[]) {
         throw new CliSendExit(1)
       }
 
-      // ARC codex audit (2026-04-10): thread_id must flow through to the INSERT
-      // and the outbound delivery so the reply lands in the same thread.
       const threadId: string | null = target.thread_id
-
-      // Re-bind state alias for the legacy code paths below that referenced
-      // `state.channel_id` etc. — keeps the diff localised.
-      const state = {
-        message_id: target.reply_to,
-        channel_id: target.channel_id,
-        signal_path: target.signal_path,
-      }
+      const channelId: string = target.channel_id
+      const replyTo: string = target.reply_to
       // Membership check — bot can only reply in channels it belongs to.
-      const ch = await db.query('SELECT members FROM channels WHERE id = $1', [state.channel_id])
+      const ch = await db.query('SELECT members FROM channels WHERE id = $1', [channelId])
       if (ch.rows.length === 0) {
-        console.error(`Error: channel ${state.channel_id} not found`)
+        console.error(`Error: channel ${channelId} not found`)
         throw new CliSendExit(1)
       }
       const members: string[] = ch.rows[0].members ?? []
       if (!members.includes(agentId)) {
-        console.error(`Error: ${agentId} is not a member of channel ${state.channel_id}`)
+        console.error(`Error: ${agentId} is not a member of channel ${channelId}`)
         throw new CliSendExit(1)
       }
 
@@ -650,7 +527,7 @@ async function sendMessage(args: string[]) {
       // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
       // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
       // secret, matching server.ts:createAuthMetadata behavior.
-      const authMeta = buildAuthMetadata(agentId, state.channel_id, content)
+      const authMeta = buildAuthMetadata(agentId, channelId, content)
       const metadata: Record<string, unknown> = {
         mentions,
         cli: 'agent-com next/send (MVP)',
@@ -661,7 +538,7 @@ async function sendMessage(args: string[]) {
            (id, channel_id, author_id, content, message_type, reply_to, metadata,
             depth, source, thread_id, direction, role)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'agent-comms', $8, 'outbound', 'agent')`,
-        [id, state.channel_id, agentId, content, messageType, state.message_id, JSON.stringify(metadata), threadId],
+        [id, channelId, agentId, content, messageType, replyTo, JSON.stringify(metadata), threadId],
       )
 
       // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
@@ -679,7 +556,7 @@ async function sendMessage(args: string[]) {
             event: 'message.created',
             to: recipient,
             message_id: id,
-            channel_id: state.channel_id,
+            channel_id: channelId,
             source: 'cli-send',
           })],
         )
@@ -719,7 +596,7 @@ async function sendMessage(args: string[]) {
       if (!discordExternalId) {
         const cr = await db.query(
           `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-          [state.channel_id],
+          [channelId],
         )
         if (cr.rows.length > 0) discordExternalId = cr.rows[0].external_id
       }
@@ -747,48 +624,30 @@ async function sendMessage(args: string[]) {
       }
 
       // ─────────────────────────────────────────────────────────────────
-      // Finalize in-flight state. Runs unconditionally now: in Phase 3 the
-      // Discord post is async, so the CLI's job is "queue the reply" not
-      // "deliver the reply". The queue row is replied / current_message_id
-      // is cleared regardless of whether outbound_queue actually got a row.
+      // Finalize in-flight state (§4.2 step 9-11).
+      // Issue #130 Phase 4: signal-mode unlink path removed. Queue mode is
+      // the only path now.
       // ─────────────────────────────────────────────────────────────────
-      if (target.mode === 'queue' && target.queue_id !== null) {
-        // Spec §4.2 step 9-11: replied + clear current_message_id.
-        await db.query(
-          `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
-           WHERE id = $2`,
-          [id, target.queue_id],
-        )
-        await db.query(
-          `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
-          [agentId],
-        )
-      }
-      // COMMIT the success path before touching the filesystem (the
-      // unlinkSync calls below are non-transactional and must run after
-      // the DB state is durable).
+      await db.query(
+        `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+         WHERE id = $2`,
+        [id, target.queue_id],
+      )
+      await db.query(
+        `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+        [agentId],
+      )
       await db.query('COMMIT')
       committed = true
-      if (target.mode === 'signal') {
-        // Mixed-Mode legacy path: clear filesystem state after COMMIT.
-        if (target.state_path) { try { unlinkSync(target.state_path) } catch {} }
-        if (target.signal_path) { try { unlinkSync(target.signal_path) } catch {} }
-      }
 
       process.stdout.write(JSON.stringify({
         ok: true,
-        mode: target.mode,
         message_id: id,
-        channel_id: state.channel_id,
+        channel_id: channelId,
         thread_id: threadId,
-        reply_to: state.message_id,
+        reply_to: replyTo,
         mentions,
         auth_signed: authMeta !== undefined,
-        // Phase 3: outbound delivery is async via the receiver consumer.
-        // `outbound_queued` is true when a row was INSERTed into
-        // outbound_queue. When false, no Discord adapter exists for this
-        // channel — the agent_messages row is still committed and reaches
-        // other bots via pg_notify, but no Discord post will happen.
         outbound_queued: outboundQueued,
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
