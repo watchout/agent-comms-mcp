@@ -690,22 +690,147 @@ async function listAgents() {
   }
 }
 
-async function status() {
+/**
+ * `agent-com status` — system or per-agent status (v1.0.2 §6.5).
+ *
+ * When AGENT_ID is set: per-agent mode → `{ agent_id, pending, status, last_seen_at }`
+ * When no AGENT_ID: system-wide → channels / agents / messages summary
+ * `--format json` → single-line JSON (for polling-driver / scripting)
+ */
+async function status(args: string[]) {
+  const { flags } = parseArgs(args)
+  const format = flags.format ?? 'text'
+  const agentId = process.env.AGENT_ID ?? flags['agent-id']
+
   const db = await getDb()
+  try {
+    if (agentId) {
+      const pending = await db.query(
+        `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+        [agentId],
+      )
+      const agent = await db.query(
+        `SELECT status, last_seen_at, current_message_id FROM agents WHERE agent_id = $1`,
+        [agentId],
+      )
+      const row = agent.rows[0]
+      const result = {
+        agent_id: agentId,
+        pending: pending.rows[0]?.n ?? 0,
+        status: row?.status ?? 'unknown',
+        last_seen_at: row?.last_seen_at ?? null,
+        current_message_id: row?.current_message_id ?? null,
+      }
+      if (format === 'json') {
+        process.stdout.write(JSON.stringify(result) + '\n')
+      } else {
+        console.log(`Agent: ${agentId}`)
+        console.log(`Status: ${result.status}`)
+        console.log(`Pending: ${result.pending}`)
+        console.log(`Last seen: ${result.last_seen_at ?? 'never'}`)
+        console.log(`Current message: ${result.current_message_id ?? 'none'}`)
+      }
+    } else {
+      const chCount = await db.query('SELECT COUNT(*) as cnt FROM channels')
+      const agOnline = await db.query("SELECT COUNT(*) as cnt FROM agents WHERE status = 'online'")
+      const agTotal = await db.query('SELECT COUNT(*) as cnt FROM agents')
+      const msgRecent = await db.query("SELECT COUNT(*) as cnt FROM agent_messages WHERE created_at > now() - interval '1 hour'")
+      if (format === 'json') {
+        process.stdout.write(JSON.stringify({
+          channels: parseInt(chCount.rows[0].cnt),
+          agents_online: parseInt(agOnline.rows[0].cnt),
+          agents_total: parseInt(agTotal.rows[0].cnt),
+          messages_1h: parseInt(msgRecent.rows[0].cnt),
+        }) + '\n')
+      } else {
+        console.log('=== agent-com status ===')
+        console.log(`DB: connected`)
+        console.log(`Channels: ${chCount.rows[0].cnt}`)
+        console.log(`Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total`)
+        console.log(`Messages (1h): ${msgRecent.rows[0].cnt}`)
+      }
+    }
+  } finally {
+    await db.end()
+  }
+}
 
-  const chCount = await db.query('SELECT COUNT(*) as cnt FROM channels')
-  const agOnline = await db.query("SELECT COUNT(*) as cnt FROM agents WHERE status = 'online'")
-  const agTotal = await db.query('SELECT COUNT(*) as cnt FROM agents')
-  const msgRecent = await db.query("SELECT COUNT(*) as cnt FROM agent_messages WHERE created_at > now() - interval '1 hour'")
-  const auditRecent = await db.query("SELECT COUNT(*) as cnt FROM audit_log WHERE created_at > now() - interval '1 hour'")
+/**
+ * `agent-com heartbeat` — update agents.last_seen_at (v1.0.2 §4.5 / §6.5).
+ * Requires AGENT_ID env var.
+ */
+async function heartbeat() {
+  const agentId = requireAgentId('heartbeat')
+  const db = await getDb()
+  try {
+    await db.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [agentId])
+    process.stdout.write(JSON.stringify({ ok: true, agent_id: agentId, last_seen_at: new Date().toISOString() }) + '\n')
+  } finally {
+    await db.end()
+  }
+}
 
-  console.log('=== agent-com status ===')
-  console.log(`DB: connected`)
-  console.log(`Channels: ${chCount.rows[0].cnt}`)
-  console.log(`Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total`)
-  console.log(`Messages (1h): ${msgRecent.rows[0].cnt}`)
-  console.log(`Audit events (1h): ${auditRecent.rows[0].cnt}`)
-  await db.end()
+/**
+ * `agent-com daemon` — long-running polling driver for MCP-unsupported envs
+ * (v1.0.2 §6.5). Runs heartbeat + poll loop, prints pending messages to
+ * stdout when they arrive. Designed for tmux sessions where the operator
+ * reads stdout and manually calls `next`.
+ *
+ * Usage: AGENT_ID=<id> agent-com daemon [--poll-interval 3000]
+ */
+async function daemon(args: string[]) {
+  const agentId = requireAgentId('daemon')
+  const { flags } = parseArgs(args)
+  const pollInterval = parseInt(flags['poll-interval'] ?? '3000', 10)
+  const heartbeatInterval = 30_000
+
+  console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms`)
+  console.error(`[daemon] Press Ctrl+C to stop`)
+
+  // Heartbeat timer
+  setInterval(async () => {
+    const db = await getDb()
+    try {
+      await db.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [agentId])
+    } catch (err) {
+      console.error(`[daemon] heartbeat error: ${err}`)
+    } finally {
+      await db.end()
+    }
+  }, heartbeatInterval)
+
+  // Poll timer
+  const poll = async () => {
+    const db = await getDb()
+    try {
+      const r = await db.query(
+        `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+        [agentId],
+      )
+      const pending: number = r.rows[0]?.n ?? 0
+      if (pending > 0) {
+        // Output a notification line so tmux watchers / piped consumers can act.
+        process.stdout.write(JSON.stringify({
+          event: 'pending',
+          agent_id: agentId,
+          pending,
+          ts: new Date().toISOString(),
+          hint: `Run 'AGENT_ID=${agentId} agent-com next' to process`,
+        }) + '\n')
+      }
+    } catch (err) {
+      console.error(`[daemon] poll error: ${err}`)
+    } finally {
+      await db.end()
+    }
+  }
+
+  // Initial poll + start interval
+  await poll()
+  setInterval(poll, pollInterval)
+
+  // Keep the process alive
+  await new Promise(() => {})
 }
 
 // --- Main ---
@@ -727,7 +852,11 @@ if (command === 'channel') {
     process.exit(1)
   }
 } else if (command === 'status') {
-  await status()
+  await status([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'heartbeat') {
+  await heartbeat()
+} else if (command === 'daemon') {
+  await daemon([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'next') {
   await nextMessage()
 } else if (command === 'send') {
@@ -747,9 +876,12 @@ Commands:
   agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code]
   status
 
-Message I/O (Issue #132, MVP — requires AGENT_ID env var):
+Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
   send --content "..." --mentions cto,ceo [--message-type chat]
-  agents                                              — list registered agents (JSON)`)
+  agents                                              — list registered agents (JSON)
+  status [--format json] [--agent-id <id>]            — system or per-agent status
+  heartbeat                                           — update last_seen_at
+  daemon [--poll-interval 3000]                       — long-running poll driver (non-MCP envs)`)
   if (command) process.exit(1)
 }

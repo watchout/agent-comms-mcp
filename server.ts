@@ -737,7 +737,121 @@ async function registerAgent(): Promise<void> {
   // Issue #129 Phase 3: start the outbound_queue consumer alongside the
   // heartbeat. Disable with OUTBOUND_QUEUE_CONSUMER=0 (tests / dev).
   startOutboundConsumer()
+
+  // v1.0.2 §6.5: start the PollingDriver so pending messages are pre-fetched
+  // into a buffer. The MCP `next` tool returns from the buffer instantly
+  // instead of hitting the DB on every call.
+  pollingDriver.start(AGENT_ID)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v1.0.2 §6.5 — PollingDriver (MCP server built-in)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Pre-fetches pending message_queue rows into an in-memory buffer on a
+// configurable interval (AGENT_COM_POLL_INTERVAL_MS, default 3000ms).
+// The MCP `next` tool returns from the buffer instantly instead of running
+// a transactional DB query on every call. If the buffer is empty at `next`
+// time, falls back to a direct DB query (same as the Phase 4 implementation).
+//
+// Also sends heartbeat (agents.last_seen_at UPDATE) every 30 seconds so the
+// watchdog and polling-driver clients know the bot is alive.
+//
+// Lifecycle:
+//   - pollingDriver.start(agentId) is called from registerAgent()
+//   - pollingDriver.stop() is called from unregisterAgent()
+
+const POLL_DRIVER_INTERVAL_MS = parseInt(process.env.AGENT_COM_POLL_INTERVAL_MS ?? '3000', 10)
+const POLL_DRIVER_HEARTBEAT_MS = 30_000
+
+interface BufferedQueueRow {
+  id: number | string
+  message_id: string | null
+  payload: string
+  priority: number
+  created_at: Date | string
+}
+
+class PollingDriver {
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private buffer: BufferedQueueRow[] = []
+  private polling = false
+
+  start(agentId: string): void {
+    if (this.pollTimer) return // already running
+
+    // Heartbeat: 30s interval — update agents.last_seen_at
+    this.heartbeatTimer = setInterval(async () => {
+      const c = await tryGetDb()
+      if (c) {
+        await c.query(
+          `UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`,
+          [agentId],
+        ).catch(() => {})
+      }
+    }, POLL_DRIVER_HEARTBEAT_MS)
+
+    // Polling: fetch pending rows into buffer
+    this.pollTimer = setInterval(() => {
+      this.poll(agentId).catch(err => {
+        process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
+      })
+    }, POLL_DRIVER_INTERVAL_MS)
+
+    process.stderr.write(
+      `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
+    )
+  }
+
+  stop(): void {
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null }
+    this.buffer = []
+  }
+
+  /**
+   * Called by the MCP `next` tool. Returns from the pre-fetched buffer if
+   * available, otherwise returns null (caller falls back to direct DB query).
+   */
+  shift(): BufferedQueueRow | null {
+    return this.buffer.shift() ?? null
+  }
+
+  /** Number of buffered rows (for status reporting). */
+  get buffered(): number {
+    return this.buffer.length
+  }
+
+  private async poll(agentId: string): Promise<void> {
+    if (this.polling) return // re-entrancy guard
+    this.polling = true
+    try {
+      const client = await tryGetDb()
+      if (!client) return
+
+      // Fetch up to 10 pending rows (don't claim them yet — the `next`
+      // tool does the transactional claim when the LLM actually calls it).
+      // This is a read-only preview so the buffer can answer instantly.
+      const r = await client.query(
+        `SELECT id, message_id, payload, priority, created_at
+         FROM message_queue
+         WHERE status = 'pending' AND agent_id = $1
+         ORDER BY priority DESC, created_at ASC
+         LIMIT 10`,
+        [agentId],
+      )
+      // Replace buffer with fresh snapshot (stale entries from prior ticks
+      // that were already claimed by `next` are naturally excluded because
+      // their status flipped to 'read').
+      this.buffer = r.rows
+    } finally {
+      this.polling = false
+    }
+  }
+}
+
+const pollingDriver = new PollingDriver()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Issue #129 Phase 3 — outbound_queue consumer (message-queue-spec §7)
@@ -867,6 +981,7 @@ function stopOutboundConsumer(): void {
 
 async function unregisterAgent(): Promise<void> {
   if (heartbeatInterval) clearInterval(heartbeatInterval)
+  pollingDriver.stop()
   stopOutboundConsumer()
   const client = await tryGetDb()
   if (client) {
@@ -1975,24 +2090,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           [priorId],
         )
       }
-      // Pop oldest pending with exclusive lock
-      const pop = await client.query(
-        `SELECT id, message_id, payload, priority, created_at
-         FROM message_queue
-         WHERE status = 'pending' AND agent_id = $1
-         ORDER BY priority DESC, created_at ASC
-         LIMIT 1
-         FOR UPDATE SKIP LOCKED`,
-        [agentId],
-      )
-      if (pop.rows.length === 0) {
+
+      // v1.0.2 §6.5: try the PollingDriver buffer first. The buffer
+      // contains a read-only snapshot of pending rows from the last poll
+      // tick. If a row is available, we still need to claim it
+      // transactionally (UPDATE status='read') — the buffer just tells us
+      // WHICH row to claim without a full SELECT ... FOR UPDATE SKIP LOCKED
+      // scan. If the buffer is empty or stale, fall back to the direct query.
+      const buffered = pollingDriver.shift()
+      let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date | string } | null = null
+
+      if (buffered) {
+        // Verify the buffered row is still pending (it may have been
+        // claimed by a concurrent next or by the CLI between poll ticks).
+        const verify = await client.query(
+          `SELECT id, message_id, payload, priority, created_at
+           FROM message_queue
+           WHERE id = $1 AND status = 'pending'
+           FOR UPDATE SKIP LOCKED`,
+          [buffered.id],
+        )
+        if (verify.rows.length > 0) {
+          row = verify.rows[0]
+        }
+        // If stale, fall through to the direct query below.
+      }
+
+      if (!row) {
+        // Direct query fallback (Phase 4 original path)
+        const pop = await client.query(
+          `SELECT id, message_id, payload, priority, created_at
+           FROM message_queue
+           WHERE status = 'pending' AND agent_id = $1
+           ORDER BY priority DESC, created_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED`,
+          [agentId],
+        )
+        if (pop.rows.length > 0) row = pop.rows[0]
+      }
+
+      if (!row) {
         if (priorId !== null) {
           await client.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
         }
         await client.query('COMMIT')
         return { content: [{ type: 'text', text: JSON.stringify({ waiting: 0 }) }] }
       }
-      const row = pop.rows[0]
+
       await client.query(
         `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
         [row.id],
