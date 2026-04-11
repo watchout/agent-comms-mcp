@@ -2370,6 +2370,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // so callers know their message was divided.
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
 
+    // Issue #130 Phase 4: finalize message_queue state after successful send.
+    // If the bot used MCP `next` to pop a queue row before calling `send`,
+    // agents.current_message_id points at that row. Mark it 'replied' and
+    // clear current_message_id so the next `next` call doesn't implicit-skip
+    // a row that was already answered. This mirrors cli/index.ts sendMessage.
+    if (dbClient) {
+      const agentRow = await dbClient.query(
+        `SELECT current_message_id FROM agents WHERE agent_id = $1`,
+        [agentId],
+      )
+      const currentMqId = agentRow.rows[0]?.current_message_id
+      if (currentMqId) {
+        await dbClient.query(
+          `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
+          [id, currentMqId],
+        )
+        await dbClient.query(
+          `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+          [agentId],
+        )
+      }
+    }
+
     // Response with delivery feedback
     // Issue #118 ③: include reply_context (original author + channel + content snippet)
     const replyCtxSuffix = buildReplyContextSuffix(
