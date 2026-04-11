@@ -428,6 +428,28 @@ DBが設定されていない場合：
 - 通信ログ検索は利用不可
 - ループ検出・レート制限はインメモリで動作（再起動でリセット）
 
+### 6.5 Non-push CLI Polling Driver（Codex / Gemini 共通、message-queue-spec v1.0.2 §6.5）
+
+Claude Code 以外の CLI（push 受信不可）を interactive モードで常駐させる場合、
+外部スクリプト `scripts/polling-driver.sh` が message_queue を監視し、
+メッセージがあれば tmux セッションに指示を投入する。
+
+```
+起動例（Codex bot, lead-tuk）:
+  tmux split-window -t codex-lead-tuk \
+    './scripts/polling-driver.sh lead-tuk codex-lead-tuk 30'
+```
+
+**動作:**
+1. `agent-com heartbeat` で agents.last_seen_at を更新（watchdog 連携）
+2. `agent-com status --format json` で pending 件数をチェック
+3. pending > 0 なら `tmux send-keys` で「next を呼べ」と LLM に指示
+4. 指示後は interval × 2 秒待機（LLM の処理時間確保）
+
+**負荷:** 1 bot あたり 2 クエリ / 30 秒 = 0.067 qps。50 bot でも 3.3 qps。
+
+**Claude Code は不要:** push シグナルがこの役割を果たすため。
+
 ---
 
 ## 7. エージェント設定
