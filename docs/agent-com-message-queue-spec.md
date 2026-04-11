@@ -30,7 +30,7 @@
 │  receiver（1プロセス、専用bot token）                                  │
 │                                                                      │
 │  Discord Gateway受信 → discordToUnified()                            │
-│    → routeInbound()（純粛関数、pushTargets決定）                       │
+│    → routeInbound()（純粋関数、pushTargets決定）                       │
 │    → dispatcher()（v0.2.0: direct/delegate/summarize仕分け）          │
 │    → enrichPayload()（v0.2.0: チャンネル別コンテキスト付与）            │
 │    → agent_messages INSERT（全メッセージ永続記録）                      │
@@ -163,13 +163,13 @@ CREATE TABLE agents (
   display_name TEXT NOT NULL,
   agent_type TEXT NOT NULL CHECK (agent_type IN ('human', 'dev', 'org')),
   cli_type TEXT CHECK (cli_type IN ('claude_code', 'codex', 'gemini', 'other')),
-  discord_token TEXT,                  -- 送信用（暟号化検討: §13）
+  discord_token TEXT,                  -- 送信用（暗号化検討: §13）
   discord_user_id TEXT,                -- Discord上のuser ID
   status TEXT NOT NULL DEFAULT 'offline'
     CHECK (status IN ('idle', 'busy', 'disconnected', 'offline')),
   status_detail TEXT,                  -- "PRレビュー中" 等
   status_updated_at TIMESTAMPTZ,
-  heartbeat_at TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ,
   heartbeat_interval INTEGER DEFAULT 30, -- 秒
   observer_mode BOOLEAN NOT NULL DEFAULT FALSE,
   dispatch_enabled BOOLEAN NOT NULL DEFAULT FALSE, -- v0.2.0
@@ -232,7 +232,7 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
   "channel": "#agent-mem",
   "thread": "v0.2.0-test",
   "topic": "agent-memoryの記憶管理開発",
-  "content": "テスト結果�d���",
+  "content": "テスト結果�d���",
   "attachments": [],
   "reply_context": null,
   "my_recent": [
@@ -263,7 +263,7 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 3. status='read', read_at=NOW() に更新
 4. agents.status='busy', status_detail='メッセージ処理中' に更新
 5. currentMessageIdをプロセス内メモリに保持
-6. ペイロードをJSON出劘
+6. ペイロードをJSON出力
 ```
 
 ### 4.2 agent-com send
@@ -298,7 +298,7 @@ agent-com send --agent-id cto \
 1. currentMessageIdが無い → NO_CURRENT_MESSAGE エラー
 2. mentions検証:
    a. 空配列 → NOT_MENTIONEDエラー（元送信者を提案）
-   b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有劺一覧表示）
+   b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有効一覧表示）
    c. DB不達 → MENTION_VALIDATION_UNAVAILABLEエラー
 3. 権限チェック: channels.membersに送信者が含まれるか
 4. reply_to = currentMessageId（自動設定）
@@ -370,7 +370,7 @@ agent-com heartbeat --agent-id codex-auditor
 {
   "ok": true,
   "agent_id": "codex-auditor",
-  "heartbeat_at": "2026-04-08T15:00:00Z"
+  "last_seen_at": "2026-04-08T15:00:00Z"
 }
 ```
 
@@ -620,7 +620,7 @@ class PollingDriver {
 
   private async heartbeat(): Promise<void> {
     await this.db.query(
-      `UPDATE agents SET heartbeat_at = NOW(), status = 
+      `UPDATE agents SET last_seen_at = NOW(), status = 
        CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
        WHERE agent_id = $1`,
       [this.agentId]
@@ -634,7 +634,7 @@ class PollingDriver {
 ```
 
 ```
-動作フロヾ:
+動作フロー:
 
   MCP server起動
     → PollingDriver開始（heartbeat + polling自動実行）
@@ -709,7 +709,7 @@ receiverClient.on("messageCreate", async (msg) => {
   // 1. Discord形式 → UnifiedMessage
   const unified = await discordToUnified(msg, db);
 
-  // 2. routeInbound()（純粻関数）
+  // 2. routeInbound()（純粋関数）
   const channel = channelCache.get(unified.channel_id);
   const agents = agentCache;
   const result = routeInbound(unified, channel, agents);
@@ -783,7 +783,7 @@ setInterval(async () => {
   await db.query(`
     UPDATE agents
     SET status = 'disconnected', status_detail = 'heartbeat timeout'
-    WHERE heartbeat_at < NOW() - (heartbeat_interval * 3 || ' seconds')::INTERVAL
+    WHERE last_seen_at < NOW() - (heartbeat_interval * 3 || ' seconds')::INTERVAL
       AND status NOT IN ('disconnected', 'offline')
   `);
 }, 30_000);

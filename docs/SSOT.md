@@ -445,9 +445,9 @@ cron・外部スクリプトは不要。
 - tmux セッション内で起動し、stdin 経由で LLM に指示を投入
 
 **負荷:**
-- 1 bot あたり ~0.033 qps (1 query / 30s heartbeat + 1 query / 3s poll)
-- ~50 bot: 1.7 qps (PostgreSQL で問題なし)
-- ~100+ bot: pg_notify ハイブリッドに切替推奨 (§14.5)
+- 1 bot あたり ~0.37 qps (1/30 heartbeat + 1/3 poll = 0.033 + 0.333)
+- ~50 bot: ~18 qps (PostgreSQL で問題なし)
+- ~100+ bot: polling 間隔延長 or pg_notify ハイブリッドに切替推奨 (§14.5)
 
 ---
 
