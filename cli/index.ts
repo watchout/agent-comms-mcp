@@ -173,13 +173,24 @@ async function agentRegister(args: string[]) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve the runtime AGENT_ID. Required for next/send because the CLI must
- * know which inbox to read and which author to stamp on outbound rows.
+ * Resolve agent_id from --agent-id flag (if present in args) or AGENT_ID env.
+ * ARC codex audit (PR#139): spec contracts use `--agent-id <id>` on the CLI,
+ * so both sources must be checked.
+ */
+function resolveAgentId(args: string[], command: string): string {
+  const idx = args.indexOf('--agent-id')
+  if (idx !== -1 && args[idx + 1]) return args[idx + 1]
+  return requireAgentId(command)
+}
+
+/**
+ * Resolve the runtime AGENT_ID from env var only. Use resolveAgentId() when
+ * the command also accepts --agent-id flags.
  */
 function requireAgentId(command: string): string {
   const id = process.env.AGENT_ID
   if (!id) {
-    console.error(`Error: AGENT_ID env var is required for 'agent-com ${command}'`)
+    console.error(`Error: AGENT_ID env var or --agent-id flag is required for 'agent-com ${command}'`)
     process.exit(2)
   }
   return id
@@ -756,14 +767,19 @@ async function status(args: string[]) {
 }
 
 /**
- * `agent-com heartbeat` — update agents.last_seen_at (v1.0.2 §4.5 / §6.5).
- * Requires AGENT_ID env var.
+ * `agent-com heartbeat [--agent-id <id>]` — update agents.last_seen_at + disconnected→idle (v1.0.2 §4.5 / §6.5).
  */
-async function heartbeat() {
-  const agentId = requireAgentId('heartbeat')
+async function heartbeat(args: string[]) {
+  const agentId = resolveAgentId(args, 'heartbeat')
   const db = await getDb()
   try {
-    await db.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [agentId])
+    // ARC codex audit (PR#139): spec requires disconnected→idle recovery on heartbeat.
+    await db.query(
+      `UPDATE agents SET last_seen_at = now(),
+       status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
+       WHERE agent_id = $1`,
+      [agentId],
+    )
     process.stdout.write(JSON.stringify({ ok: true, agent_id: agentId, last_seen_at: new Date().toISOString() }) + '\n')
   } finally {
     await db.end()
@@ -776,10 +792,10 @@ async function heartbeat() {
  * stdout when they arrive. Designed for tmux sessions where the operator
  * reads stdout and manually calls `next`.
  *
- * Usage: AGENT_ID=<id> agent-com daemon [--poll-interval 3000]
+ * Usage: agent-com daemon --agent-id <id> [--poll-interval 3000]
  */
 async function daemon(args: string[]) {
-  const agentId = requireAgentId('daemon')
+  const agentId = resolveAgentId(args, 'daemon')
   const { flags } = parseArgs(args)
   const pollInterval = parseInt(flags['poll-interval'] ?? '3000', 10)
   const heartbeatInterval = 30_000
@@ -791,7 +807,12 @@ async function daemon(args: string[]) {
   setInterval(async () => {
     const db = await getDb()
     try {
-      await db.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [agentId])
+      await db.query(
+        `UPDATE agents SET last_seen_at = now(),
+         status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
+         WHERE agent_id = $1`,
+        [agentId],
+      )
     } catch (err) {
       console.error(`[daemon] heartbeat error: ${err}`)
     } finally {
@@ -854,7 +875,7 @@ if (command === 'channel') {
 } else if (command === 'status') {
   await status([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'heartbeat') {
-  await heartbeat()
+  await heartbeat([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'daemon') {
   await daemon([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'next') {

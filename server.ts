@@ -785,8 +785,11 @@ class PollingDriver {
     this.heartbeatTimer = setInterval(async () => {
       const c = await tryGetDb()
       if (c) {
+        // ARC codex audit (PR#139): spec requires disconnected→idle on heartbeat.
         await c.query(
-          `UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`,
+          `UPDATE agents SET last_seen_at = now(),
+           status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
+           WHERE agent_id = $1`,
           [agentId],
         ).catch(() => {})
       }
