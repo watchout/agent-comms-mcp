@@ -816,7 +816,7 @@ async function refreshCaches() {
 ### 7.7 Receiver Token
 
 ```
-専用receiver bot）Discord Developer Portalで新規作成）を使う。
+専用receiver bot（Discord Developer Portalで新規作成）を使う。
 既存botのtokenを流用しない（C5対策）。
 
 AGENT_COM_RECEIVER_TOKEN=（専用bot token）
