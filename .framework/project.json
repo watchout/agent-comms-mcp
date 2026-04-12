@@ -7,15 +7,16 @@
   "phase": -1,
   "status": "initialized",
   "techStack": {
-    "framework": "next.js",
+    "framework": "mcp-server",
     "language": "typescript",
-    "ui": "react",
-    "testing": "vitest",
-    "hosting": "vercel"
+    "runtime": "bun",
+    "ui": null,
+    "testing": "bun-test",
+    "hosting": "self-hosted-tmux"
   },
   "config": {
     "aiProvider": "anthropic",
-    "aiModel": "claude-sonnet-4-20250514",
+    "aiModel": null,
     "autoCommit": false,
     "escalationMode": "strict"
   }
