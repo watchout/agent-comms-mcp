@@ -1,0 +1,73 @@
+{
+  "gateA": {
+    "status": "failed",
+    "checks": [
+      {
+        "name": "package.json exists",
+        "passed": true,
+        "message": "package.json exists: found"
+      },
+      {
+        "name": "Dependencies installed (node_modules/)",
+        "passed": true,
+        "message": "Dependencies installed (node_modules/): found"
+      },
+      {
+        "name": "Environment config (.env or .env.example)",
+        "passed": true,
+        "message": "Environment config found"
+      },
+      {
+        "name": "Docker Compose config",
+        "passed": false,
+        "message": "docker-compose.yml not found. DB/Redis may not be available."
+      },
+      {
+        "name": "CI configuration (.github/workflows/)",
+        "passed": true,
+        "message": "CI configuration found"
+      },
+      {
+        "name": "Framework management (.framework/)",
+        "passed": true,
+        "message": "Framework management (.framework/): found"
+      }
+    ],
+    "checkedAt": "2026-04-12T22:22:33.050Z"
+  },
+  "gateB": {
+    "status": "failed",
+    "checks": [
+      {
+        "name": "Implementation plan (.framework/plan.json)",
+        "passed": false,
+        "message": "No plan found. Run 'framework plan' to generate."
+      },
+      {
+        "name": "Plan contains features",
+        "passed": false,
+        "message": "Cannot check features — no plan exists."
+      },
+      {
+        "name": "Project profile configured (.framework/project.json)",
+        "passed": true,
+        "message": "Project profile found"
+      }
+    ],
+    "checkedAt": "2026-04-12T22:22:33.052Z"
+  },
+  "gateC": {
+    "status": "passed",
+    "checks": [
+      {
+        "name": "Gate C (new-format SSOT-0~5)",
+        "passed": true,
+        "message": "New-format SSOT detected (6 files: docs/requirements/SSOT-0_PRD.md, docs/requirements/SSOT-1_FEATURE_CATALOG.md, docs/design/core/SSOT-2_UI_STATE.md, docs/design/core/SSOT-3_API_CONTRACT.md, docs/design/core/SSOT-4_DATA_MODEL.md, docs/design/core/SSOT-5_CROSS_CUTTING.md). Gate C auto-passed.",
+        "filePath": "",
+        "missingSections": []
+      }
+    ],
+    "checkedAt": "2026-04-12T22:22:33.053Z"
+  },
+  "updatedAt": "2026-04-12T22:22:33.053Z"
+}
