@@ -235,6 +235,18 @@ async function migrate() {
       ON message_queue(agent_id, status, priority DESC, created_at ASC)
       WHERE status = 'pending';
 
+    -- Drop duplicate (agent_id, message_id) rows before enforcing uniqueness.
+    -- Keep the lowest id per pair so earliest enqueue wins.
+    DELETE FROM message_queue a
+    USING message_queue b
+    WHERE a.message_id IS NOT NULL
+      AND a.agent_id = b.agent_id
+      AND a.message_id = b.message_id
+      AND a.id > b.id;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_mq_agent_message
+      ON message_queue(agent_id, message_id)
+      WHERE message_id IS NOT NULL;
+
     -- Issue #128 Phase 2: agents.current_message_id (BIGINT, references message_queue.id)
     -- Tracks the in-flight next result so send can resolve reply_to/dest automatically.
     -- DB-backed (not process-memory) so it survives CLI restarts. ADD COLUMN IF NOT

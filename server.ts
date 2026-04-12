@@ -1628,7 +1628,7 @@ async function handleInboundMessage(params: {
         ...(attachments ? { attachments } : {}),
       })
       await client.query(
-        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3)`,
+        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
         [receiverAgentId, messageId, mqPayload],
       ).catch(err => {
         process.stderr.write(`agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`)
@@ -2407,7 +2407,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (dbClient) {
           try {
             await dbClient.query(
-              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3)`,
+              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
               [recipient, id, mqPayload],
             )
           } catch (err) {
