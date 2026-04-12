@@ -22,32 +22,45 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
 
 describe('ADR-041 S2-B — single inbound receiver entry point', () => {
-  test('server.ts binds exactly one Discord onMessage handler', () => {
-    const matches = SERVER_SRC.match(/\.onMessage\(\(msg\)\s*=>/g) ?? []
-    expect(matches.length).toBe(1)
+  test('handleInboundMessage is invoked from exactly one callsite', () => {
+    // handleInboundMessage (message_queue INSERT + routing) must be called
+    // from only one onMessage handler — the stdio-mode adapter.
+    const invocations = SERVER_SRC.match(/handleInboundMessage\(\{/g) ?? []
+    expect(invocations.length).toBe(1)
   })
 
-  test('the sole onMessage handler is inside the stdio-mode branch', () => {
+  test('the handleInboundMessage callsite is inside the stdio-mode branch', () => {
     const stdioBranchIdx = SERVER_SRC.indexOf("TRANSPORT_MODE !== 'daemon'")
     expect(stdioBranchIdx).toBeGreaterThan(-1)
-    const firstBinding = SERVER_SRC.indexOf('.onMessage((msg) =>')
-    expect(firstBinding).toBeGreaterThan(stdioBranchIdx)
+    const callsite = SERVER_SRC.indexOf('handleInboundMessage({')
+    expect(callsite).toBeGreaterThan(stdioBranchIdx)
   })
 
-  test('daemon block contains no Discord inbound binding', () => {
+  test('daemon block does NOT invoke handleInboundMessage', () => {
     const daemonIdx = SERVER_SRC.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     expect(daemonIdx).toBeGreaterThan(-1)
     const daemonSection = SERVER_SRC.slice(daemonIdx, daemonIdx + 25000)
-    expect(daemonSection).not.toContain('botDiscord.onMessage(')
-    expect(daemonSection).not.toContain('discord.onMessage(')
+    expect(daemonSection).not.toContain('handleInboundMessage({')
   })
 
-  test('handleInboundMessage is invoked from exactly one onMessage callsite', () => {
-    // handleInboundMessage is defined once and called once from an inbound
-    // handler. Definition + single call = 2 textual occurrences in server.ts
-    // (excluding comments). We assert the invocation count specifically.
-    const invocations = SERVER_SRC.match(/handleInboundMessage\(\{/g) ?? []
-    expect(invocations.length).toBe(1)
+  test('daemon block does NOT bind per-bot Discord onMessage', () => {
+    const daemonIdx = SERVER_SRC.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
+    const daemonSection = SERVER_SRC.slice(daemonIdx, daemonIdx + 25000)
+    expect(daemonSection).not.toContain('botDiscord.onMessage(')
+  })
+
+  test('daemon shared onMessage (if present) only emits sendHumanWarning', () => {
+    // daemon retains a shared-client onMessage for §2.2 Pattern A only.
+    // It must NOT call handleInboundMessage nor write to message_queue.
+    const daemonIdx = SERVER_SRC.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
+    const daemonSection = SERVER_SRC.slice(daemonIdx, daemonIdx + 25000)
+    const sharedIdx = daemonSection.indexOf('discord.onMessage(')
+    if (sharedIdx >= 0) {
+      const handlerBody = daemonSection.slice(sharedIdx, sharedIdx + 2000)
+      expect(handlerBody).toContain('sendHumanWarning')
+      expect(handlerBody).not.toContain('handleInboundMessage')
+      expect(handlerBody).not.toContain('message_queue')
+    }
   })
 
   test('daemon per-bot Discord client is still created for outbound', () => {

@@ -3489,18 +3489,41 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
 
     // Connect Discord shared adapter (outbound / admin fallback for bots
     // without a per-bot token). ADR-041 S2-B: the stdio-mode adapter owns
-    // inbound; daemon MUST NOT bind onMessage here. The connection itself is
-    // retained so outbound REST + admin paths keep working for shared-token
+    // inbound (handleInboundMessage / message_queue INSERT); daemon MUST NOT
+    // bind onMessage for inbound routing. The connection itself is retained
+    // so outbound REST + admin paths keep working for shared-token
     // deployments.
+    //
+    // §2.2 Pattern A human-warning path: daemon retains a minimal onMessage
+    // binding that *only* emits sendHumanWarning (no handleInboundMessage,
+    // no message_queue INSERT). This preserves the human-warning UX in
+    // shared-token configurations where the author posts without mentions.
+    // sendHumanWarning uses pg_try_advisory_lock for cross-process dedup,
+    // so firing from both stdio and daemon is safe.
     if (DISCORD_BOT_TOKEN) {
       try {
+        discord.onMessage((msg) => {
+          // §2.2 Pattern A only — no inbound routing, no DB writes.
+          const isHuman = !msg.author.isBot
+          const noMentions = !msg.mentionUserIds || msg.mentionUserIds.length === 0
+          const noReply = !msg.replyTo
+          if (isHuman && noMentions && noReply) {
+            sendHumanWarning(discord, msg.channel, msg.id)
+          }
+        })
         // No stateDir for daemon shared client — outbound/admin only
         await discord.connect({ token: DISCORD_BOT_TOKEN })
-        process.stderr.write(`agent-comms: daemon Discord adapter connected (outbound/admin only)\n`)
+        process.stderr.write(`agent-comms: daemon Discord adapter connected (outbound/admin + human-warning only)\n`)
       } catch (err) {
         process.stderr.write(`agent-comms: WARNING — daemon Discord connection failed (non-fatal): ${err}\n`)
       }
     }
+
+    // ADR-041 S2-B migration guard: daemon alone does NOT receive inbound.
+    // If no stdio-mode adapter is running (separate process), inbound Discord
+    // messages will silently drop. Operators must ensure a stdio receiver is
+    // co-deployed. See docs/agent-com-message-queue-spec.md §2 原則 #2.
+    process.stderr.write(`agent-comms: [S2-B migration guard] daemon mode is outbound-only for Discord inbound. Ensure a stdio-mode receiver is co-deployed, or inbound messages will not be processed. See spec §2 / ADR-041.\n`)
   })()
 
   httpServer.listen(SSE_PORT, () => {

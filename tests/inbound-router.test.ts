@@ -91,12 +91,11 @@ describe('Inbound Router — Source Structure', () => {
 // stdio-mode Discord adapter is the sole inbound source. daemon retains
 // per-bot Discord clients for outbound only.
 describe('Inbound Router — Daemon Mode Source Structure (ADR-041 S2-B)', () => {
-  test('daemon mode does NOT bind any Discord onMessage handler', () => {
+  test('daemon mode does NOT bind per-bot Discord onMessage', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     expect(daemonBlock).toBeGreaterThan(-1)
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).not.toContain('botDiscord.onMessage(')
-    expect(daemonSection).not.toContain('discord.onMessage(')
   })
 
   test('daemon mode does NOT invoke handleInboundMessage', () => {
