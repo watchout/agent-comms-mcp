@@ -3099,6 +3099,10 @@ async function postConnect() {
   }
 
   // Phase 5: Connect Discord adapter (if token provided, stdio/channel-plugin mode)
+  // ADR-041 S2-B: this stdio-mode `discord.onMessage` is the SOLE inbound source
+  // for handleInboundMessage. daemon mode per-bot / shared Discord clients are
+  // retained for outbound + presence only and MUST NOT bind onMessage.
+  // See: docs/agent-com-message-queue-spec.md §2 原則 #2 (受信は1プロセス).
   if (DISCORD_BOT_TOKEN && TRANSPORT_MODE !== 'daemon') {
     try {
       discord.onMessage((msg) => {
@@ -3400,35 +3404,8 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
           const botDiscord = await connectBotDiscord(botId, tokenResult.token)
           if (botDiscord) {
             discordClients.set(botId, botDiscord)
-            // Register inbound handler for this bot's Discord client
-            // No processedIds check — dedup at channel-server level, shared client also routes
-            botDiscord.onMessage((msg) => {
-              const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
-              const inboundContent = msg.content || (atts ? '(attachment)' : '')
-              extractDiscordMentions(inboundContent, msg.mentionUserIds).then(resolvedMentions => {
-                return handleInboundMessage({
-                  receiverAgentId: botId,
-                  externalChannelId: msg.channel,
-                  externalMessageId: msg.id,
-                  authorExternalId: msg.author.id,
-                  authorName: msg.author.name,
-                  authorIsBot: msg.author.isBot,
-                  content: inboundContent,
-                  attachments: atts,
-                  timestamp: msg.timestamp,
-                  platform: 'discord',
-                  mentions: resolvedMentions,
-                  replyToMessageId: msg.replyTo,
-                })
-              }).then(async _result => {
-                // Issue #130 Phase 4: pushToChannelServer + SSE fallback removed.
-                // Delivery to the recipient is now handled by:
-                //   (a) message_queue INSERT inside handleInboundMessage (Phase 2)
-                //   (b) pollNewMessages 3-second loop for backward-compatible push
-              }).catch(err => {
-                process.stderr.write(`agent-comms: per-bot inbound routing error for ${botId}: ${err}\n`)
-              })
-            })
+            // ADR-041 S2-B: daemon per-bot Discord client is outbound-only.
+            // Inbound reception is owned exclusively by the stdio-mode adapter.
           }
         }
         } // end else (skip if already connected)
@@ -3499,33 +3476,9 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
         const botDiscord = await connectBotDiscord(botId, tokenResult.token)
         if (botDiscord) {
           discordClients.set(botId, botDiscord)
-          // Register inbound handler — routes through handleInboundMessage + message_queue
-          botDiscord.onMessage((msg) => {
-            const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
-            const inboundContent = msg.content || (atts ? '(attachment)' : '')
-            extractDiscordMentions(inboundContent, msg.mentionUserIds).then(resolvedMentions => {
-              return handleInboundMessage({
-                receiverAgentId: botId,
-                externalChannelId: msg.channel,
-                externalMessageId: msg.id,
-                authorExternalId: msg.author.id,
-                authorName: msg.author.name,
-                authorIsBot: msg.author.isBot,
-                content: inboundContent,
-                attachments: atts,
-                timestamp: msg.timestamp,
-                platform: 'discord',
-                mentions: resolvedMentions,
-                replyToMessageId: msg.replyTo,
-              })
-            }).then(async _result => {
-              // Issue #130 Phase 4: pushToChannelServer removed. message_queue
-              // INSERT inside handleInboundMessage handles delivery.
-            }).catch(err => {
-              process.stderr.write(`agent-comms: startup per-bot inbound error for ${botId}: ${err}\n`)
-            })
-          })
-          process.stderr.write(`agent-comms: startup Discord client for ${botId} (${tokenResult.source})\n`)
+          // ADR-041 S2-B: startup daemon per-bot Discord client is outbound-only.
+          // Inbound reception is owned exclusively by the stdio-mode adapter.
+          process.stderr.write(`agent-comms: startup Discord client for ${botId} (${tokenResult.source}, outbound-only)\n`)
         }
       }
       // Staggered connect delay
@@ -3534,62 +3487,10 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
       }
     }
 
-    // Connect Discord adapter (shared fallback for bots without per-bot token)
-    if (DISCORD_BOT_TOKEN) {
-      try {
-        discord.onMessage((msg) => {
-          if (processedIds.has(msg.id)) return
-          processedIds.set(msg.id, Date.now())
-
-          const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
-          const content = msg.content || (atts ? '(attachment)' : '')
-
-          // Route through core inbound router for all expected bots
-          extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
-            // Route to all EXPECTED_BOTS with channel_port (Webhook Channel)
-            let humanWarningSent = false
-            for (const expectedBot of EXPECTED_BOTS) {
-              const ctx = botContexts.get(expectedBot)
-              handleInboundMessage({
-                receiverAgentId: expectedBot,
-                externalChannelId: msg.channel,
-                externalMessageId: msg.id,
-                authorExternalId: msg.author.id,
-                authorName: msg.author.name,
-                authorIsBot: msg.author.isBot,
-                content,
-                attachments: atts,
-                timestamp: msg.timestamp,
-                platform: 'discord',
-                mentions: resolvedMentions,
-                replyToMessageId: msg.replyTo,
-              }).then(async result => {
-                if (!result.delivered) {
-                  process.stderr.write(`agent-comms: daemon inbound not delivered to ${expectedBot} — ${result.reason} (msg: ${msg.id})\n`)
-                  // §2.2 Pattern A: human warning (daemon mode — send once)
-                  if (result.humanWarning && !humanWarningSent) {
-                    humanWarningSent = true
-                    sendHumanWarning(discord, msg.channel, msg.id)
-                  }
-                  return
-                }
-                // Issue #130 Phase 4: pushToChannelServer + SSE fallback removed.
-                // message_queue INSERT inside handleInboundMessage handles delivery.
-              }).catch(err => {
-                process.stderr.write(`agent-comms: daemon inbound routing error for ${expectedBot}: ${err}\n`)
-              })
-            }
-          }).catch(err => {
-            process.stderr.write(`agent-comms: daemon mention extraction error: ${err}\n`)
-          })
-        })
-        // No stateDir for daemon shared client — gate() passes all, routeInbound() filters
-        await discord.connect({ token: DISCORD_BOT_TOKEN })
-        process.stderr.write(`agent-comms: daemon Discord adapter connected\n`)
-      } catch (err) {
-        process.stderr.write(`agent-comms: WARNING — daemon Discord connection failed (non-fatal): ${err}\n`)
-      }
-    }
+    // ADR-041 S2-B: daemon shared Discord adapter is no longer bound for inbound.
+    // The stdio-mode adapter is the sole inbound source. daemon retains
+    // per-bot Discord clients for outbound only (see EXPECTED_BOTS loop above).
+    // The shared `discord` client is intentionally not connected in daemon mode.
   })()
 
   httpServer.listen(SSE_PORT, () => {
