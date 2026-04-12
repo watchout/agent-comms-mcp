@@ -235,6 +235,73 @@ async function migrate() {
       ON message_queue(agent_id, status, priority DESC, created_at ASC)
       WHERE status = 'pending';
 
+    -- Codex audit (PR#140) refinement: dedup with quarantine.
+    --   1. Move non-safe duplicates (non-identical payload / non-pending
+    --      status) to message_queue_dedup_quarantine so the operator can
+    --      inspect and reconcile manually.
+    --   2. Safe-delete remaining identical-pending duplicates in-place.
+    --   3. CREATE UNIQUE — fails loud if any unsafe duplicate slipped past
+    --      the quarantine step (defense in depth).
+    CREATE TABLE IF NOT EXISTS message_queue_dedup_quarantine (
+      LIKE message_queue
+    );
+    ALTER TABLE message_queue_dedup_quarantine
+      ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      ADD COLUMN IF NOT EXISTS quarantine_reason TEXT;
+
+    -- Move non-safe duplicates. Keep the lowest id in-place as canonical.
+    WITH pairs AS (
+      SELECT agent_id, message_id, MIN(id) AS keep_id
+      FROM message_queue
+      WHERE message_id IS NOT NULL
+      GROUP BY agent_id, message_id
+      HAVING count(*) > 1
+    ),
+    unsafe AS (
+      SELECT mq.id
+      FROM message_queue mq
+      JOIN pairs p ON mq.agent_id = p.agent_id AND mq.message_id = p.message_id
+      JOIN message_queue kept ON kept.id = p.keep_id
+      WHERE mq.id <> p.keep_id
+        AND (mq.status <> 'pending' OR kept.status <> 'pending' OR mq.payload <> kept.payload)
+    )
+    INSERT INTO message_queue_dedup_quarantine (
+      id, agent_id, message_id, payload, status, priority, created_at, read_at, replied_at, replied_with,
+      quarantine_reason
+    )
+    SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+           mq.created_at, mq.read_at, mq.replied_at, mq.replied_with,
+           'v1.0.3 uq_mq_agent_message migration — non-safe duplicate (payload or status diverges)'
+    FROM message_queue mq
+    JOIN unsafe u ON u.id = mq.id;
+
+    DELETE FROM message_queue
+    WHERE id IN (SELECT id FROM message_queue_dedup_quarantine);
+
+    -- Safe delete: identical-pending duplicates (true replicas of the kept row).
+    DELETE FROM message_queue a
+    USING message_queue b
+    WHERE a.message_id IS NOT NULL
+      AND a.agent_id = b.agent_id
+      AND a.message_id = b.message_id
+      AND a.id > b.id
+      AND a.status = 'pending'
+      AND b.status = 'pending'
+      AND a.payload = b.payload;
+
+    -- Post-run observability (migrate stderr visible to operator).
+    DO $$
+    DECLARE
+      q_count INTEGER;
+    BEGIN
+      SELECT count(*) INTO q_count FROM message_queue_dedup_quarantine;
+      RAISE NOTICE 'message_queue dedup — quarantined rows total: %', q_count;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_mq_agent_message
+      ON message_queue(agent_id, message_id)
+      WHERE message_id IS NOT NULL;
+
     -- Issue #128 Phase 2: agents.current_message_id (BIGINT, references message_queue.id)
     -- Tracks the in-flight next result so send can resolve reply_to/dest automatically.
     -- DB-backed (not process-memory) so it survives CLI restarts. ADD COLUMN IF NOT
