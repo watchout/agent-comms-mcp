@@ -1,4 +1,4 @@
-# agent-com 統合メッセージキュー仕様 v1.0.2
+# agent-com 統合メッセージキュー仕様 v1.0.3
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
@@ -127,7 +127,27 @@ CREATE TABLE message_queue (
 CREATE INDEX idx_mq_agent_pending
   ON message_queue(agent_id, status, priority DESC, created_at ASC)
   WHERE status = 'pending';
+
+-- v1.0.3: DDL invariant — duplicate-INSERT safety net (ADR-048 Phase 0 D4)
+-- Rationale: handleInboundMessage の onMessage path が複数 (stdio + daemon
+-- per-bot + daemon shared) 存在した時期に、同一 (agent_id, message_id) が
+-- 複数行 enqueue される drift が発生した。受信経路の一元化 (ADR-041 PR-B)
+-- が完了しても、DB 側の保険として部分 UNIQUE を保持する。
+CREATE UNIQUE INDEX uq_mq_agent_message
+  ON message_queue(agent_id, message_id)
+  WHERE message_id IS NOT NULL;
 ```
+
+**DML rule (上記 DDL invariant `uq_mq_agent_message` と対応)**:
+`message_queue` への INSERT は **必ず** 以下の形式で行うこと。ON CONFLICT の target を明示し (部分 UNIQUE の述語も同一)、並行 enqueue が UNIQUE 違反で throw しない・どの制約が発火したかも明示される:
+
+```sql
+INSERT INTO message_queue (agent_id, message_id, payload)
+VALUES ($1, $2, $3)
+ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING;
+```
+
+`message_id` が NULL のシステムメッセージ経路は部分 UNIQUE の対象外なので ON CONFLICT は発火しない (legacy 互換)。
 
 ### 3.3 outbound_queue（Discord送信キュー、新規）
 
@@ -1448,5 +1468,6 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-12 | v1.0.3: §3.2 に `uq_mq_agent_message` 部分 UNIQUE index 追加 + INSERT の正式形式を `ON CONFLICT DO NOTHING` と規定（ADR-048 Phase 0 D4、PR#142 / 対応実装 PR#140） |
 | 2026-04-12 | v1.0.2: §6.1-6.5 全CLIをMCP内蔵polling driverに統一、§14.5 スケーラビリティ追加、§4.3/4.5/13.3/18.2/18.3 cron依存を全廃止（全てMCP server/receiver内蔵に統一） |
 | 2026-04-10 | v1.0.0: 統合メッセージキュー仕様（旧receiver-architecture + channel-thread-control統合、全22セクション） |
