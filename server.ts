@@ -2545,13 +2545,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           [agentId],
         )
       } else if (reply_to) {
-        await dbClient.query(
-          `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
-           WHERE agent_id = $2 AND message_id = $3 AND status IN ('pending', 'read')`,
-          [id, agentId, reply_to],
-        ).catch(err => {
-          process.stderr.write(`agent-comms: D3 fallback replied transition failed (non-fatal): ${err}\n`)
-        })
+        try {
+          const res = await dbClient.query(
+            `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+             WHERE agent_id = $2 AND message_id = $3 AND status IN ('pending', 'read')`,
+            [id, agentId, reply_to],
+          )
+          process.stderr.write(JSON.stringify({
+            event: 'd3_fallback_replied',
+            agent_id: agentId, reply_to, replied_with: id,
+            row_count: res.rowCount ?? 0,
+          }) + '\n')
+          if ((res.rowCount ?? 0) === 0) {
+            await writeAuditLog('d3.fallback.miss', agentId, null, { reply_to, replied_with: id })
+          }
+        } catch (err) {
+          const failureReason = err instanceof Error ? err.message : String(err)
+          process.stderr.write(JSON.stringify({
+            event: 'd3_fallback_error',
+            agent_id: agentId, reply_to, replied_with: id,
+            failure_reason: failureReason,
+          }) + '\n')
+          await writeAuditLog('d3.fallback.error', agentId, null, {
+            reply_to, replied_with: id, failure_reason: failureReason,
+          }).catch(() => {})
+        }
       }
     }
 
