@@ -3487,10 +3487,20 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
       }
     }
 
-    // ADR-041 S2-B: daemon shared Discord adapter is no longer bound for inbound.
-    // The stdio-mode adapter is the sole inbound source. daemon retains
-    // per-bot Discord clients for outbound only (see EXPECTED_BOTS loop above).
-    // The shared `discord` client is intentionally not connected in daemon mode.
+    // Connect Discord shared adapter (outbound / admin fallback for bots
+    // without a per-bot token). ADR-041 S2-B: the stdio-mode adapter owns
+    // inbound; daemon MUST NOT bind onMessage here. The connection itself is
+    // retained so outbound REST + admin paths keep working for shared-token
+    // deployments.
+    if (DISCORD_BOT_TOKEN) {
+      try {
+        // No stateDir for daemon shared client — outbound/admin only
+        await discord.connect({ token: DISCORD_BOT_TOKEN })
+        process.stderr.write(`agent-comms: daemon Discord adapter connected (outbound/admin only)\n`)
+      } catch (err) {
+        process.stderr.write(`agent-comms: WARNING — daemon Discord connection failed (non-fatal): ${err}\n`)
+      }
+    }
   })()
 
   httpServer.listen(SSE_PORT, () => {
