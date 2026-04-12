@@ -1465,5 +1465,6 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-12 | v1.0.3: §3.2 に `uq_mq_agent_message` 部分 UNIQUE index 追加 + INSERT の正式形式を `ON CONFLICT DO NOTHING` と規定（ADR-048 Phase 0 D4、PR#142 / 対応実装 PR#140） |
 | 2026-04-12 | v1.0.2: §6.1-6.5 全CLIをMCP内蔵polling driverに統一、§14.5 スケーラビリティ追加、§4.3/4.5/13.3/18.2/18.3 cron依存を全廃止（全てMCP server/receiver内蔵に統一） |
 | 2026-04-10 | v1.0.0: 統合メッセージキュー仕様（旧receiver-architecture + channel-thread-control統合、全22セクション） |
