@@ -1,8 +1,9 @@
 # Outbound Forwarder Unification (S2-A / S3 相当)
 
-Status: **draft v2** (author: lead-ama, 2026-04-13 JST — v1 差し戻し反映)
+Status: **draft v3 (最終版)** (author: lead-ama, 2026-04-13 JST — CEO 全件承認反映)
 Route: `route:ceo-approval` (architectural shift / 全 bot 挙動変更)
 Feature: **FEAT-005** (SSOT-1, status = Refactoring)
+CEO 承認: **2026-04-12 23:07 UTC = 2026-04-13 08:07 JST** (Open Q1-5 全件 CTO 推奨採用、CTO 追加指摘 §5.2 mutex 反映)
 Related merged: PR#139 / #140 / #142 / #156 / #157 / #160 / #161
 Related in-flight: PR #162 (ADF enforcement hooks)
 
@@ -156,7 +157,7 @@ v1 でこの案を推奨したのは lead-ama の SSOT 照合ミス (2026-04-12 
 | token 集中 | ❌ 19 bot 分の token を 1 プロセスで保持 (blast radius ↑) |
 | 実装量 | 中〜大 |
 
-将来的に bot 数が 100+ に増えた段階で再検討可能だが、Phase 1 規模 (19 bot) では不要な複雑性。
+将来的に bot 数が増えた段階で再検討。**再評価 trigger は `docs/agent-com-message-queue-spec.md §14.5` (polling driver スケーラビリティ段階) 到達時** (CEO 2026-04-12 23:07 UTC 指示、§9 Q5)。Phase 1 規模 (19 bot) では採用しない。
 
 ---
 
@@ -331,10 +332,20 @@ HAVING count(DISTINCT discord_message_id) > 1;
 
 ### 5.2 Canary
 
-1. **canary 1 bot**: 低トラフィックな `secretary` (v1 の lead-ama から変更、§9 Q1)
+1. **canary 1 bot**: 低トラフィックな `secretary` (CEO 承認済)
 2. 24h 観測: 重複 post 0 / `attempts` 中央値=1 / P99 ≤ 2 / orphan reclaim 発火率
 3. `lead-ama` / `agent-com-dev` / `auditor` / `arc` を順次切替
 4. 4 bot で 48h 安定後、残り 14 bot を rolling 切替 (1 min 間隔)
+
+#### 5.2.1 canary 期間中の旧/新経路の mutual exclusion (CTO 追加指摘、CEO 承認済)
+
+canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
+
+- secretary の row は **新経路**で secretary daemon のみが claim (`WHERE agent_id='secretary' AND status='pending'` + runtime gate が daemon のみ claim)
+- 他 18 bot の row は **legacy 経路**で各 stdio consumer が claim (`OUTBOUND_FORWARDER_MODE=legacy` の挙動 = agent_id filter なし + status 不変の旧 claim SQL)
+- 同一 row が新旧両経路から claim されることはない: canary bot の agent_id は新経路でのみ filter 合致し、他 bot の row は legacy 経路の全 consumer から見えるが **secretary daemon は agent_id filter で参加しない** ため競合しない
+
+この mutual exclusion が canary を安全にする構造的根拠。feature flag の切替えが atomic でなくても (process 間で `OUTBOUND_FORWARDER_MODE` 伝播に数秒の skew があっても) duplicate post は発生しない。
 
 ### 5.3 bot 再起動順序
 
@@ -409,13 +420,15 @@ HAVING count(DISTINCT discord_message_id) > 1;
 
 ---
 
-## 9. Open Questions (CEO / CTO 判断論点)
+## 9. Resolved decisions (CEO 承認済 2026-04-12 23:07 UTC / 08:07 JST)
 
-1. **canary bot**: v1 は lead-ama、v2 は secretary に変更提案 (低トラフィック優先)。異論あれば指示を。
-2. **default flip timing**: v1 7 日 → v2 3 日に短縮提案 (canary 24h + 4bot 48h = 3 日で全 19 bot covered)。
-3. **legacy 削除 PR の分離**: default flip と同一 PR / 別 PR の選択 (別 PR 推奨、blast radius 分離)。
-4. **`claimed_at` + `next_retry_at` 2 列追加**: 最小化で `claimed_at` のみにし backoff を `attempts * interval` で推定する選択肢もある。現案は明示性重視。
-5. **Option C (集中型) の将来適用条件**: bot 数が 50 / 100 を超えた段階で再議論するか、明示的 trigger (例: orphan reclaim 発火率 > X/hr) を設けるか。
+全 5 件、CTO 推奨案で CEO 確定。以下は記録目的で保持 (後から「何がどう決まったか」を辿れるように):
+
+1. **canary bot** → ✅ `secretary` に確定 (低トラフィック優先)
+2. **default flip timing** → ✅ 3 日 (canary 24h + 4bot 48h = 3 日で全 19 bot covered)
+3. **legacy 削除 PR の分離** → ✅ default flip と別 PR (blast radius 分離)
+4. **migration column 数** → ✅ `claimed_at` + `next_retry_at` の 2 列追加 (明示性重視、`attempts * interval` 推定は不採用)
+5. **Option C (集中型) 再評価 trigger** → ✅ 現規模 (Phase 1, 19 bot) では planning 外。**再評価 trigger は `docs/agent-com-message-queue-spec.md §14.5` (polling driver スケーラビリティ段階)** に到達した時点 (CEO 指示、本計画書でも §3.1 Option C 評価の前提として参照)
 
 ---
 
@@ -461,4 +474,5 @@ HAVING count(DISTINCT discord_message_id) > 1;
 | 日付 | 変更 | 理由 |
 |---|---|---|
 | 2026-04-13 JST | v1 | 初版 |
-| 2026-04-13 JST | **v2** (本版) | v1 差し戻し反映: SSOT §1 line 39 引用追加 / 推奨を Option A に変更 / exponential backoff + orphan reclaim 追記 / spec-enforcement test 定義 / regression fixture 拡張 (4 事例) / FEAT-005 参照 |
+| 2026-04-13 JST | v2 | v1 差し戻し反映: SSOT §1 line 39 引用追加 / 推奨を Option A に変更 / exponential backoff + orphan reclaim 追記 / spec-enforcement test 定義 / regression fixture 拡張 (4 事例) / FEAT-005 参照 |
+| 2026-04-13 JST | **v3 (最終版)** (本版) | CEO 全件承認 (2026-04-12 23:07 UTC) を反映: §5.2.1 に canary 期間の新/旧経路 mutual exclusion を CTO 追加指摘に従い明文化 / §9 を "Resolved decisions" に転換し 5 件の確定結果を記録 / §9 Q5 + §2 Option C に「§14.5 スケール段階を再評価 trigger」を CEO 指示として明示 / ヘッダに CEO 承認日時記載 |
