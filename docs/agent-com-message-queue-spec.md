@@ -268,10 +268,15 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 
 ### 4.2 agent-com send
 
-受信メッセージへの返信。`reply_to` は **両分岐とも呼び出し側が必須指定**（CLI フラグ / MCP 引数）。サーバー側で内部自動設定は行わない。分岐は `agents.current_message_id` の状態で決まる（ADR-048 Phase 0 D3）:
+受信メッセージへの返信。`reply_to` の扱いは caller と分岐で異なる（ADR-048 Phase 0 D3）:
 
-- **分岐 A (next 経由)**: CLI / MCP `next` で pop 済。`agents.current_message_id` が当該 `message_queue` 行を指す。`message_queue` 遷移は primary UPDATE（`current_message_id` 起点）。
-- **分岐 B (channel-plugin session-injection 経由)**: LLM session に直接注入されたメッセージへの返信。`next` を呼ばないため `agents.current_message_id = NULL`。`message_queue` 遷移は D3 fallback UPDATE（`reply_to` 起点、step 9 参照）。
+- **分岐 A (`next` 経由、`agents.current_message_id` あり)**: `next` で pop 済の行への返信。
+  - **CLI**: `--reply-to` は省略可。省略時は `current_message_id` が指す `message_queue` 行から `message_id` を内部解決する。
+  - **MCP tool**: `reply_to` は常に必須（MCP server 側に `current_message_id` を参照する経路がなく、tool schema で required）。
+  - `message_queue` 遷移は primary UPDATE（`WHERE id = current_message_id`）。
+- **分岐 B (channel-plugin session-injection 経由、`agents.current_message_id = NULL`)**: LLM session に直接注入されたメッセージへの返信。
+  - **CLI / MCP tool 共通**: `reply_to` 必須（caller 指定、`agent_messages.id` UUID 前提）。
+  - `message_queue` 遷移は D3 fallback UPDATE（`WHERE agent_id AND message_id = reply_to AND status IN ('pending','read')`、step 9 参照）。
 
 ```bash
 agent-com send --agent-id cto \
@@ -298,18 +303,19 @@ agent-com send --agent-id cto \
 **内部処理**:
 
 ```
-1. 経路判定（`agents.current_message_id` と caller 指定の `reply_to` から分岐選択）:
-   - **分岐 A**: `current_message_id` あり → primary path に入る
-   - **分岐 B**: `current_message_id = NULL` かつ `reply_to` 指定あり → fallback path に入る
-   - どちらにも該当しない CLI 経路（`current_message_id` も `reply_to` もなし） → `NO_CURRENT_MESSAGE` エラー
+1. 経路判定:
+   - **分岐 A**: `agents.current_message_id` あり → primary path
+   - **分岐 B**: `current_message_id = NULL` かつ caller 指定 `reply_to` あり → fallback path
+   - どちらにも該当しない場合（`current_message_id` も `reply_to` もなし） → `NO_CURRENT_MESSAGE` エラー（CLI）/ `NO_REPLY_TO` エラー（MCP、reply_to 引数欠落時）
 2. mentions検証:
    a. 空配列 → NOT_MENTIONEDエラー（元送信者を提案）
    b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有効一覧表示）
    c. DB不達 → MENTION_VALIDATION_UNAVAILABLEエラー
 3. 権限チェック: channels.membersに送信者が含まれるか
-4. reply_to 受け取り（両分岐とも caller 指定必須、`agent_messages.id` UUID 前提）:
-   - 欠落時は `NO_REPLY_TO` エラー（notify 用途は §4.3 を使用）
-   - サーバー側で `current_message_id` から `reply_to` を自動生成することはしない
+4. reply_to 確定（`agent_messages.id` UUID 前提）:
+   - **CLI 分岐 A** (`--reply-to` 省略時): `agents.current_message_id` が指す `message_queue` 行の `message_id` を内部解決して使用
+   - **CLI 分岐 A** (`--reply-to` 明示時) / **分岐 B** / **MCP tool 全般**: caller 指定の `reply_to` をそのまま使用
+   - 最終的に `reply_to` が空のまま MCP tool に到達した場合 → `NO_REPLY_TO` エラー（notify 用途は §4.3 を使用）
 5. 宛先解決（`resolveSendDestination(reply_to)`）:
    - 両分岐共通: `reply_to` の UUID から `agent_messages` を引き、`channel_id` / `thread_id` を導出
    - `reply_to` が `agent_messages` に存在しない（e.g., Discord snowflake 直渡し） → `MESSAGE_NOT_FOUND` エラー（fallback UPDATE 未到達）
