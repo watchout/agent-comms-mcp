@@ -33,20 +33,20 @@
         "message": "Framework management (.framework/): found"
       }
     ],
-    "checkedAt": "2026-04-12T22:22:33.050Z"
+    "checkedAt": "2026-04-12T22:35:56.200Z"
   },
   "gateB": {
-    "status": "failed",
+    "status": "passed",
     "checks": [
       {
         "name": "Implementation plan (.framework/plan.json)",
-        "passed": false,
-        "message": "No plan found. Run 'framework plan' to generate."
+        "passed": true,
+        "message": "Plan found: 4 waves, status=generated"
       },
       {
         "name": "Plan contains features",
-        "passed": false,
-        "message": "Cannot check features — no plan exists."
+        "passed": true,
+        "message": "50 features across 4 waves"
       },
       {
         "name": "Project profile configured (.framework/project.json)",
@@ -54,7 +54,7 @@
         "message": "Project profile found"
       }
     ],
-    "checkedAt": "2026-04-12T22:22:33.052Z"
+    "checkedAt": "2026-04-12T22:35:56.203Z"
   },
   "gateC": {
     "status": "passed",
@@ -67,7 +67,7 @@
         "missingSections": []
       }
     ],
-    "checkedAt": "2026-04-12T22:22:33.053Z"
+    "checkedAt": "2026-04-12T22:35:56.204Z"
   },
-  "updatedAt": "2026-04-12T22:22:33.053Z"
+  "updatedAt": "2026-04-12T22:35:56.204Z"
 }
