@@ -128,10 +128,10 @@ describe('Phase 3c — Shared Client Routing', () => {
     expect(daemonSection).toContain('discordClients.has(botId)) continue')
   })
 
-  test('per-bot client registers its own onMessage handler', () => {
+  test('per-bot client does NOT register an onMessage handler (ADR-041 S2-B: outbound-only)', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain('botDiscord.onMessage((msg)')
+    expect(daemonSection).not.toContain('botDiscord.onMessage((msg)')
   })
 
   test('shared discord instance is preserved for stdio/sse modes', () => {

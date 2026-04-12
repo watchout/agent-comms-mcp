@@ -183,10 +183,12 @@ describe('§2.2 Pattern A — Human warning', () => {
     expect(stdioSection).toContain('sendHumanWarning')
   })
 
-  test('daemon mode caller sends human warning (once)', () => {
+  test('daemon mode caller sends human warning', () => {
+    // ADR-041 S2-B: daemon retains a minimal shared-client onMessage that
+    // only emits sendHumanWarning (no handleInboundMessage). The human
+    // warning UX (§2.2 Pattern A) remains functional in daemon mode.
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain('humanWarningSent')
     expect(daemonSection).toContain('sendHumanWarning')
   })
 })
@@ -197,24 +199,20 @@ describe('Inbound Mentions Filter — callsite updates', () => {
     expect(SERVER_SOURCE).toContain('extractDiscordMentions(content, msg.mentionUserIds)')
   })
 
-  test('daemon per-bot client passes mentions to handleInboundMessage', () => {
+  test('daemon per-bot client does NOT bind onMessage (ADR-041 S2-B: outbound-only)', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    const perBotIdx = daemonSection.indexOf('botDiscord.onMessage')
-    expect(perBotIdx).toBeGreaterThan(-1)
-    const perBotBody = daemonSection.slice(perBotIdx, perBotIdx + 2000)
-    expect(perBotBody).toContain('extractDiscordMentions')
-    expect(perBotBody).toContain('mentions: resolvedMentions')
+    expect(daemonSection).not.toContain('botDiscord.onMessage')
   })
 
-  test('daemon shared client passes mentions to handleInboundMessage', () => {
+  test('daemon shared client onMessage (if any) does NOT call handleInboundMessage', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    const sharedIdx = daemonSection.indexOf('discord.onMessage((msg) => {')
-    expect(sharedIdx).toBeGreaterThan(-1)
-    const sharedBody = daemonSection.slice(sharedIdx, sharedIdx + 3000)
-    expect(sharedBody).toContain('extractDiscordMentions')
-    expect(sharedBody).toContain('mentions: resolvedMentions')
+    const sharedIdx = daemonSection.indexOf('discord.onMessage((msg)')
+    if (sharedIdx >= 0) {
+      const handlerBody = daemonSection.slice(sharedIdx, sharedIdx + 3000)
+      expect(handlerBody).not.toContain('handleInboundMessage({')
+    }
   })
 
   test('all callsites use handleInboundMessage (not old routeInbound)', () => {

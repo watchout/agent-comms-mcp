@@ -18,6 +18,31 @@
 7. PostgreSQLでもSQLiteでも同じCLIコマンドが動く
 ```
 
+### 原則 #2 の実装対応（ADR-041 S2-B / PR#157）
+
+「受信は1プロセス」を構造的に保証するため、Discord inbound は **stdio モード
+の `discord.onMessage` ハンドラ 1 箇所のみ**に集約される（retreat path (a)
+pull-on-notify 採用、PollingDriver を polling 基盤とする）。
+
+- **stdio モード**: `discord.onMessage` を唯一の inbound entry point として
+  保持し、`handleInboundMessage` → `agent_messages` / `message_queue` INSERT
+  を行う。
+- **daemon モード**:
+  - per-bot Discord client は `onMessage` を bind せず、connect のみ保持
+    （outbound REST 専用）。
+  - shared Discord client は connect を保持し、**`onMessage` は §2.2
+    Pattern A 人間警告専用の shortcut のみ** bind する。この listener は
+    `sendHumanWarning` のみを呼び、`handleInboundMessage` /
+    `message_queue` INSERT は行わない。
+  - つまり daemon は inbound routing（`handleInboundMessage`）を呼ばないが、
+    mention されない人間投稿への warning 機能だけは保持する。
+  - daemon は PollingDriver と outbound_queue 消費を担当する。
+- daemon と stdio を同時に起動しても `handleInboundMessage` は 1 回だけ発火
+  するため、`message_queue` への重複 INSERT は構造的に発生しない。
+
+この不変条件は `tests/spec-enforcement/s2b-receiver-unify.test.ts` で
+ソースレベルに pin されている。
+
 ---
 
 ## 2. 全体アーキテクチャ

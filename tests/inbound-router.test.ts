@@ -87,46 +87,29 @@ describe('Inbound Router — Source Structure', () => {
 // ============================================================
 // 1b. Daemon mode source-level regression tests
 // ============================================================
-describe('Inbound Router — Daemon Mode Source Structure', () => {
-  test('daemon mode uses handleInboundMessage for all Discord inbound paths', () => {
+// ADR-041 S2-B (PR#157): daemon mode inbound handlers were removed. The
+// stdio-mode Discord adapter is the sole inbound source. daemon retains
+// per-bot Discord clients for outbound only.
+describe('Inbound Router — Daemon Mode Source Structure (ADR-041 S2-B)', () => {
+  test('daemon mode does NOT bind per-bot Discord onMessage', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     expect(daemonBlock).toBeGreaterThan(-1)
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-
-    // Both startup per-bot and shared client use handleInboundMessage
-    expect(daemonSection).toContain('handleInboundMessage({')
-    // No direct saveMessage in any onMessage handler
-    const sharedOnMsg = daemonSection.indexOf('discord.onMessage((msg) => {')
-    expect(sharedOnMsg).toBeGreaterThan(-1)
-    const sharedBody = daemonSection.slice(sharedOnMsg, sharedOnMsg + 4000)
-    expect(sharedBody).not.toContain('saveMessage({')
+    expect(daemonSection).not.toContain('botDiscord.onMessage(')
   })
 
-  test('daemon startup connects per-bot Discord clients from EXPECTED_BOTS', () => {
+  test('daemon mode does NOT invoke handleInboundMessage', () => {
+    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
+    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
+    expect(daemonSection).not.toContain('handleInboundMessage({')
+  })
+
+  test('daemon startup still connects per-bot Discord clients (outbound-only)', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(daemonSection).toContain('for (const botId of EXPECTED_BOTS)')
     expect(daemonSection).toContain('resolveDiscordToken(botId)')
     expect(daemonSection).toContain('connectBotDiscord(botId,')
-  })
-
-  test('daemon startup per-bot calls pushToChannelServer after handleInboundMessage', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('pushToChannelServer(botId, inboundContent,')
-  })
-
-  test('daemon shared client iterates over EXPECTED_BOTS', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('for (const expectedBot of EXPECTED_BOTS)')
-  })
-
-  test('daemon mode pushes via pushToChannelServer with SSE fallback', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('pushToChannelServer(expectedBot,')
-    expect(daemonSection).toContain('ctx?.transport')
   })
 })
 
