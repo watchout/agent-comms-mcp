@@ -56,7 +56,17 @@ describe('ADR-041 S2-B — single inbound receiver entry point', () => {
     const daemonSection = SERVER_SRC.slice(daemonIdx, daemonIdx + 25000)
     const sharedIdx = daemonSection.indexOf('discord.onMessage(')
     if (sharedIdx >= 0) {
-      const handlerBody = daemonSection.slice(sharedIdx, sharedIdx + 2000)
+      // Extract the handler body: from onMessage( to the matching `})`.
+      const open = daemonSection.indexOf('{', sharedIdx)
+      let depth = 1
+      let i = open + 1
+      while (i < daemonSection.length && depth > 0) {
+        const c = daemonSection[i]
+        if (c === '{') depth++
+        else if (c === '}') depth--
+        i++
+      }
+      const handlerBody = daemonSection.slice(sharedIdx, i)
       expect(handlerBody).toContain('sendHumanWarning')
       expect(handlerBody).not.toContain('handleInboundMessage')
       expect(handlerBody).not.toContain('message_queue')
@@ -72,6 +82,7 @@ describe('ADR-041 S2-B — single inbound receiver entry point', () => {
 
   test('spec §2 原則 #2 (受信は1プロセス) is referenced in server comments', () => {
     expect(SERVER_SRC).toMatch(/ADR-041 S2-B/)
-    expect(SERVER_SRC).toMatch(/sole inbound source/i)
+    expect(SERVER_SRC).toMatch(/sole callsite of/i)
+    expect(SERVER_SRC).toContain('handleInboundMessage')
   })
 })

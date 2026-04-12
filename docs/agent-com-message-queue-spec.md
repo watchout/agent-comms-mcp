@@ -27,10 +27,16 @@ pull-on-notify 採用、PollingDriver を polling 基盤とする）。
 - **stdio モード**: `discord.onMessage` を唯一の inbound entry point として
   保持し、`handleInboundMessage` → `agent_messages` / `message_queue` INSERT
   を行う。
-- **daemon モード**: per-bot / shared Discord client は **outbound と admin
-  専用**。`onMessage` を bind してはならないが、**connect 自体は保持**する
-  （shared-token 配備の outbound REST / admin が継続動作するため）。daemon
-  は PollingDriver と outbound_queue 消費のみを inbound 的に担当しない。
+- **daemon モード**:
+  - per-bot Discord client は `onMessage` を bind せず、connect のみ保持
+    （outbound REST 専用）。
+  - shared Discord client は connect を保持し、**`onMessage` は §2.2
+    Pattern A 人間警告専用の shortcut のみ** bind する。この listener は
+    `sendHumanWarning` のみを呼び、`handleInboundMessage` /
+    `message_queue` INSERT は行わない。
+  - つまり daemon は inbound routing（`handleInboundMessage`）を呼ばないが、
+    mention されない人間投稿への warning 機能だけは保持する。
+  - daemon は PollingDriver と outbound_queue 消費を担当する。
 - daemon と stdio を同時に起動しても `handleInboundMessage` は 1 回だけ発火
   するため、`message_queue` への重複 INSERT は構造的に発生しない。
 

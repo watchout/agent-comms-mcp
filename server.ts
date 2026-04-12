@@ -3099,9 +3099,11 @@ async function postConnect() {
   }
 
   // Phase 5: Connect Discord adapter (if token provided, stdio/channel-plugin mode)
-  // ADR-041 S2-B: this stdio-mode `discord.onMessage` is the SOLE inbound source
-  // for handleInboundMessage. daemon mode per-bot / shared Discord clients are
-  // retained for outbound + presence only and MUST NOT bind onMessage.
+  // ADR-041 S2-B: this stdio-mode `discord.onMessage` is the SOLE callsite of
+  // `handleInboundMessage` (i.e. sole inbound routing / message_queue INSERT
+  // source). daemon mode per-bot Discord clients MUST NOT bind onMessage at
+  // all; daemon shared Discord client binds a MINIMAL onMessage that ONLY
+  // emits `sendHumanWarning` (no handleInboundMessage, no message_queue).
   // See: docs/agent-com-message-queue-spec.md §2 原則 #2 (受信は1プロセス).
   if (DISCORD_BOT_TOKEN && TRANSPORT_MODE !== 'daemon') {
     try {
@@ -3405,7 +3407,8 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
           if (botDiscord) {
             discordClients.set(botId, botDiscord)
             // ADR-041 S2-B: daemon per-bot Discord client is outbound-only.
-            // Inbound reception is owned exclusively by the stdio-mode adapter.
+            // No onMessage binding; handleInboundMessage is invoked only from
+            // the stdio-mode adapter.
           }
         }
         } // end else (skip if already connected)
@@ -3477,7 +3480,8 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
         if (botDiscord) {
           discordClients.set(botId, botDiscord)
           // ADR-041 S2-B: startup daemon per-bot Discord client is outbound-only.
-          // Inbound reception is owned exclusively by the stdio-mode adapter.
+          // No onMessage binding; handleInboundMessage is invoked only from
+          // the stdio-mode adapter.
           process.stderr.write(`agent-comms: startup Discord client for ${botId} (${tokenResult.source}, outbound-only)\n`)
         }
       }
@@ -3519,11 +3523,13 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
       }
     }
 
-    // ADR-041 S2-B migration guard: daemon alone does NOT receive inbound.
-    // If no stdio-mode adapter is running (separate process), inbound Discord
-    // messages will silently drop. Operators must ensure a stdio receiver is
-    // co-deployed. See docs/agent-com-message-queue-spec.md §2 原則 #2.
-    process.stderr.write(`agent-comms: [S2-B migration guard] daemon mode is outbound-only for Discord inbound. Ensure a stdio-mode receiver is co-deployed, or inbound messages will not be processed. See spec §2 / ADR-041.\n`)
+    // ADR-041 S2-B advisory notice: daemon alone does NOT invoke
+    // handleInboundMessage. If no stdio-mode adapter is running (separate
+    // process), inbound Discord messages will not be routed to message_queue.
+    // Operators must ensure a stdio receiver is co-deployed. This is an
+    // advisory log only — NOT a fail-fast guard. See
+    // docs/agent-com-message-queue-spec.md §2 原則 #2.
+    process.stderr.write(`agent-comms: [S2-B advisory] daemon mode is outbound-only for Discord inbound routing. Ensure a stdio-mode receiver is co-deployed, or inbound messages will not be processed. See spec §2 / ADR-041.\n`)
   })()
 
   httpServer.listen(SSE_PORT, () => {
