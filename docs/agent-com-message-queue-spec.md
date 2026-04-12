@@ -268,12 +268,10 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 
 ### 4.2 agent-com send
 
-受信メッセージへの返信。`reply_to` は 2 通りの経路で導出される（ADR-048 Phase 0 D3）:
+受信メッセージへの返信。`reply_to` は **両分岐とも呼び出し側が必須指定**（CLI フラグ / MCP 引数）。サーバー側で内部自動設定は行わない。分岐は `agents.current_message_id` の状態で決まる（ADR-048 Phase 0 D3）:
 
-- **分岐 A (next 経由)**: CLI / MCP `next` で pop したメッセージへの返信。
-  `reply_to` は `agents.current_message_id` から内部自動設定、`message_queue` 遷移は primary UPDATE。
-- **分岐 B (channel-plugin session-injection 経由)**: LLM session に直接注入されたメッセージへの返信。
-  `next` を呼ばないため `agents.current_message_id = NULL`。caller は `reply_to` を明示指定する必要があり、`message_queue` 遷移は D3 fallback UPDATE（step 9 参照）。
+- **分岐 A (next 経由)**: CLI / MCP `next` で pop 済。`agents.current_message_id` が当該 `message_queue` 行を指す。`message_queue` 遷移は primary UPDATE（`current_message_id` 起点）。
+- **分岐 B (channel-plugin session-injection 経由)**: LLM session に直接注入されたメッセージへの返信。`next` を呼ばないため `agents.current_message_id = NULL`。`message_queue` 遷移は D3 fallback UPDATE（`reply_to` 起点、step 9 参照）。
 
 ```bash
 agent-com send --agent-id cto \
@@ -309,9 +307,9 @@ agent-com send --agent-id cto \
    b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有効一覧表示）
    c. DB不達 → MENTION_VALIDATION_UNAVAILABLEエラー
 3. 権限チェック: channels.membersに送信者が含まれるか
-4. reply_to の確定:
-   - **分岐 A**: `reply_to = agents.current_message_id` が指す `message_queue` 行の `message_id`（内部自動設定）
-   - **分岐 B**: caller 指定の `reply_to`（`agent_messages.id` UUID 前提）をそのまま使用
+4. reply_to 受け取り（両分岐とも caller 指定必須、`agent_messages.id` UUID 前提）:
+   - 欠落時は `NO_REPLY_TO` エラー（notify 用途は §4.3 を使用）
+   - サーバー側で `current_message_id` から `reply_to` を自動生成することはしない
 5. 宛先解決（`resolveSendDestination(reply_to)`）:
    - 両分岐共通: `reply_to` の UUID から `agent_messages` を引き、`channel_id` / `thread_id` を導出
    - `reply_to` が `agent_messages` に存在しない（e.g., Discord snowflake 直渡し） → `MESSAGE_NOT_FOUND` エラー（fallback UPDATE 未到達）
