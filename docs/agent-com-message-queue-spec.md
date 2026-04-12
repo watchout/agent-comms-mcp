@@ -1,4 +1,4 @@
-# agent-com 統合メッセージキュー仕様 v1.0.2
+# agent-com 統合メッセージキュー仕様 v1.0.3
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
@@ -127,6 +127,23 @@ CREATE TABLE message_queue (
 CREATE INDEX idx_mq_agent_pending
   ON message_queue(agent_id, status, priority DESC, created_at ASC)
   WHERE status = 'pending';
+
+-- v1.0.3: duplicate-INSERT safety net (ADR-048 Phase 0 D4)
+-- Rationale: handleInboundMessage の onMessage path が複数 (stdio + daemon
+-- per-bot + daemon shared) 存在した時期に、同一 (agent_id, message_id) が
+-- 複数行 enqueue される drift が発生した。受信経路の一元化 (ADR-041 PR-B)
+-- が完了しても、DB 側の保険として部分 UNIQUE を保持する。
+CREATE UNIQUE INDEX uq_mq_agent_message
+  ON message_queue(agent_id, message_id)
+  WHERE message_id IS NOT NULL;
+```
+
+INSERT 時は必ず `ON CONFLICT DO NOTHING` を付与し、並行 enqueue が UNIQUE 違反で throw しないこと:
+
+```sql
+INSERT INTO message_queue (agent_id, message_id, payload)
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING;
 ```
 
 ### 3.3 outbound_queue（Discord送信キュー、新規）
