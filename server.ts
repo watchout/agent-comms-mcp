@@ -2519,10 +2519,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
 
     // Issue #130 Phase 4: finalize message_queue state after successful send.
-    // If the bot used MCP `next` to pop a queue row before calling `send`,
-    // agents.current_message_id points at that row. Mark it 'replied' and
-    // clear current_message_id so the next `next` call doesn't implicit-skip
-    // a row that was already answered. This mirrors cli/index.ts sendMessage.
+    // Primary path: if the bot used MCP `next`, agents.current_message_id points
+    // at the claimed row. Mark it 'replied' and clear current_message_id.
+    //
+    // ADR-048 Phase 0 D3 fallback: bots that receive via channel-plugin session
+    // injection never call `next`, so current_message_id stays NULL and the
+    // queue row would stagnate at 'pending'. When reply_to is provided, look up
+    // the matching message_queue row by (agent_id, message_id=reply_to) — the
+    // partial UNIQUE uq_mq_agent_message (v1.0.3 §3.2) guarantees uniqueness so
+    // this is a single-row UPDATE with no ambiguity. Status filter restricts to
+    // ('pending','read') so an already-replied row isn't overwritten.
     if (dbClient) {
       const agentRow = await dbClient.query(
         `SELECT current_message_id FROM agents WHERE agent_id = $1`,
@@ -2538,6 +2544,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
           [agentId],
         )
+      } else if (reply_to) {
+        await dbClient.query(
+          `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+           WHERE agent_id = $2 AND message_id = $3 AND status IN ('pending', 'read')`,
+          [id, agentId, reply_to],
+        ).catch(err => {
+          process.stderr.write(`agent-comms: D3 fallback replied transition failed (non-fatal): ${err}\n`)
+        })
       }
     }
 
