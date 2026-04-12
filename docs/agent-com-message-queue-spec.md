@@ -295,7 +295,11 @@ agent-com send --agent-id cto \
 **内部処理**:
 
 ```
-1. currentMessageIdが無い → NO_CURRENT_MESSAGE エラー
+1. currentMessageIdチェック:
+   - MCP `next` 経由で pop 済（currentMessageId あり） → step 9 の primary branch に進む
+   - channel-plugin session-injection 経由（currentMessageId = NULL）で reply_to あり
+     → step 9 の D3 fallback branch に進む（ADR-048 Phase 0）
+   - どちらも該当しない CLI 経路 → NO_CURRENT_MESSAGE エラー
 2. mentions検証:
    a. 空配列 → NOT_MENTIONEDエラー（元送信者を提案）
    b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有効一覧表示）
@@ -307,8 +311,16 @@ agent-com send --agent-id cto \
 7. push対象のmessage_queue INSERT​（mentions対象分）
    → 対象botのstatusに応じて senderにフィードバック（§9）
 8. outbound_queue INSERT​（Discord送信用）
-9. currentMessageのstatus='replied', replied_with=message_id
-10. currentMessageId = null
+9. message_queue を 'replied' へ遷移（ADR-048 Phase 0 D3）:
+   - **primary branch** (currentMessageId あり): `UPDATE message_queue SET status='replied', replied_with=message_id WHERE id = currentMessageId`
+   - **fallback branch** (currentMessageId = NULL, reply_to あり):
+     `UPDATE message_queue SET status='replied', replied_with=message_id
+      WHERE agent_id=$self AND message_id=reply_to AND status IN ('pending','read')`
+     - v1.0.3 §3.2 の partial UNIQUE `uq_mq_agent_message` により 0 or 1 行
+     - 0 行の場合は `d3.fallback.miss` を audit_log に記録（このbotが queue に持っていない UUID への reply = cross-agent 応答等）
+     - 例外時は `d3.fallback.error` を audit_log + stderr JSON log、send 本体は成功（non-fatal）
+   - **scope**: reply_to は `agent_messages.id` UUID 前提。Discord snowflake 経路は `resolveSendDestination` の `MESSAGE_NOT_FOUND` で pre-send 段階で落ちる（fallback 未到達）→ 別 issue #158 (D3b)
+10. currentMessageId = null（primary branch のみ。fallback branch は currentMessageId が元々 NULL）
 11. agents.status='idle' に更新
 12. 結果をJSON出力
 ```

@@ -91,13 +91,23 @@ const UPDATE_FALLBACK_SQL =
 
 describe('D3 fallback — DB integration (real Postgres)', () => {
   let db: PgClient
+  let dbAvailable = false
   let pendingId: number
   let readId: number
   let alreadyRepliedId: number
 
   beforeAll(async () => {
-    db = new PgClient({ connectionString: databaseUrl })
-    await db.connect()
+    // Skip-safe connect: if the DB is unreachable (e.g., CI without a local PG),
+    // flag the suite and let each test early-return. Matches the degrade-to-noop
+    // convention in tests/inbound-router.test.ts and pr-b-2-mixed-mode.test.ts.
+    try {
+      db = new PgClient({ connectionString: databaseUrl })
+      await db.connect()
+      dbAvailable = true
+    } catch (err) {
+      console.warn(`[d3-replied-fallback] DB unavailable, skipping integration cases: ${err}`)
+      return
+    }
     // Ensure a clean slate for this agent's fixtures.
     await db.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT])
 
@@ -115,12 +125,14 @@ describe('D3 fallback — DB integration (real Postgres)', () => {
   })
 
   afterAll(async () => {
+    if (!dbAvailable) return
     await db.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT]).catch(() => {})
-    await db.end()
+    await db.end().catch(() => {})
   })
 
   // Case 1: current_message_id=NULL + reply_to matches → exactly 1 row flips to 'replied'.
   test('case 1: reply_to match transitions exactly one row (pending → replied)', async () => {
+    if (!dbAvailable) return
     const res = await db.query(UPDATE_FALLBACK_SQL, [FIXTURE_REPLIED_WITH, FIXTURE_AGENT, FIXTURE_REPLY_TO_A])
     expect(res.rowCount).toBe(1)
     const after = await db.query(
@@ -133,6 +145,7 @@ describe('D3 fallback — DB integration (real Postgres)', () => {
 
   // Case 2: reply_to mismatch → zero rows touched, no collateral update.
   test('case 2: reply_to mismatch touches zero rows and leaves other rows intact', async () => {
+    if (!dbAvailable) return
     const BOGUS = '00000000-0000-0000-0000-00000000dead'
     const before = await db.query(
       `SELECT id, status FROM message_queue WHERE agent_id = $1 ORDER BY id`, [FIXTURE_AGENT],
@@ -154,29 +167,39 @@ describe('D3 fallback — DB integration (real Postgres)', () => {
     expect(repliedRow.rows[0].status).toBe('replied')
   })
 
-  // Case 3: DB exception path — invalid parameter shape (e.g., NULL message_id)
-  // must not corrupt state. The server.ts try/catch wraps this so send itself
-  // succeeds; here we prove the UPDATE either no-ops or raises, never partial-writes.
-  test('case 3: DB exception path leaves queue state unchanged (no partial writes)', async () => {
+  // Case 3: production-realistic DB failure path — a query issued on a pg
+  // client whose connection has already ended throws a real client-library
+  // error ("Client was closed and is not queryable" or similar). This mirrors
+  // the production failure modes the server.ts try/catch actually has to
+  // handle: connection reset / pool exhaustion / shutdown-during-query.
+  // Asserts: (a) the UPDATE raises, (b) no partial write landed on the row
+  // we targeted in the live DB, (c) queue state is unchanged.
+  //
+  // Note on "malformed reply_to" as a failure class: in production, a
+  // malformed UUID reaching this branch is a no-op, not an exception —
+  // `getMessageById` in resolveSendDestination would have already rejected
+  // the send with MESSAGE_NOT_FOUND before the fallback UPDATE runs. That
+  // class is covered by case 2 (0-row UPDATE), not case 3.
+  test('case 3: closed-client DB exception leaves queue state unchanged (no partial writes)', async () => {
+    if (!dbAvailable) return
     const before = await db.query(
-      `SELECT id, status, replied_with FROM message_queue WHERE id = $1`, [readId],
+      `SELECT id, status, replied_with, replied_at FROM message_queue WHERE id = $1`, [readId],
     )
-    // Drive a predictable failure by feeding a non-text value through a CAST
-    // the planner will reject. `reply_to` parameter is typed TEXT in production,
-    // so we simulate a "malformed reply_to" at the SQL layer via an explicit cast.
+
+    const scratch = new PgClient({ connectionString: databaseUrl })
+    await scratch.connect()
+    await scratch.end() // connection now terminated; subsequent query must fail
+
     let threw = false
     try {
-      await db.query(
-        `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
-         WHERE agent_id = $2 AND message_id = $3::uuid::text AND status IN ('pending', 'read')`,
-        [FIXTURE_REPLIED_WITH, FIXTURE_AGENT, 'not-a-uuid'],
-      )
+      await scratch.query(UPDATE_FALLBACK_SQL, [FIXTURE_REPLIED_WITH, FIXTURE_AGENT, FIXTURE_REPLY_TO_B])
     } catch {
       threw = true
     }
     expect(threw).toBe(true)
+
     const after = await db.query(
-      `SELECT id, status, replied_with FROM message_queue WHERE id = $1`, [readId],
+      `SELECT id, status, replied_with, replied_at FROM message_queue WHERE id = $1`, [readId],
     )
     expect(after.rows[0]).toEqual(before.rows[0])
   })
