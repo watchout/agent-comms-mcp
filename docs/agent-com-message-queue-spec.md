@@ -288,7 +288,29 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 
 ### 4.2 agent-com send
 
-直前にnextで取得したメッセージへの返信。reply_toは内部自動設定。
+受信メッセージへの返信。分岐は `agents.current_message_id` の state で決まる（caller 非依存）。caller (CLI / MCP) は到達可能な分岐の組み合わせが異なる（ADR-048 Phase 0 D3）:
+
+**分岐 A — primary path (`agents.current_message_id` set)**
+- `next` で pop 済の行への返信。`current_message_id` が当該 `message_queue.id` を指す
+- CLI: 常にこの分岐（`next` → `send` パターン必須）。`--reply-to` は省略可で、省略時は `current_message_id` が指す行の `message_id` を内部解決
+- MCP: LLM が MCP `next` tool を呼んだ後の send。`reply_to` は tool schema で required（caller 指定）
+- `message_queue` 遷移は **primary UPDATE**: `WHERE agent_id AND id = current_message_id`
+
+**分岐 B — fallback path (`current_message_id = NULL`, `reply_to` 指定あり)**
+- MCP の channel-plugin session-injection 経路専用（LLM session に直接注入され、`next` tool を呼ばない）
+- CLI はこの分岐に**到達不能**: `current_message_id` が未 set なら `NO_CURRENT_MESSAGE` エラーで pre-send 中断
+- MCP は `reply_to` 必須（`agent_messages.id` UUID 前提）
+- `message_queue` 遷移は **fallback UPDATE**: `WHERE agent_id AND message_id = reply_to AND status IN ('pending','read')`
+- PR#142 (v1.0.3 §3.2) の partial UNIQUE `uq_mq_agent_message` により 0-or-1 行
+
+**到達可能 matrix**:
+
+| Caller | 分岐 A (primary) | 分岐 B (fallback) |
+|---|---|---|
+| **CLI** | ✅ default（`next` → `send`） | ❌ `NO_CURRENT_MESSAGE` で到達不能 |
+| **MCP** | ✅ MCP `next` tool 経由 | ✅ channel-plugin session-injection 経由（本 PR 対応） |
+
+本 PR (#156) で追加したのは **分岐 B の fallback UPDATE** と関連 observability（step 9 参照）。分岐 A の primary UPDATE は従前から存在し、CLI / MCP 共通で動作する。
 
 ```bash
 agent-com send --agent-id cto \
@@ -315,20 +337,38 @@ agent-com send --agent-id cto \
 **内部処理**:
 
 ```
-1. currentMessageIdが無い → NO_CURRENT_MESSAGE エラー
+1. 経路判定（`agents.current_message_id` の state で決まる、caller 非依存）:
+   - `current_message_id` set → **分岐 A (primary path)**
+   - `current_message_id = NULL` かつ `reply_to` 指定あり → **分岐 B (fallback path)**
+   - どちらも不成立:
+     - CLI: `NO_CURRENT_MESSAGE` エラー（CLI は分岐 B に到達不能）
+     - MCP: `NO_REPLY_TO` エラー（`reply_to` 引数が tool schema で required）
 2. mentions検証:
    a. 空配列 → NOT_MENTIONEDエラー（元送信者を提案）
    b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有効一覧表示）
    c. DB不達 → MENTION_VALIDATION_UNAVAILABLEエラー
 3. 権限チェック: channels.membersに送信者が含まれるか
-4. reply_to = currentMessageId（自動設定）
-5. 宛先 = currentMessageのchannel_id/thread_id（自動設定）
+4. reply_to 確定（`agent_messages.id` UUID 前提）:
+   - **CLI 分岐 A (`--reply-to` 省略時)**: `agents.current_message_id` が指す `message_queue` 行の `message_id` を内部解決して default に採用
+   - **それ以外（CLI 分岐 A `--reply-to` 明示時 / MCP 分岐 A / MCP 分岐 B）**: caller 指定の `reply_to` をそのまま使用
+5. 宛先解決（`resolveSendDestination(reply_to)`）:
+   - 両分岐共通: `reply_to` の UUID から `agent_messages` を引き、`channel_id` / `thread_id` を導出
+   - `reply_to` が `agent_messages` に存在しない（e.g., Discord snowflake 直渡し） → `MESSAGE_NOT_FOUND` エラー（fallback UPDATE 未到達）
 6. agent_messages INSERT
 7. push対象のmessage_queue INSERT​（mentions対象分）
    → 対象botのstatusに応じて senderにフィードバック（§9）
 8. outbound_queue INSERT​（Discord送信用）
-9. currentMessageのstatus='replied', replied_with=message_id
-10. currentMessageId = null
+9. message_queue を 'replied' へ遷移（ADR-048 Phase 0 D3）:
+   - **分岐 A (primary UPDATE, CLI / MCP 共通)**:
+     `UPDATE message_queue SET status='replied', replied_with=message_id WHERE id = current_message_id`
+   - **分岐 B (fallback UPDATE, MCP session-injection 専用)**:
+     `UPDATE message_queue SET status='replied', replied_with=message_id
+      WHERE agent_id=$self AND message_id=reply_to AND status IN ('pending','read')`
+     - v1.0.3 §3.2 の partial UNIQUE `uq_mq_agent_message` により 0 or 1 行
+     - 0 行の場合は `d3.fallback.miss` を audit_log に記録（このbotが queue に持っていない UUID への reply = cross-agent 応答等）
+     - 例外時は `d3.fallback.error` を audit_log + stderr JSON log、send 本体は成功（non-fatal）
+   - **scope**: reply_to は `agent_messages.id` UUID 前提。Discord snowflake 経路は step 5 の `resolveSendDestination` で `MESSAGE_NOT_FOUND` として pre-send 段階で落ちる → 別 issue #158 (D3b)
+10. current_message_id = null（分岐 A のみ）
 11. agents.status='idle' に更新
 12. 結果をJSON出力
 ```
