@@ -1,0 +1,30 @@
+#!/bin/sh
+# === Pre-Code Gate (framework) ===
+# Runs full gate check before allowing commits that touch source code.
+# Bypass: git commit --no-verify
+
+PROTECTED_STAGED=$(git diff --cached --name-only | grep -E '^(adapters|cli|core|db|shared|scripts)/|^server\.ts$|^agent-com-bridge\.ts$')
+
+if [ -z "$PROTECTED_STAGED" ]; then
+  exit 0
+fi
+
+if ! command -v framework >/dev/null 2>&1; then
+  echo "[Pre-Code Gate] WARNING: 'framework' CLI not found. Skipping gate check."
+  exit 0
+fi
+
+echo "[Pre-Code Gate] Source code staged. Running gate check..."
+framework gate check
+gate_exit=$?
+
+if [ $gate_exit -ne 0 ]; then
+  echo ""
+  echo "[Pre-Code Gate] COMMIT BLOCKED: Pre-Code Gates have not passed."
+  echo "[Pre-Code Gate] Fix the issues above, then run 'framework gate check' again."
+  echo "[Pre-Code Gate] Emergency bypass: git commit --no-verify"
+  exit 1
+fi
+
+echo "[Pre-Code Gate] All gates passed."
+# === End Pre-Code Gate ===

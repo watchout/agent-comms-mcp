@@ -41,7 +41,8 @@
     "test": "bun test tests/",
     "migrate": "bun run db/migrate.ts",
     "seed": "bun run db/seed.ts",
-    "dev": "bun --watch server.ts"
+    "dev": "bun --watch server.ts",
+    "prepare": "git config core.hooksPath .husky 2>/dev/null || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",

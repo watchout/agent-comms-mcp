@@ -6,6 +6,11 @@ config.json
 .mcp.json.bak
 logs/
 *.log
-.claude/
+# .claude/ — ignore everything EXCEPT enforcement hooks + settings (ADF framework)
+.claude/*
+!.claude/hooks/
+!.claude/hooks/*.sh
+!.claude/settings.json
+!.claude/rules/
 agent-com-dev-state.md
 dist/

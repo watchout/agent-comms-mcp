@@ -1,0 +1,57 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-code-gate.sh\"",
+            "statusMessage": "Pre-Code Gate check..."
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-tracker.sh\"",
+            "statusMessage": "Tracking skill activation..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/framework-runner.sh\" 2>/dev/null || true"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/channel-routing.sh\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|mcp__agent-comms__reply|mcp__agent-comms__send_message",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "DATABASE_URL=postgresql://localhost/agent_comms AGENT_MEMORY_AGENT_ID=agent-com-dev AGENT_MEMORY_PROJECT=agent-comms-mcp bash /Users/yuji/Developer/agent-memory/scripts/post-tool-hook.sh 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

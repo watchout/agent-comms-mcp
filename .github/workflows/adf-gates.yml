@@ -1,0 +1,36 @@
+name: ADF Pre-Code Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  gate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          path: target
+
+      - name: Checkout ADF
+        uses: actions/checkout@v4
+        with:
+          repository: watchout/ai-dev-framework
+          path: framework
+          token: ${{ secrets.ADF_CLONE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build ADF CLI
+        working-directory: framework
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:cli
+
+      - name: Run gate check
+        working-directory: target
+        run: |
+          node ../framework/dist/cli/index.js gate check
