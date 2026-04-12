@@ -1628,7 +1628,7 @@ async function handleInboundMessage(params: {
         ...(attachments ? { attachments } : {}),
       })
       const mqIns = await client.query(
-        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id`,
+        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
         [receiverAgentId, messageId, mqPayload],
       ).catch(err => {
         process.stderr.write(`agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`)
@@ -2413,7 +2413,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (dbClient) {
           try {
             const sendIns = await dbClient.query(
-              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id`,
+              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
               [recipient, id, mqPayload],
             )
             // Codex audit (PR#140): observability — surface ON CONFLICT hits.
