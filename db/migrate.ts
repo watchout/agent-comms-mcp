@@ -336,10 +336,30 @@ async function migrate() {
       ON outbound_queue(status, created_at ASC)
       WHERE status = 'pending';
 
-    -- S2-A (FEAT-005): atomic claim + backoff support
-    -- See: db/migrations/0001_outbound_queue_claimed_next_retry.sql
+    -- S2-A (FEAT-005): atomic claim + exponential backoff support.
+    -- Forward-only changes for existing DBs that predate this PR. All
+    -- statements are idempotent so the whole migration is safe to re-run.
+    -- See: docs/plans/outbound-forwarder-unification.md §3.
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+
+    -- status CHECK mutation: drop + re-add so pre-S2-A DBs accept the
+    -- 'processing' claim flip. Postgres does not allow CHECK constraint
+    -- mutation in place; bracketed in DO $$ for idempotency.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'outbound_queue'::regclass
+           AND conname  = 'outbound_queue_status_check'
+      ) THEN
+        ALTER TABLE outbound_queue DROP CONSTRAINT outbound_queue_status_check;
+      END IF;
+      ALTER TABLE outbound_queue
+        ADD CONSTRAINT outbound_queue_status_check
+        CHECK (status IN ('pending', 'processing', 'sent', 'failed'));
+    END $$;
+
     CREATE INDEX IF NOT EXISTS idx_outbound_queue_processing_claimed_at
       ON outbound_queue(status, claimed_at)
       WHERE status = 'processing';

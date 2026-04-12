@@ -795,16 +795,26 @@ class PollingDriver {
       }
     }, POLL_DRIVER_HEARTBEAT_MS)
 
-    // Polling: fetch pending rows into buffer
-    this.pollTimer = setInterval(() => {
-      this.poll(agentId).catch(err => {
-        process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
-      })
-    }, POLL_DRIVER_INTERVAL_MS)
-
-    process.stderr.write(
-      `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
-    )
+    // S2-A (FEAT-005) B2: SSOT §1 line 39 places PollingDriver under the
+    // daemon runtime (alongside outbound_queue consumption). stdio MCP
+    // servers skip the poll timer — MCP `next` still works because
+    // PollingDriver.shift() returns null on empty buffer and the MCP tool
+    // falls back to a direct DB query. Heartbeat timer above stays on for
+    // all runtimes so agents.last_seen_at keeps updating regardless.
+    if (isDaemonRuntime()) {
+      this.pollTimer = setInterval(() => {
+        this.poll(agentId).catch(err => {
+          process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
+        })
+      }, POLL_DRIVER_INTERVAL_MS)
+      process.stderr.write(
+        `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
+      )
+    } else {
+      process.stderr.write(
+        `agent-comms: PollingDriver poll timer skipped (stdio runtime); heartbeat only\n`,
+      )
+    }
   }
 
   stop(): void {
@@ -1022,12 +1032,21 @@ async function reclaimOrphanOutboundRows(): Promise<void> {
   if (!client) return
   const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '300', 10) || 300)
   try {
+    // Plan §3.5: reschedule with same backoff the transient-failure path
+    // uses so a crashed consumer's rows don't thundering-herd back and
+    // immediately re-race. Inline SQL mirrors computeOutboundRetryDelayMs():
+    //   delay = min(30s, 2^(attempts-1) s) + jitter(0..500ms).
     const res = await client.query(
       `UPDATE outbound_queue
           SET status = 'pending',
               last_error = 'orphan_reclaim',
               claimed_at = NULL,
               next_retry_at = now()
+                            + LEAST(
+                                interval '30 seconds',
+                                (power(2, greatest(attempts - 1, 0)))::int * interval '1 second'
+                              )
+                            + ((random() * 500)::int || ' milliseconds')::interval
         WHERE status = 'processing'
           AND agent_id = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
