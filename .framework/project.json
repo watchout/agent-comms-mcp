@@ -1,0 +1,23 @@
+{
+  "name": "agent-comms-mcp",
+  "version": "0.1.0",
+  "profileType": "api",
+  "createdAt": "2026-04-12T22:22:17.352Z",
+  "updatedAt": "2026-04-12T22:22:17.352Z",
+  "phase": -1,
+  "status": "initialized",
+  "techStack": {
+    "framework": "mcp-server",
+    "language": "typescript",
+    "runtime": "bun",
+    "ui": null,
+    "testing": "bun-test",
+    "hosting": "self-hosted-tmux"
+  },
+  "config": {
+    "aiProvider": "anthropic",
+    "aiModel": null,
+    "autoCommit": false,
+    "escalationMode": "strict"
+  }
+}

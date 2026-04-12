@@ -1,0 +1,296 @@
+{
+  "projectDir": "/Users/yuji/Developer/agent-comms-mcp",
+  "projectName": "agent-comms-mcp",
+  "scannedAt": "2026-04-12T22:22:17.346Z",
+  "directory": {
+    "hasSrc": false,
+    "hasDocs": true,
+    "hasTests": true,
+    "hasPublic": false,
+    "hasFramework": false,
+    "hasClaudeMd": true,
+    "hasPackageJson": true,
+    "topLevelDirs": [
+      "adapters",
+      "cli",
+      "core",
+      "db",
+      "demo",
+      "docs",
+      "logs",
+      "scripts",
+      "shared",
+      "tests"
+    ],
+    "srcSubdirs": []
+  },
+  "techStack": [
+    {
+      "name": "TypeScript",
+      "category": "language",
+      "version": "^5.7.3",
+      "source": "package.json (typescript)"
+    }
+  ],
+  "fileStats": {
+    "totalFiles": 70,
+    "totalLines": 22547,
+    "byExtension": {
+      ".json": 5,
+      ".md": 18,
+      ".ts": 47
+    }
+  },
+  "existingDocs": [
+    {
+      "path": "docs/SPEC-INDEX.md",
+      "name": "SPEC-INDEX.md",
+      "sizeBytes": 4030,
+      "category": "docs"
+    },
+    {
+      "path": "docs/SSE_TRANSPORT_SPEC.md",
+      "name": "SSE_TRANSPORT_SPEC.md",
+      "sizeBytes": 14625,
+      "category": "docs"
+    },
+    {
+      "path": "docs/SSOT.md",
+      "name": "SSOT.md",
+      "sizeBytes": 43612,
+      "category": "docs"
+    },
+    {
+      "path": "docs/agent-com-message-queue-spec.md",
+      "name": "agent-com-message-queue-spec.md",
+      "sizeBytes": 55093,
+      "category": "docs"
+    },
+    {
+      "path": "docs/archive/RECEIVER_ARCHITECTURE_v0.2.0_PROPOSAL.md",
+      "name": "RECEIVER_ARCHITECTURE_v0.2.0_PROPOSAL.md",
+      "sizeBytes": 60051,
+      "category": "archive"
+    },
+    {
+      "path": "docs/archive/agent-com-webhook-architecture.md",
+      "name": "agent-com-webhook-architecture.md",
+      "sizeBytes": 21965,
+      "category": "archive"
+    },
+    {
+      "path": "docs/archive/channel-thread-control-spec.md",
+      "name": "channel-thread-control-spec.md",
+      "sizeBytes": 45500,
+      "category": "archive"
+    },
+    {
+      "path": "docs/design/core/SSOT-2_UI_STATE.md",
+      "name": "SSOT-2_UI_STATE.md",
+      "sizeBytes": 365,
+      "category": "core"
+    },
+    {
+      "path": "docs/design/core/SSOT-3_API_CONTRACT.md",
+      "name": "SSOT-3_API_CONTRACT.md",
+      "sizeBytes": 15529,
+      "category": "core"
+    },
+    {
+      "path": "docs/design/core/SSOT-4_DATA_MODEL.md",
+      "name": "SSOT-4_DATA_MODEL.md",
+      "sizeBytes": 10469,
+      "category": "core"
+    },
+    {
+      "path": "docs/design/core/SSOT-5_CROSS_CUTTING.md",
+      "name": "SSOT-5_CROSS_CUTTING.md",
+      "sizeBytes": 15877,
+      "category": "core"
+    },
+    {
+      "path": "docs/investigations/arc-reply-behavior-2026-04-09.md",
+      "name": "arc-reply-behavior-2026-04-09.md",
+      "sizeBytes": 21058,
+      "category": "investigations"
+    },
+    {
+      "path": "docs/operations/DEPLOYMENT.md",
+      "name": "DEPLOYMENT.md",
+      "sizeBytes": 3497,
+      "category": "operations"
+    },
+    {
+      "path": "docs/plans/outbound-forwarder-unification.md",
+      "name": "outbound-forwarder-unification.md",
+      "sizeBytes": 14375,
+      "category": "plans"
+    },
+    {
+      "path": "CLAUDE.md",
+      "name": "CLAUDE.md",
+      "sizeBytes": 1534,
+      "category": "root"
+    },
+    {
+      "path": "README.md",
+      "name": "README.md",
+      "sizeBytes": 6958,
+      "category": "root"
+    },
+    {
+      "path": "agent-com-dev-state.md",
+      "name": "agent-com-dev-state.md",
+      "sizeBytes": 407,
+      "category": "root"
+    }
+  ],
+  "gaps": [
+    {
+      "ssoId": "SSOT-0",
+      "name": "PRD",
+      "path": "docs/requirements/SSOT-0_PRD.md",
+      "status": "missing",
+      "recommendation": "Required: Generate PRD from codebase analysis"
+    },
+    {
+      "ssoId": "SSOT-1",
+      "name": "Feature Catalog",
+      "path": "docs/requirements/SSOT-1_FEATURE_CATALOG.md",
+      "status": "missing",
+      "recommendation": "Required: Generate Feature Catalog from codebase analysis"
+    },
+    {
+      "ssoId": "SSOT-2",
+      "name": "UI/State",
+      "path": "docs/design/core/SSOT-2_UI_STATE.md",
+      "status": "exists",
+      "recommendation": "Audit with 'framework audit ssot' to verify quality"
+    },
+    {
+      "ssoId": "SSOT-3",
+      "name": "API Contract",
+      "path": "docs/design/core/SSOT-3_API_CONTRACT.md",
+      "status": "exists",
+      "recommendation": "Audit with 'framework audit ssot' to verify quality"
+    },
+    {
+      "ssoId": "SSOT-4",
+      "name": "Data Model",
+      "path": "docs/design/core/SSOT-4_DATA_MODEL.md",
+      "status": "exists",
+      "recommendation": "Audit with 'framework audit ssot' to verify quality"
+    },
+    {
+      "ssoId": "SSOT-5",
+      "name": "Cross-Cutting",
+      "path": "docs/design/core/SSOT-5_CROSS_CUTTING.md",
+      "status": "exists",
+      "recommendation": "Audit with 'framework audit ssot' to verify quality"
+    },
+    {
+      "ssoId": "STD-TECH",
+      "name": "Tech Stack",
+      "path": "docs/standards/TECH_STACK.md",
+      "status": "missing",
+      "recommendation": "Required: Generate Tech Stack from codebase analysis"
+    },
+    {
+      "ssoId": "STD-CODE",
+      "name": "Coding Standards",
+      "path": "docs/standards/CODING_STANDARDS.md",
+      "status": "missing",
+      "recommendation": "Optional: Generate Coding Standards when ready"
+    },
+    {
+      "ssoId": "STD-GIT",
+      "name": "Git Workflow",
+      "path": "docs/standards/GIT_WORKFLOW.md",
+      "status": "missing",
+      "recommendation": "Optional: Generate Git Workflow when ready"
+    },
+    {
+      "ssoId": "STD-TEST",
+      "name": "Testing Standards",
+      "path": "docs/standards/TESTING_STANDARDS.md",
+      "status": "missing",
+      "recommendation": "Optional: Generate Testing Standards when ready"
+    },
+    {
+      "ssoId": "IDEA",
+      "name": "Idea Canvas",
+      "path": "docs/idea/IDEA_CANVAS.md",
+      "status": "missing",
+      "recommendation": "Optional: Generate Idea Canvas when ready"
+    },
+    {
+      "ssoId": "OPS-ENV",
+      "name": "Environments",
+      "path": "docs/operations/ENVIRONMENTS.md",
+      "status": "missing",
+      "recommendation": "Optional: Generate Environments when ready"
+    },
+    {
+      "ssoId": "OPS-DEPLOY",
+      "name": "Deployment",
+      "path": "docs/operations/DEPLOYMENT.md",
+      "status": "exists",
+      "recommendation": "Audit with 'framework audit ssot' to verify quality"
+    }
+  ],
+  "readiness": {
+    "score": 50,
+    "maxScore": 91,
+    "details": [
+      {
+        "name": "package.json exists",
+        "passed": true,
+        "points": 10
+      },
+      {
+        "name": "src/ directory exists",
+        "passed": false,
+        "points": 10,
+        "detail": "No src/ directory"
+      },
+      {
+        "name": "Framework detected",
+        "passed": false,
+        "points": 10,
+        "detail": "No framework detected"
+      },
+      {
+        "name": "TypeScript configured",
+        "passed": true,
+        "points": 10
+      },
+      {
+        "name": "Testing framework configured",
+        "passed": false,
+        "points": 10,
+        "detail": "No testing framework detected"
+      },
+      {
+        "name": "docs/ directory exists",
+        "passed": true,
+        "points": 10
+      },
+      {
+        "name": "Required SSOT documents",
+        "passed": false,
+        "points": 11,
+        "detail": "4/7 required SSOTs exist"
+      },
+      {
+        "name": "Not already managed",
+        "passed": true,
+        "points": 10
+      },
+      {
+        "name": "CLAUDE.md exists",
+        "passed": true,
+        "points": 10
+      }
+    ]
+  }
+}
