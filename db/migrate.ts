@@ -236,13 +236,22 @@ async function migrate() {
       WHERE status = 'pending';
 
     -- Drop duplicate (agent_id, message_id) rows before enforcing uniqueness.
-    -- Keep the lowest id per pair so earliest enqueue wins.
+    -- Codex audit (PR#140): only delete rows that are still 'pending' on BOTH
+    -- sides and have identical payloads. This preserves any row whose status
+    -- has already progressed ('read'/'replied'/'skipped') and avoids discarding
+    -- a divergent payload. If residual duplicates remain after this scrub, the
+    -- CREATE UNIQUE INDEX below will fail loud — the operator is expected to
+    -- inspect and reconcile manually rather than have migrate.ts silently drop
+    -- potentially-non-identical rows.
     DELETE FROM message_queue a
     USING message_queue b
     WHERE a.message_id IS NOT NULL
       AND a.agent_id = b.agent_id
       AND a.message_id = b.message_id
-      AND a.id > b.id;
+      AND a.id > b.id
+      AND a.status = 'pending'
+      AND b.status = 'pending'
+      AND a.payload = b.payload;
     CREATE UNIQUE INDEX IF NOT EXISTS uq_mq_agent_message
       ON message_queue(agent_id, message_id)
       WHERE message_id IS NOT NULL;

@@ -1627,12 +1627,18 @@ async function handleInboundMessage(params: {
         ts: timestamp.toISOString(),
         ...(attachments ? { attachments } : {}),
       })
-      await client.query(
-        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      const mqIns = await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id`,
         [receiverAgentId, messageId, mqPayload],
       ).catch(err => {
         process.stderr.write(`agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`)
+        return null
       })
+      // Codex audit (PR#140): observability — log when ON CONFLICT DO NOTHING
+      // suppressed a row so duplicate enqueue attempts are visible in stderr.
+      if (mqIns && mqIns.rowCount === 0) {
+        process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`)
+      }
     }
   }
 
@@ -2406,10 +2412,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
-            await dbClient.query(
-              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+            const sendIns = await dbClient.query(
+              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id`,
               [recipient, id, mqPayload],
             )
+            // Codex audit (PR#140): observability — surface ON CONFLICT hits.
+            if (sendIns.rowCount === 0) {
+              process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${recipient}, message_id=${id}) skipped by uq_mq_agent_message\n`)
+            }
           } catch (err) {
             process.stderr.write(`agent-comms: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
           }
