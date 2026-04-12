@@ -128,7 +128,7 @@ CREATE INDEX idx_mq_agent_pending
   ON message_queue(agent_id, status, priority DESC, created_at ASC)
   WHERE status = 'pending';
 
--- v1.0.3: duplicate-INSERT safety net (ADR-048 Phase 0 D4)
+-- v1.0.3: DDL invariant — duplicate-INSERT safety net (ADR-048 Phase 0 D4)
 -- Rationale: handleInboundMessage の onMessage path が複数 (stdio + daemon
 -- per-bot + daemon shared) 存在した時期に、同一 (agent_id, message_id) が
 -- 複数行 enqueue される drift が発生した。受信経路の一元化 (ADR-041 PR-B)
@@ -138,13 +138,16 @@ CREATE UNIQUE INDEX uq_mq_agent_message
   WHERE message_id IS NOT NULL;
 ```
 
-INSERT 時は必ず `ON CONFLICT DO NOTHING` を付与し、並行 enqueue が UNIQUE 違反で throw しないこと:
+**DML rule (上記 DDL invariant `uq_mq_agent_message` と対応)**:
+`message_queue` への INSERT は **必ず** 以下の形式で行うこと。ON CONFLICT の target を明示し (部分 UNIQUE の述語も同一)、並行 enqueue が UNIQUE 違反で throw しない・どの制約が発火したかも明示される:
 
 ```sql
 INSERT INTO message_queue (agent_id, message_id, payload)
 VALUES ($1, $2, $3)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING;
 ```
+
+`message_id` が NULL のシステムメッセージ経路は部分 UNIQUE の対象外なので ON CONFLICT は発火しない (legacy 互換)。
 
 ### 3.3 outbound_queue（Discord送信キュー、新規）
 
