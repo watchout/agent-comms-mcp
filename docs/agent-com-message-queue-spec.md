@@ -187,18 +187,38 @@ CREATE TABLE outbound_queue (
   attachments TEXT DEFAULT '[]',       -- ファイルパス配列
   reply_to_discord_id TEXT,            -- Discord native reply参照
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'sent', 'failed')),
+    CHECK (status IN ('pending', 'processing', 'sent', 'failed')),  -- S2-A: 'processing' added
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 5,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  sent_at TIMESTAMPTZ
+  sent_at TIMESTAMPTZ,
+  claimed_at TIMESTAMPTZ,              -- S2-A (PR #164): consumer が atomic claim した時刻、orphan 検出用
+  next_retry_at TIMESTAMPTZ,           -- S2-A (PR #164): transient 失敗時の exponential backoff 再試行時刻
+  discord_message_id TEXT              -- Phase C Step 1 PR-A (PR #168): idempotency 用に送信成功時 Discord snowflake を永続化
 );
 
 CREATE INDEX idx_oq_pending
   ON outbound_queue(status, created_at ASC)
   WHERE status = 'pending';
+
+-- S2-A: processing claim の orphan 検出用 + agent 毎の next_retry_at 早期取り出し用
+CREATE INDEX idx_outbound_queue_processing_claimed_at
+  ON outbound_queue(status, claimed_at)
+  WHERE status = 'processing';
+CREATE INDEX idx_outbound_queue_agent_pending_next_retry
+  ON outbound_queue(agent_id, status, next_retry_at)
+  WHERE status = 'pending';
 ```
+
+**カラム詳細** (drift 解消、実装と同期、本 §3.3 が SSOT):
+
+| カラム | 導入 PR | 役割 |
+|---|---|---|
+| `status='processing'` | PR #164 (S2-A) | atomic claim で `UPDATE status='pending'→'processing'` する瞬間的状態。`FOR UPDATE SKIP LOCKED` と組み合わせて別 consumer の二重取得を防ぐ |
+| `claimed_at` | PR #164 (S2-A) | consumer が claim した瞬間の wall-clock。orphan 再回収の閾値判定 (`OUTBOUND_ORPHAN_TIMEOUT_SEC`) |
+| `next_retry_at` | PR #164 (S2-A) | transient failure 後の再試行最早時刻。`min(30s, 2^(attempt-1)) + jitter` の exponential backoff |
+| `discord_message_id` | PR #168 (Phase C Step 1 PR-A) | 送信成功時 Discord snowflake を永続化。consumer が claim 時に非 null を検出したら re-post せず `status='sent'` に short-circuit。HTTP 応答喪失 retry 後のクラッシュ耐性 |
 
 ### 3.4 agents（既存テーブル改修）
 
@@ -814,6 +834,21 @@ receiverClient.on("messageCreate", async (msg) => {
 ```
 
 ### 7.4 Outbound処理
+
+> **S2-A (PR #164) + Phase C Step 1 PR-A (PR #168) で挙動更新済**。以下の例示コードは初版方式（batch SELECT）。実装は atomic claim (UPDATE...FOR UPDATE SKIP LOCKED) + exponential backoff + nonce idempotency へ進化した。例示コードの後ろに現行の挙動仕様を明記する。
+
+#### 現行の挙動仕様 (実装との SSOT)
+
+1. **Atomic claim (§3.3)**: 1 tick (1 秒) につき 1 行、`agent_id = AGENT_ID` 条件で `status='pending' → 'processing'`、`attempts += 1`、`claimed_at = now()` を `FOR UPDATE SKIP LOCKED` で取得。別 consumer の二重取得は構造的に不可
+2. **Row-level idempotency short-circuit (§3.3 `discord_message_id`)**: claim 時に `discord_message_id` が既に非 null なら、consumer は `sendAdapterMessage` を再呼び出しせず直接 `status='sent'` へ flip。HTTP 応答喪失後の retry がクラッシュ復旧しても重複送信しない
+3. **Platform-level nonce dedup**: `sendAdapterMessage` に `nonce = "out-<row.id>"` を渡し、Discord `enforceNonce: true` で 5 分 window の重複送信を Discord 側で拒否
+4. **Duplicate-nonce error handling**: Discord が error code `40062` ("Cannot send a message using that nonce") を返した場合、consumer は **idempotent success として `status='sent'` に flip する**。discord_message_id は不明のため NULL のまま。この分岐が「HTTP 応答喪失 + row-level 未永続化 + nonce window 内 retry」という最悪シーケンスに対する最終防衛線
+5. **Success path**: 送信成功時は `status='sent'` + `sent_at=now()` + `discord_message_id=<返却された snowflake>` を 1 つの UPDATE で永続化
+6. **Transient failure → exponential backoff (§3.4)**: network/timeout/5xx/429 等は `status='pending'` に戻し、`next_retry_at = now() + min(30s, 2^(attempt-1) s) + jitter`
+7. **Permanent failure**: 非 transient or `attempts >= max_attempts` なら `status='failed' + last_error=<err>`
+8. **Orphan reclaim (§3.5)**: `OUTBOUND_ORPHAN_TIMEOUT_SEC` (default 600 秒 = Discord nonce dedup 5 分 + buffer 5 分) を超えた `processing` 行は `pending` へ戻し、claim した consumer がクラッシュした場合のロック滞留を防ぐ
+
+#### 例示コード（初版方式、historical reference）
 
 ```typescript
 // 1秒ごとにoutbound_queueを消費

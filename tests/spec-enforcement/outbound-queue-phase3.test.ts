@@ -290,4 +290,33 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
     const typesSrc = readFileSync(join(REPO_ROOT, 'adapters', 'types.ts'), 'utf-8')
     expect(typesSrc).toMatch(/nonce\?:\s*string/)
   })
+
+  // cycle 2 — duplicate-nonce idempotent branch pins.
+  test('consumer imports isDuplicateNonceError from core/outbound-delivery', () => {
+    expect(SERVER_SRC).toMatch(
+      /import\s+\{\s*isDuplicateNonceError\s*\}\s+from\s+['"]\.\/core\/outbound-delivery['"]/,
+    )
+  })
+
+  test('consumer catch-block calls isDuplicateNonceError and flips deliveryError to null', () => {
+    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
+    expect(fnBody).toMatch(/isDuplicateNonceError\(err,\s*deliveryError\)/)
+    expect(fnBody).toMatch(/duplicateNonceIdempotent\s*=\s*true/)
+    expect(fnBody).toMatch(/deliveryError\s*=\s*null/)
+  })
+
+  test('core/outbound-delivery.ts exports the pure classifier', () => {
+    const coreSrc = readFileSync(join(REPO_ROOT, 'core', 'outbound-delivery.ts'), 'utf-8')
+    expect(coreSrc).toMatch(/export function isDuplicateNonceError/)
+    expect(coreSrc).toMatch(/40062/)
+  })
+
+  // S1 — orphan timeout default raised to 600s (Discord nonce window + buffer).
+  test('OUTBOUND_ORPHAN_TIMEOUT_SEC default is 600 seconds', () => {
+    const fnIdx = SERVER_SRC.indexOf('async function reclaimOrphanOutboundRows')
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 1500)
+    expect(fnBody).toMatch(/OUTBOUND_ORPHAN_TIMEOUT_SEC\s*\?\?\s*'600'/)
+    expect(fnBody).toMatch(/\|\|\s*600/)
+  })
 })

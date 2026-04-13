@@ -43,6 +43,7 @@ import {
   validateMentionOrError,
   buildReplyContextSuffix,
 } from './core/send-errors'
+import { isDuplicateNonceError } from './core/outbound-delivery'
 import {
   refreshAgentCacheWith,
   applyMentionsAutoFill,
@@ -887,8 +888,13 @@ const pollingDriver = new PollingDriver()
 // max_attempts=5 exhausts to status='failed'.
 //
 // Orphan reclaim (§3.5): separate 60s tick returns 'processing' rows whose
-// claimed_at is older than OUTBOUND_ORPHAN_TIMEOUT_SEC (default 300) back to
+// claimed_at is older than OUTBOUND_ORPHAN_TIMEOUT_SEC (default 600) back to
 // 'pending' so a crashed consumer doesn't pin rows indefinitely.
+// Phase C Step 1 PR-A cycle 2 (S1): default raised from 300s → 600s so the
+// orphan reclaim window is strictly larger than Discord's ~5-minute
+// enforceNonce dedup window (300s) plus a 300s buffer. This guarantees that
+// a crashed consumer whose row is reclaimed and retried cannot race the
+// Discord dedup window from the other side.
 //
 // Fallback removed (§3.6): outbound send uses discordClients.get(row.agent_id)
 // directly; rows whose bot has no client are marked failed with
@@ -991,11 +997,13 @@ async function consumeOneOutboundRow(): Promise<void> {
 
     let deliveryError: string | null = null
     let discordMessageId: string | null = null
+    let duplicateNonceIdempotent = false
     try {
       // Phase C Step 1 PR-A (B): nonce = "out-<row.id>" (<=25 chars for any
-      // realistic row id). Discord enforces uniqueness per channel for ~5
-      // minutes, so a retry inside that window that Discord already accepted
-      // returns an error instead of a duplicate post.
+      // realistic outbound_queue.id). `enforceNonce: true` asks Discord to
+      // dedupe messages posted to the same channel with the same nonce in
+      // the last ~5 minutes. outbound_queue.id is BIGSERIAL so nonces are
+      // globally unique across bots; same nonce across bots cannot collide.
       const result = await clientForAgent.sendAdapterMessage({
         external_channel_id: row.channel_external_id,
         content: truncateForPlatform(row.content, 'discord'),
@@ -1004,18 +1012,39 @@ async function consumeOneOutboundRow(): Promise<void> {
       discordMessageId = result.external_message_id ?? null
     } catch (err) {
       deliveryError = String(err).slice(0, 500)
+      // Phase C Step 1 PR-A cycle 2 — B1: duplicate-nonce idempotent branch.
+      // Discord returns code 40062 ("Cannot send a message using that nonce")
+      // when enforceNonce rejects a retry inside its dedup window. This is
+      // the exact condition the nonce was added to catch: our first attempt
+      // reached Discord, our HTTP response was lost, the retry must NOT
+      // create a second post and MUST NOT mark the row failed. Detect the
+      // code via the shared classifier and treat as idempotent success. We
+      // lose the Discord message_id (Discord does not return it for the
+      // rejected retry) so the row-level short-circuit on the *next* retry
+      // has nothing to key off — but at this point the row is flipped to
+      // 'sent' so there is no next retry.
+      if (isDuplicateNonceError(err, deliveryError)) {
+        duplicateNonceIdempotent = true
+        deliveryError = null
+        process.stderr.write(`agent-comms: outbound row id=${row.id} — Discord rejected duplicate nonce (code 40062), treating as idempotent success\n`)
+      }
     }
 
     if (deliveryError === null) {
       // Phase C Step 1 PR-A (B): persist discord_message_id together with the
       // status flip so a post-success crash before mark-sent is recoverable
       // via the short-circuit above instead of causing a duplicate post.
+      // cycle 2: when the success came via the duplicate-nonce idempotent
+      // branch, discordMessageId is unknown; we still flip to 'sent' so the
+      // consumer never re-posts, accepting the observability trade-off of a
+      // NULL id for the rare lost-response case.
       await client.query(
         `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
         [discordMessageId, row.id],
       ).catch(err => {
         process.stderr.write(`agent-comms: outbound consumer mark-sent failed for id=${row.id}: ${err}\n`)
       })
+      void duplicateNonceIdempotent // retained for future observability / metrics
       return
     }
 
@@ -1050,13 +1079,14 @@ async function consumeOneOutboundRow(): Promise<void> {
 }
 
 // §3.5 Orphan reclaim: rows stuck at 'processing' beyond
-// OUTBOUND_ORPHAN_TIMEOUT_SEC (default 300) likely belong to a crashed
-// consumer. Return them to 'pending' with next_retry_at honoring the
-// regular backoff schedule so we don't immediately retry.
+// OUTBOUND_ORPHAN_TIMEOUT_SEC (default 600 — Discord nonce dedup 5 min +
+// 5 min buffer, per Phase C Step 1 PR-A cycle 2 S1) likely belong to a
+// crashed consumer. Return them to 'pending' with next_retry_at honoring
+// the regular backoff schedule so we don't immediately retry.
 async function reclaimOrphanOutboundRows(): Promise<void> {
   const client = await tryGetDb()
   if (!client) return
-  const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '300', 10) || 300)
+  const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '600', 10) || 600)
   try {
     // Plan §3.5: reschedule with same backoff the transient-failure path
     // uses so a crashed consumer's rows don't thundering-herd back and

@@ -37,6 +37,14 @@ interface Adapter {
     content: string;
     reply_to_external_id?: string;
     thread_external_id?: string;
+    /**
+     * Idempotency nonce. When set, the adapter MUST forward it to the
+     * platform with platform-level deduplication enabled (Discord: `nonce`
+     * + `enforceNonce: true`) so a retry racing with a lost HTTP response
+     * does not create a duplicate post. outbound_queue consumer supplies
+     * `"out-<row.id>"`; see §7 and agent-com-message-queue-spec §7.
+     */
+    nonce?: string;
   }): Promise<{ external_message_id: string }>;
   onMessage(callback: (msg: InboundMessage) => void): void;
   fetchHistory?(params: {
@@ -48,6 +56,19 @@ interface Adapter {
 
 - 既存UIAdapter（adapters/types.ts）と統合
 - fetchHistoryはオプション（全プラットフォームが対応するとは限らない）
+
+### nonce/duplicate エラー契約 (Phase C Step 1 PR-A cycle 2)
+
+`sendMessage` に nonce を渡して呼び出した際、プラットフォームが「同一 nonce は最近使用済み」と判定した場合の契約:
+
+| プラットフォーム挙動 | アダプター責務 | 呼び出し側（consumer）責務 |
+|---|---|---|
+| 既存メッセージを返却（idempotent success） | `{ external_message_id }` をそのまま返す | そのまま mark sent、discord_message_id を永続化 |
+| エラー応答（Discord: code 40062） | 例外を throw（そのまま rethrow、アダプターで握りつぶさない） | エラーに `code === 40062` or 40062 文言一致を検出し、**idempotent success として mark sent する** (discord_message_id は不明のため NULL 可) |
+
+この「error を success と再解釈する」規則は consumer に限定される。送信 API の失敗 = 常にエラー、という原則は他の全経路で維持する。
+
+nonce は outbound_queue.id (BIGSERIAL) を基に `"out-<id>"` 形式で生成し、25 chars 以内かつグローバル一意を保証する。別 bot との衝突は構造的に不可。
 
 ---
 
