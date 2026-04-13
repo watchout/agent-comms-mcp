@@ -494,9 +494,12 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     // same channel, catching the race where our HTTP request succeeded but
     // the response was lost so our retry fires a second send. `nonce` must
     // be a string <= 25 chars per Discord's API; callers feed outbound row
-    // id (e.g. "out-123") which fits that ceiling.
+    // id (e.g. "out-123") which fits that ceiling. cycle 4: `enforceNonce`
+    // is honoured from options (SSOT-5 §1 contract); default when only
+    // `nonce` is supplied is `true` so consumers that simply pass a nonce
+    // get the dedup guarantee without having to know the platform flag.
     const nonceOpts = options?.nonce
-      ? { nonce: options.nonce, enforceNonce: true as const }
+      ? { nonce: options.nonce, enforceNonce: options.enforceNonce ?? true }
       : {}
 
     let sentMsg
@@ -614,6 +617,8 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     thread_external_id?: string
     /** Phase C Step 1 PR-A (B): idempotency nonce forwarded to platform. */
     nonce?: string
+    /** Phase C Step 1 PR-A cycle 4: opt-in rejection of duplicate nonces (SSOT-5 §1). */
+    enforceNonce?: boolean
   }): Promise<{ external_message_id: string }> {
     // Convert @agent_id mentions to Discord <@id>
     const convertedContent = await this.convertMentionsToDiscord(params.content)
@@ -627,9 +632,10 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       }
     }
 
-    const opts: { replyTo?: string; nonce?: string } = {}
+    const opts: { replyTo?: string; nonce?: string; enforceNonce?: boolean } = {}
     if (params.reply_to_external_id) opts.replyTo = params.reply_to_external_id
     if (params.nonce) opts.nonce = params.nonce
+    if (params.enforceNonce !== undefined) opts.enforceNonce = params.enforceNonce
 
     const result = await this.sendMessage(
       targetChannel,

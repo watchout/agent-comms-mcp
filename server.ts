@@ -965,13 +965,16 @@ async function consumeOneOutboundRow(): Promise<void> {
 
     const row = claimed.rows[0]
 
-    // Phase C Step 1 PR-A (B): row-level idempotency short-circuit. A prior
-    // attempt that succeeded on the Discord side but lost its HTTP response
-    // may have left status='pending' after backoff; if we already persisted
-    // a discord_message_id for this row it means Discord accepted the post,
-    // so flip to 'sent' without re-posting. This is the first-line guard;
-    // Discord's enforceNonce provides the second-line guard for cases where
-    // we never got as far as persisting the id.
+    // Phase C Step 1 PR-A cycle 3/4 honesty note: `discord_message_id` is an
+    // observability column, NOT the front-line dedup layer. Effective dedup
+    // is (1) platform nonce + enforceNonce and (2) the 40062 idempotent
+    // collapse in the catch block below. Because we write `discord_message_id`
+    // in the SAME UPDATE as `status='sent'`, the pending-filter in the claim
+    // above cannot normally see a row that carries a non-null id — so this
+    // short-circuit is a limited safeguard for the edge case where a row is
+    // manually (or by a future migration / tool) moved back to 'pending'
+    // after mark-sent. In that narrow case we still avoid a duplicate post.
+    // See docs/agent-com-message-queue-spec.md §3.3 / §7.4.
     if (row.discord_message_id) {
       await client.query(
         `UPDATE outbound_queue SET status = 'sent', sent_at = COALESCE(sent_at, now()) WHERE id = $1`,

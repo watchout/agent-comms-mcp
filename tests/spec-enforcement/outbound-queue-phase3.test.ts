@@ -259,7 +259,7 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
 
   test('consumer short-circuits to sent when row already has discord_message_id', () => {
     const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 6000)
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
     // Guard: the discord_message_id-presence check exists and routes to
     // status='sent' without re-calling sendAdapterMessage.
     expect(fnBody).toMatch(/if\s*\(\s*row\.discord_message_id\s*\)/)
@@ -268,13 +268,13 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
 
   test('consumer passes nonce "out-<row.id>" to sendAdapterMessage', () => {
     const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 6000)
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
     expect(fnBody).toMatch(/sendAdapterMessage\(\{[\s\S]*?nonce:\s*`out-\$\{row\.id\}`/)
   })
 
   test('consumer persists discord_message_id on mark-sent', () => {
     const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 6000)
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
     expect(fnBody).toMatch(
       /UPDATE outbound_queue SET status = 'sent'[^`]*discord_message_id\s*=\s*\$1/,
     )
@@ -282,13 +282,16 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
 
   test('discord adapter sendMessage passes enforceNonce to Discord when nonce is provided', () => {
     const adapterSrc = readFileSync(join(REPO_ROOT, 'adapters', 'discord.ts'), 'utf-8')
-    expect(adapterSrc).toMatch(/enforceNonce:\s*true/)
+    // cycle 4: default is `options.enforceNonce ?? true` so the flag is
+    // still forwarded, but callers can now override it per SSOT-5 §1.
+    expect(adapterSrc).toMatch(/enforceNonce:\s*options\.enforceNonce\s*\?\?\s*true/)
     expect(adapterSrc).toMatch(/nonce:\s*options\.nonce/)
   })
 
-  test('SendOptions interface declares nonce', () => {
+  test('SendOptions interface declares nonce and enforceNonce (cycle 4, SSOT-5 §1 contract)', () => {
     const typesSrc = readFileSync(join(REPO_ROOT, 'adapters', 'types.ts'), 'utf-8')
     expect(typesSrc).toMatch(/nonce\?:\s*string/)
+    expect(typesSrc).toMatch(/enforceNonce\?:\s*boolean/)
   })
 
   // cycle 2 — duplicate-nonce idempotent branch pins.
