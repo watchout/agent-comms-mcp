@@ -5,7 +5,11 @@
  * outbound consumer and PollingDriver (message_queue preview) share a
  * single home that the daemon entrypoint can start explicitly.
  *
- * Design invariants (see docs/plans/outbound-forwarder-unification.md v5):
+ * SSOT: docs/agent-com-message-queue-spec.md §1 line 39 places the
+ *       daemon in charge of PollingDriver + outbound_queue consumption.
+ * Plan: docs/plans/outbound-forwarder-unification.md v5.
+ *
+ * Design invariants (see plan v5):
  *
  *   1. Atomic claim (§3.3): UPDATE flips `status='pending' → 'claimed'`
  *      + sets `claimed_at=now()` in one statement with
