@@ -141,6 +141,27 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
   })
 
+  test('12. stdio postConnect registers AGENT_ID → shared discord in discordClients Map', () => {
+    // Hotfix regression guard: PR #164 removed the `?? discord` fallback
+    // in consumeOneOutboundRow, but the per-bot `discordClients` populate
+    // path is gated on TRANSPORT_MODE === 'daemon'. Fleet bots run with
+    // AGENT_COM_RUNTIME=daemon + TRANSPORT_MODE=stdio (default), so the
+    // Map stayed empty and every outbound row failed with
+    // 'no_discord_client_for_agent' (85% → 1% drop, 2026-04-13).
+    //
+    // In stdio/channel-plugin mode each process is a single-bot daemon
+    // whose shared `discord` adapter is connected with that bot's own
+    // DISCORD_BOT_TOKEN. Registering it under AGENT_ID is the only
+    // populate path in that mode; lose this line and outbound dies again.
+    const callIdx = SERVER_SRC.indexOf('await discord.connect({')
+    expect(callIdx).toBeGreaterThan(-1)
+    // Look only at the code that runs after the shared adapter finishes
+    // connecting — a `discordClients.set(AGENT_ID, ...)` earlier in the
+    // file (e.g. the daemon SSE handler) does not satisfy the stdio path.
+    const afterConnect = SERVER_SRC.slice(callIdx, callIdx + 2000)
+    expect(afterConnect).toMatch(/discordClients\.set\(\s*AGENT_ID\s*,\s*discord\s*\)/)
+  })
+
   test('11. server.ts DEFAULT_CLAUDE_CMD (restart_bot MCP tool fallback) carries AGENT_COM_RUNTIME=daemon as prefix', () => {
     // Auditor cycle-3 CONDITIONAL: restart_bot MCP tool falls back to
     // DEFAULT_CLAUDE_CMD when a registry row parses with an empty

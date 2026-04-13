@@ -3331,6 +3331,17 @@ async function postConnect() {
         stateDir: DISCORD_STATE_DIR_ENV || undefined,
       })
       process.stderr.write('agent-comms: Discord adapter connected (channel plugin mode)\n')
+      // Hotfix (post-#164): outbound consumer gates on isDaemonRuntime()
+      // (AGENT_COM_RUNTIME=daemon) while per-bot `discordClients` population
+      // is gated on TRANSPORT_MODE === 'daemon'. Fleet bots set the former
+      // but not the latter (default 'stdio'), so consumeOneOutboundRow()
+      // found an empty Map and failed every row with
+      // 'no_discord_client_for_agent'. In stdio/channel-plugin mode each
+      // process is a single-bot daemon: the shared `discord` adapter is
+      // connected with this bot's own DISCORD_BOT_TOKEN, so registering it
+      // under AGENT_ID restores per-bot outbound delivery without
+      // re-introducing cross-identity fallback.
+      discordClients.set(AGENT_ID, discord)
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
     }
