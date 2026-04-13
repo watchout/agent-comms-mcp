@@ -70,8 +70,9 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     expect(ddl).toMatch(/created_at\s+TIMESTAMPTZ\s+NOT NULL\s+DEFAULT now\(\)/)
     expect(ddl).toMatch(/sent_at\s+TIMESTAMPTZ/)
   })
-  test('status CHECK constraint covers pending/sent/failed', () => {
-    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'sent'\s*,\s*'failed'\s*\)\s*\)/)
+  test('status CHECK constraint covers pending/processing/sent/failed', () => {
+    // S2-A (FEAT-005): 'processing' added to allow atomic claim flip.
+    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'processing'\s*,\s*'sent'\s*,\s*'failed'\s*\)\s*\)/)
   })
   test('idx_oq_pending partial index is created', () => {
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_oq_pending/)
@@ -99,10 +100,16 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     expect(SERVER_SRC).toMatch(/OUTBOUND_POLL_INTERVAL_MS\s*=\s*1000/)
   })
   test('consumer claims rows with FOR UPDATE SKIP LOCKED inside an UPDATE … RETURNING', () => {
-    expect(SERVER_SRC).toMatch(/UPDATE outbound_queue SET attempts\s*=\s*attempts\s*\+\s*1/)
-    expect(SERVER_SRC).toMatch(/SELECT id FROM outbound_queue\s*\n?\s*WHERE status\s*=\s*'pending'/)
+    // S2-A (FEAT-005): atomic claim flips status → 'processing' + sets claimed_at
+    // + bumps attempts in a single UPDATE, and filters WHERE agent_id so each
+    // bot only consumes its own rows. See s2a-daemon-owns-outbound.test.ts for
+    // the atomic-claim invariants.
+    expect(SERVER_SRC).toMatch(/UPDATE\s+outbound_queue[\s\S]*?SET[\s\S]*?attempts\s*=\s*attempts\s*\+\s*1/)
+    expect(SERVER_SRC).toMatch(/SELECT id FROM outbound_queue[\s\S]*?WHERE status\s*=\s*'pending'/)
     expect(SERVER_SRC).toMatch(/FOR UPDATE SKIP LOCKED/)
-    expect(SERVER_SRC).toMatch(/RETURNING\s+id,\s*message_id,\s*agent_id,\s*channel_external_id/)
+    // RETURNING shape shifted: agent_id is now implicit (AGENT_ID filter on the
+    // claim), so it no longer has to round-trip through the query result.
+    expect(SERVER_SRC).toMatch(/RETURNING\s+id,\s*message_id,\s*channel_external_id/)
   })
   test('consumer transitions claimed rows to sent or failed', () => {
     expect(SERVER_SRC).toMatch(/UPDATE outbound_queue SET status\s*=\s*'sent',\s*sent_at\s*=\s*now\(\)/)

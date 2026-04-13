@@ -795,16 +795,26 @@ class PollingDriver {
       }
     }, POLL_DRIVER_HEARTBEAT_MS)
 
-    // Polling: fetch pending rows into buffer
-    this.pollTimer = setInterval(() => {
-      this.poll(agentId).catch(err => {
-        process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
-      })
-    }, POLL_DRIVER_INTERVAL_MS)
-
-    process.stderr.write(
-      `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
-    )
+    // S2-A (FEAT-005) B2: SSOT §1 line 39 places PollingDriver under the
+    // daemon runtime (alongside outbound_queue consumption). stdio MCP
+    // servers skip the poll timer — MCP `next` still works because
+    // PollingDriver.shift() returns null on empty buffer and the MCP tool
+    // falls back to a direct DB query. Heartbeat timer above stays on for
+    // all runtimes so agents.last_seen_at keeps updating regardless.
+    if (isDaemonRuntime()) {
+      this.pollTimer = setInterval(() => {
+        this.poll(agentId).catch(err => {
+          process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
+        })
+      }, POLL_DRIVER_INTERVAL_MS)
+      process.stderr.write(
+        `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
+      )
+    } else {
+      process.stderr.write(
+        `agent-comms: PollingDriver poll timer skipped (stdio runtime); heartbeat only\n`,
+      )
+    }
   }
 
   stop(): void {
@@ -857,32 +867,59 @@ class PollingDriver {
 const pollingDriver = new PollingDriver()
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue #129 Phase 3 — outbound_queue consumer (message-queue-spec §7)
+// S2-A (FEAT-005) — outbound_queue consumer, daemon-owns-outbound
+// See: docs/agent-com-message-queue-spec.md §1 line 39
+//   「daemon は PollingDriver と outbound_queue 消費を担当する」
+// Plan: docs/plans/outbound-forwarder-unification.md
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Polls outbound_queue on a 1-second tick. Claims one pending row at a time
-// using FOR UPDATE SKIP LOCKED + RETURNING so two server instances (or two
-// concurrent ticks) never deliver the same row twice. Claim/release runs in
-// a single SQL statement so the row lock is released as soon as the SELECT
-// returns; the Discord HTTP call happens OUTSIDE the lock so a slow request
-// doesn't stall other tick iterations.
+// Runtime gate: consumer only runs when AGENT_COM_RUNTIME='daemon' (set by
+// `agent-com daemon` CLI). stdio-mode MCP servers skip consumer boot so the
+// 19-bot stdio fleet no longer races on the same queue.
 //
-// Lifecycle:
-//   - startOutboundConsumer() is called from registerAgent() so it boots
-//     alongside the heartbeat once the DB is reachable.
-//   - stopOutboundConsumer() runs from unregisterAgent() so SIGINT/exit
-//     paths cleanly stop the timer and let in-flight ticks drain.
+// Atomic claim (§3.3): UPDATE flips status='pending' → 'processing' and sets
+// claimed_at=now() in a single statement with FOR UPDATE SKIP LOCKED and
+// agent_id=$1 filter. A bot only ever touches its own rows; the status flip
+// removes the race window that left rows re-claimable at status='pending'.
 //
-// Failure handling (spec §3.3):
-//   - Each attempt increments `attempts`. If attempts ≥ max_attempts,
-//     status flips to 'failed' and last_error is recorded.
-//   - Otherwise the row stays at 'pending' so the next tick retries.
+// Exponential backoff (§3.4): transient delivery failures flip status back
+// to 'pending' with next_retry_at = now() + min(30s, 1s*2^(attempt-1)) + jitter.
+// max_attempts=5 exhausts to status='failed'.
 //
-// Disable with `OUTBOUND_QUEUE_CONSUMER=0` for tests / dev that don't want
-// background DB polling.
+// Orphan reclaim (§3.5): separate 60s tick returns 'processing' rows whose
+// claimed_at is older than OUTBOUND_ORPHAN_TIMEOUT_SEC (default 300) back to
+// 'pending' so a crashed consumer doesn't pin rows indefinitely.
+//
+// Fallback removed (§3.6): outbound send uses discordClients.get(row.agent_id)
+// directly; rows whose bot has no client are marked failed with
+// last_error='no_discord_client_for_agent' instead of silently posting from
+// the shared adapter (which caused identity misattribution in prod 2026-04-12).
+//
+// Disable with OUTBOUND_QUEUE_CONSUMER=0 (emergency kill, preserved from Phase 3).
 const OUTBOUND_POLL_INTERVAL_MS = 1000
+const OUTBOUND_ORPHAN_TICK_MS = 60_000
+const OUTBOUND_BACKOFF_MAX_MS = 30_000
 let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
+let outboundOrphanInterval: ReturnType<typeof setInterval> | null = null
 let outboundConsumerInFlight = false
+
+function isDaemonRuntime(): boolean {
+  return process.env.AGENT_COM_RUNTIME === 'daemon'
+}
+
+function computeOutboundRetryDelayMs(attempt: number): number {
+  const base = Math.min(OUTBOUND_BACKOFF_MAX_MS, 1_000 * Math.pow(2, Math.max(0, attempt - 1)))
+  const jitter = Math.floor(Math.random() * 500)
+  return base + jitter
+}
+
+// Pragmatic transient classifier: network / timeout / 5xx / 429 are retryable;
+// everything else (4xx auth, validation, unknown channel) is permanent.
+// Plan §3.4 referenced core/send-errors.ts but that module covers send-tool
+// validation errors, not Discord REST delivery; classifier lives here.
+function isTransientDeliveryError(err: string): boolean {
+  return /timeout|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network|rate limit|\b429\b|\b5\d\d\b|HTTP 5/i.test(err)
+}
 
 async function consumeOneOutboundRow(): Promise<void> {
   // Re-entrancy guard: if a previous tick is still running (slow Discord
@@ -893,23 +930,27 @@ async function consumeOneOutboundRow(): Promise<void> {
     const client = await tryGetDb()
     if (!client) return
 
-    // Claim one pending row in a single statement: SELECT ... FOR UPDATE
-    // SKIP LOCKED nested inside an UPDATE that bumps attempts and RETURNs
-    // the full row. The row lock is released as soon as the UPDATE commits
-    // (single-statement = implicit txn) so the Discord HTTP call below runs
-    // unlocked.
+    // §3.3 Atomic claim: flip status 'pending' → 'processing' + set claimed_at
+    // + filter by agent_id so each bot only consumes rows tagged to itself.
+    // FOR UPDATE SKIP LOCKED + single-statement UPDATE removes the race that
+    // allowed multiple consumers to observe the same 'pending' row between
+    // select and send (2026-04-12 duplicate-Discord-post incident).
     const claimed = await client.query(
-      `UPDATE outbound_queue SET attempts = attempts + 1
-       WHERE id = (
-         SELECT id FROM outbound_queue
-         WHERE status = 'pending'
-         ORDER BY created_at ASC
-         LIMIT 1
-         FOR UPDATE SKIP LOCKED
-       )
-       RETURNING id, message_id, agent_id, channel_external_id, content,
-                 mentions_display, attachments, reply_to_discord_id,
-                 attempts, max_attempts`,
+      `UPDATE outbound_queue
+          SET status = 'processing', attempts = attempts + 1, claimed_at = now()
+        WHERE id = (
+          SELECT id FROM outbound_queue
+           WHERE status = 'pending'
+             AND agent_id = $1
+             AND (next_retry_at IS NULL OR next_retry_at <= now())
+           ORDER BY created_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, message_id, channel_external_id, content,
+                  mentions_display, attachments, reply_to_discord_id,
+                  attempts, max_attempts`,
+      [AGENT_ID],
     ).catch(err => {
       process.stderr.write(`agent-comms: outbound consumer claim failed: ${err}\n`)
       return null
@@ -917,16 +958,26 @@ async function consumeOneOutboundRow(): Promise<void> {
     if (!claimed || claimed.rows.length === 0) return
 
     const row = claimed.rows[0]
+
+    // §3.6 Fallback removed: the row must be delivered by the bot whose
+    // token is loaded (discordClients.get(AGENT_ID)). No shared-client
+    // fallback — if the client is missing we fail the row explicitly so
+    // another consumer doesn't silently re-post under the wrong identity.
+    const clientForAgent = discordClients.get(AGENT_ID)
+    if (!clientForAgent) {
+      await client.query(
+        `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
+        ['no_discord_client_for_agent', row.id],
+      ).catch(() => {})
+      process.stderr.write(`agent-comms: outbound row id=${row.id} failed: no Discord client for agent ${AGENT_ID}\n`)
+      return
+    }
+
     let deliveryError: string | null = null
     try {
-      // Use the bot's existing discord.js client (loaded with that bot's
-      // token) to post. This matches the legacy adapter path and means we
-      // don't have to load tokens here.
-      await getDiscordClient(row.agent_id).sendAdapterMessage({
+      await clientForAgent.sendAdapterMessage({
         external_channel_id: row.channel_external_id,
         content: truncateForPlatform(row.content, 'discord'),
-        // Phase 3 leaves thread/reply context implicit in the
-        // channel_external_id (threads ARE channels in Discord's API).
       })
     } catch (err) {
       deliveryError = String(err).slice(0, 500)
@@ -939,25 +990,74 @@ async function consumeOneOutboundRow(): Promise<void> {
       ).catch(err => {
         process.stderr.write(`agent-comms: outbound consumer mark-sent failed for id=${row.id}: ${err}\n`)
       })
-    } else if (row.attempts >= row.max_attempts) {
+      return
+    }
+
+    const transient = isTransientDeliveryError(deliveryError)
+    const exhausted = row.attempts >= row.max_attempts
+
+    if (!transient || exhausted) {
       await client.query(
         `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
         [deliveryError, row.id],
       ).catch(err => {
         process.stderr.write(`agent-comms: outbound consumer mark-failed failed for id=${row.id}: ${err}\n`)
       })
-      process.stderr.write(`agent-comms: outbound delivery permanently failed (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}): ${deliveryError}\n`)
-    } else {
-      // Leave at status='pending'. record the latest error so operators can
-      // grep without waiting for max_attempts exhaustion.
-      await client.query(
-        `UPDATE outbound_queue SET last_error = $1 WHERE id = $2`,
-        [deliveryError, row.id],
-      ).catch(() => {})
-      process.stderr.write(`agent-comms: outbound delivery transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}): ${deliveryError}\n`)
+      process.stderr.write(`agent-comms: outbound delivery permanently failed (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, transient=${transient}): ${deliveryError}\n`)
+      return
     }
+
+    // §3.4 Exponential backoff: return row to 'pending' with next_retry_at.
+    const delayMs = computeOutboundRetryDelayMs(row.attempts)
+    await client.query(
+      `UPDATE outbound_queue
+          SET status = 'pending', last_error = $1,
+              next_retry_at = now() + ($2::int || ' ms')::interval,
+              claimed_at = NULL
+        WHERE id = $3`,
+      [deliveryError, delayMs, row.id],
+    ).catch(() => {})
+    process.stderr.write(`agent-comms: outbound transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, retry in ${delayMs}ms): ${deliveryError}\n`)
   } finally {
     outboundConsumerInFlight = false
+  }
+}
+
+// §3.5 Orphan reclaim: rows stuck at 'processing' beyond
+// OUTBOUND_ORPHAN_TIMEOUT_SEC (default 300) likely belong to a crashed
+// consumer. Return them to 'pending' with next_retry_at honoring the
+// regular backoff schedule so we don't immediately retry.
+async function reclaimOrphanOutboundRows(): Promise<void> {
+  const client = await tryGetDb()
+  if (!client) return
+  const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '300', 10) || 300)
+  try {
+    // Plan §3.5: reschedule with same backoff the transient-failure path
+    // uses so a crashed consumer's rows don't thundering-herd back and
+    // immediately re-race. Inline SQL mirrors computeOutboundRetryDelayMs():
+    //   delay = min(30s, 2^(attempts-1) s) + jitter(0..500ms).
+    const res = await client.query(
+      `UPDATE outbound_queue
+          SET status = 'pending',
+              last_error = 'orphan_reclaim',
+              claimed_at = NULL,
+              next_retry_at = now()
+                            + LEAST(
+                                interval '30 seconds',
+                                (power(2, greatest(attempts - 1, 0)))::int * interval '1 second'
+                              )
+                            + ((random() * 500)::int || ' milliseconds')::interval
+        WHERE status = 'processing'
+          AND agent_id = $1
+          AND claimed_at < now() - ($2::int || ' seconds')::interval
+        RETURNING id, attempts`,
+      [AGENT_ID, timeoutSec],
+    )
+    if (res.rowCount && res.rowCount > 0) {
+      process.stderr.write(`agent-comms: outbound orphan reclaim — ${res.rowCount} row(s) returned to pending (agent=${AGENT_ID}, timeout=${timeoutSec}s)\n`)
+    }
+  } catch (err) {
+    process.stderr.write(`agent-comms: outbound orphan reclaim failed: ${err}\n`)
   }
 }
 
@@ -966,19 +1066,34 @@ function startOutboundConsumer(): void {
     process.stderr.write('agent-comms: outbound queue consumer disabled via env\n')
     return
   }
+  // §3.2 Runtime gate: only the daemon runtime owns the outbound consumer.
+  // stdio MCP servers skip boot so the 19-bot fleet no longer races.
+  if (!isDaemonRuntime()) {
+    process.stderr.write('agent-comms: outbound consumer skipped (stdio runtime, AGENT_COM_RUNTIME!=daemon)\n')
+    return
+  }
   if (outboundConsumerInterval !== null) return // already running
   outboundConsumerInterval = setInterval(() => {
     consumeOneOutboundRow().catch(err => {
       process.stderr.write(`agent-comms: outbound consumer tick error: ${err}\n`)
     })
   }, OUTBOUND_POLL_INTERVAL_MS)
-  process.stderr.write(`agent-comms: outbound queue consumer started (tick=${OUTBOUND_POLL_INTERVAL_MS}ms)\n`)
+  outboundOrphanInterval = setInterval(() => {
+    reclaimOrphanOutboundRows().catch(err => {
+      process.stderr.write(`agent-comms: outbound orphan tick error: ${err}\n`)
+    })
+  }, OUTBOUND_ORPHAN_TICK_MS)
+  process.stderr.write(`agent-comms: outbound queue consumer started (tick=${OUTBOUND_POLL_INTERVAL_MS}ms, orphan_tick=${OUTBOUND_ORPHAN_TICK_MS}ms)\n`)
 }
 
 function stopOutboundConsumer(): void {
   if (outboundConsumerInterval !== null) {
     clearInterval(outboundConsumerInterval)
     outboundConsumerInterval = null
+  }
+  if (outboundOrphanInterval !== null) {
+    clearInterval(outboundOrphanInterval)
+    outboundOrphanInterval = null
   }
 }
 
@@ -2880,7 +2995,7 @@ interface BotEntry {
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
-const DEFAULT_CLAUDE_CMD = 'claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_CLAUDE_CMD = 'AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
 
 function loadBotRegistry(): BotEntry[] {
   try {
