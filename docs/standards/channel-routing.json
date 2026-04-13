@@ -1,0 +1,11 @@
+{
+  "channels": {
+    "1486097810989383773": { "project": "hotel-kanri", "bot": "Hotel Dev", "tag": "&hot" },
+    "1486161309941764317": { "project": "haishin-puls-hub", "bot": "Haishin Dev", "tag": "&hai" },
+    "1486160897100742778": { "project": "wbs", "bot": "WBS Dev", "tag": "&wbs" },
+    "1485598480553611357": { "project": "agent-comms-mcp", "bot": "agent-com Dev", "tag": "&agent-com" },
+    "1486161338832126083": { "project": "ai-dev-framework", "bot": "ADF Dev", "tag": "&adf" },
+    "1488775669306626088": { "project": "org", "bot": "Vice/Arc", "tag": "" },
+    "1488448917917143080": { "project": "haishin-puls-hub", "bot": "Haishin Dev", "tag": "&hai" }
+  }
+}

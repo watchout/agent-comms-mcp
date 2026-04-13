@@ -1,0 +1,16 @@
+# CODEOWNERS - Require review for critical paths
+#
+# Format: path  @owner
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# SSOT (spec changes require lead review)
+/docs/design/core/         @tech-lead
+/docs/standards/           @tech-lead
+/docs/requirements/        @tech-lead
+
+# Common features (auth, shared infrastructure)
+# /src/features/auth/      @auth-owner
+# /src/features/account/   @auth-owner
+
+# Project features
+# /src/features/xxx/       @feature-owner
