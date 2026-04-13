@@ -13,6 +13,25 @@ export interface AdapterConfig {
 export interface SendOptions {
   /** Reply to a specific message ID */
   replyTo?: string
+  /**
+   * Idempotency nonce forwarded to the platform. The adapter MUST pass this
+   * through to the underlying send API (Discord: `nonce` field) together
+   * with `enforceNonce: true` when supplied, so a retry racing a lost HTTP
+   * response cannot produce a duplicate post. outbound_queue consumer
+   * supplies `"out-<row.id>"`. See docs/design/core/SSOT-5_CROSS_CUTTING.md
+   * §1 and docs/agent-com-message-queue-spec.md §7.4. Phase C Step 1 PR-A.
+   */
+  nonce?: string
+  /**
+   * Opt-in flag that instructs the platform to reject rather than silently
+   * accept a duplicate `nonce` within its dedup window. Discord surfaces
+   * this as `enforce_nonce: true` in the message-create payload; a rejected
+   * retry returns error code 40062 which the consumer collapses to
+   * idempotent success. Adapters whose platform does not expose the flag
+   * may treat it as a no-op but MUST NOT drop the `nonce`. Phase C Step 1
+   * PR-A cycle 4 — aligned with the SSOT-5 adapter contract.
+   */
+  enforceNonce?: boolean
 }
 
 export interface Attachment {

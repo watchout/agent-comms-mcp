@@ -24,7 +24,10 @@ import { Client } from 'pg'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const TEST_AGENT = `test-s2a-orphan-${process.pid}`
-const TIMEOUT_SEC = 300 // matches OUTBOUND_ORPHAN_TIMEOUT_SEC default
+// Phase C Step 1 PR-A cycle 2 S1: default raised 300 → 600 so the orphan
+// reclaim window is strictly larger than Discord's ~5-minute enforceNonce
+// dedup window. Keep in sync with server.ts::reclaimOrphanOutboundRows.
+const TIMEOUT_SEC = 600 // matches OUTBOUND_ORPHAN_TIMEOUT_SEC default
 
 let client: Client | null = null
 let available = false
@@ -131,7 +134,7 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
     if (!available) return
 
     // Seed a "fresh" processing row (claimed_at = now() - 60s, well below
-    // the 300s threshold). The reclaim UPDATE must leave it untouched.
+    // the 600s threshold). The reclaim UPDATE must leave it untouched.
     const seed = await client!.query(
       `INSERT INTO outbound_queue
          (message_id, agent_id, channel_external_id, content,
