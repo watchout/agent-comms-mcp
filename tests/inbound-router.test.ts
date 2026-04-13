@@ -15,7 +15,14 @@ import { join, dirname } from 'node:path'
 import { Client } from 'pg'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
-const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite): connectBotDiscord / resolveDiscordToken /
+// getDiscordClient / discordClients live in adapters/discord-client.ts.
+// Concatenate so structural pins still enforce the same invariants at
+// their new home.
+const SERVER_SOURCE =
+  readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/discord-client.ts'), 'utf-8')
 // PR-A: routing helpers extracted to core/. Source-level regression tests
 // look in core/route-message{,-db}.ts for the moved functions, and in
 // server.ts for the call sites + imports.

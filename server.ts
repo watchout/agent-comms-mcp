@@ -25,6 +25,15 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { DiscordAdapter } from './adapters/discord'
+import {
+  discord,
+  discordClients,
+  refreshAgentCache,
+  resolveDiscordToken,
+  connectBotDiscord,
+  getDiscordClient,
+  setDbGetter as setDiscordClientDbGetter,
+} from './adapters/discord-client'
 import { signPayload } from './shared/hmac'
 // PR-A: pure routing functions extracted to core/ so the future receiver
 // (PR-B) and this server share a single implementation. Behavioural
@@ -44,11 +53,7 @@ import {
   buildReplyContextSuffix,
 } from './core/send-errors'
 import { isDuplicateNonceError } from './core/outbound-delivery'
-import {
-  refreshAgentCacheWith,
-  applyMentionsAutoFill,
-  type AgentCacheEntry,
-} from './core/agent-cache'
+import { applyMentionsAutoFill } from './core/agent-cache'
 import {
   getMessageById,
   isHumanAgent,
@@ -179,98 +184,12 @@ const RECEIVER_PIPELINE_BOTS = new Set<string>(
 const sseStartTime = Date.now()
 const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
-// --- Discord Adapter (Phase 5: integrated into server.ts) ---
-const discord = new DiscordAdapter()  // shared client (stdio/sse modes + daemon fallback)
-const discordClients = new Map<string, DiscordAdapter>()  // per-bot clients (daemon mode, Phase 3c)
+// --- Discord Adapter (Phase 5, FEAT-005: extracted to adapters/discord-client.ts) ---
+// `discord`, `discordClients`, refreshAgentCache, resolveDiscordToken,
+// connectBotDiscord, getDiscordClient are imported from
+// adapters/discord-client.ts. DB accessor is wired below once
+// tryGetDb() is defined.
 const STAGGERED_CONNECT_DELAY_MS = 5_000
-const DISCORD_BACKOFF_MAX_MS = 30_000
-
-// Issue #118 PR-B ①: agent_id cache (TTL 60s)
-let agentCacheEntry: AgentCacheEntry | null = null
-const AGENT_CACHE_TTL_MS = 60_000
-
-async function refreshAgentCache(): Promise<string[]> {
-  const db = await tryGetDb()
-  const queryFn = db
-    ? async () => {
-        const r = await db.query(
-          "SELECT agent_id FROM agents WHERE status != 'disabled' ORDER BY agent_id",
-        ).catch(() => ({ rows: [] as any[] }))
-        return r.rows.map((row: any) => row.agent_id as string)
-      }
-    : null
-  const { updated, ids } = await refreshAgentCacheWith(agentCacheEntry, AGENT_CACHE_TTL_MS, queryFn)
-  if (updated) agentCacheEntry = updated
-  return ids
-}
-
-/** Resolve Discord Bot Token for a specific bot (Phase 3c) */
-async function resolveDiscordToken(botId: string): Promise<{ token: string; source: 'per-bot' | 'fallback' } | null> {
-  // 1. Check per-bot env var: DISCORD_TOKEN_{AGENT_ID} (uppercase, hyphens → underscores)
-  const envKey = `DISCORD_TOKEN_${botId.toUpperCase().replace(/-/g, '_')}`
-  const perBotToken = process.env[envKey]
-  if (perBotToken) {
-    // Validate token via Discord REST API
-    try {
-      const res = await fetch('https://discord.com/api/v10/users/@me', {
-        headers: { Authorization: `Bot ${perBotToken}` },
-      })
-      if (res.ok) {
-        process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token valid (${envKey})\n`)
-        return { token: perBotToken, source: 'per-bot' }
-      }
-      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token invalid (${envKey}, status: ${res.status})\n`)
-    } catch (err) {
-      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token check failed: ${err}\n`)
-    }
-  }
-
-  // 2. Fallback to shared DISCORD_BOT_TOKEN
-  if (DISCORD_BOT_TOKEN) {
-    process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — fallback to shared DISCORD_BOT_TOKEN\n`)
-    return { token: DISCORD_BOT_TOKEN, source: 'fallback' }
-  }
-
-  process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — no token available\n`)
-  return null
-}
-
-/** Connect a per-bot Discord client with exponential backoff */
-async function connectBotDiscord(botId: string, token: string): Promise<DiscordAdapter | null> {
-  let delay = 1000
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      const adapter = new DiscordAdapter()
-      // Inject DB query function
-      adapter.setDbQuery(async (sql: string, params?: any[]) => {
-        const client = await tryGetDb()
-        if (!client) throw new Error('DB unavailable')
-        return client.query(sql, params)
-      })
-      // ADR-040 D1: tell the adapter which agent it belongs to so the
-      // ready handler can self-register discord_id into the agents row.
-      adapter.setAgentId(botId)
-      // No stateDir → no access.json → gate() passes all messages through
-      // Filtering is handled by routeInbound() (daemon-only, Phase 3c)
-      await adapter.connect({ token })
-      process.stderr.write(`agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt}, no access.json — routeInbound filters)\n`)
-      return adapter
-    } catch (err) {
-      process.stderr.write(`agent-comms: per-bot Discord connect failed for ${botId} (attempt ${attempt}/${5}): ${err}\n`)
-      if (attempt < 5) {
-        await new Promise(r => setTimeout(r, delay))
-        delay = Math.min(delay * 2, DISCORD_BACKOFF_MAX_MS)
-      }
-    }
-  }
-  process.stderr.write(`agent-comms: ALERT — per-bot Discord connect failed for ${botId} after 5 attempts\n`)
-  return null
-}
-
-/** Get the Discord client for a specific bot (per-bot or shared fallback) */
-function getDiscordClient(botId: string): DiscordAdapter {
-  return discordClients.get(botId) ?? discord
-}
 
 const INBOX_SIGNAL_TTL_MS = 5 * 60 * 1000
 const GC_INTERVAL_MS = 5 * 60 * 1000
@@ -441,6 +360,11 @@ async function tryGetDb(): Promise<Client | null> {
     return null
   }
 }
+
+// FEAT-005: adapters/discord-client.ts needs a DB accessor for agent
+// cache refresh + per-bot adapter DB wiring. Injected here to avoid an
+// import cycle.
+setDiscordClientDbGetter(tryGetDb)
 
 // PR-A helper: build a `DbAdapter` for core/ helpers from the lazy `tryGetDb()`.
 // Returns null when the DB is unavailable, matching the existing fallback semantics.

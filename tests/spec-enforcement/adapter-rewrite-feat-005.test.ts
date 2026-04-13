@@ -123,11 +123,8 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     expect(src!).toMatch(/getDiscordClient\s*\([^)]*\)\s*:\s*[^=]*\bnull\b/)
     // Error log on miss so operators can diagnose.
     expect(fn).toMatch(/console\.(error|warn)\(/)
-    // Outbound consumer's own send path must also remain fallback-free.
-    const outbound = readIfExists('adapters/outbound-consumer.ts')
-    expect(outbound).not.toBeNull()
-    const consumer = sliceFn(outbound!, 'consumeOneOutboundRow')
-    expect(consumer).not.toMatch(/\?\?\s*discord\b/)
+    // NOTE: outbound consumer's own send path is guarded separately in
+    // test #6 (same file) because that module lands in CP3.
   })
 
   test('5. orphan reclaim returns claimed rows to pending with backoff after OUTBOUND_ORPHAN_TIMEOUT_SEC', () => {
@@ -160,6 +157,10 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     // sendMessage/sendAdapterMessage call site carries nonce + enforceNonce.
     expect(fn).toMatch(/nonce\s*:/)
     expect(fn).toMatch(/enforceNonce\s*:\s*true/)
+    // The consumer's Discord-client resolution must not fall back to the
+    // shared `discord` adapter — identity misattribution was the root
+    // cause of the 2026-04-12 incident (CTO directive 2.4).
+    expect(fn).not.toMatch(/\?\?\s*discord\b/)
   })
 
   test('7. inbound routing inserts one message_queue row per mention (ON CONFLICT DO NOTHING)', () => {
