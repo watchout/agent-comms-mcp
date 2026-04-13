@@ -7,7 +7,12 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
-const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite): handleInboundMessage lives in
+// adapters/inbound-receiver.ts. Concat keeps pin semantics.
+const SERVER_SOURCE =
+  readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/inbound-receiver.ts'), 'utf-8')
 
 describe('Webhook Channel push — handleInboundMessage + caller push', () => {
   test('handleInboundMessage returns pushMeta when delivered', () => {

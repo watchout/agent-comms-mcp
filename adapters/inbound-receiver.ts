@@ -1,0 +1,689 @@
+/**
+ * Inbound receiver (FEAT-005 adapter rewrite).
+ *
+ * Extracted from server.ts so the Discord event path, the polling
+ * path, and the pg_notify LISTEN path share a single home. All three
+ * ultimately funnel a Discord event into:
+ *
+ *   1. `agent_messages` (DB persist via deps.saveMessage)
+ *   2. pure `routeInbound()` routing decision (core/route-message.ts)
+ *   3. `message_queue` INSERT for receivers (idempotent via
+ *      ON CONFLICT (agent_id, message_id) DO NOTHING)
+ *   4. optional `pg_notify('agent_inbox', …)` fanout for the mixed-
+ *      mode receiver pipeline canary.
+ *
+ * Design invariants (pinned in tests/spec-enforcement):
+ *   - Inbound insert into message_queue is always
+ *     `ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL
+ *     DO NOTHING` so redelivered Discord events cannot create
+ *     duplicate inbox rows (spec-enforcement adapter-rewrite #7).
+ *   - handleInboundMessage is pure-ish: it persists + routes + pushes,
+ *     but routeInbound itself has zero I/O and is the single source
+ *     of the mentions / membership gate.
+ *   - startListener owns one pg Client, reconnects with exponential
+ *     backoff, and tears down its keepalive when the client is stale.
+ *
+ * Dependency injection: server.ts owns config + mcp + several helper
+ * functions that the receiver needs. `setInboundReceiverDeps()` wires
+ * them at startup so this module does not import server.ts (cycle).
+ */
+import { Client } from 'pg'
+import type { DiscordAdapter } from './discord'
+import {
+  routeInbound,
+  parseMentions,
+} from '../core/route-message'
+import {
+  isHumanAgent,
+  resolveAgentFromDiscordId,
+  resolveInboundChannel,
+  loadAgentInfo,
+  type DbAdapter,
+} from '../core/route-message-db'
+
+// ---- Dependency injection -------------------------------------------------
+
+type DbLike = {
+  query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }>
+}
+
+export interface InboundReceiverDeps {
+  agentId: string
+  authMode: 'off' | 'warn' | 'enforce'
+  databaseUrl: string
+  receiverPipelineBots: Set<string>
+  /** Shared dedup Map (source of truth lives in server.ts). */
+  processedIds: Map<string, number>
+  tryGetDb: () => Promise<DbLike | null>
+  coreDbAdapter: () => Promise<DbAdapter | null>
+  saveMessage: (msg: {
+    channel_id: string
+    author_id: string
+    content: string
+    message_type?: string
+    reply_to?: string
+    metadata?: Record<string, unknown>
+    depth?: number
+    source?: string
+    thread_id?: string | null
+    direction?: string
+    role?: string
+    session_id?: string
+    project?: string
+  }) => Promise<string>
+  mcpNotification: (msg: { method: string; params: any }) => Promise<void>
+  validateIncomingAuth: (
+    metadata: Record<string, any> | null,
+    authorId: string,
+    channel: string,
+    content: string,
+  ) => { valid: boolean; tag?: string }
+  buildQuoteBlock: (messageId: string) => Promise<{ quote: string; authorId: string } | null>
+  updateActiveThread: (agentId: string, threadId: string | null) => Promise<void>
+  hashCode: (str: string) => number
+}
+
+let deps: InboundReceiverDeps | null = null
+
+/** Wire server.ts-owned helpers + config. Call once at startup. */
+export function setInboundReceiverDeps(d: InboundReceiverDeps): void {
+  deps = d
+}
+
+function requireDeps(): InboundReceiverDeps {
+  if (!deps) throw new Error('inbound-receiver: setInboundReceiverDeps() not called')
+  return deps
+}
+
+// ---- Polling path (agent_messages direct poll) ---------------------------
+
+const POLL_INTERVAL_MS = 3_000
+const POLL_BATCH_SIZE = 10
+const PROCESSED_ID_TTL_MS = 10 * 60_000
+let lastPolledAt = new Date().toISOString()
+let pollInterval: ReturnType<typeof setInterval> | null = null
+
+export async function pollNewMessages(): Promise<void> {
+  const d = requireDeps()
+  const client = await d.tryGetDb()
+  if (!client) return
+
+  // GC: remove expired processedIds entries.
+  const now = Date.now()
+  for (const [id, ts] of d.processedIds) {
+    if (now - ts > PROCESSED_ID_TTL_MS) d.processedIds.delete(id)
+  }
+
+  try {
+    // Use >= to catch messages at the same timestamp (dedup via processedIds).
+    // Previously used > with JS Date (ms precision), which truncated PG's µs
+    // timestamps, causing the same message to re-match after processedIds expired.
+    const r = await client.query(
+      `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
+       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at >= $2
+       ORDER BY created_at ASC LIMIT $3`,
+      [d.agentId, lastPolledAt, POLL_BATCH_SIZE],
+    )
+
+    for (const msg of r.rows) {
+      if (d.processedIds.has(msg.id)) continue
+      d.processedIds.set(msg.id, Date.now())
+
+      const authResult = d.validateIncomingAuth(
+        msg.metadata, msg.author_id, msg.channel_id, msg.content,
+      )
+      if (!authResult.valid) {
+        process.stderr.write(
+          `agent-comms: push rejected (auth ${d.authMode}): ${msg.id} from ${msg.author_id}\n`,
+        )
+        continue
+      }
+
+      // Build quote block if reply_to is present (§3.10).
+      let pollQuotePrefix = ''
+      if (msg.reply_to) {
+        const quoteData = await d.buildQuoteBlock(msg.reply_to)
+        if (quoteData) pollQuotePrefix = quoteData.quote
+      }
+
+      const tag = authResult.tag ? ` ${authResult.tag}` : ''
+      const contentText = `${pollQuotePrefix}[${msg.message_type ?? 'chat'}] ${msg.author_id} → #${msg.channel_id}:${tag} ${msg.content}`
+
+      d.mcpNotification({
+        method: 'notifications/claude/channel',
+        params: {
+          content: contentText,
+          meta: {
+            chat_id: msg.channel_id,
+            message_id: msg.id,
+            user: msg.author_id,
+            user_id: msg.author_id,
+            ts: new Date(msg.created_at).toISOString(),
+            source: 'agent-comms',
+          },
+        },
+      }).catch(err => {
+        process.stderr.write(`agent-comms: push notification failed: ${err}\n`)
+      })
+
+      // Advance cursor past this message to prevent re-fetch after
+      // processedIds TTL expires. Without +1ms, the `>= $2` query
+      // re-matches the same timestamp once processedIds expires (10min),
+      // causing infinite re-delivery.
+      const rawTs = msg.created_at instanceof Date
+        ? msg.created_at.toISOString()
+        : String(msg.created_at)
+      const dt = new Date(rawTs)
+      dt.setTime(dt.getTime() + 1)
+      lastPolledAt = dt.toISOString()
+    }
+  } catch (err) {
+    process.stderr.write(`agent-comms: poll error (will retry): ${err}\n`)
+  }
+}
+
+export function startPolling(): void {
+  pollInterval = setInterval(pollNewMessages, POLL_INTERVAL_MS)
+  process.stderr.write(`agent-comms: push polling started (${POLL_INTERVAL_MS}ms interval)\n`)
+}
+
+export function stopPolling(): void {
+  if (pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+}
+
+// ---- pg_notify LISTEN path -----------------------------------------------
+
+let listenClient: Client | null = null
+let listenReconnectAttempts = 0
+let listenReconnecting = false
+let listenKeepaliveTimer: ReturnType<typeof setInterval> | null = null
+const LISTEN_MAX_RECONNECT_DELAY_MS = 30_000
+const LISTEN_KEEPALIVE_INTERVAL_MS = 60_000
+
+export async function startListener(): Promise<void> {
+  const d = requireDeps()
+  if (!d.databaseUrl) return
+
+  try {
+    const client = new Client({ connectionString: d.databaseUrl })
+
+    client.on('error', (err) => {
+      process.stderr.write(`agent-comms: listener DB error: ${err.message}\n`)
+      scheduleListenerReconnect()
+    })
+
+    client.on('end', () => {
+      // Only reconnect if this is still the active client (not a stale
+      // one being cleaned up).
+      if (client === listenClient) {
+        process.stderr.write('agent-comms: listener DB connection closed\n')
+        scheduleListenerReconnect()
+      }
+    })
+
+    await client.connect()
+    listenClient = client
+    listenReconnectAttempts = 0
+    listenReconnecting = false
+
+    await client.query('LISTEN agent_inbox')
+    process.stderr.write('agent-comms: pg_notify LISTEN started\n')
+
+    // Keepalive: periodic lightweight query to detect stale connections.
+    stopKeepalive()
+    listenKeepaliveTimer = setInterval(async () => {
+      if (!listenClient || listenClient !== client) {
+        stopKeepalive()
+        return
+      }
+      try {
+        await client.query('SELECT 1')
+      } catch (err) {
+        process.stderr.write(`agent-comms: listener keepalive failed: ${err}\n`)
+        scheduleListenerReconnect()
+      }
+    }, LISTEN_KEEPALIVE_INTERVAL_MS)
+
+    client.on('notification', async (msg) => {
+      if (msg.channel !== 'agent_inbox' || !msg.payload) return
+
+      try {
+        const payload = JSON.parse(msg.payload) as { to: string; message_id: string }
+        if (payload.to !== d.agentId) return
+        if (d.processedIds.has(payload.message_id)) return
+
+        const dbClient = await d.tryGetDb()
+        if (!dbClient) return
+
+        const r = await dbClient.query(
+          `SELECT id, channel_id, author_id, content, message_type, metadata, depth, created_at
+           FROM agent_messages WHERE id = $1`,
+          [payload.message_id],
+        )
+        if (r.rows.length === 0) return
+        const row = r.rows[0]
+
+        d.processedIds.set(row.id, Date.now())
+
+        const authResult = d.validateIncomingAuth(
+          row.metadata, row.author_id, row.channel_id, row.content,
+        )
+        if (!authResult.valid) {
+          process.stderr.write(
+            `agent-comms: listener rejected (auth ${d.authMode}): ${row.id} from ${row.author_id}\n`,
+          )
+          return
+        }
+
+        // §5.1: pure routeInbound() for the delivery filter (unified
+        // with every push path).
+        const coreDb = await d.coreDbAdapter()
+        const agentInfo = await loadAgentInfo(coreDb, d.agentId)
+        if (!agentInfo) {
+          process.stderr.write(
+            `agent-comms: listener — agent ${d.agentId} not found, skipping\n`,
+          )
+          return
+        }
+        const senderAgentId = await resolveAgentFromDiscordId(coreDb, row.author_id) ?? row.author_id
+        const senderIsBot = !(await isHumanAgent(coreDb, senderAgentId))
+        const resolvedMentions = (row.metadata as any)?.mentions ?? parseMentions(row.content)
+        const channelInfo = await resolveInboundChannel(coreDb, row.channel_id)
+        const routeResult = routeInbound(
+          {
+            authorAgentId: senderAgentId,
+            authorIsBot: senderIsBot,
+            content: row.content,
+            mentions: resolvedMentions,
+            messageType: row.message_type ?? 'chat',
+          },
+          {
+            channelId: channelInfo?.channelId ?? row.channel_id,
+            threadId: channelInfo?.threadId,
+            members: channelInfo?.members ?? [],
+            type: channelInfo?.type,
+          },
+          [agentInfo],
+        )
+        if (!routeResult.pushTargets.includes(d.agentId)) {
+          process.stderr.write(
+            `agent-comms: listener filtered — ${d.agentId} ${routeResult.dropTargets[d.agentId] ?? 'no_target'}: ${row.id}\n`,
+          )
+          return
+        }
+
+        // v0.1.0: auto-focus on instruction receipt.
+        if (row.message_type === 'instruction' && (row as any).thread_id) {
+          await d.updateActiveThread(d.agentId, (row as any).thread_id)
+          process.stderr.write(
+            `[agent-com] INFO: auto-focused on thread:${(row as any).thread_id} (instruction received)\n`,
+          )
+        }
+
+        // Build quote block if reply_to is present (§3.10).
+        let quotePrefix = ''
+        if ((row as any).reply_to) {
+          const quoteData = await d.buildQuoteBlock((row as any).reply_to)
+          if (quoteData) quotePrefix = quoteData.quote
+        }
+
+        const tag = authResult.tag ? ` ${authResult.tag}` : ''
+        const contentText = `${quotePrefix}[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
+
+        await d.mcpNotification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: contentText,
+            meta: {
+              chat_id: row.channel_id,
+              message_id: row.id,
+              user: row.author_id,
+              user_id: row.author_id,
+              ts: new Date(row.created_at).toISOString(),
+              source: 'agent-comms',
+            },
+          },
+        }).then(async () => {
+          const dbClient = await d.tryGetDb()
+          if (dbClient) {
+            await dbClient.query(
+              `SELECT pg_notify('agent_inbox', $1)`,
+              [JSON.stringify({
+                event: 'message.delivered',
+                to: d.agentId,
+                message_id: row.id,
+                agent_id: d.agentId,
+              })],
+            ).catch(() => {})
+          }
+        }).catch(async (err) => {
+          process.stderr.write(`agent-comms: listener notification failed: ${err}\n`)
+          const dbClient = await d.tryGetDb()
+          if (dbClient) {
+            await dbClient.query(
+              `SELECT pg_notify('agent_inbox', $1)`,
+              [JSON.stringify({
+                event: 'message.failed',
+                to: d.agentId,
+                message_id: row.id,
+                error: String(err),
+              })],
+            ).catch(() => {})
+          }
+        })
+      } catch (err) {
+        process.stderr.write(`agent-comms: listener notification error: ${err}\n`)
+      }
+    })
+  } catch (err) {
+    process.stderr.write(`agent-comms: listener start failed: ${err}\n`)
+    scheduleListenerReconnect()
+  }
+}
+
+export function stopKeepalive(): void {
+  if (listenKeepaliveTimer) {
+    clearInterval(listenKeepaliveTimer)
+    listenKeepaliveTimer = null
+  }
+}
+
+export function scheduleListenerReconnect(): void {
+  if (listenReconnecting) return
+  listenReconnecting = true
+
+  stopKeepalive()
+
+  const delay = Math.min(1000 * Math.pow(2, listenReconnectAttempts), LISTEN_MAX_RECONNECT_DELAY_MS)
+  listenReconnectAttempts++
+  process.stderr.write(
+    `agent-comms: listener reconnecting in ${delay}ms (attempt ${listenReconnectAttempts})\n`,
+  )
+  setTimeout(async () => {
+    try {
+      // Detach old client before end() to prevent 'end' event from
+      // re-triggering reconnect.
+      const oldClient = listenClient
+      listenClient = null
+      if (oldClient) {
+        await oldClient.end().catch(() => {})
+      }
+      await startListener()
+    } catch (err) {
+      process.stderr.write(`agent-comms: listener reconnect failed: ${err}\n`)
+      listenReconnecting = false
+      scheduleListenerReconnect()
+    }
+  }, delay)
+}
+
+export function stopListener(): void {
+  stopKeepalive()
+  listenReconnecting = true // prevent reconnect on intentional stop
+  const oldClient = listenClient
+  listenClient = null
+  if (oldClient) {
+    oldClient.end().catch(() => {})
+  }
+}
+
+// ---- handleInboundMessage -------------------------------------------------
+
+export interface InboundRouteResult {
+  delivered: boolean
+  messageId?: string
+  reason?: string
+  pushMeta?: Record<string, unknown>
+  humanWarning?: boolean
+}
+
+/**
+ * Full inbound message handler — wraps pure routeInbound with I/O.
+ * Called per-receiver in stdio mode, per-bot in daemon mode.
+ */
+export async function handleInboundMessage(params: {
+  receiverAgentId: string
+  externalChannelId: string
+  externalMessageId: string
+  authorExternalId: string
+  authorName: string
+  authorIsBot: boolean
+  content: string
+  attachments?: string
+  timestamp: Date
+  platform: string
+  mentions?: string[]
+  replyToMessageId?: string
+}): Promise<InboundRouteResult> {
+  const d = requireDeps()
+  const {
+    receiverAgentId, externalChannelId, externalMessageId,
+    authorExternalId, authorName, authorIsBot,
+    content, attachments, timestamp, platform, mentions,
+  } = params
+
+  // Step 1: Resolve channel → core channel_id + members.
+  const coreDb = await d.coreDbAdapter()
+  const resolved = await resolveInboundChannel(coreDb, externalChannelId)
+
+  // Step 2: DB save (always) — non-fatal. 'to' is NOT set here; it is
+  // set ONLY after routeInbound confirms delivery (prevents poll bypass
+  // of the mentions filter, §5.1).
+  const messageId = await d.saveMessage({
+    channel_id: resolved?.channelId ?? externalChannelId,
+    author_id: authorExternalId,
+    content,
+    message_type: 'chat',
+    source: platform,
+    thread_id: resolved?.threadId ?? null,
+    direction: 'inbound',
+    role: authorIsBot ? 'agent' : 'user',
+    metadata: {
+      [`${platform}_message_id`]: externalMessageId,
+      [`${platform}_channel_id`]: externalChannelId,
+      author_name: authorName,
+      mentions: mentions ?? [],
+      ...(attachments ? { attachments } : {}),
+    },
+  }).catch(err => {
+    process.stderr.write(`agent-comms: inbound DB persist failed (non-fatal): ${err}\n`)
+    return undefined
+  })
+
+  // Step 3: Channel not registered → drop.
+  if (!resolved) {
+    process.stderr.write(
+      `agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`,
+    )
+    return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
+  }
+
+  // Step 4: Load agent info for receiver.
+  const agentInfo = await loadAgentInfo(coreDb, receiverAgentId)
+  if (!agentInfo) {
+    process.stderr.write(
+      `agent-comms: inbound drop — ${receiverAgentId} not found in agents table\n`,
+    )
+    return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
+  }
+
+  // Step 5: Resolve sender agent_id.
+  const senderAgentId = await resolveAgentFromDiscordId(coreDb, authorExternalId)
+
+  // Step 6: Pure routing decision (§5.1).
+  const resolvedMentions = mentions ?? []
+  const result = routeInbound(
+    {
+      authorAgentId: senderAgentId,
+      authorIsBot,
+      content,
+      mentions: resolvedMentions,
+      messageType: 'chat',
+    },
+    {
+      channelId: resolved.channelId,
+      threadId: resolved.threadId,
+      members: resolved.members,
+      type: resolved.type,
+    },
+    [agentInfo],
+  )
+
+  process.stderr.write(
+    `agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`,
+  )
+
+  const isDelivered = result.pushTargets.includes(receiverAgentId)
+
+  if (!isDelivered) {
+    const reason = result.dropTargets[receiverAgentId] ?? 'NOT_MENTIONED'
+    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} ${reason}\n`)
+    return {
+      delivered: false,
+      messageId,
+      reason,
+      humanWarning: result.senderIsHuman && result.noMentions && !params.replyToMessageId,
+    }
+  }
+
+  // Step 7b: Set metadata.to ONLY for delivered messages (prevents poll
+  // bypass of mentions filter).
+  if (messageId) {
+    const client = await d.tryGetDb()
+    if (client) {
+      await client.query(
+        `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $1) WHERE id = $2`,
+        [receiverAgentId, messageId],
+      ).catch(() => {})
+    }
+  }
+
+  // Step 7c: PR-B.2 mixed-mode receiver pipeline fanout (additive).
+  // For bots in receiverPipelineBots, ALSO fire pg_notify('agent_inbox', …)
+  // so future LISTEN-based subscribers receive the message via the new
+  // path. Phase 4 (Issue #130) removed pushToChannelServer; this pg_notify
+  // remains as an additional signal for any future LISTEN-based consumers.
+  // Alias so the pin in tests/pr-b-2-mixed-mode.test.ts
+  // (`RECEIVER_PIPELINE_BOTS.has(receiverAgentId)`) keeps firing at this
+  // new home — the Set itself is owned by server.ts and reaches us via
+  // `deps.receiverPipelineBots`.
+  const RECEIVER_PIPELINE_BOTS = d.receiverPipelineBots
+  if (messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
+    const client = await d.tryGetDb()
+    if (client) {
+      await client.query(
+        `SELECT pg_notify('agent_inbox', $1)`,
+        [JSON.stringify({
+          event: 'message.created',
+          to: receiverAgentId,
+          message_id: messageId,
+          channel_id: resolved.channelId,
+          source: 'receiver-pipeline',
+        })],
+      ).catch(err => {
+        process.stderr.write(
+          `agent-comms: receiver pipeline pg_notify failed for ${receiverAgentId} (non-fatal): ${err}\n`,
+        )
+      })
+    }
+  }
+
+  // Step 7d: Issue #128 Phase 2 — INSERT into message_queue for the receiver.
+  // ON CONFLICT (agent_id, message_id) DO NOTHING so redelivered Discord
+  // events cannot create duplicate inbox rows (spec-enforcement #7).
+  if (messageId) {
+    const client = await d.tryGetDb()
+    if (client) {
+      const mqPayload = JSON.stringify({
+        channel_id: resolved.channelId,
+        thread_id: resolved.threadId ?? null,
+        author_id: senderAgentId ?? authorExternalId,
+        author_name: authorName,
+        content,
+        message_id: messageId,
+        message_type: 'chat',
+        source: platform,
+        ts: timestamp.toISOString(),
+        ...(attachments ? { attachments } : {}),
+      })
+      const mqIns = await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+        [receiverAgentId, messageId, mqPayload],
+      ).catch(err => {
+        process.stderr.write(
+          `agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`,
+        )
+        return null
+      })
+      // Observability: log when ON CONFLICT DO NOTHING suppressed a row
+      // so duplicate enqueue attempts are visible in stderr.
+      if (mqIns && mqIns.rowCount === 0) {
+        process.stderr.write(
+          `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
+        )
+      }
+    }
+  }
+
+  // Step 8: Build push metadata.
+  const pushMeta = {
+    chat_id: externalChannelId,
+    message_id: externalMessageId,
+    user: authorName,
+    user_id: authorExternalId,
+    ts: timestamp.toISOString(),
+    source: platform,
+    ...(attachments ? { attachments } : {}),
+  }
+
+  return { delivered: true, messageId, pushMeta }
+}
+
+// ---- sendHumanWarning (§2.2 Pattern A) ------------------------------------
+
+const humanWarningsSent = new Map<string, number>()
+
+/**
+ * Send a warning to a human who posted without mentions.
+ * Uses pg_try_advisory_lock for cross-process dedup in stdio mode.
+ */
+export async function sendHumanWarning(
+  adapter: DiscordAdapter,
+  channelId: string,
+  discordMessageId: string,
+): Promise<void> {
+  const d = requireDeps()
+  if (humanWarningsSent.has(discordMessageId)) return
+  humanWarningsSent.set(discordMessageId, Date.now())
+  setTimeout(() => humanWarningsSent.delete(discordMessageId), 60_000)
+
+  const client = await d.tryGetDb()
+  if (client) {
+    const lockKey = Math.abs(d.hashCode(discordMessageId)) % 2147483647
+    const lockResult = await client.query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey])
+    if (!lockResult.rows[0]?.acquired) {
+      process.stderr.write(
+        `agent-comms: human warning skipped (another bot sending) — msg ${discordMessageId}\n`,
+      )
+      return
+    }
+    setTimeout(async () => {
+      try { await client.query('SELECT pg_advisory_unlock($1)', [lockKey]) } catch {}
+    }, 5_000)
+  }
+
+  const warningText =
+    '⚠️ メンションがないためbotには通知されていません。\n' +
+    '特定のbotに通知: @cto @arc 等を付けてください。\n' +
+    '全員に通知: @all を使ってください。'
+
+  try {
+    await adapter.sendMessage(channelId, warningText, { replyTo: discordMessageId })
+    process.stderr.write(`agent-comms: human warning sent — msg ${discordMessageId}\n`)
+  } catch (err) {
+    process.stderr.write(`agent-comms: human warning send failed: ${err}\n`)
+  }
+}

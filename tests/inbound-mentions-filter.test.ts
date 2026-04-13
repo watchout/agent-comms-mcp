@@ -17,7 +17,16 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
-const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005: handleInboundMessage + sendHumanWarning moved to
+// adapters/inbound-receiver.ts; outbound consumer to adapters/
+// outbound-consumer.ts. Concat so mentions-filter structural pins
+// still fire at the new home.
+const SERVER_SOURCE =
+  readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/inbound-receiver.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/outbound-consumer.ts'), 'utf-8')
 // PR-A: routeInbound + helpers extracted to core/route-message{,-db}.ts
 const CORE_PURE_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message.ts'), 'utf-8')
 const CORE_DB_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message-db.ts'), 'utf-8')

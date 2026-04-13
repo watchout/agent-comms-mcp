@@ -22,7 +22,17 @@ import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { Client } from 'pg'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
-const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite): Discord client + outbound consumer +
+// inbound receiver live in adapters/*.ts. Concat so existing
+// plugin-regression pins still fire at their new home.
+const SERVER_SOURCE =
+  readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/discord-client.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/outbound-consumer.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/inbound-receiver.ts'), 'utf-8')
 
 // --- Test 1: Bot Filter ---
 describe('1. Bot Filter', () => {
