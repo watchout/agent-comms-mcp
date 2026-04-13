@@ -174,4 +174,32 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line).toBeDefined()
     expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
   })
+
+  test('13. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {
+    // Regression class: the 2026-04-13 CTO wedged-consumer incident. An
+    // awaited call (Discord REST or `pg` query) never settled, so the
+    // try/finally never ran and `outboundConsumerInFlight` stayed true
+    // for ~2 hours while rows piled up at `pending, attempts=0`. The
+    // tick must therefore arm a setTimeout that releases the guard
+    // independently of the awaited work, and must clearTimeout when the
+    // normal path completes so the guard is not double-released into a
+    // later unrelated tick.
+    const fn = sliceFn(SERVER_SRC, 'consumeOneOutboundRow')
+    // The budget constant is defined at module scope (not inside the fn)
+    // but the fn must reference it to schedule the release.
+    expect(fn).toContain('OUTBOUND_TICK_TIMEOUT_MS')
+    // setTimeout arms the watchdog, its callback clears the guard.
+    expect(fn).toMatch(
+      /setTimeout\([\s\S]{0,400}?outboundConsumerInFlight\s*=\s*false/,
+    )
+    // The finally MUST clearTimeout the watchdog handle so a fast-path
+    // completion does not leave a stale timer that later clears the
+    // guard mid-way through a subsequent (legitimate) tick.
+    expect(fn).toMatch(/finally[\s\S]{0,200}?clearTimeout\(/)
+    // The module-scope constant itself has a safety floor so a misconfig
+    // (e.g. OUTBOUND_TICK_TIMEOUT_MS=0) cannot disable the watchdog.
+    expect(SERVER_SRC).toMatch(
+      /OUTBOUND_TICK_TIMEOUT_MS\s*=\s*Math\.max\(\s*[\s\S]{0,20}?\d[\d_]*\s*,/,
+    )
+  })
 })

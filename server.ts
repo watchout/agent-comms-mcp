@@ -905,6 +905,17 @@ const pollingDriver = new PollingDriver()
 const OUTBOUND_POLL_INTERVAL_MS = 1000
 const OUTBOUND_ORPHAN_TICK_MS = 60_000
 const OUTBOUND_BACKOFF_MAX_MS = 30_000
+// Force-release the re-entrancy guard if a single tick runs longer than this.
+// The awaited work (Discord send, DB call) is not cancelled — JavaScript has
+// no cross-promise cancellation — but subsequent ticks are unblocked so a
+// hung network call does not wedge the whole consumer. Tunable via env for
+// tests. Observed incident 2026-04-13: CTO consumer wedged ~2h with 3 rows
+// stuck at `pending, attempts=0` because the guard was set to true and the
+// awaited work never completed nor threw.
+const OUTBOUND_TICK_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.OUTBOUND_TICK_TIMEOUT_MS ?? '60000', 10) || 60_000,
+)
 let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
 let outboundOrphanInterval: ReturnType<typeof setInterval> | null = null
 let outboundConsumerInFlight = false
@@ -932,6 +943,16 @@ async function consumeOneOutboundRow(): Promise<void> {
   // call, DB lock contention), skip this tick instead of stacking work.
   if (outboundConsumerInFlight) return
   outboundConsumerInFlight = true
+  // Force-release the guard after OUTBOUND_TICK_TIMEOUT_MS so that a hung
+  // awaited call cannot wedge the consumer forever. Concurrency is still
+  // bounded by the atomic `status='pending' → 'processing'` claim (§3.3),
+  // so briefly overlapping ticks are safe: each picks a different row.
+  const guardTimeout = setTimeout(() => {
+    outboundConsumerInFlight = false
+    process.stderr.write(
+      `agent-comms: outbound consumer tick exceeded ${OUTBOUND_TICK_TIMEOUT_MS}ms — force-released re-entrancy guard (hung tick still running; orphan reclaim will handle any stuck 'processing' row)\n`,
+    )
+  }, OUTBOUND_TICK_TIMEOUT_MS)
   try {
     const client = await tryGetDb()
     if (!client) return
@@ -1077,6 +1098,7 @@ async function consumeOneOutboundRow(): Promise<void> {
     ).catch(() => {})
     process.stderr.write(`agent-comms: outbound transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, retry in ${delayMs}ms): ${deliveryError}\n`)
   } finally {
+    clearTimeout(guardTimeout)
     outboundConsumerInFlight = false
   }
 }
