@@ -146,7 +146,7 @@ describe('outbound consumer SQL contract — PR-A cycle 2', () => {
     // 1) Atomic claim (mirrors server.ts consumeOneOutboundRow).
     const claim = await client!.query(
       `UPDATE outbound_queue
-          SET status = 'processing', attempts = attempts + 1, claimed_at = now()
+          SET status = 'claimed', attempts = attempts + 1, claimed_at = now()
         WHERE id = (
           SELECT id FROM outbound_queue
            WHERE status = 'pending'
