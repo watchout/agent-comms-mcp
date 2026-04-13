@@ -17,3 +17,6 @@ discord-wbs|~/Developer/wbs|wbs-dev|8804|AGENT_COM_RUNTIME=daemon claude --dange
 discord-secretary|~/Developer/secretary|secretary|8805|AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
 discord-webb|~/Developer/webb-dev|webb-dev|8806|AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
 discord-agent-mem|~/Developer/agent-memory|agent-mem-dev|8802|AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
+discord-lead-ama|~/Developer/lead-ama|lead-ama|8807|AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
+discord-lead-sus|~/Developer/lead-sus|lead-sus|8809|AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
+discord-lead-tuk|~/Developer/lead-tuk|lead-tuk|8830|AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
