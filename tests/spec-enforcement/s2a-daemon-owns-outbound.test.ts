@@ -103,4 +103,23 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     // stays for all runtimes so we only assert the gate wraps pollTimer.
     expect(body).toMatch(/isDaemonRuntime\(\)[\s\S]*?this\.pollTimer\s*=\s*setInterval/)
   })
+
+  test('8. bot-registry.txt every non-comment row carries AGENT_COM_RUNTIME=daemon', () => {
+    const registry = readFileSync(join(REPO_ROOT, 'scripts', 'bot-registry.txt'), 'utf-8')
+    const rows = registry.split('\n').filter(line => line.trim().length > 0 && !line.trim().startsWith('#'))
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      const parts = row.split('|')
+      expect(parts.length).toBeGreaterThanOrEqual(5)
+      const command = parts.slice(4).join('|')
+      expect(command).toContain('AGENT_COM_RUNTIME=daemon')
+    }
+  })
+
+  test('9. restart-bot.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
+    const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
+    expect(line).toBeDefined()
+    expect(line!).toContain('AGENT_COM_RUNTIME=daemon')
+  })
 })
