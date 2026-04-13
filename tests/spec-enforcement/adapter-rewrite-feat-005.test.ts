@@ -214,4 +214,36 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     expect(src!).toMatch(/from\s+['"]\.\/inbound-receiver(?:\.ts)?['"]/)
     expect(src!).toMatch(/startListener|handleInboundMessage/)
   })
+
+  test('10. db/migrate.ts forward migration renames claim vocabulary atomically', () => {
+    // CP-3 migration invariants:
+    //   - CHECK installs the new vocabulary (pending/claimed/sent/failed)
+    //   - UPDATE migrates in-flight rows from the old vocabulary
+    //   - Partial-index WHERE predicate follows 'claimed'
+    //   - Entire block sits inside BEGIN … COMMIT so DDL + UPDATE land
+    //     in a single transaction (no window with a stale CHECK or
+    //     orphan rows that violate either vocabulary).
+    const src = readIfExists('db/migrate.ts')
+    expect(src).not.toBeNull()
+    // Locate the last CHECK on outbound_queue.status (the forward-
+    // migration one) and assert it does not list 'processing'.
+    const checkMatches = src!.match(/CHECK\s*\(\s*status\s+IN[^)]*\)/g) ?? []
+    expect(checkMatches.length).toBeGreaterThan(0)
+    const forwardCheck = checkMatches[checkMatches.length - 1]!
+    expect(forwardCheck).toMatch(/'pending'[\s\S]*'claimed'[\s\S]*'sent'[\s\S]*'failed'/)
+    expect(forwardCheck).not.toContain("'processing'")
+    // WHERE predicate intentionally relaxed so a future guard like
+    //   WHERE status='processing' AND created_at < now() - interval '1 day'
+    // does not false-negative this pin (CTO guidance 2026-04-14).
+    expect(src!).toMatch(/UPDATE\s+outbound_queue\s+SET\s+status\s*=\s*'claimed'\s+WHERE\s+[^;]*?'processing'/i)
+    // Partial-index predicate must follow the new vocabulary.
+    expect(src!).toMatch(/idx_outbound_queue_claimed_claimed_at[\s\S]*WHERE\s+status\s*=\s*'claimed'/)
+    // Single-transaction invariant: UPDATE sits inside BEGIN/COMMIT.
+    expect(src!).toMatch(/BEGIN;[\s\S]*UPDATE\s+outbound_queue[\s\S]*COMMIT;/)
+    // Down migration lives at its documented path and is symmetric.
+    const down = readIfExists('db/rollback-claim-vocabulary.sql')
+    expect(down).not.toBeNull()
+    expect(down!).toMatch(/UPDATE\s+outbound_queue\s+SET\s+status\s*=\s*'processing'\s+WHERE\s+[^;]*?'claimed'/i)
+    expect(down!).toMatch(/BEGIN;[\s\S]*COMMIT;/)
+  })
 })

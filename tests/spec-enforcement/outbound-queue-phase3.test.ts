@@ -33,7 +33,17 @@ import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
-const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite 2026-04-14): the outbound consumer +
+// PollingDriver + per-bot Discord lookup moved out of server.ts into
+// adapters/outbound-consumer.ts and adapters/discord-client.ts. The
+// T2/T5 substring pins below continue to enforce the same invariants
+// at their new home via a concatenated SERVER_SRC.
+const SERVER_SRC =
+  readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'outbound-consumer.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
 
 // ─────────────────────────────────────────────────────────────────────────────
