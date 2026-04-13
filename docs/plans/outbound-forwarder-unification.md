@@ -1,6 +1,6 @@
 # Outbound Forwarder Unification (S2-A / S3 相当)
 
-Status: **draft v3 (最終版)** (author: lead-ama, 2026-04-13 JST — CEO 全件承認反映)
+Status: **v5** (author: lead-ama, 2026-04-13 JST — startup SSOT 認識反転)
 Route: `route:ceo-approval` (architectural shift / 全 bot 挙動変更)
 Feature: **FEAT-005** (SSOT-1, status = Refactoring)
 CEO 承認: **2026-04-12 23:07 UTC = 2026-04-13 08:07 JST** (Open Q1-5 全件 CTO 推奨採用、CTO 追加指摘 §5.2 mutex 反映)
@@ -189,9 +189,15 @@ function startOutboundConsumer() {
 }
 ```
 
-daemon runtime の識別方法:
-- CLI `agent-com daemon` で起動された場合 `process.env.AGENT_COM_RUNTIME='daemon'` を設定
-- stdio-mode MCP server は何も設定しない (既定 = stdio)
+daemon runtime の識別方法 (**v5 で認識反転、codex-auditor 2026-04-13 01:52 UTC PR #164 B3 指摘反映**):
+
+Production 運用の実態は「各 bot は Claude Code TUI + MCP server (stdio) を tmux session で起動」(= `scripts/bot-registry.txt` の COMMAND 列が SSOT)。CLI `agent-com daemon` は使用されていない。したがって SSOT §1 line 39 の「daemon」は、production reality においては **bot 起動経路で立ち上がる MCP server process 自身** を指す:
+
+- **起動経路 SSOT**: `scripts/bot-registry.txt` の各行 COMMAND、および `scripts/restart-bot.sh` の `DEFAULT_CMD`
+- **runtime 識別方法**: bot-registry / restart-bot.sh の COMMAND 先頭に `AGENT_COM_RUNTIME=daemon` を prefix。tmux session から MCP server に env 継承される
+- **stdio と daemon の二分を撤回**: 本 plan の当初前提 (stdio=inbound 専任 / daemon=outbound 専任) は production 実装では実現されておらず、今後も (ADF の大規模化まで) MCP server process が両責務を持つ。inbound routing は `handleInboundMessage` が 1 callsite 限定 (PR#157 S2-B) で構造保証済、outbound は `AGENT_COM_RUNTIME=daemon` 設定 + `isDaemonRuntime()` gate で起動制御
+- **CLI `agent-com daemon` 経由起動**: production で未使用だが、PR #164 の `cli/index.ts` が `process.env.AGENT_COM_RUNTIME='daemon'` を設定しているため、仮に CLI 経由起動しても同挙動となる (two-path support、backwards compatible)
+- **spec-enforcement**: `tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts` に bot-registry.txt / restart-bot.sh への env prefix が存在することを assert 追加 (PR #164 cycle 3 で実装)
 
 ### 3.3 atomic claim + agent_id filter
 
@@ -458,6 +464,11 @@ canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
 - PR#160 ADF retrofit / PR#161 SSOT-1 populated
 - PR#162 ADF enforcement hooks (in-flight、v2 gate-design review の前提)
 
+### Startup SSOT (v5 追加)
+- **`scripts/bot-registry.txt`** — 全 bot の起動 COMMAND 列 (SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND)。watchdog / restart-bot.sh が verbatim 参照する production 起動経路。`AGENT_COM_RUNTIME=daemon` prefix はここに設定 (PR #164 cycle 3 で全 19 bot 反映)
+- **`scripts/restart-bot.sh`** — `DEFAULT_CMD` 変数が registry fallback 時の COMMAND。ここにも同 env prefix を反映
+- **`cli/index.ts` `daemon()`** — CLI 経由起動時の `process.env.AGENT_COM_RUNTIME='daemon'` 設定 (現 production 未使用、backwards compatible)
+
 ### Governance
 - `~/.claude/rules/governance-flow.md` — 4-layer review chain、Gate D post-merge 検証
 - ADR-041 (Receiver-MessageBus) / ADR-045 (Dev-Lead Pool)
@@ -477,4 +488,5 @@ canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
 | 2026-04-13 JST | v1 | 初版 |
 | 2026-04-13 JST | v2 | v1 差し戻し反映: SSOT §1 line 39 引用追加 / 推奨を Option A に変更 / exponential backoff + orphan reclaim 追記 / spec-enforcement test 定義 / regression fixture 拡張 (4 事例) / FEAT-005 参照 |
 | 2026-04-13 JST | v3 | CEO 全件承認 (2026-04-12 23:07 UTC) を反映: §5.2.1 に canary 期間の新/旧経路 mutual exclusion を CTO 追加指摘に従い明文化 / §9 を "Resolved decisions" に転換し 5 件の確定結果を記録 / §9 Q5 + §2 Option C に「§14.5 スケール段階を再評価 trigger」を CEO 指示として明示 / ヘッダに CEO 承認日時記載 |
-| 2026-04-13 JST | **v4** (本版) | codex-auditor 2026-04-12 23:26 UTC 6 axes review (A) 指摘反映: §3.4 transient 判定を `core/send-errors.ts` 継承から **本 consumer 内 inline 保持** (`isTransientDeliveryError()` 新設) に修正。§10 References から send-errors.ts を削除 (参照しない旨注記)。実装側 PR #164 との整合回復。本版では plan の他項目は無変更 (B1-B3 blocker は実装側修正で対応) |
+| 2026-04-13 JST | v4 | codex-auditor 2026-04-12 23:26 UTC 6 axes review (A) 指摘反映: §3.4 transient 判定を `core/send-errors.ts` 継承から **本 consumer 内 inline 保持** (`isTransientDeliveryError()` 新設) に修正。§10 References から send-errors.ts を削除 (参照しない旨注記)。実装側 PR #164 との整合回復 |
+| 2026-04-13 JST | **v5** (本版) | codex-auditor 2026-04-13 01:52 UTC PR #164 B3 指摘反映: §3.2 "daemon runtime の識別方法" を production 実態に合わせ認識反転。§10 References に **Startup SSOT 節** (bot-registry.txt / restart-bot.sh / cli daemon) 新設。stdio/daemon 二分の当初前提を明示撤回 |
