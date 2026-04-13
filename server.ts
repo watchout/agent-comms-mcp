@@ -949,7 +949,7 @@ async function consumeOneOutboundRow(): Promise<void> {
         )
         RETURNING id, message_id, channel_external_id, content,
                   mentions_display, attachments, reply_to_discord_id,
-                  attempts, max_attempts`,
+                  attempts, max_attempts, discord_message_id`,
       [AGENT_ID],
     ).catch(err => {
       process.stderr.write(`agent-comms: outbound consumer claim failed: ${err}\n`)
@@ -958,6 +958,22 @@ async function consumeOneOutboundRow(): Promise<void> {
     if (!claimed || claimed.rows.length === 0) return
 
     const row = claimed.rows[0]
+
+    // Phase C Step 1 PR-A (B): row-level idempotency short-circuit. A prior
+    // attempt that succeeded on the Discord side but lost its HTTP response
+    // may have left status='pending' after backoff; if we already persisted
+    // a discord_message_id for this row it means Discord accepted the post,
+    // so flip to 'sent' without re-posting. This is the first-line guard;
+    // Discord's enforceNonce provides the second-line guard for cases where
+    // we never got as far as persisting the id.
+    if (row.discord_message_id) {
+      await client.query(
+        `UPDATE outbound_queue SET status = 'sent', sent_at = COALESCE(sent_at, now()) WHERE id = $1`,
+        [row.id],
+      ).catch(() => {})
+      process.stderr.write(`agent-comms: outbound row id=${row.id} short-circuited to sent (discord_message_id=${row.discord_message_id} already persisted)\n`)
+      return
+    }
 
     // §3.6 Fallback removed: the row must be delivered by the bot whose
     // token is loaded (discordClients.get(AGENT_ID)). No shared-client
@@ -974,19 +990,29 @@ async function consumeOneOutboundRow(): Promise<void> {
     }
 
     let deliveryError: string | null = null
+    let discordMessageId: string | null = null
     try {
-      await clientForAgent.sendAdapterMessage({
+      // Phase C Step 1 PR-A (B): nonce = "out-<row.id>" (<=25 chars for any
+      // realistic row id). Discord enforces uniqueness per channel for ~5
+      // minutes, so a retry inside that window that Discord already accepted
+      // returns an error instead of a duplicate post.
+      const result = await clientForAgent.sendAdapterMessage({
         external_channel_id: row.channel_external_id,
         content: truncateForPlatform(row.content, 'discord'),
+        nonce: `out-${row.id}`,
       })
+      discordMessageId = result.external_message_id ?? null
     } catch (err) {
       deliveryError = String(err).slice(0, 500)
     }
 
     if (deliveryError === null) {
+      // Phase C Step 1 PR-A (B): persist discord_message_id together with the
+      // status flip so a post-success crash before mark-sent is recoverable
+      // via the short-circuit above instead of causing a duplicate post.
       await client.query(
-        `UPDATE outbound_queue SET status = 'sent', sent_at = now() WHERE id = $1`,
-        [row.id],
+        `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
+        [discordMessageId, row.id],
       ).catch(err => {
         process.stderr.write(`agent-comms: outbound consumer mark-sent failed for id=${row.id}: ${err}\n`)
       })
@@ -1540,9 +1566,22 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
     }
   }
 
-  // 2. Include raw Discord mention user IDs (from msg.mentions.users — covers replies)
+  // 2. Include raw Discord mention user IDs, but ONLY those that also appear
+  //    as <@...> in content. Discord.js's msg.mentions.users includes the
+  //    reply target (auto-mention) even when the author did not type the
+  //    mention in the body; accepting those verbatim caused cross-bot push
+  //    pollution (bug 1895/1896: CEO's `<@agent-com-dev> テスト` reply to
+  //    a lead-ama message was routed to lead-ama as well because lead-ama's
+  //    Discord user ID rode in via msg.mentions.users). Restricting to IDs
+  //    present in the content text excludes the auto-mention while still
+  //    letting this block act as a fallback resolver for IDs the content
+  //    regex already matched.
   if (rawDiscordUserIds) {
+    const contentIdSet = new Set<string>(
+      (content.match(/<@!?(\d+)>/g) ?? []).map(m => m.replace(/<@!?(\d+)>/, '$1')),
+    )
     for (const discordId of rawDiscordUserIds) {
+      if (!contentIdSet.has(discordId)) continue
       const agentId = await resolveAgentFromDiscordId(db, discordId)
       if (agentId) agentIds.push(agentId)
     }

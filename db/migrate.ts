@@ -343,6 +343,15 @@ async function migrate() {
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
 
+    -- Phase C Step 1 PR-A (B): discord_message_id capture for outbound idempotency.
+    -- When sendAdapterMessage succeeds we persist the returned Discord snowflake
+    -- so a retry (caused by HTTP response loss, consumer crash, orphan reclaim)
+    -- can short-circuit to status='sent' instead of re-posting. Paired with
+    -- Discord's per-channel nonce (enforceNonce) which provides the 5-minute
+    -- server-side dedup window that catches the race before our row-level
+    -- check lands.
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS discord_message_id TEXT;
+
     -- status CHECK mutation: drop + re-add so pre-S2-A DBs accept the
     -- 'processing' claim flip. Postgres does not allow CHECK constraint
     -- mutation in place; bracketed in DO $$ for idempotency.

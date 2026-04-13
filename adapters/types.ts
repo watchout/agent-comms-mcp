@@ -13,6 +13,13 @@ export interface AdapterConfig {
 export interface SendOptions {
   /** Reply to a specific message ID */
   replyTo?: string
+  /**
+   * Idempotency nonce. When set, the adapter should pass it to the platform
+   * with platform-level deduplication enabled (Discord: `nonce` +
+   * `enforceNonce`) so a retry that races with a lost HTTP response does not
+   * produce a duplicate post. Phase C Step 1 PR-A (B).
+   */
+  nonce?: string
 }
 
 export interface Attachment {

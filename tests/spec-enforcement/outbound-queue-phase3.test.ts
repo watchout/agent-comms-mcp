@@ -233,3 +233,61 @@ describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
     expect(body).toMatch(/outboundSkipReason\s*=\s*'no discord adapter mapping/)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T5 — Phase C Step 1 PR-A (B): outbound consumer idempotency
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: duplicate Discord post caused by HTTP-response-loss
+// retries (same outbound row claimed twice, same content posted twice). The
+// fix pairs (a) a persisted discord_message_id with a short-circuit in the
+// consumer and (b) a Discord enforceNonce nonce that lets the server dedupe
+// within its ~5-minute window. If any link in that chain regresses we get
+// duplicate posts again.
+describe('T5 — outbound idempotency (PR-A B)', () => {
+  test('migrate.ts adds discord_message_id column on outbound_queue', () => {
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS discord_message_id TEXT/,
+    )
+  })
+
+  test('consumeOneOutboundRow selects discord_message_id in RETURNING', () => {
+    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
+    expect(fnIdx).toBeGreaterThan(-1)
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 4000)
+    expect(fnBody).toMatch(/RETURNING[^;]*discord_message_id/)
+  })
+
+  test('consumer short-circuits to sent when row already has discord_message_id', () => {
+    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 6000)
+    // Guard: the discord_message_id-presence check exists and routes to
+    // status='sent' without re-calling sendAdapterMessage.
+    expect(fnBody).toMatch(/if\s*\(\s*row\.discord_message_id\s*\)/)
+    expect(fnBody).toMatch(/SET status = 'sent'[^`]*WHERE id = \$1/)
+  })
+
+  test('consumer passes nonce "out-<row.id>" to sendAdapterMessage', () => {
+    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 6000)
+    expect(fnBody).toMatch(/sendAdapterMessage\(\{[\s\S]*?nonce:\s*`out-\$\{row\.id\}`/)
+  })
+
+  test('consumer persists discord_message_id on mark-sent', () => {
+    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 6000)
+    expect(fnBody).toMatch(
+      /UPDATE outbound_queue SET status = 'sent'[^`]*discord_message_id\s*=\s*\$1/,
+    )
+  })
+
+  test('discord adapter sendMessage passes enforceNonce to Discord when nonce is provided', () => {
+    const adapterSrc = readFileSync(join(REPO_ROOT, 'adapters', 'discord.ts'), 'utf-8')
+    expect(adapterSrc).toMatch(/enforceNonce:\s*true/)
+    expect(adapterSrc).toMatch(/nonce:\s*options\.nonce/)
+  })
+
+  test('SendOptions interface declares nonce', () => {
+    const typesSrc = readFileSync(join(REPO_ROOT, 'adapters', 'types.ts'), 'utf-8')
+    expect(typesSrc).toMatch(/nonce\?:\s*string/)
+  })
+})

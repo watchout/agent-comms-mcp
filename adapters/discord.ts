@@ -489,16 +489,26 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       }
     }
 
+    // Phase C Step 1 PR-A (B): idempotency nonce. Discord dedups
+    // messages with the same nonce+enforceNonce within ~5 minutes on the
+    // same channel, catching the race where our HTTP request succeeded but
+    // the response was lost so our retry fires a second send. `nonce` must
+    // be a string <= 25 chars per Discord's API; callers feed outbound row
+    // id (e.g. "out-123") which fits that ceiling.
+    const nonceOpts = options?.nonce
+      ? { nonce: options.nonce, enforceNonce: true as const }
+      : {}
+
     let sentMsg
     if (effectiveReplyTo) {
       try {
         const refMsg = await textChannel.messages.fetch(effectiveReplyTo)
-        sentMsg = await refMsg.reply({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
+        sentMsg = await refMsg.reply({ content: truncated, allowedMentions: { parse: ['users', 'roles'] }, ...nonceOpts })
       } catch {
-        sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
+        sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] }, ...nonceOpts })
       }
     } else {
-      sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] } })
+      sentMsg = await textChannel.send({ content: truncated, allowedMentions: { parse: ['users', 'roles'] }, ...nonceOpts })
     }
 
     return { messageId: sentMsg.id }
@@ -602,6 +612,8 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     content: string
     reply_to_external_id?: string
     thread_external_id?: string
+    /** Phase C Step 1 PR-A (B): idempotency nonce forwarded to platform. */
+    nonce?: string
   }): Promise<{ external_message_id: string }> {
     // Convert @agent_id mentions to Discord <@id>
     const convertedContent = await this.convertMentionsToDiscord(params.content)
@@ -615,10 +627,14 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       }
     }
 
+    const opts: { replyTo?: string; nonce?: string } = {}
+    if (params.reply_to_external_id) opts.replyTo = params.reply_to_external_id
+    if (params.nonce) opts.nonce = params.nonce
+
     const result = await this.sendMessage(
       targetChannel,
       convertedContent,
-      params.reply_to_external_id ? { replyTo: params.reply_to_external_id } : undefined
+      Object.keys(opts).length > 0 ? opts : undefined
     )
     return { external_message_id: result.messageId }
   }

@@ -40,14 +40,26 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 
   test('also parses @agent_id native mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1200)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
     expect(fnBody).toContain('parseMentions(content)')
   })
 
   test('deduplicates mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1200)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
     expect(fnBody).toContain('new Set(')
+  })
+
+  // Phase C Step 1 PR-A (A): regression pin for bug 1895/1896.
+  // Discord.js msg.mentions.users auto-includes the reply target; accepting
+  // those verbatim leaks the reply target into agent mentions and causes
+  // cross-bot message_queue INSERTs. The function must filter rawDiscordUserIds
+  // to those that actually appear as <@...> in the content text.
+  test('filters rawDiscordUserIds to IDs present in content (excludes reply auto-mention)', () => {
+    const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    expect(fnBody).toContain('contentIdSet')
+    expect(fnBody).toMatch(/if\s*\(!contentIdSet\.has\(discordId\)\)\s*continue/)
   })
 })
 
