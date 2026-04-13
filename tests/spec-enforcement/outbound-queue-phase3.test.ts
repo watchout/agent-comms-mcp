@@ -127,12 +127,18 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     // Retry budget gate: only flip to 'failed' once attempts >= max_attempts.
     expect(SERVER_SRC).toMatch(/row\.attempts\s*>=\s*row\.max_attempts/)
   })
-  test('consumer is wired into registerAgent / unregisterAgent', () => {
-    // Started alongside the heartbeat in registerAgent.
+  test('consumer is wired into entrypoints/daemon.ts + unregisterAgent (stop only, FEAT-005 CP-5)', () => {
+    // CP-5 (2026-04-14): the daemon entrypoint (entrypoints/daemon.ts)
+    // is now the SOLE caller of startOutboundConsumer. registerAgent no
+    // longer boots the consumer; stdio / MCP-plugin processes stay
+    // quiet, which is what stopped the 19-bot parallel-consumer race.
+    const daemonEntry = readFileSync(join(REPO_ROOT, 'entrypoints', 'daemon.ts'), 'utf-8')
+    expect(daemonEntry).toMatch(/startOutboundConsumer\(\)/)
+    // registerAgent explicitly does NOT call startOutboundConsumer.
     const regStart = SERVER_SRC.indexOf('async function registerAgent')
     const regEnd = SERVER_SRC.indexOf('\nasync function ', regStart + 1)
     const regBody = SERVER_SRC.slice(regStart, regEnd === -1 ? undefined : regEnd)
-    expect(regBody).toMatch(/startOutboundConsumer\(\)/)
+    expect(regBody).not.toMatch(/startOutboundConsumer\s*\(/)
     // Stopped alongside the heartbeat in unregisterAgent.
     const unregStart = SERVER_SRC.indexOf('async function unregisterAgent')
     const unregEnd = SERVER_SRC.indexOf('\nasync function ', unregStart + 1)

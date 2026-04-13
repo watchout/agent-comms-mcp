@@ -684,9 +684,11 @@ async function registerAgent(): Promise<void> {
     }
   }, 5 * 60 * 1000)
 
-  // Issue #129 Phase 3: start the outbound_queue consumer alongside the
-  // heartbeat. Disable with OUTBOUND_QUEUE_CONSUMER=0 (tests / dev).
-  startOutboundConsumer()
+  // FEAT-005 CP-5: outbound consumer bootstrap moved out.
+  // Only entrypoints/daemon.ts starts the consumer — one process,
+  // one consumer loop, never 19 parallel (see docs/plans/
+  // outbound-forwarder-unification.md v5 §3.2). stdio / MCP-plugin
+  // processes registering an agent do not need to drain the queue.
 
   // v1.0.2 §6.5: start the PollingDriver so pending messages are pre-fetched
   // into a buffer. The MCP `next` tool returns from the buffer instantly
@@ -2113,7 +2115,7 @@ interface BotEntry {
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
-const DEFAULT_CLAUDE_CMD = 'AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_CLAUDE_CMD = 'AGENT_COM_RUNTIME=daemon claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
 
 function loadBotRegistry(): BotEntry[] {
   try {
