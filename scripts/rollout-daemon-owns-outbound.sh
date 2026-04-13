@@ -9,9 +9,12 @@
 # queue undrained.
 #
 # Current registry: scripts/bot-registry.txt (SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND)
-# Each row's COMMAND launches `claude ... server:agent-comms ...`; the MCP
-# server inherits env from the tmux session, so setting the env before
-# tmux new-session is enough — we do NOT need to rewrite the COMMAND column.
+# Every row's COMMAND is already prefixed with `AGENT_COM_RUNTIME=daemon`
+# (see PR #164 B3 v2). This script is kept for canary-style restart of a
+# subset of sessions using the already-prefixed COMMAND; no COMMAND column
+# rewrite is needed here because the rewrite landed in bot-registry.txt
+# itself. Removing the prefix from either the registry rows or the COMMAND
+# used here would re-open the silent outbound-drain vector.
 #
 # Rollout stages (canary → fleet):
 #   1. Apply to `discord-cto` and `discord-agent-com` only, verify:

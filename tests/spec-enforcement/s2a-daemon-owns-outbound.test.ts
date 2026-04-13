@@ -122,4 +122,21 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line).toBeDefined()
     expect(line!).toContain('AGENT_COM_RUNTIME=daemon')
   })
+
+  test('10. watchdog.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon', () => {
+    // Auditor cycle-3 CONDITIONAL: watchdog is the autonomous restart
+    // path; its fallback DEFAULT_CMD is the last line of defense when a
+    // registry row is malformed or missing. Must not revert to no-env.
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
+    const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
+    expect(line).toBeDefined()
+    expect(line!).toContain('AGENT_COM_RUNTIME=daemon')
+  })
+
+  test('11. server.ts DEFAULT_CLAUDE_CMD (restart_bot MCP tool fallback) carries AGENT_COM_RUNTIME=daemon', () => {
+    // Auditor cycle-3 CONDITIONAL: restart_bot MCP tool falls back to
+    // DEFAULT_CLAUDE_CMD when a registry row parses with an empty
+    // COMMAND field. That fallback must also carry the env.
+    expect(SERVER_SRC).toMatch(/const\s+DEFAULT_CLAUDE_CMD\s*=\s*'[^']*AGENT_COM_RUNTIME=daemon[^']*'/)
+  })
 })
