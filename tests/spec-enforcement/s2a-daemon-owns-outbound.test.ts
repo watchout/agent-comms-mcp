@@ -112,31 +112,45 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
       const parts = row.split('|')
       expect(parts.length).toBeGreaterThanOrEqual(5)
       const command = parts.slice(4).join('|')
-      expect(command).toContain('AGENT_COM_RUNTIME=daemon')
+      // Cycle-4 rigor: the env assignment must be the shell *prefix* of
+      // the command, not just present somewhere. A mid-line match would
+      // silently accept regressions like `claude ... AGENT_COM_RUNTIME=daemon`
+      // (treating it as a stray argument, which does NOT propagate to the
+      // process env the way a prefix assignment does).
+      expect(command.trimStart()).toMatch(/^AGENT_COM_RUNTIME=daemon\s+/)
     }
   })
 
-  test('9. restart-bot.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon', () => {
+  test('9. restart-bot.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon as prefix', () => {
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
     const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
     expect(line).toBeDefined()
-    expect(line!).toContain('AGENT_COM_RUNTIME=daemon')
+    // Cycle-4 rigor: env assignment is the first token inside the quotes,
+    // not a substring elsewhere in the fallback command.
+    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
   })
 
-  test('10. watchdog.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon', () => {
+  test('10. watchdog.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon as prefix', () => {
     // Auditor cycle-3 CONDITIONAL: watchdog is the autonomous restart
     // path; its fallback DEFAULT_CMD is the last line of defense when a
     // registry row is malformed or missing. Must not revert to no-env.
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
     const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
     expect(line).toBeDefined()
-    expect(line!).toContain('AGENT_COM_RUNTIME=daemon')
+    // Cycle-4 rigor: position-pinned env prefix.
+    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
   })
 
-  test('11. server.ts DEFAULT_CLAUDE_CMD (restart_bot MCP tool fallback) carries AGENT_COM_RUNTIME=daemon', () => {
+  test('11. server.ts DEFAULT_CLAUDE_CMD (restart_bot MCP tool fallback) carries AGENT_COM_RUNTIME=daemon as prefix', () => {
     // Auditor cycle-3 CONDITIONAL: restart_bot MCP tool falls back to
     // DEFAULT_CLAUDE_CMD when a registry row parses with an empty
     // COMMAND field. That fallback must also carry the env.
-    expect(SERVER_SRC).toMatch(/const\s+DEFAULT_CLAUDE_CMD\s*=\s*'[^']*AGENT_COM_RUNTIME=daemon[^']*'/)
+    // Cycle-4 rigor: pin position — env assignment is the first token
+    // inside the string literal, not somewhere in the argument tail.
+    const line = SERVER_SRC
+      .split('\n')
+      .find(l => l.trimStart().startsWith('const DEFAULT_CLAUDE_CMD'))
+    expect(line).toBeDefined()
+    expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
   })
 })
