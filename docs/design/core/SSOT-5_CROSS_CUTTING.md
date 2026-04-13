@@ -57,18 +57,20 @@ interface Adapter {
 - 既存UIAdapter（adapters/types.ts）と統合
 - fetchHistoryはオプション（全プラットフォームが対応するとは限らない）
 
-### nonce/duplicate エラー契約 (Phase C Step 1 PR-A cycle 2)
+### nonce/duplicate エラー契約 (Phase C Step 1 PR-A cycle 2, 記述更新 cycle 3)
 
-`sendMessage` に nonce を渡して呼び出した際、プラットフォームが「同一 nonce は最近使用済み」と判定した場合の契約:
+outbound 経路の重複送信は **2 層の dedup** で防ぐ。いずれも consumer 内部の動作で、adapter 層は「nonce を platform に透過的に渡す」責務のみ。
 
-| プラットフォーム挙動 | アダプター責務 | 呼び出し側（consumer）責務 |
-|---|---|---|
-| 既存メッセージを返却（idempotent success） | `{ external_message_id }` をそのまま返す | そのまま mark sent、discord_message_id を永続化 |
-| エラー応答（Discord: code 40062） | 例外を throw（そのまま rethrow、アダプターで握りつぶさない） | エラーに `code === 40062` or 40062 文言一致を検出し、**idempotent success として mark sent する** (discord_message_id は不明のため NULL 可) |
+| Layer | 位置 | 契機 | 契約 |
+|---|---|---|---|
+| **1. Platform-level nonce** | Discord (adapter 経由) | `sendMessage({nonce})` 時 | adapter は `nonce` + platform 独自の dedup フラグ (Discord: `enforceNonce: true`) を platform へ forward。platform が ~5 分 window で重複を検出したら API 側で送信を拒否 |
+| **2. Duplicate-nonce idempotent 収束** | consumer (送信失敗時の分岐) | Layer 1 が `{code: 40062, "Cannot send a message using that nonce"}` (または同等文言) を返した時 | consumer はエラーを **idempotent success に再解釈** し `status='sent'` に flip。adapter は 40062 を throw する義務あり、握りつぶし不可 |
 
-この「error を success と再解釈する」規則は consumer に限定される。送信 API の失敗 = 常にエラー、という原則は他の全経路で維持する。
+nonce は `"out-<outbound_queue.id>"` (BIGSERIAL 由来、25 chars 以内、global unique)。別 bot collision は構造的に不可。
 
-nonce は outbound_queue.id (BIGSERIAL) を基に `"out-<id>"` 形式で生成し、25 chars 以内かつグローバル一意を保証する。別 bot との衝突は構造的に不可。
+「error を success と再解釈する」規則は consumer に限定。送信 API の失敗 = 常にエラー、という原則は他の全経路で維持する。
+
+**`discord_message_id` 観測性カラム**: consumer は送信成功時 `status='sent'` と同じ UPDATE で Discord snowflake を永続化する。これは dedup layer ではなく observability / post-hoc 照合用のカラム (dedup は上記 2 層で閉じる)。詳細は `agent-com-message-queue-spec.md §3.3` / §7.4。
 
 ---
 
