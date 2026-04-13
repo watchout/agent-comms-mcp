@@ -348,9 +348,9 @@ async function migrate() {
     -- by (1) Discord's per-channel nonce + enforceNonce flag and (2) the
     -- consumer's 40062 idempotent-collapse branch; this column is NOT the
     -- front-line dedup layer. Because the column is written in the same
-    -- UPDATE as `status='sent'`, the pending-filter claim cannot normally
+    -- UPDATE as 'status=sent', the pending-filter claim cannot normally
     -- see a row that already carries a non-null id, so the in-code
-    -- short-circuit on `row.discord_message_id` is a limited safeguard
+    -- short-circuit on 'row.discord_message_id' is a limited safeguard
     -- only — useful if a row is manually or tool-reset back to 'pending'
     -- after mark-sent. See docs/agent-com-message-queue-spec.md §3.3 / §7.4.
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS discord_message_id TEXT;
