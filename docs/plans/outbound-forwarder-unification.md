@@ -224,7 +224,8 @@ next_retry_at = now() + delay(attempts)
 - status を 'pending' に戻し、claim SQL の `next_retry_at <= now()` で再 claim 可
 - max_attempts=5 に対し: 1s, 2s, 4s, 8s, 16s (caps at 30s) + jitter
 - jitter は thundering herd 回避 (agent_id filter で単一 bot に限定されているため影響小だが、Option C への移行余地を残す)
-- transient 判定は `core/send-errors.ts` の既存分類 (network / rate-limit / discord-5xx) を継承
+- transient 判定は **本 consumer 内に inline で保持** (`core/send-errors.ts` は送信 tool 側の入力 validation helper であり Discord transport retry classifier の住所ではない)。判定分類: network error / Discord rate-limit (429) / Discord 5xx を transient、他を permanent。実装時に共通ヘルパ `isTransientDeliveryError()` を server.ts 内に新設
+- (v3→v4 修正、codex-auditor 2026-04-12 6 axes review (A) 指摘反映)
 
 ### 3.5 Orphan reclaim (`processing` stuck recovery)
 
@@ -438,7 +439,7 @@ canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
 - `server.ts` L270 (`getDiscordClient` fallback)
 - `server.ts` L720-739 (`registerAgent` → `startOutboundConsumer`)
 - `server.ts` L887-962 (`consumeOneOutboundRow` claim + send + update)
-- `core/send-errors.ts` (transient / permanent 分類、backoff の分岐元)
+- (~~`core/send-errors.ts`~~ は **参照しない**、v4 で修正。理由: 送信 tool validation helper であり transport retry classifier の住所ではない)
 
 ### SSOT / Spec
 - `docs/SSOT.md` §1.4 (7 invariants)
@@ -475,4 +476,5 @@ canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
 |---|---|---|
 | 2026-04-13 JST | v1 | 初版 |
 | 2026-04-13 JST | v2 | v1 差し戻し反映: SSOT §1 line 39 引用追加 / 推奨を Option A に変更 / exponential backoff + orphan reclaim 追記 / spec-enforcement test 定義 / regression fixture 拡張 (4 事例) / FEAT-005 参照 |
-| 2026-04-13 JST | **v3 (最終版)** (本版) | CEO 全件承認 (2026-04-12 23:07 UTC) を反映: §5.2.1 に canary 期間の新/旧経路 mutual exclusion を CTO 追加指摘に従い明文化 / §9 を "Resolved decisions" に転換し 5 件の確定結果を記録 / §9 Q5 + §2 Option C に「§14.5 スケール段階を再評価 trigger」を CEO 指示として明示 / ヘッダに CEO 承認日時記載 |
+| 2026-04-13 JST | v3 | CEO 全件承認 (2026-04-12 23:07 UTC) を反映: §5.2.1 に canary 期間の新/旧経路 mutual exclusion を CTO 追加指摘に従い明文化 / §9 を "Resolved decisions" に転換し 5 件の確定結果を記録 / §9 Q5 + §2 Option C に「§14.5 スケール段階を再評価 trigger」を CEO 指示として明示 / ヘッダに CEO 承認日時記載 |
+| 2026-04-13 JST | **v4** (本版) | codex-auditor 2026-04-12 23:26 UTC 6 axes review (A) 指摘反映: §3.4 transient 判定を `core/send-errors.ts` 継承から **本 consumer 内 inline 保持** (`isTransientDeliveryError()` 新設) に修正。§10 References から send-errors.ts を削除 (参照しない旨注記)。実装側 PR #164 との整合回復。本版では plan の他項目は無変更 (B1-B3 blocker は実装側修正で対応) |
