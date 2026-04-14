@@ -1,11 +1,28 @@
 # Outbound Forwarder Unification (S2-A / S3 相当)
 
-Status: **v5** (author: lead-ama, 2026-04-13 JST — startup SSOT 認識反転)
+Status: **Implemented** (PR #172 FEAT-005 adapter rewrite, merged 2026-04-14)
 Route: `route:ceo-approval` (architectural shift / 全 bot 挙動変更)
-Feature: **FEAT-005** (SSOT-1, status = Refactoring)
-CEO 承認: **2026-04-12 23:07 UTC = 2026-04-13 08:07 JST** (Open Q1-5 全件 CTO 推奨採用、CTO 追加指摘 §5.2 mutex 反映)
-Related merged: PR#139 / #140 / #142 / #156 / #157 / #160 / #161
-Related in-flight: PR #162 (ADF enforcement hooks)
+Feature: **FEAT-005** (SSOT-1, status = Implemented)
+CEO 承認: **2026-04-12 23:07 UTC = 2026-04-13 08:07 JST** (Open Q1-5 全件 CTO 推奨採用、CTO 追加指摘 §5.2 mutex 反映) + **2026-04-14** (retroactive dev-DB migration apply + 1-PR-2-concern waiver)
+Related merged: PR#139 / #140 / #142 / #156 / #157 / #160 / #161 / #168 / #172
+Related in-flight: —
+
+Implementation summary (PR #172):
+  - `adapters/discord-client.ts` — Discord.js client wrapper, shared-
+    fallback removed (getDiscordClient returns null + error log on
+    unknown botId).
+  - `adapters/outbound-consumer.ts` — consumer + PollingDriver + orphan
+    reclaim + force-release watchdog. Claim state renamed
+    `'processing'` → `'claimed'` (work-queue standard vocabulary).
+  - `adapters/inbound-receiver.ts` — handleInboundMessage +
+    startListener + sendHumanWarning. ON CONFLICT (agent_id,
+    message_id) DO NOTHING preserved.
+  - `entrypoints/daemon.ts` — sole caller of startOutboundConsumer.
+  - `scripts/{bot-registry.txt,restart-bot.sh,watchdog.sh}` +
+    `server.ts::DEFAULT_CLAUDE_CMD` — `--dangerously-load-development-
+    channels` flag removed from the 4 locations.
+  - CI retrofit: pr-checks.yml + detect-breaking-changes.sh + migrate
+    idempotency test + `import.meta.main` guard on db/migrate.ts.
 
 ---
 
