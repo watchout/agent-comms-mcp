@@ -31,14 +31,17 @@ describe('Webhook Channel push — handleInboundMessage + caller push', () => {
     expect(routeBody).not.toContain('updateLastReceivedContext')
   })
 
-  test('daemon shared client handles push after handleInboundMessage', () => {
+  // Phase 4 (Issue #130) removed `pushToChannelServer`. The two
+  // pins below reference that removed function, so they fail against
+  // post-Phase-4 server.ts. Skipped here so Layer 0 CI stays green.
+  test.skip('daemon shared client handles push after handleInboundMessage (obsolete)', () => {
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const section = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
     expect(section).toContain('if (result.delivered)')
     expect(section).toContain('pushToChannelServer(expectedBot,')
   })
 
-  test('pushToChannelServer skips when channel_port is NULL', () => {
+  test.skip('pushToChannelServer skips when channel_port is NULL (obsolete)', () => {
     expect(SERVER_SOURCE).toContain('no channel_port for')
   })
 })
