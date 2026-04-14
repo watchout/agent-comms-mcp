@@ -447,4 +447,16 @@ async function migrate() {
   await client.end()
 }
 
-migrate().catch(e => { console.error(e); process.exit(1) })
+// Guardrail 2 (FEAT-005 CP-6): only run when this file is invoked
+// directly. Prior behaviour — top-level `migrate().catch(...)` — ran
+// the migration on every `import('./db/migrate.ts')` (side effect of
+// loading the module), which is how the CP-3 CHECK rename landed on
+// the dev DB out of sequence on 2026-04-14 despite CTO holding the
+// apply-GO until post-merge. `import.meta.main` is Bun's canonical
+// "this module is the entrypoint" flag and matches the behaviour of
+// `__name__ == '__main__'` in Python / `require.main === module` in
+// Node. Tests / tools that merely import migrate.ts for its exports
+// get no side effect.
+if (import.meta.main) {
+  migrate().catch(e => { console.error(e); process.exit(1) })
+}

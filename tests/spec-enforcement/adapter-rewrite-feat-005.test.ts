@@ -246,4 +246,19 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     expect(down!).toMatch(/UPDATE\s+outbound_queue\s+SET\s+status\s*=\s*'processing'\s+WHERE\s+[^;]*?'claimed'/i)
     expect(down!).toMatch(/BEGIN;[\s\S]*COMMIT;/)
   })
+
+  test('11. db/migrate.ts only runs migrate() when invoked directly (guardrail 2)', () => {
+    // Guardrail 2 (CP-6): top-level migrate() invocation is wrapped in
+    // `if (import.meta.main)` so merely importing the module (tools,
+    // tests, editor IDE features) does NOT apply the migration. Prior
+    // unguarded top-level call caused the 2026-04-14 accidental DB
+    // apply during a backtick parse-check.
+    const src = readIfExists('db/migrate.ts')
+    expect(src).not.toBeNull()
+    expect(src!).toMatch(/if\s*\(\s*import\.meta\.main\s*\)\s*\{[\s\S]*?migrate\(\)/)
+    // There must be no unguarded top-level migrate() at module scope.
+    // Accept the call ONLY inside the import.meta.main block.
+    const unguarded = src!.match(/^migrate\(\)/m)
+    expect(unguarded).toBeNull()
+  })
 })
