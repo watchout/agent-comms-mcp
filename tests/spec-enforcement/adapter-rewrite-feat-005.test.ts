@@ -71,37 +71,49 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     expect(sql).toMatch(/next_retry_at\s+IS\s+NULL\s+OR\s+next_retry_at\s*<=\s*now\(\)/i)
   })
 
-  test('2. stdio entrypoint only starts the outbound consumer when AGENT_COM_RUNTIME=daemon (phasing)', () => {
+  test('2. stdio entrypoint only starts the outbound consumer after discordClients.set, gated on AGENT_COM_RUNTIME=daemon (phasing)', () => {
     // FEAT-005 original invariant: daemon owns outbound. stdio-mode
     // processes (MCP plugin) must never bootstrap consumeOneOutboundRow
     // ticks, or the 19-bot race returns. Enforced at both call-site
     // and runtime gate.
     //
-    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172):
-    // production launch path is `claude server:agent-comms` →
-    // server.ts (stdio MCP) with AGENT_COM_RUNTIME=daemon set in the
-    // shell. entrypoints/daemon.ts has no supervise wrapper yet, so
-    // server.ts is allowed to *also* call startOutboundConsumer when
-    // it observes the daemon flag — otherwise no process drains
-    // outbound_queue. The 19-bot race is still prevented because
-    // (a) only one process per agent_id ever runs and (b) the claim
-    // SQL filters by agent_id with FOR UPDATE SKIP LOCKED.
+    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172,
+    // auditor cycle 2 startup-order fix): production launch path is
+    // `claude server:agent-comms` → server.ts (stdio MCP) with
+    // AGENT_COM_RUNTIME=daemon set in the shell. entrypoints/daemon.ts
+    // has no supervise wrapper yet, so server.ts is allowed to *also*
+    // call startOutboundConsumer when it observes the daemon flag.
+    //
+    // Placement matters: the call must sit AFTER
+    // `discordClients.set(AGENT_ID, discord)` so the first tick can
+    // find a Discord client. Cycle 1 placed it inside registerAgent()
+    // and lost the race (discord.connect hadn't resolved yet), flipping
+    // every row to `status='failed',
+    // last_error='no_discord_client_for_agent'`. registerAgent() now
+    // holds NO startOutboundConsumer call.
     //
     // Future: when supervise base for entrypoints/daemon.ts ships,
     // remove the server.ts call and restore the strict daemon-only
-    // invariant. This test will tighten back to "no call inside
-    // registerAgent" at that time.
+    // invariant.
     const server = readIfExists('server.ts')
     expect(server).not.toBeNull()
-    // registerAgent-scoped slice: any startOutboundConsumer call MUST
-    // be gated on isDaemonRuntime() (no unconditional bootstrap).
+    // registerAgent holds no startOutboundConsumer call.
     const regIdx = server!.search(/async\s+function\s+registerAgent\s*\(/)
     expect(regIdx).toBeGreaterThan(-1)
-    const regSlice = server!.slice(regIdx, regIdx + 5000)
-    const matches = regSlice.match(/startOutboundConsumer\s*\(/g) ?? []
-    if (matches.length > 0) {
-      // Each call must sit inside an isDaemonRuntime() guard.
-      expect(regSlice).toMatch(
+    const regEnd = server!.indexOf('\nasync function ', regIdx + 1)
+    const regSlice = server!.slice(regIdx, regEnd === -1 ? undefined : regEnd)
+    expect(regSlice).not.toMatch(/\bstartOutboundConsumer\s*\(/)
+    // Any call in server.ts must appear AFTER
+    // `discordClients.set(AGENT_ID, discord)` in source order and sit
+    // inside an isDaemonRuntime() guard.
+    const calls = [...server!.matchAll(/startOutboundConsumer\s*\(/g)]
+    if (calls.length > 0) {
+      const setIdx = server!.indexOf('discordClients.set(AGENT_ID, discord)')
+      expect(setIdx).toBeGreaterThan(-1)
+      for (const m of calls) {
+        expect(m.index!).toBeGreaterThan(setIdx)
+      }
+      expect(server!).toMatch(
         /if\s*\(\s*isDaemonRuntime\(\)\s*\)\s*\{[^}]*startOutboundConsumer\s*\(/,
       )
     }

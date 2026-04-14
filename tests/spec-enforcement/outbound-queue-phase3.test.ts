@@ -133,26 +133,35 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     // longer boots the consumer; stdio / MCP-plugin processes stay
     // quiet, which is what stopped the 19-bot parallel-consumer race.
     //
-    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172):
-    // production launch path is `claude server:agent-comms` →
-    // server.ts (stdio MCP) with AGENT_COM_RUNTIME=daemon set in the
-    // shell. entrypoints/daemon.ts has no supervise wrapper yet, so
-    // server.ts is allowed to also call startOutboundConsumer when
-    // it observes the daemon flag. 1 process per agent_id only, so
-    // the 19-bot race is structurally impossible (claim SQL filters
-    // by agent_id with FOR UPDATE SKIP LOCKED). When the supervise
-    // wrapper for daemon.ts ships, the server.ts call is removed and
-    // this assertion tightens back to "no call inside registerAgent".
+    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172,
+    // auditor cycle 2 startup-order fix): production launch path is
+    // `claude server:agent-comms` → server.ts (stdio MCP) with
+    // AGENT_COM_RUNTIME=daemon set in the shell. entrypoints/daemon.ts
+    // has no supervise wrapper yet, so server.ts is allowed to call
+    // startOutboundConsumer ONLY after `discordClients.set(AGENT_ID,
+    // discord)` — placing it inside registerAgent() was tried in
+    // cycle 1 and lost the race (1s tick fired before discord.connect
+    // resolved, flipping every row to failed). registerAgent() again
+    // holds NO startOutboundConsumer call. When the supervise wrapper
+    // for daemon.ts ships, the server.ts call is removed and this
+    // assertion tightens back to daemon-only.
     const daemonEntry = readFileSync(join(REPO_ROOT, 'entrypoints', 'daemon.ts'), 'utf-8')
     expect(daemonEntry).toMatch(/startOutboundConsumer\(\)/)
-    // registerAgent: any startOutboundConsumer call MUST be gated on
-    // isDaemonRuntime() (no unconditional bootstrap allowed).
+    // registerAgent: no startOutboundConsumer call.
     const regStart = SERVER_SRC.indexOf('async function registerAgent')
     const regEnd = SERVER_SRC.indexOf('\nasync function ', regStart + 1)
     const regBody = SERVER_SRC.slice(regStart, regEnd === -1 ? undefined : regEnd)
-    const regCalls = regBody.match(/startOutboundConsumer\s*\(/g) ?? []
-    if (regCalls.length > 0) {
-      expect(regBody).toMatch(
+    expect(regBody).not.toMatch(/\bstartOutboundConsumer\s*\(/)
+    // Any server.ts call sits after discordClients.set(AGENT_ID, …)
+    // and inside an isDaemonRuntime() guard.
+    const calls = [...SERVER_SRC.matchAll(/startOutboundConsumer\s*\(/g)]
+    if (calls.length > 0) {
+      const setIdx = SERVER_SRC.indexOf('discordClients.set(AGENT_ID, discord)')
+      expect(setIdx).toBeGreaterThan(-1)
+      for (const m of calls) {
+        expect(m.index!).toBeGreaterThan(setIdx)
+      }
+      expect(SERVER_SRC).toMatch(
         /if\s*\(\s*isDaemonRuntime\(\)\s*\)\s*\{[^}]*startOutboundConsumer\s*\(/,
       )
     }

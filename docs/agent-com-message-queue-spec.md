@@ -37,7 +37,7 @@ pull-on-notify 採用、PollingDriver を polling 基盤とする）。
   - つまり daemon は inbound routing（`handleInboundMessage`）を呼ばないが、
     mention されない人間投稿への warning 機能だけは保持する。
   - daemon は PollingDriver と outbound_queue 消費を担当する (PR #172 FEAT-005: 具体的には `entrypoints/daemon.ts` が `startOutboundConsumer()` の唯一の呼出点、server.ts `registerAgent()` からは除去済)。
-  - **2026-04-14 phasing 注記 (CEO directive Task 1)**: 現行 production 起動経路は `claude server:agent-comms` → server.ts (stdio MCP) で、`AGENT_COM_RUNTIME=daemon` を shell 環境で立てるパターン。`entrypoints/daemon.ts` に supervise wrapper が無い間は、**server.ts も `isDaemonRuntime()` の条件下で `startOutboundConsumer()` を呼ぶ**ことを許容する（両経路から起動可）。1 agent_id あたり起動するプロセスは 1 本だけなので 19-bot race は構造的に発生しない。supervise 基盤完成時に server.ts 側を再剥離して daemon-only invariant を復元する。
+  - **2026-04-14 phasing 注記 (CEO directive Task 1, auditor cycle 2 startup-order fix)**: 現行 production 起動経路は `claude server:agent-comms` → server.ts (stdio MCP) で、`AGENT_COM_RUNTIME=daemon` を shell 環境で立てるパターン。`entrypoints/daemon.ts` に supervise wrapper が無い間は、**server.ts も `isDaemonRuntime()` の条件下で `startOutboundConsumer()` を呼ぶ**ことを許容する（両経路から起動可）。呼出位置は `discordClients.set(AGENT_ID, discord)` の直後（postConnect 内）に限定する — `registerAgent()` 末尾に置くと 1 秒 tick が `discord.connect()` resolve 前に発火し、`no_discord_client_for_agent` で全行 failed になる (cycle 1 で観測)。current production topology (claude CLI 1 agent = 1 process) では 19-bot race は想定しない。supervise 基盤完成時に server.ts 側を再剥離して daemon-only invariant を復元する。
 - daemon と stdio を同時に起動しても `handleInboundMessage` は 1 回だけ発火
   するため、`message_queue` への重複 INSERT は構造的に発生しない。
 
@@ -838,7 +838,7 @@ receiverClient.on("messageCreate", async (msg) => {
 
 > **S2-A (PR #164) + Phase C Step 1 PR-A (PR #168) + FEAT-005 adapter rewrite (PR #172) で挙動更新済**。以下の例示コードは初版方式（batch SELECT）。実装は atomic claim (UPDATE...FOR UPDATE SKIP LOCKED) + exponential backoff + nonce idempotency へ進化した。PR #172 で claim state を `'processing'` → `'claimed'` に rename (work-queue 標準語彙) + consumer / PollingDriver / inbound receiver を `adapters/*.ts` に抽出し、daemon entrypoint (`entrypoints/daemon.ts`) を consumer の唯一の起動点とした。例示コードの後ろに現行の挙動仕様を明記する。
 >
-> **2026-04-14 phasing 注記 (CEO directive Task 1, PR #172 post-merge hotfix)**: production 起動経路 (`claude server:agent-comms`) が `entrypoints/daemon.ts` を経由しないため、PR #172 直後に outbound_queue が drain されない不具合が発生 (pending 8 行滞留)。応急処置として server.ts `registerAgent()` でも `isDaemonRuntime()` 条件下で `startOutboundConsumer()` を呼ぶよう復活した。1 agent_id あたり 1 プロセスのみ起動するため 19-bot race は構造的に発生しない。entrypoints/daemon.ts に supervise wrapper が完成した時点で server.ts 側を再剥離する（daemon-only invariant 復元）。
+> **2026-04-14 phasing 注記 (CEO directive Task 1, PR #172 post-merge hotfix, auditor cycle 2 startup-order fix)**: production 起動経路 (`claude server:agent-comms`) が `entrypoints/daemon.ts` を経由しないため、PR #172 直後に outbound_queue が drain されない不具合が発生 (pending 8 行滞留)。応急処置として server.ts の `postConnect()` 内で `discordClients.set(AGENT_ID, discord)` の直後に `isDaemonRuntime()` 条件下で `startOutboundConsumer()` を呼ぶ。`registerAgent()` 末尾に置く実装 (cycle 1) は `discord.connect()` resolve 前に tick が発火し `no_discord_client_for_agent` で全行 failed になったため却下。current production topology (1 agent = 1 process) では 19-bot race は想定しない。entrypoints/daemon.ts に supervise wrapper が完成した時点で server.ts 側を再剥離する（daemon-only invariant 復元）。
 
 #### 現行の挙動仕様 (実装との SSOT)
 

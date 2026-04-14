@@ -9,6 +9,17 @@
  * caused the 2026-04-12 identity-misattribution incident and the
  * 2026-04-13 drain stall.
  *
+ * 2026-04-14 phasing note (CEO directive Task 1, post-PR-#172 hotfix):
+ * current production launch path is `claude server:agent-comms` →
+ * server.ts (stdio MCP) with AGENT_COM_RUNTIME=daemon set in the
+ * shell. This entrypoint is not yet wrapped by a supervise layer, so
+ * until that ships, server.ts ALSO bootstraps the consumer — gated on
+ * isDaemonRuntime() and placed after `discordClients.set(AGENT_ID,
+ * discord)` so the first tick can resolve a client. This entrypoint
+ * remains the canonical single call site; server.ts is the phasing
+ * revival path and will be removed when the supervise base lands,
+ * restoring the daemon-only invariant described above.
+ *
  * Responsibilities added on top of loading server.ts:
  *   1. Start the outbound consumer tick + orphan-reclaim tick
  *      exactly once. The consumer's own `isDaemonRuntime()` gate

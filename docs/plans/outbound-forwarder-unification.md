@@ -18,15 +18,20 @@ Implementation summary (PR #172):
     startListener + sendHumanWarning. ON CONFLICT (agent_id,
     message_id) DO NOTHING preserved.
   - `entrypoints/daemon.ts` — sole caller of startOutboundConsumer
-    (canonical). **2026-04-14 phasing revival (CEO directive Task 1)**:
-    server.ts `registerAgent()` も `isDaemonRuntime()` 条件下で同関数を
-    呼ぶ。理由: production 起動経路が `claude server:agent-comms` →
+    (canonical). **2026-04-14 phasing revival (CEO directive Task 1,
+    auditor cycle 2 startup-order fix)**: server.ts も `isDaemonRuntime()`
+    条件下で同関数を呼ぶ。呼出位置は `postConnect()` 内の
+    `discordClients.set(AGENT_ID, discord)` 直後に限定する。
+    `registerAgent()` 末尾に置く実装 (cycle 1) は `discord.connect()`
+    resolve 前に tick が発火し `no_discord_client_for_agent` で全行
+    failed になったため却下。
+    理由: production 起動経路が `claude server:agent-comms` →
     server.ts (stdio MCP, `AGENT_COM_RUNTIME=daemon` shell env) で、
     `entrypoints/daemon.ts` の supervise wrapper が未着手のため、
     PR #172 直後に outbound_queue が drain されない不具合 (pending 8
-    行滞留) が発生。1 agent_id あたり 1 プロセスのみ起動するため
-    19-bot race は構造的に発生しない。supervise 基盤完成時に
-    server.ts 側を再剥離して daemon-only invariant を復元する。
+    行滞留) が発生。current production topology (1 agent = 1 process)
+    では 19-bot race は想定しない。supervise 基盤完成時に server.ts
+    側を再剥離して daemon-only invariant を復元する。
   - `scripts/{bot-registry.txt,restart-bot.sh,watchdog.sh}` +
     `server.ts::DEFAULT_CLAUDE_CMD` — `--dangerously-load-development-
     channels` flag removed from the 4 locations.
