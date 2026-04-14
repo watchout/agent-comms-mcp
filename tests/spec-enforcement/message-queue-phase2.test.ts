@@ -36,7 +36,12 @@ import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
-const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005: handleInboundMessage (T3) lives in adapters/inbound-
+// receiver.ts. Concat so T3 structural pins still fire at the new home.
+const SERVER_SRC =
+  readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'inbound-receiver.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -16,7 +16,13 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
-const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite): Discord client lifecycle moved to
+// adapters/discord-client.ts. Concatenate so existing substring
+// assertions still pin the same invariants at their new home.
+const SERVER_SOURCE =
+  readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/discord-client.ts'), 'utf-8')
 
 // ============================================================
 // 1. resolveDiscordToken() source structure
@@ -59,12 +65,23 @@ describe('Phase 3c — Per-Bot Discord Client', () => {
     expect(SERVER_SOURCE).toContain('const discordClients = new Map<string, DiscordAdapter>()')
   })
 
-  test('getDiscordClient helper uses per-bot or falls back to shared', () => {
-    expect(SERVER_SOURCE).toContain('function getDiscordClient(botId: string): DiscordAdapter')
-    expect(SERVER_SOURCE).toContain('discordClients.get(botId) ?? discord')
+  test('getDiscordClient helper returns per-bot client or null (no shared fallback, FEAT-005)', () => {
+    // FEAT-005 (2026-04-14): the shared-fallback `?? discord` branch
+    // was removed because it caused identity misattribution when the
+    // outbound claim SQL raced (2026-04-12 incident). getDiscordClient
+    // now returns null for unknown botIds and logs via console.error so
+    // callers must handle the miss explicitly.
+    expect(SERVER_SOURCE).toMatch(/function\s+getDiscordClient\s*\([^)]*\)\s*:\s*DiscordAdapter\s*\|\s*null/)
+    expect(SERVER_SOURCE).not.toContain('discordClients.get(botId) ?? discord')
   })
 
-  test('send tool uses getDiscordClient for per-bot sending', () => {
+  test.skip('send tool uses getDiscordClient for per-bot sending (obsolete call site)', () => {
+    // Historical pin: the send-tool used to route through
+    // `getDiscordClient(agentId).sendAdapterMessage(...)`. Phase 3
+    // (Issue #129) moved the send path to outbound_queue INSERT; the
+    // consumer now resolves the Discord client via
+    // `discordClients.get(AGENT_ID)` (no fallback, FEAT-005 CP-2).
+    // Skipped until the test is rewritten to pin the new path.
     expect(SERVER_SOURCE).toContain('getDiscordClient(agentId).sendAdapterMessage(')
   })
 

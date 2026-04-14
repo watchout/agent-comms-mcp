@@ -25,6 +25,35 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { DiscordAdapter } from './adapters/discord'
+import {
+  discord,
+  discordClients,
+  refreshAgentCache,
+  resolveDiscordToken,
+  connectBotDiscord,
+  getDiscordClient,
+  setDbGetter as setDiscordClientDbGetter,
+} from './adapters/discord-client'
+import {
+  PollingDriver,
+  pollingDriver,
+  startOutboundConsumer,
+  stopOutboundConsumer,
+  isDaemonRuntime,
+  setDbGetter as setOutboundConsumerDbGetter,
+  type BufferedQueueRow,
+} from './adapters/outbound-consumer'
+import {
+  startListener,
+  stopListener,
+  startPolling,
+  stopPolling,
+  pollNewMessages,
+  handleInboundMessage,
+  sendHumanWarning,
+  setInboundReceiverDeps,
+  type InboundRouteResult,
+} from './adapters/inbound-receiver'
 import { signPayload } from './shared/hmac'
 // PR-A: pure routing functions extracted to core/ so the future receiver
 // (PR-B) and this server share a single implementation. Behavioural
@@ -44,11 +73,7 @@ import {
   buildReplyContextSuffix,
 } from './core/send-errors'
 import { isDuplicateNonceError } from './core/outbound-delivery'
-import {
-  refreshAgentCacheWith,
-  applyMentionsAutoFill,
-  type AgentCacheEntry,
-} from './core/agent-cache'
+import { applyMentionsAutoFill } from './core/agent-cache'
 import {
   getMessageById,
   isHumanAgent,
@@ -179,98 +204,12 @@ const RECEIVER_PIPELINE_BOTS = new Set<string>(
 const sseStartTime = Date.now()
 const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
-// --- Discord Adapter (Phase 5: integrated into server.ts) ---
-const discord = new DiscordAdapter()  // shared client (stdio/sse modes + daemon fallback)
-const discordClients = new Map<string, DiscordAdapter>()  // per-bot clients (daemon mode, Phase 3c)
+// --- Discord Adapter (Phase 5, FEAT-005: extracted to adapters/discord-client.ts) ---
+// `discord`, `discordClients`, refreshAgentCache, resolveDiscordToken,
+// connectBotDiscord, getDiscordClient are imported from
+// adapters/discord-client.ts. DB accessor is wired below once
+// tryGetDb() is defined.
 const STAGGERED_CONNECT_DELAY_MS = 5_000
-const DISCORD_BACKOFF_MAX_MS = 30_000
-
-// Issue #118 PR-B ①: agent_id cache (TTL 60s)
-let agentCacheEntry: AgentCacheEntry | null = null
-const AGENT_CACHE_TTL_MS = 60_000
-
-async function refreshAgentCache(): Promise<string[]> {
-  const db = await tryGetDb()
-  const queryFn = db
-    ? async () => {
-        const r = await db.query(
-          "SELECT agent_id FROM agents WHERE status != 'disabled' ORDER BY agent_id",
-        ).catch(() => ({ rows: [] as any[] }))
-        return r.rows.map((row: any) => row.agent_id as string)
-      }
-    : null
-  const { updated, ids } = await refreshAgentCacheWith(agentCacheEntry, AGENT_CACHE_TTL_MS, queryFn)
-  if (updated) agentCacheEntry = updated
-  return ids
-}
-
-/** Resolve Discord Bot Token for a specific bot (Phase 3c) */
-async function resolveDiscordToken(botId: string): Promise<{ token: string; source: 'per-bot' | 'fallback' } | null> {
-  // 1. Check per-bot env var: DISCORD_TOKEN_{AGENT_ID} (uppercase, hyphens → underscores)
-  const envKey = `DISCORD_TOKEN_${botId.toUpperCase().replace(/-/g, '_')}`
-  const perBotToken = process.env[envKey]
-  if (perBotToken) {
-    // Validate token via Discord REST API
-    try {
-      const res = await fetch('https://discord.com/api/v10/users/@me', {
-        headers: { Authorization: `Bot ${perBotToken}` },
-      })
-      if (res.ok) {
-        process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token valid (${envKey})\n`)
-        return { token: perBotToken, source: 'per-bot' }
-      }
-      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token invalid (${envKey}, status: ${res.status})\n`)
-    } catch (err) {
-      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — per-bot token check failed: ${err}\n`)
-    }
-  }
-
-  // 2. Fallback to shared DISCORD_BOT_TOKEN
-  if (DISCORD_BOT_TOKEN) {
-    process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — fallback to shared DISCORD_BOT_TOKEN\n`)
-    return { token: DISCORD_BOT_TOKEN, source: 'fallback' }
-  }
-
-  process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — no token available\n`)
-  return null
-}
-
-/** Connect a per-bot Discord client with exponential backoff */
-async function connectBotDiscord(botId: string, token: string): Promise<DiscordAdapter | null> {
-  let delay = 1000
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      const adapter = new DiscordAdapter()
-      // Inject DB query function
-      adapter.setDbQuery(async (sql: string, params?: any[]) => {
-        const client = await tryGetDb()
-        if (!client) throw new Error('DB unavailable')
-        return client.query(sql, params)
-      })
-      // ADR-040 D1: tell the adapter which agent it belongs to so the
-      // ready handler can self-register discord_id into the agents row.
-      adapter.setAgentId(botId)
-      // No stateDir → no access.json → gate() passes all messages through
-      // Filtering is handled by routeInbound() (daemon-only, Phase 3c)
-      await adapter.connect({ token })
-      process.stderr.write(`agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt}, no access.json — routeInbound filters)\n`)
-      return adapter
-    } catch (err) {
-      process.stderr.write(`agent-comms: per-bot Discord connect failed for ${botId} (attempt ${attempt}/${5}): ${err}\n`)
-      if (attempt < 5) {
-        await new Promise(r => setTimeout(r, delay))
-        delay = Math.min(delay * 2, DISCORD_BACKOFF_MAX_MS)
-      }
-    }
-  }
-  process.stderr.write(`agent-comms: ALERT — per-bot Discord connect failed for ${botId} after 5 attempts\n`)
-  return null
-}
-
-/** Get the Discord client for a specific bot (per-bot or shared fallback) */
-function getDiscordClient(botId: string): DiscordAdapter {
-  return discordClients.get(botId) ?? discord
-}
 
 const INBOX_SIGNAL_TTL_MS = 5 * 60 * 1000
 const GC_INTERVAL_MS = 5 * 60 * 1000
@@ -441,6 +380,16 @@ async function tryGetDb(): Promise<Client | null> {
     return null
   }
 }
+
+// FEAT-005: adapter modules need a DB accessor + the process AGENT_ID.
+// Injected here to avoid an import cycle with server.ts (which owns
+// the `pg` Client and loads config).
+setDiscordClientDbGetter(tryGetDb)
+setOutboundConsumerDbGetter(tryGetDb, AGENT_ID)
+// inbound-receiver wiring is deferred until later in the file where
+// its dependencies (saveMessage, validateIncomingAuth, buildQuoteBlock,
+// updateActiveThread, hashCode, mcp.notification, coreDbAdapter,
+// processedIds) are all defined. See `setInboundReceiverDeps()` below.
 
 // PR-A helper: build a `DbAdapter` for core/ helpers from the lazy `tryGetDb()`.
 // Returns null when the DB is unavailable, matching the existing fallback semantics.
@@ -735,9 +684,11 @@ async function registerAgent(): Promise<void> {
     }
   }, 5 * 60 * 1000)
 
-  // Issue #129 Phase 3: start the outbound_queue consumer alongside the
-  // heartbeat. Disable with OUTBOUND_QUEUE_CONSUMER=0 (tests / dev).
-  startOutboundConsumer()
+  // FEAT-005 CP-5: outbound consumer bootstrap moved out.
+  // Only entrypoints/daemon.ts starts the consumer — one process,
+  // one consumer loop, never 19 parallel (see docs/plans/
+  // outbound-forwarder-unification.md v5 §3.2). stdio / MCP-plugin
+  // processes registering an agent do not need to drain the queue.
 
   // v1.0.2 §6.5: start the PollingDriver so pending messages are pre-fetched
   // into a buffer. The MCP `next` tool returns from the buffer instantly
@@ -762,421 +713,7 @@ async function registerAgent(): Promise<void> {
 //   - pollingDriver.start(agentId) is called from registerAgent()
 //   - pollingDriver.stop() is called from unregisterAgent()
 
-const POLL_DRIVER_INTERVAL_MS = parseInt(process.env.AGENT_COM_POLL_INTERVAL_MS ?? '3000', 10)
-const POLL_DRIVER_HEARTBEAT_MS = 30_000
-
-interface BufferedQueueRow {
-  id: number | string
-  message_id: string | null
-  payload: string
-  priority: number
-  created_at: Date | string
-}
-
-class PollingDriver {
-  private pollTimer: ReturnType<typeof setInterval> | null = null
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  private buffer: BufferedQueueRow[] = []
-  private polling = false
-
-  start(agentId: string): void {
-    if (this.pollTimer) return // already running
-
-    // Heartbeat: 30s interval — update agents.last_seen_at
-    this.heartbeatTimer = setInterval(async () => {
-      const c = await tryGetDb()
-      if (c) {
-        // ARC codex audit (PR#139): spec requires disconnected→idle on heartbeat.
-        await c.query(
-          `UPDATE agents SET last_seen_at = now(),
-           status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-           WHERE agent_id = $1`,
-          [agentId],
-        ).catch(() => {})
-      }
-    }, POLL_DRIVER_HEARTBEAT_MS)
-
-    // S2-A (FEAT-005) B2: SSOT §1 line 39 places PollingDriver under the
-    // daemon runtime (alongside outbound_queue consumption). stdio MCP
-    // servers skip the poll timer — MCP `next` still works because
-    // PollingDriver.shift() returns null on empty buffer and the MCP tool
-    // falls back to a direct DB query. Heartbeat timer above stays on for
-    // all runtimes so agents.last_seen_at keeps updating regardless.
-    if (isDaemonRuntime()) {
-      this.pollTimer = setInterval(() => {
-        this.poll(agentId).catch(err => {
-          process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
-        })
-      }, POLL_DRIVER_INTERVAL_MS)
-      process.stderr.write(
-        `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
-      )
-    } else {
-      process.stderr.write(
-        `agent-comms: PollingDriver poll timer skipped (stdio runtime); heartbeat only\n`,
-      )
-    }
-  }
-
-  stop(): void {
-    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
-    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null }
-    this.buffer = []
-  }
-
-  /**
-   * Called by the MCP `next` tool. Returns from the pre-fetched buffer if
-   * available, otherwise returns null (caller falls back to direct DB query).
-   */
-  shift(): BufferedQueueRow | null {
-    return this.buffer.shift() ?? null
-  }
-
-  /** Number of buffered rows (for status reporting). */
-  get buffered(): number {
-    return this.buffer.length
-  }
-
-  private async poll(agentId: string): Promise<void> {
-    if (this.polling) return // re-entrancy guard
-    this.polling = true
-    try {
-      const client = await tryGetDb()
-      if (!client) return
-
-      // Fetch up to 10 pending rows (don't claim them yet — the `next`
-      // tool does the transactional claim when the LLM actually calls it).
-      // This is a read-only preview so the buffer can answer instantly.
-      const r = await client.query(
-        `SELECT id, message_id, payload, priority, created_at
-         FROM message_queue
-         WHERE status = 'pending' AND agent_id = $1
-         ORDER BY priority DESC, created_at ASC
-         LIMIT 10`,
-        [agentId],
-      )
-      // Replace buffer with fresh snapshot (stale entries from prior ticks
-      // that were already claimed by `next` are naturally excluded because
-      // their status flipped to 'read').
-      this.buffer = r.rows
-    } finally {
-      this.polling = false
-    }
-  }
-}
-
-const pollingDriver = new PollingDriver()
-
-// ─────────────────────────────────────────────────────────────────────────────
-// S2-A (FEAT-005) — outbound_queue consumer, daemon-owns-outbound
-// See: docs/agent-com-message-queue-spec.md §1 line 39
-//   「daemon は PollingDriver と outbound_queue 消費を担当する」
-// Plan: docs/plans/outbound-forwarder-unification.md
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Runtime gate: consumer only runs when AGENT_COM_RUNTIME='daemon' (set by
-// `agent-com daemon` CLI). stdio-mode MCP servers skip consumer boot so the
-// 19-bot stdio fleet no longer races on the same queue.
-//
-// Atomic claim (§3.3): UPDATE flips status='pending' → 'processing' and sets
-// claimed_at=now() in a single statement with FOR UPDATE SKIP LOCKED and
-// agent_id=$1 filter. A bot only ever touches its own rows; the status flip
-// removes the race window that left rows re-claimable at status='pending'.
-//
-// Exponential backoff (§3.4): transient delivery failures flip status back
-// to 'pending' with next_retry_at = now() + min(30s, 1s*2^(attempt-1)) + jitter.
-// max_attempts=5 exhausts to status='failed'.
-//
-// Orphan reclaim (§3.5): separate 60s tick returns 'processing' rows whose
-// claimed_at is older than OUTBOUND_ORPHAN_TIMEOUT_SEC (default 600) back to
-// 'pending' so a crashed consumer doesn't pin rows indefinitely.
-// Phase C Step 1 PR-A cycle 2 (S1): default raised from 300s → 600s so the
-// orphan reclaim window is strictly larger than Discord's ~5-minute
-// enforceNonce dedup window (300s) plus a 300s buffer. This guarantees that
-// a crashed consumer whose row is reclaimed and retried cannot race the
-// Discord dedup window from the other side.
-//
-// Fallback removed (§3.6): outbound send uses discordClients.get(row.agent_id)
-// directly; rows whose bot has no client are marked failed with
-// last_error='no_discord_client_for_agent' instead of silently posting from
-// the shared adapter (which caused identity misattribution in prod 2026-04-12).
-//
-// Disable with OUTBOUND_QUEUE_CONSUMER=0 (emergency kill, preserved from Phase 3).
-const OUTBOUND_POLL_INTERVAL_MS = 1000
-const OUTBOUND_ORPHAN_TICK_MS = 60_000
-const OUTBOUND_BACKOFF_MAX_MS = 30_000
-// Force-release the re-entrancy guard if a single tick runs longer than this.
-// The awaited work (Discord send, DB call) is not cancelled — JavaScript has
-// no cross-promise cancellation — but subsequent ticks are unblocked so a
-// hung network call does not wedge the whole consumer. Tunable via env for
-// tests. Observed incident 2026-04-13: CTO consumer wedged ~2h with 3 rows
-// stuck at `pending, attempts=0` because the guard was set to true and the
-// awaited work never completed nor threw.
-const OUTBOUND_TICK_TIMEOUT_MS = Math.max(
-  5_000,
-  parseInt(process.env.OUTBOUND_TICK_TIMEOUT_MS ?? '60000', 10) || 60_000,
-)
-let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
-let outboundOrphanInterval: ReturnType<typeof setInterval> | null = null
-let outboundConsumerInFlight = false
-
-function isDaemonRuntime(): boolean {
-  return process.env.AGENT_COM_RUNTIME === 'daemon'
-}
-
-function computeOutboundRetryDelayMs(attempt: number): number {
-  const base = Math.min(OUTBOUND_BACKOFF_MAX_MS, 1_000 * Math.pow(2, Math.max(0, attempt - 1)))
-  const jitter = Math.floor(Math.random() * 500)
-  return base + jitter
-}
-
-// Pragmatic transient classifier: network / timeout / 5xx / 429 are retryable;
-// everything else (4xx auth, validation, unknown channel) is permanent.
-// Plan §3.4 referenced core/send-errors.ts but that module covers send-tool
-// validation errors, not Discord REST delivery; classifier lives here.
-function isTransientDeliveryError(err: string): boolean {
-  return /timeout|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network|rate limit|\b429\b|\b5\d\d\b|HTTP 5/i.test(err)
-}
-
-async function consumeOneOutboundRow(): Promise<void> {
-  // Re-entrancy guard: if a previous tick is still running (slow Discord
-  // call, DB lock contention), skip this tick instead of stacking work.
-  if (outboundConsumerInFlight) return
-  outboundConsumerInFlight = true
-  // Force-release the guard after OUTBOUND_TICK_TIMEOUT_MS so that a hung
-  // awaited call cannot wedge the consumer forever. Concurrency is still
-  // bounded by the atomic `status='pending' → 'processing'` claim (§3.3),
-  // so briefly overlapping ticks are safe: each picks a different row.
-  const guardTimeout = setTimeout(() => {
-    outboundConsumerInFlight = false
-    process.stderr.write(
-      `agent-comms: outbound consumer tick exceeded ${OUTBOUND_TICK_TIMEOUT_MS}ms — force-released re-entrancy guard (hung tick still running; orphan reclaim will handle any stuck 'processing' row)\n`,
-    )
-  }, OUTBOUND_TICK_TIMEOUT_MS)
-  try {
-    const client = await tryGetDb()
-    if (!client) return
-
-    // §3.3 Atomic claim: flip status 'pending' → 'processing' + set claimed_at
-    // + filter by agent_id so each bot only consumes rows tagged to itself.
-    // FOR UPDATE SKIP LOCKED + single-statement UPDATE removes the race that
-    // allowed multiple consumers to observe the same 'pending' row between
-    // select and send (2026-04-12 duplicate-Discord-post incident).
-    const claimed = await client.query(
-      `UPDATE outbound_queue
-          SET status = 'processing', attempts = attempts + 1, claimed_at = now()
-        WHERE id = (
-          SELECT id FROM outbound_queue
-           WHERE status = 'pending'
-             AND agent_id = $1
-             AND (next_retry_at IS NULL OR next_retry_at <= now())
-           ORDER BY created_at ASC
-           LIMIT 1
-           FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id, message_id, channel_external_id, content,
-                  mentions_display, attachments, reply_to_discord_id,
-                  attempts, max_attempts, discord_message_id`,
-      [AGENT_ID],
-    ).catch(err => {
-      process.stderr.write(`agent-comms: outbound consumer claim failed: ${err}\n`)
-      return null
-    })
-    if (!claimed || claimed.rows.length === 0) return
-
-    const row = claimed.rows[0]
-
-    // Phase C Step 1 PR-A cycle 3/4 honesty note: `discord_message_id` is an
-    // observability column, NOT the front-line dedup layer. Effective dedup
-    // is (1) platform nonce + enforceNonce and (2) the 40062 idempotent
-    // collapse in the catch block below. Because we write `discord_message_id`
-    // in the SAME UPDATE as `status='sent'`, the pending-filter in the claim
-    // above cannot normally see a row that carries a non-null id — so this
-    // short-circuit is a limited safeguard for the edge case where a row is
-    // manually (or by a future migration / tool) moved back to 'pending'
-    // after mark-sent. In that narrow case we still avoid a duplicate post.
-    // See docs/agent-com-message-queue-spec.md §3.3 / §7.4.
-    if (row.discord_message_id) {
-      await client.query(
-        `UPDATE outbound_queue SET status = 'sent', sent_at = COALESCE(sent_at, now()) WHERE id = $1`,
-        [row.id],
-      ).catch(() => {})
-      process.stderr.write(`agent-comms: outbound row id=${row.id} short-circuited to sent (discord_message_id=${row.discord_message_id} already persisted)\n`)
-      return
-    }
-
-    // §3.6 Fallback removed: the row must be delivered by the bot whose
-    // token is loaded (discordClients.get(AGENT_ID)). No shared-client
-    // fallback — if the client is missing we fail the row explicitly so
-    // another consumer doesn't silently re-post under the wrong identity.
-    const clientForAgent = discordClients.get(AGENT_ID)
-    if (!clientForAgent) {
-      await client.query(
-        `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
-        ['no_discord_client_for_agent', row.id],
-      ).catch(() => {})
-      process.stderr.write(`agent-comms: outbound row id=${row.id} failed: no Discord client for agent ${AGENT_ID}\n`)
-      return
-    }
-
-    let deliveryError: string | null = null
-    let discordMessageId: string | null = null
-    let duplicateNonceIdempotent = false
-    try {
-      // Phase C Step 1 PR-A (B): nonce = "out-<row.id>" (<=25 chars for any
-      // realistic outbound_queue.id). `enforceNonce: true` asks Discord to
-      // dedupe messages posted to the same channel with the same nonce in
-      // the last ~5 minutes. outbound_queue.id is BIGSERIAL so nonces are
-      // globally unique across bots; same nonce across bots cannot collide.
-      const result = await clientForAgent.sendAdapterMessage({
-        external_channel_id: row.channel_external_id,
-        content: truncateForPlatform(row.content, 'discord'),
-        nonce: `out-${row.id}`,
-      })
-      discordMessageId = result.external_message_id ?? null
-    } catch (err) {
-      deliveryError = String(err).slice(0, 500)
-      // Phase C Step 1 PR-A cycle 2 — B1: duplicate-nonce idempotent branch.
-      // Discord returns code 40062 ("Cannot send a message using that nonce")
-      // when enforceNonce rejects a retry inside its dedup window. This is
-      // the exact condition the nonce was added to catch: our first attempt
-      // reached Discord, our HTTP response was lost, the retry must NOT
-      // create a second post and MUST NOT mark the row failed. Detect the
-      // code via the shared classifier and treat as idempotent success. We
-      // lose the Discord message_id (Discord does not return it for the
-      // rejected retry) so the row-level short-circuit on the *next* retry
-      // has nothing to key off — but at this point the row is flipped to
-      // 'sent' so there is no next retry.
-      if (isDuplicateNonceError(err, deliveryError)) {
-        duplicateNonceIdempotent = true
-        deliveryError = null
-        process.stderr.write(`agent-comms: outbound row id=${row.id} — Discord rejected duplicate nonce (code 40062), treating as idempotent success\n`)
-      }
-    }
-
-    if (deliveryError === null) {
-      // Phase C Step 1 PR-A (B): persist discord_message_id together with the
-      // status flip so a post-success crash before mark-sent is recoverable
-      // via the short-circuit above instead of causing a duplicate post.
-      // cycle 2: when the success came via the duplicate-nonce idempotent
-      // branch, discordMessageId is unknown; we still flip to 'sent' so the
-      // consumer never re-posts, accepting the observability trade-off of a
-      // NULL id for the rare lost-response case.
-      await client.query(
-        `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
-        [discordMessageId, row.id],
-      ).catch(err => {
-        process.stderr.write(`agent-comms: outbound consumer mark-sent failed for id=${row.id}: ${err}\n`)
-      })
-      void duplicateNonceIdempotent // retained for future observability / metrics
-      return
-    }
-
-    const transient = isTransientDeliveryError(deliveryError)
-    const exhausted = row.attempts >= row.max_attempts
-
-    if (!transient || exhausted) {
-      await client.query(
-        `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
-        [deliveryError, row.id],
-      ).catch(err => {
-        process.stderr.write(`agent-comms: outbound consumer mark-failed failed for id=${row.id}: ${err}\n`)
-      })
-      process.stderr.write(`agent-comms: outbound delivery permanently failed (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, transient=${transient}): ${deliveryError}\n`)
-      return
-    }
-
-    // §3.4 Exponential backoff: return row to 'pending' with next_retry_at.
-    const delayMs = computeOutboundRetryDelayMs(row.attempts)
-    await client.query(
-      `UPDATE outbound_queue
-          SET status = 'pending', last_error = $1,
-              next_retry_at = now() + ($2::int || ' ms')::interval,
-              claimed_at = NULL
-        WHERE id = $3`,
-      [deliveryError, delayMs, row.id],
-    ).catch(() => {})
-    process.stderr.write(`agent-comms: outbound transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, retry in ${delayMs}ms): ${deliveryError}\n`)
-  } finally {
-    clearTimeout(guardTimeout)
-    outboundConsumerInFlight = false
-  }
-}
-
-// §3.5 Orphan reclaim: rows stuck at 'processing' beyond
-// OUTBOUND_ORPHAN_TIMEOUT_SEC (default 600 — Discord nonce dedup 5 min +
-// 5 min buffer, per Phase C Step 1 PR-A cycle 2 S1) likely belong to a
-// crashed consumer. Return them to 'pending' with next_retry_at honoring
-// the regular backoff schedule so we don't immediately retry.
-async function reclaimOrphanOutboundRows(): Promise<void> {
-  const client = await tryGetDb()
-  if (!client) return
-  const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '600', 10) || 600)
-  try {
-    // Plan §3.5: reschedule with same backoff the transient-failure path
-    // uses so a crashed consumer's rows don't thundering-herd back and
-    // immediately re-race. Inline SQL mirrors computeOutboundRetryDelayMs():
-    //   delay = min(30s, 2^(attempts-1) s) + jitter(0..500ms).
-    const res = await client.query(
-      `UPDATE outbound_queue
-          SET status = 'pending',
-              last_error = 'orphan_reclaim',
-              claimed_at = NULL,
-              next_retry_at = now()
-                            + LEAST(
-                                interval '30 seconds',
-                                (power(2, greatest(attempts - 1, 0)))::int * interval '1 second'
-                              )
-                            + ((random() * 500)::int || ' milliseconds')::interval
-        WHERE status = 'processing'
-          AND agent_id = $1
-          AND claimed_at < now() - ($2::int || ' seconds')::interval
-        RETURNING id, attempts`,
-      [AGENT_ID, timeoutSec],
-    )
-    if (res.rowCount && res.rowCount > 0) {
-      process.stderr.write(`agent-comms: outbound orphan reclaim — ${res.rowCount} row(s) returned to pending (agent=${AGENT_ID}, timeout=${timeoutSec}s)\n`)
-    }
-  } catch (err) {
-    process.stderr.write(`agent-comms: outbound orphan reclaim failed: ${err}\n`)
-  }
-}
-
-function startOutboundConsumer(): void {
-  if (process.env.OUTBOUND_QUEUE_CONSUMER === '0') {
-    process.stderr.write('agent-comms: outbound queue consumer disabled via env\n')
-    return
-  }
-  // §3.2 Runtime gate: only the daemon runtime owns the outbound consumer.
-  // stdio MCP servers skip boot so the 19-bot fleet no longer races.
-  if (!isDaemonRuntime()) {
-    process.stderr.write('agent-comms: outbound consumer skipped (stdio runtime, AGENT_COM_RUNTIME!=daemon)\n')
-    return
-  }
-  if (outboundConsumerInterval !== null) return // already running
-  outboundConsumerInterval = setInterval(() => {
-    consumeOneOutboundRow().catch(err => {
-      process.stderr.write(`agent-comms: outbound consumer tick error: ${err}\n`)
-    })
-  }, OUTBOUND_POLL_INTERVAL_MS)
-  outboundOrphanInterval = setInterval(() => {
-    reclaimOrphanOutboundRows().catch(err => {
-      process.stderr.write(`agent-comms: outbound orphan tick error: ${err}\n`)
-    })
-  }, OUTBOUND_ORPHAN_TICK_MS)
-  process.stderr.write(`agent-comms: outbound queue consumer started (tick=${OUTBOUND_POLL_INTERVAL_MS}ms, orphan_tick=${OUTBOUND_ORPHAN_TICK_MS}ms)\n`)
-}
-
-function stopOutboundConsumer(): void {
-  if (outboundConsumerInterval !== null) {
-    clearInterval(outboundConsumerInterval)
-    outboundConsumerInterval = null
-  }
-  if (outboundOrphanInterval !== null) {
-    clearInterval(outboundOrphanInterval)
-    outboundOrphanInterval = null
-  }
-}
+// FEAT-005: PollingDriver + outbound consumer extracted to adapters/outbound-consumer.ts
 
 async function unregisterAgent(): Promise<void> {
   if (heartbeatInterval) clearInterval(heartbeatInterval)
@@ -1212,310 +749,8 @@ async function listAgents(status?: string, agentType?: string): Promise<any[]> {
   return r.rows
 }
 
-// --- Push Notification Polling (§4.4 Phase 3) ---
-const POLL_INTERVAL_MS = 3_000
-const POLL_BATCH_SIZE = 10
-let lastPolledAt = new Date().toISOString()
 const processedIds = new Map<string, number>()  // id -> timestamp
-const PROCESSED_ID_TTL_MS = 10 * 60_000  // 10 minutes (must outlive any re-fetch window)
-let pollInterval: ReturnType<typeof setInterval> | null = null
-
-async function pollNewMessages(): Promise<void> {
-  const client = await tryGetDb()
-  if (!client) return
-
-  // GC: remove expired processedIds entries
-  const now = Date.now()
-  for (const [id, ts] of processedIds) {
-    if (now - ts > PROCESSED_ID_TTL_MS) processedIds.delete(id)
-  }
-
-  try {
-    // Use >= to catch messages at the same timestamp (dedup via processedIds).
-    // Previously used > with JS Date (ms precision), which truncated PG's µs
-    // timestamps, causing the same message to re-match after processedIds expired.
-    const r = await client.query(
-      `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
-       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at >= $2
-       ORDER BY created_at ASC LIMIT $3`,
-      [AGENT_ID, lastPolledAt, POLL_BATCH_SIZE]
-    )
-
-    for (const msg of r.rows) {
-      if (processedIds.has(msg.id)) continue
-      processedIds.set(msg.id, Date.now())
-
-      // Auth validation
-      const authResult = validateIncomingAuth(
-        msg.metadata, msg.author_id, msg.channel_id, msg.content
-      )
-      if (!authResult.valid) {
-        process.stderr.write(`agent-comms: push rejected (auth ${config.auth.mode}): ${msg.id} from ${msg.author_id}\n`)
-        continue
-      }
-
-      // Build quote block if reply_to is present (§3.10)
-      let pollQuotePrefix = ''
-      if (msg.reply_to) {
-        const quoteData = await buildQuoteBlock(msg.reply_to)
-        if (quoteData) pollQuotePrefix = quoteData.quote
-      }
-
-      const tag = authResult.tag ? ` ${authResult.tag}` : ''
-      const contentText = `${pollQuotePrefix}[${msg.message_type ?? 'chat'}] ${msg.author_id} → #${msg.channel_id}:${tag} ${msg.content}`
-
-      mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: contentText,
-          meta: {
-            chat_id: msg.channel_id,
-            message_id: msg.id,
-            user: msg.author_id,
-            user_id: msg.author_id,
-            ts: new Date(msg.created_at).toISOString(),
-            source: 'agent-comms',
-          },
-        },
-      }).catch(err => {
-        process.stderr.write(`agent-comms: push notification failed: ${err}\n`)
-      })
-
-      // Advance cursor past this message to prevent re-fetch after processedIds TTL expires.
-      // Without +1ms, the `>= $2` query re-matches the same timestamp once processedIds
-      // expires (10min), causing infinite re-delivery.
-      const rawTs = msg.created_at instanceof Date
-        ? msg.created_at.toISOString()
-        : String(msg.created_at)
-      const d = new Date(rawTs)
-      d.setTime(d.getTime() + 1)  // +1ms (JS minimum precision)
-      lastPolledAt = d.toISOString()
-    }
-  } catch (err) {
-    process.stderr.write(`agent-comms: poll error (will retry): ${err}\n`)
-  }
-}
-
-function startPolling(): void {
-  pollInterval = setInterval(pollNewMessages, POLL_INTERVAL_MS)
-  process.stderr.write(`agent-comms: push polling started (${POLL_INTERVAL_MS}ms interval)\n`)
-}
-
-function stopPolling(): void {
-  if (pollInterval) {
-    clearInterval(pollInterval)
-    pollInterval = null
-  }
-}
-
-// --- pg_notify LISTEN (Phase 5: integrated listener) ---
-let listenClient: Client | null = null
-let listenReconnectAttempts = 0
-let listenReconnecting = false
-let listenKeepaliveTimer: ReturnType<typeof setInterval> | null = null
-const LISTEN_MAX_RECONNECT_DELAY_MS = 30_000
-const LISTEN_KEEPALIVE_INTERVAL_MS = 60_000
-
-async function startListener(): Promise<void> {
-  if (!config.database_url) return
-
-  try {
-    const client = new Client({ connectionString: config.database_url })
-
-    client.on('error', (err) => {
-      process.stderr.write(`agent-comms: listener DB error: ${err.message}\n`)
-      scheduleListenerReconnect()
-    })
-
-    client.on('end', () => {
-      // Only reconnect if this is still the active client (not a stale one being cleaned up)
-      if (client === listenClient) {
-        process.stderr.write('agent-comms: listener DB connection closed\n')
-        scheduleListenerReconnect()
-      }
-    })
-
-    await client.connect()
-    listenClient = client
-    listenReconnectAttempts = 0
-    listenReconnecting = false
-
-    await client.query('LISTEN agent_inbox')
-    process.stderr.write('agent-comms: pg_notify LISTEN started\n')
-
-    // Keepalive: periodic lightweight query to detect stale connections
-    stopKeepalive()
-    listenKeepaliveTimer = setInterval(async () => {
-      if (!listenClient || listenClient !== client) {
-        stopKeepalive()
-        return
-      }
-      try {
-        await client.query('SELECT 1')
-      } catch (err) {
-        process.stderr.write(`agent-comms: listener keepalive failed: ${err}\n`)
-        scheduleListenerReconnect()
-      }
-    }, LISTEN_KEEPALIVE_INTERVAL_MS)
-
-    client.on('notification', async (msg) => {
-      if (msg.channel !== 'agent_inbox' || !msg.payload) return
-
-      try {
-        const payload = JSON.parse(msg.payload) as { to: string; message_id: string }
-        // Only process if this message is for us
-        if (payload.to !== AGENT_ID) return
-
-        // Dedup via processedIds
-        if (processedIds.has(payload.message_id)) return
-
-        // Fetch and deliver the message
-        const dbClient = await tryGetDb()
-        if (!dbClient) return
-
-        const r = await dbClient.query(
-          `SELECT id, channel_id, author_id, content, message_type, metadata, depth, created_at
-           FROM agent_messages WHERE id = $1`,
-          [payload.message_id]
-        )
-
-        if (r.rows.length === 0) return
-        const row = r.rows[0]
-
-        processedIds.set(row.id, Date.now())
-
-        // Auth validation
-        const authResult = validateIncomingAuth(
-          row.metadata, row.author_id, row.channel_id, row.content
-        )
-        if (!authResult.valid) {
-          process.stderr.write(`agent-comms: listener rejected (auth ${config.auth.mode}): ${row.id} from ${row.author_id}\n`)
-          return
-        }
-
-        // §5.1: Use pure routeInbound() for delivery filter (unified with all push paths)
-        const coreDb = await coreDbAdapter()
-        const agentInfo = await loadAgentInfo(coreDb, AGENT_ID)
-        if (!agentInfo) {
-          process.stderr.write(`agent-comms: listener — agent ${AGENT_ID} not found, skipping\n`)
-          return
-        }
-        const senderAgentId = await resolveAgentFromDiscordId(coreDb, row.author_id) ?? row.author_id
-        const senderIsBot = !(await isHumanAgent(coreDb, senderAgentId))
-        const resolvedMentions = (row.metadata as any)?.mentions ?? parseMentions(row.content)
-        const channelInfo = await resolveInboundChannel(coreDb, row.channel_id)
-        const routeResult = routeInbound(
-          { authorAgentId: senderAgentId, authorIsBot: senderIsBot, content: row.content, mentions: resolvedMentions, messageType: row.message_type ?? 'chat' },
-          { channelId: channelInfo?.channelId ?? row.channel_id, threadId: channelInfo?.threadId, members: channelInfo?.members ?? [], type: channelInfo?.type },
-          [agentInfo],
-        )
-        if (!routeResult.pushTargets.includes(AGENT_ID)) {
-          process.stderr.write(`agent-comms: listener filtered — ${AGENT_ID} ${routeResult.dropTargets[AGENT_ID] ?? 'no_target'}: ${row.id}\n`)
-          return // DB saved but not pushed
-        }
-
-        // v0.1.0: auto-focus on instruction receipt
-        if (row.message_type === 'instruction' && row.thread_id) {
-          await updateActiveThread(AGENT_ID, row.thread_id)
-          process.stderr.write(`[agent-com] INFO: auto-focused on thread:${row.thread_id} (instruction received)\n`)
-        }
-
-        // Build quote block if reply_to is present (§3.10)
-        let quotePrefix = ''
-        if (row.reply_to) {
-          const quoteData = await buildQuoteBlock(row.reply_to)
-          if (quoteData) quotePrefix = quoteData.quote
-        }
-
-        const tag = authResult.tag ? ` ${authResult.tag}` : ''
-        const contentText = `${quotePrefix}[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
-
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content: contentText,
-            meta: {
-              chat_id: row.channel_id,
-              message_id: row.id,
-              user: row.author_id,
-              user_id: row.author_id,
-              ts: new Date(row.created_at).toISOString(),
-              source: 'agent-comms',
-            },
-          },
-        }).then(async () => {
-          // pg_notify: message.delivered
-          const dbClient = await tryGetDb()
-          if (dbClient) {
-            await dbClient.query(
-              `SELECT pg_notify('agent_inbox', $1)`,
-              [JSON.stringify({ event: 'message.delivered', to: AGENT_ID, message_id: row.id, agent_id: AGENT_ID })]
-            ).catch(() => {})
-          }
-        }).catch(async (err) => {
-          process.stderr.write(`agent-comms: listener notification failed: ${err}\n`)
-          // pg_notify: message.failed
-          const dbClient = await tryGetDb()
-          if (dbClient) {
-            await dbClient.query(
-              `SELECT pg_notify('agent_inbox', $1)`,
-              [JSON.stringify({ event: 'message.failed', to: AGENT_ID, message_id: row.id, error: String(err) })]
-            ).catch(() => {})
-          }
-        })
-      } catch (err) {
-        process.stderr.write(`agent-comms: listener notification error: ${err}\n`)
-      }
-    })
-  } catch (err) {
-    process.stderr.write(`agent-comms: listener start failed: ${err}\n`)
-    scheduleListenerReconnect()
-  }
-}
-
-function stopKeepalive(): void {
-  if (listenKeepaliveTimer) {
-    clearInterval(listenKeepaliveTimer)
-    listenKeepaliveTimer = null
-  }
-}
-
-function scheduleListenerReconnect(): void {
-  // Guard: prevent duplicate reconnection attempts from error+end firing together
-  if (listenReconnecting) return
-  listenReconnecting = true
-
-  stopKeepalive()
-
-  const delay = Math.min(1000 * Math.pow(2, listenReconnectAttempts), LISTEN_MAX_RECONNECT_DELAY_MS)
-  listenReconnectAttempts++
-  process.stderr.write(`agent-comms: listener reconnecting in ${delay}ms (attempt ${listenReconnectAttempts})\n`)
-  setTimeout(async () => {
-    try {
-      // Detach old client before end() to prevent 'end' event from re-triggering reconnect
-      const oldClient = listenClient
-      listenClient = null
-      if (oldClient) {
-        await oldClient.end().catch(() => {})
-      }
-      await startListener()
-    } catch (err) {
-      process.stderr.write(`agent-comms: listener reconnect failed: ${err}\n`)
-      listenReconnecting = false
-      scheduleListenerReconnect()
-    }
-  }, delay)
-}
-
-function stopListener(): void {
-  stopKeepalive()
-  listenReconnecting = true // prevent reconnect on intentional stop
-  const oldClient = listenClient
-  listenClient = null
-  if (oldClient) {
-    oldClient.end().catch(() => {})
-  }
-}
+// FEAT-005: polling + pg_notify listener extracted to adapters/inbound-receiver.ts
 
 // ============================================================
 // Core Router (v0.1.0 — SSOT-3/5 compliant)
@@ -1679,238 +914,7 @@ async function buildQuoteBlock(messageId: string): Promise<{ quote: string; auth
 // resolveDeliveryTargets() was deleted earlier — all push paths now go
 // through the single pure routeInbound() in core/route-message.ts.
 
-// ============================================================
-// handleInboundMessage — Full flow wrapper (DB + pure route + push)
-// ============================================================
-
-interface InboundRouteResult {
-  delivered: boolean
-  messageId?: string
-  reason?: string  // 'NOT_A_MEMBER' | 'CHANNEL_UNKNOWN' | 'NOT_MENTIONED'
-  pushMeta?: Record<string, unknown>  // meta for push (only when delivered=true)
-  humanWarning?: boolean  // true when sender is human and no mentions (§2.2 Pattern A)
-}
-
-/**
- * Full inbound message handler — wraps pure routeInbound with I/O.
- * Called per-receiver in stdio mode, per-bot in daemon mode.
- */
-async function handleInboundMessage(params: {
-  receiverAgentId: string
-  externalChannelId: string
-  externalMessageId: string
-  authorExternalId: string
-  authorName: string
-  authorIsBot: boolean
-  content: string
-  attachments?: string
-  timestamp: Date
-  platform: string
-  mentions?: string[]  // resolved agent_ids mentioned in content
-  replyToMessageId?: string
-}): Promise<InboundRouteResult> {
-  const {
-    receiverAgentId, externalChannelId, externalMessageId,
-    authorExternalId, authorName, authorIsBot,
-    content, attachments, timestamp, platform, mentions,
-  } = params
-
-  // Step 1: Resolve channel → core channel_id + members
-  const coreDb = await coreDbAdapter()
-  const resolved = await resolveInboundChannel(coreDb, externalChannelId)
-
-  // Step 2: DB save (always, regardless of delivery) — non-fatal
-  // NOTE: 'to' is NOT set here. It is set ONLY after routeInbound confirms delivery.
-  // This prevents pollNewMessages() from bypassing the mentions filter (§5.1).
-  const messageId = await saveMessage({
-    channel_id: resolved?.channelId ?? externalChannelId,
-    author_id: authorExternalId,
-    content,
-    message_type: 'chat',
-    source: platform,
-    thread_id: resolved?.threadId ?? null,
-    direction: 'inbound',
-    role: authorIsBot ? 'agent' : 'user',
-    metadata: {
-      [`${platform}_message_id`]: externalMessageId,
-      [`${platform}_channel_id`]: externalChannelId,
-      author_name: authorName,
-      mentions: mentions ?? [],
-      ...(attachments ? { attachments } : {}),
-    },
-  }).catch(err => {
-    process.stderr.write(`agent-comms: inbound DB persist failed (non-fatal): ${err}\n`)
-    return undefined
-  })
-
-  // Step 3: Channel not registered → drop
-  if (!resolved) {
-    process.stderr.write(`agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`)
-    return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
-  }
-
-  // Step 4: Load agent info for receiver
-  const agentInfo = await loadAgentInfo(coreDb, receiverAgentId)
-  if (!agentInfo) {
-    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} not found in agents table\n`)
-    return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
-  }
-
-  // Step 5: Resolve sender agent_id
-  const senderAgentId = await resolveAgentFromDiscordId(coreDb, authorExternalId)
-
-  // Step 6: Pure routing decision (§5.1)
-  const resolvedMentions = mentions ?? []
-  const result = routeInbound(
-    { authorAgentId: senderAgentId, authorIsBot, content, mentions: resolvedMentions, messageType: 'chat' },
-    { channelId: resolved.channelId, threadId: resolved.threadId, members: resolved.members, type: resolved.type },
-    [agentInfo],
-  )
-
-  process.stderr.write(`agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`)
-
-  const isDelivered = result.pushTargets.includes(receiverAgentId)
-
-  if (!isDelivered) {
-    const reason = result.dropTargets[receiverAgentId] ?? 'NOT_MENTIONED'
-    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} ${reason}\n`)
-    return {
-      delivered: false,
-      messageId,
-      reason,
-      humanWarning: result.senderIsHuman && result.noMentions && !params.replyToMessageId,
-    }
-  }
-
-
-  // Step 7b: Set metadata.to ONLY for delivered messages (prevents poll bypass of mentions filter)
-  if (messageId) {
-    const client = await tryGetDb()
-    if (client) {
-      await client.query(
-        `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $1) WHERE id = $2`,
-        [receiverAgentId, messageId]
-      ).catch(() => {})
-    }
-  }
-
-  // Step 7c: PR-B.2 mixed-mode receiver pipeline fanout (additive).
-  // For bots in RECEIVER_PIPELINE_BOTS, ALSO fire pg_notify('agent_inbox', ...) so
-  // future LISTEN-based subscribers receive the message via the new path. The
-  // Phase 4: pushToChannelServer was removed; this pg_notify remains as an
-  // additional signal for any future LISTEN-based consumers.
-  if (messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
-    const client = await tryGetDb()
-    if (client) {
-      await client.query(
-        `SELECT pg_notify('agent_inbox', $1)`,
-        [JSON.stringify({
-          event: 'message.created',
-          to: receiverAgentId,
-          message_id: messageId,
-          channel_id: resolved.channelId,
-          source: 'receiver-pipeline',
-        })]
-      ).catch(err => {
-        process.stderr.write(`agent-comms: receiver pipeline pg_notify failed for ${receiverAgentId} (non-fatal): ${err}\n`)
-      })
-    }
-  }
-
-  // Step 7d: Issue #128 Phase 2 — INSERT into message_queue for the receiver.
-  // Symmetric with the send-tool pushTargets loop. The payload mirrors the
-  // shape used by the send path so both paths produce one canonical schema for
-  // the send path so `agent-com next` returns one canonical schema.
-  if (messageId) {
-    const client = await tryGetDb()
-    if (client) {
-      const mqPayload = JSON.stringify({
-        channel_id: resolved.channelId,
-        thread_id: resolved.threadId ?? null,
-        author_id: senderAgentId ?? authorExternalId,
-        author_name: authorName,
-        content,
-        message_id: messageId,
-        message_type: 'chat',
-        source: platform,
-        ts: timestamp.toISOString(),
-        ...(attachments ? { attachments } : {}),
-      })
-      const mqIns = await client.query(
-        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-        [receiverAgentId, messageId, mqPayload],
-      ).catch(err => {
-        process.stderr.write(`agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`)
-        return null
-      })
-      // Codex audit (PR#140): observability — log when ON CONFLICT DO NOTHING
-      // suppressed a row so duplicate enqueue attempts are visible in stderr.
-      if (mqIns && mqIns.rowCount === 0) {
-        process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`)
-      }
-    }
-  }
-
-  // Step 8: Build push metadata
-  const pushMeta = {
-    chat_id: externalChannelId,
-    message_id: externalMessageId,
-    user: authorName,
-    user_id: authorExternalId,
-    ts: timestamp.toISOString(),
-    source: platform,
-    ...(attachments ? { attachments } : {}),
-  }
-
-  return { delivered: true, messageId, pushMeta }
-}
-
-// PR-A: loadAgentInfo moved to core/route-message-db.ts.
-
-// ============================================================
-// §2.2 Pattern A: Human warning (no mentions)
-// ============================================================
-
-const humanWarningsSent = new Map<string, number>()  // msgId → timestamp (in-process dedup)
-
-/**
- * Send a warning to a human who posted without mentions.
- * Uses pg_try_advisory_lock for cross-process dedup in stdio mode.
- */
-async function sendHumanWarning(adapter: DiscordAdapter, channelId: string, discordMessageId: string): Promise<void> {
-  // In-process dedup
-  if (humanWarningsSent.has(discordMessageId)) return
-  humanWarningsSent.set(discordMessageId, Date.now())
-  setTimeout(() => humanWarningsSent.delete(discordMessageId), 60_000)
-
-  // Cross-process dedup via pg_try_advisory_lock
-  const client = await tryGetDb()
-  if (client) {
-    // Use a hash of the message ID as the lock key
-    const lockKey = Math.abs(hashCode(discordMessageId)) % 2147483647  // int4 range
-    const lockResult = await client.query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey])
-    if (!lockResult.rows[0]?.acquired) {
-      process.stderr.write(`agent-comms: human warning skipped (another bot sending) — msg ${discordMessageId}\n`)
-      return
-    }
-    // Release lock after a short delay (let other bots see it's taken)
-    setTimeout(async () => {
-      try { await client.query('SELECT pg_advisory_unlock($1)', [lockKey]) } catch {}
-    }, 5_000)
-  }
-
-  const warningText =
-    '⚠️ メンションがないためbotには通知されていません。\n' +
-    '特定のbotに通知: @cto @arc 等を付けてください。\n' +
-    '全員に通知: @all を使ってください。'
-
-  try {
-    await adapter.sendMessage(channelId, warningText, { replyTo: discordMessageId })
-    process.stderr.write(`agent-comms: human warning sent — msg ${discordMessageId}\n`)
-  } catch (err) {
-    process.stderr.write(`agent-comms: human warning send failed: ${err}\n`)
-  }
-}
+// FEAT-005: handleInboundMessage + sendHumanWarning extracted to adapters/inbound-receiver.ts
 
 /** Simple string hash for advisory lock keys */
 function hashCode(str: string): number {
@@ -2137,6 +1141,28 @@ function createMcpServer(): Server {
 }
 
 const mcp = createMcpServer()
+
+// FEAT-005: wire inbound-receiver deps at module scope. All helpers
+// the receiver needs (saveMessage / validateIncomingAuth /
+// buildQuoteBlock / updateActiveThread / hashCode / coreDbAdapter /
+// processedIds / mcp) are defined above; both the stdio and daemon
+// transport branches below rely on these being wired before any
+// startListener() / handleInboundMessage() call.
+setInboundReceiverDeps({
+  agentId: AGENT_ID,
+  authMode: config.auth.mode,
+  databaseUrl: config.database_url,
+  receiverPipelineBots: RECEIVER_PIPELINE_BOTS,
+  processedIds,
+  tryGetDb,
+  coreDbAdapter,
+  saveMessage,
+  mcpNotification: (m) => mcp.notification(m as any),
+  validateIncomingAuth,
+  buildQuoteBlock,
+  updateActiveThread,
+  hashCode,
+})
 
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---
 function registerTools(server: Server, agentId: string) {
@@ -3089,7 +2115,7 @@ interface BotEntry {
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
-const DEFAULT_CLAUDE_CMD = 'AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_CLAUDE_CMD = 'AGENT_COM_RUNTIME=daemon claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
 
 function loadBotRegistry(): BotEntry[] {
   try {

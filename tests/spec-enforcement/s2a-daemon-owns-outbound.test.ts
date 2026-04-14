@@ -19,7 +19,22 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
-const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 CP-2/CP-3 (adapter rewrite 2026-04-14): the outbound
+// consumer, PollingDriver, and per-bot Discord lookup moved out of
+// server.ts into adapters/outbound-consumer.ts + adapters/discord-
+// client.ts. Tests #1-#7, #12, #13 now pin the invariants at their
+// new home; tests #8-#11 still target the shell scripts + server.ts
+// fallback command. Concat the three source files so a single
+// SERVER_SRC fires every substring pin regardless of location.
+//
+// bot-registry.txt + restart-bot.sh + watchdog.sh are read
+// separately inside tests #8-#10 (not concatenated here).
+const SERVER_SRC =
+  readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'outbound-consumer.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
 
 /**
  * Slice a top-level `(async) function name(...)` body up to (but not
@@ -28,11 +43,13 @@ const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
  * regressions elsewhere in the file.
  */
 function sliceFn(src: string, name: string): string {
-  const startRegex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`, 'g')
+  // CP-3: relaxed to match an optional leading `export` because the
+  // extracted adapters/*.ts modules export their top-level functions.
+  const startRegex = new RegExp(`(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\(`, 'g')
   const m = startRegex.exec(src)
   if (!m) throw new Error(`sliceFn: ${name} not found`)
   const start = m.index
-  const endRegex = /\n(?:async\s+)?function\s+\w+\s*\(/g
+  const endRegex = /\n(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(/g
   endRegex.lastIndex = start + m[0].length
   const next = endRegex.exec(src)
   return src.slice(start, next ? next.index : src.length)
@@ -45,15 +62,17 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(fn).toMatch(/if\s*\(\s*!\s*isDaemonRuntime\(\)\s*\)/)
   })
 
-  test('2. consumeOneOutboundRow claim SQL atomically flips to processing + filters agent_id', () => {
+  test('2. consumeOneOutboundRow claim SQL atomically flips to claimed + filters agent_id', () => {
     // Scope assertions to consumeOneOutboundRow so a future unrelated
-    // UPDATE outbound_queue elsewhere in server.ts cannot accidentally
-    // satisfy this test (S3 auditor fix).
+    // UPDATE outbound_queue elsewhere cannot accidentally satisfy
+    // this test (S3 auditor fix).
+    // CP-3 (2026-04-14): vocabulary 'processing' → 'claimed'. Same
+    // atomic-flip invariant, renamed to match the claim SQL verb.
     const fn = sliceFn(SERVER_SRC, 'consumeOneOutboundRow')
     const m = fn.match(/UPDATE\s+outbound_queue[\s\S]{0,2000}?RETURNING/)
     expect(m).not.toBeNull()
     const sql = m![0]
-    expect(sql).toMatch(/SET[\s\S]*status\s*=\s*'processing'/)
+    expect(sql).toMatch(/SET[\s\S]*status\s*=\s*'claimed'/)
     expect(sql).toMatch(/WHERE[\s\S]*agent_id\s*=\s*\$\d/)
     expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/)
   })

@@ -2,7 +2,7 @@
 /**
  * S2-A (FEAT-005) §4.5 — orphan reclaim behavioural test.
  *
- * Seeds a fixture row with status='processing' + claimed_at older than
+ * Seeds a fixture row with status='claimed' + claimed_at older than
  * OUTBOUND_ORPHAN_TIMEOUT_SEC, runs the exact reclaim SQL that
  * server.ts::reclaimOrphanOutboundRows executes, and verifies:
  *   - status flips back to 'pending'
@@ -78,7 +78,7 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
          (message_id, agent_id, channel_external_id, content,
           status, attempts, max_attempts, claimed_at)
        VALUES ($1, $2, 'test-channel', 'fixture',
-               'processing', $3, 5, now() - ($4::int || ' seconds')::interval)
+               'claimed', $3, 5, now() - ($4::int || ' seconds')::interval)
        RETURNING id`,
       ['test-message-id', TEST_AGENT, attempts, claimedAtOffsetSec],
     )
@@ -100,7 +100,7 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
                                 (power(2, greatest(attempts - 1, 0)))::int * interval '1 second'
                               )
                             + ((random() * 500)::int || ' milliseconds')::interval
-        WHERE status = 'processing'
+        WHERE status = 'claimed'
           AND agent_id = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
         RETURNING id, attempts`,
@@ -140,7 +140,7 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
          (message_id, agent_id, channel_external_id, content,
           status, attempts, max_attempts, claimed_at)
        VALUES ($1, $2, 'test-channel', 'fixture-young',
-               'processing', 1, 5, now() - interval '60 seconds')
+               'claimed', 1, 5, now() - interval '60 seconds')
        RETURNING id`,
       ['test-young-message-id', TEST_AGENT],
     )
@@ -151,7 +151,7 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
           SET status = 'pending',
               last_error = 'orphan_reclaim',
               claimed_at = NULL
-        WHERE status = 'processing'
+        WHERE status = 'claimed'
           AND agent_id = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND id = $3
@@ -164,6 +164,6 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
       `SELECT status FROM outbound_queue WHERE id = $1`,
       [fixtureId],
     )
-    expect(rows[0].status).toBe('processing')
+    expect(rows[0].status).toBe('claimed')
   })
 })

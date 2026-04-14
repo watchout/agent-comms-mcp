@@ -348,16 +348,17 @@ async function migrate() {
     -- by (1) Discord's per-channel nonce + enforceNonce flag and (2) the
     -- consumer's 40062 idempotent-collapse branch; this column is NOT the
     -- front-line dedup layer. Because the column is written in the same
-    -- UPDATE as `status='sent'`, the pending-filter claim cannot normally
+    -- UPDATE as 'status=sent', the pending-filter claim cannot normally
     -- see a row that already carries a non-null id, so the in-code
-    -- short-circuit on `row.discord_message_id` is a limited safeguard
+    -- short-circuit on 'row.discord_message_id' is a limited safeguard
     -- only — useful if a row is manually or tool-reset back to 'pending'
     -- after mark-sent. See docs/agent-com-message-queue-spec.md §3.3 / §7.4.
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS discord_message_id TEXT;
 
-    -- status CHECK mutation: drop + re-add so pre-S2-A DBs accept the
-    -- 'processing' claim flip. Postgres does not allow CHECK constraint
-    -- mutation in place; bracketed in DO $$ for idempotency.
+    -- S2-A (FEAT-005 pre-CP-3) CHECK: drop + re-add so pre-S2-A DBs
+    -- accept the atomic claim flip. Postgres has no in-place CHECK
+    -- mutation; DO $$ for idempotency. CP-3 block below then renames
+    -- 'processing' → 'claimed' in a single transaction.
     DO $$
     BEGIN
       IF EXISTS (
@@ -372,12 +373,57 @@ async function migrate() {
         CHECK (status IN ('pending', 'processing', 'sent', 'failed'));
     END $$;
 
-    CREATE INDEX IF NOT EXISTS idx_outbound_queue_processing_claimed_at
-      ON outbound_queue(status, claimed_at)
-      WHERE status = 'processing';
     CREATE INDEX IF NOT EXISTS idx_outbound_queue_agent_pending_next_retry
       ON outbound_queue(agent_id, status, next_retry_at)
       WHERE status = 'pending';
+  `)
+
+  // FEAT-005 CP-3 forward migration: rename outbound_queue claim state
+  // 'processing' → 'claimed'. Semantic clarity — 'claimed' is the
+  // standard work-queue vocabulary and matches the claim SQL verb.
+  //
+  // Forward-only, single transaction, idempotent:
+  //   - DROP CONSTRAINT IF EXISTS → never fails on re-run
+  //   - UPDATE matches the empty set after first success → no-op
+  //   - ADD CONSTRAINT with the new vocabulary is deterministic
+  //   - DROP INDEX IF EXISTS + CREATE INDEX IF NOT EXISTS is idempotent
+  //
+  // Rollback: db/rollback-claim-vocabulary.sql (psql -f).
+  await client.query(`
+    BEGIN;
+
+    DO $$
+    BEGIN
+      -- 1. Drop the current CHECK so the UPDATE below cannot be rejected.
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'outbound_queue'::regclass
+           AND conname  = 'outbound_queue_status_check'
+      ) THEN
+        ALTER TABLE outbound_queue DROP CONSTRAINT outbound_queue_status_check;
+      END IF;
+
+      -- 2. Migrate in-flight rows from the old vocabulary. Empty on
+      --    re-run (all processing rows have already been renamed).
+      UPDATE outbound_queue SET status = 'claimed' WHERE status = 'processing';
+
+      -- 3. Install the post-CP-3 CHECK with the new vocabulary. Single
+      --    atomic re-statement inside the outer transaction so the
+      --    table never sits with no CHECK at all.
+      ALTER TABLE outbound_queue
+        ADD CONSTRAINT outbound_queue_status_check
+        CHECK (status IN ('pending', 'claimed', 'sent', 'failed'));
+    END $$;
+
+    -- 4. Partial-index WHERE predicate must follow the new vocabulary
+    --    or orphan reclaim cannot use it. DROP old, CREATE new — same
+    --    transaction so there is never a window with zero index.
+    DROP INDEX IF EXISTS idx_outbound_queue_processing_claimed_at;
+    CREATE INDEX IF NOT EXISTS idx_outbound_queue_claimed_claimed_at
+      ON outbound_queue(status, claimed_at)
+      WHERE status = 'claimed';
+
+    COMMIT;
   `)
 
   // Sync channel settings from config.json if available
@@ -401,4 +447,16 @@ async function migrate() {
   await client.end()
 }
 
-migrate().catch(e => { console.error(e); process.exit(1) })
+// Guardrail 2 (FEAT-005 CP-6): only run when this file is invoked
+// directly. Prior behaviour — top-level `migrate().catch(...)` — ran
+// the migration on every `import('./db/migrate.ts')` (side effect of
+// loading the module), which is how the CP-3 CHECK rename landed on
+// the dev DB out of sequence on 2026-04-14 despite CTO holding the
+// apply-GO until post-merge. `import.meta.main` is Bun's canonical
+// "this module is the entrypoint" flag and matches the behaviour of
+// `__name__ == '__main__'` in Python / `require.main === module` in
+// Node. Tests / tools that merely import migrate.ts for its exports
+// get no side effect.
+if (import.meta.main) {
+  migrate().catch(e => { console.error(e); process.exit(1) })
+}

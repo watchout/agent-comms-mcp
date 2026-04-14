@@ -17,7 +17,13 @@ import { join, dirname } from 'node:path'
 import { Client, Pool } from 'pg'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
-const SERVER_SOURCE = readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite): handleInboundMessage lives in
+// adapters/inbound-receiver.ts. Concat so PR-B.2 structural pins fire
+// at its new home.
+const SERVER_SOURCE =
+  readFileSync(join(PROJECT_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(PROJECT_ROOT, 'adapters/inbound-receiver.ts'), 'utf-8')
 
 let databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const configPath = join(PROJECT_ROOT, 'config.json')

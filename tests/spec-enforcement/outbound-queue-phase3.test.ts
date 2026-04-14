@@ -33,7 +33,17 @@ import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
-const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+// FEAT-005 (adapter rewrite 2026-04-14): the outbound consumer +
+// PollingDriver + per-bot Discord lookup moved out of server.ts into
+// adapters/outbound-consumer.ts and adapters/discord-client.ts. The
+// T2/T5 substring pins below continue to enforce the same invariants
+// at their new home via a concatenated SERVER_SRC.
+const SERVER_SRC =
+  readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'outbound-consumer.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,12 +127,18 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     // Retry budget gate: only flip to 'failed' once attempts >= max_attempts.
     expect(SERVER_SRC).toMatch(/row\.attempts\s*>=\s*row\.max_attempts/)
   })
-  test('consumer is wired into registerAgent / unregisterAgent', () => {
-    // Started alongside the heartbeat in registerAgent.
+  test('consumer is wired into entrypoints/daemon.ts + unregisterAgent (stop only, FEAT-005 CP-5)', () => {
+    // CP-5 (2026-04-14): the daemon entrypoint (entrypoints/daemon.ts)
+    // is now the SOLE caller of startOutboundConsumer. registerAgent no
+    // longer boots the consumer; stdio / MCP-plugin processes stay
+    // quiet, which is what stopped the 19-bot parallel-consumer race.
+    const daemonEntry = readFileSync(join(REPO_ROOT, 'entrypoints', 'daemon.ts'), 'utf-8')
+    expect(daemonEntry).toMatch(/startOutboundConsumer\(\)/)
+    // registerAgent explicitly does NOT call startOutboundConsumer.
     const regStart = SERVER_SRC.indexOf('async function registerAgent')
     const regEnd = SERVER_SRC.indexOf('\nasync function ', regStart + 1)
     const regBody = SERVER_SRC.slice(regStart, regEnd === -1 ? undefined : regEnd)
-    expect(regBody).toMatch(/startOutboundConsumer\(\)/)
+    expect(regBody).not.toMatch(/startOutboundConsumer\s*\(/)
     // Stopped alongside the heartbeat in unregisterAgent.
     const unregStart = SERVER_SRC.indexOf('async function unregisterAgent')
     const unregEnd = SERVER_SRC.indexOf('\nasync function ', unregStart + 1)

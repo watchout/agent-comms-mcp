@@ -36,7 +36,7 @@ pull-on-notify 採用、PollingDriver を polling 基盤とする）。
     `message_queue` INSERT は行わない。
   - つまり daemon は inbound routing（`handleInboundMessage`）を呼ばないが、
     mention されない人間投稿への warning 機能だけは保持する。
-  - daemon は PollingDriver と outbound_queue 消費を担当する。
+  - daemon は PollingDriver と outbound_queue 消費を担当する (PR #172 FEAT-005: 具体的には `entrypoints/daemon.ts` が `startOutboundConsumer()` の唯一の呼出点、server.ts `registerAgent()` からは除去済)。
 - daemon と stdio を同時に起動しても `handleInboundMessage` は 1 回だけ発火
   するため、`message_queue` への重複 INSERT は構造的に発生しない。
 
@@ -187,7 +187,7 @@ CREATE TABLE outbound_queue (
   attachments TEXT DEFAULT '[]',       -- ファイルパス配列
   reply_to_discord_id TEXT,            -- Discord native reply参照
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'processing', 'sent', 'failed')),  -- S2-A: 'processing' added
+    CHECK (status IN ('pending', 'claimed', 'sent', 'failed')),  -- FEAT-005 CP-3: renamed 'processing' → 'claimed'
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 5,
   last_error TEXT,
@@ -202,10 +202,10 @@ CREATE INDEX idx_oq_pending
   ON outbound_queue(status, created_at ASC)
   WHERE status = 'pending';
 
--- S2-A: processing claim の orphan 検出用 + agent 毎の next_retry_at 早期取り出し用
-CREATE INDEX idx_outbound_queue_processing_claimed_at
+-- FEAT-005 CP-3: 'claimed' claim の orphan 検出用 + agent 毎の next_retry_at 早期取り出し用
+CREATE INDEX idx_outbound_queue_claimed_claimed_at
   ON outbound_queue(status, claimed_at)
-  WHERE status = 'processing';
+  WHERE status = 'claimed';
 CREATE INDEX idx_outbound_queue_agent_pending_next_retry
   ON outbound_queue(agent_id, status, next_retry_at)
   WHERE status = 'pending';
@@ -215,7 +215,7 @@ CREATE INDEX idx_outbound_queue_agent_pending_next_retry
 
 | カラム | 導入 PR | 役割 |
 |---|---|---|
-| `status='processing'` | PR #164 (S2-A) | atomic claim で `UPDATE status='pending'→'processing'` する瞬間的状態。`FOR UPDATE SKIP LOCKED` と組み合わせて別 consumer の二重取得を防ぐ |
+| `status='claimed'` | PR #164 (S2-A) / PR #172 (FEAT-005 CP-3) | atomic claim で `UPDATE status='pending'→'claimed'` する瞬間的状態。`FOR UPDATE SKIP LOCKED` と組み合わせて別 consumer の二重取得を防ぐ。vocabulary was `'processing'` in PR #164; renamed to `'claimed'` in PR #172 to match work-queue convention and the claim SQL verb |
 | `claimed_at` | PR #164 (S2-A) | consumer が claim した瞬間の wall-clock。orphan 再回収の閾値判定 (`OUTBOUND_ORPHAN_TIMEOUT_SEC`) |
 | `next_retry_at` | PR #164 (S2-A) | transient failure 後の再試行最早時刻。`min(30s, 2^(attempt-1)) + jitter` の exponential backoff |
 | `discord_message_id` | PR #168 (Phase C Step 1 PR-A) | 送信成功時 Discord snowflake を永続化する **観測性カラム**。dedup layer ではない — `status='sent'` と同じ UPDATE で atomic に書くため、通常 pending filter は discord_message_id 非 null の行を拾わない構造的保証があり、consumer 内の short-circuit 分岐は mark-sent 完了後に行が何らかの理由で再度 pending に戻る極稀なエッジケースに対する**限定的保険**として動作するに留まる。実効 dedup は §7.4 の 2 層 (platform nonce + 40062 idempotent 収束)|
@@ -835,7 +835,7 @@ receiverClient.on("messageCreate", async (msg) => {
 
 ### 7.4 Outbound処理
 
-> **S2-A (PR #164) + Phase C Step 1 PR-A (PR #168) で挙動更新済**。以下の例示コードは初版方式（batch SELECT）。実装は atomic claim (UPDATE...FOR UPDATE SKIP LOCKED) + exponential backoff + nonce idempotency へ進化した。例示コードの後ろに現行の挙動仕様を明記する。
+> **S2-A (PR #164) + Phase C Step 1 PR-A (PR #168) + FEAT-005 adapter rewrite (PR #172) で挙動更新済**。以下の例示コードは初版方式（batch SELECT）。実装は atomic claim (UPDATE...FOR UPDATE SKIP LOCKED) + exponential backoff + nonce idempotency へ進化した。PR #172 で claim state を `'processing'` → `'claimed'` に rename (work-queue 標準語彙) + consumer / PollingDriver / inbound receiver を `adapters/*.ts` に抽出し、daemon entrypoint (`entrypoints/daemon.ts`) を consumer の唯一の起動点とした。例示コードの後ろに現行の挙動仕様を明記する。
 
 #### 現行の挙動仕様 (実装との SSOT)
 
@@ -848,12 +848,12 @@ Cycle 3 honesty: `discord_message_id` は観測性カラムであり dedup layer
 
 ##### その他の処理ステップ
 
-1. **Atomic claim (§3.3)**: 1 tick (1 秒) につき 1 行、`agent_id = AGENT_ID` 条件で `status='pending' → 'processing'`、`attempts += 1`、`claimed_at = now()` を `FOR UPDATE SKIP LOCKED` で取得。別 consumer の二重取得は構造的に不可
+1. **Atomic claim (§3.3)**: 1 tick (1 秒) につき 1 行、`agent_id = AGENT_ID` 条件で `status='pending' → 'claimed'`、`attempts += 1`、`claimed_at = now()` を `FOR UPDATE SKIP LOCKED` で取得。別 consumer の二重取得は構造的に不可 (PR #172 FEAT-005 CP-3 で vocabulary `'processing'` → `'claimed'` に rename)
 2. **Row-level short-circuit (限定保険)**: claim した行の `discord_message_id` が既に非 null なら `sendAdapterMessage` を呼ばず直接 `status='sent'` へ flip。通常 path では `status='sent'` と同時 UPDATE で永続化するため pending filter がこの行を拾わず到達不能だが、mark-sent 完了後に行が何らかの理由 (手動 UPDATE / ツール直叩き等) で再度 pending に戻された場合の safeguard として残す
 3. **Success path**: 送信成功時は `status='sent'` + `sent_at=now()` + `discord_message_id=<返却された snowflake>` を 1 つの UPDATE で atomic に永続化。この atomicity が上記 Layer 1/2 dedup の前提
 4. **Transient failure → exponential backoff (§3.4)**: network/timeout/5xx/429 等は `status='pending'` に戻し、`next_retry_at = now() + min(30s, 2^(attempt-1) s) + jitter`
 5. **Permanent failure**: 非 transient or `attempts >= max_attempts` なら `status='failed' + last_error=<err>`
-6. **Orphan reclaim (§3.5)**: `OUTBOUND_ORPHAN_TIMEOUT_SEC` (default 600 秒 = Discord nonce dedup 5 分 + buffer 5 分) を超えた `processing` 行は `pending` へ戻し、claim した consumer がクラッシュした場合のロック滞留を防ぐ
+6. **Orphan reclaim (§3.5)**: `OUTBOUND_ORPHAN_TIMEOUT_SEC` (default 600 秒 = Discord nonce dedup 5 分 + buffer 5 分) を超えた `claimed` 行は `pending` へ戻し、claim した consumer がクラッシュした場合のロック滞留を防ぐ
 
 #### 例示コード（初版方式、historical reference）
 

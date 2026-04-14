@@ -14,7 +14,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_REGISTRY="${BOT_REGISTRY:-${SCRIPT_DIR}/bot-registry.txt}"
-DEFAULT_CMD="AGENT_COM_RUNTIME=daemon claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
+DEFAULT_CMD="AGENT_COM_RUNTIME=daemon claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
 LOG_TAG="[watchdog]"
 WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-/tmp/watchdog-state}"
 DISCONNECT_LOG="/tmp/bot-disconnect.log"
