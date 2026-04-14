@@ -68,6 +68,10 @@ import {
   type RouteResult,
 } from './core/route-message'
 import {
+  checkBotHealth as checkBotHealthCore,
+  type BotHealthResult,
+} from './core/bot-health'
+import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
@@ -2219,54 +2223,19 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   return log.join('\n')
 }
 
-function checkBotHealth(entry: BotEntry): { status: string; details: string } {
-  // Check 1: tmux session
-  if (!tmuxHasSession(entry.session)) {
-    return { status: 'dead', details: 'tmux session not found' }
-  }
-
-  const output = tmuxCapture(entry.session, 30)
-
-  // Check 2: crash patterns
-  if (/panic|fatal|SIGKILL|segmentation fault|killed|out of memory/i.test(output)) {
-    return { status: 'crashed', details: 'crash pattern detected' }
-  }
-
-  // Check 3: shell prompt (Claude exited)
-  const lastLine = output.split('\n').filter(l => l.trim()).pop() ?? ''
-  if (/^\S+@\S+ .+ % $|^\$ $/.test(lastLine)) {
-    return { status: 'exited', details: 'Claude Code exited to shell prompt' }
-  }
-
-  // Check 4: bun server.ts running on expected port.
-  // Post-PR#172 the `--dangerously-load-development-channels` flag was
-  // removed from all launch paths (bot-registry.txt, watchdog.sh,
-  // restart-bot.sh, server.ts DEFAULT_CLAUDE_CMD). The previous check
-  // for that flag in tmux output was a false-alarm source for all 19
-  // bots. The stable signal of channel-plugin mode today is that a
-  // `bun run .../server.ts` process is listening on the agent's
-  // WEBHOOK_PORT — the MCP plugin spawns it and holds the port.
-  const pids = getProcessOnPort(entry.port)
-  if (pids.length === 0) {
-    return { status: 'initializing', details: `session exists, port ${entry.port} free (bun not yet listening)` }
-  }
-
-  const portInfo = `port ${entry.port} in use (PID: ${pids.join(',')})`
-  const pidIsBunServer = pids.some(pid => {
-    try {
+// Pure branch logic lives in core/bot-health.ts so unit tests can
+// cover all six branches with injected deps. This wrapper binds the
+// real tmux / lsof / ps side-effect helpers.
+function checkBotHealth(entry: BotEntry): BotHealthResult {
+  return checkBotHealthCore(entry, {
+    hasSession: tmuxHasSession,
+    capture: tmuxCapture,
+    getPids: getProcessOnPort,
+    psCommand: (pid: string) => {
       const r = Bun.spawnSync(['ps', '-p', pid, '-o', 'command='])
-      const cmd = new TextDecoder().decode(r.stdout)
-      return /bun.*server\.ts/.test(cmd)
-    } catch {
-      return false
-    }
+      return new TextDecoder().decode(r.stdout)
+    },
   })
-
-  if (!pidIsBunServer) {
-    return { status: 'misconfigured', details: `${portInfo} but PID is not bun server.ts (port squatted by unrelated process)` }
-  }
-
-  return { status: 'healthy', details: `bun server.ts listening + ${portInfo}` }
 }
 
 // --- Port conflict resolution (uses shared helpers above) ---
