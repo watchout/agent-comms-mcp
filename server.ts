@@ -694,6 +694,15 @@ async function registerAgent(): Promise<void> {
   // into a buffer. The MCP `next` tool returns from the buffer instantly
   // instead of hitting the DB on every call.
   pollingDriver.start(AGENT_ID)
+
+  // NOTE: outbound consumer bootstrap is NOT here. It would race the
+  // Discord adapter: registerAgent() returns before discord.connect()
+  // resolves and before `discordClients.set(AGENT_ID, discord)` runs,
+  // so the first consumer tick (1s later) would find an empty map and
+  // flip every claimed row to `status='failed'` with
+  // `last_error='no_discord_client_for_agent'` (outbound-consumer.ts
+  // §3.6 fallback-removed branch). The consumer is instead started
+  // inside postConnect() (below) after the client is registered.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2462,6 +2471,30 @@ async function postConnect() {
       // under AGENT_ID restores per-bot outbound delivery without
       // re-introducing cross-identity fallback.
       discordClients.set(AGENT_ID, discord)
+
+      // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172
+      // cycle 2): current production launch path is
+      // `claude server:agent-comms` → server.ts (stdio MCP) with
+      // AGENT_COM_RUNTIME=daemon set in the shell. entrypoints/daemon.ts
+      // has no supervise wrapper yet, so until it ships, server.ts must
+      // also start the outbound consumer when it sees the daemon flag
+      // — otherwise no process drains outbound_queue.
+      //
+      // The bootstrap sits AFTER `discordClients.set(AGENT_ID, discord)`
+      // so the first consumer tick can resolve the client for this
+      // agent. Placing it inside registerAgent() (the obvious spot) was
+      // tried in cycle 1 and lost the race: the 1s tick fired before
+      // discord.connect() resolved, and every claimed row was flipped
+      // to `status='failed', last_error='no_discord_client_for_agent'`
+      // (outbound-consumer.ts §3.6 fallback-removed branch).
+      //
+      // The consumer's own isDaemonRuntime() gate stays in place so a
+      // pure stdio MCP server (no daemon flag) still skips. When the
+      // supervise base for daemon.ts is shipped, remove this call and
+      // restore the daemon-only invariant.
+      if (isDaemonRuntime()) {
+        startOutboundConsumer()
+      }
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
     }
