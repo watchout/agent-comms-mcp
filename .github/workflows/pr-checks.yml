@@ -42,14 +42,25 @@ jobs:
       - name: Type check
         run: bunx tsc --noEmit --allowImportingTsExtensions --skipLibCheck || true
       - name: Breaking-change detection (Layer 0 gate)
-        # Fails the build when any of the 7 breaking-change patterns
-        # (deleted fallbacks, signature changes, removed exports,
-        # removed env vars, DROP TABLE/COLUMN, API endpoint deletion,
-        # shared/global resource deletion) are detected. Base ref is
-        # `origin/main` because the script does `git diff BASE...HEAD`
-        # and only origin/* refs are populated after the checkout
-        # action. For PRs the pull_request.base.sha would also work;
-        # origin/main is the simpler anchor.
+        # Scans for 7 breaking-change patterns (deleted fallbacks,
+        # signature changes, removed exports, removed env vars,
+        # DROP TABLE/COLUMN, API endpoint deletion, shared/global
+        # resource deletion) vs origin/main. Base ref must be
+        # `origin/main` because only origin/* refs are populated
+        # after actions/checkout@v4.
+        #
+        # When the PR carries the `breaking-change-verified` label,
+        # the governance flow (ai-dev-framework governance-flow.md)
+        # treats the change as intentional and consumer-verified —
+        # this step then logs findings for the audit trail but does
+        # not block the build. Without the label, any detection is
+        # a hard fail.
+        if: "!contains(github.event.pull_request.labels.*.name, 'breaking-change-verified')"
         run: bash scripts/detect-breaking-changes.sh origin/main
+      - name: Breaking-change detection (label-override, informational)
+        if: contains(github.event.pull_request.labels.*.name, 'breaking-change-verified')
+        run: |
+          echo "::notice::PR has 'breaking-change-verified' label — detection is informational only."
+          bash scripts/detect-breaking-changes.sh origin/main || true
       - name: Run test suite
         run: bun test
