@@ -694,6 +694,21 @@ async function registerAgent(): Promise<void> {
   // into a buffer. The MCP `next` tool returns from the buffer instantly
   // instead of hitting the DB on every call.
   pollingDriver.start(AGENT_ID)
+
+  // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172):
+  // current production launch path is `claude server:agent-comms` →
+  // server.ts (stdio MCP) with AGENT_COM_RUNTIME=daemon set in the
+  // shell. entrypoints/daemon.ts has no supervise wrapper yet, so
+  // until that wrapper exists, server.ts must also start the
+  // outbound consumer when it sees the daemon runtime flag —
+  // otherwise no process drains outbound_queue.
+  // The consumer's own isDaemonRuntime() gate stays in place so a
+  // pure stdio MCP server (no daemon flag) still skips. When the
+  // supervise base for daemon.ts is shipped, remove this call and
+  // restore the daemon-only invariant.
+  if (isDaemonRuntime()) {
+    startOutboundConsumer()
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

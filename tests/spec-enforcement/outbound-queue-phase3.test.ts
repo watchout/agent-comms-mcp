@@ -132,13 +132,30 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     // is now the SOLE caller of startOutboundConsumer. registerAgent no
     // longer boots the consumer; stdio / MCP-plugin processes stay
     // quiet, which is what stopped the 19-bot parallel-consumer race.
+    //
+    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172):
+    // production launch path is `claude server:agent-comms` →
+    // server.ts (stdio MCP) with AGENT_COM_RUNTIME=daemon set in the
+    // shell. entrypoints/daemon.ts has no supervise wrapper yet, so
+    // server.ts is allowed to also call startOutboundConsumer when
+    // it observes the daemon flag. 1 process per agent_id only, so
+    // the 19-bot race is structurally impossible (claim SQL filters
+    // by agent_id with FOR UPDATE SKIP LOCKED). When the supervise
+    // wrapper for daemon.ts ships, the server.ts call is removed and
+    // this assertion tightens back to "no call inside registerAgent".
     const daemonEntry = readFileSync(join(REPO_ROOT, 'entrypoints', 'daemon.ts'), 'utf-8')
     expect(daemonEntry).toMatch(/startOutboundConsumer\(\)/)
-    // registerAgent explicitly does NOT call startOutboundConsumer.
+    // registerAgent: any startOutboundConsumer call MUST be gated on
+    // isDaemonRuntime() (no unconditional bootstrap allowed).
     const regStart = SERVER_SRC.indexOf('async function registerAgent')
     const regEnd = SERVER_SRC.indexOf('\nasync function ', regStart + 1)
     const regBody = SERVER_SRC.slice(regStart, regEnd === -1 ? undefined : regEnd)
-    expect(regBody).not.toMatch(/startOutboundConsumer\s*\(/)
+    const regCalls = regBody.match(/startOutboundConsumer\s*\(/g) ?? []
+    if (regCalls.length > 0) {
+      expect(regBody).toMatch(
+        /if\s*\(\s*isDaemonRuntime\(\)\s*\)\s*\{[^}]*startOutboundConsumer\s*\(/,
+      )
+    }
     // Stopped alongside the heartbeat in unregisterAgent.
     const unregStart = SERVER_SRC.indexOf('async function unregisterAgent')
     const unregEnd = SERVER_SRC.indexOf('\nasync function ', unregStart + 1)
