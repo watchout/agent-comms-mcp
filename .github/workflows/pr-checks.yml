@@ -26,6 +26,12 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so `scripts/detect-breaking-changes.sh` can
+          # `git diff BASE...HEAD`. With the default shallow checkout
+          # the base ref is unreachable and the script bails with
+          # `fatal: ambiguous argument 'main..HEAD'`.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -39,10 +45,11 @@ jobs:
         # Fails the build when any of the 7 breaking-change patterns
         # (deleted fallbacks, signature changes, removed exports,
         # removed env vars, DROP TABLE/COLUMN, API endpoint deletion,
-        # shared/global resource deletion) are detected without a
-        # `breaking-change-verified` PR label. Non-PR pushes (e.g.
-        # direct pushes to main) skip the label requirement so the
-        # build does not hard-fail on legitimate merges.
-        run: bash scripts/detect-breaking-changes.sh
+        # shared/global resource deletion) are detected. Base ref is
+        # `origin/main` because the script does `git diff BASE...HEAD`
+        # and only origin/* refs are populated after the checkout
+        # action. For PRs the pull_request.base.sha would also work;
+        # origin/main is the simpler anchor.
+        run: bash scripts/detect-breaking-changes.sh origin/main
       - name: Run test suite
         run: bun test
