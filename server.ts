@@ -2205,13 +2205,15 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   tmuxExec(['send-keys', '-t', entry.session, 'Enter'])
   log.push(`Sent Enter to confirm TUI prompt`)
 
-  // 5. Verify startup
+  // 5. Verify startup — post-PR#172: look for bun server.ts on the
+  // expected port instead of the retired "Listening for channel
+  // messages" string (emitted by the old channel-server only).
   Bun.sleepSync(5000)
-  const output = tmuxCapture(entry.session, 10)
-  if (output.includes('Listening for channel messages')) {
-    log.push(`✅ Confirmed: Listening for channel messages`)
+  const pids = getProcessOnPort(entry.port)
+  if (pids.length > 0) {
+    log.push(`✅ Confirmed: bun server.ts listening on port ${entry.port} (PID: ${pids.join(',')})`)
   } else {
-    log.push(`⚠️ Not yet confirmed — may still be initializing`)
+    log.push(`⚠️ Not yet confirmed — port ${entry.port} still free (may still be initializing)`)
   }
 
   return log.join('\n')
@@ -2230,28 +2232,41 @@ function checkBotHealth(entry: BotEntry): { status: string; details: string } {
     return { status: 'crashed', details: 'crash pattern detected' }
   }
 
-  // Check 3: channel plugin mode
-  if (output.includes('❯') && !output.includes('Listening for channel messages')) {
-    if (!output.includes('dangerously-load-development-channels')) {
-      return { status: 'misconfigured', details: 'not in channel plugin mode (bare claude)' }
-    }
-  }
-
-  // Check 4: shell prompt (Claude exited)
+  // Check 3: shell prompt (Claude exited)
   const lastLine = output.split('\n').filter(l => l.trim()).pop() ?? ''
   if (/^\S+@\S+ .+ % $|^\$ $/.test(lastLine)) {
     return { status: 'exited', details: 'Claude Code exited to shell prompt' }
   }
 
-  // Check 5: port status
+  // Check 4: bun server.ts running on expected port.
+  // Post-PR#172 the `--dangerously-load-development-channels` flag was
+  // removed from all launch paths (bot-registry.txt, watchdog.sh,
+  // restart-bot.sh, server.ts DEFAULT_CLAUDE_CMD). The previous check
+  // for that flag in tmux output was a false-alarm source for all 19
+  // bots. The stable signal of channel-plugin mode today is that a
+  // `bun run .../server.ts` process is listening on the agent's
+  // WEBHOOK_PORT — the MCP plugin spawns it and holds the port.
   const pids = getProcessOnPort(entry.port)
-  const portInfo = pids.length > 0 ? `port ${entry.port} in use (PID: ${pids.join(',')})` : `port ${entry.port} free`
-
-  if (output.includes('Listening for channel messages')) {
-    return { status: 'healthy', details: `listening + ${portInfo}` }
+  if (pids.length === 0) {
+    return { status: 'initializing', details: `session exists, port ${entry.port} free (bun not yet listening)` }
   }
 
-  return { status: 'initializing', details: `session exists, ${portInfo}` }
+  const portInfo = `port ${entry.port} in use (PID: ${pids.join(',')})`
+  const pidIsBunServer = pids.some(pid => {
+    try {
+      const r = Bun.spawnSync(['ps', '-p', pid, '-o', 'command='])
+      const cmd = new TextDecoder().decode(r.stdout)
+      return /bun.*server\.ts/.test(cmd)
+    } catch {
+      return false
+    }
+  })
+
+  if (!pidIsBunServer) {
+    return { status: 'misconfigured', details: `${portInfo} but PID is not bun server.ts (port squatted by unrelated process)` }
+  }
+
+  return { status: 'healthy', details: `bun server.ts listening + ${portInfo}` }
 }
 
 // --- Port conflict resolution (uses shared helpers above) ---
