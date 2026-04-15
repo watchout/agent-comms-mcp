@@ -68,6 +68,10 @@ import {
   type RouteResult,
 } from './core/route-message'
 import {
+  checkBotHealth as checkBotHealthCore,
+  type BotHealthResult,
+} from './core/bot-health'
+import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
@@ -2205,53 +2209,33 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   tmuxExec(['send-keys', '-t', entry.session, 'Enter'])
   log.push(`Sent Enter to confirm TUI prompt`)
 
-  // 5. Verify startup
+  // 5. Verify startup — post-PR#172: look for bun server.ts on the
+  // expected port instead of the retired "Listening for channel
+  // messages" string (emitted by the old channel-server only).
   Bun.sleepSync(5000)
-  const output = tmuxCapture(entry.session, 10)
-  if (output.includes('Listening for channel messages')) {
-    log.push(`✅ Confirmed: Listening for channel messages`)
+  const pids = getProcessOnPort(entry.port)
+  if (pids.length > 0) {
+    log.push(`✅ Confirmed: bun server.ts listening on port ${entry.port} (PID: ${pids.join(',')})`)
   } else {
-    log.push(`⚠️ Not yet confirmed — may still be initializing`)
+    log.push(`⚠️ Not yet confirmed — port ${entry.port} still free (may still be initializing)`)
   }
 
   return log.join('\n')
 }
 
-function checkBotHealth(entry: BotEntry): { status: string; details: string } {
-  // Check 1: tmux session
-  if (!tmuxHasSession(entry.session)) {
-    return { status: 'dead', details: 'tmux session not found' }
-  }
-
-  const output = tmuxCapture(entry.session, 30)
-
-  // Check 2: crash patterns
-  if (/panic|fatal|SIGKILL|segmentation fault|killed|out of memory/i.test(output)) {
-    return { status: 'crashed', details: 'crash pattern detected' }
-  }
-
-  // Check 3: channel plugin mode
-  if (output.includes('❯') && !output.includes('Listening for channel messages')) {
-    if (!output.includes('dangerously-load-development-channels')) {
-      return { status: 'misconfigured', details: 'not in channel plugin mode (bare claude)' }
-    }
-  }
-
-  // Check 4: shell prompt (Claude exited)
-  const lastLine = output.split('\n').filter(l => l.trim()).pop() ?? ''
-  if (/^\S+@\S+ .+ % $|^\$ $/.test(lastLine)) {
-    return { status: 'exited', details: 'Claude Code exited to shell prompt' }
-  }
-
-  // Check 5: port status
-  const pids = getProcessOnPort(entry.port)
-  const portInfo = pids.length > 0 ? `port ${entry.port} in use (PID: ${pids.join(',')})` : `port ${entry.port} free`
-
-  if (output.includes('Listening for channel messages')) {
-    return { status: 'healthy', details: `listening + ${portInfo}` }
-  }
-
-  return { status: 'initializing', details: `session exists, ${portInfo}` }
+// Pure branch logic lives in core/bot-health.ts so unit tests can
+// cover all six branches with injected deps. This wrapper binds the
+// real tmux / lsof / ps side-effect helpers.
+function checkBotHealth(entry: BotEntry): BotHealthResult {
+  return checkBotHealthCore(entry, {
+    hasSession: tmuxHasSession,
+    capture: tmuxCapture,
+    getPids: getProcessOnPort,
+    psCommand: (pid: string) => {
+      const r = Bun.spawnSync(['ps', '-p', pid, '-o', 'command='])
+      return new TextDecoder().decode(r.stdout)
+    },
+  })
 }
 
 // --- Port conflict resolution (uses shared helpers above) ---
