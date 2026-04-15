@@ -130,8 +130,11 @@ describe('T3 — handleInboundMessage writes a message_queue row for the receive
     const body = SERVER_SRC.slice(fnStart, fnEnd)
 
     // (a) call site delegation — receiverAgentId + messageId + mqPayload
-    //     are forwarded as named keys of the params object.
-    expect(body).toMatch(/persistInboundDelivery\s*\(\s*client\s*,\s*\{[\s\S]{0,300}?receiverAgentId\s*,[\s\S]{0,200}?messageId\s*,[\s\S]{0,200}?mqPayloadJson\s*:\s*mqPayload/)
+    //     are forwarded as named keys of the params object. Cycle 2
+    //     (auditor BLOCKER 1): the first arg is `d.databaseUrl` so the
+    //     helper owns a transaction-private pg.Client, not the shared
+    //     singleton from tryGetDb().
+    expect(body).toMatch(/persistInboundDelivery\s*\(\s*d\.databaseUrl\s*,\s*\{[\s\S]{0,300}?receiverAgentId\s*,[\s\S]{0,200}?messageId\s*,[\s\S]{0,200}?mqPayloadJson\s*:\s*mqPayload/)
 
     // (b) helper body holds the INSERT + ON CONFLICT DO NOTHING pin.
     //     SERVER_SRC is concatenated with core/inbound-delivery.ts above,

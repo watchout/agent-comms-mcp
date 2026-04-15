@@ -880,38 +880,59 @@ metadata->>'to' = $agent` filter saw NULL.
   payload) VALUES (...) ON CONFLICT (agent_id, message_id) WHERE
   message_id IS NOT NULL DO NOTHING RETURNING id`
 
-Both queries run on the **same** `pg.Client` inside one
+Both queries run on a **transaction-private** `pg.Client` inside one
 `BEGIN`/`COMMIT`. Implementation: `core/inbound-delivery.ts`
-`persistInboundDelivery()`. Invariants:
+`persistInboundDelivery(databaseUrl, params)`. Invariants:
 
-1. **Both-or-neither.** A successful return means both queries committed.
-   Any thrown error (connection loss, constraint violation, unexpected
-   server state) triggers `ROLLBACK`; no partial `metadata.to` /
-   `message_queue` state is observable to readers that open a new
-   transaction after the failure.
+1. **Both-or-neither *and* UPDATE row matched** (Cycle 2 — auditor
+   BLOCKER 2). A successful return means (a) Step 7b's UPDATE matched
+   exactly one row (stale `messageId` is caught and forces a
+   `ROLLBACK` with `error: 'update_no_match'`) AND (b) Step 7d's
+   INSERT was either accepted or dedup-suppressed by `ON CONFLICT DO
+   NOTHING`. Any thrown error (connection loss, constraint violation,
+   unexpected server state) or UPDATE mismatch triggers `ROLLBACK`; no
+   partial `metadata.to` / `message_queue` state is observable to
+   readers that open a new transaction after the failure.
 2. **No silent swallow.** Failures return `{committed: false, error}` to
    the caller, which logs one `stderr` line with `receiverAgentId`,
    `messageId`, and the error. Pre-fix `.catch(() => {})` is gone.
-3. **Retry idempotency.** The existing partial unique index
-   `uq_mq_agent_message` (`agent_id`, `message_id`) WHERE `message_id IS
-   NOT NULL` means `ON CONFLICT DO NOTHING` suppresses the second
+3. **Transaction-private connection** (Cycle 2 — auditor BLOCKER 1).
+   `persistInboundDelivery()` instantiates a dedicated `pg.Client` from
+   the given `databaseUrl`, connects, runs the transaction, and
+   `end()`s in `finally`. The process-global singleton returned by
+   `server.ts::getDb()` is NOT acceptable here: `pg.Client` transaction
+   state is per-**connection**, not per-call, so two concurrent inbound
+   handlers sharing one connection would interleave their
+   `BEGIN`/`COMMIT` and violate atomicity. Each call owns its
+   connection for its lifetime; concurrent inbound calls cannot
+   interleave. The lower-level export
+   `persistInboundDeliveryOnClient(client, params)` exists for tests
+   only — production code must not pass the singleton to it.
+4. **Retry idempotency.** The existing partial unique index
+   `uq_mq_agent_message` (`agent_id`, `message_id`) WHERE `message_id
+   IS NOT NULL` means `ON CONFLICT DO NOTHING` suppresses the second
    `message_queue` INSERT. `persistInboundDelivery()` surfaces this as
    `duplicateDedup: true`, which `handleInboundMessage` logs at the
    inbound level (unchanged stderr wording: `message_queue dedup —
    duplicate …`). The `metadata.to` `UPDATE` is already idempotent
    because `||` is monoidal for the same key/value.
-4. **pg_notify ordering (7c).** The receiver-pipeline `pg_notify
+5. **pg_notify ordering (7c).** The receiver-pipeline `pg_notify
    ('agent_inbox', …)` fanout runs **after** the 7b+7d commit and is
    **skipped** when the transaction rolled back. Subscribers therefore
    never wake up on a delivery that was never persisted, and never read
    `metadata.to = NULL` during the race window between `INSERT` and
    `UPDATE`.
-5. **agent_messages row unaffected on rollback.** Step 2's save of the
+6. **agent_messages row unaffected on rollback.** Step 2's save of the
    raw `agent_messages` row runs before routing and is not in the 7b+7d
    transaction. A failed 7b+7d therefore leaves `agent_messages` with
    the message but no `metadata.to` and no `message_queue` row — i.e.
    the receiver sees nothing in its inbox, which is the correct
    "delivery failed" observation.
+
+`mqPayloadJson` is stored into `message_queue.payload`, a `text`
+column (`db/migrate.ts` — NOT `jsonb`). The JSON encoding is the
+caller's responsibility (`handleInboundMessage` builds it via
+`JSON.stringify`).
 
 **Scope boundary.** Steps 1–6 (channel resolve, `agent_messages` save,
 routing decision) and Step 7c (post-commit `pg_notify`) are deliberately

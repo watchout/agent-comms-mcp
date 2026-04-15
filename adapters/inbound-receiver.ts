@@ -554,42 +554,42 @@ export async function handleInboundMessage(params: {
   // (Issue #177). Prior to this change they were two independent queries
   // with Step 7b's error silently swallowed — partial failure left the
   // inbox filter (metadata->>'to') NULL while the queue held a pending
-  // row ("inbox-ghost"). They now run in a single BEGIN/COMMIT on the
-  // same pg.Client; rollback restores pre-call state. See
-  // `core/inbound-delivery.ts` and SSOT §7.3.1.
+  // row ("inbox-ghost"). They now run in a single BEGIN/COMMIT on a
+  // transaction-private pg.Client instantiated by the helper from
+  // `deps.databaseUrl` (cycle 2 — the process-global singleton returned
+  // by `tryGetDb()` would let concurrent callers interleave their
+  // transactions on one socket, defeating atomicity). Rollback restores
+  // pre-call state. See `core/inbound-delivery.ts` and SSOT §7.3.1.
   let inboundCommitted = false
   if (messageId) {
-    const client = await d.tryGetDb()
-    if (client) {
-      const mqPayload = JSON.stringify({
-        channel_id: resolved.channelId,
-        thread_id: resolved.threadId ?? null,
-        author_id: senderAgentId ?? authorExternalId,
-        author_name: authorName,
-        content,
-        message_id: messageId,
-        message_type: 'chat',
-        source: platform,
-        ts: timestamp.toISOString(),
-        ...(attachments ? { attachments } : {}),
-      })
-      const r = await persistInboundDelivery(client, {
-        receiverAgentId,
-        messageId,
-        mqPayloadJson: mqPayload,
-      })
-      inboundCommitted = r.committed
-      if (!r.committed) {
-        process.stderr.write(
-          `agent-comms: inbound 7b+7d transaction failed for ${receiverAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,
-        )
-      } else if (r.duplicateDedup) {
-        // Observability: log ON CONFLICT DO NOTHING dedup at the inbound
-        // level (unchanged stderr format from prior Step 7d path).
-        process.stderr.write(
-          `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
-        )
-      }
+    const mqPayload = JSON.stringify({
+      channel_id: resolved.channelId,
+      thread_id: resolved.threadId ?? null,
+      author_id: senderAgentId ?? authorExternalId,
+      author_name: authorName,
+      content,
+      message_id: messageId,
+      message_type: 'chat',
+      source: platform,
+      ts: timestamp.toISOString(),
+      ...(attachments ? { attachments } : {}),
+    })
+    const r = await persistInboundDelivery(d.databaseUrl, {
+      receiverAgentId,
+      messageId,
+      mqPayloadJson: mqPayload,
+    })
+    inboundCommitted = r.committed
+    if (!r.committed) {
+      process.stderr.write(
+        `agent-comms: inbound 7b+7d transaction failed for ${receiverAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,
+      )
+    } else if (r.duplicateDedup) {
+      // Observability: log ON CONFLICT DO NOTHING dedup at the inbound
+      // level (unchanged stderr format from prior Step 7d path).
+      process.stderr.write(
+        `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
+      )
     }
   }
 
