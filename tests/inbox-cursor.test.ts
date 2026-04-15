@@ -146,23 +146,34 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
     expect(result.nextCursor).toEqual(cursor)
   })
 
-  test('6. µs-tied created_at — UUID tiebreaker advances past the larger-id row', async () => {
-    // Both rows share the same created_at timestamp (same µs INSERT).
-    // Row-value cursor (created_at, id) orders them by id ASC as the
-    // tiebreaker, so the last row's id is the cursor's id on the
-    // next call — and neither row is lost.
-    const sharedTs = new Date('2026-04-15T07:15:00.123456Z')
+  test('6. same-ms created_at — UUID tiebreaker advances past the larger-id row (ms precision pinned)', async () => {
+    // Precision: ms-granular per §4.8.1 (node-postgres default OID 1184
+    // parser returns JS Date which holds ms; this module does NOT
+    // override the global parser). Two rows inserted within the same
+    // millisecond collide on createdAt; the id UUID tiebreaker does
+    // real ordering work at the ms boundary — not µs — per PR #182
+    // cycle 2 auditor feedback.
+    const sharedTs = new Date('2026-04-15T07:15:00.123Z')
+    // Sanity: JS Date truncates µs → ms, so a µs-level ISO string and
+    // a ms-level ISO string collapse to the same instant.
+    expect(new Date('2026-04-15T07:15:00.123456Z').getTime()).toBe(sharedTs.getTime())
+
     const rowA = makeRow({ id: LATER_CREATED_EARLIER_UUID, created_at: sharedTs })
     const rowB = makeRow({ id: EARLIER_CREATED_LATER_UUID, created_at: sharedTs })
     const result = await fetchNewMessages('lead-ama', 20, null, {
       query: async () => ({ rows: [rowA, rowB] }),
     })
     expect(result.rows).toHaveLength(2)
-    // Cursor advances to the LAST row (id sort order in SELECT).
+    // Cursor advances to the LAST row. id ASC in the SELECT places
+    // EARLIER_CREATED_LATER_UUID (lex-larger) last, so it anchors the
+    // cursor for the next call.
     expect(result.nextCursor).toEqual({
       createdAt: sharedTs.toISOString(),
       id: EARLIER_CREATED_LATER_UUID,
     })
+    // Confirm the ISO form is ms-precise (no µs trailing digits).
+    expect(result.nextCursor!.createdAt).toBe('2026-04-15T07:15:00.123Z')
+    expect(result.nextCursor!.createdAt).not.toMatch(/\.\d{4,}Z$/)
   })
 
   test('7. ORDER BY created_at ASC, id ASC is in the SELECT (monotonic delivery)', async () => {

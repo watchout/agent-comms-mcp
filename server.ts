@@ -496,10 +496,12 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
 }
 
 // Cursor-based read tracking for the `inbox` MCP tool (SSOT
-// docs/agent-com-message-queue-spec.md §9.4). Composite (created_at,
-// id) cursor — see core/inbox-cursor.ts docstring for the rationale
-// (Issue #179: UUID-lex cursor dropped new rows whose v4 UUID sorted
-// before the stored max).
+// docs/agent-com-message-queue-spec.md §4.8.1). Composite
+// (created_at, id) cursor — see core/inbox-cursor.ts docstring for
+// the rationale (Issue #179: UUID-lex cursor dropped new rows whose
+// v4 UUID sorted before the stored max). Precision is ms-granular
+// because node-postgres's default OID 1184 parser returns JS Date;
+// same-ms bursts rely on the id UUID tiebreaker.
 let inboxCursor: InboxCursor | null = null
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {

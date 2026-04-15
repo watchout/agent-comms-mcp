@@ -9,13 +9,40 @@
  * next `inbox` call filters the new row out. See Issue #179.
  *
  * Fix: cursor is `{ createdAt, id }` and the WHERE clause uses the
- * PostgreSQL row-value comparison `(created_at, id) > ($3, $4)`.
- * Row-value `>` is lexicographic over the tuple, matching the
- * `ORDER BY created_at ASC, id ASC` ordering exactly. UUID is kept
- * as a deterministic tiebreaker for the µs-tied created_at case so
- * rows inserted in the same microsecond are not lost.
+ * explicit expansion of the composite `>` comparison:
  *
- * Semantics (SSOT: docs/agent-com-message-queue-spec.md §9.4):
+ *   AND (created_at > $3::timestamptz
+ *        OR (created_at = $3::timestamptz AND id > $4::uuid))
+ *   ORDER BY created_at ASC, id ASC
+ *
+ * Expanded form (not PG's row-value `(a, b) > ROW(...)`) because
+ * node-postgres hits PG 42P18 "could not determine data type of
+ * parameter" on anonymous record comparison, even with explicit
+ * `::type` casts. The two forms are semantically identical; the
+ * expanded form anchors each parameter to a single-column compare
+ * which the planner types unambiguously.
+ *
+ * ### Precision (PR #182 cycle 2 — auditor Layer 2 feedback)
+ *
+ * The cursor's effective precision is **millisecond-granular**.
+ * node-postgres's default OID 1184 (timestamptz) type parser
+ * converts the PG column to a JS `Date`, which holds milliseconds.
+ * This module does NOT override the global parser (doing so would
+ * affect every other timestamptz consumer in this process,
+ * expanding scope beyond the inbox fix). Consequence: two rows
+ * inserted within the same millisecond have the same `createdAt`
+ * in JS and rely on the `id` UUID tiebreaker to order and de-skip.
+ * The tiebreaker therefore does real work at the **ms** boundary,
+ * not the µs boundary.
+ *
+ * Same-ms insert bursts are the only scenario where the tiebreaker
+ * matters, and are rare given the inbox is one-writer-per-agent.
+ * If a future use case needs µs precision, we will switch to a
+ * scoped parser override (probably by routing this path through a
+ * dedicated `pg.Client` configured with `types.setTypeParser`)
+ * rather than flipping the global.
+ *
+ * ### Semantics (SSOT: docs/agent-com-message-queue-spec.md §4.8.1)
  *   - cursor is per-process (one inbox reader = one bot's server.ts)
  *   - advancing the cursor is side-effect of reading; if the caller
  *     does not persist it, duplicate delivery is possible on retry
@@ -23,9 +50,9 @@
  *     subsequent call with the same cursor still sees newer rows
  */
 export interface InboxCursor {
-  /** ISO-8601 timestamp with µs precision (PG timestamptz). */
+  /** ISO-8601 timestamp, ms precision (PG timestamptz via JS Date). */
   createdAt: string
-  /** UUID v4; deterministic tiebreaker for same-µs inserts. */
+  /** UUID v4; deterministic tiebreaker for same-ms inserts. */
   id: string
 }
 
