@@ -1015,7 +1015,7 @@ discord-cto|~/Developer/tech-lead|cto|8789|claude --dangerously-load-development
 3. tmuxセッションをkill
 4. 新規tmuxセッション作成 → claude起動コマンド送信
 5. 3秒待機 → Enter送信（TUIプロンプト自動確認）
-6. 起動確認（Listening for channel messages の検出）
+6. 起動確認（`bun server.ts` が期待ポートで listen 開始を検出。正典: `core/bot-health.ts::checkBotHealth` Check 4）
 
 #### bot_status
 
@@ -1028,7 +1028,7 @@ discord-cto|~/Developer/tech-lead|cto|8789|claude --dangerously-load-development
 **返却情報（bot毎）:**
 - セッション名、プロジェクトDir、ポート
 - tmuxセッション有無
-- チャンネルプラグインモード稼働有無
+- 稼働状態: `healthy` / `initializing` / `misconfigured` / `dead` / `crashed` / `exited` のいずれか。判定ロジックの正典は `core/bot-health.ts::checkBotHealth`
 - ポート使用状態
 
 #### watchdog_check
@@ -1042,7 +1042,7 @@ discord-cto|~/Developer/tech-lead|cto|8789|claude --dangerously-load-development
 **チェック項目:**
 1. tmuxセッション存在チェック
 2. クラッシュパターン検出（panic, fatal, SIGKILL等）
-3. チャンネルプラグインモード検証
+3. 稼働状態検証（`bun server.ts` の期待ポート listen、PID squatter の検出など。判定の正典は `core/bot-health.ts::checkBotHealth`）
 4. シェルプロンプト検出（Claude Code終了検知）
 
 #### cleanup_ports
