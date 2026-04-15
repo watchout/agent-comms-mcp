@@ -202,13 +202,22 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     // Plan §6.1 / earlier PR #168: handleInboundMessage must insert into
     // message_queue using ON CONFLICT (agent_id, message_id) DO NOTHING
     // so redelivered Discord events don't create duplicate inbox rows.
-    const src = readIfExists('adapters/inbound-receiver.ts')
-    expect(src).not.toBeNull()
-    const fn = sliceFn(src!, 'handleInboundMessage')
-    expect(fn).toMatch(/INSERT\s+INTO\s+message_queue[\s\S]{0,600}?ON\s+CONFLICT[\s\S]{0,300}?DO\s+NOTHING/i)
+    // Issue #177: the INSERT moved into persistInboundDelivery
+    // (core/inbound-delivery.ts) so 7b UPDATE + 7d INSERT can share one
+    // BEGIN/COMMIT. The handler still owns the decision to invoke it.
+    const handler = readIfExists('adapters/inbound-receiver.ts')
+    expect(handler).not.toBeNull()
+    const fn = sliceFn(handler!, 'handleInboundMessage')
+    // handler delegates to persistInboundDelivery (Issue #177 helper).
+    expect(fn).toMatch(/persistInboundDelivery\s*\(/)
+
+    const helper = readIfExists('core/inbound-delivery.ts')
+    expect(helper).not.toBeNull()
+    // The helper body contains the INSERT + ON CONFLICT DO NOTHING pin.
+    expect(helper!).toMatch(/INSERT\s+INTO\s+message_queue[\s\S]{0,600}?ON\s+CONFLICT[\s\S]{0,300}?DO\s+NOTHING/i)
     // The conflict target is (agent_id, message_id) — per the Phase 2
     // partial-unique index.
-    expect(fn).toMatch(/ON\s+CONFLICT[\s\S]{0,200}?\(\s*agent_id\s*,\s*message_id\s*\)/i)
+    expect(helper!).toMatch(/ON\s+CONFLICT[\s\S]{0,200}?\(\s*agent_id\s*,\s*message_id\s*\)/i)
   })
 
   test('8. bot-registry + watchdog/restart scripts drop --dangerously-load-development-channels', () => {

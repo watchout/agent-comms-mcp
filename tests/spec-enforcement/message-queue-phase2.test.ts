@@ -38,10 +38,16 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
 // FEAT-005: handleInboundMessage (T3) lives in adapters/inbound-
 // receiver.ts. Concat so T3 structural pins still fire at the new home.
+// Issue #177: the message_queue INSERT was extracted into
+// core/inbound-delivery.ts (persistInboundDelivery) so 7b UPDATE + 7d INSERT
+// can share a single BEGIN/COMMIT. Concat the new home so the same
+// structural pins keep firing.
 const SERVER_SRC =
   readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
   + '\n'
   + readFileSync(join(REPO_ROOT, 'adapters', 'inbound-receiver.ts'), 'utf-8')
+  + '\n'
+  + readFileSync(join(REPO_ROOT, 'core', 'inbound-delivery.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,16 +116,28 @@ describe('T2 — server.ts send-tool writes message_queue rows for each pushTarg
 // the queue or Phase 2 `next` returns empty for inbound Discord messages.
 describe('T3 — handleInboundMessage writes a message_queue row for the receiver', () => {
   test('inbound INSERT references receiverAgentId and the saved messageId', () => {
-    // Locate handleInboundMessage and grab a window from there until the
-    // closing `return { delivered: true ... }` so the assertions don't pick
-    // up the unrelated send-tool INSERT.
+    // Issue #177: the INSERT is now owned by persistInboundDelivery
+    // (core/inbound-delivery.ts), which handleInboundMessage invokes with
+    // receiverAgentId + messageId + mqPayload. Two pins:
+    //   (a) handleInboundMessage calls persistInboundDelivery(client, {
+    //       receiverAgentId, messageId, mqPayloadJson: mqPayload })
+    //   (b) persistInboundDelivery contains the message_queue INSERT
+    //       keyed by (agent_id, message_id, payload).
     const fnStart = SERVER_SRC.indexOf('async function handleInboundMessage')
     expect(fnStart).toBeGreaterThan(-1)
     const fnEnd = SERVER_SRC.indexOf('return { delivered: true', fnStart)
     expect(fnEnd).toBeGreaterThan(fnStart)
     const body = SERVER_SRC.slice(fnStart, fnEnd)
-    expect(body).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload\)/)
-    expect(body).toMatch(/\[receiverAgentId,\s*messageId,\s*mqPayload\]/)
+
+    // (a) call site delegation — receiverAgentId + messageId + mqPayload
+    //     are forwarded as named keys of the params object.
+    expect(body).toMatch(/persistInboundDelivery\s*\(\s*client\s*,\s*\{[\s\S]{0,300}?receiverAgentId\s*,[\s\S]{0,200}?messageId\s*,[\s\S]{0,200}?mqPayloadJson\s*:\s*mqPayload/)
+
+    // (b) helper body holds the INSERT + ON CONFLICT DO NOTHING pin.
+    //     SERVER_SRC is concatenated with core/inbound-delivery.ts above,
+    //     so the same regex still matches at the new home.
+    expect(SERVER_SRC).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload\)/)
+    expect(SERVER_SRC).toMatch(/ON\s+CONFLICT[\s\S]{0,200}?DO\s+NOTHING/i)
   })
 })
 
