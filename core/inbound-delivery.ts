@@ -106,12 +106,14 @@ export interface InboundDeliveryResult {
    */
   duplicateDedup: boolean
   /**
-   * Populated on failure. One of:
-   *   - the thrown error (pg driver error, connection loss, etc.)
+   * Populated on failure. Forms:
+   *   - the thrown `Error` (pg driver error, connection loss, unexpected
+   *     server state, or the `.connect()` failure in
+   *     `persistInboundDelivery`). No sentinel wrapping — callers that
+   *     need to discriminate should inspect the error object.
    *   - the string `'update_no_match'` when Step 7b's `UPDATE` matched
-   *     zero rows (stale `messageId`).
-   *   - the string `'connect_failed'` when `persistInboundDelivery` could
-   *     not open a dedicated Client.
+   *     zero rows (stale `messageId`). This is the one string sentinel
+   *     used by the helper; everything else is the raw driver error.
    */
   error?: unknown
 }
@@ -136,7 +138,15 @@ export async function persistInboundDelivery(
   try {
     return await persistInboundDeliveryOnClient(client, params)
   } finally {
-    await client.end().catch(() => {})
+    // Teardown failure is non-fatal for the caller (the transaction has
+    // already either committed or rolled back at this point), but we log
+    // it to stderr so connection-churn / server-side cleanup issues
+    // become observable instead of silently piling up.
+    await client.end().catch((err) => {
+      process.stderr.write(
+        `agent-comms: persistInboundDelivery client.end() failed (non-fatal): ${err}\n`,
+      )
+    })
   }
 }
 

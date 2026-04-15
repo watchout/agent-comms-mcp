@@ -382,6 +382,81 @@ dbDescribe('persistInboundDelivery — DB integration round-trip', () => {
     }
   })
 
+  test('concurrent persistInboundDelivery calls do not interleave (transaction-private connection)', async () => {
+    // Cycle 2 refinement — auditor CONDITIONAL concern #2: the BLOCKER
+    // 1 fix (dedicated Client per call) is only meaningful if concurrent
+    // calls don't share a connection. Run two calls via Promise.all
+    // against two distinct probe rows; both must commit and both
+    // metadata.to writes must land. If the implementation ever regressed
+    // to the singleton model, one transaction would end up consuming
+    // the other's BEGIN/COMMIT and at least one metadata.to would be
+    // missing (or the driver would raise "another command already in
+    // progress").
+    const seedClient = new Client({ connectionString: DATABASE_URL })
+    await seedClient.connect()
+    const agent1 = `probe-inbound-177-conc-a-${process.pid}-${Date.now()}`
+    const agent2 = `probe-inbound-177-conc-b-${process.pid}-${Date.now()}`
+    const msg1 = crypto.randomUUID()
+    const msg2 = crypto.randomUUID()
+    try {
+      await seedClient.query(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, source, direction, role)
+         VALUES ($1::uuid, 'probe-channel', 'probe-sender', 'hi', 'chat', '{}'::jsonb, 'agent-comms', 'inbound', 'agent')`,
+        [msg1],
+      )
+      await seedClient.query(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, source, direction, role)
+         VALUES ($1::uuid, 'probe-channel', 'probe-sender', 'hi', 'chat', '{}'::jsonb, 'agent-comms', 'inbound', 'agent')`,
+        [msg2],
+      )
+
+      const [r1, r2] = await Promise.all([
+        persistInboundDelivery(DATABASE_URL!, {
+          receiverAgentId: agent1,
+          messageId: msg1,
+          mqPayloadJson: JSON.stringify({ message_id: msg1 }),
+        }),
+        persistInboundDelivery(DATABASE_URL!, {
+          receiverAgentId: agent2,
+          messageId: msg2,
+          mqPayloadJson: JSON.stringify({ message_id: msg2 }),
+        }),
+      ])
+
+      expect(r1.committed).toBe(true)
+      expect(r2.committed).toBe(true)
+      expect(r1.error).toBeUndefined()
+      expect(r2.error).toBeUndefined()
+
+      const rows = await seedClient.query(
+        `SELECT id, metadata->>'to' AS t FROM agent_messages WHERE id IN ($1::uuid, $2::uuid) ORDER BY id`,
+        [msg1, msg2],
+      )
+      expect(rows.rows).toHaveLength(2)
+      // Both metadata.to set, and each belongs to its own receiver —
+      // interleave would have left one NULL or crossed the values.
+      const byId = new Map(rows.rows.map((r: any) => [r.id, r.t]))
+      expect(byId.get(msg1)).toBe(agent1)
+      expect(byId.get(msg2)).toBe(agent2)
+
+      const mq = await seedClient.query(
+        `SELECT agent_id, message_id FROM message_queue WHERE agent_id IN ($1, $2)`,
+        [agent1, agent2],
+      )
+      expect(mq.rows).toHaveLength(2)
+    } finally {
+      await seedClient.query(
+        `DELETE FROM message_queue WHERE agent_id IN ($1, $2)`,
+        [agent1, agent2],
+      )
+      await seedClient.query(
+        `DELETE FROM agent_messages WHERE id IN ($1::uuid, $2::uuid)`,
+        [msg1, msg2],
+      )
+      await seedClient.end()
+    }
+  })
+
   test('persistInboundDelivery(databaseUrl, …) with stale messageId rolls back (update_no_match)', async () => {
     // Exercise BLOCKER 2 fix end-to-end: a messageId that doesn't exist in
     // agent_messages must not leave a queue row behind.
