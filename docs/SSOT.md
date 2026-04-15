@@ -1085,6 +1085,27 @@ claude --dangerously-load-development-channels server:agent-comms \
 
 TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動通過する。
 
+### 16.6 Bot 起動時 agent-comms tool 呼出 convention (Issue #183 — 2026-04-16)
+
+各 bot の `CLAUDE.md` 起動ルーチンは、**起動直後に少なくとも 1 回 agent-comms MCP tool を呼出すこと**。
+
+- **対象 tool (どれか 1 つ)**: `mcp__agent-comms__inbox` / `mcp__agent-comms__bot_status` / `mcp__agent-comms__next` / `mcp__agent-comms__agents` 等、agent-comms MCP server が提供する tool。
+- **必要性**: Claude Code は MCP server を **lazy spawn** する (`.mcp.json` 記載でも自動 spawn せず、最初の tool 呼出で起動)。起動ルーチンが agent-comms tool を一度も呼ばない bot は bun (`agent-comms-mcp/server.ts`) が永遠に spawn されず、`WEBHOOK_PORT` が free のまま。`checkBotHealth` (`core/bot-health.ts`) は Check 4 で「bun server.ts listening on expected port」を pin するため、該当 bot は `initializing` 状態で固定される。
+- **観測事例**: 2026-04-15 — `discord-research` の起動ルーチンが Notion MCP のみを呼び agent-comms MCP tool を一度も呼ばなかったため、bun 不起動 / port 8801 free → `bot_status` で `initializing` 表示 (Issue #183)。
+- **点検方法**:
+  - `lsof -i :<WEBHOOK_PORT> -t` で PID を確認し、`ps eww -p <pid>` の出力に `AGENT_ID=<expected>` を含むこと
+  - `mcp__agent-comms__bot_status` で対象 bot が `healthy: bun server.ts listening + port N in use` になること
+- **CLAUDE.md 起動ルーチンの例 (推奨パターン)**:
+
+  ```markdown
+  ## 起動時ルーチン
+  1. `mcp__agent-comms__inbox` を呼出し、未処理メッセージを確認する
+     (agent-comms MCP server を spawn させる副次効果あり、§16.6)
+  2. (bot 固有の業務処理)
+  ```
+
+- **違反時の振る舞い**: bug ではなく missing convention の結果。当該 bot の `CLAUDE.md` を更新して agent-comms tool の初回呼出を追加すれば解消する。
+
 ---
 
 ## 17. 残存する設計課題（Phase 2以降）
