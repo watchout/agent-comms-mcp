@@ -514,6 +514,35 @@ agent-com history --channel agent-mem [--limit 20] [--before msg_id]
 agent-com inbox --agent-id cto [--limit 20]
 ```
 
+#### 4.8.1 inbox cursor semantics (Issue #179 — 2026-04-15)
+
+`fetchNewMessages` (server.ts / `core/inbox-cursor.ts`) は per-process の **composite cursor `(created_at, id)`** を保持する。SQL predicate:
+
+```sql
+-- 次回呼出で既読分を除外する条件
+AND (created_at > $cursor_created_at::timestamptz
+     OR (created_at = $cursor_created_at::timestamptz AND id > $cursor_id::uuid))
+ORDER BY created_at ASC, id ASC
+```
+
+- **不変条件**:
+  1. `created_at` を主キーに、`id` を **同ミリ秒内**行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない (bare `id > $cursor` は lex 比較で新着を取りこぼす、Issue #179 の原因)
+  2. cursor 進める条件は rows.length > 0 のみ。empty 結果では cursor を保持 (再試行で取りこぼさない)
+  3. cursor は process 単位の in-memory state、restart で null に戻る (restart 直後は全 unread を返すためカーソル overrun リスクなし)
+  4. 行の `metadata->>'to' = $agent_id` filter は cursor と独立。route 判定は handleInboundMessage Step 7b で確定済 (Issue #177 で同期問題を追跡)
+
+- **SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で PG 42P18 ("could not determine data type of parameter") を誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
+
+- **precision は µs 相当** (PR #182 cycle 3 auditor BLOCK 対応): PG timestamptz は µs 保持、node-postgres の default OID 1184 parser は JS `Date` (ms 粒度) に落とす。cursor を parsed `Date` から生成すると cursor ms / DB µs の非対称で `created_at > cursor` に**同一行が再マッチし duplicate delivery** が起きる (cycle 2 で見落とした論理バグ)。対応として SELECT に companion column `created_at::text AS created_at_text` を追加し、cursor 値はそちらから取る。PG の text cast は cursor round-trip に必要な精度を保持する (default DateStyle 下では `'2026-04-15 07:15:00.123456+00'` 形式)。global `pg.types.setTypeParser` 上書きは**しない** (他 timestamptz 消費箇所への副作用を避ける)。predicate/index path は実質不変の見込み (WHERE 述語は `created_at > $3::timestamptz` のままで SELECT 列追加のみ)。`id` UUID tiebreaker は µs-tied 行の case を guard。
+
+- **`created_at_text` 観測差分**: `InboxRow.created_at_text` は optional 公開フィールドとして callers (inbox tool, 将来の consumer) に観測可能。raw row を JSON.stringify / snapshot test する consumer は出力に差分が出る。列名 tidy (非公開化 / 別 object 化) は **本 Issue #179 の scope 外、future cleanup**。
+
+- **behavioral test** (`tests/inbox-cursor.test.ts`):
+  - UUID lex 順 ≠ 時系列の具体例 pair で Issue #179 回帰を pin
+  - `created_at::text AS created_at_text` が SELECT に含まれることを pin
+  - cursor が companion text (µs) を Date (ms) より優先することを unit test で pin
+  - **µs round-trip DB integration** (auditor cycle 2 必須指摘対応): `'.123456+00'` 行を INSERT → fetch1 は行を返しつつ cursor が `/\.\d{6}\+\d{2}$/` にマッチ → fetch2 で同 cursor を使い empty を確認 (duplicate delivery regression guard)
+
 ---
 
 ## 5. MCP Tools（Claude Code用ラッパー）
