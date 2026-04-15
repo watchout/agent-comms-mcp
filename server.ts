@@ -85,6 +85,10 @@ import {
   type DbAdapter,
 } from './core/route-message-db'
 import { splitMessage } from './core/message-split'
+import {
+  fetchNewMessages as fetchNewMessagesCore,
+  type InboxCursor,
+} from './core/inbox-cursor'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -491,28 +495,24 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
   return r.rows.reverse()
 }
 
-// Cursor-based read tracking for check_inbox (SSOT §9.4)
-let lastReadId: string | null = null
+// Cursor-based read tracking for the `inbox` MCP tool (SSOT
+// docs/agent-com-message-queue-spec.md §9.4). Composite (created_at,
+// id) cursor — see core/inbox-cursor.ts docstring for the rationale
+// (Issue #179: UUID-lex cursor dropped new rows whose v4 UUID sorted
+// before the stored max).
+let inboxCursor: InboxCursor | null = null
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
   const client = await tryGetDb()
   if (!client) return [] // DBなしモード: 空配列
-  const params: any[] = [forAgent, limit]
-  let whereClause = `metadata->>'to' = $1 AND author_id != $1`
-  if (lastReadId) {
-    whereClause += ` AND id > $3`
-    params.push(lastReadId)
-  }
-  const r = await client.query(
-    `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
-     FROM agent_messages WHERE ${whereClause}
-     ORDER BY created_at ASC LIMIT $2`,
-    params)
-  // Update cursor to the max id returned
-  if (r.rows.length > 0) {
-    lastReadId = r.rows[r.rows.length - 1].id
-  }
-  return r.rows
+  const { rows, nextCursor } = await fetchNewMessagesCore(
+    forAgent,
+    limit,
+    inboxCursor,
+    { query: (sql, params) => client.query(sql, params) as any },
+  )
+  inboxCursor = nextCursor
+  return rows
 }
 
 // --- Rate Limiting (DB-persistent with in-memory fallback) ---

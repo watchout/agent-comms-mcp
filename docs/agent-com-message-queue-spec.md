@@ -514,6 +514,27 @@ agent-com history --channel agent-mem [--limit 20] [--before msg_id]
 agent-com inbox --agent-id cto [--limit 20]
 ```
 
+#### 4.8.1 inbox cursor semantics (Issue #179 — 2026-04-15)
+
+`fetchNewMessages` (server.ts / `core/inbox-cursor.ts`) は per-process の **composite cursor `(created_at, id)`** を保持する。SQL predicate:
+
+```sql
+-- 次回呼出で既読分を除外する条件
+AND (created_at > $cursor_created_at::timestamptz
+     OR (created_at = $cursor_created_at::timestamptz AND id > $cursor_id::uuid))
+ORDER BY created_at ASC, id ASC
+```
+
+- **不変条件**:
+  1. `created_at` を主キーに、`id` を µs-tied 行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない (bare `id > $cursor` は lex 比較で新着を取りこぼす、Issue #179 の原因)
+  2. cursor 進める条件は rows.length > 0 のみ。empty 結果では cursor を保持 (再試行で取りこぼさない)
+  3. cursor は process 単位の in-memory state、restart で null に戻る (restart 直後は全 unread を返すためカーソル overrun リスクなし)
+  4. 行の `metadata->>'to' = $agent_id` filter は cursor と独立。route 判定は handleInboundMessage Step 7b で確定済 (Issue #177 で同期問題を追跡)
+
+- **SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で PG 42P18 ("could not determine data type of parameter") を誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
+
+- **behavioral test**: `tests/inbox-cursor.test.ts` が UUID lex 順 ≠ 時系列の具体例 pair で回帰を pin、DB integration test で expanded form の SELECT 結果順序を確認する。
+
 ---
 
 ## 5. MCP Tools（Claude Code用ラッパー）
