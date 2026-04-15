@@ -533,7 +533,9 @@ ORDER BY created_at ASC, id ASC
 
 - **SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で PG 42P18 ("could not determine data type of parameter") を誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
 
-- **precision は µs** (PR #182 cycle 3 auditor BLOCK 対応): PG timestamptz は µs 保持、node-postgres の default OID 1184 parser は JS `Date` (ms 粒度) に落とす。cursor を parsed `Date` から生成すると cursor ms / DB µs の非対称で `created_at > cursor` に**同一行が再マッチし duplicate delivery** が起きる (cycle 2 で見落とした論理バグ)。対応として SELECT に companion column `created_at::text AS created_at_text` を追加し、cursor 値はそちらから取る (PG の text cast は µs を保持: `'2026-04-15 07:15:00.123456+00'`)。global `pg.types.setTypeParser` 上書きは**しない** (他 timestamptz 消費箇所への副作用を避ける)。`id` UUID tiebreaker は µs-tied 行の case を guard。
+- **precision は µs 相当** (PR #182 cycle 3 auditor BLOCK 対応): PG timestamptz は µs 保持、node-postgres の default OID 1184 parser は JS `Date` (ms 粒度) に落とす。cursor を parsed `Date` から生成すると cursor ms / DB µs の非対称で `created_at > cursor` に**同一行が再マッチし duplicate delivery** が起きる (cycle 2 で見落とした論理バグ)。対応として SELECT に companion column `created_at::text AS created_at_text` を追加し、cursor 値はそちらから取る。PG の text cast は cursor round-trip に必要な精度を保持する (default DateStyle 下では `'2026-04-15 07:15:00.123456+00'` 形式)。global `pg.types.setTypeParser` 上書きは**しない** (他 timestamptz 消費箇所への副作用を避ける)。predicate/index path は実質不変の見込み (WHERE 述語は `created_at > $3::timestamptz` のままで SELECT 列追加のみ)。`id` UUID tiebreaker は µs-tied 行の case を guard。
+
+- **`created_at_text` 観測差分**: `InboxRow.created_at_text` は optional 公開フィールドとして callers (inbox tool, 将来の consumer) に観測可能。raw row を JSON.stringify / snapshot test する consumer は出力に差分が出る。列名 tidy (非公開化 / 別 object 化) は **本 Issue #179 の scope 外、future cleanup**。
 
 - **behavioral test** (`tests/inbox-cursor.test.ts`):
   - UUID lex 順 ≠ 時系列の具体例 pair で Issue #179 回帰を pin

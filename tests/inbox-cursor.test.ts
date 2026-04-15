@@ -329,6 +329,11 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
       // Cursor anchor MUST carry µs (6 fractional digits). This is the
       // core regression guard — the ms-truncated form '.123000+00' or
       // '.123Z' would fail here.
+      // NOTE: the exact `.ffffff+HH` textual form depends on the PG
+      // session DateStyle ('ISO, MDY' default). A non-default DateStyle
+      // could change the surrounding layout (date-component order /
+      // tz format); the sub-millisecond digits themselves are still
+      // emitted so the cursor round-trip still works.
       expect(first.nextCursor!.createdAt).toMatch(/\.\d{6}\+\d{2}$/)
       expect(first.nextCursor!.createdAt).toContain('.123456')
 

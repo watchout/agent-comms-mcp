@@ -35,11 +35,22 @@
  * (which would affect every other timestamptz consumer in this
  * process) or route this path through a scoped `pg.Client`, the
  * SELECT adds a companion column `created_at::text AS created_at_text`.
- * PG's text cast preserves full µs precision
- * (e.g. `'2026-04-15 07:15:00.123456+00'`), and passing that value
- * back through `$3::timestamptz` parses the µs portion correctly on
- * the next call. The `created_at` Date column stays available for
- * row-level UI / sorting in the caller; it is NOT the cursor value.
+ * The text-cast round-trip retains the precision the cursor needs
+ * (concrete form under the default PG DateStyle resembles
+ * `'2026-04-15 07:15:00.123456+00'`, carrying the sub-millisecond
+ * portion); passing that value back through `$3::timestamptz`
+ * parses it correctly on the next call. The `created_at` Date
+ * column stays available for row-level UI / sorting in the caller;
+ * it is NOT the cursor value.
+ *
+ * #### `created_at_text` observability note
+ *
+ * `InboxRow.created_at_text` is an optional public field on every
+ * row this function returns. Callers that JSON.stringify / snapshot
+ * rows will observe it in their output — it is not an internal
+ * scratch column. Tidying it up (hiding, renaming, moving to a
+ * parallel object) is deliberately out of scope for Issue #179 and
+ * is marked as future cleanup.
  *
  * The `id` UUID tiebreaker covers the exact µs-tied case where two
  * rows share `.123456+00` — strict `>` excludes the first row and the
@@ -55,10 +66,12 @@
  */
 export interface InboxCursor {
   /**
-   * PG timestamptz serialized as text (µs-precise).
-   * Format example: `'2026-04-15 07:15:00.123456+00'`.
-   * This is the value returned from `created_at::text` in the SELECT,
-   * NOT a JS `Date.toISOString()` (which would drop µs to ms).
+   * PG timestamptz serialized as text. Concrete format under the
+   * default DateStyle resembles `'2026-04-15 07:15:00.123456+00'`
+   * and preserves the sub-millisecond portion that the cursor
+   * round-trip needs. This is the value returned from
+   * `created_at::text` in the SELECT, NOT a JS `Date.toISOString()`
+   * (which would drop µs to ms).
    */
   createdAt: string
   /** UUID v4; deterministic tiebreaker for µs-tied inserts. */
@@ -77,9 +90,16 @@ export interface InboxRow {
   created_at: Date | string
   /**
    * Populated by the SELECT's `created_at::text AS created_at_text`
-   * companion column — µs-precise text form used as the cursor
-   * anchor. Optional so unit tests that don't simulate the column
-   * still compile; the runtime fetch path always populates it.
+   * companion column — the cursor-round-trip-precision text form
+   * used as the cursor anchor. Optional so unit tests that don't
+   * simulate the column still compile; the runtime fetch path
+   * always populates it.
+   *
+   * NOTE: publicly observable on every returned row (see the
+   * `created_at_text` observability note in the module docstring).
+   * Callers that serialize rows (JSON.stringify, snapshot tests)
+   * will see this field; hiding/renaming/segregating it is deferred
+   * as future cleanup outside Issue #179's scope.
    */
   created_at_text?: string
 }
