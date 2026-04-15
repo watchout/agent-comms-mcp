@@ -40,6 +40,7 @@ import {
   loadAgentInfo,
   type DbAdapter,
 } from '../core/route-message-db'
+import { persistInboundDelivery } from '../core/inbound-delivery'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -549,29 +550,57 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // Step 7b: Set metadata.to ONLY for delivered messages (prevents poll
-  // bypass of mentions filter).
+  // Steps 7b + 7d: atomic metadata.to UPDATE + message_queue INSERT
+  // (Issue #177). Prior to this change they were two independent queries
+  // with Step 7b's error silently swallowed — partial failure left the
+  // inbox filter (metadata->>'to') NULL while the queue held a pending
+  // row ("inbox-ghost"). They now run in a single BEGIN/COMMIT on a
+  // transaction-private pg.Client instantiated by the helper from
+  // `deps.databaseUrl` (cycle 2 — the process-global singleton returned
+  // by `tryGetDb()` would let concurrent callers interleave their
+  // transactions on one socket, defeating atomicity). Rollback restores
+  // pre-call state. See `core/inbound-delivery.ts` and SSOT §7.3.1.
+  let inboundCommitted = false
   if (messageId) {
-    const client = await d.tryGetDb()
-    if (client) {
-      await client.query(
-        `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $1) WHERE id = $2`,
-        [receiverAgentId, messageId],
-      ).catch(() => {})
+    const mqPayload = JSON.stringify({
+      channel_id: resolved.channelId,
+      thread_id: resolved.threadId ?? null,
+      author_id: senderAgentId ?? authorExternalId,
+      author_name: authorName,
+      content,
+      message_id: messageId,
+      message_type: 'chat',
+      source: platform,
+      ts: timestamp.toISOString(),
+      ...(attachments ? { attachments } : {}),
+    })
+    const r = await persistInboundDelivery(d.databaseUrl, {
+      receiverAgentId,
+      messageId,
+      mqPayloadJson: mqPayload,
+    })
+    inboundCommitted = r.committed
+    if (!r.committed) {
+      process.stderr.write(
+        `agent-comms: inbound 7b+7d transaction failed for ${receiverAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,
+      )
+    } else if (r.duplicateDedup) {
+      // Observability: log ON CONFLICT DO NOTHING dedup at the inbound
+      // level (unchanged stderr format from prior Step 7d path).
+      process.stderr.write(
+        `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
+      )
     }
   }
 
   // Step 7c: PR-B.2 mixed-mode receiver pipeline fanout (additive).
-  // For bots in receiverPipelineBots, ALSO fire pg_notify('agent_inbox', …)
-  // so future LISTEN-based subscribers receive the message via the new
-  // path. Phase 4 (Issue #130) removed pushToChannelServer; this pg_notify
-  // remains as an additional signal for any future LISTEN-based consumers.
-  // Alias so the pin in tests/pr-b-2-mixed-mode.test.ts
-  // (`RECEIVER_PIPELINE_BOTS.has(receiverAgentId)`) keeps firing at this
-  // new home — the Set itself is owned by server.ts and reaches us via
-  // `deps.receiverPipelineBots`.
+  // For bots in receiverPipelineBots, fire pg_notify('agent_inbox', …) so
+  // LISTEN-based subscribers get a signal. Runs AFTER the 7b+7d commit so
+  // subscribers that query agent_messages / message_queue on wake-up read
+  // a consistent state (Issue #177). Skips on uncommitted 7b+7d to avoid
+  // announcing a delivery that was rolled back.
   const RECEIVER_PIPELINE_BOTS = d.receiverPipelineBots
-  if (messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
+  if (inboundCommitted && messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
     const client = await d.tryGetDb()
     if (client) {
       await client.query(
@@ -588,43 +617,6 @@ export async function handleInboundMessage(params: {
           `agent-comms: receiver pipeline pg_notify failed for ${receiverAgentId} (non-fatal): ${err}\n`,
         )
       })
-    }
-  }
-
-  // Step 7d: Issue #128 Phase 2 — INSERT into message_queue for the receiver.
-  // ON CONFLICT (agent_id, message_id) DO NOTHING so redelivered Discord
-  // events cannot create duplicate inbox rows (spec-enforcement #7).
-  if (messageId) {
-    const client = await d.tryGetDb()
-    if (client) {
-      const mqPayload = JSON.stringify({
-        channel_id: resolved.channelId,
-        thread_id: resolved.threadId ?? null,
-        author_id: senderAgentId ?? authorExternalId,
-        author_name: authorName,
-        content,
-        message_id: messageId,
-        message_type: 'chat',
-        source: platform,
-        ts: timestamp.toISOString(),
-        ...(attachments ? { attachments } : {}),
-      })
-      const mqIns = await client.query(
-        `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-        [receiverAgentId, messageId, mqPayload],
-      ).catch(err => {
-        process.stderr.write(
-          `agent-comms: inbound message_queue INSERT failed for ${receiverAgentId} (non-fatal): ${err}\n`,
-        )
-        return null
-      })
-      // Observability: log when ON CONFLICT DO NOTHING suppressed a row
-      // so duplicate enqueue attempts are visible in stderr.
-      if (mqIns && mqIns.rowCount === 0) {
-        process.stderr.write(
-          `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
-        )
-      }
     }
   }
 
