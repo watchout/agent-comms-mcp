@@ -7,17 +7,21 @@
  *   2. Old bare `id > $3` cursor DROPS a new row whose UUID sorts
  *      lexicographically before the seen max. Same INPUT against
  *      the new cursor logic sees the row.
- *   3. Composite cursor SQL shape (row-value comparison).
+ *   3. Composite cursor SQL shape (expanded form, not row-value).
  *   4. Empty result preserves the cursor (no advance).
- *   5. µs-tied created_at — UUID tiebreaker advances the cursor
+ *   5. Same-ms created_at — UUID tiebreaker advances the cursor
  *      without dropping either row.
  *   6. The SELECT honors the ORDER BY (created_at ASC, id ASC)
  *      passed to deps.query (callers rely on monotonic delivery).
+ *   7. µs-precision round-trip (cycle 3 DB integration): insert a
+ *      row with `.123456+00`, fetch1 returns it with a µs-precise
+ *      cursor, fetch2 with that cursor returns empty (no duplicate
+ *      delivery).
  *
- * Test shape is unit + SQL-shape (deps.query mock). DB-integration
- * paths that require a live PostgreSQL are kept minimal and skipped
- * without DATABASE_URL, matching the pattern used by
- * tests/outbound-delivery.test.ts.
+ * Test shape is unit + SQL-shape (deps.query mock) + DB-integration
+ * for the µs round-trip (required by auditor cycle 2 BLOCK). The
+ * DB-integration tests skip without DATABASE_URL, matching the
+ * pattern used by tests/outbound-delivery.test.ts.
  */
 import { describe, test, expect } from 'bun:test'
 import { fetchNewMessages, type InboxCursor, type InboxRow } from '../core/inbox-cursor'
@@ -199,6 +203,45 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
       id: LATER_CREATED_EARLIER_UUID,
     })
   })
+
+  test('9. SELECT adds created_at::text AS created_at_text (cycle 3 µs-precision companion)', async () => {
+    let capturedSql = ''
+    await fetchNewMessages('lead-ama', 20, null, {
+      query: async (sql) => {
+        capturedSql = sql
+        return { rows: [] }
+      },
+    })
+    // The companion column is the µs-precision anchor — required so
+    // the cursor is NOT built from the ms-truncated JS Date.
+    expect(capturedSql).toContain('created_at::text AS created_at_text')
+  })
+
+  test('10. cursor prefers created_at_text over JS Date (µs-precision preserved)', async () => {
+    // Simulate what the real DB returns: the JS Date is ms-truncated
+    // (`.123Z`) but the companion text column keeps µs (`.123456+00`).
+    // The cursor MUST use the text value so the next WHERE compares
+    // µs-precisely and does NOT re-match the same row.
+    const msDate = new Date('2026-04-15T07:15:00.123Z')
+    const usText = '2026-04-15 07:15:00.123456+00'
+    const result = await fetchNewMessages('lead-ama', 20, null, {
+      query: async () => ({
+        rows: [
+          {
+            ...makeRow({ id: LATER_CREATED_EARLIER_UUID, created_at: msDate }),
+            created_at_text: usText,
+          },
+        ],
+      }),
+    })
+    expect(result.nextCursor).toEqual({
+      createdAt: usText,
+      id: LATER_CREATED_EARLIER_UUID,
+    })
+    // Explicitly: the µs-lossy Date ISO string is NOT used as the
+    // cursor anchor.
+    expect(result.nextCursor!.createdAt).not.toBe(msDate.toISOString())
+  })
 })
 
 // DB integration — requires DATABASE_URL. Skipped otherwise to match
@@ -245,6 +288,57 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
         query: (sql, params) => client.query(sql, params) as any,
       })
       expect(second.rows.map(r => r.id)).toEqual([LATER_CREATED_EARLIER_UUID])
+    } finally {
+      await client.query('ROLLBACK')
+      await client.end()
+    }
+  })
+
+  test('µs-precision round-trip — insert→fetch1→fetch2 empty (cycle 3 regression guard)', async () => {
+    // This is the test auditor cycle 2 called out as the critical
+    // missing piece: prove that a row with µs in `created_at` is
+    // returned exactly once and NOT re-delivered on the next fetch.
+    //
+    // Under the ms-truncated cursor (cycle 2), the INSERT at
+    // `.123456+00` would be re-matched by the next WHERE because
+    // cursor.createdAt was `.123+00` (ms) and `.123456 > .123` is
+    // true. Under the cycle 3 fix (`created_at::text AS created_at_text`
+    // preserves µs into the cursor), fetch2 returns empty.
+    const { Client } = await import('pg')
+    const client = new Client({ connectionString: DB_URL })
+    await client.connect()
+    try {
+      await client.query('BEGIN')
+      const agent = `test-inbox-us-${Date.now()}`
+      const sender = `test-sender-us-${Date.now()}`
+      const rowId = '11111111-2222-4333-8444-555555555555'
+      await client.query(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, metadata, created_at)
+         VALUES ($1::uuid, 'ch-test', $2, 'us-precise post', jsonb_build_object('to', $3::text),
+                 '2026-01-03 00:00:00.123456+00'::timestamptz)`,
+        [rowId, sender, agent],
+      )
+
+      // fetch1: no cursor → row returned.
+      const first = await fetchNewMessages(agent, 10, null, {
+        query: (sql, params) => client.query(sql, params) as any,
+      })
+      expect(first.rows).toHaveLength(1)
+      expect(first.rows[0]!.id).toBe(rowId)
+      expect(first.nextCursor).not.toBeNull()
+      // Cursor anchor MUST carry µs (6 fractional digits). This is the
+      // core regression guard — the ms-truncated form '.123000+00' or
+      // '.123Z' would fail here.
+      expect(first.nextCursor!.createdAt).toMatch(/\.\d{6}\+\d{2}$/)
+      expect(first.nextCursor!.createdAt).toContain('.123456')
+
+      // fetch2 with that µs-precise cursor: row is NOT re-delivered.
+      const second = await fetchNewMessages(agent, 10, first.nextCursor, {
+        query: (sql, params) => client.query(sql, params) as any,
+      })
+      expect(second.rows).toEqual([])
+      // Cursor preserved (no advance on empty result).
+      expect(second.nextCursor).toEqual(first.nextCursor)
     } finally {
       await client.query('ROLLBACK')
       await client.end()

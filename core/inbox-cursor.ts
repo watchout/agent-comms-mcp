@@ -22,25 +22,29 @@
  * expanded form anchors each parameter to a single-column compare
  * which the planner types unambiguously.
  *
- * ### Precision (PR #182 cycle 2 — auditor Layer 2 feedback)
+ * ### Precision (PR #182 cycle 3 — auditor Layer 2 feedback)
  *
- * The cursor's effective precision is **millisecond-granular**.
- * node-postgres's default OID 1184 (timestamptz) type parser
- * converts the PG column to a JS `Date`, which holds milliseconds.
- * This module does NOT override the global parser (doing so would
- * affect every other timestamptz consumer in this process,
- * expanding scope beyond the inbox fix). Consequence: two rows
- * inserted within the same millisecond have the same `createdAt`
- * in JS and rely on the `id` UUID tiebreaker to order and de-skip.
- * The tiebreaker therefore does real work at the **ms** boundary,
- * not the µs boundary.
+ * The cursor is **µs-precise** to match `agent_messages.created_at`
+ * (PG timestamptz holds microseconds). node-postgres's default OID
+ * 1184 parser converts the column to a JS `Date` which only holds
+ * milliseconds; using that parsed value as the cursor would truncate
+ * `.123456Z` to `.123000Z` and the next WHERE (`created_at >
+ * .123000Z`) would match the same row again — duplicate delivery.
  *
- * Same-ms insert bursts are the only scenario where the tiebreaker
- * matters, and are rare given the inbox is one-writer-per-agent.
- * If a future use case needs µs precision, we will switch to a
- * scoped parser override (probably by routing this path through a
- * dedicated `pg.Client` configured with `types.setTypeParser`)
- * rather than flipping the global.
+ * Rather than override the global `pg.types.setTypeParser(1184, …)`
+ * (which would affect every other timestamptz consumer in this
+ * process) or route this path through a scoped `pg.Client`, the
+ * SELECT adds a companion column `created_at::text AS created_at_text`.
+ * PG's text cast preserves full µs precision
+ * (e.g. `'2026-04-15 07:15:00.123456+00'`), and passing that value
+ * back through `$3::timestamptz` parses the µs portion correctly on
+ * the next call. The `created_at` Date column stays available for
+ * row-level UI / sorting in the caller; it is NOT the cursor value.
+ *
+ * The `id` UUID tiebreaker covers the exact µs-tied case where two
+ * rows share `.123456+00` — strict `>` excludes the first row and the
+ * OR branch with `created_at = cursor AND id > cursor_id` advances
+ * past the id that was just consumed.
  *
  * ### Semantics (SSOT: docs/agent-com-message-queue-spec.md §4.8.1)
  *   - cursor is per-process (one inbox reader = one bot's server.ts)
@@ -50,9 +54,14 @@
  *     subsequent call with the same cursor still sees newer rows
  */
 export interface InboxCursor {
-  /** ISO-8601 timestamp, ms precision (PG timestamptz via JS Date). */
+  /**
+   * PG timestamptz serialized as text (µs-precise).
+   * Format example: `'2026-04-15 07:15:00.123456+00'`.
+   * This is the value returned from `created_at::text` in the SELECT,
+   * NOT a JS `Date.toISOString()` (which would drop µs to ms).
+   */
   createdAt: string
-  /** UUID v4; deterministic tiebreaker for same-ms inserts. */
+  /** UUID v4; deterministic tiebreaker for µs-tied inserts. */
   id: string
 }
 
@@ -66,6 +75,13 @@ export interface InboxRow {
   metadata: Record<string, unknown> | null
   depth: number | null
   created_at: Date | string
+  /**
+   * Populated by the SELECT's `created_at::text AS created_at_text`
+   * companion column — µs-precise text form used as the cursor
+   * anchor. Optional so unit tests that don't simulate the column
+   * still compile; the runtime fetch path always populates it.
+   */
+  created_at_text?: string
 }
 
 export interface InboxQueryDeps {
@@ -103,8 +119,12 @@ export async function fetchNewMessages(
       ` OR (created_at = $3::timestamptz AND id > $4::uuid))`
     params.push(cursor.createdAt, cursor.id)
   }
+  // `created_at::text AS created_at_text` preserves µs precision for
+  // cursor advancement — see the Precision section in the module
+  // docstring for why this is required to avoid duplicate delivery.
   const r = await deps.query(
-    `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
+    `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth,
+            created_at, created_at::text AS created_at_text
      FROM agent_messages WHERE ${whereClause}
      ORDER BY created_at ASC, id ASC LIMIT $2`,
     params,
@@ -113,11 +133,18 @@ export async function fetchNewMessages(
     return { rows: [], nextCursor: cursor }
   }
   const last = r.rows[r.rows.length - 1]
-  const createdAtStr = last.created_at instanceof Date
-    ? last.created_at.toISOString()
-    : String(last.created_at)
+  // Prefer the µs-precise text column for the cursor. Fallback to the
+  // Date/string form of `created_at` only if the companion column is
+  // missing (unit-test fixtures that don't simulate it); in that case
+  // ms precision is all we have, which is fine for mocks that don't
+  // exercise µs semantics.
+  const createdAtCursor =
+    last.created_at_text ??
+    (last.created_at instanceof Date
+      ? last.created_at.toISOString()
+      : String(last.created_at))
   return {
     rows: r.rows,
-    nextCursor: { createdAt: createdAtStr, id: last.id },
+    nextCursor: { createdAt: createdAtCursor, id: last.id },
   }
 }

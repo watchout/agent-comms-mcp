@@ -533,9 +533,13 @@ ORDER BY created_at ASC, id ASC
 
 - **SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で PG 42P18 ("could not determine data type of parameter") を誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
 
-- **precision は ms 粒度** (PR #182 cycle 2 auditor 指摘対応): node-postgres の default OID 1184 (timestamptz) parser は PG の µs 値を JS `Date` (ms 粒度) に変換する。本 module は global な `pg.types.setTypeParser` 上書きを**しない** (他 timestamptz 消費箇所への副作用を避ける、scope 拡大リスク)。結果として同一 ms に insert された行は `createdAt` が同値になり、`id` UUID tiebreaker が ms 境界で実効的に働く。同 ms バースト insert は inbox が 1-writer-per-agent である運用上稀。µs 精度が必要になった時点で、本 cursor path を dedicated `pg.Client` + scoped `types.setTypeParser(1184, …)` に切り替える (global 変更はしない) 方針。
+- **precision は µs** (PR #182 cycle 3 auditor BLOCK 対応): PG timestamptz は µs 保持、node-postgres の default OID 1184 parser は JS `Date` (ms 粒度) に落とす。cursor を parsed `Date` から生成すると cursor ms / DB µs の非対称で `created_at > cursor` に**同一行が再マッチし duplicate delivery** が起きる (cycle 2 で見落とした論理バグ)。対応として SELECT に companion column `created_at::text AS created_at_text` を追加し、cursor 値はそちらから取る (PG の text cast は µs を保持: `'2026-04-15 07:15:00.123456+00'`)。global `pg.types.setTypeParser` 上書きは**しない** (他 timestamptz 消費箇所への副作用を避ける)。`id` UUID tiebreaker は µs-tied 行の case を guard。
 
-- **behavioral test**: `tests/inbox-cursor.test.ts` が UUID lex 順 ≠ 時系列の具体例 pair で回帰を pin、ms 粒度 + id tiebreaker を明示 pin、DB integration test で expanded form の SELECT 結果順序を確認する。
+- **behavioral test** (`tests/inbox-cursor.test.ts`):
+  - UUID lex 順 ≠ 時系列の具体例 pair で Issue #179 回帰を pin
+  - `created_at::text AS created_at_text` が SELECT に含まれることを pin
+  - cursor が companion text (µs) を Date (ms) より優先することを unit test で pin
+  - **µs round-trip DB integration** (auditor cycle 2 必須指摘対応): `'.123456+00'` 行を INSERT → fetch1 は行を返しつつ cursor が `/\.\d{6}\+\d{2}$/` にマッチ → fetch2 で同 cursor を使い empty を確認 (duplicate delivery regression guard)
 
 ---
 

@@ -499,9 +499,10 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
 // docs/agent-com-message-queue-spec.md §4.8.1). Composite
 // (created_at, id) cursor — see core/inbox-cursor.ts docstring for
 // the rationale (Issue #179: UUID-lex cursor dropped new rows whose
-// v4 UUID sorted before the stored max). Precision is ms-granular
-// because node-postgres's default OID 1184 parser returns JS Date;
-// same-ms bursts rely on the id UUID tiebreaker.
+// v4 UUID sorted before the stored max). Precision is µs: the SELECT
+// returns `created_at::text AS created_at_text` so the cursor value
+// preserves µs (PG timestamptz) and the next WHERE compares µs-precisely.
+// The id UUID tiebreaker covers µs-tied bursts.
 let inboxCursor: InboxCursor | null = null
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
