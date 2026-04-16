@@ -421,8 +421,8 @@ CEO → @cto "PR #168 をレビューして"
 
 ### 11.1 課題
 
-v1.0.3 の §6.5 では PollingDriver を MCP server 内蔵と standalone のデュアルモードで定義した。
-しかし Claude Code / Codex 等の MCP host は lazy spawn（最初の tool 呼び出しまで MCP server プロセスを起動しない）を採用しており、agent-comms tool を呼ばない bot では MCP server が起動せず、heartbeat / polling が動かない (embedded モードの場合)。
+v1.0.3 の §6.5 では PollingDriver を MCP server 内蔵 (embedded) と standalone のデュアルモードで定義し、プロセス境界・起動シーケンス・heartbeat writer 責務を規定した。
+しかし MCP host は lazy spawn（最初の tool 呼び出しまで MCP server プロセスを起動しない）を採用しており、agent-comms tool を呼ばない bot では MCP server が起動せず、heartbeat / polling が動かない (embedded モードの場合)。standalone モードでは daemon が先行起動するためこの問題を回避できる（§6.5 起動シーケンス参照）。
 
 ```
 問題の構造:
