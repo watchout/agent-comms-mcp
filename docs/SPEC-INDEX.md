@@ -1,6 +1,7 @@
 # agent-com 仕様書インデックス
 
 > 最終更新: 2026-04-17
+> **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
 ---
@@ -9,10 +10,11 @@
 
 | ファイル | バージョン | 内容 | 最終更新 |
 |----------|-----------|------|----------|
-| agent-com-message-queue-spec.md | v1.0.3 | 統合メッセージキュー仕様（コア）— PollingDriver embedded/standalone 化 / §6.6 確定技術制約 / Phase C 4 完了条件 | 2026-04-16 |
-| agent-com-source-awareness.md | v1.1.0 (PROPOSED) | source-aware routing / Single-Recipient / Daemon 分離 拡張仕様（実装着手は Phase C 完了後） | 2026-04-16 |
-| agent-com-attachment-spec.md | v1.0.0 | ファイル添付の送受信仕様 — receiver + message_queue + outbound_queue ベースに刷新（Task A2 完了） | 2026-04-17 |
-| agent-com-chat-ui-sync-spec.md | v0.1.0 | Discord↔DB同期仕様（**Task A3 で更新予定** — CEO 承認待ち + schema drift） | 2026-04-07 |
+| agent-com-message-queue-spec.md | v1.0.3 → **v2.0.0 改訂予定** | 統合メッセージキュー仕様（コア）— Phase C 再定義により OSS primary / SQLite / 1 daemon に改訂予定 | 2026-04-16 |
+| agent-com-source-awareness.md | v1.1.0 (PROPOSED) | source-aware routing / Single-Recipient 拡張仕様（実装着手は Phase C 完了後） | 2026-04-16 |
+| agent-com-attachment-spec.md | v1.0.0 | ファイル添付の送受信仕様 — receiver + message_queue + outbound_queue ベース | 2026-04-17 |
+| agent-com-chat-ui-sync-spec.md | v0.1.0 | Discord↔DB同期仕様（新 Phase C 条件で scope 再評価予定） | 2026-04-07 |
+| phase-c-redef-approval.md | — | Phase C 完了条件の再定義 (CEO 承認 2026-04-17) | 2026-04-17 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-04-17 |
 
 ---
@@ -95,5 +97,5 @@ Claude.aiプロジェクトナレッジにも以下を反映する：
 |--------|------|--------|-----------|
 | adapter仕様 | Discord以外（Telegram, Slack）対応 | 低 | 他プラットフォーム対応時 |
 | watchdog仕様 | Check 1-5, grace period, 再起動ロジック | 中 | 現行シェルスクリプトの正式化時 |
-| seed/init仕様 | agent-com init, seed.ts, bot-registry.txt | 中 | OSS公開準備時 |
-| OSS公開計画 | README, デモGIF, ライセンス | 高 | OSS公開前 |
+| seed/init仕様 | `npx agent-comms-mcp init` — token 入力 + SQLite 作成 | **高** | Phase C (v2.0.0) |
+| OSS公開計画 | README, デモGIF, ライセンス | 高 | Phase C 完了後 |
