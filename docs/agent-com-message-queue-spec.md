@@ -1,4 +1,4 @@
-# agent-com 統合メッセージキュー仕様 v1.0.3
+# agent-com 統合メッセージキュー仕様 v2.0.0
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
@@ -9,13 +9,14 @@
 ## 1. 設計原則
 
 ```
-1. CLIコマンドが正のインターフェース。MCP toolsはラッパー
-2. 受信は1プロセス（receiver）だけが行う。INSERT競合が構造的に不可能
-3. 配信はDBキューで行う。HTTP POST / SSE / pg_notify直接配信を排除
-4. LLMにUUID・チャンネルID・宛先選択を触らせない
-5. 全メッセージがDBに記録される。例外経路ゼロ
-6. MCP設定だけで接続完了。cron・外部スクリプト不要
-7. PostgreSQLでもSQLiteでも同じCLIコマンドが動く
+1. **OSS primary**: SQLite + 1 コマンドで動く製品が primary shape。PostgreSQL / multi-bot は拡張
+2. **1 daemon**: inbound receiver + outbound consumer + heartbeat monitor を 1 プロセスに集約。MCP server (per-bot) は stateless ラッパー
+3. **DB が唯一の通信路**: daemon ↔ MCP server 間は DB のみ。IPC / HTTP / WebSocket なし
+4. **LLM-agnostic**: spec に特定 LLM / MCP 実装の名前を書かない。CLI コマンドが interface
+5. **routing は deterministic**: routeInbound() は純粋関数。LLM 判断ゼロ。配信先は channels.members で決定
+6. **polling 統一**: 新着通知は polling (3s default)。PostgreSQL 接続時は pg_notify で加速 (opt-in)
+7. **PostgreSQL でも SQLite でも同じ CLI コマンドが動く**
+8. **Reply Chain Context**: next_message は reply_to chain を辿り、会話の文脈のみを返す。チャンネル履歴の一括付与はしない
 ```
 
 ### 原則 #2 の実装対応（ADR-041 S2-B / PR#157）
@@ -48,63 +49,44 @@ pull-on-notify 採用、PollingDriver を polling 基盤とする）。
 
 ## 2. 全体アーキテクチャ
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  Discord / Telegram / Slack                                          │
-│       ↓ inbound                              ↑ outbound             │
-├──────────────────────────────────────────────────────────────────────┤
-│  receiver（1プロセス、専用bot token）                                  │
-│                                                                      │
-│  Discord Gateway受信 → discordToUnified()                            │
-│    → routeInbound()（純粋関数、pushTargets決定）                       │
-│    → dispatcher()（v0.2.0: direct/delegate/summarize仕分け）          │
-│    → enrichPayload()（v0.2.0: チャンネル別コンテキスト付与）            │
-│    → agent_messages INSERT（全メッセージ永続記録）                      │
-│    → message_queue INSERT（push対象bot分）                            │
-│    → pg_notify / ファイルシグナル（新着通知のみ）                       │
-│                                                                      │
-│  outbound_queue消費（1秒polling）                                     │
-│    → Discord REST API送信（bot固有token）                             │
-│    → discord_message_id保存                                          │
-│    → 失敗時リトライ（最大5回）                                        │
-│                                                                      │
-│  heartbeat監視（30秒ごと）                                            │
-│    → 90秒途絶 → disconnected判定                                     │
-│                                                                      │
-│  起動時: 全bot tokenからdiscord_id一括登録                             │
-├──────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│                    message_queue (DB)                                 │
-│                    outbound_queue (DB)                                │
-│                    agent_messages (DB)                                │
-│                                                                      │
-├──────────────────────────────────────────────────────────────────────┤
-│  agent-com CLI（正のインターフェース）                                  │
-│                                                                      │
-│  agent-com next     未処理メッセージ1件取得                            │
-│  agent-com send     返信送信                                          │
-│  agent-com notify   自発送信（watchdog / 起動通知 / 定期レポート用）    │
-│  agent-com status   自分の状態・キュー件数確認                         │
-│  agent-com heartbeat ハートビート送信                                  │
-│  agent-com agents   エージェント一覧取得                               │
-│  agent-com history  チャンネル履歴取得                                 │
-│  agent-com inbox    未読メッセージ一覧取得                             │
-├──────────────────────────────────────────────────────────────────────┤
-│      │                 │               │               │               │
-│   MCP tools        bash直接         bash直接       bash直接          │
-│  (CLIラッパー)                                                        │
-│      │                 │               │               │               │
-│   Claude             Codex            Gemini         将来の             │
-│   Code             CLI              CLI            任意CLI            │
-└──────────────────────────────────────────────────────────────────────┘
+プロセス構成:
 
-オプション:
-┌──────────────────────────────┐ × bot数
-│  presence client              │
-│  Discord.js Client(intents:[])│
-│  オンライン表示のみ、処理なし  │
-└──────────────────────────────┘
 ```
+npx agent-comms-mcp
+  └─ 1 daemon プロセス:
+     ├─ Discord Gateway (N bot token)
+     ├─ inbound receiver
+     │    ├─ adapter.onMessage() → discordToUnified()
+     │    ├─ routeInbound(unified, channel, agents) → pushTargets[]
+     │    ├─ agent_messages INSERT
+     │    ├─ message_queue INSERT (pushTargets 分)
+     │    └─ polling signal (pg_notify opt-in)
+     ├─ outbound consumer
+     │    ├─ outbound_queue atomic claim
+     │    ├─ adapter.sendMessage() → Discord REST API
+     │    └─ nonce dedup + backoff + orphan reclaim
+     ├─ heartbeat monitor
+     │    ├─ 全 agent の heartbeat_at を READ ONLY 監視 (30s)
+     │    └─ timeout → agents.status = 'disconnected'
+     └─ MCP tools (stdio / SSE)
+          ├─ next (message_queue + reply chain context)
+          ├─ send (outbound_queue INSERT)
+          └─ agents / status / heartbeat / history / inbox
+```
+
+データフロー:
+
+```
+Discord → daemon (inbound) → agent_messages + message_queue
+                                     │
+                                     ▼
+LLM CLI → MCP server (next) ← message_queue (polling)
+LLM CLI → MCP server (send) → outbound_queue
+                                     │
+                                     ▼
+Discord ← daemon (outbound) ← outbound_queue (claim)
+```
+
 
 ---
 
@@ -196,7 +178,7 @@ CREATE TABLE outbound_queue (
   sent_at TIMESTAMPTZ,
   claimed_at TIMESTAMPTZ,              -- S2-A (PR #164): consumer が atomic claim した時刻、orphan 検出用
   next_retry_at TIMESTAMPTZ,           -- S2-A (PR #164): transient 失敗時の exponential backoff 再試行時刻
-  discord_message_id TEXT              -- Phase C Step 1 PR-A (PR #168): 送信成功時 Discord snowflake を観測性カラムとして永続化 (dedup layer ではない — 詳細は §7.4)
+  discord_message_id TEXT              -- Phase C Step 1 PR-A (PR #168): 送信成功時 Discord snowflake を観測性カラムとして永続化 (dedup layer ではない — 詳細は §6.4)
 );
 
 CREATE INDEX idx_oq_pending
@@ -219,7 +201,7 @@ CREATE INDEX idx_outbound_queue_agent_pending_next_retry
 | `status='claimed'` | PR #164 (S2-A) / PR #172 (FEAT-005 CP-3) | atomic claim で `UPDATE status='pending'→'claimed'` する瞬間的状態。`FOR UPDATE SKIP LOCKED` と組み合わせて別 consumer の二重取得を防ぐ。vocabulary was `'processing'` in PR #164; renamed to `'claimed'` in PR #172 to match work-queue convention and the claim SQL verb |
 | `claimed_at` | PR #164 (S2-A) | consumer が claim した瞬間の wall-clock。orphan 再回収の閾値判定 (`OUTBOUND_ORPHAN_TIMEOUT_SEC`) |
 | `next_retry_at` | PR #164 (S2-A) | transient failure 後の再試行最早時刻。`min(30s, 2^(attempt-1)) + jitter` の exponential backoff |
-| `discord_message_id` | PR #168 (Phase C Step 1 PR-A) | 送信成功時 Discord snowflake を永続化する **観測性カラム**。dedup layer ではない — `status='sent'` と同じ UPDATE で atomic に書くため、通常 pending filter は discord_message_id 非 null の行を拾わない構造的保証があり、consumer 内の short-circuit 分岐は mark-sent 完了後に行が何らかの理由で再度 pending に戻る極稀なエッジケースに対する**限定的保険**として動作するに留まる。実効 dedup は §7.4 の 2 層 (platform nonce + 40062 idempotent 収束)|
+| `discord_message_id` | PR #168 (Phase C Step 1 PR-A) | 送信成功時 Discord snowflake を永続化する **観測性カラム**。dedup layer ではない — `status='sent'` と同じ UPDATE で atomic に書くため、通常 pending filter は discord_message_id 非 null の行を拾わない構造的保証があり、consumer 内の short-circuit 分岐は mark-sent 完了後に行が何らかの理由で再度 pending に戻る極稀なエッジケースに対する**限定的保険**として動作するに留まる。実効 dedup は §6.4 の 2 層 (platform nonce + 40062 idempotent 収束)|
 
 ### 3.4 agents（既存テーブル改修）
 
@@ -229,7 +211,7 @@ CREATE TABLE agents (
   display_name TEXT NOT NULL,
   agent_type TEXT NOT NULL CHECK (agent_type IN ('human', 'dev', 'org')),
   cli_type TEXT CHECK (cli_type IN ('claude_code', 'codex', 'gemini', 'other')),
-  discord_token TEXT,                  -- 送信用（暗号化検討: §13）
+  discord_token TEXT,                  -- 送信用（暗号化検討: §12）
   discord_user_id TEXT,                -- Discord上のuser ID
   status TEXT NOT NULL DEFAULT 'offline'
     CHECK (status IN ('idle', 'busy', 'disconnected', 'offline')),
@@ -238,7 +220,6 @@ CREATE TABLE agents (
   last_seen_at TIMESTAMPTZ,
   heartbeat_interval INTEGER DEFAULT 30, -- 秒
   observer_mode BOOLEAN NOT NULL DEFAULT FALSE,
-  dispatch_enabled BOOLEAN NOT NULL DEFAULT FALSE, -- v0.2.0
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
@@ -334,29 +315,11 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 
 ### 4.2 agent-com send
 
-受信メッセージへの返信。分岐は `agents.current_message_id` の state で決まる（caller 非依存）。caller (CLI / MCP) は到達可能な分岐の組み合わせが異なる（ADR-048 Phase 0 D3）:
+受信メッセージへの返信。`next` → `send` パターンが唯一の経路。`agents.current_message_id` が `next` で pop 済の `message_queue.id` を指す。
 
-**分岐 A — primary path (`agents.current_message_id` set)**
-- `next` で pop 済の行への返信。`current_message_id` が当該 `message_queue.id` を指す
-- CLI: 常にこの分岐（`next` → `send` パターン必須）。`--reply-to` は省略可で、省略時は `current_message_id` が指す行の `message_id` を内部解決
-- MCP: LLM が MCP `next` tool を呼んだ後の send。`reply_to` は tool schema で required（caller 指定）
-- `message_queue` 遷移は **primary UPDATE**: `WHERE agent_id AND id = current_message_id`
-
-**分岐 B — fallback path (`current_message_id = NULL`, `reply_to` 指定あり)**
-- MCP の channel-plugin session-injection 経路専用（LLM session に直接注入され、`next` tool を呼ばない）
-- CLI はこの分岐に**到達不能**: `current_message_id` が未 set なら `NO_CURRENT_MESSAGE` エラーで pre-send 中断
-- MCP は `reply_to` 必須（`agent_messages.id` UUID 前提）
-- `message_queue` 遷移は **fallback UPDATE**: `WHERE agent_id AND message_id = reply_to AND status IN ('pending','read')`
-- PR#142 (v1.0.3 §3.2) の partial UNIQUE `uq_mq_agent_message` により 0-or-1 行
-
-**到達可能 matrix**:
-
-| Caller | 分岐 A (primary) | 分岐 B (fallback) |
-|---|---|---|
-| **CLI** | ✅ default（`next` → `send`） | ❌ `NO_CURRENT_MESSAGE` で到達不能 |
-| **MCP** | ✅ MCP `next` tool 経由 | ✅ channel-plugin session-injection 経由（本 PR 対応） |
-
-本 PR (#156) で追加したのは **分岐 B の fallback UPDATE** と関連 observability（step 9 参照）。分岐 A の primary UPDATE は従前から存在し、CLI / MCP 共通で動作する。
+- CLI: `--reply-to` は省略可。省略時は `current_message_id` が指す行の `message_id` を内部解決
+- MCP: `reply_to` は tool schema で required（caller 指定）
+- `message_queue` 遷移: `UPDATE ... SET status='replied' WHERE agent_id AND id = current_message_id`
 
 ```bash
 agent-com send --agent-id cto \
@@ -383,38 +346,28 @@ agent-com send --agent-id cto \
 **内部処理**:
 
 ```
-1. 経路判定（`agents.current_message_id` の state で決まる、caller 非依存）:
-   - `current_message_id` set → **分岐 A (primary path)**
-   - `current_message_id = NULL` かつ `reply_to` 指定あり → **分岐 B (fallback path)**
-   - どちらも不成立:
-     - CLI: `NO_CURRENT_MESSAGE` エラー（CLI は分岐 B に到達不能）
-     - MCP: `NO_REPLY_TO` エラー（`reply_to` 引数が tool schema で required）
+1. 経路判定:
+   - `current_message_id` set → primary path
+   - `current_message_id = NULL` → `NO_CURRENT_MESSAGE` エラー
 2. mentions検証:
    a. 空配列 → NOT_MENTIONEDエラー（元送信者を提案）
    b. 存在しないagent_id → INVALID_MENTION_FORMATエラー（有効一覧表示）
    c. DB不達 → MENTION_VALIDATION_UNAVAILABLEエラー
 3. 権限チェック: channels.membersに送信者が含まれるか
 4. reply_to 確定（`agent_messages.id` UUID 前提）:
-   - **CLI 分岐 A (`--reply-to` 省略時)**: `agents.current_message_id` が指す `message_queue` 行の `message_id` を内部解決して default に採用
-   - **それ以外（CLI 分岐 A `--reply-to` 明示時 / MCP 分岐 A / MCP 分岐 B）**: caller 指定の `reply_to` をそのまま使用
+   - `--reply-to` 省略時: `agents.current_message_id` が指す `message_queue` 行の `message_id` を内部解決して default に採用
+   - `--reply-to` 明示時: caller 指定の `reply_to` をそのまま使用
 5. 宛先解決（`resolveSendDestination(reply_to)`）:
-   - 両分岐共通: `reply_to` の UUID から `agent_messages` を引き、`channel_id` / `thread_id` を導出
-   - `reply_to` が `agent_messages` に存在しない（e.g., Discord snowflake 直渡し） → `MESSAGE_NOT_FOUND` エラー（fallback UPDATE 未到達）
+   - `reply_to` の UUID から `agent_messages` を引き、`channel_id` / `thread_id` を導出
+   - `reply_to` が `agent_messages` に存在しない → `MESSAGE_NOT_FOUND` エラー
 6. agent_messages INSERT
-7. push対象のmessage_queue INSERT​（mentions対象分）
-   → 対象botのstatusに応じて senderにフィードバック（§9）
-8. outbound_queue INSERT​（Discord送信用）
-9. message_queue を 'replied' へ遷移（ADR-048 Phase 0 D3）:
-   - **分岐 A (primary UPDATE, CLI / MCP 共通)**:
-     `UPDATE message_queue SET status='replied', replied_with=message_id WHERE id = current_message_id`
-   - **分岐 B (fallback UPDATE, MCP session-injection 専用)**:
-     `UPDATE message_queue SET status='replied', replied_with=message_id
-      WHERE agent_id=$self AND message_id=reply_to AND status IN ('pending','read')`
-     - v1.0.3 §3.2 の partial UNIQUE `uq_mq_agent_message` により 0 or 1 行
-     - 0 行の場合は `d3.fallback.miss` を audit_log に記録（このbotが queue に持っていない UUID への reply = cross-agent 応答等）
-     - 例外時は `d3.fallback.error` を audit_log + stderr JSON log、send 本体は成功（non-fatal）
-   - **scope**: reply_to は `agent_messages.id` UUID 前提。Discord snowflake 経路は step 5 の `resolveSendDestination` で `MESSAGE_NOT_FOUND` として pre-send 段階で落ちる → 別 issue #158 (D3b)
-10. current_message_id = null（分岐 A のみ）
+7. push対象のmessage_queue INSERT（mentions対象分）
+   → 対象botのstatusに応じて senderにフィードバック（§8）
+8. outbound_queue INSERT（Discord送信用）
+9. message_queue を 'replied' へ遷移:
+   `UPDATE message_queue SET status='replied', replied_with=message_id WHERE id = current_message_id`
+   - **scope**: reply_to は `agent_messages.id` UUID 前提。Discord snowflake 経路は step 5 で `MESSAGE_NOT_FOUND` として pre-send 段階で落ちる
+10. current_message_id = null
 11. agents.status='idle' に更新
 12. 結果をJSON出力
 ```
@@ -466,7 +419,7 @@ agent-com status --agent-id cto
 
 ### 4.5 agent-com heartbeat
 
-生存報告。polling driver内のsetIntervalで自動実行（§6.5）。CLIコマンドとしても手動実行可能。
+生存報告。daemon 内の setInterval で自動実行（§5.3）。CLIコマンドとしても手動実行可能。
 
 ```bash
 agent-com heartbeat --agent-id codex-auditor
@@ -545,330 +498,47 @@ ORDER BY created_at ASC, id ASC
 
 ---
 
-## 5. MCP Tools（Claude Code用ラッパー）
+## 5. LLM Integration
 
-全ツールはCLIコマンドのラッパー。ロジックはCLI側に集約。
+### 5.1 汎用パターン
 
-```typescript
-// src/mcp-tools.ts
+agent-com は CLI コマンドを提供。任意の LLM ツールが MCP / shell exec でラップ。
 
-import { execSync } from "child_process";
+| LLM ツール | 接続方式 | 設定 |
+|-----------|---------|------|
+| Claude Code | MCP server (stdio) | .mcp.json |
+| Codex CLI | MCP server (stdio) | codex --mcp |
+| Gemini CLI | shell exec | gemini --tool |
+| 任意 CLI | shell exec or MCP | CLI 直接呼出 |
 
-const agentId = process.env.AGENT_ID;
+### 5.2 MCP server 設定例
 
-server.tool("next_message", {
-  description: "未処理メッセージを1件取得します。取得時点で既読になります。",
-  params: {
-    priority: { type: "string", optional: true, description: "ceo_first: CEO優先" },
-    channel: { type: "string", optional: true, description: "特定チャンネルのみ" },
-  },
-}, async (params) => {
-  const args = [`--agent-id`, agentId, `--format`, `json`];
-  if (params.priority) args.push(`--priority`, params.priority);
-  if (params.channel) args.push(`--channel`, params.channel);
-  const result = execSync(`agent-com next ${args.join(" ")}`);
-  return JSON.parse(result.toString());
-});
-
-server.tool("send", {
-  description: buildSendDescription(agentCache),
-  params: {
-    mentions: { type: "array", items: { type: "string" }, required: true },
-    content: { type: "string", required: true },
-    attachments: { type: "array", items: { type: "string" }, optional: true },
-  },
-}, async (params) => {
-  const args = [
-    `--agent-id`, agentId,
-    `--mentions`, params.mentions.join(","),
-    `--content`, JSON.stringify(params.content),
-    `--format`, `json`,
-  ];
-  if (params.attachments) args.push(`--attachments`, params.attachments.join(","));
-  const result = execSync(`agent-com send ${args.join(" ")}`);
-  return JSON.parse(result.toString());
-});
-
-// agents, history, inbox, status も同様にCLIラッパー
-
-// ===== ハートビート（バックグラウンド） =====
-setInterval(() => {
-  try { execSync(`agent-com heartbeat --agent-id ${agentId}`); } catch {}
-}, 30_000);
+```json
+{ "mcpServers": { "agent-comms": { "command": "npx", "args": ["agent-comms-mcp", "--agent-id", "my-bot"] } } }
 ```
 
-### 5.1 sendツールのdescription動的生成
+MCP server は stateless。daemon 未起動なら自動 background start。
 
-```typescript
-function buildSendDescription(agents: Agent[]): string {
-  const list = agents
-    .filter(a => a.status !== 'disabled')
-    .map(a => `${a.agent_id} (${a.display_name})`)
-    .join(", ");
-  return (
-    `直前にnext_message()で取得したメッセージへ返信します。\n` +
-    `宛先チャンネルは自動設定されます。\n\n` +
-    `mentionsに指定可能なagent_id:\n${list}\n` +
-    `グループ: all（全員）, dev（開発者全員）, org（組織層全員）\n\n` +
-    `返信前にsearch_memory()で過去の決定事項を確認してください。`
-  );
-}
-```
+### 5.3 Daemon プロセスモデル
 
-### 5.2 agent_idキャッシュ
+- daemon (host に 1): receiver + outbound + heartbeat + Discord Gateway
+- per-bot MCP server (lazy spawn): stateless DB ラッパー
+- DB のみで通信、IPC なし
 
-```typescript
-let agentCache: Agent[] = [];
-let cacheExpiry = 0;
+起動シーケンス:
+1. daemon: DB 接続 → migration auto → Discord 接続 → receiver/outbound 開始
+2. MCP server: lazy spawn → DB 合流
+3. daemon 停止時: MCP は DB polling 継続 (受信済みは読める、新規受信停止)
 
-async function refreshAgentCache(): Promise<Agent[]> {
-  if (Date.now() > cacheExpiry) {
-    const result = execSync(`agent-com agents --format json`);
-    agentCache = JSON.parse(result.toString()).agents;
-    cacheExpiry = Date.now() + 60_000;
-  }
-  return agentCache;
-}
-```
+heartbeat:
+- per-bot MCP: 自 agent_id の heartbeat_at を UPDATE (30s, 1 writer per row)
+- daemon: heartbeat_at を READ ONLY 監視、timeout 時のみ status UPDATE
 
 ---
 
-## 6. 各CLIでの利用方法
+## 6. Receiver
 
-### 6.1 Claude Code（MCP経由）
-
-```json
-// .mcp.json
-{
-  "mcpServers": {
-    "agent-comms": {
-      "command": "node",
-      "args": ["src/mcp-server.js"],
-      "env": {
-        "AGENT_ID": "cto",
-        "AGENT_COM_DB": "postgres",
-        "DATABASE_URL": "postgres://..."
-      }
-    }
-  }
-}
-```
-
-LLMはMCPツール（next_message, send, agents等）を使用。
-ハートビートとpolling driverはMCP server内のsetIntervalで自動実行（§6.5参照）。
-cron・外部スクリプト不要。MCP設定のみで完結。
-
-### 6.2 Codex CLI（MCP経由）
-
-```json
-// .codex/config.toml 相当
-[mcp]
-agent-comms = { command = "node", args = ["src/mcp-server.js"] }
-
-[mcp.agent-comms.env]
-AGENT_ID = "codex-auditor"
-AGENT_COM_DB = "postgres"
-DATABASE_URL = "postgres://..."
-```
-
-Claude Codeと同一のMCP serverを使用。polling driver（§6.5）がMCP server内で自動実行されるため、crontab設定は不要。
-
-Codexはpush受信（channel plugin）が使えないため、LLMがタスク完了後に`next_message`を自発的に呼ぶことで受信する。CLAUDE.md相当の指示で以下を記載：
-
-```
-タスク完了後、次のタスクに着手する前に必ず
-mcp__agent_comms__next を実行してメッセージを確認してください。
-メッセージがあれば対応してから次のタスクに進んでください。
-```
-
-polling driverはnext呼び出し間のメッセージをバッファし、next実行時に即返却する。
-
-### 6.3 Gemini CLI（MCP経由）
-
-Gemini CLIもMCP serverに接続可能な場合は§6.1/6.2と同一構成。
-MCP未対応の場合のみbash直接実行にフォールバック：
-
-```bash
-#!/bin/bash
-# gemini-fallback.sh（MCP未対応時のみ使用）
-
-# agent-com CLIを直接呼び出し
-# heartbeatはバックグラウンドで自動実行
-agent-com daemon --agent-id spec-auditor &
-DAEMON_PID=$!
-trap "kill $DAEMON_PID" EXIT
-
-gemini -p "あなたはspec-auditor（仕様監査役）です。
-メッセージ確認: agent-com next --agent-id spec-auditor --format json
-返信: agent-com send --agent-id spec-auditor --mentions <宛先> --content <内容>
-まずメッセージを確認してください。"
-```
-
-`agent-com daemon`はheartbeat + polling driverを内蔵した常駐プロセス（§6.5のCLI版）。
-
-### 6.4 将来の任意CLI
-
-MCP対応CLI → MCP設定のみで接続完了。cron不要。
-MCP未対応CLI → `agent-com daemon` + bash呼び出しで接続。cron不要。
-
-いずれの場合もcrontab・外部スクリプト・追加セットアップは不要。
-
-### 6.5 Polling Driver（embeddedモード / standaloneモード）
-
-全CLIで共通のメッセージ受信基盤。2つの起動モードを持つ。
-
-#### プロセス境界
-
-```
-standalone mode のプロセス構成:
-- agent-com daemon (host に 1): receiver loop + outbound consumer + agent monitor
-- per-bot MCP server (bot ごとに 1, lazy spawn): next/send の stateless ラッパー
-- 両者は DB のみを介して通信、IPC なし
-```
-
-#### 起動シーケンス
-
-```
-1. daemon first: DB 接続 → receiver 購読開始 → outbound consumer 開始
-2. MCP server は lazy spawn 時に DB 経由で既存 daemon に「合流」
-3. 再起動シナリオ: daemon 停止 → MCP server は embedded fallback → daemon 復帰時に自動切替
-```
-
-> 運用スクリプト (restart-bot.sh 等) の手順は spec に書かない。spec はプロセス間の契約のみ定義。
-
-#### 起動モード
-
-```
-AGENT_COM_DAEMON_MODE=embedded    MCP server内蔵（デフォルト）
-AGENT_COM_DAEMON_MODE=standalone  agent-com daemon別プロセス（推奨）
-```
-
-**standaloneモード（推奨）:** MCP serverのlazy spawnに依存しない。restart-bot.shで先にdaemonを起動するため、 MCP serverが起動する前からheartbeat + pollingが動作する。全CLI・全botで同一の起動スクリプトが使える。
-
-```bash
-# restart-bot.sh（全bot共通、standaloneモード）
-agent-com daemon --agent-id $AGENT_ID &   # 即起動、CLI不問
-claude server:agent-comms ...             # or codex / gemini / 任意CLI
-```
-
-**embeddedモード（レガシー）:** MCP serverプロセス内でPollingDriverを実行。MCP serverがlazy spawnされるまで heartbeat/pollingが開始しない。agent-comms toolを 1 回も呼ばないbotではMCP serverが起動せず `initializing` 固定になる問題がある (Issue #183、§6.6 技術制約 #3 参照)。
-
-```typescript
-// PollingDriver実装（embedded/standalone共通）
-class PollingDriver {
-  private buffer: QueueRow[] = [];
-  private interval: NodeJS.Timeout;
-
-  constructor(
-    private agentId: string,
-    private db: DbAdapter,
-    private intervalMs: number  // AGENT_COM_POLL_INTERVAL_MS（デフォルト: 3000）
-  ) {
-    // 1. heartbeat（30秒ごと）
-    setInterval(() => this.heartbeat(), 30_000);
-
-    // 2. polling（AGENT_COM_POLL_INTERVAL_MS ごと）
-    this.interval = setInterval(() => this.poll(), this.intervalMs);
-  }
-
-  private async poll(): Promise<void> {
-    const pending = await this.db.getNextPending(this.agentId);
-    if (pending) {
-      this.buffer.push(pending);
-      console.error(`[agent-com] new message from ${pending.author_id}`);
-    }
-  }
-
-  async getNext(): Promise<QueueRow | null> {
-    if (this.buffer.length > 0) {
-      return this.buffer.shift()!;
-    }
-    return this.db.getNextPending(this.agentId);
-  }
-
-  private async heartbeat(): Promise<void> {
-    await this.db.query(
-      `UPDATE agents SET heartbeat_at = NOW(), status = 
-       CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-       WHERE agent_id = $1`,
-      [this.agentId]
-    );
-  }
-
-  stop(): void {
-    clearInterval(this.interval);
-  }
-}
-```
-
-standaloneモードの動作フロー:
-
-```
-  restart-bot.sh実行
-    → agent-com daemon起動（即座にPollingDriver開始）
-    → heartbeat + polling即開始（MCP serverの起動を待たない）
-    → LLM CLIセッション起動
-    → LLMがnext_messageツールを呼ぶ
-    → MCP server経由でdaemonのバッファから即返却
-
-  MCP serverのlazy spawnに依存しない。
-  agent-comms toolを 1 回も呼ばないbotでもheartbeatが動作する。
-```
-
-embeddedモードの動作フロー（レガシー）:
-
-```
-  MCP server起動（lazy spawn: 最初のtool呼び出し時）
-    → PollingDriver開始
-    → LLMがnextを呼ぶ → バッファから返却
-
-  注意: MCP serverがspawnされるまでheartbeat/pollingは動作しない。
-```
-
-```
-環境変数:
-  AGENT_COM_DAEMON_MODE=embedded    # デフォルト: embedded（現行 legacy）
-                                    # daemon 実装完了後に standalone へ default 切替予定
-  AGENT_COM_POLL_INTERVAL_MS=3000   # デフォルト 3 秒
-```
-
-スケーラビリティについては§14.5を参照。
-
-#### heartbeat writer 責務
-
-```
-- per-bot MCP が自 agent_id の heartbeat_at のみ UPDATE (自行 write、1 writer per row)
-- daemon は全 agent の heartbeat_at を READ ONLY で監視、timeout 検知時のみ agents.status を UPDATE
-- 同一セルへの同時書き込みは構造的に発生しない
-```
-
-### 6.6 確定済み技術制約
-
-以下は Claude Code CLI の仕様制約であり、agent-com では回避不能。
-
-```
-1. MCP notification による Claude Code コンテキスト注入: NG
-   （2026-04-11 stdio/SSE 両方で実機検証済み）
-
-2. MCP notification による idle session wake: NG
-   （2026-04-14 notification 到達は確認、session を wake しない。Issue #178）
-
-3. MCP server lazy spawn: tool が呼ばれるまで起動しない
-   （Claude Code 省メモリ設計。standalone モードで回避。Issue #183）
-```
-
-結論: bot への即時 push は現時点で不可能。
-
-```
-全 bot は next polling + タスク完了後の自発的 next 呼び出しで受信。
-standalone モードの daemon が heartbeat + polling の起動を保証する。
-```
-
----
-
-## 7. Receiver
-
-### 7.1 責務
+### 6.1 責務
 
 ```
 1. Discord Gateway接続（1 Client、専用receiver bot token）
@@ -880,7 +550,7 @@ standalone モードの daemon が heartbeat + polling の起動を保証する�
 7. 起動時: 全bot tokenからdiscord_id一括登録
 ```
 
-### 7.2 起動時のdiscord_id一括登録
+### 6.2 起動時のdiscord_id一括登録
 
 ```typescript
 async function registerAllDiscordIds(db: DbAdapter, tokens: Map<string, string>) {
@@ -899,7 +569,7 @@ async function registerAllDiscordIds(db: DbAdapter, tokens: Map<string, string>)
 }
 ```
 
-### 7.3 Inbound処理
+### 6.3 Inbound処理
 
 ```typescript
 receiverClient.on("messageCreate", async (msg) => {
@@ -922,16 +592,15 @@ receiverClient.on("messageCreate", async (msg) => {
 
   // 4. push対象のmessage_queue INSERT
   for (const agentId of result.pushTargets) {
-    const enriched = await enrichPayload(unified, agentId, db); // v0.2.0
-    await db.insertQueue(agentId, unified.id, enriched);
+    await db.insertQueue(agentId, unified.id, payload); // Reply Chain Context (§18.1) は next 取得時に付与
     await bus.signal(`bot_${agentId}`); // 新着シグナルのみ
-    // 送信者へのフィードバック（§9）
+    // 送信者へのフィードバック（§8）
     await notifySenderOfDeliveryStatus(unified.author_id, agentId, unified.id);
   }
 });
 ```
 
-#### 7.3.1 Inbound handler transactional semantics (Issue #177 — 2026-04-15)
+#### 6.3.1 Inbound handler transactional semantics (Issue #177 — 2026-04-15)
 
 `handleInboundMessage` (in `adapters/inbound-receiver.ts`) executes four
 post-routing persistence steps for every delivered message. Until Issue
@@ -1009,7 +678,7 @@ because they share the inbox-visibility invariant; widening the
 transaction would couple routing to DB transaction lifetime for no
 semantic win.
 
-### 7.4 Outbound処理
+### 6.4 Outbound処理
 
 > **S2-A (PR #164) + Phase C Step 1 PR-A (PR #168) + FEAT-005 adapter rewrite (PR #172) で挙動更新済**。以下の例示コードは初版方式（batch SELECT）。実装は atomic claim (UPDATE...FOR UPDATE SKIP LOCKED) + exponential backoff + nonce idempotency へ進化した。PR #172 で claim state を `'processing'` → `'claimed'` に rename (work-queue 標準語彙) + consumer / PollingDriver / inbound receiver を `adapters/*.ts` に抽出し、daemon entrypoint (`entrypoints/daemon.ts`) を consumer の唯一の起動点とした。例示コードの後ろに現行の挙動仕様を明記する。
 >
@@ -1080,7 +749,7 @@ setInterval(async () => {
 }, 1000);
 ```
 
-### 7.5 Heartbeat監視
+### 6.5 Heartbeat監視
 
 ```typescript
 // 30秒ごとに全agentのheartbeatを確認
@@ -1094,7 +763,7 @@ setInterval(async () => {
 }, 30_000);
 ```
 
-### 7.6 キャッシュ
+### 6.6 キャッシュ
 
 ```typescript
 // channels / agents は変更頻度が低いのでキャッシュ（TTL 60秒）
@@ -1118,7 +787,7 @@ async function refreshCaches() {
 }
 ```
 
-### 7.7 Receiver Token
+### 6.7 Receiver Token
 
 ```
 専用receiver bot（Discord Developer Portalで新規作成）を使う。
@@ -1133,7 +802,7 @@ Privileged Intents: MESSAGE CONTENT INTENT を有効化。
 
 ---
 
-## 8. routeInbound（純粋関数）
+## 7. routeInbound（純粋関数）
 
 全push経路で必ずこの関数を通る。例外なし。
 
@@ -1192,9 +861,9 @@ function routeInbound(
 
 ---
 
-## 9. Bot状態管理とフィードバック
+## 8. Bot状態管理とフィードバック
 
-### 9.1 状態遷移
+### 8.1 状態遷移
 
 ```
 offline → idle:          heartbeat受信時
@@ -1204,7 +873,7 @@ idle/busy → disconnected: heartbeat 90秒途絶
 disconnected → idle:      heartbeat再開時
 ```
 
-### 9.2 送信者フィードバック
+### 8.2 送信者フィードバック
 
 ```typescript
 async function notifySenderOfDeliveryStatus(
@@ -1249,7 +918,7 @@ async function notifySenderOfDeliveryStatus(
 }
 ```
 
-### 9.3 busy解除時の対応開始通知
+### 8.3 busy解除時の対応開始通知
 
 ```typescript
 // agent-com send コマンド内（送信成功後）
@@ -1277,9 +946,9 @@ async function notifyQueueWaiters(agentId: string) {
 
 ---
 
-## 10. メンション制御
+## 9. メンション制御
 
-### 10.1 botはagent_id形式のみ使用
+### 9.1 botはagent_id形式のみ使用
 
 ```
 "cto", "arc", "hotel-dev" 等。
@@ -1287,7 +956,7 @@ Discord形式（<@1234567890>）は使わない。
 変換はCLI内部で自動実行。
 ```
 
-### 10.2 sendコマンド内のmentions検証
+### 9.2 sendコマンド内のmentions検証
 
 ```typescript
 function validateMentions(
@@ -1323,7 +992,7 @@ function validateMentions(
 }
 ```
 
-### 10.3 メンション変換（CLI内部、自動）
+### 9.3 メンション変換（CLI内部、自動）
 
 ```
 Outbound: agent_id → Discord形式
@@ -1335,7 +1004,7 @@ Inbound: Discord形式 → agent_id
   agent_adaptersテーブルで逆引き
 ```
 
-### 10.4 access.json 廃止後の permission model
+### 9.4 access.json 廃止後の permission model
 
 ```
 Phase C 完了条件「access.json 依存ゼロ」の実体:
@@ -1346,9 +1015,9 @@ Phase C 完了条件「access.json 依存ゼロ」の実体:
 
 ---
 
-## 11. メッセージパターン
+## 10. メッセージパターン
 
-### 11.1 パターン一覧
+### 10.1 パターン一覧
 
 ```
 パターン       経路           reply_to    mentions    宛先決定
@@ -1365,7 +1034,7 @@ D. エラー通知  system自動     —           自動        送信者のキ
   ✅ LLMがUUID/チャンネルIDを扱うことがない
 ```
 
-### 11.2 引用テキスト付与
+### 10.2 引用テキスト付与
 
 ```typescript
 function formatPushContent(payload: PushPayload): string {
@@ -1394,7 +1063,7 @@ function formatPushContent(payload: PushPayload): string {
 
 ---
 
-## 12. エラーコード一覧
+## 11. エラーコード一覧
 
 ```
 NOT_MENTIONED                 mentions配列が空
@@ -1421,16 +1090,16 @@ ATTACHMENT_NOT_FOUND          指定ファイルが存在しない
 
 ---
 
-## 13. セキュリティ
+## 12. セキュリティ
 
-### 13.1 通信経路
+### 12.1 通信経路
 
 ```
 全通信がDB経由。HTTPポートはreceiverのhealthcheck（127.0.0.1:9000）のみ。
 HMAC署名不要（HTTP POST配信を廃止したため）。
 ```
 
-### 13.2 Discord Token管理
+### 12.2 Discord Token管理
 
 ```
 現状: agents.discord_token にプレーンテキスト保存
@@ -1440,7 +1109,7 @@ v0.2.0: 環境変数（DISCORD_TOKEN_{AGENT_ID}）に移行
   → SQLiteファイル流出時のtoken漏洩を防止
 ```
 
-### 13.3 bash curl直叩き検出
+### 12.3 bash curl直叩き検出
 
 ```
 agent_messagesに記録がないDiscord投稿を定期検出（receiver内蔵setInterval）:
@@ -1451,7 +1120,7 @@ agent_messagesに記録がないDiscord投稿を定期検出（receiver内蔵set
   → cron不要。receiverプロセスが生きている限り自動実行
 ```
 
-### 13.4 .env保護
+### 12.4 .env保護
 
 ```bash
 chmod 600 .env
@@ -1460,9 +1129,9 @@ chmod 600 .env
 
 ---
 
-## 14. PostgreSQL / SQLite 対応
+## 13. PostgreSQL / SQLite 対応
 
-### 14.1 MessageBus抽象化
+### 13.1 MessageBus抽象化
 
 ```typescript
 interface MessageBus {
@@ -1478,7 +1147,7 @@ class PgMessageBus implements MessageBus { ... }
 class SqliteMessageBus implements MessageBus { ... }
 ```
 
-### 14.2 DbAdapter抽象化
+### 13.2 DbAdapter抽象化
 
 ```typescript
 interface DbAdapter {
@@ -1498,7 +1167,7 @@ class PgDbAdapter implements DbAdapter { ... }
 class SqliteDbAdapter implements DbAdapter { ... }
 ```
 
-### 14.3 設定
+### 13.3 設定
 
 ```env
 AGENT_COM_DB=postgres    # pg_notify（リアルタイム）
@@ -1507,10 +1176,10 @@ AGENT_COM_DB=sqlite      # polling（1-2秒遅延）
 DATABASE_URL=postgres://user:pass@localhost:5432/agent_com
 AGENT_COM_SQLITE_PATH=./data/agent-com.db
 
-AGENT_COM_POLL_INTERVAL_MS=3000  # polling間隔（§6.5参照）
+AGENT_COM_POLL_INTERVAL_MS=3000  # polling間隔（§5.3参照）
 ```
 
-### 14.4 比較
+### 13.4 比較
 
 ```
                     PostgreSQL           SQLite
@@ -1523,7 +1192,7 @@ agent-memory連携   pgvector使用可        別途対応必要
 推奨用途           本番・大規模         開発・小規模
 ```
 
-### 14.5 スケーラビリティ（polling driver）
+### 13.5 スケーラビリティ（polling driver）
 
 bot数に応じたpolling driverの推奨設定。
 
@@ -1570,46 +1239,44 @@ client.login(process.env.DISCORD_TOKEN);
 
 ---
 
-## 16. 移行戦略
+## 14. Phase C 完了条件 (CEO 承認 2026-04-17)
 
-### 16.1 Mixed Mode（旧新共存）
+| # | 条件 | 検証方法 |
+|---|------|----------|
+| 1 | npx agent-comms-mcp で全機能起動 | CI: fresh env → bot online |
+| 2 | SQLite default / PostgreSQL optional | CI: SQLite で全テスト pass |
+| 3 | 1 daemon で inbound + outbound + heartbeat 完結 | test: daemon → Discord 送受信 |
+| 4 | routing 100% deterministic (LLM 判断ゼロ) | test: LLM 未接続で全 routing 動作 |
+| 5 | 外部ファイル依存ゼロ | grep: access.json/plugin 参照なし |
 
-```
-Phase A: receiverを追加起動（既存per-bot clientも維持）
-  → 両方がメッセージを受信
-  → discord_message_id UNIQUE制約 + ON CONFLICT DO NOTHING でdedup
-  → 旧botは変わらず動く
+---
 
-Phase B: 1 botずつ新方式に切替
-  → per-bot clientの受信を停止
-  → CLI + message_queue経由に切替
-  → 問題があればper-bot client再開（ロールバック可能）
+## 15. CLI Setup
 
-Phase C: 全bot切替完了 + daemon 分離
-  → 旧 daemon / channel-server コード削除
-  → --dangerously-load-development-channels 除去（全 bot）
-  → per-bot Discord client を presence client に置換
-  → restart-bot.sh に agent-com daemon standalone モード追加
-  → 完了条件:
-    ・全 bot で plugin:discord が /mcp に表示されない
-    ・全 bot で agent-com daemon が heartbeat 送信中
-    ・受信が next_message 一本（channel plugin 経由ゼロ）
-    ・access.json 依存ゼロ
+Quick Start:
+
+```bash
+npx agent-comms-mcp          # 未 init → init + start / init 済 → start
+npx agent-comms-mcp init     # 初期化のみ
+npx agent-comms-mcp start    # daemon 起動のみ
+npx agent-comms-mcp status   # 状態表示
 ```
 
-### 16.2 ロールバック
+.env テンプレート (init 時自動生成):
 
 ```
-各Phase間でロールバック可能:
-  Phase B失敗 → per-bot client再開（即時復旧）
-  Phase A失敗 → receiver停止（既存動作に影響なし）
+DISCORD_TOKEN=your-bot-token
+AGENT_COM_DB=sqlite
+AGENT_COM_SQLITE_PATH=./agent-com.db
+AGENT_COM_POLL_INTERVAL_MS=3000
+AGENT_COM_REPLY_CHAIN_DEPTH=10
 ```
 
 ---
 
-## 17. agent-memoryとの連携
+## 16. agent-memoryとの連携
 
-### 17.1 search_memory誘導
+### 16.1 search_memory誘導
 
 ```
 next_messageの結果にhintを含める:
@@ -1619,7 +1286,7 @@ sendツールのdescriptionにも記載:
   "返信前にsearch_memory()で過去の決定事項を確認してください。"
 ```
 
-### 17.2 DB共有
+### 16.2 DB共有
 
 ```
 PostgreSQL環境:
@@ -1633,9 +1300,9 @@ SQLite環境:
 
 ---
 
-## 18. 監視
+## 17. 監視
 
-### 18.1 Receiverヘルスチェック
+### 17.1 Receiverヘルスチェック
 
 ```json
 // GET http://127.0.0.1:9000/health
@@ -1661,21 +1328,21 @@ SQLite環境:
 }
 ```
 
-### 18.2 Gemini CLI Spec Auditor（日次）
+### 17.2 Gemini CLI Spec Auditor（日次）
 
 ```
 全仕様書を一括読み込み → 矛盾検出レポート
-spec-auditor botがpolling driver（§6.5）で常駐。
+spec-auditor botがpolling driver（§5.3）で常駐。
 CLAUDE.md相当の指示で24時間ごとに全spec監査を自発実行。
 PRマージ後のトリガーはagent-com notify経由でbot宛にメッセージ送信。
 結果をCEOのキューに投入。
 cron不要。
 ```
 
-### 18.3 bash curl直叩き検出（receiver内蔵、1時間ごと）
+### 17.3 bash curl直叩き検出（receiver内蔵、1時間ごと）
 
 ```
-receiver内のsetIntervalで自動実行（§13.3と同一実装）。
+receiver内のsetIntervalで自動実行（§12.3と同一実装）。
 Discord REST APIで最新メッセージ取得
 → agent_messages.discord_message_idと突合
 → 未記録のメッセージ = bypass → audit_log + CEO通知
@@ -1684,27 +1351,43 @@ cron不要。receiverプロセスに内蔵。
 
 ---
 
-## 19. v0.2.0 精度向上対策
+## 18. 精度向上対策
 
-### 19.1 Push Enrichment
+### 18.1 Reply Chain Context
 
-message_queue INSERT前に、受信者のチャンネル別直近発言・会話フローを付与。
-詳細は §4.1 next_messageのmy_recent / channel_recentフィールドで実装済み。
+next_message が返すメッセージに reply_to chain を辿った会話文脈を付加。
 
-### 19.2 Dispatcher層
+問題: チャンネル内で複数話題が並行する場合、直近 N 件履歴では無関係メッセージが混入。
+解決: reply_to を再帰的に辿り、当該会話の chain のみを返す。
 
-routeInbound()とmessage_queue INSERT間に挟み、メッセージを仕分け。
-direct / delegate / summarize の3択。ルールベース + Haikuフォールバック。
-詳細は別文書（receiver-architecture §19.2）を参照。
+```typescript
+interface NextMessageResponse {
+  message: AgentMessage;
+  reply_chain: AgentMessage[];  // reply_to 祖先 (最大 REPLY_CHAIN_DEPTH)
+}
+```
 
-### 19.3 チャンネルtopic表示
+```sql
+-- SQL (再帰 CTE、SQLite / PostgreSQL 共通)
+WITH RECURSIVE chain AS (
+  SELECT * FROM agent_messages WHERE id = $current_message_id
+  UNION ALL
+  SELECT m.* FROM agent_messages m JOIN chain c ON m.id = c.reply_to
+)
+SELECT * FROM chain ORDER BY created_at ASC LIMIT $REPLY_CHAIN_DEPTH;
+```
+
+設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 10)
+reply_to = NULL (会話起点) に到達するか depth 到達で停止。
+
+### 18.2 チャンネルtopic表示
 
 channels.topicカラムを追加済み（§3.5）。
 next_message結果 / send結果にtopicを含めることで、LLMがチャンネルの目的を常に把握。
 
 ---
 
-## 20. 設定一覧
+## 19. 設定一覧
 
 | 環境変数 | デフォルト | 説明 |
 |----------|-----------|------|
@@ -1713,39 +1396,17 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_SQLITE_PATH` | `./data/agent-com.db` | SQLiteファイルパス |
 | `AGENT_COM_RECEIVER_TOKEN` | — | 専用receiver bot token |
 | `DISCORD_TOKEN_{AGENT_ID}` | — | 各botのDiscord token |
-| `AGENT_COM_POLL_INTERVAL_MS` | `3000` | polling間隔（§6.5、§14.5参照） |
-| `AGENT_COM_DAEMON_MODE` | `embedded` | `embedded`: MCP 内蔵（現行、legacy） / `standalone`: daemon 別プロセス（推奨、v1.1.0 で IPC 拡張）。§6.5 参照。daemon 未実装段階で standalone を default にすると bot が heartbeat 不在になるため `embedded` を default に固定（CTO 技術判断 2026-04-16、source-awareness §12 後方互換性と整合） |
+| `AGENT_COM_POLL_INTERVAL_MS` | `3000` | polling間隔（§5.3、§13.5参照） |
 | `AGENT_COM_HEALTH_PORT` | `9000` | healthcheckポート |
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
-| `AGENT_COM_ENRICH_PUSH` | `false` | Push Enrichment(v0.2.0) |
-| `AGENT_COM_DISPATCH_ENABLED` | `false` | Dispatcher(v0.2.0) |
-| `AGENT_COM_DISPATCH_MODEL` | `claude-haiku-4-5-20251001` | 判定用LLM |
+| `AGENT_COM_REPLY_CHAIN_DEPTH` | `10` | Reply Chain Context の最大遡り深度（§18.1） |
 | `AGENT_COM_ATTACHMENT_TTL_HOURS` | `24` | 添付ファイル保持時間 |
 | `AGENT_COM_ATTACHMENT_MAX_SIZE` | `52428800` | 添付1ファイル上限(bytes) |
 | `AGENT_COM_ATTACHMENT_DISK_LIMIT_MB` | `1024` | temp領域ディスク上限 |
 
 ---
 
-## 21. 実装優先順
-
-| Phase | 内容 | 依存 |
-|-------|------|------|
-| 1 | agent-com CLI基盤（next / send / notify / status / heartbeat / agents） | なし |
-| 2 | DbAdapter（Pg + SQLite） + MessageBus（Pg + SQLite） | なし |
-| 3 | message_queue / outbound_queue テーブル + マイグレーション | Phase 2 |
-| 4 | receiver実装（inbound + outbound消費 + heartbeat監視） | Phase 2, 3 |
-| 5 | MCP tools（CLIラッパー） | Phase 1 |
-| 6 | 移行: Mixed Mode（Phase A: receiver追加起動） | Phase 4 |
-| 7 | 移行: Phase B（1 botずつ新方式切替） | Phase 6 |
-| 8 | 移行: Phase C（旧コード削除 + channel plugin 除去 + daemon standalone モード + presence client） | Phase 7 |
-| 9 | v0.2.0: Push Enrichment + Dispatcher | Phase 7完了後 |
-| 10 | v0.2.0: Gemini CLI spec auditor + bash curl検出 | Phase 7完了後 |
-
-Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
-
----
-
-## 22. 廃止される要素
+## 20. 廃止される要素
 
 ```
 ❌ SSE daemon
@@ -1762,6 +1423,14 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 ❌ channel_portカラム / ポート管理
 ❌ 共有Client vs Per-Bot Clientの二重構造
 ❌ human → 全員push例外
+❌ Dispatcher 層 — CEO 判断で廃止
+❌ AGENT_COM_DAEMON_MODE — 1 mode に統一
+❌ AGENT_COM_DISPATCH_ENABLED / DISPATCH_MODEL
+❌ agents.dispatch_enabled カラム
+❌ embedded mode — daemon 一択
+❌ access.json — DB routing で完結
+❌ plugin:discord — adapter 統合済み
+❌ Push Enrichment (チャンネル履歴) — Reply Chain Context に置換
 ```
 
 ---
@@ -1770,6 +1439,7 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-17 | v2.0.0: OSS primary に組織原理を転換。Dispatcher 廃止 / dual mode 廃止 / SQLite default / 1 daemon 集約 / Reply Chain Context 導入 / LLM-agnostic 化。Phase C 条件を product 視点で再定義 (CEO 承認)。 |
 | 2026-04-17 | Task A2.5: §6.5 にプロセス境界図・起動シーケンス・heartbeat writer 責務を追記、§10.4 access.json 廃止後 permission model 追加。外部 AI レビュー指摘（what は書いたが how が未記述）への対応 |
 | 2026-04-16 | Task A1 repo sync: gdrive canonical を repo 反映、§20 `AGENT_COM_DAEMON_MODE` default を `embedded` に訂正（gdrive 表記 standalone は daemon 未実装段階で bug、CTO 技術判断）、source-awareness §11.8 との矛盾を解消、SPEC-INDEX 更新同梱 |
 | 2026-04-14 | v1.0.3: §6.5 PollingDriver embedded/standalone デュアルモード化（standalone 推奨）、§6.6 確定済み技術制約追加（MCP notification NG + idle wake NG + lazy spawn）、§16 Phase C に daemon 分離・完了条件追加、§21 Phase 8 拡張、§20 `AGENT_COM_DAEMON_MODE` 追加 |

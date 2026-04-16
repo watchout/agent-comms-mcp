@@ -10,7 +10,7 @@
 
 | ファイル | バージョン | 内容 | 最終更新 |
 |----------|-----------|------|----------|
-| agent-com-message-queue-spec.md | v1.0.3 → **v2.0.0 改訂予定** | 統合メッセージキュー仕様（コア）— Phase C 再定義により OSS primary / SQLite / 1 daemon に改訂予定 | 2026-04-16 |
+| agent-com-message-queue-spec.md | v2.0.0 | 統合メッセージキュー仕様（コア）— OSS primary / SQLite default / 1 daemon 集約 / LLM-agnostic / Reply Chain Context (Phase C 再定義 CEO 承認) | 2026-04-17 |
 | agent-com-source-awareness.md | v1.1.0 (PROPOSED) | source-aware routing / Single-Recipient 拡張仕様（実装着手は Phase C 完了後） | 2026-04-16 |
 | agent-com-attachment-spec.md | v1.0.0 | ファイル添付の送受信仕様 — receiver + message_queue + outbound_queue ベース | 2026-04-17 |
 | agent-com-chat-ui-sync-spec.md | v0.1.0 | Discord↔DB同期仕様（新 Phase C 条件で scope 再評価予定） | 2026-04-07 |
