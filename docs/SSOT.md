@@ -241,7 +241,7 @@ interface AccessConfig {
 
 ### 4.2 メッセージルーティング
 
-> 詳細仕様: docs/channel-thread-control-spec.md
+> 詳細仕様: docs/agent-com-message-queue-spec.md §4 / §8 / §10-12 (旧 channel-thread-control-spec から統合、SPEC-INDEX.md:70 参照)
 
 #### 設計原則
 1. botが宛先を選択する手段を物理的に持たない
@@ -272,7 +272,7 @@ interface AccessConfig {
    - それ以外 → drop（DB保存のみ）
 4. DB INSERT（全メッセージ、フィルタ結果に関わらず）
 5. push対象botのlast_received_channel/thread更新
-6. push対象botにのみpushToChannelServer()で配信
+6. push対象botにのみmessage_queue経由で配信（Phase 4 以降、旧 pushToChannelServer は廃止）
 
 #### 廃止された機能
 - ~~active_thread~~ → last_received_contextに置き換え
@@ -310,7 +310,7 @@ send tool / CLI send → agent_messages INSERT + outbound_queue INSERT
 - LISTEN ハンドラが受信して追加ルーティング (Phase 5 receiver pipeline canary)
 
 **廃止済み (Phase 4で削除):**
-- pushToChannelServer / channel-server.ts / agents.channel_port (soft-deprecated)
+- pushToChannelServer / channel-server.ts （PR #193 で削除済） / agents.channel_port (soft-deprecated、未 DROP)
 - sendInboxSignal / filesystem .signal files
 - SSE fallback (botContexts.get → server.notification) in send tool
 
@@ -516,19 +516,19 @@ claude --channels agent-com:discord agent-com:slack
 
 ```bash
 # Phase 5起動コマンド（全機能統合 — server.ts 1プロセスで MCP tools + channel + Discord + pg_notify）
-# channelサーバー名: "server" — server.tsがclaude/channel capabilityを宣言するMCPサーバー
+# 実態: bot-registry.txt と一致 (AGENT_COM_RUNTIME=daemon claude server:agent-comms ...)
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
 WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
-claude --dangerously-load-development-channels server:server.ts \
+AGENT_COM_RUNTIME=daemon claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```
 
-> **channelサーバー名について:** `server:server.ts` の `server` はMCPサーバー名（.mcp.jsonで定義）。
-> `server.ts` はそのサーバーのエントリポイント。`--dangerously-load-development-channels server:server.ts`
-> はserver MCPサーバーのserver.tsファイルをchannelサーバーとして読み込むことを意味する。
+> **MCPサーバー名について:** `server:agent-comms` の `agent-comms` は `.mcp.json` で定義された MCP サーバー名。
+> `server.ts` がそのエントリポイント。`AGENT_COM_RUNTIME=daemon` で daemon モード起動 (PollingDriver + outbound consumer 含む)。
+> daemon 分離（standalone モード）は Phase C 以降の予定。
 
-**旧方式（Phase 4 — bridge別プロセス、フォールバック用）:**
+**旧方式（Phase 4 — bridge別プロセス、フォールバック用、現在は未使用）:**
 ```bash
 claude --dangerously-load-development-channels server:agent-com-bridge \
        --mcp-config .mcp.json \
@@ -753,10 +753,10 @@ npm start
 #   5. DBポーリング（フォールバック）
 
 # Claude Code起動コマンド
-# channelサーバー名 "server" は .mcp.json で定義されたMCPサーバー名
+# MCPサーバー名 "agent-comms" は .mcp.json で定義 (実態は bot-registry.txt と一致)
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
 WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
-claude --dangerously-load-development-channels server:server.ts \
+AGENT_COM_RUNTIME=daemon claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```
@@ -990,7 +990,7 @@ bun agent-com check-plugin
 
 ```
 # SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND
-discord-cto|~/Developer/tech-lead|cto|8789|claude --dangerously-load-development-channels server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
+discord-cto|~/Developer/tech-lead|cto|8789|AGENT_COM_RUNTIME=daemon claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
 ...
 ```
 
@@ -1076,9 +1076,9 @@ bot-registry.txtに登録されたポートのうち、対応するtmuxセッシ
 
 ### 16.5 起動コマンド
 
-全botが統一コマンドで起動される：
+全botが統一コマンドで起動される（実態: bot-registry.txt と一致）：
 ```bash
-claude --dangerously-load-development-channels server:agent-comms \
+AGENT_COM_RUNTIME=daemon claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```

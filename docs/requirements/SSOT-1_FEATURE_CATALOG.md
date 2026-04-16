@@ -41,7 +41,6 @@
 | FEAT-030 | Webhook inbound adapter (connect-webhook-push) | P1 | proprietary | M | FEAT-011 |
 | FEAT-031 | SSE transport (push delivery over Server-Sent Events) | P2 | proprietary | L | FEAT-003 |
 | FEAT-032 | LLM adapter abstraction (anthropic / openai / google) | P2 | proprietary | M | None |
-| FEAT-033 | HMAC signing for bridge webhooks (shared/hmac) | P1 | proprietary | S | None |
 | FEAT-034 | Audit log (audit_log table, agent lifecycle events) | P1 | proprietary | S | FEAT-009 |
 | FEAT-035 | Rate limiting (rate_limits table, per agent/channel) | P1 | proprietary | S | FEAT-002 |
 | FEAT-036 | Duplicate detection window (duplicate_hashes, 10s) | P1 | proprietary | S | None |
@@ -89,6 +88,7 @@ All features here are **`proprietary`** because agent-comms-mcp is an infrastruc
 | FEAT-031 | Existing | SSE_TRANSPORT_SPEC.md; low-traffic bridge path |
 | FEAT-049 | Refactoring | to be added in outbound_forwarder_unification v2 |
 | FEAT-050 | Existing | growing — s2a spec-enforcement test pending FEAT-005 |
+| FEAT-033 | Removed (PR #193) | HMAC signing for bridge webhooks (shared/hmac) — Phase 4 で旧 Webhook Channel 廃止 + PR #193 で shared/hmac 削除済、entry も catalog から除外 |
 
 ---
 
@@ -119,3 +119,4 @@ All features here are **`proprietary`** because agent-comms-mcp is an infrastruc
 |------|--------|--------|
 | 2026-04-12 | Stub created by framework retrofit | agent-com-dev (PR #160) |
 | 2026-04-13 | Initial catalog populated (50 features) from codebase survey | lead-ama |
+| 2026-04-16 | FEAT-033 (HMAC signing for bridge webhooks) removed — shared/hmac deleted in PR #193, Phase C Tier 2 docs cleanup | agent-com-dev |

@@ -9,10 +9,12 @@
 
 PR-B.2 enables an additive `pg_notify('agent_inbox')` fanout from the receiver pipeline
 for the bots listed in `RECEIVER_PIPELINE_BOTS` (default: `auditor`). The existing
-per-bot Discord client + `pushToChannelServer` paths keep running unchanged, so
+per-bot Discord client + `message_queue` delivery paths keep running unchanged, so
 mixed-mode is purely additive: any bot in the canary set receives messages via BOTH
-the legacy push path AND the new `LISTEN agent_inbox` path. Subscribers' in-process
+the queue path AND the new `LISTEN agent_inbox` path. Subscribers' in-process
 `processedIds` Set handles double-delivery.
+
+> 注: 当初 PR-B.2 description は `pushToChannelServer` 経由を前提にしていたが、Phase 4 (Issue #130) で同 path は廃止、PR #193 で channel-server.ts 自体も削除済。現在の per-bot 経路は message_queue + outbound_queue。
 
 ### Connection-pool monitoring (CTO scope #7, Spike 2 finding)
 
