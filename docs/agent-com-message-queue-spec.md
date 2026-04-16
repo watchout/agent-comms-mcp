@@ -713,12 +713,27 @@ MCP未対応CLI → `agent-com daemon` + bash呼び出しで接続。cron不要�
 
 いずれの場合もcrontab・外部スクリプト・追加セットアップは不要。
 
-### 6.5 Polling Driver（MCP server内蔵）
+### 6.5 Polling Driver（embeddedモード / standaloneモード）
 
-全CLIで共通のメッセージ受信基盤。MCP serverプロセス内で自動実行される。
+全CLIで共通のメッセージ受信基盤。2つの起動モードを持つ。
+
+```
+AGENT_COM_DAEMON_MODE=embedded    MCP server内蔵（デフォルト）
+AGENT_COM_DAEMON_MODE=standalone  agent-com daemon別プロセス（推奨）
+```
+
+**standaloneモード（推奨）:** MCP serverのlazy spawnに依存しない。restart-bot.shで先にdaemonを起動するため、 MCP serverが起動する前からheartbeat + pollingが動作する。全CLI・全botで同一の起動スクリプトが使える。
+
+```bash
+# restart-bot.sh（全bot共通、standaloneモード）
+agent-com daemon --agent-id $AGENT_ID &   # 即起動、CLI不問
+claude server:agent-comms ...             # or codex / gemini / 任意CLI
+```
+
+**embeddedモード（レガシー）:** MCP serverプロセス内でPollingDriverを実行。MCP serverがlazy spawnされるまで heartbeat/pollingが開始しない。agent-comms toolを 1 回も呼ばないbotではMCP serverが起動せず `initializing` 固定になる問題がある (Issue #183、§16.6 技術制約 #3 参照)。
 
 ```typescript
-// MCP server起動時に自動開始
+// PollingDriver実装（embedded/standalone共通）
 class PollingDriver {
   private buffer: QueueRow[] = [];
   private interval: NodeJS.Timeout;
@@ -731,7 +746,7 @@ class PollingDriver {
     // 1. heartbeat（30秒ごと）
     setInterval(() => this.heartbeat(), 30_000);
 
-    // 2. polling（AGENT_COM_POLL_INTERVAL_MS ごどと）
+    // 2. polling（AGENT_COM_POLL_INTERVAL_MS ごと）
     this.interval = setInterval(() => this.poll(), this.intervalMs);
   }
 
@@ -739,23 +754,20 @@ class PollingDriver {
     const pending = await this.db.getNextPending(this.agentId);
     if (pending) {
       this.buffer.push(pending);
-      // ログ出力（デバッグ用）
       console.error(`[agent-com] new message from ${pending.author_id}`);
     }
   }
 
-  // next_message ツール呼び出し時にバッファから返却
   async getNext(): Promise<QueueRow | null> {
     if (this.buffer.length > 0) {
       return this.buffer.shift()!;
     }
-    // バッファ空の場合、即時DBチェック
     return this.db.getNextPending(this.agentId);
   }
 
   private async heartbeat(): Promise<void> {
     await this.db.query(
-      `UPDATE agents SET last_seen_at = NOW(), status = 
+      `UPDATE agents SET heartbeat_at = NOW(), status = 
        CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
        WHERE agent_id = $1`,
       [this.agentId]
@@ -768,33 +780,59 @@ class PollingDriver {
 }
 ```
 
-```
-動作フロー:
-
-  MCP server起動
-    → PollingDriver開始（heartbeat + polling自動実行）
-    → LLMがnext_messageツールを呶ぶ
-    → PollingDriver.getNext()がバッファから即返却
-    → バッファ空ならDB直接チェック
-
-  cron不要。外部スクリプト不要。MCP設定だけで動く。
-```
+standaloneモードの動作フロー:
 
 ```
-CLI版（MCP未対応環境用）:
+  restart-bot.sh実行
+    → agent-com daemon起動（即座にPollingDriver開始）
+    → heartbeat + polling即開始（MCP serverの起動を待たない）
+    → LLM CLIセッション起動
+    → LLMがnext_messageツールを呼ぶ
+    → MCP server経由でdaemonのバッファから即返却
 
-  agent-com daemon --agent-id <id>
-    → 同一のPollingDriverをCLIプロセスとして実行
-    → heartbeat + polling自動実行
-    → LLMはagent-com next CLIコマンドで受信
+  MCP serverのlazy spawnに依存しない。
+  agent-comms toolを 1 回も呼ばないbotでもheartbeatが動作する。
+```
+
+embeddedモードの動作フロー（レガシー）:
+
+```
+  MCP server起動（lazy spawn: 最初のtool呼び出し時）
+    → PollingDriver開始
+    → LLMがnextを呼ぶ → バッファから返却
+
+  注意: MCP serverがspawnされるまでheartbeat/pollingは動作しない。
 ```
 
 ```
 環境変数:
-  AGENT_COM_POLL_INTERVAL_MS=3000  # デフォルト3秒
+  AGENT_COM_DAEMON_MODE=standalone  # デフォルト: standalone（推奨）
+  AGENT_COM_POLL_INTERVAL_MS=3000   # デフォルト 3 秒
 ```
 
 スケーラビリティについては§14.5を参照。
+
+### 6.6 確定済み技術制約
+
+以下は Claude Code CLI の仕様制約であり、agent-com では回避不能。
+
+```
+1. MCP notification による Claude Code コンテキスト注入: NG
+   （2026-04-11 stdio/SSE 両方で実機検証済み）
+
+2. MCP notification による idle session wake: NG
+   （2026-04-14 notification 到達は確認、session を wake しない。Issue #178）
+
+3. MCP server lazy spawn: tool が呼ばれるまで起動しない
+   （Claude Code 省メモリ設計。standalone モードで回避。Issue #183）
+```
+
+結論: bot への即時 push は現時点で不可能。
+
+```
+全 bot は next polling + タスク完了後の自発的 next 呼び出しで受信。
+standalone モードの daemon が heartbeat + polling の起動を保証する。
+```
 
 ---
 
@@ -1508,9 +1546,16 @@ Phase B: 1 botずつ新方式に切替
   → CLI + message_queue経由に切替
   → 問題があればper-bot client再開（ロールバック可能）
 
-Phase C: 全bot切替完了
-  → 旧daemon/channel-server コード削除
-  → per-bot Discord clientをpresence clientに置換
+Phase C: 全bot切替完了 + daemon 分離
+  → 旧 daemon / channel-server コード削除
+  → --dangerously-load-development-channels 除去（全 bot）
+  → per-bot Discord client を presence client に置換
+  → restart-bot.sh に agent-com daemon standalone モード追加
+  → 完了条件:
+    ・全 bot で plugin:discord が /mcp に表示されない
+    ・全 bot で agent-com daemon が heartbeat 送信中
+    ・受信が next_message 一本（channel plugin 経由ゼロ）
+    ・access.json 依存ゼロ
 ```
 
 ### 16.2 ロールバック
@@ -1630,6 +1675,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_RECEIVER_TOKEN` | — | 専用receiver bot token |
 | `DISCORD_TOKEN_{AGENT_ID}` | — | 各botのDiscord token |
 | `AGENT_COM_POLL_INTERVAL_MS` | `3000` | polling間隔（§6.5、§14.5参照） |
+| `AGENT_COM_DAEMON_MODE` | `standalone` | `embedded`: MCP 内蔵 / `standalone`: daemon 別プロセス（§6.5 参照） |
 | `AGENT_COM_HEALTH_PORT` | `9000` | healthcheckポート |
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
 | `AGENT_COM_ENRICH_PUSH` | `false` | Push Enrichment(v0.2.0) |
@@ -1652,7 +1698,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | 5 | MCP tools（CLIラッパー） | Phase 1 |
 | 6 | 移行: Mixed Mode（Phase A: receiver追加起動） | Phase 4 |
 | 7 | 移行: Phase B（1 botずつ新方式切替） | Phase 6 |
-| 8 | 移行: Phase C（旧コード削除 + presence client） | Phase 7 |
+| 8 | 移行: Phase C（旧コード削除 + channel plugin 除去 + daemon standalone モード + presence client） | Phase 7 |
 | 9 | v0.2.0: Push Enrichment + Dispatcher | Phase 7完了後 |
 | 10 | v0.2.0: Gemini CLI spec auditor + bash curl検出 | Phase 7完了後 |
 
@@ -1685,6 +1731,7 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-16 | v1.0.3 (gdrive sync, Task A): §6.5 PollingDriver embedded/standalone デュアルモード化（standalone 推奨）、§6.6 確定済み技術制約追加（MCP notification NG + idle wake NG + lazy spawn、Issue #178/#183 reference）、§16 Phase C に daemon 分離・4 完了条件追加、§21 Phase 8 拡張、§20 `AGENT_COM_DAEMON_MODE` 追加 |
 | 2026-04-12 | v1.0.3: §3.2 に `uq_mq_agent_message` 部分 UNIQUE index 追加 + INSERT の正式形式を `ON CONFLICT DO NOTHING` と規定（ADR-048 Phase 0 D4、PR#142 / 対応実装 PR#140） |
 | 2026-04-12 | v1.0.2: §6.1-6.5 全CLIをMCP内蔵polling driverに統一、§14.5 スケーラビリティ追加、§4.3/4.5/13.3/18.2/18.3 cron依存を全廃止（全てMCP server/receiver内蔵に統一） |
 | 2026-04-10 | v1.0.0: 統合メッセージキュー仕様（旧receiver-architecture + channel-thread-control統合、全22セクション） |
