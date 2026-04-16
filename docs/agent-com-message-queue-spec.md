@@ -717,6 +717,27 @@ MCP未対応CLI → `agent-com daemon` + bash呼び出しで接続。cron不要�
 
 全CLIで共通のメッセージ受信基盤。2つの起動モードを持つ。
 
+#### プロセス境界
+
+```
+standalone mode のプロセス構成:
+- agent-com daemon (host に 1): receiver loop + outbound consumer + agent monitor
+- per-bot MCP server (bot ごとに 1, lazy spawn): next/send の stateless ラッパー
+- 両者は DB のみを介して通信、IPC なし
+```
+
+#### 起動シーケンス
+
+```
+1. daemon first: DB 接続 → receiver 購読開始 → outbound consumer 開始
+2. MCP server は lazy spawn 時に DB 経由で既存 daemon に「合流」
+3. 再起動シナリオ: daemon 停止 → MCP server は embedded fallback → daemon 復帰時に自動切替
+```
+
+> 運用スクリプト (restart-bot.sh 等) の手順は spec に書かない。spec はプロセス間の契約のみ定義。
+
+#### 起動モード
+
 ```
 AGENT_COM_DAEMON_MODE=embedded    MCP server内蔵（デフォルト）
 AGENT_COM_DAEMON_MODE=standalone  agent-com daemon別プロセス（推奨）
@@ -812,6 +833,14 @@ embeddedモードの動作フロー（レガシー）:
 ```
 
 スケーラビリティについては§14.5を参照。
+
+#### heartbeat writer 責務
+
+```
+- per-bot MCP が自 agent_id の heartbeat_at のみ UPDATE (自行 write、1 writer per row)
+- daemon は全 agent の heartbeat_at を READ ONLY で監視、timeout 検知時のみ agents.status を UPDATE
+- 同一セルへの同時書き込みは構造的に発生しない
+```
 
 ### 6.6 確定済み技術制約
 
@@ -1306,6 +1335,15 @@ Inbound: Discord形式 → agent_id
   agent_adaptersテーブルで逆引き
 ```
 
+### 10.4 access.json 廃止後の permission model
+
+```
+Phase C 完了条件「access.json 依存ゼロ」の実体:
+- Routing 層: routeInbound() が channels.members で配信先を決定 (既存 DB ベース)
+- Filtering 層: bot 側の system prompt / configuration で自己責任判定 (LLM-agnostic)
+- DB に access_control テーブルは作らない
+```
+
 ---
 
 ## 11. メッセージパターン
@@ -1732,6 +1770,7 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-17 | Task A2.5: §6.5 にプロセス境界図・起動シーケンス・heartbeat writer 責務を追記、§10.4 access.json 廃止後 permission model 追加。外部 AI レビュー指摘（what は書いたが how が未記述）への対応 |
 | 2026-04-16 | Task A1 repo sync: gdrive canonical を repo 反映、§20 `AGENT_COM_DAEMON_MODE` default を `embedded` に訂正（gdrive 表記 standalone は daemon 未実装段階で bug、CTO 技術判断）、source-awareness §11.8 との矛盾を解消、SPEC-INDEX 更新同梱 |
 | 2026-04-14 | v1.0.3: §6.5 PollingDriver embedded/standalone デュアルモード化（standalone 推奨）、§6.6 確定済み技術制約追加（MCP notification NG + idle wake NG + lazy spawn）、§16 Phase C に daemon 分離・完了条件追加、§21 Phase 8 拡張、§20 `AGENT_COM_DAEMON_MODE` 追加 |
 | 2026-04-12 | v1.0.3: §3.2 に `uq_mq_agent_message` 部分 UNIQUE index 追加 + INSERT の正式形式を `ON CONFLICT DO NOTHING` と規定（ADR-048 Phase 0 D4、PR#142 / 対応実装 PR#140） |
