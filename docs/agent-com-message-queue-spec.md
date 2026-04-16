@@ -526,7 +526,7 @@ ORDER BY created_at ASC, id ASC
 ```
 
 - **不変条件**:
-  1. `created_at` を主キーに、`id` を **同ミリ秒内**行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない (bare `id > $cursor` は lex 比較で新着を取りこぼす、Issue #179 の原因)
+  1. `created_at` を主キー (µs 粒度、PG timestamptz の最小保持精度) に、`id` を **同 µs 内**行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない (bare `id > $cursor` は lex 比較で新着を取りこぼす、Issue #179 の原因)。JS `Date` は ms 粒度に丸めるため、cursor は `created_at_text` companion column 経由で µs を保持する (precision 段参照)
   2. cursor 進める条件は rows.length > 0 のみ。empty 結果では cursor を保持 (再試行で取りこぼさない)
   3. cursor は process 単位の in-memory state、restart で null に戻る (restart 直後は全 unread を返すためカーソル overrun リスクなし)
   4. 行の `metadata->>'to' = $agent_id` filter は cursor と独立。route 判定は handleInboundMessage Step 7b で確定済 (Issue #177 で同期問題を追跡)
