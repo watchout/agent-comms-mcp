@@ -410,6 +410,8 @@ CREATE INDEX idx_msg_attachments_expires
 
 ### agent_messages への参照整合性
 
+> **実装注記**: 現行 db/migrate.ts は UUID/JSONB (v0 schema)。本 spec は target state。migration は daemon 分離 Phase で実施予定。
+
 - `message_attachments.message_id` は `agent_messages.id`（TEXT、UUID 文字列）を参照
 - v1.0.3 §3.1 agent_messages の primary key は TEXT なので FK 型を一致させる
 - `ON DELETE CASCADE` で agent_messages 削除時に attachments メタも消える
