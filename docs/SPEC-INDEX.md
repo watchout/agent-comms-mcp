@@ -21,25 +21,25 @@
 
 ## 各仕様書のスコープ
 
-### message-queue-spec.md（コア仕様、全22セクション）
-- 全体アーキテクチャ（receiver + CLI + message_queue）
+### message-queue-spec.md（コア仕様、v2.0.0、全20セクション）
+- 設計原則（OSS primary / 1 daemon / DB-only / LLM-agnostic / deterministic routing / polling 統一 / cross-DB / Reply Chain Context）
+- 全体アーキテクチャ（1 daemon プロセス構成 + データフロー）
 - DBスキーマ（agent_messages, message_queue, outbound_queue, agents, channels）
 - CLIコマンド仕様（next / send / notify / status / heartbeat / agents / history / inbox）
-- MCP Tools（CLIラッパー）
-- 各CLI利用方法（Claude Code / Codex CLI / Gemini CLI）
+- LLM Integration（汎用パターン / MCP 設定例 / Daemon プロセスモデル）
 - Receiver（inbound / outbound / heartbeat監視）
-- routeInbound（純粋関数）
+- routeInbound（純粋関数、deterministic routing）
 - Bot状態管理（idle / busy / disconnected）+ フィードバック
 - メンション制御（検証 / 提案 / 変換）
 - メッセージパターン（通常返信 / 自発送信 / システム通知）
 - エラーコード一覧
 - セキュリティ
 - PostgreSQL / SQLite両対応
-- Presence Client
-- 移行戦略（Mixed Mode）
+- Phase C 完了条件（CEO 承認 2026-04-17、5 条件）
+- CLI Setup（Quick Start / .env テンプレート）
 - agent-memory連携
 - 監視
-- v0.2.0精度向上（Push Enrichment / Dispatcher）
+- 精度向上対策（Reply Chain Context）
 - 設定一覧
 - 廃止要素一覧
 
