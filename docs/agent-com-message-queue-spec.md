@@ -730,7 +730,7 @@ agent-com daemon --agent-id $AGENT_ID &   # 即起動、CLI不問
 claude server:agent-comms ...             # or codex / gemini / 任意CLI
 ```
 
-**embeddedモード（レガシー）:** MCP serverプロセス内でPollingDriverを実行。MCP serverがlazy spawnされるまで heartbeat/pollingが開始しない。agent-comms toolを 1 回も呼ばないbotではMCP serverが起動せず `initializing` 固定になる問題がある (Issue #183、§16.6 技術制約 #3 参照)。
+**embeddedモード（レガシー）:** MCP serverプロセス内でPollingDriverを実行。MCP serverがlazy spawnされるまで heartbeat/pollingが開始しない。agent-comms toolを 1 回も呼ばないbotではMCP serverが起動せず `initializing` 固定になる問題がある (Issue #183、§6.6 技術制約 #3 参照)。
 
 ```typescript
 // PollingDriver実装（embedded/standalone共通）

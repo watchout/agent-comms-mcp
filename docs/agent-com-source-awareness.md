@@ -719,8 +719,9 @@ v1.1.0 完了 = 以下全てが動作:
 
 | 日付 | 内容 |
 |------|------|
-| 2026-04-16 | v1.1.0 gdrive → repo sync (Task A): PROPOSED status で repo 反映、Phase C 完了後に着手 |
-| 2026-04-14 | v1.1.0 改訂 4: §11.8 standalone をデフォルトに変更（v1.0.3 で基本 daemon 導入済み、v1.1.0 は IPC 拡張） |
+| 2026-04-16 | §11.8 default embedded に訂正 (message-queue-spec §20 + §12 整合、auditor cycle 3 指摘反映)。gdrive canonical の "standalone default" 表記は daemon 未実装段階で bug であり、CTO 技術判断で message-queue-spec §20 と同じく `embedded` を default に統一 |
+| 2026-04-16 | v1.1.0 gdrive → repo sync (Task A1): PROPOSED status で repo 反映、Phase C 完了後に着手 |
+| 2026-04-14 | v1.1.0 改訂 4: §11.8 standalone をデフォルトに変更（v1.0.3 で基本 daemon 導入済み、v1.1.0 は IPC 拡張）※ 2026-04-16 の repo sync で embedded default に訂正済 (上記 entry 参照) |
 | 2026-04-14 | v1.1.0 改訂 3: §11 Daemon 分離追加（PollingDriver 独立プロセス化、IPC 通信、embedded / standalone 切替、watchdog 統合、restart-bot.sh 統一）、§12-14 を再番号付け、Phase 7-8 追加 |
 | 2026-04-14 | v1.1.0 改訂 2: §10 Single-Recipient Messaging 追加（1 メッセージ 1 宛先制約、send mentions 制限、routeInbound 変更、notify broadcast 例外）、§11-13 を再番号付け |
 | 2026-04-13 | v1.1.0 初版: source awareness 設計（§1-9、Phase C 完了後着手） |
