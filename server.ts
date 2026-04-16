@@ -54,7 +54,6 @@ import {
   setInboundReceiverDeps,
   type InboundRouteResult,
 } from './adapters/inbound-receiver'
-import { signPayload } from './shared/hmac'
 // PR-A: pure routing functions extracted to core/ so the future receiver
 // (PR-B) and this server share a single implementation. Behavioural
 // contract is unchanged — see ADR-041 implementation step 1/2.
