@@ -619,10 +619,12 @@ AGENT_COM_DAEMON_MODE=embedded
   → 小規模（1-3 bot）で手軽に使いたい場合
   → lazy spawn 問題は「起動時に agents tool を 1 回呼ぶ」で回避
 
-AGENT_COM_DAEMON_MODE=standalone （デフォルト、v1.0.3 で導入）
+AGENT_COM_DAEMON_MODE=standalone （推奨、v1.1.0 で IPC 拡張）
   → daemon 分離。別プロセスで heartbeat / polling / outbound 実行
   → 全 bot 規模で推奨。lazy spawn 回避が保証される
   → IYASAKA の本番構成はこちら
+  → **daemon 未実装段階では default は `embedded`**
+     (§12 後方互換性 + message-queue-spec §20 と整合、daemon 実装完了後に standalone へ default 切替)
 ```
 
 ### 11.9 watchdog 統合

@@ -806,7 +806,8 @@ embeddedモードの動作フロー（レガシー）:
 
 ```
 環境変数:
-  AGENT_COM_DAEMON_MODE=standalone  # デフォルト: standalone（推奨）
+  AGENT_COM_DAEMON_MODE=embedded    # デフォルト: embedded（現行 legacy）
+                                    # daemon 実装完了後に standalone へ default 切替予定
   AGENT_COM_POLL_INTERVAL_MS=3000   # デフォルト 3 秒
 ```
 
@@ -1675,7 +1676,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_RECEIVER_TOKEN` | — | 専用receiver bot token |
 | `DISCORD_TOKEN_{AGENT_ID}` | — | 各botのDiscord token |
 | `AGENT_COM_POLL_INTERVAL_MS` | `3000` | polling間隔（§6.5、§14.5参照） |
-| `AGENT_COM_DAEMON_MODE` | `standalone` | `embedded`: MCP 内蔵 / `standalone`: daemon 別プロセス（§6.5 参照） |
+| `AGENT_COM_DAEMON_MODE` | `embedded` | `embedded`: MCP 内蔵（現行、legacy） / `standalone`: daemon 別プロセス（推奨、v1.1.0 で IPC 拡張）。§6.5 参照。daemon 未実装段階で standalone を default にすると bot が heartbeat 不在になるため `embedded` を default に固定（CTO 技術判断 2026-04-16、source-awareness §12 後方互換性と整合） |
 | `AGENT_COM_HEALTH_PORT` | `9000` | healthcheckポート |
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
 | `AGENT_COM_ENRICH_PUSH` | `false` | Push Enrichment(v0.2.0) |
@@ -1731,7 +1732,8 @@ Phase 1-5: 実装。Phase 6-8: 移行。Phase 9-10: 精度向上。
 
 | 日付 | 内容 |
 |------|------|
-| 2026-04-16 | v1.0.3 (gdrive sync, Task A): §6.5 PollingDriver embedded/standalone デュアルモード化（standalone 推奨）、§6.6 確定済み技術制約追加（MCP notification NG + idle wake NG + lazy spawn、Issue #178/#183 reference）、§16 Phase C に daemon 分離・4 完了条件追加、§21 Phase 8 拡張、§20 `AGENT_COM_DAEMON_MODE` 追加 |
+| 2026-04-16 | Task A1 repo sync: gdrive canonical を repo 反映、§20 `AGENT_COM_DAEMON_MODE` default を `embedded` に訂正（gdrive 表記 standalone は daemon 未実装段階で bug、CTO 技術判断）、source-awareness §11.8 との矛盾を解消、SPEC-INDEX 更新同梱 |
+| 2026-04-14 | v1.0.3: §6.5 PollingDriver embedded/standalone デュアルモード化（standalone 推奨）、§6.6 確定済み技術制約追加（MCP notification NG + idle wake NG + lazy spawn）、§16 Phase C に daemon 分離・完了条件追加、§21 Phase 8 拡張、§20 `AGENT_COM_DAEMON_MODE` 追加 |
 | 2026-04-12 | v1.0.3: §3.2 に `uq_mq_agent_message` 部分 UNIQUE index 追加 + INSERT の正式形式を `ON CONFLICT DO NOTHING` と規定（ADR-048 Phase 0 D4、PR#142 / 対応実装 PR#140） |
 | 2026-04-12 | v1.0.2: §6.1-6.5 全CLIをMCP内蔵polling driverに統一、§14.5 スケーラビリティ追加、§4.3/4.5/13.3/18.2/18.3 cron依存を全廃止（全てMCP server/receiver内蔵に統一） |
 | 2026-04-10 | v1.0.0: 統合メッセージキュー仕様（旧receiver-architecture + channel-thread-control統合、全22セクション） |
