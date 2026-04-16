@@ -1214,7 +1214,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         required: ['content', 'mentions', 'reply_to'],
       },
     },
-    // focus/unfocus removed — reply_to is required (channel-thread-control-spec §4.2)
+    // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
     {
       name: 'unfocus',
       description: 'DEPRECATED — no longer needed. Destination is auto-determined.',

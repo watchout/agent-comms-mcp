@@ -553,7 +553,8 @@ async function sendMessage(args: string[]) {
       )
 
       // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
-      // full receiver-side routing (channel-server push, SSE fallback, …).
+      // full receiver-side routing (message_queue per-recipient INSERT + outbound_queue
+      // for Discord delivery; legacy channel-server push / SSE fallback removed in PR #193).
       //
       // The agent_inbox LISTEN handler routes per-recipient: `to` MUST be a
       // recipient agent_id, NOT the channel id. Fan out one notify per mention so
