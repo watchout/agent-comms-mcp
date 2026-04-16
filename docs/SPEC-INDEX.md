@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-04-16
+> 最終更新: 2026-04-17
 > agent-com 仕様書の索引です。
 
 ---
@@ -11,9 +11,9 @@
 |----------|-----------|------|----------|
 | agent-com-message-queue-spec.md | v1.0.3 | 統合メッセージキュー仕様（コア）— PollingDriver embedded/standalone 化 / §6.6 確定技術制約 / Phase C 4 完了条件 | 2026-04-16 |
 | agent-com-source-awareness.md | v1.1.0 (PROPOSED) | source-aware routing / Single-Recipient / Daemon 分離 拡張仕様（実装着手は Phase C 完了後） | 2026-04-16 |
-| agent-com-attachment-spec.md | v0.1.0 | ファイル添付の送受信仕様（**Task A2 で更新予定** — channel-server 前提 drift あり） | 2026-04-08 |
+| agent-com-attachment-spec.md | v1.0.0 | ファイル添付の送受信仕様 — receiver + message_queue + outbound_queue ベースに刷新（Task A2 完了） | 2026-04-17 |
 | agent-com-chat-ui-sync-spec.md | v0.1.0 | Discord↔DB同期仕様（**Task A3 で更新予定** — CEO 承認待ち + schema drift） | 2026-04-07 |
-| SPEC-INDEX.md | — | 本ファイル | 2026-04-16 |
+| SPEC-INDEX.md | — | 本ファイル | 2026-04-17 |
 
 ---
 
