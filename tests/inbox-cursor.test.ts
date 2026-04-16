@@ -150,13 +150,22 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
     expect(result.nextCursor).toEqual(cursor)
   })
 
-  test('6. same-ms created_at — UUID tiebreaker advances past the larger-id row (ms precision pinned)', async () => {
-    // Precision: ms-granular per §4.8.1 (node-postgres default OID 1184
-    // parser returns JS Date which holds ms; this module does NOT
-    // override the global parser). Two rows inserted within the same
-    // millisecond collide on createdAt; the id UUID tiebreaker does
-    // real ordering work at the ms boundary — not µs — per PR #182
-    // cycle 2 auditor feedback.
+  test('6. same-ms created_at — UUID tiebreaker advances past the larger-id row (mock-level ms case)', async () => {
+    // Precision note: SSOT §4.8.1 defines the cursor as µs-granular
+    // (PG timestamptz's minimum precision), with the id UUID acting as
+    // tiebreaker at the same-µs boundary. Real DB round-trips preserve
+    // µs via the `created_at_text` companion column and are pinned by
+    // the DB integration test further below (`Issue #179 regression —
+    // µs round-trip`).
+    //
+    // This unit test uses `makeRow({ created_at: new Date(...) })`
+    // mocks, and JS `Date` only holds ms. So at the mock layer the two
+    // probe rows share a ms-level instant, and the id UUID tiebreaker
+    // does its ordering work at the ms boundary here — not µs. That
+    // difference is a property of the **mock**, not of the
+    // production cursor semantics. (Earlier PR #182 cycle 2 auditor
+    // feedback stated ms; cycle 3 refined the production path to µs
+    // via `created_at_text`.)
     const sharedTs = new Date('2026-04-15T07:15:00.123Z')
     // Sanity: JS Date truncates µs → ms, so a µs-level ISO string and
     // a ms-level ISO string collapse to the same instant.
