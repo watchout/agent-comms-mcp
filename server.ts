@@ -2388,12 +2388,9 @@ async function postConnect() {
   }
 
   // Phase 5: Connect Discord adapter (if token provided, stdio/channel-plugin mode)
-  // ADR-041 S2-B: this stdio-mode `discord.onMessage` is the SOLE callsite of
-  // `handleInboundMessage` (i.e. sole inbound routing / message_queue INSERT
-  // source). daemon mode per-bot Discord clients MUST NOT bind onMessage at
-  // all; daemon shared Discord client binds a MINIMAL onMessage that ONLY
-  // emits `sendHumanWarning` (no handleInboundMessage, no message_queue).
-  // See: docs/agent-com-message-queue-spec.md §2 原則 #2 (受信は1プロセス).
+  // Phase C I3: handleInboundMessage is now invoked from 2 callsites
+  // (stdio + daemon). Dedup: processedIds + uq_mq_agent_message UNIQUE + discord_message_id UNIQUE.
+  // I5 で stdio callsite を削除し daemon に統合後、1 callsite に戻る。
   if (DISCORD_BOT_TOKEN && TRANSPORT_MODE !== 'daemon') {
     try {
       discord.onMessage((msg) => {
