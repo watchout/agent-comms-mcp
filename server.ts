@@ -212,6 +212,18 @@ const RECEIVER_PIPELINE_BOTS = new Set<string>(
 const sseStartTime = Date.now()
 const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
+// --- pg_notify helper (I2: conditional notify for SQLite/PG unification) ---
+// When AGENT_COM_PG_NOTIFY=false, all pg_notify calls are suppressed so
+// SQLite mode works with polling only. PG mode keeps pg_notify as acceleration.
+async function pgNotify(client: Client | null, channel: string, payload: string): Promise<void> {
+  if (!client || process.env.AGENT_COM_PG_NOTIFY === 'false') return
+  try {
+    await client.query(`SELECT pg_notify($1, $2)`, [channel, payload])
+  } catch (err) {
+    process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
+  }
+}
+
 // --- Discord Adapter (Phase 5, FEAT-005: extracted to adapters/discord-client.ts) ---
 // `discord`, `discordClients`, refreshAgentCache, resolveDiscordToken,
 // connectBotDiscord, getDiscordClient are imported from
@@ -693,10 +705,7 @@ async function registerAgent(): Promise<void> {
   process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
 
   // pg_notify: agent.online + audit_log
-  await client.query(
-    `SELECT pg_notify('agent_events', $1)`,
-    [JSON.stringify({ event: 'agent.online', agent_id: AGENT_ID, org_id: 'default' })]
-  ).catch(() => {})
+  await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: AGENT_ID, org_id: 'default' }))
   await writeAuditLog('agent.online', AGENT_ID, AGENT_ID, { runtime: config.agent.runtime })
 
   // Heartbeat every 5 minutes
@@ -755,10 +764,7 @@ async function unregisterAgent(): Promise<void> {
   if (client) {
     await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
     // pg_notify: agent.offline + audit_log
-    await client.query(
-      `SELECT pg_notify('agent_events', $1)`,
-      [JSON.stringify({ event: 'agent.offline', agent_id: AGENT_ID, org_id: 'default' })]
-    ).catch(() => {})
+    await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.offline', agent_id: AGENT_ID, org_id: 'default' }))
     await writeAuditLog('agent.offline', AGENT_ID, AGENT_ID, {})
   }
 }
@@ -1635,17 +1641,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         await dbClient.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
       }
 
-      // pg_notify (per part)
-      try {
-        if (dbClient) {
-          await dbClient.query(
-            `SELECT pg_notify('agent_inbox', $1)`,
-            [JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId })]
-          )
-        }
-      } catch (err) {
-        process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
-      }
+      // pg_notify (per part) — conditional via pgNotify helper (I2)
+      await pgNotify(dbClient, 'agent_inbox', JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId }))
 
       // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
       // Issue #103 Option A union: merge mentions arg + <@discord_id> tokens in content
@@ -2380,11 +2377,15 @@ async function postConnect() {
   // Start push notification polling (Phase 3)
   startPolling()
 
-  // Phase 5: Start integrated pg_notify listener
-  try {
-    await startListener()
-  } catch (err) {
-    process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+  // Phase 5: Start integrated pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode)
+  if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+    try {
+      await startListener()
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+    }
+  } else {
+    process.stderr.write('agent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\n')
   }
 
   // Phase 5: Connect Discord adapter (if token provided, stdio/channel-plugin mode)
@@ -2700,10 +2701,7 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
                ON CONFLICT (agent_id) DO UPDATE SET status = 'online', last_seen_at = now()`,
               [botId]
             )
-            await client.query(
-              `SELECT pg_notify('agent_events', $1)`,
-              [JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' })]
-            ).catch(() => {})
+            await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' }))
           }
         } catch (err) {
           process.stderr.write(`agent-comms: daemon agent registration failed for ${botId} (non-fatal): ${err}\n`)
@@ -2787,11 +2785,15 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
     // Start push notification polling
     startPolling()
 
-    // Start pg_notify listener
-    try {
-      await startListener()
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+    // Start pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode)
+    if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+      try {
+        await startListener()
+      } catch (err) {
+        process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+      }
+    } else {
+      process.stderr.write('agent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\n')
     }
 
     // Connect Per-Bot Discord Clients for all expected bots at startup
