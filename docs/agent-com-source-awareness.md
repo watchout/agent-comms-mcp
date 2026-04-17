@@ -450,6 +450,8 @@ v2.0.0 の §5.3 で daemon プロセスモデルを 1 daemon に統一。MCP ho
 5. LLM の行動に一切依存しない
 ```
 
+> **v2.0.0 注記**: message-queue-spec v2.0.0 では IPC は廃止、daemon ↔ MCP server 間は DB のみ通信 (§1 原則 3)。§§11.3-11.7 の IPC 設計は Phase C 完了後の source-awareness 全面改訂で置換予定。
+
 ### 11.3 アーキテクチャ
 
 ```

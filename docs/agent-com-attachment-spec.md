@@ -138,7 +138,7 @@ MCP server tool handler → agent-com CLI（send サブコマンド）
   ├─ message_queue INSERT（mentions 分）
   └─ outbound_queue INSERT（agent_id / channel_external_id / content / attachments 参照）
   ↓
-outbound consumer（receiver プロセス集約 or per-bot daemon、message-queue-spec §6.4）
+outbound consumer（1 daemon プロセス内、message-queue-spec §6.4）
   ├─ 1秒 polling + atomic claim（FOR UPDATE SKIP LOCKED）
   ├─ adapter.uploadAttachment(temp_path, platform_channel) → uploaded_url
   ├─ プラットフォーム API 呼出（Discord REST / Telegram Bot API / Slack API）
