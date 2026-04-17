@@ -129,13 +129,12 @@ function loadConfig(): Config {
   const configPath = process.env.AGENT_COMMS_CONFIG
     ?? join(dirname(new URL(import.meta.url).pathname), 'config.json')
 
-  if (!existsSync(configPath)) {
-    process.stderr.write(`agent-comms: config not found at ${configPath}\n`)
-    process.stderr.write(`  Copy config.example.json to config.json and edit it.\n`)
-    process.exit(1)
+  let raw: any = {}
+  if (existsSync(configPath)) {
+    raw = JSON.parse(readFileSync(configPath, 'utf-8'))
+  } else {
+    process.stderr.write(`agent-comms: config.json not found — using env vars only (OSS mode)\n`)
   }
-
-  const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
   return {
     agent_id: process.env.AGENT_ID ?? raw.agent_id ?? 'unknown',
     database_url: process.env.DATABASE_URL ?? raw.database_url ?? 'postgresql://localhost/agent_comms',
@@ -187,7 +186,7 @@ try {
 } catch {} // no process on port — expected
 
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? ''
+const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
 const DISCORD_STATE_DIR_ENV = process.env.DISCORD_STATE_DIR ?? ''
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 
