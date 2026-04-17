@@ -35,6 +35,16 @@ while IFS= read -r f; do
   esac
 done <<< "$CHANGED_RAW"
 
+# ─────────────────────────────────────────────
+# Docs-only skip: if all changed files are under docs/ or *.md,
+# breaking-change patterns cannot apply (no runtime code changed).
+# ─────────────────────────────────────────────
+non_docs=$(echo "$CHANGED_RAW" | grep -v '^docs/' | grep -v '\.md$' || true)
+if [ -z "$non_docs" ]; then
+  echo "ℹ️ docs-only PR — breaking-change detection skipped."
+  exit 0
+fi
+
 emit_json() {
   # $1 = status, remaining args = findings (one per arg)
   local status="$1"
