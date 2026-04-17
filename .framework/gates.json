@@ -1,6 +1,6 @@
 {
   "gateA": {
-    "status": "failed",
+    "status": "passed",
     "checks": [
       {
         "name": "package.json exists",

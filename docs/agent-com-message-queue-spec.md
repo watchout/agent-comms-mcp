@@ -486,16 +486,21 @@ agent-com は CLI コマンドを提供。任意の LLM ツールが MCP / shell
 
 MCP server は stateless。daemon 未起動なら自動 background start。
 
-### 5.3 Daemon プロセスモデル
+### 5.3 統一プロセスモデル (Phase C I5)
 
-- daemon (host に 1): receiver + outbound + heartbeat + Discord Gateway
-- per-bot MCP server (lazy spawn): stateless DB ラッパー
+全プロセスが単一フローで起動する。`TRANSPORT_MODE` 環境変数は廃止。
+
+- 1 プロセス = receiver + outbound + heartbeat + Discord Gateway + stdio MCP
+- multi-bot SSE HTTP server は `EXPECTED_BOTS` or `AGENT_COMMS_PORT` 設定時のみ起動
 - DB のみで通信、IPC なし
 
 起動シーケンス:
-1. daemon: DB 接続 → migration auto → Discord 接続 → receiver/outbound 開始
-2. MCP server: 需要に応じて起動 → DB 経由で daemon と合流
-3. daemon 停止時: MCP は DB polling 継続 (受信済みは読める、新規受信停止)
+1. DB 接続 → migration auto
+2. multi-bot SSE HTTP server (条件付き: EXPECTED_BOTS or AGENT_COMMS_PORT)
+3. polling + pg_notify listener 開始
+4. per-bot Discord clients (EXPECTED_BOTS 分、outbound-only)
+5. 共有 Discord adapter 接続 (inbound + outbound) → outbound consumer 開始
+6. stdio MCP transport 接続 → agent 登録
 
 heartbeat:
 - per-bot MCP: 自 agent_id の heartbeat_at を UPDATE (30s, 1 writer per row)
@@ -1348,6 +1353,8 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 ❌ access.json — DB routing で完結
 ❌ plugin:discord — adapter 統合済み
 ❌ Push Enrichment (チャンネル履歴) — Reply Chain Context に置換
+❌ TRANSPORT_MODE — Phase C I5 で統一 (stdio/daemon/sse/receiver → 単一フロー)
+❌ IS_RECEIVER_MODE — Phase C I5 で廃止
 ```
 
 ---
@@ -1356,6 +1363,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-18 | Phase C I5: §5.3 統一プロセスモデル化、§20 `TRANSPORT_MODE` / `IS_RECEIVER_MODE` 廃止追加。stdio/daemon/sse/receiver の 4 モード → 単一フローに統一。 |
 | 2026-04-17 | v2.0.0: OSS primary に組織原理を転換。Dispatcher 廃止 / dual mode 廃止 / SQLite default / 1 daemon 集約 / Reply Chain Context 導入 / LLM-agnostic 化。Phase C 条件を product 視点で再定義 (CEO 承認)。 |
 | 2026-04-17 | Task A2.5: §6.5 にプロセス境界図・起動シーケンス・heartbeat writer 責務を追記、§10.4 access.json 廃止後 permission model 追加。外部 AI レビュー指摘（what は書いたが how が未記述）への対応 |
 | 2026-04-16 | Task A1 repo sync: gdrive canonical を repo 反映、§20 `AGENT_COM_DAEMON_MODE` default を `embedded` に訂正（gdrive 表記 standalone は daemon 未実装段階で bug、CTO 技術判断）、source-awareness §11.8 との矛盾を解消、SPEC-INDEX 更新同梱 |

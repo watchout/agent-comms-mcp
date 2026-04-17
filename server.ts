@@ -191,8 +191,7 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? ''
 const DISCORD_STATE_DIR_ENV = process.env.DISCORD_STATE_DIR ?? ''
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 
-// --- SSE Transport (Phase 3) ---
-const TRANSPORT_MODE = process.env.TRANSPORT_MODE ?? 'stdio'
+// --- SSE Transport (Phase 3 → Phase C I5: unified, TRANSPORT_MODE removed) ---
 const SSE_PORT = parseInt(process.env.AGENT_COMMS_PORT ?? '8800', 10)
 const AUTH_TOKEN = process.env.AUTH_TOKEN ?? ''
 const AUTH_SKIP_LOCALHOST = (process.env.AUTH_SKIP_LOCALHOST ?? 'true') === 'true'
@@ -209,7 +208,6 @@ const RECEIVER_PIPELINE_BOTS = new Set<string>(
 )
 
 const sseStartTime = Date.now()
-const connectedBots = new Map<string, { transport: SSEServerTransport; connected_at: string; last_activity: string }>()
 
 // --- pg_notify helper (I2: conditional notify for SQLite/PG unification) ---
 // When AGENT_COM_PG_NOTIFY=false, all pg_notify calls are suppressed so
@@ -2116,7 +2114,7 @@ interface BotContext {
   lastActivity: string
 }
 
-// Active bot contexts (daemon mode)
+// Active bot contexts (multi-bot SSE)
 const botContexts = new Map<string, BotContext>()
 
 function createBotServer(botId: string): BotContext {
@@ -2355,7 +2353,8 @@ const bridgeServer = Bun.serve({
 
 process.stderr.write(`agent-comms: bridge listening on http://127.0.0.1:${WEBHOOK_PORT}\n`)
 
-// --- Post-connect setup (shared by both stdio and SSE modes) ---
+// --- Post-connect setup (Phase C I5: slim — agent registration only) ---
+// Polling, listener, and Discord setup moved to the unified startup block below.
 let postConnectDone = false
 async function postConnect() {
   if (postConnectDone) return
@@ -2372,106 +2371,6 @@ async function postConnect() {
     await registerAgent()
   } catch (err) {
     process.stderr.write(`agent-comms: WARNING — agent registration failed (non-fatal): ${err}\n`)
-  }
-  // Start push notification polling (Phase 3)
-  startPolling()
-
-  // Phase 5: Start integrated pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode)
-  if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
-    try {
-      await startListener()
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
-    }
-  } else {
-    process.stderr.write('agent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\n')
-  }
-
-  // Phase 5: Connect Discord adapter (if token provided, stdio/channel-plugin mode)
-  // Phase C I3: handleInboundMessage is now invoked from 2 callsites
-  // (stdio + daemon). Dedup: processedIds + uq_mq_agent_message UNIQUE + discord_message_id UNIQUE.
-  // I5 で stdio callsite を削除し daemon に統合後、1 callsite に戻る。
-  if (DISCORD_BOT_TOKEN && TRANSPORT_MODE !== 'daemon') {
-    try {
-      discord.onMessage((msg) => {
-        if (processedIds.has(msg.id)) return
-        processedIds.set(msg.id, Date.now())
-
-        const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
-        const content = msg.content || (atts ? '(attachment)' : '')
-
-        extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
-          return handleInboundMessage({
-            receiverAgentId: AGENT_ID,
-            externalChannelId: msg.channel,
-            externalMessageId: msg.id,
-            authorExternalId: msg.author.id,
-            authorName: msg.author.name,
-            authorIsBot: msg.author.isBot,
-            content,
-            attachments: atts,
-            timestamp: msg.timestamp,
-            platform: 'discord',
-            mentions: resolvedMentions,
-            replyToMessageId: msg.replyTo,
-          })
-        }).then(async result => {
-          if (result.delivered && result.pushMeta) {
-            await mcp.notification({
-              method: 'notifications/claude/channel',
-              params: { content, meta: result.pushMeta },
-            })
-          } else if (!result.delivered) {
-            process.stderr.write(`agent-comms: inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
-          }
-          // §2.2 Pattern A: human warning (no mentions)
-          if (result.humanWarning) {
-            sendHumanWarning(discord, msg.channel, msg.id)
-          }
-        }).catch(err => {
-          process.stderr.write(`agent-comms: inbound routing error: ${err}\n`)
-        })
-      })
-
-      discord.onPermissionResponse(async (params) => {
-        try {
-          await mcp.notification({
-            method: 'notifications/claude/channel/permission',
-            params: { request_id: params.request_id, behavior: params.behavior },
-          })
-        } catch (err) {
-          process.stderr.write(`agent-comms: permission notification failed: ${err}\n`)
-        }
-      })
-
-      // Inject DB query function for mention conversion and thread mapping
-      discord.setDbQuery(async (sql: string, params?: any[]) => {
-        const client = await tryGetDb()
-        if (!client) throw new Error('DB unavailable')
-        return client.query(sql, params)
-      })
-
-      // ADR-040 D1: stdio/sse mode owns one adapter for AGENT_ID, so the ready
-      // handler can self-register discord_id for this agent on every connect.
-      discord.setAgentId(AGENT_ID)
-
-      await discord.connect({
-        token: DISCORD_BOT_TOKEN,
-        stateDir: DISCORD_STATE_DIR_ENV || undefined,
-      })
-      process.stderr.write('agent-comms: Discord adapter connected (channel plugin mode)\n')
-      // Register this bot's Discord adapter in the per-bot client map so
-      // outbound delivery can resolve it via discordClients.get(AGENT_ID).
-      discordClients.set(AGENT_ID, discord)
-
-      // Start the outbound consumer AFTER discordClients.set so the first
-      // consumer tick can resolve the client for this agent.
-      startOutboundConsumer()
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
-    }
-  } else if (!DISCORD_BOT_TOKEN) {
-    process.stderr.write('agent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\n')
   }
 }
 
@@ -2494,29 +2393,18 @@ function authenticateRequest(req: IncomingMessage, res: ServerResponse): boolean
   return false
 }
 
-// --- SSE Transport: Health endpoint ---
+// --- SSE Transport: Health endpoint (Phase C I5: unified — always uses botContexts) ---
 function getHealthStatus(): { status: string; uptime: number; connected_bots: Record<string, { connected_at: string; last_activity: string }>; expected_bots: string[] } {
   const uptimeSeconds = Math.floor((Date.now() - sseStartTime) / 1000)
   const bots: Record<string, { connected_at: string; last_activity: string }> = {}
 
-  // Support both legacy connectedBots (sse mode) and botContexts (daemon / receiver mode).
-  // ADR-041 PR-B: receiver mode shares the daemon's per-bot MCP factory, so the health
-  // check enumerates the same `botContexts` map for both.
-  const daemonLike = TRANSPORT_MODE === 'daemon' || TRANSPORT_MODE === 'receiver'
-  if (daemonLike) {
-    for (const [botId, ctx] of botContexts) {
-      bots[botId] = { connected_at: ctx.connectedAt, last_activity: ctx.lastActivity }
-    }
-  } else {
-    for (const [botId, info] of connectedBots) {
-      bots[botId] = { connected_at: info.connected_at, last_activity: info.last_activity }
-    }
+  for (const [botId, ctx] of botContexts) {
+    bots[botId] = { connected_at: ctx.connectedAt, last_activity: ctx.lastActivity }
   }
 
   let status = 'ok'
   if (EXPECTED_BOTS.length > 0) {
-    const activeBots = daemonLike ? botContexts : connectedBots
-    const missing = EXPECTED_BOTS.filter(b => !activeBots.has(b))
+    const missing = EXPECTED_BOTS.filter(b => !botContexts.has(b))
     if (missing.length === EXPECTED_BOTS.length) {
       status = 'error'
     } else if (missing.length > 0) {
@@ -2527,38 +2415,20 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
   return { status, uptime: uptimeSeconds, connected_bots: bots, expected_bots: EXPECTED_BOTS }
 }
 
-// --- Start ---
-// ADR-041 PR-B: `receiver` is a new transport mode that shares every piece
-// of daemon setup (httpServer, per-bot MCP factories, per-bot Discord
-// clients). It does NOT open a second Gateway connection for the already-
-// connected auditor token — reusing the existing connection is the
-// explicit safety constraint in ADR-041 rev4 after today's twin-connection
-// cascade (see ADR-040 G1).
-//
-// For PR-B the behavioural delta from `daemon` is intentionally small:
-// receiver mode logs an explicit activation line and exposes a helper so
-// downstream code can branch on `IS_RECEIVER_MODE`. The actual single-
-// Discord-connection fanout (i.e. shutting off other bots' per-bot
-// Gateway clients and letting auditor's onMessage do the pg_notify
-// fan-out for everyone) is a follow-up PR-B.2 — the retreat path (a)
-// pull-on-notify semantics stay on the existing 3-second polling
-// (`POLL_INTERVAL_MS`), which is already in production.
-//
-// Ref: ADR-041 rev4 PoC token strategy — auditor bot is the interim
-// receiver, Phase B introduces a dedicated `agent-com-receiver` bot.
-const IS_RECEIVER_MODE = TRANSPORT_MODE === 'receiver'
-if (IS_RECEIVER_MODE) {
-  process.stderr.write(
-    `agent-comms: TRANSPORT_MODE='receiver' active — reusing daemon setup, auditor bot owns inbound fanout (ADR-041 rev4)\n`,
-  )
-}
+// --- Start (Phase C I5: unified flow — no TRANSPORT_MODE branching) ---
+// All processes run a single flow:
+//   1. Multi-bot SSE HTTP server (conditional: only when EXPECTED_BOTS or AGENT_COMMS_PORT is set)
+//   2. Shared startup: polling, pg_notify listener, per-bot Discord clients, shared Discord adapter
+//   3. Stdio MCP transport (unconditional)
+//   4. Single shutdown handler
 
-if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
-  // Daemon mode: Per-Bot Server Factory (Phase 3b)
-  // Each bot_id gets its own MCP Server instance with bot-specific AGENT_ID
-  const daemonTransports = new Map<string, SSEServerTransport>()
+// --- 1. Multi-bot SSE HTTP server (conditional) ---
+const MULTI_BOT_MODE = EXPECTED_BOTS.length > 0 || !!process.env.AGENT_COMMS_PORT
+const daemonTransports = new Map<string, SSEServerTransport>()
+let httpServer: ReturnType<typeof createServer> | null = null
 
-  const httpServer = createServer(async (req, res) => {
+if (MULTI_BOT_MODE) {
+  httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
 
     // OAuth bypass endpoints (Claude Code SSE MCP workaround)
@@ -2630,7 +2500,6 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
       }
 
       process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
-      // Issue #130 Phase 4: clearPushFailureWarning(botId) removed.
 
       try {
         // Create per-bot Server + Transport
@@ -2672,10 +2541,10 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
             await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' }))
           }
         } catch (err) {
-          process.stderr.write(`agent-comms: daemon agent registration failed for ${botId} (non-fatal): ${err}\n`)
+          process.stderr.write(`agent-comms: agent registration failed for ${botId} (non-fatal): ${err}\n`)
         }
 
-        // Phase 3c: Per-Bot Discord Client (On-Demand)
+        // Per-Bot Discord Client (On-Demand)
         // Staggered connect: wait before creating Discord Gateway connection
         const botCount = discordClients.size
         if (botCount > 0) {
@@ -2696,9 +2565,9 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
           const botDiscord = await connectBotDiscord(botId, tokenResult.token)
           if (botDiscord) {
             discordClients.set(botId, botDiscord)
-            // ADR-041 S2-B: daemon per-bot Discord client is outbound-only.
+            // Per-bot Discord client is outbound-only.
             // No onMessage binding; handleInboundMessage is invoked only from
-            // the stdio-mode adapter.
+            // the shared adapter below.
           }
         }
         } // end else (skip if already connected)
@@ -2734,7 +2603,7 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
       try {
         await transport.handlePostMessage(req, res)
       } catch (err) {
-        process.stderr.write(`agent-comms: daemon message handling error: ${err}\n`)
+        process.stderr.write(`agent-comms: message handling error: ${err}\n`)
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Internal server error' }))
@@ -2748,264 +2617,161 @@ if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE) {
     res.end(JSON.stringify({ error: 'Not found' }))
   })
 
-  // Daemon-specific postConnect: shared resources only (Discord, listener, polling)
-  ;(async () => {
-    // Start push notification polling
-    startPolling()
-
-    // Start pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode)
-    if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
-      try {
-        await startListener()
-      } catch (err) {
-        process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
-      }
-    } else {
-      process.stderr.write('agent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\n')
-    }
-
-    // Connect Per-Bot Discord Clients for all expected bots at startup
-    // This ensures bots in stdio mode (not SSE-connected) still have Discord presence
-    for (const botId of EXPECTED_BOTS) {
-      if (discordClients.has(botId)) continue
-      const tokenResult = await resolveDiscordToken(botId)
-      if (tokenResult && tokenResult.source === 'per-bot') {
-        const botDiscord = await connectBotDiscord(botId, tokenResult.token)
-        if (botDiscord) {
-          discordClients.set(botId, botDiscord)
-          // ADR-041 S2-B: startup daemon per-bot Discord client is outbound-only.
-          // No onMessage binding; handleInboundMessage is invoked only from
-          // the stdio-mode adapter.
-          process.stderr.write(`agent-comms: startup Discord client for ${botId} (${tokenResult.source}, outbound-only)\n`)
-        }
-      }
-      // Staggered connect delay
-      if (EXPECTED_BOTS.indexOf(botId) < EXPECTED_BOTS.length - 1) {
-        await new Promise(r => setTimeout(r, STAGGERED_CONNECT_DELAY_MS))
-      }
-    }
-
-    // Phase C I3: daemon shared adapter now handles FULL inbound routing.
-    // Previously daemon was outbound-only; inbound required a separate stdio session.
-    // Now daemon is self-sufficient: onMessage → handleInboundMessage → agent_messages + message_queue.
-    // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB) handle stdio+daemon co-deploy.
-    if (DISCORD_BOT_TOKEN) {
-      try {
-        discord.onMessage((msg) => {
-          if (processedIds.has(msg.id)) return
-          processedIds.set(msg.id, Date.now())
-
-          const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
-          const content = msg.content || (atts ? '(attachment)' : '')
-
-          extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
-            return handleInboundMessage({
-              receiverAgentId: AGENT_ID,
-              externalChannelId: msg.channel,
-              externalMessageId: msg.id,
-              authorExternalId: msg.author.id,
-              authorName: msg.author.name,
-              authorIsBot: msg.author.isBot,
-              content,
-              attachments: atts,
-              timestamp: msg.timestamp,
-              platform: 'discord',
-              mentions: resolvedMentions,
-              replyToMessageId: msg.replyTo,
-            })
-          }).then(async result => {
-            if (!result.delivered) {
-              process.stderr.write(`agent-comms: daemon inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
-            }
-            if (result.humanWarning) {
-              sendHumanWarning(discord, msg.channel, msg.id)
-            }
-          }).catch(err => {
-            process.stderr.write(`agent-comms: daemon inbound routing error: ${err}\n`)
-          })
-        })
-        await discord.connect({ token: DISCORD_BOT_TOKEN })
-        process.stderr.write(`agent-comms: daemon Discord adapter connected (inbound + outbound)\n`)
-      } catch (err) {
-        process.stderr.write(`agent-comms: WARNING — daemon Discord connection failed (non-fatal): ${err}\n`)
-      }
-    }
-  })()
-
   httpServer.listen(SSE_PORT, () => {
-    process.stderr.write(`agent-comms: daemon listening on http://127.0.0.1:${SSE_PORT} (Per-Bot Server Factory)\n`)
+    process.stderr.write(`agent-comms: SSE server listening on http://127.0.0.1:${SSE_PORT} (Per-Bot Server Factory)\n`)
     process.stderr.write(`agent-comms: endpoints: GET /sse?bot_id=<id>, GET /health, POST /messages\n`)
   })
-
-  const shutdown = async () => {
-    stopPolling()
-    stopListener()
-    await discord.disconnect().catch(() => {})
-    // Disconnect all per-bot Discord clients
-    for (const [botId, client] of discordClients) {
-      await client.disconnect().catch(() => {})
-      process.stderr.write(`agent-comms: per-bot Discord disconnected for ${botId} (shutdown)\n`)
-    }
-    discordClients.clear()
-    bridgeServer.stop()
-    // Close all per-bot transports
-    for (const [, ctx] of botContexts) {
-      if (ctx.transport) await ctx.transport.close().catch(() => {})
-      // Mark bot offline
-      const client = await tryGetDb().catch(() => null)
-      if (client) {
-        await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
-      }
-    }
-    httpServer.close()
-    if (db) await db.end().catch(() => {})
-    process.exit(0)
-  }
-  process.on('SIGINT', shutdown)
-  process.on('SIGTERM', shutdown)
-
-} else if (TRANSPORT_MODE === 'sse') {
-  // SSE HTTP server mode
-  const sseTransports = new Map<string, SSEServerTransport>()
-  let httpServer: ReturnType<typeof createServer>
-
-  httpServer = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
-
-    // Health endpoint
-    if (url.pathname === '/health' && req.method === 'GET') {
-      if (!authenticateRequest(req, res)) return
-      const health = getHealthStatus()
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(health))
-      return
-    }
-
-    // SSE endpoint — per-bot connection (graceful reconnect)
-    if (url.pathname === '/sse' && req.method === 'GET') {
-      if (!authenticateRequest(req, res)) return
-      const botId = url.searchParams.get('bot_id') ?? AGENT_ID
-
-      // Graceful reconnect: if same bot_id reconnects, close old transport first
-      const existing = connectedBots.get(botId)
-      if (existing) {
-        process.stderr.write(`agent-comms: SSE replacing existing connection for bot_id=${botId}\n`)
-        sseTransports.delete(existing.transport.sessionId)
-        await existing.transport.close().catch(() => {})
-        connectedBots.delete(botId)
-      }
-
-      process.stderr.write(`agent-comms: SSE connection from bot_id=${botId}\n`)
-
-      try {
-        const transport = new SSEServerTransport('/messages', res)
-        const sessionId = transport.sessionId
-        sseTransports.set(sessionId, transport)
-        connectedBots.set(botId, {
-          transport,
-          connected_at: new Date().toISOString(),
-          last_activity: new Date().toISOString(),
-        })
-
-        res.on('close', () => {
-          process.stderr.write(`agent-comms: SSE disconnected bot_id=${botId} session=${sessionId}\n`)
-          sseTransports.delete(sessionId)
-          // Only delete if this is still the current entry (not replaced by reconnect)
-          const current = connectedBots.get(botId)
-          if (current && current.transport.sessionId === sessionId) {
-            connectedBots.delete(botId)
-          }
-        })
-
-        await mcp.connect(transport)
-        await postConnect()
-      } catch (err) {
-        process.stderr.write(`agent-comms: SSE connection error: ${err}\n`)
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Internal server error' }))
-        }
-      }
-      return
-    }
-
-    // Messages endpoint (POST from SSE clients)
-    if (url.pathname === '/messages' && req.method === 'POST') {
-      if (!authenticateRequest(req, res)) return
-      const sessionId = url.searchParams.get('sessionId') ?? ''
-      const transport = sseTransports.get(sessionId)
-      if (!transport) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'No transport found for sessionId' }))
-        return
-      }
-
-      // Update last_activity for the bot using this transport
-      for (const [botId, info] of connectedBots) {
-        if (info.transport === transport) {
-          info.last_activity = new Date().toISOString()
-          break
-        }
-      }
-
-      try {
-        await transport.handlePostMessage(req, res)
-      } catch (err) {
-        process.stderr.write(`agent-comms: SSE message handling error: ${err}\n`)
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Internal server error' }))
-        }
-      }
-      return
-    }
-
-    // 404 for unknown routes
-    res.writeHead(404, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Not found' }))
-  })
-
-  httpServer.listen(SSE_PORT, () => {
-    process.stderr.write(`agent-comms: SSE server listening on http://127.0.0.1:${SSE_PORT}\n`)
-    process.stderr.write(`agent-comms: endpoints: GET /sse, GET /health, POST /messages\n`)
-  })
-
-  const shutdown = async () => {
-    stopPolling()
-    stopListener()
-    await discord.disconnect().catch(() => {})
-    bridgeServer.stop()
-    // Close all SSE transports
-    for (const [, transport] of sseTransports) {
-      await transport.close().catch(() => {})
-    }
-    httpServer.close()
-    await unregisterAgent()
-    if (db) await db.end().catch(() => {})
-    process.exit(0)
-  }
-  process.on('SIGINT', shutdown)
-  process.on('SIGTERM', shutdown)
-
-} else {
-  // Stdio mode (default, unchanged)
-  const transport = new StdioServerTransport()
-  mcp.connect(transport).then(async () => {
-    await postConnect()
-  }).catch(err => {
-    process.stderr.write(`agent-comms: startup failed: ${err}\n`)
-    process.exit(1)
-  })
-
-  const shutdown = async () => {
-    stopPolling()
-    stopListener()
-    await discord.disconnect().catch(() => {})
-    bridgeServer.stop()
-    await unregisterAgent()
-    if (db) await db.end().catch(() => {})
-    process.exit(0)
-  }
-  process.on('SIGINT', shutdown)
-  process.on('SIGTERM', shutdown)
 }
+
+// --- 2. Shared startup (unconditional) ---
+;(async () => {
+  // Start push notification polling
+  startPolling()
+
+  // Start pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode)
+  if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+    try {
+      await startListener()
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — pg_notify listener start failed (non-fatal): ${err}\n`)
+    }
+  } else {
+    process.stderr.write('agent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\n')
+  }
+
+  // Connect Per-Bot Discord Clients for all expected bots at startup
+  // This ensures bots (not yet SSE-connected) still have Discord presence
+  for (const botId of EXPECTED_BOTS) {
+    if (discordClients.has(botId)) continue
+    const tokenResult = await resolveDiscordToken(botId)
+    if (tokenResult && tokenResult.source === 'per-bot') {
+      const botDiscord = await connectBotDiscord(botId, tokenResult.token)
+      if (botDiscord) {
+        discordClients.set(botId, botDiscord)
+        // Per-bot Discord client is outbound-only.
+        // No onMessage binding; handleInboundMessage is invoked only from
+        // the shared adapter below.
+        process.stderr.write(`agent-comms: startup Discord client for ${botId} (${tokenResult.source}, outbound-only)\n`)
+      }
+    }
+    // Staggered connect delay
+    if (EXPECTED_BOTS.indexOf(botId) < EXPECTED_BOTS.length - 1) {
+      await new Promise(r => setTimeout(r, STAGGERED_CONNECT_DELAY_MS))
+    }
+  }
+
+  // Phase C I5: single Discord adapter handles FULL inbound routing.
+  // onMessage → handleInboundMessage → agent_messages + message_queue.
+  // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
+  if (DISCORD_BOT_TOKEN) {
+    try {
+      discord.onMessage((msg) => {
+        if (processedIds.has(msg.id)) return
+        processedIds.set(msg.id, Date.now())
+
+        const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
+        const content = msg.content || (atts ? '(attachment)' : '')
+
+        extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
+          return handleInboundMessage({
+            receiverAgentId: AGENT_ID,
+            externalChannelId: msg.channel,
+            externalMessageId: msg.id,
+            authorExternalId: msg.author.id,
+            authorName: msg.author.name,
+            authorIsBot: msg.author.isBot,
+            content,
+            attachments: atts,
+            timestamp: msg.timestamp,
+            platform: 'discord',
+            mentions: resolvedMentions,
+            replyToMessageId: msg.replyTo,
+          })
+        }).then(async result => {
+          if (!result.delivered) {
+            process.stderr.write(`agent-comms: inbound not delivered — ${result.reason} (msg: ${msg.id})\n`)
+          }
+          if (result.humanWarning) {
+            sendHumanWarning(discord, msg.channel, msg.id)
+          }
+        }).catch(err => {
+          process.stderr.write(`agent-comms: inbound routing error: ${err}\n`)
+        })
+      })
+
+      discord.onPermissionResponse(async (params) => {
+        try {
+          await mcp.notification({
+            method: 'notifications/claude/channel/permission',
+            params: { request_id: params.request_id, behavior: params.behavior },
+          })
+        } catch (err) {
+          process.stderr.write(`agent-comms: permission notification failed: ${err}\n`)
+        }
+      })
+
+      // Inject DB query function for mention conversion and thread mapping
+      discord.setDbQuery(async (sql: string, params?: any[]) => {
+        const client = await tryGetDb()
+        if (!client) throw new Error('DB unavailable')
+        return client.query(sql, params)
+      })
+
+      discord.setAgentId(AGENT_ID)
+
+      await discord.connect({
+        token: DISCORD_BOT_TOKEN,
+        stateDir: DISCORD_STATE_DIR_ENV || undefined,
+      })
+      process.stderr.write('agent-comms: Discord adapter connected (inbound + outbound)\n')
+      // Register this bot's Discord adapter in the per-bot client map so
+      // outbound delivery can resolve it via discordClients.get(AGENT_ID).
+      discordClients.set(AGENT_ID, discord)
+
+      // Start the outbound consumer AFTER discordClients.set so the first
+      // consumer tick can resolve the client for this agent.
+      startOutboundConsumer()
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
+    }
+  } else {
+    process.stderr.write('agent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\n')
+  }
+})()
+
+// --- 3. Stdio MCP transport (unconditional) ---
+const transport = new StdioServerTransport()
+mcp.connect(transport).then(async () => {
+  await postConnect()
+}).catch(err => {
+  process.stderr.write(`agent-comms: startup failed: ${err}\n`)
+  process.exit(1)
+})
+
+// --- 4. Unified shutdown handler ---
+const shutdown = async () => {
+  stopPolling()
+  stopListener()
+  await discord.disconnect().catch(() => {})
+  // Disconnect all per-bot Discord clients
+  for (const [botId, client] of discordClients) {
+    await client.disconnect().catch(() => {})
+    process.stderr.write(`agent-comms: per-bot Discord disconnected for ${botId} (shutdown)\n`)
+  }
+  discordClients.clear()
+  bridgeServer.stop()
+  // Close all per-bot transports (multi-bot SSE)
+  for (const [, ctx] of botContexts) {
+    if (ctx.transport) await ctx.transport.close().catch(() => {})
+    const client = await tryGetDb().catch(() => null)
+    if (client) {
+      await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
+    }
+  }
+  if (httpServer) httpServer.close()
+  await unregisterAgent()
+  if (db) await db.end().catch(() => {})
+  process.exit(0)
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)

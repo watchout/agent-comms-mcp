@@ -196,44 +196,34 @@ describe('§2.2 Pattern A — Human warning', () => {
     expect(fnBody).toContain('pg_try_advisory_lock')
   })
 
-  test('stdio mode caller sends human warning', () => {
-    // In the stdio onMessage handler, check for humanWarning
-    const stdioBlock = SERVER_SOURCE.indexOf("TRANSPORT_MODE !== 'daemon'")
-    const stdioSection = SERVER_SOURCE.slice(stdioBlock, stdioBlock + 3000)
-    expect(stdioSection).toContain('result.humanWarning')
-    expect(stdioSection).toContain('sendHumanWarning')
-  })
-
-  test('daemon mode caller sends human warning', () => {
-    // Phase C I3: daemon shared-client onMessage now calls handleInboundMessage
+  test('unified flow caller sends human warning (Phase C I5)', () => {
+    // Phase C I5: single shared startup onMessage handler calls handleInboundMessage
     // AND sendHumanWarning. §2.2 Pattern A human warning remains functional.
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain('sendHumanWarning')
+    const sharedStartup = SERVER_SOURCE.indexOf('// --- 2. Shared startup (unconditional) ---')
+    const sharedSection = SERVER_SOURCE.slice(sharedStartup)
+    expect(sharedSection).toContain('result.humanWarning')
+    expect(sharedSection).toContain('sendHumanWarning')
   })
 })
 
-describe('Inbound Mentions Filter — callsite updates', () => {
-  test('stdio/channel plugin Discord adapter connects and uses handleInboundMessage', () => {
-    expect(SERVER_SOURCE).toContain('Discord adapter connected (channel plugin mode)')
+describe('Inbound Mentions Filter — callsite updates (Phase C I5: unified)', () => {
+  test('Discord adapter connects and uses handleInboundMessage', () => {
+    expect(SERVER_SOURCE).toContain('Discord adapter connected (inbound + outbound)')
     expect(SERVER_SOURCE).toContain('extractDiscordMentions(content, msg.mentionUserIds)')
   })
 
-  test('daemon per-bot client does NOT bind onMessage (ADR-041 S2-B: outbound-only)', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).not.toContain('botDiscord.onMessage')
+  test('per-bot client does NOT bind onMessage (outbound-only)', () => {
+    expect(SERVER_SOURCE).not.toContain('botDiscord.onMessage')
   })
 
-  test('daemon shared client onMessage DOES call handleInboundMessage (Phase C I3)', () => {
-    // Phase C I3: daemon is now self-sufficient; shared Discord adapter
+  test('shared Discord onMessage calls handleInboundMessage (Phase C I5: single callsite)', () => {
+    // Phase C I5: unified flow — single shared Discord adapter
     // calls handleInboundMessage for full inbound routing.
-    // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    const sharedIdx = daemonSection.indexOf('discord.onMessage((msg)')
+    const sharedStartup = SERVER_SOURCE.indexOf('// --- 2. Shared startup (unconditional) ---')
+    const sharedSection = SERVER_SOURCE.slice(sharedStartup)
+    const sharedIdx = sharedSection.indexOf('discord.onMessage((msg)')
     expect(sharedIdx).toBeGreaterThan(-1)
-    const handlerBody = daemonSection.slice(sharedIdx, sharedIdx + 3000)
+    const handlerBody = sharedSection.slice(sharedIdx, sharedIdx + 3000)
     expect(handlerBody).toContain('handleInboundMessage({')
   })
 
