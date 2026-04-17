@@ -50,6 +50,13 @@ npx agent-comms-mcp
 - multi-bot: 1 プロセス内で N Discord client (discord.js 複数 Client 対応)
 - per-bot daemon (案 B) は不採用 (multi-process 管理が npm 一発と矛盾)
 
+### 4. Reply Chain Context (CEO 口頭承認 2026-04-17)
+
+- Push Enrichment (チャンネル履歴付与) を廃止し、reply_to chain による会話文脈付与に置換
+- next_message が返すメッセージに reply_to を再帰的に辿った祖先メッセージを付加
+- チャンネル内の無関係メッセージは含めない (複数話題混在問題の解決)
+- 設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 10)
+
 ### 3. Init / Start: 単一コマンド兼用
 
 ```bash

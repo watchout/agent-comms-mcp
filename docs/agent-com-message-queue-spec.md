@@ -9,7 +9,7 @@
 ## 1. 設計原則
 
 ```
-1. **OSS primary**: SQLite + 1 コマンドで動く製品が primary shape。PostgreSQL / multi-bot は拡張
+1. **OSS primary**: SQLite default + 1 コマンドで動く製品が primary shape。PostgreSQL / multi-bot は拡張。外部設定ファイル (access.json 等) への依存ゼロ
 2. **1 daemon**: inbound receiver + outbound consumer + heartbeat monitor を 1 プロセスに集約。MCP server (per-bot) は stateless ラッパー
 3. **DB が唯一の通信路**: daemon ↔ MCP server 間は DB のみ。IPC / HTTP / WebSocket なし
 4. **LLM-agnostic**: spec に特定 LLM / MCP 実装の名前を書かない。CLI コマンドが interface
@@ -66,6 +66,8 @@ Discord ← daemon (outbound) ← outbound_queue (claim)
 
 ## 3. DBスキーマ
 
+> **DDL 記法**: 本節の DDL は PostgreSQL 記法で記述。SQLite への変換 (BIGSERIAL → INTEGER PRIMARY KEY AUTOINCREMENT, TIMESTAMPTZ → TEXT, NOW() → datetime('now'), FOR UPDATE SKIP LOCKED → IMMEDIATE transaction) は DbAdapter (§13.2) の責務。
+
 ### 3.1 agent_messages（全メッセージ永続記録、既存テーブル改修）
 
 ```sql
@@ -82,7 +84,8 @@ CREATE TABLE agent_messages (
   message_type TEXT NOT NULL DEFAULT 'message'
     CHECK (message_type IN ('message', 'system_error', 'system_info', 'emergency', 'digest', 'delegated')),
   sequence INTEGER,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'
 );
 
 CREATE INDEX idx_am_channel_created ON agent_messages(channel_id, created_at);
@@ -184,7 +187,7 @@ CREATE TABLE agents (
   agent_id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
   agent_type TEXT NOT NULL CHECK (agent_type IN ('human', 'dev', 'org')),
-  cli_type TEXT CHECK (cli_type IN ('claude_code', 'codex', 'gemini', 'other')),
+  cli_type TEXT,  -- 例: claude_code, codex, gemini, cursor 等 (CHECK 制約なし、自由文字列)
   discord_token TEXT,                  -- 送信用（暗号化検討: §12）
   discord_user_id TEXT,                -- Discord上のuser ID
   status TEXT NOT NULL DEFAULT 'offline'
@@ -287,6 +290,9 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 ### 4.2 agent-com send
 
 受信メッセージへの返信。`next` → `send` パターンが唯一の経路。`agents.current_message_id` が `next` で pop 済の `message_queue.id` を指す。
+
+current_message_id は daemon process memory に保持 (DB カラムではない)。
+per-bot MCP server が next で取得したメッセージの ID を session 内変数として保持し、send 時に参照する。
 
 - CLI: `--reply-to` は省略可。省略時は `current_message_id` が指す行の `message_id` を内部解決
 - MCP: `reply_to` は tool schema で required（caller 指定）
@@ -438,7 +444,7 @@ agent-com history --channel agent-mem [--limit 20] [--before msg_id]
 agent-com inbox --agent-id cto [--limit 20]
 ```
 
-#### 4.8.1 inbox cursor semantics (Issue #179 — 2026-04-15)
+#### 4.8.1 inbox cursor semantics
 
 `fetchNewMessages` (server.ts / `core/inbox-cursor.ts`) は per-process の **composite cursor `(created_at, id)`** を保持する。SQL predicate:
 
@@ -449,23 +455,14 @@ AND (created_at > $cursor_created_at::timestamptz
 ORDER BY created_at ASC, id ASC
 ```
 
-- **不変条件**:
-  1. `created_at` を主キー (µs 粒度、PG timestamptz の最小保持精度) に、`id` を **同 µs 内**行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない (bare `id > $cursor` は lex 比較で新着を取りこぼす、Issue #179 の原因)。JS `Date` は ms 粒度に丸めるため、cursor は `created_at_text` companion column 経由で µs を保持する (precision 段参照)
-  2. cursor 進める条件は rows.length > 0 のみ。empty 結果では cursor を保持 (再試行で取りこぼさない)
-  3. cursor は process 単位の in-memory state、restart で null に戻る (restart 直後は全 unread を返すためカーソル overrun リスクなし)
-  4. 行の `metadata->>'to' = $agent_id` filter は cursor と独立。route 判定は handleInboundMessage Step 7b で確定済 (Issue #177 で同期問題を追跡)
+**不変条件**:
 
-- **SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で PG 42P18 ("could not determine data type of parameter") を誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
+1. `created_at` を主キー (µs 粒度) に、`id` を同 µs 内行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない。cursor は `created_at_text` companion column 経由で µs 精度を保持する (JS `Date` は ms 粒度に丸めるため)
+2. cursor 進める条件は rows.length > 0 のみ。empty 結果では cursor を保持 (再試行で取りこぼさない)
+3. cursor は process 単位の in-memory state、restart で null に戻る (restart 直後は全 unread を返すためカーソル overrun リスクなし)
+4. 行の `metadata->>'to' = $agent_id` filter は cursor と独立。route 判定は handleInboundMessage Step 7b で確定済
 
-- **precision は µs 相当** (PR #182 cycle 3 auditor BLOCK 対応): PG timestamptz は µs 保持、node-postgres の default OID 1184 parser は JS `Date` (ms 粒度) に落とす。cursor を parsed `Date` から生成すると cursor ms / DB µs の非対称で `created_at > cursor` に**同一行が再マッチし duplicate delivery** が起きる (cycle 2 で見落とした論理バグ)。対応として SELECT に companion column `created_at::text AS created_at_text` を追加し、cursor 値はそちらから取る。PG の text cast は cursor round-trip に必要な精度を保持する (default DateStyle 下では `'2026-04-15 07:15:00.123456+00'` 形式)。global `pg.types.setTypeParser` 上書きは**しない** (他 timestamptz 消費箇所への副作用を避ける)。predicate/index path は実質不変の見込み (WHERE 述語は `created_at > $3::timestamptz` のままで SELECT 列追加のみ)。`id` UUID tiebreaker は µs-tied 行の case を guard。
-
-- **`created_at_text` 観測差分**: `InboxRow.created_at_text` は optional 公開フィールドとして callers (inbox tool, 将来の consumer) に観測可能。raw row を JSON.stringify / snapshot test する consumer は出力に差分が出る。列名 tidy (非公開化 / 別 object 化) は **本 Issue #179 の scope 外、future cleanup**。
-
-- **behavioral test** (`tests/inbox-cursor.test.ts`):
-  - UUID lex 順 ≠ 時系列の具体例 pair で Issue #179 回帰を pin
-  - `created_at::text AS created_at_text` が SELECT に含まれることを pin
-  - cursor が companion text (µs) を Date (ms) より優先することを unit test で pin
-  - **µs round-trip DB integration** (auditor cycle 2 必須指摘対応): `'.123456+00'` 行を INSERT → fetch1 は行を返しつつ cursor が `/\.\d{6}\+\d{2}$/` にマッチ → fetch2 で同 cursor を使い empty を確認 (duplicate delivery regression guard)
+**SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で型推論エラーを誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
 
 ---
 
@@ -498,7 +495,7 @@ MCP server は stateless。daemon 未起動なら自動 background start。
 
 起動シーケンス:
 1. daemon: DB 接続 → migration auto → Discord 接続 → receiver/outbound 開始
-2. MCP server: lazy spawn → DB 合流
+2. MCP server: 需要に応じて起動 → DB 経由で daemon と合流
 3. daemon 停止時: MCP は DB polling 継続 (受信済みは読める、新規受信停止)
 
 heartbeat:
@@ -571,89 +568,28 @@ receiverClient.on("messageCreate", async (msg) => {
 });
 ```
 
-#### 6.3.1 Inbound handler transactional semantics (Issue #177 — 2026-04-15)
-
-`handleInboundMessage` (in `adapters/inbound-receiver.ts`) executes four
-post-routing persistence steps for every delivered message. Until Issue
-\#177 they ran as independent queries with 7b's error silently swallowed;
-2026-04-15 07:09-07:21 JST observed "inbox-ghost" where 7d succeeded,
-7b did not, and `fetchNewMessages` hid the row because its `WHERE
-metadata->>'to' = $agent` filter saw NULL.
+#### 6.3.1 Inbound handler transactional semantics
 
 **Atomic commit boundary (7b + 7d):**
 
-- Step **7b** — `UPDATE agent_messages SET metadata = metadata ||
-  jsonb_build_object('to', $receiverAgentId) WHERE id = $messageId`
-- Step **7d** — `INSERT INTO message_queue (agent_id, message_id,
-  payload) VALUES (...) ON CONFLICT (agent_id, message_id) WHERE
-  message_id IS NOT NULL DO NOTHING RETURNING id`
+- Step **7b** — `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $receiverAgentId) WHERE id = $messageId`
+- Step **7d** — `INSERT INTO message_queue (agent_id, message_id, payload) VALUES (...) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`
 
-Both queries run on a **transaction-private** `pg.Client` inside one
-`BEGIN`/`COMMIT`. Implementation: `core/inbound-delivery.ts`
-`persistInboundDelivery(databaseUrl, params)`. Invariants:
+Both queries run on a **transaction-private** `pg.Client` inside one `BEGIN`/`COMMIT`. Implementation: `core/inbound-delivery.ts` `persistInboundDelivery(databaseUrl, params)`. Invariants:
 
-1. **Both-or-neither *and* UPDATE row matched** (Cycle 2 — auditor
-   BLOCKER 2). A successful return means (a) Step 7b's UPDATE matched
-   exactly one row (stale `messageId` is caught and forces a
-   `ROLLBACK` with `error: 'update_no_match'`) AND (b) Step 7d's
-   INSERT was either accepted or dedup-suppressed by `ON CONFLICT DO
-   NOTHING`. Any thrown error (connection loss, constraint violation,
-   unexpected server state) or UPDATE mismatch triggers `ROLLBACK`; no
-   partial `metadata.to` / `message_queue` state is observable to
-   readers that open a new transaction after the failure.
-2. **No silent swallow.** Failures return `{committed: false, error}` to
-   the caller, which logs one `stderr` line with `receiverAgentId`,
-   `messageId`, and the error. Pre-fix `.catch(() => {})` is gone.
-3. **Transaction-private connection** (Cycle 2 — auditor BLOCKER 1).
-   `persistInboundDelivery()` instantiates a dedicated `pg.Client` from
-   the given `databaseUrl`, connects, runs the transaction, and
-   `end()`s in `finally`. The process-global singleton returned by
-   `server.ts::getDb()` is NOT acceptable here: `pg.Client` transaction
-   state is per-**connection**, not per-call, so two concurrent inbound
-   handlers sharing one connection would interleave their
-   `BEGIN`/`COMMIT` and violate atomicity. Each call owns its
-   connection for its lifetime; concurrent inbound calls cannot
-   interleave. The lower-level export
-   `persistInboundDeliveryOnClient(client, params)` exists for tests
-   only — production code must not pass the singleton to it.
-4. **Retry idempotency.** The existing partial unique index
-   `uq_mq_agent_message` (`agent_id`, `message_id`) WHERE `message_id
-   IS NOT NULL` means `ON CONFLICT DO NOTHING` suppresses the second
-   `message_queue` INSERT. `persistInboundDelivery()` surfaces this as
-   `duplicateDedup: true`, which `handleInboundMessage` logs at the
-   inbound level (unchanged stderr wording: `message_queue dedup —
-   duplicate …`). The `metadata.to` `UPDATE` is already idempotent
-   because `||` is monoidal for the same key/value.
-5. **pg_notify ordering (7c).** The receiver-pipeline `pg_notify
-   ('agent_inbox', …)` fanout runs **after** the 7b+7d commit and is
-   **skipped** when the transaction rolled back. Subscribers therefore
-   never wake up on a delivery that was never persisted, and never read
-   `metadata.to = NULL` during the race window between `INSERT` and
-   `UPDATE`.
-6. **agent_messages row unaffected on rollback.** Step 2's save of the
-   raw `agent_messages` row runs before routing and is not in the 7b+7d
-   transaction. A failed 7b+7d therefore leaves `agent_messages` with
-   the message but no `metadata.to` and no `message_queue` row — i.e.
-   the receiver sees nothing in its inbox, which is the correct
-   "delivery failed" observation.
+1. **Both-or-neither**: 7b UPDATE + 7d INSERT は同一トランザクション。どちらかが失敗すれば ROLLBACK。partial `metadata.to` / `message_queue` state は外部から観測不能。
+2. **No silent swallow.** Failures return `{committed: false, error}` to the caller.
+3. **Transaction-private connection.** 各呼び出しが専用 `pg.Client` を使用。concurrent inbound handlers の interleave を防止。
+4. **Retry idempotency.** `uq_mq_agent_message` partial UNIQUE index + `ON CONFLICT DO NOTHING` で重複 INSERT を抑制。`metadata.to` UPDATE は冪等。
+5. **pg_notify ordering (7c).** `pg_notify` は 7b+7d commit 後にのみ発火。rollback 時は skip。
+6. **rollback 時 metadata.to 不可視.** `agent_messages` の raw row は 7b+7d トランザクション外で保存済み。7b+7d 失敗時は `metadata.to` なし + `message_queue` 行なし = inbox に表示されない (正しい "delivery failed" 状態)。
 
-`mqPayloadJson` is stored into `message_queue.payload`, a `text`
-column (`db/migrate.ts` — NOT `jsonb`). The JSON encoding is the
-caller's responsibility (`handleInboundMessage` builds it via
-`JSON.stringify`).
-
-**Scope boundary.** Steps 1–6 (channel resolve, `agent_messages` save,
-routing decision) and Step 7c (post-commit `pg_notify`) are deliberately
-outside the transaction. `persistInboundDelivery()` covers only 7b+7d
-because they share the inbox-visibility invariant; widening the
-transaction would couple routing to DB transaction lifetime for no
-semantic win.
+実装経緯: GitHub Issue #177 参照
 
 ### 6.4 Outbound処理
 
 > **S2-A (PR #164) + Phase C Step 1 PR-A (PR #168) + FEAT-005 adapter rewrite (PR #172) で挙動更新済**。以下の例示コードは初版方式（batch SELECT）。実装は atomic claim (UPDATE...FOR UPDATE SKIP LOCKED) + exponential backoff + nonce idempotency へ進化した。PR #172 で claim state を `'processing'` → `'claimed'` に rename (work-queue 標準語彙) + consumer / PollingDriver / inbound receiver を `adapters/*.ts` に抽出し、daemon entrypoint (`entrypoints/daemon.ts`) を consumer の唯一の起動点とした。例示コードの後ろに現行の挙動仕様を明記する。
 >
-> **2026-04-14 phasing 注記 (CEO directive Task 1, PR #172 post-merge hotfix, auditor cycle 2 startup-order fix)**: production 起動経路 (`claude server:agent-comms`) が `entrypoints/daemon.ts` を経由しないため、PR #172 直後に outbound_queue が drain されない不具合が発生 (pending 8 行滞留)。応急処置として server.ts の `postConnect()` 内で `discordClients.set(AGENT_ID, discord)` の直後に `isDaemonRuntime()` 条件下で `startOutboundConsumer()` を呼ぶ。`registerAgent()` 末尾に置く実装 (cycle 1) は `discord.connect()` resolve 前に tick が発火し `no_discord_client_for_agent` で全行 failed になったため却下。current production topology (1 agent = 1 process) では 19-bot race は想定しない。entrypoints/daemon.ts に supervise wrapper が完成した時点で server.ts 側を再剥離する（daemon-only invariant 復元）。
 
 #### 現行の挙動仕様 (実装との SSOT)
 
@@ -761,12 +697,10 @@ async function refreshCaches() {
 ### 6.7 Receiver Token
 
 ```
-専用receiver bot（Discord Developer Portalで新規作成）を使う。
-既存botのtokenを流用しない（C5対策）。
+- 1 bot (OSS): 自 bot token で inbound + outbound を兼用。専用 receiver bot 不要
+- multi-bot: 専用 receiver bot token 推奨 (C5 対策: 自送信ループ防止)
+AGENT_COM_RECEIVER_TOKEN は multi-bot 構成でのみ設定。未設定時は DISCORD_TOKEN を使用。
 
-AGENT_COM_RECEIVER_TOKEN=（専用bot token）
-
-このbotは受信専用。送信はしない。
 Guild内の全チャンネルにアクセス可能な権限を付与。
 Privileged Intents: MESSAGE CONTENT INTENT を有効化。
 ```
@@ -1074,7 +1008,7 @@ HMAC署名不要（HTTP POST配信を廃止したため）。
 
 ```
 現状: agents.discord_token にプレーンテキスト保存
-v0.2.0: 環境変数（DISCORD_TOKEN_{AGENT_ID}）に移行
+v2.0.0: 環境変数 (DISCORD_TOKEN / DISCORD_TOKEN_{AGENT_ID}) が正。DB 保存は legacy、新規セットアップでは使用しない
   → DBにtokenを保存しない
   → receiverが起動時に環境変数から読み込み
   → SQLiteファイル流出時のtoken漏洩を防止
@@ -1160,7 +1094,7 @@ AGENT_COM_POLL_INTERVAL_MS=3000  # polling間隔（§5.3参照）
 同時書き込み        高性能               WALモードで対応
 bot数上限          無制限               ~10 bot
 agent-memory連携   pgvector使用可        別途対応必要
-推奨用途           本番・大規模         開発・小規模
+推奨用途           multi-bot 大規模     1-10 bot (OSS default)
 ```
 
 ### 13.5 スケーラビリティ（polling driver）
@@ -1196,7 +1130,9 @@ bot数         推奨間隔                     負荷
 
 OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分。
 
----
+### 13.6 Presence Client
+
+Presence Client は将来拡張、現行は opt-in。
 
 ```typescript
 // intents空 → イベント一切受信しない
@@ -1236,7 +1172,11 @@ npx agent-comms-mcp status   # 状態表示
 .env テンプレート (init 時自動生成):
 
 ```
+# 1 bot: DISCORD_TOKEN のみで OK
 DISCORD_TOKEN=your-bot-token
+# multi-bot: bot ごとに DISCORD_TOKEN_{AGENT_ID} を設定
+# DISCORD_TOKEN_cto=xxx
+# DISCORD_TOKEN_dev=yyy
 AGENT_COM_DB=sqlite
 AGENT_COM_SQLITE_PATH=./agent-com.db
 AGENT_COM_POLL_INTERVAL_MS=3000
@@ -1251,10 +1191,10 @@ AGENT_COM_REPLY_CHAIN_DEPTH=10
 
 ```
 next_messageの結果にhintを含める:
-  "hint": "search_memory()で過去の決定事項を確認してから返信してください"
+  "hint": "統合記憶系 tool (例: search_memory) で過去の決定事項を確認してから返信してください"
 
 sendツールのdescriptionにも記載:
-  "返信前にsearch_memory()で過去の決定事項を確認してください。"
+  "返信前に統合記憶系 tool (例: search_memory) で過去の決定事項を確認してください。"
 ```
 
 ### 16.2 DB共有
@@ -1304,7 +1244,7 @@ SQLite環境:
 ```
 全仕様書を一括読み込み → 矛盾検出レポート
 spec-auditor botがpolling driver（§5.3）で常駐。
-CLAUDE.md相当の指示で24時間ごとに全spec監査を自発実行。
+LLM CLI の instruction mechanism で 24 時間ごとに全spec監査を自発実行。
 PRマージ後のトリガーはagent-com notify経由でbot宛にメッセージ送信。
 結果をCEOのキューに投入。
 cron不要。
@@ -1340,13 +1280,18 @@ interface NextMessageResponse {
 
 ```sql
 -- SQL (再帰 CTE、SQLite / PostgreSQL 共通)
-WITH RECURSIVE chain AS (
-  SELECT * FROM agent_messages WHERE id = $current_message_id
+WITH RECURSIVE chain(id, channel_id, author_id, content, reply_to, created_at, depth) AS (
+  SELECT id, channel_id, author_id, content, reply_to, created_at, 0
+  FROM agent_messages WHERE id = $current_message_id
   UNION ALL
-  SELECT m.* FROM agent_messages m JOIN chain c ON m.id = c.reply_to
+  SELECT m.id, m.channel_id, m.author_id, m.content, m.reply_to, m.created_at, c.depth + 1
+  FROM agent_messages m JOIN chain c ON m.id = c.reply_to
+  WHERE c.depth + 1 < $REPLY_CHAIN_DEPTH
 )
-SELECT * FROM chain ORDER BY created_at ASC LIMIT $REPLY_CHAIN_DEPTH;
+SELECT * FROM chain ORDER BY created_at ASC;
 ```
+
+depth counter を CTE 内で管理。循環参照 (reply_to が自身を指す) は depth limit で自動停止。
 
 設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 10)
 reply_to = NULL (会話起点) に到達するか depth 到達で停止。
