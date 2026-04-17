@@ -1,5 +1,6 @@
 # agent-com チャットUI同期仕様
 
+> **前提:** message-queue-spec v2.0.0 (OSS primary / SQLite default / 1 daemon)
 > CEO承認待ち: 2026-04-08
 > 原則: 初回はチャットUI → DB（インポート）、以降はDB → チャットUI（エクスポート）
 > 対応プラットフォーム: Discord / Telegram / Slack / LINE
@@ -65,18 +66,24 @@
 
 ```sql
 CREATE TABLE agents (
-  agent_id              TEXT PRIMARY KEY,       -- "cto"（コア識別子、変更なし）
-  org_id                TEXT DEFAULT 'default',
-  display_name          TEXT,                   -- "IYASAKA CTO"
-  agent_type            TEXT,                   -- "cto"|"dev"|"org"|"human"|"auditor"
-  default_channel       TEXT,                   -- デフォルトチャンネル
-  observer_mode         BOOLEAN DEFAULT false,  -- Auditor用
-  last_received_channel TEXT,                   -- 直前受信チャンネル
-  last_received_thread  TEXT,                   -- 直前受信スレッド
-  channel_port          INTEGER,                -- channel-serverのポート
-  status                TEXT DEFAULT 'offline', -- "online"|"offline"|"idle"
-  created_at            TIMESTAMPTZ DEFAULT now(),
-  updated_at            TIMESTAMPTZ DEFAULT now()
+  agent_id              TEXT PRIMARY KEY,              -- "cto"（コア識別子、変更なし）
+  org_id                TEXT NOT NULL DEFAULT 'default',
+  display_name          TEXT,                          -- "IYASAKA CTO"
+  agent_type            TEXT NOT NULL,                 -- "cto"|"dev"|"org"|"human"|"auditor"
+  cli_type              TEXT,                          -- "claude-code"|"codex"|"custom"
+  runtime               TEXT,                          -- "bun"|"node"|"deno"
+  default_channel       TEXT,                          -- デフォルトチャンネル
+  observer_mode         BOOLEAN DEFAULT false,         -- Auditor用
+  last_received_channel TEXT,                          -- 直前受信チャンネル
+  last_received_thread  TEXT,                          -- 直前受信スレッド
+  status                TEXT NOT NULL DEFAULT 'disconnected',
+                        -- "idle"|"busy"|"disconnected"|"initializing"
+  heartbeat_at          TIMESTAMPTZ,                   -- 最終ハートビート
+  current_model         TEXT,                          -- "opus-4"|"sonnet-4" 等
+  session_start_at      TIMESTAMPTZ,                   -- 現セッション開始時刻
+  last_error            TEXT,                          -- 直近エラーメッセージ
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
@@ -102,14 +109,15 @@ CREATE TABLE agent_adapters (
 
 ```sql
 CREATE TABLE channels (
-  id                TEXT PRIMARY KEY,           -- "hotel-kanri"（コア識別子）
-  org_id            TEXT DEFAULT 'default',
-  type              TEXT NOT NULL,              -- "channel"|"dm"|"group_dm"
-  name              TEXT,                       -- 表示名
-  members           TEXT[],                     -- agent_id配列
+  id                TEXT PRIMARY KEY,                  -- "hotel-kanri"（コア識別子）
+  org_id            TEXT NOT NULL DEFAULT 'default',
+  type              TEXT NOT NULL,                     -- "dm"|"group"|"thread"
+  name              TEXT,                              -- 表示名
+  topic             TEXT,                              -- チャンネルトピック
+  members           TEXT NOT NULL DEFAULT '[]',        -- agent_id JSON配列 (TEXT)
   created_by        TEXT,
-  created_at        TIMESTAMPTZ DEFAULT now(),
-  updated_at        TIMESTAMPTZ DEFAULT now()
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
@@ -397,7 +405,7 @@ async function validateMentions(mentions: string[]): Promise<string[] | Error> {
 npm install -g agent-com
 cp .env.example .env              # BOT Tokenを設定
 agent-com init --from discord     # 全データ自動インポート
-npm start                         # daemon + channel-server起動
+npx agent-comms-mcp               # daemon起動（channel-server不要）
 ```
 
 ### 8.2 後からプラットフォーム追加
@@ -413,7 +421,7 @@ agent-com sync                    # 同期
 agent-com init --standalone       # DBのみ構築
 agent-com agent register cto      # 手動登録
 agent-com channel create test --members cto
-npm start
+npx agent-comms-mcp               # daemon起動
 ```
 
 ### 8.4 手順比較
@@ -463,12 +471,12 @@ npm start
 ### 自動登録
 - [ ] 未知スレッドの自動登録（daemon受信時）
 - [ ] agent_id自動生成（表示名からsanitize）
-- [ ] ポート自動採番（channel_port）
 
 ---
 
 ## 改訂履歴
 
-| 日付・時刻 | 内容 |
-|-----------|------|
-| 2026-04-08 | 初版: チャットUI同期仕様（インストール順序、DBスキーマ、プラットフォーム別データ、同期3タイミング、メンション変換、コンフリクト解決、OSS設定フロー） |
+| 日付 | 内容 |
+|------|------|
+| 2026-04-17 | v0.2.0 phase 1: message-queue-spec v2.0.0 追随 — Header v2.0.0 前提追記、agents DDL 整合 (dispatch_enabled 除外 / heartbeat_at 等追加)、channels DDL 整合 (members JSON string / type enum / topic)、channel-server 残骸除去、改訂履歴追加 |
+| 2026-04-08 | v0.1.0 初版 (CEO 承認待ち) |
