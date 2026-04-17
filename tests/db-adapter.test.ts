@@ -110,6 +110,38 @@ describe('SqliteAdapter', () => {
     expect(read?.status).toBe('read')
   })
 
+  it('->> converts to json_extract', async () => {
+    await adapter.execute(
+      "INSERT INTO agent_messages (id, author_id, content, metadata) VALUES ($1, $2, $3, $4)",
+      ['json-test-msg', 'test-bot', 'hello', '{"to":"cto","priority":"high"}']
+    )
+    const row = await adapter.queryOne(
+      "SELECT * FROM agent_messages WHERE metadata->>'to' = $1",
+      ['cto']
+    )
+    expect(row?.id).toBe('json-test-msg')
+  })
+
+  it('out-of-order $n params are correctly reordered', async () => {
+    await adapter.execute(
+      "INSERT INTO agents (agent_id, display_name, agent_type) VALUES ($1, $2, $3)",
+      ['order-bot', 'Order Bot', 'dev']
+    )
+    const row = await adapter.queryOne(
+      "SELECT * FROM agents WHERE agent_type = $2 AND agent_id = $1",
+      ['order-bot', 'dev']
+    )
+    expect(row?.agent_id).toBe('order-bot')
+  })
+
+  it('repeated $n params work', async () => {
+    const rows = await adapter.query(
+      "SELECT * FROM agents WHERE agent_id = $1 OR display_name = $1",
+      ['order-bot']
+    )
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+  })
+
   it('outbound_queue INSERT + claim works', async () => {
     await adapter.execute(
       `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)

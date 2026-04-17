@@ -8,7 +8,7 @@ import { SqliteAdapter } from './sqlite-adapter'
 import type { DbAdapter } from './adapter'
 
 export function createDbAdapter(): DbAdapter {
-  const dbType = process.env.AGENT_COM_DB || 'sqlite'
+  const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
   if (dbType === 'postgres' || dbType === 'postgresql') {
     return new PgAdapter()
   }

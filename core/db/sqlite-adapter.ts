@@ -1,14 +1,10 @@
 import { Database } from 'bun:sqlite'
 import type { DbAdapter } from './adapter'
 
-const PG_PARAM_RE = /\$(\d+)/g
-
-function pgToSqliteParams(sql: string): string {
-  return sql.replace(PG_PARAM_RE, '?')
-}
-
 function adaptSql(sql: string): string {
-  let s = pgToSqliteParams(sql)
+  let s = sql
+  // ->> → json_extract (must run before $n replacement to avoid collision)
+  s = s.replace(/(\w+)->>'\s*(\w+)'/g, (_, col, key) => `json_extract(${col}, '$.${key}')`)
   s = s.replace(/\bNOW\(\)/gi, "datetime('now')")
   s = s.replace(/\bTIMESTAMPTZ\b/gi, 'TEXT')
   s = s.replace(/\bJSONB\b/gi, 'TEXT')
@@ -18,10 +14,17 @@ function adaptSql(sql: string): string {
   s = s.replace(/\bDEFAULT\s+(true)\b/gi, 'DEFAULT 1')
   s = s.replace(/\bDEFAULT\s+(false)\b/gi, 'DEFAULT 0')
   s = s.replace(/\bFOR\s+UPDATE\s+SKIP\s+LOCKED\b/gi, '')
-  s = s.replace(/->>'\s*(\w+)'\s*/g, (_, key) => `json_extract($&, '$.${key}') `)
-  // Fix json_extract: metadata->>'to' → json_extract(metadata, '$.to')
-  s = s.replace(/(\w+)->>'\s*(\w+)'/g, (_, col, key) => `json_extract(${col}, '$.${key}')`)
   return s
+}
+
+function reorderParams(sql: string, params: any[]): { sql: string; params: any[] } {
+  if (!/\$\d+/.test(sql)) return { sql, params }
+  const indices: number[] = []
+  const converted = sql.replace(/\$(\d+)/g, (_, n) => {
+    indices.push(parseInt(n, 10) - 1)
+    return '?'
+  })
+  return { sql: converted, params: indices.map(i => params[i]) }
 }
 
 export class SqliteAdapter implements DbAdapter {
@@ -35,13 +38,18 @@ export class SqliteAdapter implements DbAdapter {
     this.db.exec('PRAGMA busy_timeout = 5000')
   }
 
-  async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+  private prepare(sql: string, params?: any[]): { sql: string; params: any[] } {
     const adapted = adaptSql(sql)
-    const safeParams = (params ?? []).map(p =>
+    const rawParams = (params ?? []).map(p =>
       p === true ? 1 : p === false ? 0 : p
     )
+    return reorderParams(adapted, rawParams)
+  }
+
+  async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+    const p = this.prepare(sql, params)
     try {
-      return this.db.prepare(adapted).all(...safeParams) as T[]
+      return this.db.prepare(p.sql).all(...p.params) as T[]
     } catch (err: any) {
       if (err.message?.includes('not authorized') || err.message?.includes('LISTEN')) {
         return []
@@ -56,13 +64,9 @@ export class SqliteAdapter implements DbAdapter {
   }
 
   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
-    const adapted = adaptSql(sql)
-    const safeParams = (params ?? []).map(p =>
-      p === true ? 1 : p === false ? 0 : p
-    )
+    const p = this.prepare(sql, params)
     try {
-      const stmt = this.db.prepare(adapted)
-      const result = stmt.run(...safeParams)
+      const result = this.db.prepare(p.sql).run(...p.params)
       return { rowCount: result.changes }
     } catch (err: any) {
       if (err.message?.includes('not authorized') || err.message?.includes('LISTEN')) {
