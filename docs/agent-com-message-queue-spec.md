@@ -67,6 +67,7 @@ Discord ← daemon (outbound) ← outbound_queue (claim)
 ## 3. DBスキーマ
 
 > **DDL 記法**: 本節の DDL は PostgreSQL 記法で記述。SQLite への変換 (BIGSERIAL → INTEGER PRIMARY KEY AUTOINCREMENT, TIMESTAMPTZ → TEXT, NOW() → datetime('now'), FOR UPDATE SKIP LOCKED → IMMEDIATE transaction) は DbAdapter (§13.2) の責務。
+> **Target state**: §3.1 metadata / §3.4 cli_type 等は target state。現行 db/migrate.ts との差分は Phase C 実装で migration として順次解消する。
 
 ### 3.1 agent_messages（全メッセージ永続記録、既存テーブル改修）
 
@@ -197,6 +198,7 @@ CREATE TABLE agents (
   last_seen_at TIMESTAMPTZ,
   heartbeat_interval INTEGER DEFAULT 30, -- 秒
   observer_mode BOOLEAN NOT NULL DEFAULT FALSE,
+  current_message_id TEXT,              -- next で pop した message_queue.id (send 時に参照)
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
@@ -290,9 +292,6 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 ### 4.2 agent-com send
 
 受信メッセージへの返信。`next` → `send` パターンが唯一の経路。`agents.current_message_id` が `next` で pop 済の `message_queue.id` を指す。
-
-current_message_id は daemon process memory に保持 (DB カラムではない)。
-per-bot MCP server が next で取得したメッセージの ID を session 内変数として保持し、send 時に参照する。
 
 - CLI: `--reply-to` は省略可。省略時は `current_message_id` が指す行の `message_id` を内部解決
 - MCP: `reply_to` は tool schema で required（caller 指定）
