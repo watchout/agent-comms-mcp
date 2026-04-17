@@ -35,7 +35,7 @@ v1.0.3 の設計では全メッセージの入出力が Discord 経由を前提�
 
 ```
 1. 返信は入力元と同じ経路に返す（source-aware routing）
-2. 全メッセージが経路に関わらず DB に記録される（v1.0.3 §1 原則 5 を維持）
+2. 全メッセージが経路に関わらず DB に記録される（v2.0.0 §1 原則 3「DB が唯一の通信路」を維持）
 3. 既存の CLI コマンド（next / send）のインターフェースは変更しない
 4. source awareness は MCP server / CLI 内部で透過的に処理される
 5. OSS 利用者が source awareness を意識する必要がない
@@ -421,8 +421,7 @@ CEO → @cto "PR #168 をレビューして"
 
 ### 11.1 課題
 
-v1.0.3 の §6.5 では PollingDriver を MCP server 内蔵 (embedded) と standalone のデュアルモードで定義し、プロセス境界・起動シーケンス・heartbeat writer 責務を規定した。
-しかし MCP host は lazy spawn（最初の tool 呼び出しまで MCP server プロセスを起動しない）を採用しており、agent-comms tool を呼ばない bot では MCP server が起動せず、heartbeat / polling が動かない (embedded モードの場合)。standalone モードでは daemon が先行起動するためこの問題を回避できる（§6.5 起動シーケンス参照）。
+v2.0.0 の §5.3 で daemon プロセスモデルを 1 daemon に統一。MCP host の lazy spawn 問題は daemon が先行起動することで構造的に解消された（§5.3 起動シーケンス参照）。
 
 ```
 問題の構造:
@@ -450,6 +449,8 @@ v1.0.3 の §6.5 では PollingDriver を MCP server 内蔵 (embedded) と stand
 4. 全 CLI、全 bot、同一の restart-bot.sh で起動する
 5. LLM の行動に一切依存しない
 ```
+
+> **v2.0.0 注記**: message-queue-spec v2.0.0 では IPC は廃止、daemon ↔ MCP server 間は DB のみ通信 (§1 原則 3)。§§11.3-11.7 の IPC 設計は Phase C 完了後の source-awareness 全面改訂で置換予定。
 
 ### 11.3 アーキテクチャ
 
@@ -609,23 +610,16 @@ daemon ↔ MCP server 間の通信方式:
     → MCP server の実装者にとって馴染みがある
 ```
 
-### 11.8 embedded / standalone 切り替え
+### 11.8 daemon プロセスモデル (v2.0.0)
+
+v2.0.0 で embedded / standalone の dual mode は廃止。1 daemon プロセスに統一。
 
 ```
-OSS 利用者向けに 2 モードを提供:
-
-AGENT_COM_DAEMON_MODE=embedded
-  → v1.0.3 互換（レガシー）。MCP server 内に PollingDriver / OutboundConsumer 内蔵
-  → 小規模（1-3 bot）で手軽に使いたい場合
-  → lazy spawn 問題は「起動時に agents tool を 1 回呼ぶ」で回避
-
-AGENT_COM_DAEMON_MODE=standalone （推奨、v1.1.0 で IPC 拡張）
-  → daemon 分離。別プロセスで heartbeat / polling / outbound 実行
-  → 全 bot 規模で推奨。lazy spawn 回避が保証される
-  → IYASAKA の本番構成はこちら
-  → **daemon 未実装段階では default は `embedded`**
-     (§12 後方互換性 + message-queue-spec §20 と整合、daemon 実装完了後に standalone へ default 切替)
+daemon (host に 1): receiver + outbound + heartbeat + Discord Gateway
+per-bot MCP server (lazy spawn): stateless DB ラッパー
 ```
+
+旧 `AGENT_COM_DAEMON_MODE` 環境変数は廃止（message-queue-spec §20 廃止要素）。
 
 ### 11.9 watchdog 統合
 
@@ -662,14 +656,14 @@ v1.0.3 からの移行:
   - next / send の動作は source=discord の場合 v1.0.3 と完全に同一
   - outbound_queue の platform カラムも "discord" デフォルト
   - 複数 mentions を使用していた既存ワークフローは 1 名ずつに分割が必要
-  - AGENT_COM_DAEMON_MODE=embedded がデフォルト → v1.0.2 と同一動作
+  - daemon 1 プロセス（v2.0.0 統一モデル）
 
 OSS 利用者への影響:
   - Discord 単体で使う場合: mentions 制限以外変更なし
   - terminal 入力を使う場合: 自動的に source-aware routing が効く
   - マルチプラットフォーム: adapter 追加で対応
   - 複数 bot 同時指示のユースケース: notify コマンド（broadcast）を使用
-  - daemon 分離: AGENT_COM_DAEMON_MODE=standalone に設定するだけ
+  - daemon プロセスモデル: v2.0.0 §5.3 参照
 ```
 
 ---
@@ -709,7 +703,7 @@ v1.1.0 完了 = 以下全てが動作:
   - MCP server が daemon 経由で DB 操作（IPC 通信）
   - daemon プロセスが落ちても watchdog が自動復旧
   - Claude Code セッションが落ちても daemon の heartbeat / outbound は継続
-  - embedded / standalone の切り替えが環境変数で動作
+  - daemon 1 プロセスモデルが動作
   - v1.0.3 の全機能が後方互換で動作（mentions 制限除く）
 ```
 
