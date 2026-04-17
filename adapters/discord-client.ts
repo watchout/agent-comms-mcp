@@ -62,7 +62,7 @@ export const discordClients = new Map<string, DiscordAdapter>()
 
 const DISCORD_BACKOFF_MAX_MS = 30_000
 const AGENT_CACHE_TTL_MS = 60_000
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN ?? ''
+const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
 
 // ---- Agent cache ----------------------------------------------------------
 
