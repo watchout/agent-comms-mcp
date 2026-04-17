@@ -1167,25 +1167,31 @@ client.login(process.env.DISCORD_TOKEN);
 Quick Start:
 
 ```bash
-npx agent-comms-mcp          # 未 init → init + start / init 済 → start
-npx agent-comms-mcp init     # 初期化のみ
-npx agent-comms-mcp start    # daemon 起動のみ
-npx agent-comms-mcp status   # 状態表示
+npx agent-comms-mcp          # auto-detect: .env 有 → start / 無 → init
+npx agent-comms-mcp init     # 対話式セットアップ (token / DB / Agent ID → .env 生成)
+npx agent-comms-mcp start    # .env 読込 → daemon + MCP 起動
+npx agent-comms-mcp status   # health endpoint 問合せ
 ```
 
-.env テンプレート (init 時自動生成):
+init で生成される .env:
 
 ```
-# 1 bot: DISCORD_TOKEN のみで OK
+AGENT_ID=my-bot
 DISCORD_TOKEN=your-bot-token
-# multi-bot: bot ごとに DISCORD_TOKEN_{AGENT_ID} を設定
-# DISCORD_TOKEN_cto=xxx
-# DISCORD_TOKEN_dev=yyy
 AGENT_COM_DB=sqlite
 AGENT_COM_SQLITE_PATH=./agent-com.db
+# DATABASE_URL=postgresql://localhost/agent_comms
 AGENT_COM_POLL_INTERVAL_MS=3000
 AGENT_COM_REPLY_CHAIN_DEPTH=10
 ```
+
+init フロー:
+1. `.env` 存在チェック → 上書き確認
+2. Discord bot token (必須)
+3. Agent ID (デフォルト: cwd の basename)
+4. DB 種別: sqlite (デフォルト) / postgres
+5. postgres 選択時: DATABASE_URL 入力
+6. `.env` 生成 → sqlite 選択時は `migrateSqlite()` も実行
 
 ---
 
@@ -1363,6 +1369,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-19 | Phase C I6: §15 CLI Setup 書き換え — `init` 対話式セットアップ / `start` / `status` サブコマンド実装。entrypoints/main.ts に auto-detect + subcommand routing 追加。 |
 | 2026-04-18 | Phase C I5: §5.3 統一プロセスモデル化、§20 `TRANSPORT_MODE` / `IS_RECEIVER_MODE` 廃止追加。stdio/daemon/sse/receiver の 4 モード → 単一フローに統一。 |
 | 2026-04-17 | v2.0.0: OSS primary に組織原理を転換。Dispatcher 廃止 / dual mode 廃止 / SQLite default / 1 daemon 集約 / Reply Chain Context 導入 / LLM-agnostic 化。Phase C 条件を product 視点で再定義 (CEO 承認)。 |
 | 2026-04-17 | Task A2.5: §6.5 にプロセス境界図・起動シーケンス・heartbeat writer 責務を追記、§10.4 access.json 廃止後 permission model 追加。外部 AI レビュー指摘（what は書いたが how が未記述）への対応 |

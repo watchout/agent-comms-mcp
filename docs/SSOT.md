@@ -499,41 +499,28 @@ cron・外部スクリプトは不要。
 
 ## 8. 利用方法
 
-### 8.1 起動コマンド（目標形）
+### 8.1 起動コマンド（OSS Quick Start — Phase C I6）
 
 ```bash
-# Discord組織
-claude --channels agent-com:discord --env DISCORD_BOT_TOKEN=xxx
-
-# Slack組織（将来）
-claude --channels agent-com:slack --env SLACK_BOT_TOKEN=xxx
-
-# 複数プラットフォーム（将来）
-claude --channels agent-com:discord agent-com:slack
+npx agent-comms-mcp          # auto-detect: .env 有 → start / 無 → init
+npx agent-comms-mcp init     # 対話式セットアップ (token / DB / Agent ID → .env 生成)
+npx agent-comms-mcp start    # .env 読込 → daemon + MCP 起動
+npx agent-comms-mcp status   # health endpoint 問合せ
 ```
 
-### 8.2 現在の起動コマンド（Phase 5: 統合方式）
+### 8.2 現在の起動コマンド（社内運用 — Phase 5 統合方式）
 
 ```bash
-# Phase 5起動コマンド（全機能統合 — server.ts 1プロセスで MCP tools + channel + Discord + pg_notify）
-# 実態: bot-registry.txt と一致 (AGENT_COM_RUNTIME=daemon claude server:agent-comms ...)
+# 社内 multi-bot 運用（bot-registry.txt 準拠）
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
 WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
-AGENT_COM_RUNTIME=daemon claude server:agent-comms \
+claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```
 
 > **MCPサーバー名について:** `server:agent-comms` の `agent-comms` は `.mcp.json` で定義された MCP サーバー名。
-> `server.ts` がそのエントリポイント。`AGENT_COM_RUNTIME=daemon` で daemon モード起動 (PollingDriver + outbound consumer 含む)。
-> daemon 分離（standalone モード）は Phase C 以降の予定。
-
-**旧方式（Phase 4 — bridge別プロセス、フォールバック用、現在は未使用）:**
-```bash
-claude --dangerously-load-development-channels server:agent-com-bridge \
-       --mcp-config .mcp.json \
-       --dangerously-skip-permissions
-```
+> `server.ts` がそのエントリポイント。社内運用は MCP ホスト経由の起動、OSS 利用は `npx agent-comms-mcp` 経由の起動。
 
 ---
 
@@ -1076,9 +1063,17 @@ bot-registry.txtに登録されたポートのうち、対応するtmuxセッシ
 
 ### 16.5 起動コマンド
 
-全botが統一コマンドで起動される（実態: bot-registry.txt と一致）：
+**OSS（新規セットアップ）:**
 ```bash
-AGENT_COM_RUNTIME=daemon claude server:agent-comms \
+npx agent-comms-mcp init     # 対話式セットアップ → .env 生成
+npx agent-comms-mcp start    # daemon + MCP 起動
+```
+
+**社内 multi-bot 運用（bot-registry.txt と一致）:**
+```bash
+AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
+WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' \
+claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
 ```
@@ -1099,6 +1094,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-19 | Phase C I6: §8.1 を OSS Quick Start に書き換え（`npx agent-comms-mcp init/start/status`）。§8.2 を社内運用に限定。§16.5 起動コマンドに OSS 版を追加。 |
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
 | 2026-03-28 | 追記：§5レート制限/ループ検出のDB永続化、§12エージェントID管理、§13 bot間認証、§14退行テスト |
 | 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 check_inbox説明更新 |
