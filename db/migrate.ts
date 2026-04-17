@@ -9,6 +9,9 @@
 import { Client } from 'pg'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { migrateSqlite } from './migrate-sqlite'
+
+const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
 
 // Load database_url from config.json if available, fallback to env
 let databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
@@ -458,5 +461,9 @@ async function migrate() {
 // Node. Tests / tools that merely import migrate.ts for its exports
 // get no side effect.
 if (import.meta.main) {
-  migrate().catch(e => { console.error(e); process.exit(1) })
+  if (dbType === 'sqlite') {
+    migrateSqlite()
+  } else {
+    migrate().catch(e => { console.error(e); process.exit(1) })
+  }
 }

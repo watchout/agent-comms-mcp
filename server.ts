@@ -19,6 +19,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { Client } from 'pg'
+import { createDbAdapter, type DbAdapter as NewDbAdapter, toLegacy } from './core/db'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
@@ -344,6 +345,18 @@ let db: Client | null = null
 let dbAvailable = false
 const DB_MAX_RETRIES = 3
 
+// Phase C: DB abstraction layer (sqlite/postgres)
+// New code should use getDbAdapter(). Legacy code continues using getDb()/tryGetDb().
+let dbAdapter: NewDbAdapter | null = null
+const DB_TYPE = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
+
+function getDbAdapter(): NewDbAdapter {
+  if (!dbAdapter) {
+    dbAdapter = createDbAdapter()
+  }
+  return dbAdapter
+}
+
 async function getDb(): Promise<Client> {
   if (db) {
     // Test connection health
@@ -399,8 +412,12 @@ setOutboundConsumerDbGetter(tryGetDb, AGENT_ID)
 // processedIds) are all defined. See `setInboundReceiverDeps()` below.
 
 // PR-A helper: build a `DbAdapter` for core/ helpers from the lazy `tryGetDb()`.
+// Phase C: use new adapter when DB_TYPE != postgres (SQLite mode).
 // Returns null when the DB is unavailable, matching the existing fallback semantics.
 async function coreDbAdapter(): Promise<DbAdapter | null> {
+  if (DB_TYPE !== 'postgres') {
+    return toLegacy(getDbAdapter())
+  }
   const client = await tryGetDb()
   if (!client) return null
   return {
