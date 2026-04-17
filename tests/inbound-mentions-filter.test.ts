@@ -205,9 +205,8 @@ describe('§2.2 Pattern A — Human warning', () => {
   })
 
   test('daemon mode caller sends human warning', () => {
-    // ADR-041 S2-B: daemon retains a minimal shared-client onMessage that
-    // only emits sendHumanWarning (no handleInboundMessage). The human
-    // warning UX (§2.2 Pattern A) remains functional in daemon mode.
+    // Phase C I3: daemon shared-client onMessage now calls handleInboundMessage
+    // AND sendHumanWarning. §2.2 Pattern A human warning remains functional.
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     expect(daemonSection).toContain('sendHumanWarning')
@@ -226,14 +225,16 @@ describe('Inbound Mentions Filter — callsite updates', () => {
     expect(daemonSection).not.toContain('botDiscord.onMessage')
   })
 
-  test('daemon shared client onMessage (if any) does NOT call handleInboundMessage', () => {
+  test('daemon shared client onMessage DOES call handleInboundMessage (Phase C I3)', () => {
+    // Phase C I3: daemon is now self-sufficient; shared Discord adapter
+    // calls handleInboundMessage for full inbound routing.
+    // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
     const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
     const sharedIdx = daemonSection.indexOf('discord.onMessage((msg)')
-    if (sharedIdx >= 0) {
-      const handlerBody = daemonSection.slice(sharedIdx, sharedIdx + 3000)
-      expect(handlerBody).not.toContain('handleInboundMessage({')
-    }
+    expect(sharedIdx).toBeGreaterThan(-1)
+    const handlerBody = daemonSection.slice(sharedIdx, sharedIdx + 3000)
+    expect(handlerBody).toContain('handleInboundMessage({')
   })
 
   test('all callsites use handleInboundMessage (not old routeInbound)', () => {
