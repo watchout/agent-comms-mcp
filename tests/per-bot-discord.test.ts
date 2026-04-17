@@ -85,28 +85,29 @@ describe('Phase 3c — Per-Bot Discord Client', () => {
     expect(SERVER_SOURCE).toContain('getDiscordClient(agentId).sendAdapterMessage(')
   })
 
-  test('daemon mode creates per-bot Discord client on SSE connect', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain('resolveDiscordToken(botId)')
-    expect(daemonSection).toContain('connectBotDiscord(botId,')
-    expect(daemonSection).toContain('discordClients.set(botId, botDiscord)')
+  test('multi-bot SSE creates per-bot Discord client on SSE connect', () => {
+    // Phase C I5: multi-bot SSE server (conditional) creates per-bot clients
+    const multiBotBlock = SERVER_SOURCE.indexOf('if (MULTI_BOT_MODE)')
+    const multiBotSection = SERVER_SOURCE.slice(multiBotBlock, multiBotBlock + 15000)
+    expect(multiBotSection).toContain('resolveDiscordToken(botId)')
+    expect(multiBotSection).toContain('connectBotDiscord(botId,')
+    expect(multiBotSection).toContain('discordClients.set(botId, botDiscord)')
   })
 
-  test('daemon mode cleans up per-bot Discord on SSE disconnect', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain("per-bot Discord disconnected for ${botId}")
-    expect(daemonSection).toContain('discordClients.delete(botId)')
+  test('multi-bot SSE cleans up per-bot Discord on SSE disconnect', () => {
+    const multiBotBlock = SERVER_SOURCE.indexOf('if (MULTI_BOT_MODE)')
+    const multiBotSection = SERVER_SOURCE.slice(multiBotBlock, multiBotBlock + 15000)
+    expect(multiBotSection).toContain("per-bot Discord disconnected for ${botId}")
+    expect(multiBotSection).toContain('discordClients.delete(botId)')
   })
 
-  test('daemon mode cleans up per-bot Discord on reconnect', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain('oldClient.disconnect()')
+  test('multi-bot SSE cleans up per-bot Discord on reconnect', () => {
+    const multiBotBlock = SERVER_SOURCE.indexOf('if (MULTI_BOT_MODE)')
+    const multiBotSection = SERVER_SOURCE.slice(multiBotBlock, multiBotBlock + 15000)
+    expect(multiBotSection).toContain('oldClient.disconnect()')
   })
 
-  test('daemon shutdown cleans up all per-bot Discord clients', () => {
+  test('shutdown cleans up all per-bot Discord clients', () => {
     expect(SERVER_SOURCE).toContain('discordClients.clear()')
   })
 })
@@ -138,20 +139,16 @@ describe('Phase 3c — Staggered Connect + Backoff', () => {
 // ============================================================
 // 4. Shared client skips per-bot bots
 // ============================================================
-describe('Phase 3c — Shared Client Routing', () => {
-  test('shared Discord onMessage skips bots with per-bot clients', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).toContain('discordClients.has(botId)) continue')
+describe('Phase 3c — Shared Client Routing (Phase C I5: unified)', () => {
+  test('shared startup skips bots with per-bot clients', () => {
+    expect(SERVER_SOURCE).toContain('discordClients.has(botId)) continue')
   })
 
-  test('per-bot client does NOT register an onMessage handler (ADR-041 S2-B: outbound-only)', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 15000)
-    expect(daemonSection).not.toContain('botDiscord.onMessage((msg)')
+  test('per-bot client does NOT register an onMessage handler (outbound-only)', () => {
+    expect(SERVER_SOURCE).not.toContain('botDiscord.onMessage((msg)')
   })
 
-  test('shared discord instance is preserved for stdio/sse modes', () => {
+  test('shared discord instance exists', () => {
     // The global discord instance should still exist
     expect(SERVER_SOURCE).toContain("const discord = new DiscordAdapter()")
   })

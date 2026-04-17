@@ -24,11 +24,12 @@
   ],
   "main": "server.ts",
   "bin": {
-    "agent-comms-mcp": "server.ts",
+    "agent-comms-mcp": "entrypoints/main.ts",
     "agent-com": "cli/index.ts"
   },
   "files": [
     "server.ts",
+    "entrypoints/",
     "adapters/",
     "cli/",
     "db/",

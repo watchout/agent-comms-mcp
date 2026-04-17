@@ -95,32 +95,29 @@ describe('Inbound Router — Source Structure', () => {
 })
 
 // ============================================================
-// 1b. Daemon mode source-level regression tests
+// 1b. Unified flow source-level regression tests (Phase C I5)
 // ============================================================
-// ADR-041 S2-B (PR#157) + Phase C I3: daemon mode now handles inbound via
-// shared Discord adapter. Per-bot clients remain outbound-only.
-// Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
-describe('Inbound Router — Daemon Mode Source Structure (ADR-041 S2-B + Phase C I3)', () => {
-  test('daemon mode does NOT bind per-bot Discord onMessage', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    expect(daemonBlock).toBeGreaterThan(-1)
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).not.toContain('botDiscord.onMessage(')
+// Phase C I5: all modes unified. Shared startup handles inbound via
+// Discord adapter. Per-bot clients remain outbound-only.
+describe('Inbound Router — Unified Flow Source Structure (Phase C I5)', () => {
+  test('per-bot Discord client does NOT bind onMessage (outbound-only)', () => {
+    expect(SERVER_SOURCE).not.toContain('botDiscord.onMessage(')
   })
 
-  test('daemon mode DOES invoke handleInboundMessage via shared adapter (Phase C I3)', () => {
-    // Phase C I3: daemon shared Discord adapter now calls handleInboundMessage.
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('handleInboundMessage({')
+  test('shared startup invokes handleInboundMessage via shared adapter', () => {
+    // Phase C I5: single shared Discord adapter calls handleInboundMessage.
+    const sharedStartup = SERVER_SOURCE.indexOf('// --- 2. Shared startup (unconditional) ---')
+    expect(sharedStartup).toBeGreaterThan(-1)
+    const sharedSection = SERVER_SOURCE.slice(sharedStartup)
+    expect(sharedSection).toContain('handleInboundMessage({')
   })
 
-  test('daemon startup still connects per-bot Discord clients (outbound-only)', () => {
-    const daemonBlock = SERVER_SOURCE.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
-    const daemonSection = SERVER_SOURCE.slice(daemonBlock, daemonBlock + 20000)
-    expect(daemonSection).toContain('for (const botId of EXPECTED_BOTS)')
-    expect(daemonSection).toContain('resolveDiscordToken(botId)')
-    expect(daemonSection).toContain('connectBotDiscord(botId,')
+  test('startup connects per-bot Discord clients for EXPECTED_BOTS (outbound-only)', () => {
+    const sharedStartup = SERVER_SOURCE.indexOf('// --- 2. Shared startup (unconditional) ---')
+    const sharedSection = SERVER_SOURCE.slice(sharedStartup)
+    expect(sharedSection).toContain('for (const botId of EXPECTED_BOTS)')
+    expect(sharedSection).toContain('resolveDiscordToken(botId)')
+    expect(sharedSection).toContain('connectBotDiscord(botId,')
   })
 })
 

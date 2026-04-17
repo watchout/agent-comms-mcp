@@ -164,15 +164,14 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
   test('12. stdio postConnect registers AGENT_ID → shared discord in discordClients Map', () => {
     // Hotfix regression guard: PR #164 removed the `?? discord` fallback
     // in consumeOneOutboundRow, but the per-bot `discordClients` populate
-    // path is gated on TRANSPORT_MODE === 'daemon'. Fleet bots run with
-    // AGENT_COM_RUNTIME=daemon + TRANSPORT_MODE=stdio (default), so the
+    // path was gated on TRANSPORT_MODE === 'daemon' (removed in Phase C I5).
+    // Phase C I5: unified flow always populates discordClients via shared startup, so the
     // Map stayed empty and every outbound row failed with
     // 'no_discord_client_for_agent' (85% → 1% drop, 2026-04-13).
     //
-    // In stdio/channel-plugin mode each process is a single-bot daemon
-    // whose shared `discord` adapter is connected with that bot's own
-    // DISCORD_BOT_TOKEN. Registering it under AGENT_ID is the only
-    // populate path in that mode; lose this line and outbound dies again.
+    // Phase C I5: unified flow — the shared `discord` adapter is connected
+    // with this bot's DISCORD_BOT_TOKEN. Registering it under AGENT_ID
+    // in discordClients is required; lose this line and outbound dies.
     const callIdx = SERVER_SRC.indexOf('await discord.connect({')
     expect(callIdx).toBeGreaterThan(-1)
     // Look only at the code that runs after the shared adapter finishes
