@@ -1,7 +1,7 @@
 # agent-com Attachment Specification v1.0.0
 
 > **Status:** APPROVED (v1.0.0 で major revision、Phase 4 廃止追随)
-> **前提:** message-queue-spec v1.0.3 / source-awareness v1.1.0 と整合
+> **前提:** message-queue-spec v2.0.0 / source-awareness v1.1.0 と整合
 > **v0.1.0 からの主要変更:** channel-server architecture (廃止) → receiver + message_queue + outbound_queue ベースに刷新
 
 ## 1. Overview
@@ -604,5 +604,5 @@ Phase 1-4 が v1.0.0 必須。Phase 5-7 は v1.1.0 以降で可。
 
 | 日付 | 内容 |
 |------|------|
-| 2026-04-16 | v1.0.0: architecture を receiver + message_queue + outbound_queue ベースに刷新（Phase 4 PR #130 で廃止された channel-server 前提の v0.1.0 から major update）。§3 Inbound / §4 Outbound / §6 Bot 間転送 / §11 DB schema / §12 Cleanup を書き直し、message-queue-spec v1.0.3 + source-awareness v1.1.0 との整合を pin。§11 FK 型を TEXT に修正（agent_messages.id 型と一致）。§13 エラーコード参照先を message-queue-spec §12 に変更。 |
+| 2026-04-16 | v1.0.0: architecture を receiver + message_queue + outbound_queue ベースに刷新（Phase 4 PR #130 で廃止された channel-server 前提の v0.1.0 から major update）。§3 Inbound / §4 Outbound / §6 Bot 間転送 / §11 DB schema / §12 Cleanup を書き直し、message-queue-spec v2.0.0 + source-awareness v1.1.0 との整合を pin。§11 FK 型を TEXT に修正（agent_messages.id 型と一致）。§13 エラーコード参照先を message-queue-spec §12 に変更。 |
 | 2026-04-07 | v0.1.0: 初版（channel-server architecture 前提、Phase 4 前） |

@@ -1,6 +1,7 @@
 # agent-com Source Awareness 設計書 v1.1.0
 
 > **ステータス:** PROPOSED（Phase C 完了後に着手）
+> ⚠️ **v2.0.0 互換性注記**: §11 Daemon 分離 (独立プロセス + IPC) は message-queue-spec v2.0.0 の設計 (1 daemon + DB のみ通信) と矛盾する。§11 以降は Phase C 後の全面改訂で v2.0.0 に整合させる。現時点では §1-§10 のみ有効。
 > **前提:** `agent-com-message-queue-spec.md` v1.0.3 Phase C 完了済みであること
 > **関連:** `agent-com-message-queue-spec.md` v1.0.3 を拡張するが、v1.0.3 自体は変更しない
 
