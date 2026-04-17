@@ -2,7 +2,7 @@
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
-> 全CLI対応（Claude Code / Codex CLI / Gemini CLI / 将来の任意CLI）
+> 全LLMツール対応（LLM-agnostic）
 
 ---
 
@@ -18,32 +18,6 @@
 7. **PostgreSQL でも SQLite でも同じ CLI コマンドが動く**
 8. **Reply Chain Context**: next_message は reply_to chain を辿り、会話の文脈のみを返す。チャンネル履歴の一括付与はしない
 ```
-
-### 原則 #2 の実装対応（ADR-041 S2-B / PR#157）
-
-「受信は1プロセス」を構造的に保証するため、Discord inbound は **stdio モード
-の `discord.onMessage` ハンドラ 1 箇所のみ**に集約される（retreat path (a)
-pull-on-notify 採用、PollingDriver を polling 基盤とする）。
-
-- **stdio モード**: `discord.onMessage` を唯一の inbound entry point として
-  保持し、`handleInboundMessage` → `agent_messages` / `message_queue` INSERT
-  を行う。
-- **daemon モード**:
-  - per-bot Discord client は `onMessage` を bind せず、connect のみ保持
-    （outbound REST 専用）。
-  - shared Discord client は connect を保持し、**`onMessage` は §2.2
-    Pattern A 人間警告専用の shortcut のみ** bind する。この listener は
-    `sendHumanWarning` のみを呼び、`handleInboundMessage` /
-    `message_queue` INSERT は行わない。
-  - つまり daemon は inbound routing（`handleInboundMessage`）を呼ばないが、
-    mention されない人間投稿への warning 機能だけは保持する。
-  - daemon は PollingDriver と outbound_queue 消費を担当する (PR #172 FEAT-005: 具体的には `entrypoints/daemon.ts` が `startOutboundConsumer()` の唯一の呼出点、server.ts `registerAgent()` からは除去済)。
-  - **2026-04-14 phasing 注記 (CEO directive Task 1, auditor cycle 2 startup-order fix)**: 現行 production 起動経路は `claude server:agent-comms` → server.ts (stdio MCP) で、`AGENT_COM_RUNTIME=daemon` を shell 環境で立てるパターン。`entrypoints/daemon.ts` に supervise wrapper が無い間は、**server.ts も `isDaemonRuntime()` の条件下で `startOutboundConsumer()` を呼ぶ**ことを許容する（両経路から起動可）。呼出位置は `discordClients.set(AGENT_ID, discord)` の直後（postConnect 内）に限定する — `registerAgent()` 末尾に置くと 1 秒 tick が `discord.connect()` resolve 前に発火し、`no_discord_client_for_agent` で全行 failed になる (cycle 1 で観測)。current production topology (claude CLI 1 agent = 1 process) では 19-bot race は想定しない。supervise 基盤完成時に server.ts 側を再剥離して daemon-only invariant を復元する。
-- daemon と stdio を同時に起動しても `handleInboundMessage` は 1 回だけ発火
-  するため、`message_queue` への重複 INSERT は構造的に発生しない。
-
-この不変条件は `tests/spec-enforcement/s2b-receiver-unify.test.ts` で
-ソースレベルに pin されている。
 
 ---
 
@@ -68,7 +42,7 @@ npx agent-comms-mcp
      ├─ heartbeat monitor
      │    ├─ 全 agent の heartbeat_at を READ ONLY 監視 (30s)
      │    └─ timeout → agents.status = 'disconnected'
-     └─ MCP tools (stdio / SSE)
+     └─ MCP tools (stdio)
           ├─ next (message_queue + reply chain context)
           ├─ send (outbound_queue INSERT)
           └─ agents / status / heartbeat / history / inbox
@@ -281,12 +255,9 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
   "topic": "agent-memoryの記憶管理開発",
   "content": "テスト結果�d���",
   "attachments": [],
-  "reply_context": null,
-  "my_recent": [
-    { "content": "テスト開始します", "created_at": "2026-04-08T10:00:00Z" }
-  ],
-  "channel_recent": [
-    { "from": "arc", "content": "ビルド成功", "created_at": "2026-04-08T09:58:00Z" }
+  "reply_chain": [
+    { "from": "agent-com-dev", "content": "テスト開始します", "created_at": "2026-04-08T10:00:00Z" },
+    { "from": "ceo", "content": "テスト結果を報告して", "created_at": "2026-04-08T10:01:00Z" }
   ],
   "waiting": 12,
   "hint": "search_memory()で過去の決定事項を確認してから返信してください"
@@ -1328,7 +1299,7 @@ SQLite環境:
 }
 ```
 
-### 17.2 Gemini CLI Spec Auditor（日次）
+### 17.2 Spec Auditor（日次）
 
 ```
 全仕様書を一括読み込み → 矛盾検出レポート
