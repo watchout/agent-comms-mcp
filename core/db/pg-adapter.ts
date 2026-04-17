@@ -59,6 +59,11 @@ export class PgAdapter implements DbAdapter {
     await this.client.query(`LISTEN ${channel}`)
   }
 
+  async notify(channel: string, payload: string): Promise<void> {
+    await this.ensureConnected()
+    await this.client.query(`SELECT pg_notify($1, $2)`, [channel, payload])
+  }
+
   async close(): Promise<void> {
     if (this.connected) {
       await this.client.end()

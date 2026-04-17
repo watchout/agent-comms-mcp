@@ -195,6 +195,17 @@ export function stopPolling(): void {
   }
 }
 
+// ---- pg_notify helper (I2: conditional for SQLite/PG unification) --------
+
+async function pgNotifyGuarded(client: DbLike | null, channel: string, payload: string): Promise<void> {
+  if (!client || process.env.AGENT_COM_PG_NOTIFY === 'false') return
+  try {
+    await client.query(`SELECT pg_notify($1, $2)`, [channel, payload])
+  } catch (err) {
+    process.stderr.write(`agent-comms: pg_notify failed (non-fatal): ${err}\n`)
+  }
+}
+
 // ---- pg_notify LISTEN path -----------------------------------------------
 
 let listenClient: Client | null = null
@@ -207,6 +218,8 @@ const LISTEN_KEEPALIVE_INTERVAL_MS = 60_000
 export async function startListener(): Promise<void> {
   const d = requireDeps()
   if (!d.databaseUrl) return
+  // I2: skip LISTEN when pg_notify is disabled (SQLite / polling-only mode)
+  if (process.env.AGENT_COM_PG_NOTIFY === 'false') return
 
   try {
     const client = new Client({ connectionString: d.databaseUrl })
@@ -349,31 +362,21 @@ export async function startListener(): Promise<void> {
           },
         }).then(async () => {
           const dbClient = await d.tryGetDb()
-          if (dbClient) {
-            await dbClient.query(
-              `SELECT pg_notify('agent_inbox', $1)`,
-              [JSON.stringify({
-                event: 'message.delivered',
-                to: d.agentId,
-                message_id: row.id,
-                agent_id: d.agentId,
-              })],
-            ).catch(() => {})
-          }
+          await pgNotifyGuarded(dbClient, 'agent_inbox', JSON.stringify({
+            event: 'message.delivered',
+            to: d.agentId,
+            message_id: row.id,
+            agent_id: d.agentId,
+          }))
         }).catch(async (err) => {
           process.stderr.write(`agent-comms: listener notification failed: ${err}\n`)
           const dbClient = await d.tryGetDb()
-          if (dbClient) {
-            await dbClient.query(
-              `SELECT pg_notify('agent_inbox', $1)`,
-              [JSON.stringify({
-                event: 'message.failed',
-                to: d.agentId,
-                message_id: row.id,
-                error: String(err),
-              })],
-            ).catch(() => {})
-          }
+          await pgNotifyGuarded(dbClient, 'agent_inbox', JSON.stringify({
+            event: 'message.failed',
+            to: d.agentId,
+            message_id: row.id,
+            error: String(err),
+          }))
         })
       } catch (err) {
         process.stderr.write(`agent-comms: listener notification error: ${err}\n`)
@@ -602,22 +605,13 @@ export async function handleInboundMessage(params: {
   const RECEIVER_PIPELINE_BOTS = d.receiverPipelineBots
   if (inboundCommitted && messageId && RECEIVER_PIPELINE_BOTS.has(receiverAgentId)) {
     const client = await d.tryGetDb()
-    if (client) {
-      await client.query(
-        `SELECT pg_notify('agent_inbox', $1)`,
-        [JSON.stringify({
-          event: 'message.created',
-          to: receiverAgentId,
-          message_id: messageId,
-          channel_id: resolved.channelId,
-          source: 'receiver-pipeline',
-        })],
-      ).catch(err => {
-        process.stderr.write(
-          `agent-comms: receiver pipeline pg_notify failed for ${receiverAgentId} (non-fatal): ${err}\n`,
-        )
-      })
-    }
+    await pgNotifyGuarded(client, 'agent_inbox', JSON.stringify({
+      event: 'message.created',
+      to: receiverAgentId,
+      message_id: messageId,
+      channel_id: resolved.channelId,
+      source: 'receiver-pipeline',
+    }))
   }
 
   // Step 8: Build push metadata.

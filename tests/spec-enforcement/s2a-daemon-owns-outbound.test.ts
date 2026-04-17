@@ -56,10 +56,13 @@ function sliceFn(src: string, name: string): string {
 }
 
 describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
-  test('1. startOutboundConsumer gates on isDaemonRuntime()', () => {
+  test('1. startOutboundConsumer starts unconditionally (only OUTBOUND_QUEUE_CONSUMER=0 kills it)', () => {
+    // Phase C I4: dual mode removed. isDaemonRuntime() no longer
+    // exists; the consumer starts unconditionally. The only kill
+    // switch is OUTBOUND_QUEUE_CONSUMER=0.
     const fn = sliceFn(SERVER_SRC, 'startOutboundConsumer')
-    expect(fn).toContain('isDaemonRuntime()')
-    expect(fn).toMatch(/if\s*\(\s*!\s*isDaemonRuntime\(\)\s*\)/)
+    expect(fn).not.toContain('isDaemonRuntime')
+    expect(fn).toMatch(/OUTBOUND_QUEUE_CONSUMER\s*===\s*'0'/)
   })
 
   test('2. consumeOneOutboundRow claim SQL atomically flips to claimed + filters agent_id', () => {
@@ -110,20 +113,22 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(SERVER_SRC).toMatch(/docs\/agent-com-message-queue-spec\.md\s+§1\s+line\s+39/)
   })
 
-  test('7. PollingDriver.start gates its poll timer on isDaemonRuntime()', () => {
-    // SSOT §1 line 39 places BOTH PollingDriver and outbound_queue under
-    // the daemon runtime. Auditor B2: stdio must not spin the poll timer.
+  test('7. PollingDriver.start starts poll timer unconditionally (no isDaemonRuntime gate)', () => {
+    // Phase C I4: dual mode removed. PollingDriver starts
+    // unconditionally; there is no isDaemonRuntime() gate.
     const classIdx = SERVER_SRC.indexOf('class PollingDriver')
     expect(classIdx).toBeGreaterThan(-1)
     const nextTopLevel = SERVER_SRC.indexOf('\nconst pollingDriver', classIdx)
     const body = SERVER_SRC.slice(classIdx, nextTopLevel === -1 ? undefined : nextTopLevel)
-    expect(body).toContain('isDaemonRuntime()')
-    // The pollTimer assignment must be behind the gate; heartbeatTimer
-    // stays for all runtimes so we only assert the gate wraps pollTimer.
-    expect(body).toMatch(/isDaemonRuntime\(\)[\s\S]*?this\.pollTimer\s*=\s*setInterval/)
+    expect(body).not.toContain('isDaemonRuntime')
+    // The pollTimer assignment is unconditional inside start().
+    expect(body).toMatch(/this\.pollTimer\s*=\s*setInterval/)
   })
 
-  test('8. bot-registry.txt every non-comment row carries AGENT_COM_RUNTIME=daemon', () => {
+  test('8. bot-registry.txt every non-comment row does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
+    // Phase C I4: dual mode removed. AGENT_COM_RUNTIME=daemon env
+    // prefix is no longer needed — every process is daemon-mode.
+    // Verify registry rows use `claude server:agent-comms` directly.
     const registry = readFileSync(join(REPO_ROOT, 'scripts', 'bot-registry.txt'), 'utf-8')
     const rows = registry.split('\n').filter(line => line.trim().length > 0 && !line.trim().startsWith('#'))
     expect(rows.length).toBeGreaterThan(0)
@@ -131,33 +136,29 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
       const parts = row.split('|')
       expect(parts.length).toBeGreaterThanOrEqual(5)
       const command = parts.slice(4).join('|')
-      // Cycle-4 rigor: the env assignment must be the shell *prefix* of
-      // the command, not just present somewhere. A mid-line match would
-      // silently accept regressions like `claude ... AGENT_COM_RUNTIME=daemon`
-      // (treating it as a stray argument, which does NOT propagate to the
-      // process env the way a prefix assignment does).
-      expect(command.trimStart()).toMatch(/^AGENT_COM_RUNTIME=daemon\s+/)
+      expect(command).not.toContain('AGENT_COM_RUNTIME')
+      expect(command.trimStart()).toMatch(/^claude\s+server:agent-comms/)
     }
   })
 
-  test('9. restart-bot.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon as prefix', () => {
+  test('9. restart-bot.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
+    // Phase C I4: dual mode removed. DEFAULT_CMD uses plain
+    // `claude server:agent-comms` without env prefix.
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
     const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
     expect(line).toBeDefined()
-    // Cycle-4 rigor: env assignment is the first token inside the quotes,
-    // not a substring elsewhere in the fallback command.
-    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
+    expect(line!).not.toContain('AGENT_COM_RUNTIME')
+    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+server:agent-comms/)
   })
 
-  test('10. watchdog.sh DEFAULT_CMD carries AGENT_COM_RUNTIME=daemon as prefix', () => {
-    // Auditor cycle-3 CONDITIONAL: watchdog is the autonomous restart
-    // path; its fallback DEFAULT_CMD is the last line of defense when a
-    // registry row is malformed or missing. Must not revert to no-env.
+  test('10. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
+    // Phase C I4: dual mode removed. watchdog fallback uses plain
+    // `claude server:agent-comms` without env prefix.
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
     const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
     expect(line).toBeDefined()
-    // Cycle-4 rigor: position-pinned env prefix.
-    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
+    expect(line!).not.toContain('AGENT_COM_RUNTIME')
+    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+server:agent-comms/)
   })
 
   test('12. stdio postConnect registers AGENT_ID → shared discord in discordClients Map', () => {
@@ -181,17 +182,15 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(afterConnect).toMatch(/discordClients\.set\(\s*AGENT_ID\s*,\s*discord\s*\)/)
   })
 
-  test('11. server.ts DEFAULT_CLAUDE_CMD (restart_bot MCP tool fallback) carries AGENT_COM_RUNTIME=daemon as prefix', () => {
-    // Auditor cycle-3 CONDITIONAL: restart_bot MCP tool falls back to
-    // DEFAULT_CLAUDE_CMD when a registry row parses with an empty
-    // COMMAND field. That fallback must also carry the env.
-    // Cycle-4 rigor: pin position — env assignment is the first token
-    // inside the string literal, not somewhere in the argument tail.
+  test('11. server.ts DEFAULT_CLAUDE_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
+    // Phase C I4: dual mode removed. DEFAULT_CLAUDE_CMD uses plain
+    // `claude server:agent-comms` without env prefix.
     const line = SERVER_SRC
       .split('\n')
       .find(l => l.trimStart().startsWith('const DEFAULT_CLAUDE_CMD'))
     expect(line).toBeDefined()
-    expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']AGENT_COM_RUNTIME=daemon\s+/)
+    expect(line!).not.toContain('AGENT_COM_RUNTIME')
+    expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']claude\s+server:agent-comms/)
   })
 
   test('13. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {

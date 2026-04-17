@@ -26,7 +26,6 @@ export {
   stopOutboundConsumer,
   computeOutboundRetryDelayMs,
   isTransientDeliveryError,
-  isDaemonRuntime,
   setDbGetter as setOutboundConsumerDbGetter,
   type BufferedQueueRow,
   OUTBOUND_POLL_INTERVAL_MS,

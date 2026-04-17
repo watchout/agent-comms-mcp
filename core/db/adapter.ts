@@ -4,6 +4,7 @@ export interface DbAdapter {
   execute(sql: string, params?: any[]): Promise<{ rowCount: number }>
   transaction<T>(fn: (tx: DbAdapter) => Promise<T>): Promise<T>
   listen?(channel: string, callback: (payload: string) => void): Promise<void>
+  notify?(channel: string, payload: string): Promise<void>
   close(): Promise<void>
 }
 

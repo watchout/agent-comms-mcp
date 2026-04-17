@@ -1314,6 +1314,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_POLL_INTERVAL_MS` | `3000` | polling間隔（§5.3、§13.5参照） |
 | `AGENT_COM_HEALTH_PORT` | `9000` | healthcheckポート |
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
+| `AGENT_COM_PG_NOTIFY` | `true` | pg_notify 加速 on/off (false で polling only、SQLite mode 用) |
 | `AGENT_COM_REPLY_CHAIN_DEPTH` | `10` | Reply Chain Context の最大遡り深度（§18.1） |
 | `AGENT_COM_ATTACHMENT_TTL_HOURS` | `24` | 添付ファイル保持時間 |
 | `AGENT_COM_ATTACHMENT_MAX_SIZE` | `52428800` | 添付1ファイル上限(bytes) |
@@ -1343,6 +1344,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 ❌ AGENT_COM_DISPATCH_ENABLED / DISPATCH_MODEL
 ❌ agents.dispatch_enabled カラム
 ❌ embedded mode — daemon 一択
+❌ AGENT_COM_RUNTIME — dual mode 廃止に伴い不要
 ❌ access.json — DB routing で完結
 ❌ plugin:discord — adapter 統合済み
 ❌ Push Enrichment (チャンネル履歴) — Reply Chain Context に置換

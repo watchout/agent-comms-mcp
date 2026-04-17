@@ -71,30 +71,13 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     expect(sql).toMatch(/next_retry_at\s+IS\s+NULL\s+OR\s+next_retry_at\s*<=\s*now\(\)/i)
   })
 
-  test('2. stdio entrypoint only starts the outbound consumer after discordClients.set, gated on AGENT_COM_RUNTIME=daemon (phasing)', () => {
-    // FEAT-005 original invariant: daemon owns outbound. stdio-mode
-    // processes (MCP plugin) must never bootstrap consumeOneOutboundRow
-    // ticks, or the 19-bot race returns. Enforced at both call-site
-    // and runtime gate.
-    //
-    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172,
-    // auditor cycle 2 startup-order fix): production launch path is
-    // `claude server:agent-comms` → server.ts (stdio MCP) with
-    // AGENT_COM_RUNTIME=daemon set in the shell. entrypoints/daemon.ts
-    // has no supervise wrapper yet, so server.ts is allowed to *also*
-    // call startOutboundConsumer when it observes the daemon flag.
-    //
-    // Placement matters: the call must sit AFTER
+  test('2. server.ts starts the outbound consumer unconditionally after discordClients.set (no daemon gate)', () => {
+    // Phase C I4 removed dual mode: every process is daemon-mode now.
+    // isDaemonRuntime() no longer exists; the outbound consumer starts
+    // unconditionally. Placement still matters: the call must sit AFTER
     // `discordClients.set(AGENT_ID, discord)` so the first tick can
-    // find a Discord client. Cycle 1 placed it inside registerAgent()
-    // and lost the race (discord.connect hadn't resolved yet), flipping
-    // every row to `status='failed',
-    // last_error='no_discord_client_for_agent'`. registerAgent() now
-    // holds NO startOutboundConsumer call.
-    //
-    // Future: when supervise base for entrypoints/daemon.ts ships,
-    // remove the server.ts call and restore the strict daemon-only
-    // invariant.
+    // find a Discord client. registerAgent() holds NO
+    // startOutboundConsumer call (startup-order race, 2026-04-14 cycle 1).
     const server = readIfExists('server.ts')
     expect(server).not.toBeNull()
     // registerAgent holds no startOutboundConsumer call.
@@ -103,44 +86,38 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     const regEnd = server!.indexOf('\nasync function ', regIdx + 1)
     const regSlice = server!.slice(regIdx, regEnd === -1 ? undefined : regEnd)
     expect(regSlice).not.toMatch(/\bstartOutboundConsumer\s*\(/)
-    // Any call in server.ts must appear AFTER
-    // `discordClients.set(AGENT_ID, discord)` in source order and sit
-    // inside an isDaemonRuntime() guard.
+    // server.ts must call startOutboundConsumer AFTER discordClients.set
+    // (no isDaemonRuntime guard — unconditional).
     const calls = [...server!.matchAll(/startOutboundConsumer\s*\(/g)]
-    if (calls.length > 0) {
-      const setIdx = server!.indexOf('discordClients.set(AGENT_ID, discord)')
-      expect(setIdx).toBeGreaterThan(-1)
-      for (const m of calls) {
-        expect(m.index!).toBeGreaterThan(setIdx)
-      }
-      expect(server!).toMatch(
-        /if\s*\(\s*isDaemonRuntime\(\)\s*\)\s*\{[^}]*startOutboundConsumer\s*\(/,
-      )
+    expect(calls.length).toBeGreaterThan(0)
+    const setIdx = server!.indexOf('discordClients.set(AGENT_ID, discord)')
+    expect(setIdx).toBeGreaterThan(-1)
+    for (const m of calls) {
+      expect(m.index!).toBeGreaterThan(setIdx)
     }
+    // isDaemonRuntime must NOT appear anywhere in server.ts (dual mode removed).
+    expect(server!).not.toContain('isDaemonRuntime')
   })
 
-  test('3. daemon entrypoint starts the outbound consumer exactly once, gated on isDaemonRuntime', () => {
-    // A daemon process owns one consumer loop. The entrypoint calls the
-    // starter exactly once; the starter itself still gates on
-    // isDaemonRuntime() as a defense-in-depth belt-and-braces check.
-    //
-    // 2026-04-14 phasing note: entrypoints/daemon.ts remains the
-    // canonical single-call site. server.ts is allowed to call the
-    // starter when AGENT_COM_RUNTIME=daemon (see test #2 phasing
-    // note), because a single OS process runs either daemon.ts OR
-    // server.ts per agent_id, never both. When the supervise base
-    // for daemon.ts ships, server.ts call is removed and this test
-    // becomes the sole source of truth again.
+  test('3. daemon entrypoint delegates to server.ts (no direct startOutboundConsumer call)', () => {
+    // Phase C I4: dual mode removed. entrypoints/daemon.ts simply
+    // imports server.ts which unconditionally starts the outbound
+    // consumer after discordClients.set. daemon.ts no longer calls
+    // startOutboundConsumer directly.
     const entry = readIfExists('entrypoints/daemon.ts')
     expect(entry).not.toBeNull()
+    // daemon.ts imports server.ts (delegation).
+    expect(entry!).toMatch(/import\s+['"]\.\.\/server['"]/)
+    // daemon.ts does NOT call startOutboundConsumer itself.
     const calls = entry!.match(/\bstartOutboundConsumer\s*\(/g) ?? []
-    expect(calls.length).toBe(1)
-    // The consumer module keeps the runtime gate.
+    expect(calls.length).toBe(0)
+    // The consumer module has no isDaemonRuntime gate (dual mode removed).
+    // The string may appear in doc comments explaining the removal, so
+    // check the startOutboundConsumer function body specifically.
     const src = readIfExists('adapters/outbound-consumer.ts')
     expect(src).not.toBeNull()
     const fn = sliceFn(src!, 'startOutboundConsumer')
-    expect(fn).toContain('isDaemonRuntime()')
-    expect(fn).toMatch(/if\s*\(\s*!\s*isDaemonRuntime\(\)\s*\)/)
+    expect(fn).not.toContain('isDaemonRuntime')
   })
 
   test('4. getDiscordClient(unknownBotId) returns null and logs — no shared fallback', () => {

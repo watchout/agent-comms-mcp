@@ -69,7 +69,12 @@ async function auditLog(db: Client, eventType: string, agentId: string | null, t
 }
 
 async function pgNotify(db: Client, channel: string, payload: Record<string, unknown>) {
-  await db.query(`SELECT pg_notify($1, $2)`, [channel, JSON.stringify(payload)])
+  if (process.env.AGENT_COM_PG_NOTIFY === 'false') return
+  try {
+    await db.query(`SELECT pg_notify($1, $2)`, [channel, JSON.stringify(payload)])
+  } catch (err) {
+    process.stderr.write(`agent-com: pg_notify failed (non-fatal): ${err}\n`)
+  }
 }
 
 // --- Commands ---
@@ -561,17 +566,23 @@ async function sendMessage(args: string[]) {
       // every push target gets its own routing pass — matches the inbound
       // pipeline's `to: receiverAgentId` shape (server.ts handleInboundMessage
       // L1349-1355). lead-ama follow-up to PR#133 first cut.
-      for (const recipient of mentions) {
-        await db.query(
-          `SELECT pg_notify('agent_inbox', $1)`,
-          [JSON.stringify({
-            event: 'message.created',
-            to: recipient,
-            message_id: id,
-            channel_id: channelId,
-            source: 'cli-send',
-          })],
-        )
+      if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+        for (const recipient of mentions) {
+          try {
+            await db.query(
+              `SELECT pg_notify('agent_inbox', $1)`,
+              [JSON.stringify({
+                event: 'message.created',
+                to: recipient,
+                message_id: id,
+                channel_id: channelId,
+                source: 'cli-send',
+              })],
+            )
+          } catch (err) {
+            process.stderr.write(`agent-com: pg_notify failed for ${recipient} (non-fatal): ${err}\n`)
+          }
+        }
       }
 
       // ─────────────────────────────────────────────────────────────────
@@ -798,18 +809,12 @@ async function heartbeat(args: string[]) {
  * Usage: agent-com daemon --agent-id <id> [--poll-interval 3000]
  */
 async function daemon(args: string[]) {
-  // S2-A (FEAT-005): mark this process as the daemon runtime so that
-  // server.ts startOutboundConsumer() gate in the same process tree (and
-  // any subprocess that inherits env) knows it owns the outbound queue.
-  // stdio MCP servers do NOT set this and thus skip consumer boot.
-  process.env.AGENT_COM_RUNTIME = 'daemon'
-
   const agentId = resolveAgentId(args, 'daemon')
   const { flags } = parseArgs(args)
   const pollInterval = parseInt(flags['poll-interval'] ?? '3000', 10)
   const heartbeatInterval = 30_000
 
-  console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms, runtime=daemon`)
+  console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms`)
   console.error(`[daemon] Press Ctrl+C to stop`)
 
   // Heartbeat timer

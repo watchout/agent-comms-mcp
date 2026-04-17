@@ -127,44 +127,37 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     // Retry budget gate: only flip to 'failed' once attempts >= max_attempts.
     expect(SERVER_SRC).toMatch(/row\.attempts\s*>=\s*row\.max_attempts/)
   })
-  test('consumer is wired into entrypoints/daemon.ts + unregisterAgent (stop only, FEAT-005 CP-5)', () => {
-    // CP-5 (2026-04-14): the daemon entrypoint (entrypoints/daemon.ts)
-    // is now the SOLE caller of startOutboundConsumer. registerAgent no
-    // longer boots the consumer; stdio / MCP-plugin processes stay
-    // quiet, which is what stopped the 19-bot parallel-consumer race.
+  test('consumer is started unconditionally in server.ts after discordClients.set (Phase C I4, dual mode removed)', () => {
+    // Phase C I4: dual mode removed. isDaemonRuntime() no longer
+    // exists. server.ts calls startOutboundConsumer unconditionally
+    // AFTER discordClients.set(AGENT_ID, discord). entrypoints/daemon.ts
+    // delegates to server.ts via `import '../server'` and does NOT
+    // call startOutboundConsumer itself.
     //
-    // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172,
-    // auditor cycle 2 startup-order fix): production launch path is
-    // `claude server:agent-comms` → server.ts (stdio MCP) with
-    // AGENT_COM_RUNTIME=daemon set in the shell. entrypoints/daemon.ts
-    // has no supervise wrapper yet, so server.ts is allowed to call
-    // startOutboundConsumer ONLY after `discordClients.set(AGENT_ID,
-    // discord)` — placing it inside registerAgent() was tried in
-    // cycle 1 and lost the race (1s tick fired before discord.connect
-    // resolved, flipping every row to failed). registerAgent() again
-    // holds NO startOutboundConsumer call. When the supervise wrapper
-    // for daemon.ts ships, the server.ts call is removed and this
-    // assertion tightens back to daemon-only.
+    // registerAgent() still holds NO startOutboundConsumer call
+    // (startup-order race guard from 2026-04-14 cycle 1).
     const daemonEntry = readFileSync(join(REPO_ROOT, 'entrypoints', 'daemon.ts'), 'utf-8')
-    expect(daemonEntry).toMatch(/startOutboundConsumer\(\)/)
+    // daemon.ts delegates to server.ts, not calling consumer itself.
+    expect(daemonEntry).toMatch(/import\s+['"]\.\.\/server['"]/)
+    expect(daemonEntry).not.toMatch(/startOutboundConsumer/)
     // registerAgent: no startOutboundConsumer call.
     const regStart = SERVER_SRC.indexOf('async function registerAgent')
     const regEnd = SERVER_SRC.indexOf('\nasync function ', regStart + 1)
     const regBody = SERVER_SRC.slice(regStart, regEnd === -1 ? undefined : regEnd)
     expect(regBody).not.toMatch(/\bstartOutboundConsumer\s*\(/)
-    // Any server.ts call sits after discordClients.set(AGENT_ID, …)
-    // and inside an isDaemonRuntime() guard.
+    // server.ts calls startOutboundConsumer after discordClients.set
+    // (unconditional — no isDaemonRuntime guard).
     const calls = [...SERVER_SRC.matchAll(/startOutboundConsumer\s*\(/g)]
-    if (calls.length > 0) {
-      const setIdx = SERVER_SRC.indexOf('discordClients.set(AGENT_ID, discord)')
-      expect(setIdx).toBeGreaterThan(-1)
-      for (const m of calls) {
-        expect(m.index!).toBeGreaterThan(setIdx)
-      }
-      expect(SERVER_SRC).toMatch(
-        /if\s*\(\s*isDaemonRuntime\(\)\s*\)\s*\{[^}]*startOutboundConsumer\s*\(/,
-      )
+    expect(calls.length).toBeGreaterThan(0)
+    const setIdx = SERVER_SRC.indexOf('discordClients.set(AGENT_ID, discord)')
+    expect(setIdx).toBeGreaterThan(-1)
+    for (const m of calls) {
+      expect(m.index!).toBeGreaterThan(setIdx)
     }
+    // isDaemonRuntime must not appear in server.ts code (it may appear
+    // in outbound-consumer.ts doc comments explaining the removal).
+    const serverOnly = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+    expect(serverOnly).not.toContain('isDaemonRuntime')
     // Stopped alongside the heartbeat in unregisterAgent.
     const unregStart = SERVER_SRC.indexOf('async function unregisterAgent')
     const unregEnd = SERVER_SRC.indexOf('\nasync function ', unregStart + 1)

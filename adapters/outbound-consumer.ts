@@ -35,10 +35,9 @@
  *      exponential backoff curve a transient-failure would use, so a
  *      crashed consumer's rows do not thundering-herd back.
  *
- *   5. Runtime gate: `startOutboundConsumer()` gates on
- *      `isDaemonRuntime()` as defense-in-depth against a stdio MCP
- *      server ever spinning the consumer. The primary gate is that
- *      only `entrypoints/daemon.ts` calls the starter at all.
+ *   5. Single-mode runtime: dual embedded/standalone mode was removed
+ *      in Phase C I4. Every process is now daemon-mode; there is no
+ *      `isDaemonRuntime()` gate.
  *
  * Dependency injection: `setDbGetter()` must be called once at
  * process startup to supply the `pg` client getter. Avoids an import
@@ -90,12 +89,6 @@ function truncateForDiscord(content: string): string {
   return content.slice(0, DISCORD_CONTENT_LIMIT - 20) + '\n…(truncated)'
 }
 
-// ---- Runtime gate ---------------------------------------------------------
-
-export function isDaemonRuntime(): boolean {
-  return process.env.AGENT_COM_RUNTIME === 'daemon'
-}
-
 // ---- Retry / classifier ---------------------------------------------------
 
 export function computeOutboundRetryDelayMs(attempt: number): number {
@@ -142,24 +135,14 @@ export class PollingDriver {
       }
     }, POLL_DRIVER_HEARTBEAT_MS)
 
-    // S2-A (FEAT-005) B2: SSOT §1 line 39 places PollingDriver under the
-    // daemon runtime (alongside outbound_queue consumption). stdio MCP
-    // servers skip the poll timer. Heartbeat timer stays on for all
-    // runtimes so agents.last_seen_at keeps updating regardless.
-    if (isDaemonRuntime()) {
-      this.pollTimer = setInterval(() => {
-        this.poll(agentId).catch(err => {
-          process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
-        })
-      }, POLL_DRIVER_INTERVAL_MS)
-      process.stderr.write(
-        `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
-      )
-    } else {
-      process.stderr.write(
-        `agent-comms: PollingDriver poll timer skipped (stdio runtime); heartbeat only\n`,
-      )
-    }
+    this.pollTimer = setInterval(() => {
+      this.poll(agentId).catch(err => {
+        process.stderr.write(`agent-comms: PollingDriver poll error: ${err}\n`)
+      })
+    }, POLL_DRIVER_INTERVAL_MS)
+    process.stderr.write(
+      `agent-comms: PollingDriver started (poll=${POLL_DRIVER_INTERVAL_MS}ms, heartbeat=${POLL_DRIVER_HEARTBEAT_MS}ms)\n`,
+    )
   }
 
   stop(): void {
@@ -400,15 +383,6 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
 export function startOutboundConsumer(): void {
   if (process.env.OUTBOUND_QUEUE_CONSUMER === '0') {
     process.stderr.write('agent-comms: outbound queue consumer disabled via env\n')
-    return
-  }
-  // §3.2 Runtime gate (defense-in-depth): the daemon entrypoint is the
-  // only caller of this starter, but the gate stays to make accidental
-  // stdio wiring obvious at startup rather than silent.
-  if (!isDaemonRuntime()) {
-    process.stderr.write(
-      'agent-comms: outbound consumer skipped (stdio runtime, AGENT_COM_RUNTIME!=daemon)\n',
-    )
     return
   }
   if (outboundConsumerInterval !== null) return
