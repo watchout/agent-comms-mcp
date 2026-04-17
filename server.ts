@@ -40,7 +40,6 @@ import {
   pollingDriver,
   startOutboundConsumer,
   stopOutboundConsumer,
-  isDaemonRuntime,
   setDbGetter as setOutboundConsumerDbGetter,
   type BufferedQueueRow,
 } from './adapters/outbound-consumer'
@@ -2144,7 +2143,7 @@ interface BotEntry {
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
-const DEFAULT_CLAUDE_CMD = 'AGENT_COM_RUNTIME=daemon claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_CLAUDE_CMD = 'claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
 
 function loadBotRegistry(): BotEntry[] {
   try {
@@ -2464,41 +2463,13 @@ async function postConnect() {
         stateDir: DISCORD_STATE_DIR_ENV || undefined,
       })
       process.stderr.write('agent-comms: Discord adapter connected (channel plugin mode)\n')
-      // Hotfix (post-#164): outbound consumer gates on isDaemonRuntime()
-      // (AGENT_COM_RUNTIME=daemon) while per-bot `discordClients` population
-      // is gated on TRANSPORT_MODE === 'daemon'. Fleet bots set the former
-      // but not the latter (default 'stdio'), so consumeOneOutboundRow()
-      // found an empty Map and failed every row with
-      // 'no_discord_client_for_agent'. In stdio/channel-plugin mode each
-      // process is a single-bot daemon: the shared `discord` adapter is
-      // connected with this bot's own DISCORD_BOT_TOKEN, so registering it
-      // under AGENT_ID restores per-bot outbound delivery without
-      // re-introducing cross-identity fallback.
+      // Register this bot's Discord adapter in the per-bot client map so
+      // outbound delivery can resolve it via discordClients.get(AGENT_ID).
       discordClients.set(AGENT_ID, discord)
 
-      // 2026-04-14 phasing revival (CEO directive Task 1, post-PR-#172
-      // cycle 2): current production launch path is
-      // `claude server:agent-comms` → server.ts (stdio MCP) with
-      // AGENT_COM_RUNTIME=daemon set in the shell. entrypoints/daemon.ts
-      // has no supervise wrapper yet, so until it ships, server.ts must
-      // also start the outbound consumer when it sees the daemon flag
-      // — otherwise no process drains outbound_queue.
-      //
-      // The bootstrap sits AFTER `discordClients.set(AGENT_ID, discord)`
-      // so the first consumer tick can resolve the client for this
-      // agent. Placing it inside registerAgent() (the obvious spot) was
-      // tried in cycle 1 and lost the race: the 1s tick fired before
-      // discord.connect() resolved, and every claimed row was flipped
-      // to `status='failed', last_error='no_discord_client_for_agent'`
-      // (outbound-consumer.ts §3.6 fallback-removed branch).
-      //
-      // The consumer's own isDaemonRuntime() gate stays in place so a
-      // pure stdio MCP server (no daemon flag) still skips. When the
-      // supervise base for daemon.ts is shipped, remove this call and
-      // restore the daemon-only invariant.
-      if (isDaemonRuntime()) {
-        startOutboundConsumer()
-      }
+      // Start the outbound consumer AFTER discordClients.set so the first
+      // consumer tick can resolve the client for this agent.
+      startOutboundConsumer()
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — Discord adapter failed (non-fatal): ${err}\n`)
     }

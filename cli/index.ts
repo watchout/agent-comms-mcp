@@ -809,18 +809,12 @@ async function heartbeat(args: string[]) {
  * Usage: agent-com daemon --agent-id <id> [--poll-interval 3000]
  */
 async function daemon(args: string[]) {
-  // S2-A (FEAT-005): mark this process as the daemon runtime so that
-  // server.ts startOutboundConsumer() gate in the same process tree (and
-  // any subprocess that inherits env) knows it owns the outbound queue.
-  // stdio MCP servers do NOT set this and thus skip consumer boot.
-  process.env.AGENT_COM_RUNTIME = 'daemon'
-
   const agentId = resolveAgentId(args, 'daemon')
   const { flags } = parseArgs(args)
   const pollInterval = parseInt(flags['poll-interval'] ?? '3000', 10)
   const heartbeatInterval = 30_000
 
-  console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms, runtime=daemon`)
+  console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms`)
   console.error(`[daemon] Press Ctrl+C to stop`)
 
   // Heartbeat timer

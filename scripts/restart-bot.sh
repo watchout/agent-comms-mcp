@@ -13,7 +13,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 SESSION="${1:?Usage: restart-bot.sh <session-name> [project-dir] [port] [command]}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REGISTRY="${BOT_REGISTRY:-${SCRIPT_DIR}/bot-registry.txt}"
-DEFAULT_CMD="AGENT_COM_RUNTIME=daemon claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
+DEFAULT_CMD="claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions"
 
 # Load .mcp.json sync helper (ensures AGENT_ID/PORT/STATE_DIR match registry)
 source "${SCRIPT_DIR}/sync-mcp-config.sh"
