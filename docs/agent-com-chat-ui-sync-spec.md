@@ -66,23 +66,27 @@
 
 ```sql
 CREATE TABLE agents (
+  -- core columns: mq-spec v2.0.0 §3.4 と共通
   agent_id              TEXT PRIMARY KEY,              -- "cto"（コア識別子、変更なし）
-  org_id                TEXT NOT NULL DEFAULT 'default',
-  display_name          TEXT,                          -- "IYASAKA CTO"
+  display_name          TEXT NOT NULL,                 -- "IYASAKA CTO"
   agent_type            TEXT NOT NULL,                 -- "cto"|"dev"|"org"|"human"|"auditor"
-  cli_type              TEXT,                          -- "claude-code"|"codex"|"custom"
+  cli_type              TEXT,                          -- "claude_code"|"codex"|"gemini" 等 (自由文字列)
+  status                TEXT NOT NULL DEFAULT 'disconnected',
+                        -- "idle"|"busy"|"disconnected"|"offline"
+  observer_mode         BOOLEAN NOT NULL DEFAULT false,-- Auditor用
+  heartbeat_at          TIMESTAMPTZ,                   -- 最終ハートビート
+  current_message_id    TEXT,                          -- next で pop した message_queue.id
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- extension columns: chat-ui-sync-spec 固有 (phase 2 で去就判断)
+  org_id                TEXT NOT NULL DEFAULT 'default',
   runtime               TEXT,                          -- "bun"|"node"|"deno"
   default_channel       TEXT,                          -- デフォルトチャンネル
-  observer_mode         BOOLEAN DEFAULT false,         -- Auditor用
   last_received_channel TEXT,                          -- 直前受信チャンネル
   last_received_thread  TEXT,                          -- 直前受信スレッド
-  status                TEXT NOT NULL DEFAULT 'disconnected',
-                        -- "idle"|"busy"|"disconnected"|"initializing"
-  heartbeat_at          TIMESTAMPTZ,                   -- 最終ハートビート
+  status_detail         TEXT,                          -- "PRレビュー中" 等
   current_model         TEXT,                          -- "opus-4"|"sonnet-4" 等
   session_start_at      TIMESTAMPTZ,                   -- 現セッション開始時刻
   last_error            TEXT,                          -- 直近エラーメッセージ
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -109,14 +113,16 @@ CREATE TABLE agent_adapters (
 
 ```sql
 CREATE TABLE channels (
+  -- core columns: mq-spec v2.0.0 §3.5 と共通
   id                TEXT PRIMARY KEY,                  -- "hotel-kanri"（コア識別子）
-  org_id            TEXT NOT NULL DEFAULT 'default',
-  type              TEXT NOT NULL,                     -- "dm"|"group"|"thread"
+  type              TEXT NOT NULL,                     -- "channel"|"dm"
   name              TEXT,                              -- 表示名
   topic             TEXT,                              -- チャンネルトピック
   members           TEXT NOT NULL DEFAULT '[]',        -- agent_id JSON配列 (TEXT)
-  created_by        TEXT,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- extension columns: chat-ui-sync-spec 固有 (phase 2 で去就判断)
+  org_id            TEXT NOT NULL DEFAULT 'default',
+  created_by        TEXT,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
