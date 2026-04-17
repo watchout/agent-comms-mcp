@@ -14,7 +14,7 @@ agent-com におけるファイル添付の送受信仕様。チャット UI の
 - **Bidirectional**: inbound（チャット→LLM）と outbound（LLM→チャット）の双方向対応
 - **Platform-agnostic**: core 層はプラットフォーム固有仕様を知らない。adapter 層が正規化する
 - **LLM autonomy**: LLM が添付を参照するかどうかは LLM 自身が判断する
-- **DB 経由配信**: 全ての送受信経路は `agent_messages` + `outbound_queue` 経由（HTTP POST / channel-server 等の経路は v1.0.0 で廃止、message-queue-spec §22 廃止要素と整合）
+- **DB 経由配信**: 全ての送受信経路は `agent_messages` + `outbound_queue` 経由（HTTP POST / channel-server 等の経路は v1.0.0 で廃止、message-queue-spec §20 廃止要素と整合）
 
 ---
 
@@ -57,7 +57,7 @@ interface Message {
 ```
 Discord / Telegram / Slack
   ↓ messageCreate（Gateway 受信）
-receiver プロセス（1 個、message-queue-spec §7）
+receiver プロセス（1 個、message-queue-spec §6）
   ├─ adapter.extractAttachments(rawMessage) → AttachmentMeta[]
   ├─ バリデーション（§8 サイズ / §9 MIME / §10 ファイル名）
   ├─ adapter.downloadAttachment() → /tmp/agent-com/attachments/{message_id}/
@@ -68,7 +68,7 @@ receiver プロセス（1 個、message-queue-spec §7）
   ├─ message_queue INSERT（pushTargets 分）
   └─ pg_notify / signal（新着シグナル）
   ↓
-per-bot daemon（standalone mode）or MCP server（embedded mode）
+daemon プロセス（1 プロセス集約、message-queue-spec §5.3）
   ├─ PollingDriver が message_queue から取得
   ├─ attachments メタをバッファに保持
   └─ next_message MCP tool 呼出時に返却
@@ -138,7 +138,7 @@ MCP server tool handler → agent-com CLI（send サブコマンド）
   ├─ message_queue INSERT（mentions 分）
   └─ outbound_queue INSERT（agent_id / channel_external_id / content / attachments 参照）
   ↓
-outbound consumer（receiver プロセス集約 or per-bot daemon、message-queue-spec §7.4）
+outbound consumer（receiver プロセス集約 or per-bot daemon、message-queue-spec §6.4）
   ├─ 1秒 polling + atomic claim（FOR UPDATE SKIP LOCKED）
   ├─ adapter.uploadAttachment(temp_path, platform_channel) → uploaded_url
   ├─ プラットフォーム API 呼出（Discord REST / Telegram Bot API / Slack API）
@@ -159,7 +159,7 @@ agent-com send \
   --attachments "/home/claude/review-report.md,/home/claude/diagram.png"
 ```
 
-MCP ツール経由（message-queue-spec §5）:
+MCP / CLI 経由（message-queue-spec §4/§5）:
 
 ```typescript
 server.tool("send", {
@@ -200,7 +200,7 @@ server.tool("send", {
 ⚠ 1/3 attachments failed to download: large-video.mp4 (ATTACHMENT_TOO_LARGE)
 ```
 
-- **Outbound**: 成功したファイルのみ送信。失敗分は送信者にエラーフィードバック（message-queue-spec §9 送信者フィードバック経由）
+- **Outbound**: 成功したファイルのみ送信。失敗分は送信者にエラーフィードバック（message-queue-spec §8 送信者フィードバック経由）
 
 ```
 message_type: "system_error"
@@ -236,7 +236,7 @@ botA → botB: "この画像のレビューお願い"
 
 - bot A は send コマンドの `attachments` に受信時の `temp_path` をそのまま指定可能
 - **outbound consumer**（§4 flow）が送信時に temp_path の存在と TTL 有効性を確認
-- TTL 切れの場合: `ATTACHMENT_EXPIRED` エラー（§13）→ 送信者の message_queue に system_error 投入（message-queue-spec §9.2 feedback）
+- TTL 切れの場合: `ATTACHMENT_EXPIRED` エラー（§13）→ 送信者の message_queue に system_error 投入（message-queue-spec §8.2 feedback）
 
 ### temp_path 参照の一貫性
 
@@ -453,7 +453,7 @@ AGENT_COM_ATTACHMENT_DISK_LIMIT_MB=1024
 
 ### Cleanup 処理
 
-cleanup は **receiver プロセス責務**（message-queue-spec §7 heartbeat 監視と同じく setInterval で自動実行）。外部 cron 不要。
+cleanup は **receiver プロセス責務**（message-queue-spec §6 heartbeat 監視と同じく setInterval で自動実行）。外部 cron 不要。
 
 ```typescript
 // receiver プロセス内 setInterval（60分ごと、AGENT_COM_ATTACHMENT_CLEANUP_INTERVAL_MIN）
@@ -482,13 +482,13 @@ setInterval(async () => {
 }, CLEANUP_INTERVAL_MS);
 ```
 
-`AGENT_COM_DAEMON_MODE=standalone` の場合、per-bot daemon は cleanup を実行しない（receiver 1 プロセス集約）。
+daemon 1 プロセスに集約されたため、cleanup は receiver 内で実行。
 
 ---
 
 ## 13. エラーコード
 
-message-queue-spec §12 エラーコード一覧に追加:
+message-queue-spec §11 エラーコード一覧に追加:
 
 | Code | 発生箇所 | 説明 |
 |------|----------|------|
@@ -502,7 +502,7 @@ message-queue-spec §12 エラーコード一覧に追加:
 | `ATTACHMENT_SOURCE_EXPIRED` | 再取得 | 元プラットフォーム URL も期限切れ |
 | `ATTACHMENT_DISK_FULL` | inbound | temp 領域のディスク上限到達 |
 
-全エラーで送信者フィードバック（message-queue-spec §9.2 経由）。サイレント drop 禁止。
+全エラーで送信者フィードバック（message-queue-spec §8.2 経由）。サイレント drop 禁止。
 
 ---
 
@@ -534,7 +534,7 @@ interface AttachmentMeta {
 }
 ```
 
-`AttachmentAdapter` は message-queue-spec §8 `PlatformAdapter` の subset として実装される想定（同一 adapter オブジェクトが両 interface を実装）。
+`AttachmentAdapter` は message-queue-spec §7 `PlatformAdapter` の subset として実装される想定（同一 adapter オブジェクトが両 interface を実装）。
 
 ---
 
