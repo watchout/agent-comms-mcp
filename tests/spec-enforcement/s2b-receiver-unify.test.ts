@@ -1,16 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Spec-enforcement tests for ADR-041 S2-B (PR#157): unify inbound receiver
- * to a single process (stdio mode). daemon mode inbound handlers are removed;
- * daemon retains per-bot Discord clients for outbound + admin only.
+ * Spec-enforcement tests for ADR-041 S2-B (PR#157) + Phase C I3 update:
+ * Both stdio and daemon modes are valid inbound entry points.
+ * daemon mode now calls handleInboundMessage from its shared Discord adapter.
+ * Dedup safety: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB)
+ * prevent double processing when both stdio and daemon co-deploy.
  *
- * Regression class: if anyone re-introduces a daemon-side onMessage binding
- * (per-bot OR shared), handleInboundMessage fires 2-3× per Discord message,
- * causing duplicate message_queue INSERTs that this test suite is the last
- * line of defense against.
+ * History:
+ *   - PR#157: daemon was outbound-only, stdio was the sole inbound source.
+ *   - Phase C I3: daemon is now self-sufficient; onMessage → handleInboundMessage.
  *
  * See:
- *   - docs/agent-com-message-queue-spec.md §2 原則 #2 (受信は1プロセス)
+ *   - docs/agent-com-message-queue-spec.md §2
  *   - ~/Developer/tech-lead/docs/decisions/archive/041-receiver-messagebus-architecture.md
  *   - https://github.com/watchout/agent-comms-mcp/pull/157
  */
@@ -21,12 +22,12 @@ import { join } from 'node:path'
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
 
-describe('ADR-041 S2-B — single inbound receiver entry point', () => {
-  test('handleInboundMessage is invoked from exactly one callsite', () => {
-    // handleInboundMessage (message_queue INSERT + routing) must be called
-    // from only one onMessage handler — the stdio-mode adapter.
+describe('ADR-041 S2-B + Phase C I3 — inbound receiver entry points', () => {
+  test('handleInboundMessage is invoked from exactly two callsites (stdio + daemon)', () => {
+    // Phase C I3: both stdio and daemon modes call handleInboundMessage.
+    // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
     const invocations = SERVER_SRC.match(/handleInboundMessage\(\{/g) ?? []
-    expect(invocations.length).toBe(1)
+    expect(invocations.length).toBe(2)
   })
 
   test('the handleInboundMessage callsite is inside the stdio-mode branch', () => {
@@ -36,11 +37,13 @@ describe('ADR-041 S2-B — single inbound receiver entry point', () => {
     expect(callsite).toBeGreaterThan(stdioBranchIdx)
   })
 
-  test('daemon block does NOT invoke handleInboundMessage', () => {
+  test('daemon block DOES invoke handleInboundMessage (Phase C I3)', () => {
+    // Phase C I3: daemon shared Discord adapter now calls handleInboundMessage
+    // for full inbound routing. Dedup prevents double processing.
     const daemonIdx = SERVER_SRC.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     expect(daemonIdx).toBeGreaterThan(-1)
     const daemonSection = SERVER_SRC.slice(daemonIdx, daemonIdx + 25000)
-    expect(daemonSection).not.toContain('handleInboundMessage({')
+    expect(daemonSection).toContain('handleInboundMessage({')
   })
 
   test('daemon block does NOT bind per-bot Discord onMessage', () => {
@@ -49,28 +52,26 @@ describe('ADR-041 S2-B — single inbound receiver entry point', () => {
     expect(daemonSection).not.toContain('botDiscord.onMessage(')
   })
 
-  test('daemon shared onMessage (if present) only emits sendHumanWarning', () => {
-    // daemon retains a shared-client onMessage for §2.2 Pattern A only.
-    // It must NOT call handleInboundMessage nor write to message_queue.
+  test('daemon shared onMessage calls both handleInboundMessage and sendHumanWarning (Phase C I3)', () => {
+    // Phase C I3: daemon shared-client onMessage now calls handleInboundMessage
+    // for full inbound routing AND sendHumanWarning for §2.2 Pattern A.
     const daemonIdx = SERVER_SRC.indexOf("if (TRANSPORT_MODE === 'daemon' || IS_RECEIVER_MODE)")
     const daemonSection = SERVER_SRC.slice(daemonIdx, daemonIdx + 25000)
     const sharedIdx = daemonSection.indexOf('discord.onMessage(')
-    if (sharedIdx >= 0) {
-      // Extract the handler body: from onMessage( to the matching `})`.
-      const open = daemonSection.indexOf('{', sharedIdx)
-      let depth = 1
-      let i = open + 1
-      while (i < daemonSection.length && depth > 0) {
-        const c = daemonSection[i]
-        if (c === '{') depth++
-        else if (c === '}') depth--
-        i++
-      }
-      const handlerBody = daemonSection.slice(sharedIdx, i)
-      expect(handlerBody).toContain('sendHumanWarning')
-      expect(handlerBody).not.toContain('handleInboundMessage')
-      expect(handlerBody).not.toContain('message_queue')
+    expect(sharedIdx).toBeGreaterThan(-1)
+    // Extract the handler body: from onMessage( to the matching `})`.
+    const open = daemonSection.indexOf('{', sharedIdx)
+    let depth = 1
+    let i = open + 1
+    while (i < daemonSection.length && depth > 0) {
+      const c = daemonSection[i]
+      if (c === '{') depth++
+      else if (c === '}') depth--
+      i++
     }
+    const handlerBody = daemonSection.slice(sharedIdx, i)
+    expect(handlerBody).toContain('handleInboundMessage')
+    expect(handlerBody).toContain('sendHumanWarning')
   })
 
   test('daemon per-bot Discord client is still created for outbound', () => {
@@ -80,9 +81,8 @@ describe('ADR-041 S2-B — single inbound receiver entry point', () => {
     expect(daemonSection).toContain('discordClients.set(botId')
   })
 
-  test('spec §2 原則 #2 (受信は1プロセス) is referenced in server comments', () => {
+  test('ADR-041 S2-B is referenced in server comments', () => {
     expect(SERVER_SRC).toMatch(/ADR-041 S2-B/)
-    expect(SERVER_SRC).toMatch(/sole callsite of/i)
     expect(SERVER_SRC).toContain('handleInboundMessage')
   })
 })
