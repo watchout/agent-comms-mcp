@@ -49,7 +49,7 @@ export function generateEnv(opts: {
   return lines.join('\n')
 }
 
-async function main() {
+export async function main() {
   const envPath = join(process.cwd(), '.env')
 
   // Step 1: Check for existing .env

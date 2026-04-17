@@ -18,12 +18,12 @@
 const arg = process.argv[2]
 
 if (arg === 'init') {
-  await import('../cli/init')
+  const { main } = await import('../cli/init')
+  await main()
 } else if (arg === 'start') {
   await import('../cli/start')
 } else if (arg === 'status') {
-  // Quick status check via health endpoint
-  const port = process.env.WEBHOOK_PORT || process.env.AGENT_COMMS_PORT || '8795'
+  const port = process.env.AGENT_COMMS_PORT || '8800'
   try {
     const res = await fetch(`http://127.0.0.1:${port}/health`)
     const data = await res.json()
@@ -32,12 +32,12 @@ if (arg === 'init') {
     console.log('Not running')
   }
 } else {
-  // Auto-detect: .env exists → start, else → init
   const { existsSync } = await import('node:fs')
   if (existsSync('.env')) {
     await import('../cli/start')
   } else {
     console.log('No .env found — starting interactive setup...\n')
-    await import('../cli/init')
+    const { main } = await import('../cli/init')
+    await main()
   }
 }
