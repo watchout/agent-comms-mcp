@@ -17,8 +17,9 @@ const SERVER_SOURCE =
 describe('Webhook Channel push — handleInboundMessage + caller push', () => {
   test('handleInboundMessage returns pushMeta when delivered', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    // Slice grew with PR-B.2 §H2 receiver-pipeline fanout block (Step 7c).
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 7000)
+    // Slice widened to cover spec §8.2 sender-feedback block (Behavioral FAIL
+    // B5) that sits between persistInboundDelivery and Step 7c.
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 9000)
     expect(fnBody).toContain('delivered: true, messageId, pushMeta')
   })
 

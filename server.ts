@@ -90,6 +90,7 @@ import {
   type InboxCursor,
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
+import { notifySenderOfDeliveryStatus } from './core/sender-feedback'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -1185,6 +1186,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         required: ['content', 'mentions', 'reply_to'],
       },
     },
+    {
+      // spec §4.3 — self-originated post (watchdog / startup / periodic reports).
+      // reply_to is intentionally absent: notify does not mark any
+      // message_queue row 'replied' and does not touch agents.current_message_id.
+      name: 'notify',
+      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. mentions must contain agent_id strings.${agentListStr}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          channel: { type: 'string', description: 'Channel id (or name) to post into. Required.' },
+          thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
+          content: { type: 'string', description: 'Message content (max 50,000 chars)' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. Required (empty array is rejected).' },
+          message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
+          metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
+        },
+        required: ['channel', 'mentions', 'content'],
+      },
+    },
     // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
     {
       name: 'unfocus',
@@ -1372,8 +1392,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
         [row.id],
       )
+      // spec §4.1 step 4 — mark agent busy while processing this message.
+      // Combined with current_message_id UPDATE so both transitions are atomic.
       await client.query(
-        `UPDATE agents SET current_message_id = $1 WHERE agent_id = $2`,
+        `UPDATE agents SET current_message_id = $1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $2`,
         [row.id, agentId],
       )
       await client.query('COMMIT')
@@ -1437,6 +1459,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
+    }
+
+    // spec §4.2 step 1 — current_message_id guard. `send` is valid only as a
+    // reply to a message claimed via `next`. If the bot never called `next`,
+    // `agents.current_message_id` is NULL and we reject the call before any
+    // side effects (agent_messages INSERT, outbound_queue INSERT, Discord
+    // delivery) run. Fix for the double-send bug where skipping `next` caused
+    // the prior in-flight message to stay `read` and the outbound_queue row
+    // was enqueued twice on retry (spec §4/§8 Behavioral FAIL B2).
+    {
+      const guardDb = await tryGetDb()
+      if (!guardDb) {
+        return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for send' }], isError: true }
+      }
+      const guardRow = await guardDb.query(
+        `SELECT current_message_id FROM agents WHERE agent_id = $1`,
+        [agentId],
+      )
+      const currentMqIdGuard = guardRow.rows[0]?.current_message_id
+      if (!currentMqIdGuard) {
+        return { content: [{ type: 'text', text: `Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — call \`next\` first` }], isError: true }
+      }
     }
 
     // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
@@ -1653,77 +1697,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      // Issue #129 Phase 3: outbound_queue INSERT (replaces direct
-      // sendAdapterMessage call). The receiver-side outbound consumer
-      // (startOutboundConsumer / consumeOneOutboundRow above) picks the row
-      // up on its 1-second tick and posts to Discord. This decouples the
-      // send-tool from the (potentially slow) outbound HTTP call so the
-      // tool returns as soon as the DB is durable.
-      //
-      // Resolution order for channel_external_id:
-      //   1. If dest.threadId is set, prefer thread_adapters so the post
-      //      lands in the same thread (threads are channels in Discord's API).
-      //   2. Otherwise fall back to channel_adapters for the parent channel.
-      if (client) {
-        let externalId: string | null = null
-        if (dest.threadId) {
-          const tr = await client.query(
-            `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
-            [dest.threadId],
-          ).catch(() => ({ rows: [] as any[] }))
-          if (tr.rows.length > 0) externalId = tr.rows[0].external_id
-        }
-        if (!externalId) {
-          const cr = await client.query(
-            `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-            [dest.channelId],
-          ).catch(() => ({ rows: [] as any[] }))
-          if (cr.rows.length > 0) externalId = cr.rows[0].external_id
-        }
-        if (externalId) {
-          // ARC codex audit (PR#135, lead-ama msg 1492293367835660500): the
-          // outbound_queue INSERT must NOT be silently swallowed. Phase 3
-          // makes the queue the sole outbound delivery path, so a failed
-          // INSERT means the Discord reply is permanently lost (the
-          // consumer never sees the row). The CLI rolls back its
-          // transaction on the same failure; the send tool must mirror
-          // that durability contract by surfacing the failure as an error
-          // result so the caller knows their message was DB-saved but
-          // never queued for delivery.
-          try {
-            await client.query(
-              `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
-               VALUES ($1, $2, $3, $4)`,
-              [id, agentId, externalId, truncateForPlatform(partContent, 'discord')],
-            )
-          } catch (err) {
-            process.stderr.write(`agent-comms: outbound_queue INSERT failed: ${err}\n`)
-            await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
-              code: 'OUTBOUND_ENQUEUE_FAILED',
-              message_id: id,
-              channel_external_id: externalId,
-              error: String(err).slice(0, 500),
-            })
-            return {
-              content: [{
-                type: 'text',
-                text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました。メッセージはDB保存済み (message_id: ${id}) ですが、Discordには配信されません。原因: ${String(err).slice(0, 200)}`,
-              }],
-              isError: true,
-            }
-          }
-        }
-      }
-
       // Also forward via legacy forwarding config
       forwardAll(agentId, dest.channelId, partContent, message_type ?? 'chat')
 
-      // Inter-part delay: keep the Discord client from burst-hitting the
-      // outbound rate limit and preserve the visual ordering in the UI.
-      // Skip after the last part.
-      if (partIdx < parts.length - 1) {
-        await new Promise(r => setTimeout(r, 150))
-      }
+      // Inter-part delay is skipped here because the outbound_queue INSERTs
+      // happen in a second loop (spec §4/§8 Behavioral FAIL B2 — outbound
+      // must run after `message_queue` is marked 'replied' so a retry can't
+      // double-post on failure). The pacing delay now lives in the outbound
+      // loop below.
     }
 
     // Pick a representative id for the summary response (part 1).
@@ -1755,17 +1736,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // so callers know their message was divided.
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
 
-    // Issue #130 Phase 4: finalize message_queue state after successful send.
-    // Primary path: if the bot used MCP `next`, agents.current_message_id points
-    // at the claimed row. Mark it 'replied' and clear current_message_id.
-    //
-    // ADR-048 Phase 0 D3 fallback: bots that receive via channel-plugin session
-    // injection never call `next`, so current_message_id stays NULL and the
-    // queue row would stagnate at 'pending'. When reply_to is provided, look up
-    // the matching message_queue row by (agent_id, message_id=reply_to) — the
-    // partial UNIQUE uq_mq_agent_message (v1.0.3 §3.2) guarantees uniqueness so
-    // this is a single-row UPDATE with no ambiguity. Status filter restricts to
-    // ('pending','read') so an already-replied row isn't overwritten.
+    // spec §4.2 step 7 tail — sender feedback (§8.2). Fire once per unique
+    // recipient using the last-part delivery (pushTargets are stable across
+    // parts because routing inputs — mentions, dest, members — don't change
+    // between parts). Idle targets are no-ops inside the helper, so the
+    // common case is cheap. Failures are swallowed inside the helper.
+    {
+      const feedbackDb = await coreDbAdapter()
+      if (feedbackDb) {
+        const uniqueRecipients = new Set(delivery.pushTargets)
+        for (const recipient of uniqueRecipients) {
+          if (recipient === agentId) continue
+          await notifySenderOfDeliveryStatus(feedbackDb, {
+            senderId: agentId,
+            targetId: recipient,
+            messageId: partIds[0] ?? null,
+          })
+        }
+      }
+    }
+
+    // spec §4.2 steps 9-11 — finalize in-flight state BEFORE outbound_queue
+    // INSERT. Order of operations: message_queue → 'replied' → clear
+    // current_message_id + flip agents.status to 'idle' (§8.1), then enqueue
+    // outbound. This prevents double-posting on retry: if outbound fails, the
+    // guard at the top of the next send rejects with NO_CURRENT_MESSAGE
+    // instead of re-enqueuing a duplicate Discord message (Behavioral FAIL
+    // B2). The D3 fallback path was removed — the top-of-
+    // handler guard now makes current_message_id non-null unconditionally.
     if (dbClient) {
       const agentRow = await dbClient.query(
         `SELECT current_message_id FROM agents WHERE agent_id = $1`,
@@ -1777,35 +1775,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
           [id, currentMqId],
         )
+        // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in
+        // a single UPDATE so the two transitions are always atomic.
         await dbClient.query(
-          `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+          `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
           [agentId],
         )
-      } else if (reply_to) {
-        try {
-          const res = await dbClient.query(
-            `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
-             WHERE agent_id = $2 AND message_id = $3 AND status IN ('pending', 'read')`,
-            [id, agentId, reply_to],
-          )
-          process.stderr.write(JSON.stringify({
-            event: 'd3_fallback_replied',
-            agent_id: agentId, reply_to, replied_with: id,
-            row_count: res.rowCount ?? 0,
-          }) + '\n')
-          if ((res.rowCount ?? 0) === 0) {
-            await writeAuditLog('d3.fallback.miss', agentId, null, { reply_to, replied_with: id })
+      }
+    }
+
+    // spec §4.2 step 8 (reordered after 9-11 per Behavioral FAIL B2) — enqueue
+    // outbound for each part. Resolution of channel_external_id is per-
+    // destination, not per-part, so it's hoisted out of the loop.
+    if (client) {
+      let externalId: string | null = null
+      if (dest.threadId) {
+        const tr = await client.query(
+          `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
+          [dest.threadId],
+        ).catch(() => ({ rows: [] as any[] }))
+        if (tr.rows.length > 0) externalId = tr.rows[0].external_id
+      }
+      if (!externalId) {
+        const cr = await client.query(
+          `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
+          [dest.channelId],
+        ).catch(() => ({ rows: [] as any[] }))
+        if (cr.rows.length > 0) externalId = cr.rows[0].external_id
+      }
+      if (externalId) {
+        for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
+          const partMessageId = partIds[partIdx]
+          const partContent = parts[partIdx]
+          try {
+            await client.query(
+              `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
+               VALUES ($1, $2, $3, $4)`,
+              [partMessageId, agentId, externalId, truncateForPlatform(partContent, 'discord')],
+            )
+          } catch (err) {
+            // ARC codex audit (PR#135): do NOT silently swallow. The
+            // outbound_queue is the sole delivery path; a failed INSERT =
+            // permanent loss of the Discord reply. Surface as error so the
+            // caller knows their message was DB-saved but never queued.
+            process.stderr.write(`agent-comms: outbound_queue INSERT failed: ${err}\n`)
+            await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
+              code: 'OUTBOUND_ENQUEUE_FAILED',
+              message_id: partMessageId,
+              channel_external_id: externalId,
+              error: String(err).slice(0, 500),
+            })
+            return {
+              content: [{
+                type: 'text',
+                text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました。メッセージはDB保存済み (message_id: ${partMessageId}) ですが、Discordには配信されません。原因: ${String(err).slice(0, 200)}`,
+              }],
+              isError: true,
+            }
           }
-        } catch (err) {
-          const failureReason = err instanceof Error ? err.message : String(err)
-          process.stderr.write(JSON.stringify({
-            event: 'd3_fallback_error',
-            agent_id: agentId, reply_to, replied_with: id,
-            failure_reason: failureReason,
-          }) + '\n')
-          await writeAuditLog('d3.fallback.error', agentId, null, {
-            reply_to, replied_with: id, failure_reason: failureReason,
-          }).catch(() => {})
+          // Inter-part delay paces outbound_queue INSERTs so the consumer
+          // doesn't hit Discord's rate limiter in a burst. Skip after last.
+          if (partIdx < partIds.length - 1) {
+            await new Promise(r => setTimeout(r, 150))
+          }
         }
       }
     }
@@ -1830,6 +1862,261 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // focus/unfocus removed — destination is derived deterministically from reply_to.
   // last_received_context fallback was also abolished on 2026-04-08 (PR#89) for the same reason.
+
+  // spec §4.3 — `notify` is a self-originated post, no reply context. It has
+  // zero overlap with send's spec §4.2 step 1 guard (current_message_id),
+  // step 9 (message_queue 'replied'), step 10-11 (clear current / idle).
+  // Everything else (mentions validation, membership, routeInbound, split,
+  // message_queue INSERT, outbound_queue INSERT, sender feedback) is shared
+  // conceptually with send; we replicate the minimum necessary to satisfy
+  // the spec flow without pulling in reply_to-dependent paths.
+  if (name === 'notify') {
+    const { channel, thread_id: threadArg, content, message_type, metadata } = args as any
+    const mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
+
+    // spec §4.3 step 1 — --channel / --mentions / --content required.
+    if (!channel || typeof channel !== 'string') {
+      return { content: [{ type: 'text', text: 'Error [CHANNEL_REQUIRED]: channel is required for notify' }], isError: true }
+    }
+    if (!content || content.length === 0) {
+      return { content: [{ type: 'text', text: 'Error [CONTENT_EMPTY]: content must not be empty' }], isError: true }
+    }
+    if (content.length > CORE_CONTENT_LIMIT) {
+      return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
+    }
+    if (mentions.length === 0) {
+      return { content: [{ type: 'text', text: 'Error [NOT_MENTIONED]: mentions is required (at least one agent_id)' }], isError: true }
+    }
+    if (mentions.length === 1 && mentions[0] === agentId) {
+      return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
+    }
+
+    const client = await tryGetDb()
+    if (!client) {
+      return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for notify' }], isError: true }
+    }
+
+    // spec §4.3 step 2 — resolve channel by id OR name. threadArg short-
+    // circuits channel resolution because thread id uniquely identifies the
+    // destination. Falls back to channels.name only if channels.id didn't
+    // match. The `channels.name` column is unique per org so a name lookup
+    // is deterministic when the caller opts into it.
+    let resolvedChannelId: string | null = null
+    let resolvedThreadId: string | null = threadArg ?? null
+    if (resolvedThreadId) {
+      const tr = await client.query(
+        `SELECT channel_id FROM threads WHERE id = $1`,
+        [resolvedThreadId],
+      )
+      if (tr.rows.length === 0) {
+        return { content: [{ type: 'text', text: `Error [THREAD_NOT_FOUND]: thread '${resolvedThreadId}' not found` }], isError: true }
+      }
+      resolvedChannelId = tr.rows[0].channel_id
+    } else {
+      const byId = await client.query(`SELECT id FROM channels WHERE id = $1`, [channel])
+      if (byId.rows.length > 0) {
+        resolvedChannelId = channel
+      } else {
+        const byName = await client.query(`SELECT id FROM channels WHERE name = $1 LIMIT 1`, [channel])
+        if (byName.rows.length > 0) {
+          resolvedChannelId = byName.rows[0].id
+        }
+      }
+    }
+    if (!resolvedChannelId) {
+      return { content: [{ type: 'text', text: `Error [CHANNEL_NOT_FOUND]: channel '${channel}' not found` }], isError: true }
+    }
+
+    // spec §4.3 step 4 — permission + mentions validation (same as send).
+    const dest = await resolveDestination(
+      resolvedThreadId ? `thread:${resolvedThreadId}` : `channel:${resolvedChannelId}`,
+      agentId,
+    )
+    if ('error' in dest) {
+      await writeAuditLog('access.denied', agentId, null, { error: dest.error, code: dest.code })
+      return { content: [{ type: 'text', text: `Error [${dest.code}]: ${dest.error}` }], isError: true }
+    }
+    if (!dest.members.includes(agentId)) {
+      await writeAuditLog('access.denied', agentId, dest.channelId, { code: 'NOT_A_MEMBER' })
+      return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
+    }
+
+    // spec §4.3 step 3 — mentions validation (same as send).
+    const validAgentIds = await refreshAgentCache()
+    for (const mention of mentions) {
+      const mentionErr = validateMentionOrError(mention, validAgentIds)
+      if (mentionErr) {
+        return { content: [{ type: 'text', text: mentionErr }], isError: true }
+      }
+    }
+
+    // Rate limit + duplicate guards (same posture as send; notify is
+    // caller-driven so still bounded).
+    const rate = await checkRateLimit(agentId)
+    if (!rate.allowed) {
+      await writeAuditLog('message.blocked', agentId, dest.channelId, { code: 'RATE_LIMITED' })
+      return { content: [{ type: 'text', text: `Error [RATE_LIMITED]: rate limit exceeded (${config.rate_limit.max_per_minute}/min)` }], isError: true }
+    }
+    if (await checkDuplicate(content, dest.channelId)) {
+      await writeAuditLog('message.blocked', agentId, dest.channelId, { code: 'DUPLICATE' })
+      return { content: [{ type: 'text', text: 'Error [DUPLICATE]: same message sent within 10s, skipped' }], isError: true }
+    }
+    if (!checkBurst()) {
+      await new Promise(r => setTimeout(r, BURST_MIN_INTERVAL_MS))
+    }
+
+    const safeContent = sanitizeContent(content)
+    const notifyCoreDb = await coreDbAdapter()
+    const resolvedMentionStrings = (
+      await Promise.all(
+        (mentions as string[]).map(async (aid) => {
+          const did = await getAgentDiscordId(notifyCoreDb, aid).catch(() => null)
+          return did ? `<@${did}>` : null
+        }),
+      )
+    ).filter((s): s is string => s !== null)
+    const parts = splitMessage(safeContent, 'discord', resolvedMentionStrings)
+
+    const senderIsBot = !(await isHumanAgent(notifyCoreDb, agentId))
+    const allAgentInfos: AgentInfo[] = []
+    for (const member of dest.members) {
+      const info = await loadAgentInfo(notifyCoreDb, member)
+      if (info) allAgentInfos.push(info)
+    }
+
+    const partIds: string[] = []
+    let lastDelivery: ReturnType<typeof routeInbound> | null = null
+
+    // spec §4.3 steps 5-6 — per-part agent_messages + message_queue INSERT.
+    // Outbound is deferred to a second loop for symmetry with send (the
+    // notify flow has no reply-state to finalize between the two).
+    for (let partIdx = 0; partIdx < parts.length; partIdx++) {
+      const partContent = parts[partIdx]
+      const sequence = await getNextSequence(dest.channelId)
+      const authMeta = createAuthMetadata(dest.channelId, partContent)
+      const partMeta = parts.length > 1 ? { split_part: partIdx + 1, split_total: parts.length } : {}
+      const fullMetadata = { ...metadata, ...authMeta, ...partMeta }
+
+      const id = await saveMessage({
+        channel_id: dest.channelId, author_id: agentId, content: partContent,
+        message_type: message_type ?? 'chat', reply_to: undefined,
+        metadata: fullMetadata, depth: 0,
+        source: 'agent-comms', thread_id: dest.threadId ?? null,
+        direction: 'outbound', role: 'agent',
+      })
+      partIds.push(id)
+      await client.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
+      await pgNotify(client, 'agent_inbox', JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId }))
+
+      const sendMentions = await buildSendMentions(
+        mentions,
+        partContent,
+        (did) => resolveAgentFromDiscordId(notifyCoreDb, did),
+      )
+      const delivery = routeInbound(
+        { authorAgentId: agentId, authorIsBot: senderIsBot, content: partContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
+        { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
+        allAgentInfos,
+      )
+      lastDelivery = delivery
+
+      const mqPayload = JSON.stringify({
+        channel_id: dest.channelId,
+        thread_id: dest.threadId ?? null,
+        author_id: agentId,
+        content: partContent,
+        message_id: id,
+        message_type: message_type ?? 'chat',
+        source: 'agent-comms',
+        ts: new Date().toISOString(),
+      })
+      for (const recipient of delivery.pushTargets) {
+        try {
+          await client.query(
+            `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING`,
+            [recipient, id, mqPayload],
+          )
+        } catch (err) {
+          process.stderr.write(`agent-comms: notify message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
+        }
+      }
+    }
+
+    // spec §4.3 step 6 tail — sender feedback (§8.2). notify shares the
+    // §8.2 obligation: idle targets are free, busy/disconnected targets get
+    // a system row in the sender's queue so they know delivery deferred.
+    if (lastDelivery) {
+      const feedbackDb = await coreDbAdapter()
+      if (feedbackDb) {
+        const uniqueRecipients = new Set(lastDelivery.pushTargets)
+        for (const recipient of uniqueRecipients) {
+          if (recipient === agentId) continue
+          await notifySenderOfDeliveryStatus(feedbackDb, {
+            senderId: agentId,
+            targetId: recipient,
+            messageId: partIds[0] ?? null,
+          })
+        }
+      }
+    }
+
+    // spec §4.3 step 7 — outbound_queue INSERT per part.
+    let externalId: string | null = null
+    if (dest.threadId) {
+      const tr = await client.query(
+        `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
+        [dest.threadId],
+      ).catch(() => ({ rows: [] as any[] }))
+      if (tr.rows.length > 0) externalId = tr.rows[0].external_id
+    }
+    if (!externalId) {
+      const cr = await client.query(
+        `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
+        [dest.channelId],
+      ).catch(() => ({ rows: [] as any[] }))
+      if (cr.rows.length > 0) externalId = cr.rows[0].external_id
+    }
+    if (externalId) {
+      for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
+        const partMessageId = partIds[partIdx]
+        const partContent = parts[partIdx]
+        try {
+          await client.query(
+            `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
+             VALUES ($1, $2, $3, $4)`,
+            [partMessageId, agentId, externalId, truncateForPlatform(partContent, 'discord')],
+          )
+        } catch (err) {
+          process.stderr.write(`agent-comms: notify outbound_queue INSERT failed: ${err}\n`)
+          await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
+            code: 'OUTBOUND_ENQUEUE_FAILED',
+            message_id: partMessageId,
+            channel_external_id: externalId,
+            error: String(err).slice(0, 500),
+          })
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました。message_id: ${partMessageId}。原因: ${String(err).slice(0, 200)}`,
+            }],
+            isError: true,
+          }
+        }
+        if (partIdx < partIds.length - 1) {
+          await new Promise(r => setTimeout(r, 150))
+        }
+      }
+    }
+
+    await writeAuditLog('message.notify', agentId, dest.channelId, {
+      message_id: partIds[0],
+      recipients: lastDelivery?.pushTargets.length ?? 0,
+    })
+
+    const id = partIds[0]
+    const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
+    return { content: [{ type: 'text', text: `notified (id: ${id}) to channel ${dest.channelId}${partSuffix}` }] }
+  }
 
   if (name === 'quote') {
     const { message_id, to: targetAgent, comment } = args as any

@@ -337,8 +337,9 @@ async function nextMessage() {
           `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
           [popped.id],
         )
+        // spec §4.1 step 4 — mark agent busy while processing this message.
         await db.query(
-          `UPDATE agents SET current_message_id = $1 WHERE agent_id = $2`,
+          `UPDATE agents SET current_message_id = $1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $2`,
           [popped.id, agentId],
         )
         await db.query('COMMIT')
@@ -676,8 +677,10 @@ async function sendMessage(args: string[]) {
          WHERE id = $2`,
         [id, target.queue_id],
       )
+      // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in a
+      // single atomic UPDATE (§8.1 busy → idle on send).
       await db.query(
-        `UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`,
+        `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
         [agentId],
       )
       await db.query('COMMIT')
@@ -713,6 +716,167 @@ async function sendMessage(args: string[]) {
     await db.end()
   }
   if (exitCode !== 0) process.exit(exitCode)
+}
+
+/**
+ * `agent-com notify` — self-originated post (spec §4.3). No reply context,
+ * no current_message_id touched, no agents.status transition. Intended for
+ * watchdog / startup / periodic-report flows where the caller picks the
+ * destination explicitly.
+ *
+ * Flags:
+ *   --channel <id|name>       required — destination channel (id or name)
+ *   --thread-id <id>          optional — post into a thread instead
+ *   --mentions a,b,c          required — comma-separated agent_ids
+ *   --content "<text>"        required
+ *   --message-type chat|...   default: chat
+ */
+async function notifyMessage(args: string[]) {
+  const agentId = requireAgentId('notify')
+  const { flags } = parseArgs(args)
+  const channelArg = flags.channel
+  const threadArg = flags['thread-id'] ?? null
+  const content = flags.content
+  const mentionsRaw = flags.mentions
+  const messageType = flags['message-type'] ?? 'chat'
+
+  if (!channelArg) {
+    console.error('Error: --channel is required')
+    process.exit(2)
+  }
+  if (!content) {
+    console.error('Error: --content is required')
+    process.exit(2)
+  }
+  if (!mentionsRaw) {
+    console.error('Error: --mentions is required (comma-separated agent IDs)')
+    process.exit(2)
+  }
+  const mentions = mentionsRaw.split(',').map(m => m.trim()).filter(Boolean)
+  if (mentions.length === 0) {
+    console.error('Error: --mentions must contain at least one agent ID')
+    process.exit(2)
+  }
+
+  const db = await getDb()
+  try {
+    // Resolve channel: thread_id short-circuits; otherwise id-first, name-fallback.
+    let resolvedChannelId: string | null = null
+    let resolvedThreadId: string | null = threadArg
+    if (resolvedThreadId) {
+      const tr = await db.query(`SELECT channel_id FROM threads WHERE id = $1`, [resolvedThreadId])
+      if (tr.rows.length === 0) {
+        console.error(`Error [THREAD_NOT_FOUND]: thread '${resolvedThreadId}' not found`)
+        process.exit(1)
+      }
+      resolvedChannelId = tr.rows[0].channel_id
+    } else {
+      const byId = await db.query(`SELECT id FROM channels WHERE id = $1`, [channelArg])
+      if (byId.rows.length > 0) {
+        resolvedChannelId = channelArg
+      } else {
+        const byName = await db.query(`SELECT id FROM channels WHERE name = $1 LIMIT 1`, [channelArg])
+        if (byName.rows.length > 0) resolvedChannelId = byName.rows[0].id
+      }
+    }
+    if (!resolvedChannelId) {
+      console.error(`Error [CHANNEL_NOT_FOUND]: channel '${channelArg}' not found`)
+      process.exit(1)
+    }
+
+    // Membership check.
+    const ch = await db.query(`SELECT members FROM channels WHERE id = $1`, [resolvedChannelId])
+    if (ch.rows.length === 0) {
+      console.error(`Error: channel ${resolvedChannelId} not found`)
+      process.exit(1)
+    }
+    const members: string[] = ch.rows[0].members ?? []
+    if (!members.includes(agentId)) {
+      console.error(`Error: ${agentId} is not a member of channel ${resolvedChannelId}`)
+      process.exit(1)
+    }
+
+    const id = randomUUID()
+    const authMeta = buildAuthMetadata(agentId, resolvedChannelId, content)
+    const metadata: Record<string, unknown> = {
+      mentions,
+      cli: 'agent-com notify',
+      ...(authMeta ?? {}),
+    }
+    await db.query(
+      `INSERT INTO agent_messages
+         (id, channel_id, author_id, content, message_type, reply_to, metadata,
+          depth, source, thread_id, direction, role)
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, 0, 'agent-comms', $7, 'outbound', 'agent')`,
+      [id, resolvedChannelId, agentId, content, messageType, JSON.stringify(metadata), resolvedThreadId],
+    )
+
+    if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+      for (const recipient of mentions) {
+        try {
+          await db.query(
+            `SELECT pg_notify('agent_inbox', $1)`,
+            [JSON.stringify({
+              event: 'message.created',
+              to: recipient,
+              message_id: id,
+              channel_id: resolvedChannelId,
+              source: 'cli-notify',
+            })],
+          )
+        } catch (err) {
+          process.stderr.write(`agent-com: pg_notify failed for ${recipient} (non-fatal): ${err}\n`)
+        }
+      }
+    }
+
+    let discordExternalId: string | null = null
+    if (resolvedThreadId) {
+      const tr = await db.query(
+        `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
+        [resolvedThreadId],
+      )
+      if (tr.rows.length > 0) discordExternalId = tr.rows[0].external_id
+    }
+    if (!discordExternalId) {
+      const cr = await db.query(
+        `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
+        [resolvedChannelId],
+      )
+      if (cr.rows.length > 0) discordExternalId = cr.rows[0].external_id
+    }
+
+    let outboundQueued = false
+    let outboundSkipReason: string | null = null
+    if (discordExternalId) {
+      try {
+        await db.query(
+          `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
+           VALUES ($1, $2, $3, $4)`,
+          [id, agentId, discordExternalId, content],
+        )
+        outboundQueued = true
+      } catch (err) {
+        console.error(`Error [OUTBOUND_ENQUEUE_FAILED]: ${String(err).slice(0, 200)}`)
+        process.exit(1)
+      }
+    } else {
+      outboundSkipReason = 'no discord adapter mapping for this channel'
+    }
+
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      message_id: id,
+      channel_id: resolvedChannelId,
+      thread_id: resolvedThreadId,
+      mentions,
+      auth_signed: authMeta !== undefined,
+      outbound_queued: outboundQueued,
+      ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
+    }) + '\n')
+  } finally {
+    await db.end()
+  }
 }
 
 /**
@@ -918,6 +1082,9 @@ if (command === 'channel') {
   // Issue #132: rest of argv is flag-style (--content / --mentions / ...).
   // subcommand here is the first positional after `send`, which doesn't apply.
   await sendMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'notify') {
+  // spec §4.3: self-originated post, no reply context.
+  await notifyMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -934,6 +1101,7 @@ Commands:
 Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
   send --content "..." --mentions cto,ceo [--message-type chat]
+  notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
