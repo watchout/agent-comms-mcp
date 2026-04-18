@@ -372,14 +372,14 @@ async function nextMessage() {
     )
     const waiting: number = waitingRow.rows[0]?.n ?? 0
 
-    // §18.1 Reply Chain Context — resolve ancestor chain for conversation
-    // context. Non-fatal on query failure (returns []).
-    const replyToId = (payload.reply_to as string | null | undefined) ?? null
+    // §18.1 Reply Chain Context — seed is the current message
+    // (spec `$current_message_id`). Non-fatal on query failure.
+    const currentMessageId = (row.message_id as string | null) ?? (payload.message_id as string | null | undefined) ?? null
     let replyChain: Awaited<ReturnType<typeof fetchReplyChain>> = []
-    if (replyToId) {
+    if (currentMessageId) {
       const depth = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
       try {
-        replyChain = await fetchReplyChain(replyToId, depth, {
+        replyChain = await fetchReplyChain(currentMessageId, depth, {
           async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
             const r = await db.query(sql, params)
             return r.rows as T[]

@@ -43,7 +43,7 @@ export function generateEnv(opts: {
   }
   lines.push(
     `AGENT_COM_POLL_INTERVAL_MS=3000`,
-    `AGENT_COM_REPLY_CHAIN_DEPTH=10`,
+    `AGENT_COM_REPLY_CHAIN_DEPTH=5`,
     '', // trailing newline
   )
   return lines.join('\n')
