@@ -169,10 +169,13 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // lead-ama's prescribed snippet) and FOR UPDATE SKIP LOCKED appended.
     expect(body).toMatch(/FROM message_queue\s*\n?\s*WHERE status = 'pending' AND agent_id = \$1\s*\n?\s*ORDER BY priority DESC, created_at ASC/)
   })
-  test('marks read + stamps current_message_id atomically (per row)', () => {
+  test('marks read + stamps current_message_id + flips status to busy atomically', () => {
     const body = nextMessageBody()
     expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'read',\s*read_at\s*=\s*now\(\)/)
-    expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1\s*WHERE agent_id/)
+    // spec §4.1 step 4 — the same UPDATE stamps current_message_id AND sets
+    // status='busy' + status_detail so `next` leaves the agent in a consistent
+    // "processing" state (Behavioral FAIL B1).
+    expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1,\s*status\s*=\s*'busy',\s*status_detail\s*=\s*'メッセージ処理中'[\s\S]*?WHERE agent_id/)
   })
   // PR#134 ARC follow-up (lead-ama msg 1492279341898272849) — concurrency.
   test('SELECT + UPDATEs are wrapped in BEGIN/COMMIT with FOR UPDATE SKIP LOCKED', () => {
@@ -224,10 +227,13 @@ describe('T5 — `agent-com send` resolves target via agents.current_message_id 
     const body = sendMessageBody()
     expect(body).toMatch(/NO_CURRENT_MESSAGE/)
   })
-  test('on success, queue mode UPDATEs message_queue to replied + clears current_message_id', () => {
+  test('on success, queue mode UPDATEs message_queue to replied + clears current_message_id + flips status to idle', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'replied',\s*replied_at\s*=\s*now\(\),\s*replied_with/)
-    expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
+    // spec §4.2 step 10-11 + §8.1 — the same UPDATE clears current_message_id
+    // AND flips status back to 'idle' so the agent is ready for the next
+    // message (Behavioral FAIL B4).
+    expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL,\s*status\s*=\s*'idle'/)
   })
   // Issue #130 Phase 4: signal-mode unlink test removed — queue-only now.
   // The PR#134 failure-response and queue/signal failure-branch tests were

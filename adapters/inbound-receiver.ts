@@ -47,6 +47,7 @@ import {
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
+import { notifySenderOfDeliveryStatus } from '../core/sender-feedback'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -471,6 +472,29 @@ export async function handleInboundMessage(params: {
       process.stderr.write(
         `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
       )
+    }
+  }
+
+  // spec §8.2 — sender feedback. Inbound handler represents the tail of
+  // step 6's "push対象のmessage_queue INSERT → 対象botのstatusに応じて
+  // senderにフィードバック". We only fire feedback on a successful 7b+7d
+  // commit and only when the sender resolved to an agent_id (human-only
+  // Discord authors are not addressable via message_queue, so skipping them
+  // avoids phantom feedback rows). Non-fatal inside the helper.
+  if (inboundCommitted && senderAgentId && messageId) {
+    const feedbackClient = await d.tryGetDb()
+    if (feedbackClient) {
+      const feedbackDb = {
+        async query<T = any>(sql: string, params?: any[]): Promise<{ rows: T[] }> {
+          const r = await feedbackClient.query(sql, params)
+          return { rows: r.rows as T[] }
+        },
+      }
+      await notifySenderOfDeliveryStatus(feedbackDb, {
+        senderId: senderAgentId,
+        targetId: receiverAgentId,
+        messageId,
+      })
     }
   }
 
