@@ -60,7 +60,7 @@ fi
 tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR_EXPANDED"
 tmux send-keys -t "$SESSION" "$CLAUDE_CMD" Enter
 
-# Step 4: Wait for TUI prompt and auto-confirm (option 1)
+# Step 5: Wait for TUI prompt and auto-confirm
 sleep 3
 tmux send-keys -t "$SESSION" Enter
 

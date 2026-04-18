@@ -114,14 +114,24 @@ export interface BufferedQueueRow {
   created_at: Date | string
 }
 
+// spec §13.5.1: MCP 標準 notification で pending 件数を client に通知。
+// 本体は依然 `next` pull (spec §4.1)、件数シグナルのみ。
+export type NotifyPendingFn = (waiting: number) => void | Promise<void>
+
+export interface PollingDriverOptions {
+  notifyPending?: NotifyPendingFn
+}
+
 export class PollingDriver {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private buffer: BufferedQueueRow[] = []
   private polling = false
+  private notifyPending: NotifyPendingFn | null = null
 
-  start(agentId: string): void {
+  start(agentId: string, opts: PollingDriverOptions = {}): void {
     if (this.pollTimer) return
+    this.notifyPending = opts.notifyPending ?? null
 
     this.heartbeatTimer = setInterval(async () => {
       const c = getDb ? await getDb() : null
@@ -149,6 +159,7 @@ export class PollingDriver {
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null }
     this.buffer = []
+    this.notifyPending = null
   }
 
   shift(): BufferedQueueRow | null {
@@ -175,6 +186,14 @@ export class PollingDriver {
         [agentId],
       )
       this.buffer = r.rows
+
+      if (this.notifyPending && r.rows.length > 0) {
+        try {
+          await this.notifyPending(r.rows.length)
+        } catch (err) {
+          process.stderr.write(`agent-comms: PollingDriver notifyPending error (non-fatal): ${err}\n`)
+        }
+      }
     } finally {
       this.polling = false
     }

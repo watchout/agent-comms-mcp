@@ -720,7 +720,15 @@ async function registerAgent(): Promise<void> {
   // v1.0.2 §6.5: start the PollingDriver so pending messages are pre-fetched
   // into a buffer. The MCP `next` tool returns from the buffer instantly
   // instead of hitting the DB on every call.
-  pollingDriver.start(AGENT_ID)
+  // spec §13.5.1: also emit a standard MCP notification so LLM clients
+  // can trigger `next` immediately instead of waiting for the poll loop.
+  // Count-only — message body is still pulled via `next` (spec §4.1).
+  pollingDriver.start(AGENT_ID, {
+    notifyPending: (waiting) => mcp.notification({
+      method: 'notifications/message/pending',
+      params: { waiting },
+    }),
+  })
 
   // NOTE: outbound consumer bootstrap is NOT here. It would race the
   // Discord adapter: registerAgent() returns before discord.connect()

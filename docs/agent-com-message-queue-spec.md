@@ -1134,6 +1134,24 @@ bot数         推奨間隔                     負荷
 
 OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分。
 
+### 13.5.1 Pending Message Notification (MCP 標準)
+
+PollingDriver が message_queue に pending を検出した場合、MCP 標準 notification で client に通知する。
+
+- method: `notifications/message/pending`
+- params: `{ waiting: number }`
+
+動作:
+
+- PollingDriver の setInterval (`AGENT_COM_POLL_INTERVAL_MS`, default 3s) で pending 検出時に毎回送信
+- LLM client がこの notification を受信 → `next` tool を呼ぶトリガーとなる
+- notification は MCP protocol 標準機能 (Claude Code / Codex / Gemini / Cursor 全対応)
+- client が notification を無視しても、手動 `next` で取得可能 (graceful degradation)
+- notification 送信失敗時 (transport 断、client 未対応等) も polling は継続 (non-fatal)
+- pending 0 のときは notification を送信しない
+
+§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分を本項で実装する (message 本体は依然 `next` pull 一択、spec §4.1)。
+
 ### 13.6 Presence Client
 
 Presence Client は将来拡張、現行は opt-in。
@@ -1371,6 +1389,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-19 | §13.5.1 Pending Message Notification (MCP 標準) 追加。PollingDriver が pending 検出時に `notifications/message/pending` を送信し、LLM client の `next` トリガーとして機能。件数シグナルのみ (本体は依然 `next` pull)、失敗は non-fatal で polling 継続。 |
 | 2026-04-18 | Phase C 即時修正: §20 に Push polling / `notifications/claude/channel` 廃止追加。spec §4.1 pull モデル (`next`) 一択に統一、legacy `pollNewMessages` / `startPolling` / `stopPolling` + MCP push dependency を inbound-receiver.ts から除去。 |
 | 2026-04-19 | Phase C I6: §15 CLI Setup 書き換え — `init` 対話式セットアップ / `start` / `status` サブコマンド実装。entrypoints/main.ts に auto-detect + subcommand routing 追加。 |
 | 2026-04-18 | Phase C I5: §5.3 統一プロセスモデル化、§20 `TRANSPORT_MODE` / `IS_RECEIVER_MODE` 廃止追加。stdio/daemon/sse/receiver の 4 モード → 単一フローに統一。 |
