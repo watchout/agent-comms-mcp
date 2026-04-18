@@ -89,6 +89,7 @@ import {
   fetchNewMessages as fetchNewMessagesCore,
   type InboxCursor,
 } from './core/inbox-cursor'
+import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -184,6 +185,7 @@ try {
 
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
+const REPLY_CHAIN_DEPTH = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 
 // --- SSE Transport (Phase 3 → Phase C I5: unified, TRANSPORT_MODE removed) ---
@@ -1385,6 +1387,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       const waiting: number = waitingRow.rows[0]?.n ?? 0
 
+      // §18.1 Reply Chain Context — fetch ancestors of the popped message
+      // for conversation context. Non-fatal on query failure (returns []).
+      const replyToId = (payload.reply_to as string | null | undefined) ?? null
+      let replyChain: Awaited<ReturnType<typeof fetchReplyChain>> = []
+      if (replyToId) {
+        try {
+          replyChain = await fetchReplyChain(replyToId, REPLY_CHAIN_DEPTH, getDbAdapter())
+        } catch (err) {
+          process.stderr.write(`agent-comms: fetchReplyChain failed (non-fatal): ${err}\n`)
+        }
+      }
+
       const result = {
         waiting,
         queue_id: row.id,
@@ -1397,6 +1411,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         message_type: payload.message_type ?? 'chat',
         source: payload.source ?? null,
         created_at: row.created_at,
+        reply_chain: replyChain,
       }
       return { content: [{ type: 'text', text: JSON.stringify(result) }] }
     } catch (err) {

@@ -24,6 +24,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
+import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 
 // --- DB connection ---
 function getDatabaseUrl(): string {
@@ -371,6 +372,24 @@ async function nextMessage() {
     )
     const waiting: number = waitingRow.rows[0]?.n ?? 0
 
+    // §18.1 Reply Chain Context — resolve ancestor chain for conversation
+    // context. Non-fatal on query failure (returns []).
+    const replyToId = (payload.reply_to as string | null | undefined) ?? null
+    let replyChain: Awaited<ReturnType<typeof fetchReplyChain>> = []
+    if (replyToId) {
+      const depth = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
+      try {
+        replyChain = await fetchReplyChain(replyToId, depth, {
+          async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+            const r = await db.query(sql, params)
+            return r.rows as T[]
+          },
+        } as any)
+      } catch (err) {
+        process.stderr.write(`agent-com: fetchReplyChain failed (non-fatal): ${err}\n`)
+      }
+    }
+
     // Spec §4.1 output shape — channel_id / content / etc come from the
     // payload the receiver enriched on INSERT.
     process.stdout.write(JSON.stringify({
@@ -386,6 +405,7 @@ async function nextMessage() {
       message_type: payload.message_type ?? 'chat',
       source: payload.source ?? null,
       created_at: row.created_at,
+      reply_chain: replyChain,
     }) + '\n')
   } finally {
     await db.end()

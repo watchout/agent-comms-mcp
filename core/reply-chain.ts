@@ -1,0 +1,73 @@
+import type { DbAdapter } from './db/adapter'
+
+export interface ReplyChainEntry {
+  id: string
+  from: string
+  content: string
+  created_at: string
+}
+
+/**
+ * Reply Chain Context (spec §18.1 / §1 原則 8).
+ *
+ * Given a starting `messageId` (typically the `reply_to` of a just-popped
+ * inbox message), walk `agent_messages.reply_to` recursively up to `depth`
+ * steps and return the *ancestors* in chronological order (oldest first).
+ * The row for `messageId` itself is stripped from the return value — the
+ * caller's message is already the focus of the surrounding `next` response,
+ * and duplicating it in `reply_chain` would just waste tokens.
+ *
+ * The CTE's `depth` counter + `depth + 1 < $depth` predicate doubles as a
+ * cycle guard: a `reply_to` that points back into the chain (directly or
+ * transitively) stops at the depth limit rather than looping forever.
+ *
+ * SQL invariant: WITH RECURSIVE is supported by both PostgreSQL ≥8.4 and
+ * SQLite ≥3.8.3. The `$n` parameter placeholders are rewritten to `?` by
+ * SqliteAdapter (core/db/sqlite-adapter.ts); PgAdapter passes them through.
+ */
+export async function fetchReplyChain(
+  messageId: string | null | undefined,
+  depth: number,
+  db: DbAdapter,
+): Promise<ReplyChainEntry[]> {
+  if (!messageId) return []
+  if (depth <= 0) return []
+
+  const rows = await db.query<{
+    id: string
+    author_id: string
+    content: string
+    created_at: string
+  }>(
+    `WITH RECURSIVE chain(id, channel_id, author_id, content, reply_to, created_at, depth) AS (
+       SELECT id, channel_id, author_id, content, reply_to, created_at, 0
+       FROM agent_messages WHERE id = $1
+       UNION ALL
+       SELECT m.id, m.channel_id, m.author_id, m.content, m.reply_to, m.created_at, c.depth + 1
+       FROM agent_messages m JOIN chain c ON m.id = c.reply_to
+       WHERE c.depth + 1 < $2
+     )
+     SELECT id, author_id, content, created_at FROM chain ORDER BY created_at ASC`,
+    [messageId, depth],
+  )
+
+  // Drop the row for `messageId` itself — the CTE seed emits it first, but
+  // the caller already has that message in scope. Return ancestors only.
+  return rows
+    .filter((row) => row.id !== messageId)
+    .map((row) => ({
+      id: row.id,
+      from: row.author_id,
+      content: row.content,
+      created_at:
+        row.created_at instanceof Date
+          ? (row.created_at as Date).toISOString()
+          : String(row.created_at),
+    }))
+}
+
+export function parseReplyChainDepth(raw: string | undefined): number {
+  const parsed = parseInt(raw ?? '10', 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10
+  return parsed
+}
