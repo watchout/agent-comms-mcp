@@ -1461,27 +1461,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
     }
 
-    // spec §4.2 step 1 — current_message_id guard. `send` is valid only as a
-    // reply to a message claimed via `next`. If the bot never called `next`,
-    // `agents.current_message_id` is NULL and we reject the call before any
-    // side effects (agent_messages INSERT, outbound_queue INSERT, Discord
-    // delivery) run. Fix for the double-send bug where skipping `next` caused
-    // the prior in-flight message to stay `read` and the outbound_queue row
-    // was enqueued twice on retry (spec §4/§8 Behavioral FAIL B2).
-    {
-      const guardDb = await tryGetDb()
-      if (!guardDb) {
-        return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for send' }], isError: true }
-      }
-      const guardRow = await guardDb.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1`,
+    // spec §4.2 step 1 — current_message_id guard, atomic. codex-auditor
+    // Layer 2 BLOCKER (PR #214 cycle 2, CTO judgment msg 89216a72): the
+    // non-transactional SELECT version left a window where two concurrent
+    // MCP `send` calls could both pass the guard before either cleared the
+    // row, producing a double Discord post. CTO 2 択 (a): wrap the entire
+    // send flow in a single BEGIN/COMMIT, acquire the agents row lock via
+    // `SELECT FOR UPDATE`, and clear `current_message_id` at COMMIT. This
+    // matches the CLI pattern (cli/index.ts sendMessage — PR#134 ARC
+    // follow-up, lead-ama msg 1492283029933133874) so a parallel caller
+    // blocks on the row lock, wakes to a NULL `current_message_id`, and
+    // exits with NO_CURRENT_MESSAGE instead of double-replying.
+    //
+    // Transaction flow:
+    //   - BEGIN on the singleton client (tryGetDb → pg pool client).
+    //   - `SELECT ... FOR UPDATE` holds the row lock for the duration of
+    //     the handler. The captured value (`claimedMqId`) is used at step
+    //     9 to mark message_queue 'replied' without a second read.
+    //   - All existing side effects (agent_messages INSERT, message_queue
+    //     INSERT per recipient, outbound_queue INSERT, pg_notify) run
+    //     against the same client, so ROLLBACK unwinds everything.
+    //   - `try { ... } finally { if (!txCommitted) ROLLBACK }` catches
+    //     every early return inside the handler (validation fail, rate
+    //     limit, outbound INSERT fail) without requiring each return site
+    //     to duplicate the ROLLBACK boilerplate.
+    const txClient = await tryGetDb()
+    if (!txClient) {
+      return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for send' }], isError: true }
+    }
+    let claimedMqId: number | string | null = null
+    let txCommitted = false
+    await txClient.query('BEGIN')
+    try {
+      const guardRow = await txClient.query(
+        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
         [agentId],
       )
-      const currentMqIdGuard = guardRow.rows[0]?.current_message_id
-      if (!currentMqIdGuard) {
+      claimedMqId = guardRow.rows[0]?.current_message_id ?? null
+      if (!claimedMqId) {
+        await txClient.query('ROLLBACK')
+        txCommitted = true // prevent double-ROLLBACK in finally
         return { content: [{ type: 'text', text: `Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — call \`next\` first` }], isError: true }
       }
-    }
 
     // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
     // This avoids NOT_MENTIONED errors when LLM forgets mentions but reply_to context is present.
@@ -1764,40 +1785,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // instead of re-enqueuing a duplicate Discord message (Behavioral FAIL
     // B2). The D3 fallback path was removed — the top-of-
     // handler guard now makes current_message_id non-null unconditionally.
-    if (dbClient) {
-      const agentRow = await dbClient.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1`,
-        [agentId],
-      )
-      const currentMqId = agentRow.rows[0]?.current_message_id
-      if (currentMqId) {
-        await dbClient.query(
-          `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
-          [id, currentMqId],
-        )
-        // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in
-        // a single UPDATE so the two transitions are always atomic.
-        await dbClient.query(
-          `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
-          [agentId],
-        )
-      }
-    }
+    //
+    // We use `claimedMqId` captured under the SELECT FOR UPDATE lock at the
+    // top of the handler, so there is no second read here and no chance of
+    // a concurrent writer slipping in between read and update.
+    await txClient.query(
+      `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
+      [id, claimedMqId],
+    )
+    // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in
+    // a single UPDATE so the two transitions are always atomic.
+    await txClient.query(
+      `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
+      [agentId],
+    )
 
     // spec §4.2 step 8 (reordered after 9-11 per Behavioral FAIL B2) — enqueue
     // outbound for each part. Resolution of channel_external_id is per-
-    // destination, not per-part, so it's hoisted out of the loop.
-    if (client) {
+    // destination, not per-part, so it's hoisted out of the loop. All queries
+    // run against `txClient` so they are part of the outer transaction —
+    // outbound INSERT failure rolls back the entire send (including the
+    // 'replied' UPDATE), so the caller can retry via `next` → `send`.
+    {
       let externalId: string | null = null
       if (dest.threadId) {
-        const tr = await client.query(
+        const tr = await txClient.query(
           `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
           [dest.threadId],
         ).catch(() => ({ rows: [] as any[] }))
         if (tr.rows.length > 0) externalId = tr.rows[0].external_id
       }
       if (!externalId) {
-        const cr = await client.query(
+        const cr = await txClient.query(
           `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
           [dest.channelId],
         ).catch(() => ({ rows: [] as any[] }))
@@ -1808,7 +1827,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const partMessageId = partIds[partIdx]
           const partContent = parts[partIdx]
           try {
-            await client.query(
+            await txClient.query(
               `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
                VALUES ($1, $2, $3, $4)`,
               [partMessageId, agentId, externalId, truncateForPlatform(partContent, 'discord')],
@@ -1818,6 +1837,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // outbound_queue is the sole delivery path; a failed INSERT =
             // permanent loss of the Discord reply. Surface as error so the
             // caller knows their message was DB-saved but never queued.
+            // Under the outer transaction, the finally block issues ROLLBACK
+            // after this return; the message_queue / agent_messages /
+            // 'replied' UPDATE all revert together.
             process.stderr.write(`agent-comms: outbound_queue INSERT failed: ${err}\n`)
             await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
               code: 'OUTBOUND_ENQUEUE_FAILED',
@@ -1828,7 +1850,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return {
               content: [{
                 type: 'text',
-                text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました。メッセージはDB保存済み (message_id: ${partMessageId}) ですが、Discordには配信されません。原因: ${String(err).slice(0, 200)}`,
+                text: `Error [OUTBOUND_ENQUEUE_FAILED]: Discord配信キューへの登録に失敗しました (message_id: ${partMessageId})。トランザクションをロールバックしたので、\`next\` を呼び直せば再送できます。原因: ${String(err).slice(0, 200)}`,
               }],
               isError: true,
             }
@@ -1841,6 +1863,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
     }
+
+    // COMMIT the transaction. The finally block below issues ROLLBACK when
+    // `txCommitted` is still false (any early return inside the try block).
+    await txClient.query('COMMIT')
+    txCommitted = true
 
     // Response with delivery feedback
     // Issue #118 ③: include reply_context (original author + channel + content snippet)
@@ -1858,6 +1885,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}` }] }
     }
     return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}` }] }
+    } finally {
+      // ROLLBACK any in-flight transaction if we didn't reach COMMIT. Catches
+      // every early return inside the try block (content / mentions / rate /
+      // duplicate / outbound failures) and the unhappy path where a helper
+      // throws an unexpected exception. The COMMIT at the end of the happy
+      // path sets `txCommitted = true`, so this is a no-op on success.
+      if (!txCommitted) {
+        await txClient.query('ROLLBACK').catch(() => {})
+      }
+    }
   }
 
   // focus/unfocus removed — destination is derived deterministically from reply_to.
@@ -1917,9 +1954,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (byId.rows.length > 0) {
         resolvedChannelId = channel
       } else {
-        const byName = await client.query(`SELECT id FROM channels WHERE name = $1 LIMIT 1`, [channel])
-        if (byName.rows.length > 0) {
+        // codex-auditor PR #214 Layer 2 finding 2 — `channels.name` has no
+        // UNIQUE constraint (db/migrate.ts), so blind `LIMIT 1` would silently
+        // pick among duplicates on misrouted posts. Be explicit instead: read
+        // up to 2 rows and fail-closed when more than one match.
+        const byName = await client.query(`SELECT id FROM channels WHERE name = $1 ORDER BY id LIMIT 2`, [channel])
+        if (byName.rows.length === 1) {
           resolvedChannelId = byName.rows[0].id
+        } else if (byName.rows.length > 1) {
+          const ids = byName.rows.map((r: { id: string }) => r.id).join(', ')
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [CHANNEL_NAME_AMBIGUOUS]: channel name '${channel}' matches multiple channels (${ids}…). Pass the channel id instead of the name.`,
+            }],
+            isError: true,
+          }
         }
       }
     }

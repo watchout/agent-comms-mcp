@@ -33,15 +33,25 @@ describe('Behavioral FAIL B2 — MCP send current_message_id guard', () => {
   test('send handler rejects with NO_CURRENT_MESSAGE when current_message_id is NULL', () => {
     expect(SERVER_SRC).toMatch(/Error \[NO_CURRENT_MESSAGE\]:\s*no in-flight message/)
   })
-  test('guard reads agents.current_message_id before any side effects', () => {
-    // The guard must execute before content-dependent logic (sanitize /
-    // splitMessage / saveMessage). We anchor the regex against the start of
-    // the send handler so later appearances don't satisfy the match.
+  test('guard reads agents.current_message_id with FOR UPDATE lock (cycle 2 atomic)', () => {
+    // codex-auditor Layer 2 BLOCKER (PR #214 cycle 2): the non-transactional
+    // SELECT version left a race where two concurrent send calls could both
+    // pass the guard. The CTO-ordered fix (a) wraps the handler in
+    // BEGIN/COMMIT and holds the agents row lock via SELECT FOR UPDATE.
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     expect(sendIdx).toBeGreaterThan(-1)
-    const handler = SERVER_SRC.slice(sendIdx, sendIdx + 3000)
-    expect(handler).toMatch(/spec §4\.2 step 1.*guard/s)
-    expect(handler).toMatch(/SELECT current_message_id FROM agents WHERE agent_id = \$1/)
+    const handler = SERVER_SRC.slice(sendIdx, sendIdx + 3500)
+    expect(handler).toMatch(/spec §4\.2 step 1.*atomic/s)
+    expect(handler).toMatch(/SELECT current_message_id FROM agents WHERE agent_id = \$1 FOR UPDATE/)
+    expect(handler).toMatch(/txClient\.query\(['"]BEGIN['"]\)/)
+  })
+  test('handler COMMITs only on the happy path and ROLLBACKs via finally on early return', () => {
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).toMatch(/txClient\.query\(['"]COMMIT['"]\)/)
+    expect(handler).toMatch(/txCommitted = true/)
+    expect(handler).toMatch(/if \(!txCommitted\)\s*\{\s*await txClient\.query\(['"]ROLLBACK['"]\)/)
   })
   test('D3 fallback (else if reply_to) is removed', () => {
     // The guard makes current_message_id non-null unconditionally, so the
@@ -59,6 +69,15 @@ describe('Behavioral FAIL B2 — MCP send current_message_id guard', () => {
     expect(repliedIdx).toBeGreaterThan(-1)
     expect(outboundIdx).toBeGreaterThan(-1)
     expect(outboundIdx).toBeGreaterThan(repliedIdx)
+  })
+  test('outbound INSERT uses txClient so failures rollback the whole send', () => {
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    // `txClient.query(...INSERT INTO outbound_queue...)` must be the INSERT
+    // used for send's outbound enqueue; drops to a different client would
+    // escape the transaction.
+    expect(handler).toMatch(/txClient\.query\([\s\S]*?INSERT INTO outbound_queue/)
   })
 })
 
@@ -103,6 +122,16 @@ describe('Behavioral FAIL B3 — notify tool implemented', () => {
   test('CLI exposes `agent-com notify` command dispatch', () => {
     expect(CLI_SRC).toMatch(/command === 'notify'/)
     expect(CLI_SRC).toMatch(/async function notifyMessage/)
+  })
+  // codex-auditor Layer 2 finding 2 — honest handling when channels.name has
+  // no UNIQUE constraint and multiple rows match.
+  test('MCP notify fails closed on ambiguous channel name (CHANNEL_NAME_AMBIGUOUS)', () => {
+    expect(SERVER_SRC).toMatch(/CHANNEL_NAME_AMBIGUOUS/)
+    expect(SERVER_SRC).toMatch(/SELECT id FROM channels WHERE name = \$1 ORDER BY id LIMIT 2/)
+  })
+  test('CLI notify fails closed on ambiguous channel name (CHANNEL_NAME_AMBIGUOUS)', () => {
+    expect(CLI_SRC).toMatch(/CHANNEL_NAME_AMBIGUOUS/)
+    expect(CLI_SRC).toMatch(/SELECT id FROM channels WHERE name = \$1 ORDER BY id LIMIT 2/)
   })
 })
 

@@ -775,8 +775,16 @@ async function notifyMessage(args: string[]) {
       if (byId.rows.length > 0) {
         resolvedChannelId = channelArg
       } else {
-        const byName = await db.query(`SELECT id FROM channels WHERE name = $1 LIMIT 1`, [channelArg])
-        if (byName.rows.length > 0) resolvedChannelId = byName.rows[0].id
+        // codex-auditor PR #214 Layer 2 finding 2 — fail-closed on ambiguous
+        // channel name lookups (no UNIQUE constraint on channels.name).
+        const byName = await db.query(`SELECT id FROM channels WHERE name = $1 ORDER BY id LIMIT 2`, [channelArg])
+        if (byName.rows.length === 1) {
+          resolvedChannelId = byName.rows[0].id
+        } else if (byName.rows.length > 1) {
+          const ids = byName.rows.map((r: { id: string }) => r.id).join(', ')
+          console.error(`Error [CHANNEL_NAME_AMBIGUOUS]: channel name '${channelArg}' matches multiple channels (${ids}…). Pass the channel id instead of the name.`)
+          process.exit(1)
+        }
       }
     }
     if (!resolvedChannelId) {
