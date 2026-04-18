@@ -188,11 +188,15 @@ export class PollingDriver {
       this.buffer = r.rows
 
       if (this.notifyPending && r.rows.length > 0) {
-        try {
-          await this.notifyPending(r.rows.length)
-        } catch (err) {
+        // Fire-and-forget so a hung callback cannot pin `this.polling=true`
+        // across ticks. The leading Promise.resolve().then() wraps sync
+        // throws into rejections so .catch() handles both paths uniformly.
+        // The tick returns immediately; the callback settles (or not) on
+        // its own timeline.
+        const cb = this.notifyPending
+        Promise.resolve().then(() => cb(r.rows.length)).catch((err) => {
           process.stderr.write(`agent-comms: PollingDriver notifyPending error (non-fatal): ${err}\n`)
-        }
+        })
       }
     } finally {
       this.polling = false

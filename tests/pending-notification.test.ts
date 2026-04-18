@@ -106,6 +106,34 @@ describe('spec §13.5.1 — PollingDriver pending notification', () => {
     expect(driver.buffered).toBe(1)
   })
 
+  test('poll() returns immediately when notifyPending hangs (fire-and-forget)', async () => {
+    // cycle 2 (auditor finding): hung callbacks must not pin polling=true
+    // across ticks. notifyPending is dispatched fire-and-forget so poll()
+    // resolves without waiting for the callback to settle.
+    const { db } = makeFakeDb([makeRow(40)])
+    setDbGetter(async () => db, 'test-agent-hang')
+
+    // Callback that never resolves — simulates a stuck MCP transport.
+    const neverResolves = new Promise<void>(() => {})
+    let callbackInvoked = false
+    driver.start('test-agent-hang', {
+      notifyPending: () => {
+        callbackInvoked = true
+        return neverResolves
+      },
+    })
+
+    // Must complete within a tight budget. If poll() were awaiting the
+    // callback this would exceed 100ms easily (the callback is infinite).
+    const start = Date.now()
+    await (driver as unknown as { poll(id: string): Promise<void> }).poll('test-agent-hang')
+    const elapsed = Date.now() - start
+
+    expect(callbackInvoked).toBe(true)
+    expect(elapsed).toBeLessThan(100)
+    expect(driver.buffered).toBe(1)
+  })
+
   test('does not attach notifyPending when callback is omitted', async () => {
     const { db } = makeFakeDb([makeRow(20), makeRow(21)])
     setDbGetter(async () => db, 'test-agent-no-cb')
@@ -149,6 +177,18 @@ describe('spec §13.5.1 — source-pin', () => {
     expect(src).toMatch(/notifyPending\??\s*:\s*NotifyPendingFn/)
     expect(src).toMatch(/this\.notifyPending\s*=\s*opts\.notifyPending/)
     expect(src).toMatch(/if\s*\(\s*this\.notifyPending\s*&&\s*r\.rows\.length\s*>\s*0\s*\)/)
+  })
+
+  test('PollingDriver.poll dispatches notifyPending fire-and-forget (no await)', () => {
+    // cycle 2 (auditor finding): the callback invocation must not be
+    // awaited. Pin the Promise.resolve().then(...).catch() pattern at
+    // source level so a future refactor cannot silently re-await.
+    const src = readFileSync(join(REPO_ROOT, 'adapters', 'outbound-consumer.ts'), 'utf-8')
+    const classIdx = src.indexOf('class PollingDriver')
+    const classEnd = src.indexOf('\nexport const pollingDriver', classIdx)
+    const body = src.slice(classIdx, classEnd === -1 ? undefined : classEnd)
+    expect(body).toMatch(/Promise\.resolve\(\)\.then\(\s*\(\)\s*=>\s*cb\(/)
+    expect(body).not.toMatch(/await\s+this\.notifyPending\(/)
   })
 
   test('server.ts wires mcp.notification with notifications/message/pending method', () => {
