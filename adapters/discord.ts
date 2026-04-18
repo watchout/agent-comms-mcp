@@ -2,12 +2,16 @@
  * Discord UI Adapter (SSOT §3.2)
  *
  * Implements UIAdapter for Discord via discord.js.
- * Handles Gateway connection, access control, typing indicators,
- * message send/receive, and history fetching.
+ * Handles Gateway connection, typing indicators, message send/receive,
+ * and history fetching. Access control (mentions / channel membership /
+ * human auto-warn) runs in `core/route-message.ts`'s `routeInbound()`
+ * against `channels.members` in the DB — this adapter does no routing
+ * gate of its own (spec §20 廃止要素の項)。
  *
- * Access control logic derived from Anthropic's Claude Code Discord plugin
- * Copyright Anthropic, PBC. Licensed under Apache 2.0
- * https://github.com/anthropics/claude-plugins-official
+ * Origin note: the pre-v2 file-based access path was derived from the
+ * Anthropic Claude Code Discord plugin (Apache 2.0,
+ * https://github.com/anthropics/claude-plugins-official). That dependency
+ * was removed when the project went OSS / LLM-agnostic.
  */
 
 import {
@@ -23,127 +27,27 @@ import {
   type ThreadChannel,
   type Interaction,
 } from 'discord.js'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { UIAdapter, Adapter, AdapterConfig, UnifiedMessage, InboundMessage, PlatformCapabilities, SendOptions } from './types'
 
-// --- Access control types (compatible with Discord plugin's access.json) ---
-interface GroupPolicy {
-  requireMention: boolean
-  allowFrom: string[]
-}
-
-export interface Access {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
-  allowFrom: string[]
-  groups: Record<string, GroupPolicy>
-  pending: Record<string, unknown>
-  mentionPatterns?: string[]
-  allowChannels?: string[]
-}
-
-function defaultAccess(): Access {
-  return {
-    dmPolicy: 'pairing',
-    allowFrom: [],
-    groups: {},
-    pending: {},
-  }
-}
-
-export function loadAccess(filePath: string): Access {
-  if (!filePath) return defaultAccess()
-  try {
-    const raw = readFileSync(filePath, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-      allowChannels: parsed.allowChannels,
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
-    process.stderr.write(`discord-adapter: access.json parse error, using defaults\n`)
-    return defaultAccess()
-  }
-}
-
-// --- Gate logic (mirrors Discord plugin's gate function) ---
-export type GateResult =
-  | { action: 'deliver' }
-  | { action: 'drop'; reason: string }
-
-export function gate(
-  access: Access,
-  senderId: string,
-  channelId: string,
-  parentChannelId: string | null,
-  isDM: boolean,
-  isMentioned: boolean,
-): GateResult {
-  if (access.dmPolicy === 'disabled') return { action: 'drop', reason: 'dmPolicy disabled' }
-
-  if (isDM) {
-    if (access.allowFrom.includes(senderId)) return { action: 'deliver' }
-    return { action: 'drop', reason: 'DM not in allowFrom' }
-  }
-
-  // Guild messages: look up channel policy (threads inherit parent)
-  const lookupId = parentChannelId ?? channelId
-  const policy = access.groups[lookupId]
-  if (!policy) {
-    // Channel not in groups: fall back to top-level allowFrom
-    if (access.allowFrom.length > 0 && !access.allowFrom.includes(senderId)) {
-      return { action: 'drop', reason: 'not in top-level allowFrom' }
-    }
-    // allowChannels: if defined, main-lead channels deliver all, others require mention
-    if (access.allowChannels && access.allowChannels.length > 0) {
-      if (access.allowChannels.includes(lookupId)) {
-        return { action: 'deliver' } // Main-lead channel: deliver all
-      }
-      // Not a main-lead channel: require mention
-      if (!isMentioned) {
-        return { action: 'drop', reason: 'not in allowChannels and no mention' }
-      }
-      return { action: 'deliver' }
-    }
-    // No allowChannels: if mentionPatterns defined, require mention (saves tokens for non-lead bots)
-    if (access.mentionPatterns && access.mentionPatterns.length > 0 && !isMentioned) {
-      return { action: 'drop', reason: 'mention required (mentionPatterns set)' }
-    }
-    return { action: 'deliver' }
-  }
-
-  const groupAllowFrom = policy.allowFrom ?? []
-  if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
-    return { action: 'drop', reason: 'not in channel allowFrom' }
-  }
-
-  if (policy.requireMention && !isMentioned) {
-    return { action: 'drop', reason: 'mention required but not found' }
-  }
-
-  return { action: 'deliver' }
+// --- Permission operators (DM / button gate for MCP permission prompts) ---
+//
+// Replaces the legacy per-bot allowlist file. Set
+// `AGENT_COM_PERMISSION_OPERATORS` to a comma-separated list of Discord user
+// IDs. When unset, permission DMs are skipped and button clicks from arbitrary
+// users are NOT authorized — the `/permission` feature effectively no-ops,
+// which is safer than the pre-v2 behaviour where a missing file quietly
+// demoted to an empty allowlist.
+function permissionOperators(): string[] {
+  const raw = process.env.AGENT_COM_PERMISSION_OPERATORS ?? ''
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
 }
 
 // --- Mention detection ---
-function checkMentioned(
-  msg: Message,
-  botUserId: string,
-  extraPatterns?: string[],
-): boolean {
-  if (msg.mentions.users.has(botUserId)) return true
-  if (extraPatterns) {
-    for (const pat of extraPatterns) {
-      try {
-        if (new RegExp(pat, 'i').test(msg.content)) return true
-      } catch {}
-    }
-  }
-  return false
+function checkMentioned(msg: Message, botUserId: string): boolean {
+  return msg.mentions.users.has(botUserId)
 }
 
 // --- Typing indicator management ---
@@ -194,7 +98,6 @@ export class DiscordAdapter implements UIAdapter, Adapter {
   }
 
   private client: Client | null = null
-  private accessFile = ''
   private messageCallback: ((msg: UnifiedMessage) => void) | null = null
   private adapterMessageCallback: ((msg: InboundMessage) => void) | null = null
   private permissionRequestCallback: ((params: { request_id: string; behavior: 'allow' | 'deny' }) => void) | null = null
@@ -301,15 +204,10 @@ export class DiscordAdapter implements UIAdapter, Adapter {
 
   async connect(config: AdapterConfig): Promise<void> {
     const token = config.token as string
-    const stateDir = config.stateDir as string | undefined
 
     if (!token) {
       process.stderr.write('discord-adapter: DISCORD_BOT_TOKEN is required\n')
       return
-    }
-
-    if (stateDir) {
-      this.accessFile = join(stateDir, 'access.json')
     }
 
     this.client = new Client({
@@ -337,8 +235,8 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       const [, action, request_id] = m
       const behavior = action === 'allow' ? 'allow' : 'deny'
 
-      const access = loadAccess(this.accessFile)
-      if (!access.allowFrom.includes(interaction.user.id)) {
+      const operators = permissionOperators()
+      if (operators.length === 0 || !operators.includes(interaction.user.id)) {
         await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
         return
       }
@@ -569,7 +467,14 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     const { request_id, tool_name, description, input_preview } = params
     pendingPermissions.set(request_id, { tool_name, description, input_preview })
 
-    const access = loadAccess(this.accessFile)
+    const operators = permissionOperators()
+    if (operators.length === 0) {
+      process.stderr.write(
+        `discord-adapter: permission DM skipped — AGENT_COM_PERMISSION_OPERATORS unset (request_id=${request_id})\n`,
+      )
+      return
+    }
+
     let prettyInput: string
     try {
       prettyInput = JSON.stringify(JSON.parse(input_preview), null, 2)
@@ -597,7 +502,7 @@ export class DiscordAdapter implements UIAdapter, Adapter {
         .setStyle(ButtonStyle.Danger),
     )
 
-    for (const userId of access.allowFrom) {
+    for (const userId of operators) {
       try {
         const user = await this.client.users.fetch(userId)
         await user.send({ content: text, components: [row] })
@@ -664,9 +569,12 @@ export class DiscordAdapter implements UIAdapter, Adapter {
   }
 
   // --- Internal: handle inbound message ---
+  //
+  // No access-control gate here: routing + mention / membership enforcement run
+  // in `routeInbound()` (core/route-message.ts) against `channels.members` in
+  // the DB. The adapter's job is to normalise the platform event and forward it
+  // to the server layer; drop decisions happen downstream.
   private async handleInbound(msg: Message): Promise<void> {
-    const access = loadAccess(this.accessFile)
-    const isDM = msg.channel.type === ChannelType.DM
     // Resolve parent channel for threads (fetch partial if needed)
     let parentChannelId: string | null = null
     if (msg.channel.isThread()) {
@@ -679,27 +587,16 @@ export class DiscordAdapter implements UIAdapter, Adapter {
         }
       } catch {}
     }
-    const isMentioned = this.client?.user
-      ? checkMentioned(msg, this.client.user.id, access.mentionPatterns)
-      : false
 
-    const result = gate(
-      access,
-      msg.author.id,
-      msg.channelId,
-      parentChannelId,
-      isDM,
-      isMentioned,
-    )
-
-    if (result.action === 'drop') {
-      process.stderr.write(`discord-adapter: dropped msg from ${msg.author.username} in ${msg.channelId} (${result.reason})\n`)
-      return
-    }
-
-    // Permission-reply intercept
+    // Permission-reply intercept — gated on AGENT_COM_PERMISSION_OPERATORS so
+    // arbitrary users cannot approve/deny requests by typing "yes XXXXX".
     const permMatch = PERMISSION_REPLY_RE.exec(msg.content)
     if (permMatch) {
+      const operators = permissionOperators()
+      if (operators.length === 0 || !operators.includes(msg.author.id)) {
+        // Silently ignore — same as pre-v2 behaviour when author wasn't in allowFrom.
+        return
+      }
       const request_id = permMatch[2]!.toLowerCase()
       const behavior = permMatch[1]!.toLowerCase() === 'yes' ? 'allow' : 'deny'
       if (this.permissionRequestCallback) {

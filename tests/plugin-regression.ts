@@ -515,9 +515,12 @@ describe('11. Phase 5 Integration', () => {
     expect(DISCORD_ADAPTER_SOURCE).toContain('implements UIAdapter')
   })
 
-  test('adapters/discord.ts has gate() and loadAccess() exports', () => {
-    expect(DISCORD_ADAPTER_SOURCE).toContain('export function gate(')
-    expect(DISCORD_ADAPTER_SOURCE).toContain('export function loadAccess(')
+  test('adapters/discord.ts does not re-introduce legacy access gate exports', () => {
+    // spec §20 廃止: routing/mention/membership は routeInbound (core/route-message.ts) に統合。
+    // adapter が gate()/loadAccess() を再び export すると二重ゲート化し drift の温床になる。
+    expect(DISCORD_ADAPTER_SOURCE).not.toContain('export function gate(')
+    expect(DISCORD_ADAPTER_SOURCE).not.toContain('export function loadAccess(')
+    expect(DISCORD_ADAPTER_SOURCE).not.toContain('accessFile')
   })
 
   test('adapters/discord.ts has code-point safe truncation', () => {
