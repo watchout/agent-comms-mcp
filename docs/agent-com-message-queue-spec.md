@@ -1182,7 +1182,7 @@ AGENT_COM_DB=sqlite
 AGENT_COM_SQLITE_PATH=./agent-com.db
 # DATABASE_URL=postgresql://localhost/agent_comms
 AGENT_COM_POLL_INTERVAL_MS=3000
-AGENT_COM_REPLY_CHAIN_DEPTH=10
+AGENT_COM_REPLY_CHAIN_DEPTH=5
 ```
 
 init フロー:
@@ -1303,7 +1303,7 @@ SELECT * FROM chain ORDER BY created_at ASC;
 
 depth counter を CTE 内で管理。循環参照 (reply_to が自身を指す) は depth limit で自動停止。
 
-設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 10)
+設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 5)
 reply_to = NULL (会話起点) に到達するか depth 到達で停止。
 
 ### 18.2 チャンネルtopic表示
@@ -1326,7 +1326,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_HEALTH_PORT` | `9000` | healthcheckポート |
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
 | `AGENT_COM_PG_NOTIFY` | `true` | pg_notify 加速 on/off (false で polling only、SQLite mode 用) |
-| `AGENT_COM_REPLY_CHAIN_DEPTH` | `10` | Reply Chain Context の最大遡り深度（§18.1） |
+| `AGENT_COM_REPLY_CHAIN_DEPTH` | `5` | Reply Chain Context の最大遡り深度（§18.1） |
 | `AGENT_COM_ATTACHMENT_TTL_HOURS` | `24` | 添付ファイル保持時間 |
 | `AGENT_COM_ATTACHMENT_MAX_SIZE` | `52428800` | 添付1ファイル上限(bytes) |
 | `AGENT_COM_ATTACHMENT_DISK_LIMIT_MB` | `1024` | temp領域ディスク上限 |

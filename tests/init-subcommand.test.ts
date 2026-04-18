@@ -27,7 +27,7 @@ describe('init subcommand', () => {
       expect(env).toContain('AGENT_COM_SQLITE_PATH=./agent-com.db')
       expect(env).toContain('# DATABASE_URL=postgresql://localhost/agent_comms')
       expect(env).toContain('AGENT_COM_POLL_INTERVAL_MS=3000')
-      expect(env).toContain('AGENT_COM_REPLY_CHAIN_DEPTH=10')
+      expect(env).toContain('AGENT_COM_REPLY_CHAIN_DEPTH=5')
     })
 
     it('generates .env with postgres settings', () => {
