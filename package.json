@@ -32,6 +32,7 @@
     "entrypoints/",
     "adapters/",
     "cli/",
+    "core/",
     "db/",
     "config.example.json",
     "LICENSE",

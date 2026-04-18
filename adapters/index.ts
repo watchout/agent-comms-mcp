@@ -37,9 +37,6 @@ export {
 } from './outbound-consumer'
 
 export {
-  pollNewMessages,
-  startPolling,
-  stopPolling,
   startListener,
   scheduleListenerReconnect,
   stopListener,

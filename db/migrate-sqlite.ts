@@ -67,11 +67,24 @@ export function migrateSqlite(dbPath?: string): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       sent_at TEXT,
       claimed_at TEXT,
-      claimed_by TEXT
+      claimed_by TEXT,
+      next_retry_at TEXT,
+      discord_message_id TEXT
     )
   `)
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_oq_pending ON outbound_queue(status, created_at ASC) WHERE status = 'pending'`)
+
+  // Idempotent column additions for DBs created before these fields were added.
+  // SQLite's ALTER TABLE lacks IF NOT EXISTS, so we check PRAGMA first.
+  const oqCols = db.query(`PRAGMA table_info(outbound_queue)`).all() as Array<{ name: string }>
+  const oqColNames = new Set(oqCols.map((c) => c.name))
+  if (!oqColNames.has('next_retry_at')) {
+    db.exec(`ALTER TABLE outbound_queue ADD COLUMN next_retry_at TEXT`)
+  }
+  if (!oqColNames.has('discord_message_id')) {
+    db.exec(`ALTER TABLE outbound_queue ADD COLUMN discord_message_id TEXT`)
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS agents (
@@ -81,7 +94,7 @@ export function migrateSqlite(dbPath?: string): void {
       cli_type TEXT,
       discord_token TEXT,
       discord_user_id TEXT,
-      status TEXT NOT NULL DEFAULT 'disconnected',
+      status TEXT NOT NULL DEFAULT 'offline',
       status_detail TEXT,
       status_updated_at TEXT,
       last_seen_at TEXT,

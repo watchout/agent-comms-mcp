@@ -46,9 +46,6 @@ import {
 import {
   startListener,
   stopListener,
-  startPolling,
-  stopPolling,
-  pollNewMessages,
   handleInboundMessage,
   sendHumanWarning,
   setInboundReceiverDeps,
@@ -1191,7 +1188,6 @@ setInboundReceiverDeps({
   tryGetDb,
   coreDbAdapter,
   saveMessage,
-  mcpNotification: (m) => mcp.notification(m as any),
   validateIncomingAuth,
   buildQuoteBlock,
   updateActiveThread,
@@ -2624,10 +2620,9 @@ if (MULTI_BOT_MODE) {
 
 // --- 2. Shared startup (unconditional) ---
 ;(async () => {
-  // Start push notification polling
-  startPolling()
-
-  // Start pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode)
+  // Start pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode).
+  // Delivery is pull-based via `next` MCP tool (spec §4.1); legacy push polling + `notifications/claude/channel`
+  // were removed per spec §20.
   if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
     try {
       await startListener()
@@ -2749,7 +2744,6 @@ mcp.connect(transport).then(async () => {
 
 // --- 4. Unified shutdown handler ---
 const shutdown = async () => {
-  stopPolling()
   stopListener()
   await discord.disconnect().catch(() => {})
   // Disconnect all per-bot Discord clients

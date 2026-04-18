@@ -412,135 +412,53 @@ describe('8. Content Sanitization', () => {
   })
 })
 
-// --- Test 9: Push Notification Polling (Phase 3) ---
-describe('9. Push Notification Polling', () => {
-  let client: Client | null = null
-  const testChannel = `__test_push_${Date.now()}`
-  const testAgent = `__test_push_agent_${Date.now()}`
+// --- Test 9: Push polling removal (spec §4.1 pull-only via `next`) ---
+// Push polling (agent_messages direct read + `notifications/claude/channel`
+// MCP push) was removed when agent-comms went LLM-agnostic. Delivery is pull-only
+// via the `next` MCP tool reading from `message_queue`. See spec §20.
+describe('9. Push polling removal', () => {
+  const INBOUND_RECEIVER_SOURCE = readFileSync(
+    join(PROJECT_ROOT, 'adapters', 'inbound-receiver.ts'),
+    'utf-8',
+  )
 
-  beforeAll(async () => {
-    try {
-      const configPath = join(PROJECT_ROOT, 'config.json')
-      const config = JSON.parse(readFileSync(configPath, 'utf-8'))
-      const dbUrl = process.env.DATABASE_URL ?? config.database_url ?? 'postgresql://localhost/agent_comms'
-      client = new Client({ connectionString: dbUrl })
-      await client.connect()
-    } catch {
-      client = null
-    }
+  test('inbound-receiver.ts does not export polling functions', () => {
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('export async function pollNewMessages')
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('export function startPolling')
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('export function stopPolling')
   })
 
-  afterAll(async () => {
-    if (client) {
-      await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [testChannel]).catch(() => {})
-      await client.end().catch(() => {})
-    }
+  test('inbound-receiver.ts does not reference polling constants', () => {
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('POLL_INTERVAL_MS')
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('POLL_BATCH_SIZE')
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('PROCESSED_ID_TTL_MS')
   })
 
-  test('server.ts contains polling implementation', () => {
-    expect(SERVER_SOURCE).toContain('startPolling')
-    expect(SERVER_SOURCE).toContain('stopPolling')
-    expect(SERVER_SOURCE).toContain('pollNewMessages')
-    expect(SERVER_SOURCE).toContain('processedIds')
-    // processedIds must be Map (not Set) for TTL-based GC
-    expect(SERVER_SOURCE).toContain('new Map<string, number>()')
-    expect(SERVER_SOURCE).toContain('PROCESSED_ID_TTL_MS')
-  })
-
-  test('server.ts uses notifications/claude/channel method', () => {
-    expect(SERVER_SOURCE).toContain("method: 'notifications/claude/channel'")
-  })
-
-  test('server.ts includes source: agent-comms in meta', () => {
-    expect(SERVER_SOURCE).toContain("source: 'agent-comms'")
-  })
-
-  test('polling query filters by metadata->to and excludes self', () => {
-    expect(SERVER_SOURCE).toContain("metadata->>'to' = $1")
-    expect(SERVER_SOURCE).toContain('author_id != $1')
-  })
-
-  test('polling starts after transport connect', () => {
-    expect(SERVER_SOURCE).toContain('startPolling()')
-  })
-
-  test('polling stops on shutdown', () => {
-    expect(SERVER_SOURCE).toContain('stopPolling()')
-  })
-
-  test('processedIds prevents duplicate injection (Map with TTL)', () => {
-    // Simulate processedIds logic (Map<string, number> with TTL)
-    const processedIds = new Map<string, number>()
-    const msgId = crypto.randomUUID()
-
-    expect(processedIds.has(msgId)).toBe(false)
-    processedIds.set(msgId, Date.now())
-    expect(processedIds.has(msgId)).toBe(true)
-
-    // Simulate TTL expiry
-    processedIds.set(msgId, Date.now() - 120_000) // 2 min ago
-    const TTL = 60_000
-    for (const [id, ts] of processedIds) {
-      if (Date.now() - ts > TTL) processedIds.delete(id)
-    }
-    expect(processedIds.has(msgId)).toBe(false)
-  })
-
-  test('poll query returns messages addressed to agent (DB)', async () => {
-    if (!client) return
-    const msgId = crypto.randomUUID()
-    const now = new Date()
-
-    // Insert a test message addressed to testAgent
-    await client.query(
-      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, depth, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [msgId, testChannel, 'sender-bot', 'push test message', 'chat',
-       JSON.stringify({ to: testAgent }), 0, now.toISOString()]
+  test('inbound-receiver.ts does not push via notifications/claude/channel', () => {
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain(
+      "method: 'notifications/claude/channel'",
     )
-
-    // Simulate the poll query
-    const beforeTime = new Date(now.getTime() - 1000).toISOString()
-    const r = await client.query(
-      `SELECT id, channel_id, author_id, content, metadata, created_at
-       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at > $2
-       ORDER BY created_at ASC LIMIT 10`,
-      [testAgent, beforeTime]
-    )
-
-    expect(r.rows.length).toBeGreaterThanOrEqual(1)
-    const found = r.rows.find((row: any) => row.id === msgId)
-    expect(found).toBeTruthy()
-    expect(found.content).toBe('push test message')
-    expect(found.metadata.to).toBe(testAgent)
   })
 
-  test('poll query excludes messages from self', async () => {
-    if (!client) return
-    const msgId = crypto.randomUUID()
-    const now = new Date()
-
-    // Insert a message FROM testAgent TO testAgent (self-message)
-    await client.query(
-      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, depth, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [msgId, testChannel, testAgent, 'self message', 'chat',
-       JSON.stringify({ to: testAgent }), 0, now.toISOString()]
-    )
-
-    const beforeTime = new Date(now.getTime() - 1000).toISOString()
-    const r = await client.query(
-      `SELECT id FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at > $2
-       ORDER BY created_at ASC LIMIT 10`,
-      [testAgent, beforeTime]
-    )
-
-    const found = r.rows.find((row: any) => row.id === msgId)
-    expect(found).toBeUndefined()
+  test('inbound-receiver.ts has no mcpNotification dependency', () => {
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('mcpNotification:')
+    expect(INBOUND_RECEIVER_SOURCE).not.toContain('d.mcpNotification')
   })
 
-  test('check_inbox description updated to mention auto-push', () => {
-    expect(SERVER_SOURCE).toContain('Messages are automatically pushed to your session')
+  test('server.ts does not import polling functions', () => {
+    expect(SERVER_SOURCE).not.toContain('startPolling,')
+    expect(SERVER_SOURCE).not.toContain('stopPolling,')
+    expect(SERVER_SOURCE).not.toContain('pollNewMessages,')
+  })
+
+  test('server.ts does not call startPolling/stopPolling', () => {
+    expect(SERVER_SOURCE).not.toContain('startPolling()')
+    expect(SERVER_SOURCE).not.toContain('stopPolling()')
+  })
+
+  test('pg_notify listener is retained (signal path, not push)', () => {
+    expect(INBOUND_RECEIVER_SOURCE).toContain('export async function startListener')
+    expect(INBOUND_RECEIVER_SOURCE).toContain('export function stopListener')
   })
 })
 

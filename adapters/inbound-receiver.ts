@@ -1,9 +1,8 @@
 /**
  * Inbound receiver (FEAT-005 adapter rewrite).
  *
- * Extracted from server.ts so the Discord event path, the polling
- * path, and the pg_notify LISTEN path share a single home. All three
- * ultimately funnel a Discord event into:
+ * Extracted from server.ts so the Discord event path and the pg_notify
+ * LISTEN path share a single home. Both funnel a Discord event into:
  *
  *   1. `agent_messages` (DB persist via deps.saveMessage)
  *   2. pure `routeInbound()` routing decision (core/route-message.ts)
@@ -12,18 +11,25 @@
  *   4. optional `pg_notify('agent_inbox', …)` fanout for the mixed-
  *      mode receiver pipeline canary.
  *
+ * Delivery model: spec §4.1 is pull-only via the `next` MCP tool. Legacy
+ * push paths (agent_messages direct polling + `notifications/claude/channel`
+ * MCP push) were removed when the project went LLM-agnostic — see §20 of
+ * docs/agent-com-message-queue-spec.md. The pg_notify LISTEN path is
+ * retained as a signal channel for observability and receiver-pipeline
+ * fanout; it no longer performs its own MCP push.
+ *
  * Design invariants (pinned in tests/spec-enforcement):
  *   - Inbound insert into message_queue is always
  *     `ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL
  *     DO NOTHING` so redelivered Discord events cannot create
  *     duplicate inbox rows (spec-enforcement adapter-rewrite #7).
- *   - handleInboundMessage is pure-ish: it persists + routes + pushes,
+ *   - handleInboundMessage is pure-ish: it persists + routes,
  *     but routeInbound itself has zero I/O and is the single source
  *     of the mentions / membership gate.
  *   - startListener owns one pg Client, reconnects with exponential
  *     backoff, and tears down its keepalive when the client is stale.
  *
- * Dependency injection: server.ts owns config + mcp + several helper
+ * Dependency injection: server.ts owns config + several helper
  * functions that the receiver needs. `setInboundReceiverDeps()` wires
  * them at startup so this module does not import server.ts (cycle).
  */
@@ -72,7 +78,6 @@ export interface InboundReceiverDeps {
     session_id?: string
     project?: string
   }) => Promise<string>
-  mcpNotification: (msg: { method: string; params: any }) => Promise<void>
   validateIncomingAuth: (
     metadata: Record<string, any> | null,
     authorId: string,
@@ -94,105 +99,6 @@ export function setInboundReceiverDeps(d: InboundReceiverDeps): void {
 function requireDeps(): InboundReceiverDeps {
   if (!deps) throw new Error('inbound-receiver: setInboundReceiverDeps() not called')
   return deps
-}
-
-// ---- Polling path (agent_messages direct poll) ---------------------------
-
-const POLL_INTERVAL_MS = 3_000
-const POLL_BATCH_SIZE = 10
-const PROCESSED_ID_TTL_MS = 10 * 60_000
-let lastPolledAt = new Date().toISOString()
-let pollInterval: ReturnType<typeof setInterval> | null = null
-
-export async function pollNewMessages(): Promise<void> {
-  const d = requireDeps()
-  const client = await d.tryGetDb()
-  if (!client) return
-
-  // GC: remove expired processedIds entries.
-  const now = Date.now()
-  for (const [id, ts] of d.processedIds) {
-    if (now - ts > PROCESSED_ID_TTL_MS) d.processedIds.delete(id)
-  }
-
-  try {
-    // Use >= to catch messages at the same timestamp (dedup via processedIds).
-    // Previously used > with JS Date (ms precision), which truncated PG's µs
-    // timestamps, causing the same message to re-match after processedIds expired.
-    const r = await client.query(
-      `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth, created_at
-       FROM agent_messages WHERE metadata->>'to' = $1 AND author_id != $1 AND created_at >= $2
-       ORDER BY created_at ASC LIMIT $3`,
-      [d.agentId, lastPolledAt, POLL_BATCH_SIZE],
-    )
-
-    for (const msg of r.rows) {
-      if (d.processedIds.has(msg.id)) continue
-      d.processedIds.set(msg.id, Date.now())
-
-      const authResult = d.validateIncomingAuth(
-        msg.metadata, msg.author_id, msg.channel_id, msg.content,
-      )
-      if (!authResult.valid) {
-        process.stderr.write(
-          `agent-comms: push rejected (auth ${d.authMode}): ${msg.id} from ${msg.author_id}\n`,
-        )
-        continue
-      }
-
-      // Build quote block if reply_to is present (§3.10).
-      let pollQuotePrefix = ''
-      if (msg.reply_to) {
-        const quoteData = await d.buildQuoteBlock(msg.reply_to)
-        if (quoteData) pollQuotePrefix = quoteData.quote
-      }
-
-      const tag = authResult.tag ? ` ${authResult.tag}` : ''
-      const contentText = `${pollQuotePrefix}[${msg.message_type ?? 'chat'}] ${msg.author_id} → #${msg.channel_id}:${tag} ${msg.content}`
-
-      d.mcpNotification({
-        method: 'notifications/claude/channel',
-        params: {
-          content: contentText,
-          meta: {
-            chat_id: msg.channel_id,
-            message_id: msg.id,
-            user: msg.author_id,
-            user_id: msg.author_id,
-            ts: new Date(msg.created_at).toISOString(),
-            source: 'agent-comms',
-          },
-        },
-      }).catch(err => {
-        process.stderr.write(`agent-comms: push notification failed: ${err}\n`)
-      })
-
-      // Advance cursor past this message to prevent re-fetch after
-      // processedIds TTL expires. Without +1ms, the `>= $2` query
-      // re-matches the same timestamp once processedIds expires (10min),
-      // causing infinite re-delivery.
-      const rawTs = msg.created_at instanceof Date
-        ? msg.created_at.toISOString()
-        : String(msg.created_at)
-      const dt = new Date(rawTs)
-      dt.setTime(dt.getTime() + 1)
-      lastPolledAt = dt.toISOString()
-    }
-  } catch (err) {
-    process.stderr.write(`agent-comms: poll error (will retry): ${err}\n`)
-  }
-}
-
-export function startPolling(): void {
-  pollInterval = setInterval(pollNewMessages, POLL_INTERVAL_MS)
-  process.stderr.write(`agent-comms: push polling started (${POLL_INTERVAL_MS}ms interval)\n`)
-}
-
-export function stopPolling(): void {
-  if (pollInterval) {
-    clearInterval(pollInterval)
-    pollInterval = null
-  }
 }
 
 // ---- pg_notify helper (I2: conditional for SQLite/PG unification) --------
@@ -337,47 +243,19 @@ export async function startListener(): Promise<void> {
           )
         }
 
-        // Build quote block if reply_to is present (§3.10).
-        let quotePrefix = ''
-        if ((row as any).reply_to) {
-          const quoteData = await d.buildQuoteBlock((row as any).reply_to)
-          if (quoteData) quotePrefix = quoteData.quote
-        }
-
-        const tag = authResult.tag ? ` ${authResult.tag}` : ''
-        const contentText = `${quotePrefix}[${row.message_type ?? 'chat'}] ${row.author_id} → #${row.channel_id}:${tag} ${row.content}`
-
-        await d.mcpNotification({
-          method: 'notifications/claude/channel',
-          params: {
-            content: contentText,
-            meta: {
-              chat_id: row.channel_id,
-              message_id: row.id,
-              user: row.author_id,
-              user_id: row.author_id,
-              ts: new Date(row.created_at).toISOString(),
-              source: 'agent-comms',
-            },
-          },
-        }).then(async () => {
-          const dbClient = await d.tryGetDb()
-          await pgNotifyGuarded(dbClient, 'agent_inbox', JSON.stringify({
-            event: 'message.delivered',
-            to: d.agentId,
-            message_id: row.id,
-            agent_id: d.agentId,
-          }))
-        }).catch(async (err) => {
-          process.stderr.write(`agent-comms: listener notification failed: ${err}\n`)
-          const dbClient = await d.tryGetDb()
-          await pgNotifyGuarded(dbClient, 'agent_inbox', JSON.stringify({
-            event: 'message.failed',
-            to: d.agentId,
-            message_id: row.id,
-            error: String(err),
-          }))
-        })
+        // Delivery is pull-based via `next` MCP tool (spec §4.1). The listener
+        // only fires an observability event; legacy `notifications/claude/channel`
+        // push was removed with the polling path (spec §20).
+        process.stderr.write(
+          `agent-comms: listener signal — ${d.agentId} msg=${row.id} (pull via next)\n`,
+        )
+        const dbClientForEvent = await d.tryGetDb()
+        await pgNotifyGuarded(dbClientForEvent, 'agent_inbox', JSON.stringify({
+          event: 'message.signal',
+          to: d.agentId,
+          message_id: row.id,
+          agent_id: d.agentId,
+        }))
       } catch (err) {
         process.stderr.write(`agent-comms: listener notification error: ${err}\n`)
       }

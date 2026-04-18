@@ -1361,6 +1361,8 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 ❌ Push Enrichment (チャンネル履歴) — Reply Chain Context に置換
 ❌ TRANSPORT_MODE — Phase C I5 で統一 (stdio/daemon/sse/receiver → 単一フロー)
 ❌ IS_RECEIVER_MODE — Phase C I5 で廃止
+❌ Push polling (agent_messages 直接読取 + MCP notification push) — message_queue ベースの next pull モデルに統一
+❌ notifications/claude/channel (Claude Code 固有 push) — LLM-agnostic 化
 ```
 
 ---
@@ -1369,6 +1371,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-18 | Phase C 即時修正: §20 に Push polling / `notifications/claude/channel` 廃止追加。spec §4.1 pull モデル (`next`) 一択に統一、legacy `pollNewMessages` / `startPolling` / `stopPolling` + MCP push dependency を inbound-receiver.ts から除去。 |
 | 2026-04-19 | Phase C I6: §15 CLI Setup 書き換え — `init` 対話式セットアップ / `start` / `status` サブコマンド実装。entrypoints/main.ts に auto-detect + subcommand routing 追加。 |
 | 2026-04-18 | Phase C I5: §5.3 統一プロセスモデル化、§20 `TRANSPORT_MODE` / `IS_RECEIVER_MODE` 廃止追加。stdio/daemon/sse/receiver の 4 モード → 単一フローに統一。 |
 | 2026-04-17 | v2.0.0: OSS primary に組織原理を転換。Dispatcher 廃止 / dual mode 廃止 / SQLite default / 1 daemon 集約 / Reply Chain Context 導入 / LLM-agnostic 化。Phase C 条件を product 視点で再定義 (CEO 承認)。 |
