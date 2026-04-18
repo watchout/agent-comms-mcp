@@ -184,7 +184,6 @@ try {
 
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
-const DISCORD_STATE_DIR_ENV = process.env.DISCORD_STATE_DIR ?? ''
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 
 // --- SSE Transport (Phase 3 → Phase C I5: unified, TRANSPORT_MODE removed) ---
@@ -991,51 +990,6 @@ async function writeAuditLog(eventType: string, agentId: string | null, target: 
 }
 
 // --- Access Control (§4.1 - Communication Bus Layer) ---
-interface AccessConfig {
-  dmPolicy: 'open' | 'pairing'
-  allowFrom: string[]
-  channels: Record<string, {
-    requireMention: boolean
-    allowFrom: string[]
-  }>
-  mentionPatterns: string[]
-  pending: Record<string, { user_id: string; requested_at: string }>
-}
-
-function loadAccessConfig(): AccessConfig {
-  const accessPath = join(STATE_DIR, 'access.json')
-  try {
-    return JSON.parse(readFileSync(accessPath, 'utf-8'))
-  } catch {
-    return { dmPolicy: 'open', allowFrom: [], channels: {}, mentionPatterns: [], pending: {} }
-  }
-}
-
-function checkAccess(authorId: string, channelId: string, content: string): { allowed: boolean; reason?: string } {
-  const access = loadAccessConfig()
-
-  // Global allowFrom
-  if (access.allowFrom.length > 0 && !access.allowFrom.includes(authorId)) {
-    return { allowed: false, reason: 'not in global allowFrom list' }
-  }
-
-  // Channel-specific rules
-  const channelRules = access.channels[channelId]
-  if (channelRules) {
-    if (channelRules.allowFrom.length > 0 && !channelRules.allowFrom.includes(authorId)) {
-      return { allowed: false, reason: `not in allowFrom for channel ${channelId}` }
-    }
-    if (channelRules.requireMention) {
-      const mentioned = access.mentionPatterns.some(p => content.includes(p))
-      if (!mentioned) {
-        return { allowed: false, reason: 'mention required but not found' }
-      }
-    }
-  }
-
-  return { allowed: true }
-}
-
 // Issue #130 Phase 4: sendInboxSignal (filesystem .signal files) was removed.
 // Delivery to recipient bots is now fully queue-based (message_queue table,
 // Phase 2). The old .signal directory at STATE_DIR/inbox/{agent}/ is no
@@ -2715,7 +2669,6 @@ if (MULTI_BOT_MODE) {
 
       await discord.connect({
         token: DISCORD_BOT_TOKEN,
-        stateDir: DISCORD_STATE_DIR_ENV || undefined,
       })
       process.stderr.write('agent-comms: Discord adapter connected (inbound + outbound)\n')
       // Register this bot's Discord adapter in the per-bot client map so

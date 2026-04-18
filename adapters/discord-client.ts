@@ -133,7 +133,7 @@ export async function connectBotDiscord(botId: string, token: string): Promise<D
       adapter.setAgentId(botId)
       await adapter.connect({ token })
       process.stderr.write(
-        `agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt}, no access.json — routeInbound filters)\n`,
+        `agent-comms: per-bot Discord connected for ${botId} (attempt ${attempt}; routing handled by routeInbound)\n`,
       )
       return adapter
     } catch (err) {
