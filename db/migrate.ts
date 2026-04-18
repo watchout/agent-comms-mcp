@@ -311,6 +311,10 @@ async function migrate() {
     -- EXISTS is idempotent on its own; no DO block needed.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id BIGINT;
 
+    -- Phase C PR #214: idle/busy state machine (spec §4.1 step 4, §4.2 step 11, §8.1)
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_detail TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
+
     -- Issue #129 Phase 3: outbound_queue (Discord send queue, message-queue-spec 3.3)
     -- Receiver-side consumer dequeues pending rows on a 1-second tick and posts
     -- them to Discord. Decouples DB INSERT from outbound HTTP so the send-tool
