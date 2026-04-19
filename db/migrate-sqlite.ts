@@ -38,17 +38,32 @@ export function migrateSqlite(dbPath?: string): void {
       agent_id TEXT NOT NULL,
       message_id TEXT,
       payload TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'read', 'replied')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed')),
       priority INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       read_at TEXT,
       replied_at TEXT,
-      replied_with TEXT
+      replied_with TEXT,
+      failed_reason TEXT
     )
   `)
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_mq_agent_pending ON message_queue(agent_id, status, priority DESC, created_at ASC)`)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_mq_agent_message ON message_queue(agent_id, message_id) WHERE message_id IS NOT NULL`)
+
+  // v2.1.0 PR 1/3: idempotent ADD COLUMN for pre-v2.1.0 SQLite DBs (SQLite lacks
+  // ALTER TABLE ADD COLUMN IF NOT EXISTS, so we PRAGMA check first). The CHECK
+  // constraint on existing tables cannot be modified in place without a table
+  // rebuild — for now we accept that operators upgrading from pre-v2.1.0 SQLite
+  // will hit a CHECK violation the first time status='skipped' / 'failed' is
+  // written, and should drop + recreate the DB (OSS users have no production
+  // data to preserve yet). New SQLite DBs created from this migration get the
+  // v2.1.0 CHECK constraint above.
+  const mqCols = db.query(`PRAGMA table_info(message_queue)`).all() as Array<{ name: string }>
+  const mqColNames = new Set(mqCols.map((c) => c.name))
+  if (!mqColNames.has('failed_reason')) {
+    db.exec(`ALTER TABLE message_queue ADD COLUMN failed_reason TEXT`)
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS outbound_queue (

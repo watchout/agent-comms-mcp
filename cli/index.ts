@@ -20,6 +20,7 @@
  */
 
 import { Client } from 'pg'
+import { truncateForDiscord } from '../core/truncate'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
@@ -301,8 +302,13 @@ async function nextMessage() {
       )
       priorId = prevRow.rows[0]?.current_message_id ?? null
       if (priorId !== null) {
+        // v2.1.0: implicit abandon is now status='failed' with
+        // failed_reason='IMPLICIT_ABANDON' (spec §4.1 step 1, §11 failed_reason
+        // 標準値). The older status='skipped' value is reserved for operator-
+        // initiated `agent-com skip` only.
         await db.query(
-          `UPDATE message_queue SET status = 'skipped'
+          `UPDATE message_queue
+              SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'
            WHERE id = $1 AND status = 'read'`,
           [priorId],
         )
@@ -649,10 +655,13 @@ async function sendMessage(args: string[]) {
       let outboundSkipReason: string | null = null
       if (discordExternalId) {
         try {
+          // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars before
+          // enqueue so an over-long LLM reply is truncated once, deterministically,
+          // instead of being split across retries inside the Discord adapter.
           await db.query(
             `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
              VALUES ($1, $2, $3, $4)`,
-            [id, agentId, discordExternalId, content],
+            [id, agentId, discordExternalId, truncateForDiscord(content)],
           )
           outboundQueued = true
         } catch (err) {
@@ -858,10 +867,11 @@ async function notifyMessage(args: string[]) {
     let outboundSkipReason: string | null = null
     if (discordExternalId) {
       try {
+        // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
           `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
            VALUES ($1, $2, $3, $4)`,
-          [id, agentId, discordExternalId, content],
+          [id, agentId, discordExternalId, truncateForDiscord(content)],
         )
         outboundQueued = true
       } catch (err) {
@@ -882,6 +892,186 @@ async function notifyMessage(args: string[]) {
       outbound_queued: outboundQueued,
       ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
     }) + '\n')
+  } finally {
+    await db.end()
+  }
+}
+
+/**
+ * `agent-com fail` (spec §4.1, §11 failed_reason, v2.1.0) — mark a message_queue
+ * row as `failed` with an explicit reason and release the agent to idle.
+ *
+ * Called by run-bot.sh / LLM integration when the message can't be replied to:
+ * LLM_FAILED (empty / non-zero exit), SEND_FAILED_AFTER_N_RETRIES, LOOP_DETECTED,
+ * or any other explicit abandon. Prior to v2.1.0 the implicit-skip path in `next`
+ * used status='skipped', which collapsed "LLM lost" and "operator muted" into one
+ * state and left no reason string. `fail` is the machine-issued counterpart to
+ * the operator-issued `skip`.
+ *
+ * Flags:
+ *   --message-id <uuid>  required — message_queue.message_id (agent_messages.id)
+ *   --reason <text>      required — free-form reason, typically one of the
+ *                                    §11 標準値 (IMPLICIT_ABANDON / LLM_FAILED /
+ *                                    SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED)
+ *
+ * Transaction: UPDATE message_queue → UPDATE agents in one BEGIN/COMMIT so a
+ * crash cannot leave the queue row 'failed' while agents.current_message_id
+ * still points at it.
+ */
+async function failMessage(args: string[]) {
+  return failOrSkipMessage('fail', args)
+}
+
+/**
+ * `agent-com skip` (spec §4.1, §11, v2.1.0) — operator-issued sibling of `fail`.
+ * Marks the message_queue row `skipped` (not `failed`) to signal "manually muted,
+ * no machine error occurred". Same transaction shape as fail.
+ *
+ * Flags:
+ *   --message-id <uuid>  required
+ *   --reason <text>      required — typically OBSOLETE / "manual override"
+ */
+async function skipMessage(args: string[]) {
+  return failOrSkipMessage('skip', args)
+}
+
+/**
+ * Shared implementation for fail/skip — they only differ in the target status.
+ * Consolidated here to keep the transaction invariants identical.
+ */
+async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
+  const agentId = requireAgentId(kind)
+  const { flags } = parseArgs(args)
+  const messageId = flags['message-id']
+  const reason = flags.reason
+
+  if (!messageId) {
+    console.error(`Error: --message-id is required`)
+    process.exit(2)
+  }
+  if (!reason) {
+    console.error(`Error: --reason is required`)
+    process.exit(2)
+  }
+
+  const targetStatus = kind === 'fail' ? 'failed' : 'skipped'
+
+  const db = await getDb()
+  try {
+    await db.query('BEGIN')
+    try {
+      // Match on (agent_id, message_id) — the partial UNIQUE index guarantees
+      // this pair is unique when message_id IS NOT NULL, so we need no tie-break.
+      const upd = await db.query(
+        `UPDATE message_queue
+            SET status = $1, failed_reason = $2
+          WHERE agent_id = $3 AND message_id = $4 AND status IN ('pending','read')
+          RETURNING id`,
+        [targetStatus, reason, agentId, messageId],
+      )
+      if (upd.rows.length === 0) {
+        await db.query('ROLLBACK')
+        console.error(
+          `Error: no in-flight or pending message_queue row for agent_id=${agentId}, message_id=${messageId} (already replied/failed/skipped?)`,
+        )
+        process.exit(1)
+      }
+      const queueId = upd.rows[0].id
+
+      // Clear current_message_id (if this row was the in-flight one) and
+      // flip the agent back to idle. The WHERE clause narrows to the specific
+      // queueId so a concurrent next() that already pointed somewhere else is
+      // untouched.
+      await db.query(
+        `UPDATE agents
+            SET current_message_id = NULL,
+                status = 'idle',
+                status_detail = NULL,
+                status_updated_at = now()
+          WHERE agent_id = $1 AND current_message_id = $2`,
+        [agentId, queueId],
+      )
+      await db.query('COMMIT')
+
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        queue_id: queueId,
+        message_id: messageId,
+        status: targetStatus,
+        failed_reason: reason,
+      }) + '\n')
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {})
+      throw err
+    }
+  } finally {
+    await db.end()
+  }
+}
+
+/**
+ * `agent-com reclaim` (spec §4.1, v2.1.0) — manual orphan reclaim. When a bot
+ * crashed mid-read (status='read' but never transitioned to replied/failed/skipped)
+ * and the normal 15-minute daemon heartbeat reclaim has not run yet, an operator
+ * can force the release here.
+ *
+ * The reclaim is intentionally conservative: it only rolls `read` → `pending` for
+ * rows whose `read_at` is older than RECLAIM_MIN_AGE (15 minutes), matching the
+ * daemon's orphan-reclaim cutoff. It also clears agents.current_message_id so a
+ * fresh `next` can pop from the queue cleanly. Both updates run in one
+ * BEGIN/COMMIT so a crash mid-flight cannot leave the agent stuck in `busy`.
+ *
+ * Flags:
+ *   --agent-id <id>  required (falls back to AGENT_ID env)
+ */
+async function reclaimMessages(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? process.env.AGENT_ID
+  if (!agentId) {
+    console.error('Error: --agent-id (or AGENT_ID env) is required')
+    process.exit(2)
+  }
+
+  const db = await getDb()
+  try {
+    await db.query('BEGIN')
+    try {
+      // Roll 'read' rows older than 15 minutes back to 'pending'. read_at is
+      // cleared so a follow-up next() doesn't think the row is still in-flight.
+      const rollback = await db.query(
+        `UPDATE message_queue
+            SET status = 'pending', read_at = NULL
+          WHERE agent_id = $1
+            AND status = 'read'
+            AND read_at < now() - INTERVAL '15 minutes'
+          RETURNING id`,
+        [agentId],
+      )
+
+      // Always clear current_message_id — even if no row was rolled back, a
+      // stale pointer would trigger a phantom implicit-fail on the next next()
+      // call.
+      await db.query(
+        `UPDATE agents
+            SET current_message_id = NULL,
+                status = 'idle',
+                status_detail = NULL,
+                status_updated_at = now()
+          WHERE agent_id = $1`,
+        [agentId],
+      )
+      await db.query('COMMIT')
+
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        agent_id: agentId,
+        reclaimed_count: rollback.rows.length,
+        reclaimed_queue_ids: rollback.rows.map((r: any) => r.id),
+      }) + '\n')
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {})
+      throw err
+    }
   } finally {
     await db.end()
   }
@@ -1093,6 +1283,15 @@ if (command === 'channel') {
 } else if (command === 'notify') {
   // spec §4.3: self-originated post, no reply context.
   await notifyMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'fail') {
+  // spec §4.1, §11 (v2.1.0): explicit abandon with failed_reason.
+  await failMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'skip') {
+  // spec §4.1, §11 (v2.1.0): operator-initiated skip with failed_reason.
+  await skipMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'reclaim') {
+  // spec §4.1 (v2.1.0): manual orphan reclaim for crashed bots.
+  await reclaimMessages([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -1110,6 +1309,9 @@ Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
   send --content "..." --mentions cto,ceo [--message-type chat]
   notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
+  fail --message-id <uuid> --reason <text>            — mark in-flight message failed (v2.1.0, §4.1)
+  skip --message-id <uuid> --reason <text>            — operator-initiated skip (v2.1.0, §4.1)
+  reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at

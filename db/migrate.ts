@@ -227,12 +227,13 @@ async function migrate() {
       message_id TEXT,                       -- agent_messages.id (NULL for system messages)
       payload TEXT NOT NULL,                 -- enriched JSON payload
       status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'read', 'replied', 'skipped')),
+        CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed')),
       priority INTEGER NOT NULL DEFAULT 0,   -- higher = more urgent
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       read_at TIMESTAMPTZ,
       replied_at TIMESTAMPTZ,
-      replied_with TEXT                      -- reply message id
+      replied_with TEXT,                     -- reply message id
+      failed_reason TEXT                     -- v2.1.0: fail CLI で設定 (IMPLICIT_ABANDON / LLM_FAILED / SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED / OBSOLETE)
     );
     CREATE INDEX IF NOT EXISTS idx_mq_agent_pending
       ON message_queue(agent_id, status, priority DESC, created_at ASC)
@@ -314,6 +315,36 @@ async function migrate() {
     -- Phase C PR #214: idle/busy state machine (spec §4.1 step 4, §4.2 step 11, §8.1)
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_detail TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
+
+    -- v2.1.0 PR 1/3: message_queue.failed_reason + extend status CHECK to include 'failed'.
+    -- fail/skip CLIs store the abandonment reason so operators can distinguish
+    -- IMPLICIT_ABANDON / LLM_FAILED / SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED / OBSOLETE
+    -- without reading logs. Idempotent: the ADD COLUMN is IF NOT EXISTS, the CHECK
+    -- constraint swap is DO-guarded so re-runs are safe.
+    ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT;
+
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = 'message_queue_status_check'
+           AND conrelid = 'message_queue'::regclass
+           AND pg_get_constraintdef(oid) NOT LIKE '%failed%'
+      ) THEN
+        ALTER TABLE message_queue DROP CONSTRAINT message_queue_status_check;
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = 'message_queue_status_check'
+           AND conrelid = 'message_queue'::regclass
+      ) THEN
+        ALTER TABLE message_queue
+          ADD CONSTRAINT message_queue_status_check
+          CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
+      END IF;
+    END $$;
 
     -- Issue #129 Phase 3: outbound_queue (Discord send queue, message-queue-spec 3.3)
     -- Receiver-side consumer dequeues pending rows on a 1-second tick and posts
