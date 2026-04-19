@@ -184,3 +184,47 @@ describe('spec §5.3 / §13.5.1 — run-bot.sh lost-wake-up fix (source pin)', (
     expect(script).toContain('kill "$SLEEP_PID"')
   })
 })
+
+describe('spec §5.3 — run-bot.sh end-to-end flow (source pin)', () => {
+  // Source-pin for the spec §5.3 end-to-end flow (PR #218): the runner
+  // must invoke `next` → LLM → `send` in the same iteration. If any of
+  // these hooks disappear the runner has regressed into a stdout-only
+  // probe and no reply reaches the chat UI.
+  const fs = require('node:fs') as typeof import('node:fs')
+  const path = require('node:path') as typeof import('node:path')
+  const script = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'run-bot.sh'),
+    'utf-8',
+  )
+
+  test('LLM_CMD env var defaults to `claude --print`', () => {
+    expect(script).toContain('LLM_CMD="${LLM_CMD:-claude --print}"')
+  })
+
+  test('extracts content / reply_chain / message_id / from from the next JSON', () => {
+    expect(script).toContain(`jq -r '.content // ""'`)
+    expect(script).toContain(`jq -r '.reply_chain // "[]"'`)
+    expect(script).toContain(`jq -r '.message_id // ""'`)
+    expect(script).toContain(`jq -r '.from // ""'`)
+  })
+
+  test('pipes the context through $LLM_CMD (unquoted for multi-token commands)', () => {
+    // `$LLM_CMD` must be unquoted so `claude --print` splits into argv
+    // tokens; quoting would hand the whole string to execvp as argv[0].
+    expect(script).toMatch(/echo -e "\$context"\s*\|\s*\$LLM_CMD/)
+  })
+
+  test('calls `agent-com send` with --reply-to + --mentions when the LLM produced output', () => {
+    expect(script).toContain(`cli/index.ts" send`)
+    expect(script).toContain('--content "$response"')
+    expect(script).toContain('--reply-to "$message_id"')
+    expect(script).toContain('--mentions "$from"')
+  })
+
+  test('skips send when the LLM response is empty (implicit skip per §4.1 step 1)', () => {
+    // Spec §5.3 エラーハンドリング: "LLM 失敗: send を呼ばない。次の next
+    // 呼出で暗黙 skip (§4.1 step 1)、新規コマンド不要"
+    expect(script).toContain('if [ -n "$response" ]; then')
+    expect(script).toContain('LLM failed, skipping')
+  })
+})
