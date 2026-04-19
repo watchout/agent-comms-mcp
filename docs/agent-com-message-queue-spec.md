@@ -506,6 +506,22 @@ heartbeat:
 - per-bot MCP: 自 agent_id の heartbeat_at を UPDATE (30s, 1 writer per row)
 - daemon: heartbeat_at を READ ONLY 監視、timeout 時のみ status UPDATE
 
+### bot 起動方式 (run-bot.sh, LLM-agnostic event-driven)
+
+```bash
+# scripts/run-bot.sh — LLM-agnostic event-driven bot runner
+# PID file 作成 → SIGUSR1 trap → next loop
+# signal 受信で即 next、timeout 時は polling fallback (§13.5.1)
+./scripts/run-bot.sh <agent-id>
+```
+
+- daemon (inbound / outbound) と bot runner (LLM 処理) は独立プロセス
+- daemon が message_queue INSERT → `bus.signal()` (UnixSignalBus) → bot runner が SIGUSR1 受信 → `next` で取得
+- LLM は bot runner から呼ばれる (MCP session 常駐不要、§13.5.1 primary 経路)
+- PID file: `/tmp/agent-com-{agentId}.pid` に自 PID を書込、終了時 trap で削除
+- signal 不達時も polling fallback で最大 `waitForSignal` timeout (default 30s) 以内に取得
+- `scripts/restart-bot.sh` の tmux send-keys 初期指示は廃止 (§20)。MessageBus signal で LLM への初期指示は不要
+
 ---
 
 ## 6. Receiver
@@ -1048,13 +1064,23 @@ interface MessageBus {
   waitForSignal(channel: string, timeout: number): Promise<boolean>;
   close(): Promise<void>;
 }
-
-// PostgreSQL: pg_notify / LISTEN
-class PgMessageBus implements MessageBus { ... }
-
-// SQLite: message_queue テーブルの変更検知（polling）
-class SqliteMessageBus implements MessageBus { ... }
 ```
+
+実装: `UnixSignalBus` (PG/SQLite 共通、DB 機能に依存しない)
+
+- `signal(channel)`: PID file (`/tmp/agent-com-{agentId}.pid`) を読み、`SIGUSR1` を送信。bot 未起動 / PID file 不在時は non-fatal (silently no-op)
+- `waitForSignal(channel, timeout)`: `SIGUSR1` 受信まで block。timeout 到達で `false` を返す (polling fallback のトリガー)
+- PgMessageBus / SqliteMessageBus は廃止。DB vendor 固有の signal 機構 (pg_notify / LISTEN、SQLite polling) は使わない
+
+```typescript
+// Unix Signal (PG/SQLite 共通、DB 非依存)
+class UnixSignalBus implements MessageBus {
+  // signal(channel) → readFileSync PID file → process.kill(pid, SIGUSR1)
+  // waitForSignal(channel, timeout) → process.once(SIGUSR1) + setTimeout
+}
+```
+
+channel 命名: `bot_<agentId>` (1 agent = 1 PID file = 1 SIGUSR1 listener)。
 
 ### 13.2 DbAdapter抽象化
 
@@ -1134,23 +1160,33 @@ bot数         推奨間隔                     負荷
 
 OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分。
 
-### 13.5.1 Pending Message Notification (MCP 標準)
+### 13.5.1 メッセージ配信メカニズム
 
-PollingDriver が message_queue に pending を検出した場合、MCP 標準 notification で client に通知する。
+メッセージ配信は 3 層構造。**primary (signal) → secondary (MCP notification) → fallback (polling)** の順に作用する。
 
-- method: `notifications/message/pending`
-- params: `{ waiting: number }`
+**Primary: MessageBus signal (§13.1)**
 
-動作:
+- inbound handler が message_queue INSERT 直後に ``bus.signal(`bot_${agentId}`)`` で宛先 bot に即通知
+- bot 側 (`run-bot.sh` 等、§5.3) は `bus.waitForSignal()` で待機 → SIGUSR1 受信 → `next` で取得
+- DB 機能に非依存、PG/SQLite 共通、LLM-agnostic
+- PID file 不在 (bot 未起動) / kill 失敗時は non-fatal (次層にフォールバック)
 
+**Secondary: MCP notification (MCP client 対応時の加速)**
+
+- PollingDriver が pending 検出時に MCP 標準 notification を送信
+- method: `notifications/message/pending` / params: `{ waiting: number }`
 - PollingDriver の setInterval (`AGENT_COM_POLL_INTERVAL_MS`, default 3s) で pending 検出時に毎回送信
-- LLM client がこの notification を受信 → `next` tool を呼ぶトリガーとなる
-- notification は MCP protocol 標準機能 (Claude Code / Codex / Gemini / Cursor 全対応)
-- client が notification を無視しても、手動 `next` で取得可能 (graceful degradation)
-- notification 送信失敗時 (transport 断、client 未対応等) も polling は継続 (non-fatal)
-- pending 0 のときは notification を送信しない
+- MCP client がコンテキスト注入をサポートする場合、LLM が `next` tool を呼ぶトリガーとして機能 (Claude Code / Codex / Gemini / Cursor 全対応の MCP protocol 標準機能)
+- 現時点では Claude Code 未対応 (§13.5 既知制約)。対応クライアントで signal を補助する位置づけ
+- pending 0 のときは送信しない。送信失敗時 (transport 断、client 未対応等) も polling は継続 (non-fatal)
 
-§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分を本項で実装する (message 本体は依然 `next` pull 一択、spec §4.1)。
+**Fallback: Polling (signal 失敗時)**
+
+- `waitForSignal()` timeout (default 30s) 到達時、bot runner は `next` を polling 呼出
+- signal / notification が全て失敗しても最大 30 秒でメッセージ取得
+- `AGENT_COM_POLL_INTERVAL_MS` は polling driver 側の pre-fetch 間隔 (§13.5 参照)
+
+§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分は secondary として実装済み (message 本体は依然 `next` pull 一択、spec §4.1)。**primary は UnixSignalBus** で LLM 非依存の配信を実現する。
 
 ### 13.6 Presence Client
 
@@ -1381,6 +1417,9 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 ❌ IS_RECEIVER_MODE — Phase C I5 で廃止
 ❌ Push polling (agent_messages 直接読取 + MCP notification push) — message_queue ベースの next pull モデルに統一
 ❌ notifications/claude/channel (Claude Code 固有 push) — LLM-agnostic 化
+❌ PgMessageBus (pg_notify / LISTEN 依存) — UnixSignalBus (PID file + SIGUSR1) に統一
+❌ SqliteMessageBus (テーブル変更 polling 依存) — UnixSignalBus に統一
+❌ restart-bot.sh の LLM 初期指示 (tmux send-keys) — MessageBus signal (§13.5.1 primary) で代替、初期指示送信は不要
 ```
 
 ---
@@ -1389,6 +1428,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-19 | §13.1 / §13.5.1 / §5.3 / §20 更新。MessageBus 実装を `UnixSignalBus` (PID file + SIGUSR1) に統一、PgMessageBus / SqliteMessageBus を廃止。§13.5.1 を「メッセージ配信メカニズム」に改題、primary=MessageBus signal / secondary=MCP notification / fallback=polling の 3 層構造化。§5.3 に `run-bot.sh` event-driven bot runner 記述追加、§20 に PgMessageBus / SqliteMessageBus / restart-bot.sh LLM 初期指示 廃止追加。docs-only (実装は後続 PR)。 |
 | 2026-04-19 | §13.5.1 Pending Message Notification (MCP 標準) 追加。PollingDriver が pending 検出時に `notifications/message/pending` を送信し、LLM client の `next` トリガーとして機能。件数シグナルのみ (本体は依然 `next` pull)、失敗は non-fatal で polling 継続。 |
 | 2026-04-18 | Phase C 即時修正: §20 に Push polling / `notifications/claude/channel` 廃止追加。spec §4.1 pull モデル (`next`) 一択に統一、legacy `pollNewMessages` / `startPolling` / `stopPolling` + MCP push dependency を inbound-receiver.ts から除去。 |
 | 2026-04-19 | Phase C I6: §15 CLI Setup 書き換え — `init` 対話式セットアップ / `start` / `status` サブコマンド実装。entrypoints/main.ts に auto-detect + subcommand routing 追加。 |
