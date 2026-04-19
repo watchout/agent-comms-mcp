@@ -1,4 +1,4 @@
-# agent-com 統合メッセージキュー仕様 v2.0.0
+# agent-com 統合メッセージキュー仕様 v2.1.0
 
 > 旧仕様（receiver-architecture, channel-thread-control-spec, webhook-architecture）を統合・置き換え
 > attachment-spec, chat-ui-sync-spec は独立文書として維持
@@ -102,12 +102,13 @@ CREATE TABLE message_queue (
   message_id TEXT,                     -- agent_messages.id（systemメッセージはNULL可）
   payload TEXT NOT NULL,               -- PushPayload JSON（enrichment済み）
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'read', 'replied')),
+    CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed')),
   priority INTEGER NOT NULL DEFAULT 0, -- 高い値 = 高優先
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   read_at TIMESTAMPTZ,
   replied_at TIMESTAMPTZ,
-  replied_with TEXT                    -- 返信メッセージのID
+  replied_with TEXT,                   -- 返信メッセージのID
+  failed_reason TEXT                   -- v2.1.0: fail CLI で設定 (LOOP_DETECTED, LLM_FAILED 等)
 );
 
 CREATE INDEX idx_mq_agent_pending
@@ -281,7 +282,7 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 **内部処理**:
 
 ```
-1. 直前のcurrentMessageがあれば暗黙skip（status='read'のまま）
+1. 直前のcurrentMessageがあれば agent-com fail --reason IMPLICIT_ABANDON で明示 failed 遷移（status='failed'、v2.1.0 で暗黙 skip 廃止）
 2. message_queueからpending最古の1件取得（priority/channel考慮）
 3. status='read', read_at=NOW() に更新
 4. agents.status='busy', status_detail='メッセージ処理中' に更新
@@ -340,11 +341,12 @@ agent-com send --agent-id cto \
 7. push対象のmessage_queue INSERT（mentions対象分）
    → 対象botのstatusに応じて senderにフィードバック（§8）
 8. outbound_queue INSERT（Discord送信用）
-9. message_queue を 'replied' へ遷移:
-   `UPDATE message_queue SET status='replied', replied_with=message_id WHERE id = current_message_id`
-   - **scope**: reply_to は `agent_messages.id` UUID 前提。Discord snowflake 経路は step 5 で `MESSAGE_NOT_FOUND` として pre-send 段階で落ちる
-10. current_message_id = null
-11. agents.status='idle' に更新
+9. message_queue 状態遷移:
+   - send 成功: `status='replied'`, `replied_with=message_id`
+   - agent-com fail: `status='failed'`, `failed_reason=reason` (retry 上限 / loop 検出 / LLM 失敗時)
+   - agent-com skip: `status='skipped'`, `failed_reason=reason` (手動運用のみ)
+10. current_message_id = null (send / fail / skip いずれでもクリア)
+11. agents.status='idle', status_detail=NULL に更新
 12. 結果をJSON出力
 ```
 
@@ -503,7 +505,8 @@ MCP server は stateless。daemon 未起動なら自動 background start。
 6. stdio MCP transport 接続 → agent 登録
 
 heartbeat:
-- per-bot MCP: 自 agent_id の heartbeat_at を UPDATE (30s, 1 writer per row)
+- run-bot.sh: background process で 30s ごとに agent-com heartbeat (§5.3 heartbeat 参照)
+- MCP session (legacy): 自 agent_id の heartbeat_at を UPDATE (30s)
 - daemon: heartbeat_at を READ ONLY 監視、timeout 時のみ status UPDATE
 
 ### bot 起動方式 (run-bot.sh, LLM-agnostic event-driven)
@@ -550,9 +553,81 @@ heartbeat:
 #### エラーハンドリング
 
 - next 失敗: `{"waiting":0}` として扱い、loop 継続
-- LLM 失敗: send を呼ばない。message_queue は `read` のまま。次の next 呼出で暗黙 skip (§4.1 step 1)、新規コマンド不要
-- send 失敗: non-fatal、loop 継続
+- LLM 失敗: `agent-com fail --message-id X --reason LLM_FAILED` で status='failed' に明示遷移。暗黙 skip は使わない
+- send 失敗: retry (max 3, exponential backoff 2/4/8s)。上限到達 → `agent-com fail`。retry 時は前回エラーを LLM prompt に追加
 - signal 不達: polling fallback (30s) で回復
+- LLM 出力超過: CLI send 内で 1900 文字に truncate (JavaScript `String.slice`、multibyte safe)
+- bot-to-bot loop: reply_chain 内に自 agent_id が 3 回以上 → `agent-com fail --reason LOOP_DETECTED`
+
+#### CLI 追加 (v2.1.0)
+
+- `agent-com fail --message-id X --reason Y` → status='failed', failed_reason 設定, current_message_id=NULL, status='idle'
+- `agent-com skip --message-id X --reason Y` → status='skipped' (手動運用のみ)
+- `agent-com register --agent-id X --token $TOKEN --channels ch1,ch2` → agents INSERT + channels.members 追加
+- `agent-com reclaim --agent-id X` → 手動 orphan reclaim (read→pending + current_message_id=NULL)
+
+#### DB schema 追加 (v2.1.0)
+
+```sql
+ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT;
+-- status CHECK: ('pending', 'read', 'replied', 'skipped', 'failed')
+```
+
+#### signal coalescing (burst 対応)
+
+1 signal で複数 message を処理。drain loop で `waiting=0` まで回す:
+
+```
+while true; do
+  SHUTDOWN check (BEFORE consume)
+  msg = next
+  waiting = 0 → break
+  process_message(msg)
+done
+sleep (signal で即中断)
+```
+
+#### graceful shutdown
+
+SIGTERM/SIGINT で SHUTDOWN flag → drain loop の次 iteration で break。現在処理中の message は send 完了まで待つ。LLM は `timeout` コマンドで制限 (default 120s)。
+
+#### orphan reclaim
+
+daemon heartbeat monitor (30s 間隔) が `status='read' AND read_at < NOW() - 15 minutes` の行を pending に戻す。同時に `agents.current_message_id` もクリア (transaction 内)。
+
+#### heartbeat (run-bot.sh 責務)
+
+background process で 30 秒ごとに `agent-com heartbeat` を送信。LLM 処理中も heartbeat 継続。daemon から disconnected と誤判定されない。
+
+#### consumer 排他制御 (1 agent = 1 consumer)
+
+PID file で排他チェック。既にプロセス生存 → exit 1 (block)。MCP session 側も同様に block。
+
+#### process supervision
+
+auto-restart (bash while loop)。crash 5 回 / 60 秒 → 停止。exit code 0 = normal shutdown, 1 = fatal (retry なし), other = transient (retry)。
+
+#### LLM プロンプトテンプレート
+
+```
+CORE_RULES (強制): mention 必須, 1900 文字以下, AI disclaimer 禁止
+USER_RULES (任意): AGENT_COM_SYSTEM_PROMPT 環境変数でカスタマイズ
+```
+
+core rules は常に先頭に付与。user がカスタマイズしても mention / 文字数ルールが消えない。
+
+#### AGENT_ID validation
+
+`[a-z0-9][a-z0-9_-]*` (1-64 文字)。run-bot.sh 起動時 + register CLI で検証。
+
+#### subcommand 化
+
+```bash
+npx agent-comms-mcp run-bot --agent-id X --llm "claude --print"
+npx agent-comms-mcp register --agent-id X --token $TOKEN
+```
+
+npm publish で scripts/ は含まれない。entrypoints/main.ts の subcommand として実装。
 
 #### マルチチャット UI
 
@@ -567,6 +642,15 @@ Chat UI → adapter → daemon (inbound) → message_queue → bus.signal()
 ```
 
 新しい chat UI (Telegram / Slack / Web) を追加しても bot runner は変更不要。adapter 層が吸収する。
+
+#### migration 計画 (Claude Code session → run-bot.sh)
+
+1. agent-com-dev のみ移行 (テスト済み)
+2. 低稼働 bot 順次移行
+3. 全 bot 移行
+4. MCP session model deprecated
+
+切替手順: tmux kill → 15 分待機 (orphan reclaim) → run-bot.sh 起動。即時切替は `agent-com reclaim` CLI 使用。
 
 ---
 
@@ -838,11 +922,14 @@ function routeInbound(
 
 ```
 offline → idle:          heartbeat受信時
-idle → busy:             next_message実行時
-busy → idle:             send実行時 or 次のnext_message実行時（暗黙skip）
+idle → busy:             next実行時
+busy → idle:             send / fail / skip CLI 実行時
+busy → idle:             orphan reclaim (15分 timeout) 時
 idle/busy → disconnected: heartbeat 90秒途絶
 disconnected → idle:      heartbeat再開時
 ```
+
+暗黙 skip は v2.1.0 で廃止。busy → idle は必ず send / fail / skip / reclaim のいずれかを経由する。
 
 ### 8.2 送信者フィードバック
 
@@ -1057,6 +1144,13 @@ ATTACHMENT_BLOCKED_TYPE       ブロックされたファイル種別
 ATTACHMENT_NOT_FOUND          指定ファイルが存在しない
 
 全エラーで送信者にフィードバック。サイレントdrop禁止。
+
+v2.1.0 failed_reason 標準値 (message_queue.failed_reason に設定):
+IMPLICIT_ABANDON              next 実行時に前の message が未返信
+LLM_FAILED                    LLM CLI が空応答 or exit non-zero
+SEND_FAILED_AFTER_N_RETRIES   send が retry 上限到達 (N=MAX_RETRIES)
+LOOP_DETECTED                 reply_chain 内に自 agent_id が MAX_SELF_IN_CHAIN 回以上
+OBSOLETE                      管理者による手動 skip
 ```
 
 ---
@@ -1197,11 +1291,9 @@ bot数         推奨間隔                     負荷
   環境変数で調整するだけ。コード変更不要
 
 ~100 bot以上:
-  PollingDriverをpg_notifyハイブリッドモードに切替:
-    PostgreSQL: pg_notify受信 → 即座にgetNext()
-    SQLite: 従来のpolling（間隔延長）
-  将来Claude CodeがMCP notificationのコンテキスト注入を
-  サポートした時点でpush方式に完全移行可能
+  MessageBus signal (§13.1 UnixSignalBus) + polling interval 延長
+  PostgreSQL 環境では Phase D で MessageBus の pg_notify 実装を追加可能
+  SQLite 環境では UnixSignalBus + polling で十分
 ```
 
 OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分。
@@ -1254,11 +1346,18 @@ client.login(process.env.DISCORD_TOKEN);
 
 | # | 条件 | 検証方法 |
 |---|------|----------|
-| 1 | npx agent-comms-mcp で全機能起動 | CI: fresh env → bot online |
-| 2 | SQLite default / PostgreSQL optional | CI: SQLite で全テスト pass |
-| 3 | 1 daemon で inbound + outbound + heartbeat 完結 | test: daemon → Discord 送受信 |
+| 1 | npx agent-comms-mcp で全機能起動 (run-bot subcommand 含む) | CI: fresh env → init → run-bot → message 送受信 |
+| 2 | SQLite default (PostgreSQL 基本機能動作) | CI: SQLite で全テスト pass。PG MessageBus 抽象化は Phase D |
+| 3 | 1 daemon で inbound + outbound + heartbeat 完結 | test: daemon → Discord 送受信 → run-bot.sh が LLM で返信 |
 | 4 | routing 100% deterministic (LLM 判断ゼロ) | test: LLM 未接続で全 routing 動作 |
 | 5 | 外部ファイル依存ゼロ | grep: access.json/plugin 参照なし |
+
+v2.1.0 追加テストケース:
+- 排他制御: 2 consumer 同時起動 → 2 番目が exit 1
+- orphan reclaim: read → RECLAIM_TIMEOUT 経過 → pending に戻る
+- loop 検出: reply_chain に self 3 回 → fail (LOOP_DETECTED)
+- truncate: 2000 文字超 → 1900 で切られる (CLI send 内)
+- heartbeat: run-bot.sh 起動中 → agents.last_seen_at が更新される
 
 ---
 
@@ -1474,6 +1573,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-04-19 | v2.1.0: §5.3-5.4 run-bot.sh 安定動作要件追加 (end-to-end flow / signal coalescing / graceful shutdown / orphan reclaim / retry+dead-letter / truncate / loop 防止 / consumer 排他 / heartbeat / LLM prompt / subcommand 化 / migration 計画)。§4.1 暗黙 skip 廃止 → fail CLI 明示遷移。§3.2 message_queue に failed_reason + status CHECK 拡張。§4.2 send step 9 を fail/skip 3 分岐に。§8.1 状態遷移表に fail/skip/reclaim 追加。§11 エラーコードに failed_reason 標準値追加。§13.5 pg_notify 記述を UnixSignalBus 整合に修正。§14 Phase C 完了条件に v2.1.0 テストケース追加。外部 AI 3 round review 反映。 |
 | 2026-04-19 | §13.1 / §13.5.1 / §5.3 / §20 更新。MessageBus 実装を `UnixSignalBus` (PID file + SIGUSR1) に統一、PgMessageBus / SqliteMessageBus を廃止。§13.5.1 を「メッセージ配信メカニズム」に改題、primary=MessageBus signal / secondary=MCP notification / fallback=polling の 3 層構造化。§5.3 に `run-bot.sh` event-driven bot runner 記述追加、§20 に PgMessageBus / SqliteMessageBus / restart-bot.sh LLM 初期指示 廃止追加。docs-only (実装は後続 PR)。 |
 | 2026-04-19 | §13.5.1 Pending Message Notification (MCP 標準) 追加。PollingDriver が pending 検出時に `notifications/message/pending` を送信し、LLM client の `next` トリガーとして機能。件数シグナルのみ (本体は依然 `next` pull)、失敗は non-fatal で polling 継続。 |
 | 2026-04-18 | Phase C 即時修正: §20 に Push polling / `notifications/claude/channel` 廃止追加。spec §4.1 pull モデル (`next`) 一択に統一、legacy `pollNewMessages` / `startPolling` / `stopPolling` + MCP push dependency を inbound-receiver.ts から除去。 |
