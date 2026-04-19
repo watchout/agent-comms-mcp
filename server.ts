@@ -92,6 +92,7 @@ import {
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderOfDeliveryStatus } from './core/sender-feedback'
 import { createMessageBus, type MessageBus } from './core/message-bus'
+import { truncateForDiscord } from './core/truncate'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -1326,6 +1327,41 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         properties: {},
       },
     },
+    // ───────────────── v2.1.0 (spec §4.1, §11 failed_reason) ─────────────────
+    {
+      name: 'fail',
+      description: 'Mark the in-flight message_queue row as failed (status=\'failed\') with an explicit reason string, and release the agent to idle. Use when the LLM could not reply (LLM_FAILED, SEND_FAILED_AFTER_N_RETRIES, LOOP_DETECTED, OBSOLETE, etc.). Matches `agent-com fail --message-id X --reason Y`.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          message_id: { type: 'string', description: 'message_queue.message_id (agent_messages UUID). Required.' },
+          reason: { type: 'string', description: 'Free-form failure reason. Use §11 標準値 (IMPLICIT_ABANDON / LLM_FAILED / SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED) when possible.' },
+        },
+        required: ['message_id', 'reason'],
+      },
+    },
+    {
+      name: 'skip',
+      description: 'Operator-initiated sibling of fail — marks a message_queue row `skipped` instead of `failed`. Use for manual overrides where no machine error occurred. Matches `agent-com skip --message-id X --reason Y`.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          message_id: { type: 'string', description: 'message_queue.message_id (agent_messages UUID). Required.' },
+          reason: { type: 'string', description: 'Free-form skip reason (e.g. OBSOLETE).' },
+        },
+        required: ['message_id', 'reason'],
+      },
+    },
+    {
+      name: 'reclaim',
+      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'read\' row whose read_at is older than 15 minutes back to pending, and clears agents.current_message_id. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          agent_id: { type: 'string', description: 'Agent whose orphan in-flight row should be reclaimed. Falls back to the caller\'s AGENT_ID.' },
+        },
+      },
+    },
   ],
   }
 })
@@ -1350,8 +1386,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       const priorId: number | null = prevRow.rows[0]?.current_message_id ?? null
       if (priorId !== null) {
+        // v2.1.0: implicit abandon is now status='failed' with
+        // failed_reason='IMPLICIT_ABANDON' (spec §4.1 step 1, §11 failed_reason).
+        // status='skipped' is reserved for operator-initiated `agent-com skip`.
         await client.query(
-          `UPDATE message_queue SET status = 'skipped' WHERE id = $1 AND status = 'read'`,
+          `UPDATE message_queue
+              SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'
+           WHERE id = $1 AND status = 'read'`,
           [priorId],
         )
       }
@@ -1845,7 +1886,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             await txClient.query(
               `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
                VALUES ($1, $2, $3, $4)`,
-              [partMessageId, agentId, externalId, truncateForPlatform(partContent, 'discord')],
+              // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars to
+              // match spec §5.3 エラーハンドリング. truncateForPlatform's 2000-char
+              // limit is the raw Discord hard cap; truncateForDiscord bakes in
+              // 100 chars of headroom for mentions / reply markers / Discord
+              // server-side reformat.
+              [partMessageId, agentId, externalId, truncateForDiscord(partContent)],
             )
           } catch (err) {
             // ARC codex audit (PR#135): do NOT silently swallow. The
@@ -2149,7 +2195,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await client.query(
             `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
              VALUES ($1, $2, $3, $4)`,
-            [partMessageId, agentId, externalId, truncateForPlatform(partContent, 'discord')],
+            // v2.1.0: clamp at DISCORD_MAX (1900) before enqueue — see send-tool
+            // call site above for rationale.
+            [partMessageId, agentId, externalId, truncateForDiscord(partContent)],
           )
         } catch (err) {
           process.stderr.write(`agent-comms: notify outbound_queue INSERT failed: ${err}\n`)
@@ -2354,6 +2402,117 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ? `[watchdog dry-run] ${alive}/${registry.length} healthy`
       : `[watchdog] ${alive}/${registry.length} alive, ${restarted} restarted`
     return { content: [{ type: 'text', text: `${summary}\n\n${results.join('\n')}` }] }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // v2.1.0 — fail / skip / reclaim (spec §4.1, §11 failed_reason)
+  // ─────────────────────────────────────────────────────────────────────
+  // Shared with `agent-com fail` / `agent-com skip` / `agent-com reclaim`.
+  // Kept inline here (rather than in core/) because the MCP tool handler and
+  // the CLI live on opposite sides of the Node/Bun split and the SQL is tiny.
+  if (name === 'fail' || name === 'skip') {
+    const client = await tryGetDb()
+    if (!client) {
+      return { content: [{ type: 'text', text: 'Error: DATABASE_URL not configured — fail/skip require PG access.' }], isError: true }
+    }
+    const messageId = typeof args?.message_id === 'string' ? args.message_id : undefined
+    const reason = typeof args?.reason === 'string' ? args.reason : undefined
+    if (!messageId || !reason) {
+      return { content: [{ type: 'text', text: `Error: ${name} requires both message_id and reason.` }], isError: true }
+    }
+    const targetStatus = name === 'fail' ? 'failed' : 'skipped'
+    try {
+      await client.query('BEGIN')
+      try {
+        const upd = await client.query(
+          `UPDATE message_queue
+              SET status = $1, failed_reason = $2
+            WHERE agent_id = $3 AND message_id = $4 AND status IN ('pending','read')
+            RETURNING id`,
+          [targetStatus, reason, AGENT_ID, messageId],
+        )
+        if (upd.rows.length === 0) {
+          await client.query('ROLLBACK')
+          return {
+            content: [{
+              type: 'text',
+              text: `Error: no in-flight or pending message_queue row for agent_id=${AGENT_ID}, message_id=${messageId} (already replied/failed/skipped?).`,
+            }],
+            isError: true,
+          }
+        }
+        const queueId = upd.rows[0].id as number
+        await client.query(
+          `UPDATE agents
+              SET current_message_id = NULL,
+                  status = 'idle',
+                  status_detail = NULL,
+                  status_updated_at = now()
+            WHERE agent_id = $1 AND current_message_id = $2`,
+          [AGENT_ID, queueId],
+        )
+        await client.query('COMMIT')
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ ok: true, queue_id: queueId, message_id: messageId, status: targetStatus, failed_reason: reason }),
+          }],
+        }
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${name} failed: ${String(err).slice(0, 500)}` }], isError: true }
+    }
+  }
+
+  if (name === 'reclaim') {
+    const client = await tryGetDb()
+    if (!client) {
+      return { content: [{ type: 'text', text: 'Error: DATABASE_URL not configured — reclaim requires PG access.' }], isError: true }
+    }
+    const targetAgent = (typeof args?.agent_id === 'string' && args.agent_id.length > 0) ? args.agent_id : AGENT_ID
+    try {
+      await client.query('BEGIN')
+      try {
+        const rollback = await client.query(
+          `UPDATE message_queue
+              SET status = 'pending', read_at = NULL
+            WHERE agent_id = $1
+              AND status = 'read'
+              AND read_at < now() - INTERVAL '15 minutes'
+            RETURNING id`,
+          [targetAgent],
+        )
+        await client.query(
+          `UPDATE agents
+              SET current_message_id = NULL,
+                  status = 'idle',
+                  status_detail = NULL,
+                  status_updated_at = now()
+            WHERE agent_id = $1`,
+          [targetAgent],
+        )
+        await client.query('COMMIT')
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: true,
+              agent_id: targetAgent,
+              reclaimed_count: rollback.rows.length,
+              reclaimed_queue_ids: rollback.rows.map((r: any) => r.id),
+            }),
+          }],
+        }
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: reclaim failed: ${String(err).slice(0, 500)}` }], isError: true }
+    }
   }
 
   if (name === 'cleanup_ports') {

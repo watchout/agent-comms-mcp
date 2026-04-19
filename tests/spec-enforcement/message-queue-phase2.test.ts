@@ -63,8 +63,11 @@ describe('T1 — db/migrate.ts ships the message_queue table + agents.current_me
   test('message_queue.id is BIGSERIAL PRIMARY KEY', () => {
     expect(MIGRATE_SRC).toMatch(/id\s+BIGSERIAL\s+PRIMARY KEY/)
   })
-  test('message_queue.status CHECK constraint covers all four states', () => {
-    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'read'\s*,\s*'replied'\s*,\s*'skipped'\s*\)\s*\)/)
+  test('message_queue.status CHECK constraint covers all five states (v2.1.0 adds failed)', () => {
+    // v2.1.0 (PR #220): `failed` was added alongside the existing
+    // pending/read/replied/skipped so that explicit abandon (fail CLI) can
+    // persist a reason distinct from operator-issued skip.
+    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'read'\s*,\s*'replied'\s*,\s*'skipped'\s*,\s*'failed'\s*\)\s*\)/)
   })
   test('idx_mq_agent_pending partial index is created', () => {
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_agent_pending/)
@@ -157,11 +160,15 @@ function nextMessageBody(): string {
 }
 
 describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
-  test('reads agents.current_message_id and implicit-skips the prior row', () => {
+  test('reads agents.current_message_id and implicit-fails the prior row (v2.1.0)', () => {
     const body = nextMessageBody()
     expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id/)
-    // Implicit-skip: UPDATE the prior row to 'skipped' if it's still 'read'.
-    expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'skipped'[\s\S]*?status\s*=\s*'read'/)
+    // v2.1.0 (PR #220): implicit abandon is now status='failed' with
+    // failed_reason='IMPLICIT_ABANDON'. `skipped` is reserved for the
+    // operator-issued `agent-com skip` CLI.
+    expect(body).toMatch(/SET status\s*=\s*'failed',\s*failed_reason\s*=\s*'IMPLICIT_ABANDON'[\s\S]*?status\s*=\s*'read'/)
+    // Negative: the pre-v2.1.0 implicit-skip must not coexist.
+    expect(body).not.toMatch(/SET status\s*=\s*'skipped'\s+WHERE id\s*=\s*\$1 AND status\s*=\s*'read'/)
   })
   test('SELECTs the oldest pending row with priority/created_at ordering', () => {
     const body = nextMessageBody()
