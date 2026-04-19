@@ -141,3 +141,46 @@ describe('spec §13.1 — pidFilePathFor()', () => {
     expect(pidFilePathFor('demo')).toBe('/tmp/agent-com-demo.pid')
   })
 })
+
+describe('spec §5.3 / §13.5.1 — run-bot.sh lost-wake-up fix (source pin)', () => {
+  // Source-pin for the cycle 2 BLOCKER fix. If any of these disappear,
+  // the lost-wake-up window the auditor flagged in cycle 1 is likely
+  // back (trap drops the signal while `next` is running; sleep then
+  // blocks for the full polling interval even though a message is
+  // already waiting).
+  const fs = require('node:fs') as typeof import('node:fs')
+  const path = require('node:path') as typeof import('node:path')
+  const script = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'run-bot.sh'),
+    'utf-8',
+  )
+
+  test('trap sets SIGNAL_RECEIVED=1 on SIGUSR1 (flag-tracked)', () => {
+    expect(script).toContain(`trap 'SIGNAL_RECEIVED=1' USR1`)
+  })
+
+  test('loop body checks SIGNAL_RECEIVED before entering the sleep', () => {
+    // The `if [ "$SIGNAL_RECEIVED" = "1" ]` guard must appear before the
+    // background sleep, so a signal that fired during `next` skips the
+    // wait entirely.
+    const signalGuardIdx = script.indexOf(`if [ "$SIGNAL_RECEIVED" = "1" ]`)
+    const sleepIdx = script.indexOf(`sleep "$WAIT_SECONDS" &`)
+    expect(signalGuardIdx).toBeGreaterThan(-1)
+    expect(sleepIdx).toBeGreaterThan(signalGuardIdx)
+  })
+
+  test('uses background sleep + wait so SIGUSR1 can interrupt', () => {
+    // A foreground `sleep` is not interrupted by trapped signals in bash;
+    // the fix backgrounds the sleep and `wait`s on its PID so the trap
+    // can fire during the wait and return early.
+    expect(script).toContain('sleep "$WAIT_SECONDS" &')
+    expect(script).toContain('wait "$SLEEP_PID"')
+  })
+
+  test('kills the pending sleep if wait was interrupted by SIGUSR1', () => {
+    // When the wait returns because of a signal (not the natural
+    // timeout), the sleep process is still alive and must be killed to
+    // avoid leaking one sleep per interrupted iteration.
+    expect(script).toContain('kill "$SLEEP_PID"')
+  })
+})

@@ -12,18 +12,27 @@
  *   fallback  — polling (waitForSignal timeout → next)
  *
  * Unix signal approach is portable across PG/SQLite and does not rely
- * on DB-vendor-specific mechanisms (pg_notify / LISTEN etc.). PID file
- * lookup means a missing or stale file silently no-ops (bot offline),
- * deferring to the polling fallback.
+ * on DB-vendor-specific mechanisms (pg_notify / LISTEN etc.). A missing
+ * PID file (bot offline) or an ESRCH `kill` is a no-op and the polling
+ * fallback handles recovery. A *stale* PID file is NOT silent: if the
+ * kernel has recycled the PID to an unrelated process, `process.kill()`
+ * will succeed and deliver SIGUSR1 to that process. The default action
+ * of SIGUSR1 is `terminate`, so this is non-fatal for our system but
+ * observable on the unrelated victim — callers should treat the PID
+ * file lifecycle (write on startup, `rm` via EXIT trap) as the primary
+ * defence, not signal-source validation.
  */
 import { readFileSync } from 'node:fs'
 
 export interface MessageBus {
   /**
    * Signal the bot subscribed to `channel` that a new message is waiting.
-   * Non-fatal: missing PID file, kill failure, or an uninstalled bot all
-   * silently no-op. The fallback polling path (waitForSignal timeout) is
-   * responsible for recovery.
+   * Non-fatal: a missing PID file (bot offline), an ESRCH `kill`, or a
+   * permission error all no-op and the polling fallback covers recovery.
+   * Caveat: a *stale* PID file (kernel has recycled the PID) will cause
+   * `process.kill()` to deliver SIGUSR1 to an unrelated process — see
+   * the module docstring for why we accept this in favour of PID-file
+   * hygiene (write on startup, EXIT-trap remove).
    */
   signal(channel: string): Promise<void>
 
@@ -54,6 +63,14 @@ export function pidFilePathFor(agentId: string): string {
  *
  * Channel naming convention: `bot_<agentId>` (1 agent = 1 PID file = 1
  * SIGUSR1 listener in the bot's process).
+ *
+ * Stale-PID honesty: if the file exists but the PID has been recycled
+ * by the kernel to an unrelated process, `process.kill()` will succeed
+ * and deliver SIGUSR1 to that victim. SIGUSR1's default disposition is
+ * `terminate`, so the consequence is bounded but *not* silent. We rely
+ * on PID-file lifecycle (write on startup, `rm` on EXIT trap) to keep
+ * the file in sync with the owning process; validating signal source
+ * in this module is explicitly out of scope.
  */
 export class UnixSignalBus implements MessageBus {
   async signal(channel: string): Promise<void> {
@@ -62,9 +79,12 @@ export class UnixSignalBus implements MessageBus {
     try {
       const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
       if (!Number.isFinite(pid) || pid <= 0) return
+      // See class docstring — a stale PID can deliver SIGUSR1 to an
+      // unrelated process. Non-fatal for us, but documented honestly.
       process.kill(pid, 'SIGUSR1')
     } catch {
-      // bot offline / stale PID file / EPERM → fallback polling handles recovery
+      // ENOENT (bot offline) / ESRCH (PID already reaped) / EPERM →
+      // polling fallback handles recovery.
     }
   }
 
