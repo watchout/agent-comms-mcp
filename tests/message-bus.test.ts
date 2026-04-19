@@ -211,7 +211,9 @@ describe('spec §5.3 — run-bot.sh end-to-end flow (source pin)', () => {
   test('pipes the context through $LLM_CMD (unquoted for multi-token commands)', () => {
     // `$LLM_CMD` must be unquoted so `claude --print` splits into argv
     // tokens; quoting would hand the whole string to execvp as argv[0].
-    expect(script).toMatch(/echo -e "\$context"\s*\|\s*\$LLM_CMD/)
+    // v2.1.0 wraps the invocation in `timeout "$LLM_TIMEOUT_SECONDS"` so the
+    // variable passes through `timeout` instead of being piped directly.
+    expect(script).toMatch(/echo -e "\$full_context"\s*\|\s*timeout "\$LLM_TIMEOUT_SECONDS"\s*\$LLM_CMD/)
   })
 
   test('calls `agent-com send` with --reply-to + --mentions when the LLM produced output', () => {
@@ -221,10 +223,12 @@ describe('spec §5.3 — run-bot.sh end-to-end flow (source pin)', () => {
     expect(script).toContain('--mentions "$from"')
   })
 
-  test('skips send when the LLM response is empty (implicit skip per §4.1 step 1)', () => {
-    // Spec §5.3 エラーハンドリング: "LLM 失敗: send を呼ばない。次の next
-    // 呼出で暗黙 skip (§4.1 step 1)、新規コマンド不要"
-    expect(script).toContain('if [ -n "$response" ]; then')
-    expect(script).toContain('LLM failed, skipping')
+  test('fails the row with LLM_FAILED when LLM exits non-zero or empty (v2.1.0 spec §5.3)', () => {
+    // v2.1.0: implicit skip was removed. Empty / non-zero exit must call
+    // `agent-com fail --reason LLM_FAILED` so the row transitions to
+    // status='failed' with a recorded reason instead of sitting in 'read'.
+    expect(script).toMatch(/if \[ "\$llm_exit" -ne 0 \] \|\| \[ -z "\$response" \]/)
+    expect(script).toContain('--reason LLM_FAILED')
+    expect(script).toContain('LLM failed')
   })
 })
