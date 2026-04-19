@@ -91,6 +91,7 @@ import {
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderOfDeliveryStatus } from './core/sender-feedback'
+import { createMessageBus, type MessageBus } from './core/message-bus'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -1144,6 +1145,11 @@ const mcp = createMcpServer()
 // processedIds / mcp) are defined above; both the stdio and daemon
 // transport branches below rely on these being wired before any
 // startListener() / handleInboundMessage() call.
+// spec §13.5.1 primary — MessageBus (UnixSignalBus). Inbound commits wake
+// the receiver's bot runner via SIGUSR1 instead of paying the full polling
+// interval. Missing PID files fall through to polling fallback.
+const messageBus: MessageBus = createMessageBus()
+
 setInboundReceiverDeps({
   agentId: AGENT_ID,
   authMode: config.auth.mode,
@@ -1157,6 +1163,7 @@ setInboundReceiverDeps({
   buildQuoteBlock,
   updateActiveThread,
   hashCode,
+  bus: messageBus,
 })
 
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---

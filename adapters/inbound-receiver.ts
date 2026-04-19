@@ -48,6 +48,7 @@ import {
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
 import { notifySenderOfDeliveryStatus } from '../core/sender-feedback'
+import type { MessageBus } from '../core/message-bus'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -88,6 +89,13 @@ export interface InboundReceiverDeps {
   buildQuoteBlock: (messageId: string) => Promise<{ quote: string; authorId: string } | null>
   updateActiveThread: (agentId: string, threadId: string | null) => Promise<void>
   hashCode: (str: string) => number
+  /**
+   * Primary delivery signal (spec §13.5.1). Fired after a successful
+   * message_queue commit so a waiting bot runner (scripts/run-bot.sh)
+   * wakes immediately instead of paying the full polling interval.
+   * Non-fatal: a missing bus or a kill failure defers to polling.
+   */
+  bus?: MessageBus
 }
 
 let deps: InboundReceiverDeps | null = null
@@ -471,6 +479,21 @@ export async function handleInboundMessage(params: {
       // level (unchanged stderr format from prior Step 7d path).
       process.stderr.write(
         `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
+      )
+    }
+  }
+
+  // spec §13.5.1 primary — MessageBus signal. Fire SIGUSR1 to the receiver
+  // bot runner as soon as the 7b+7d commit is durable. A missing PID file
+  // (bot offline) or kill failure is a no-op inside UnixSignalBus, so the
+  // polling fallback still covers recovery. We skip on duplicate-dedup /
+  // rollback to avoid announcing a delivery that is not actually queued.
+  if (inboundCommitted && d.bus) {
+    try {
+      await d.bus.signal(`bot_${receiverAgentId}`)
+    } catch (err) {
+      process.stderr.write(
+        `agent-comms: bus.signal failed (non-fatal, falling back to polling): ${err}\n`,
       )
     }
   }
