@@ -510,8 +510,7 @@ heartbeat:
 
 ```bash
 # scripts/run-bot.sh — LLM-agnostic event-driven bot runner
-# PID file 作成 → SIGUSR1 trap → next loop
-# signal 受信で即 next、timeout 時は polling fallback (§13.5.1)
+# Usage: LLM_CMD="claude --print" ./scripts/run-bot.sh <agent-id>
 ./scripts/run-bot.sh <agent-id>
 ```
 
@@ -521,6 +520,53 @@ heartbeat:
 - PID file: `/tmp/agent-com-{agentId}.pid` に自 PID を書込、終了時 trap で削除
 - signal 不達時も polling fallback で最大 `waitForSignal` timeout (default 30s) 以内に取得
 - `scripts/restart-bot.sh` の tmux send-keys 初期指示は廃止 (§20)。MessageBus signal で LLM への初期指示は不要
+
+#### end-to-end flow
+
+```
+1. run-bot.sh 起動
+   → PID file 作成 → SIGUSR1 trap → EXIT trap (PID file 削除)
+
+2. メッセージ待機
+   → SIGUSR1 待ち (timeout default 30s、polling fallback)
+
+3. メッセージ取得
+   → agent-com next --agent-id $AGENT_ID
+   → waiting = 0 → 2 に戻る
+   → waiting > 0 → message JSON (content, reply_chain, from, message_id)
+
+4. LLM 呼出 (交換可能)
+   → echo "$content" | $LLM_CMD
+   → 環境変数 LLM_CMD で指定 (default: claude --print)
+   → claude --print / codex --quiet / gemini --prompt / 任意 CLI
+
+5. 返信送信
+   → agent-com send --reply-to $message_id --mentions $from --content "$response"
+   → outbound_queue → outbound consumer → Chat UI (Discord / Telegram / Slack)
+
+6. loop (2 に戻る)
+```
+
+#### エラーハンドリング
+
+- next 失敗: `{"waiting":0}` として扱い、loop 継続
+- LLM 失敗: send を呼ばない。message_queue は `read` のまま。次の next 呼出で暗黙 skip (§4.1 step 1)、新規コマンド不要
+- send 失敗: non-fatal、loop 継続
+- signal 不達: polling fallback (30s) で回復
+
+#### マルチチャット UI
+
+bot runner は chat UI に依存しない:
+
+```
+Chat UI → adapter → daemon (inbound) → message_queue → bus.signal()
+                                                            ↓
+                                                      run-bot.sh (next → LLM → send)
+                                                            ↓
+                                                      outbound_queue → adapter → Chat UI
+```
+
+新しい chat UI (Telegram / Slack / Web) を追加しても bot runner は変更不要。adapter 層が吸収する。
 
 ---
 
