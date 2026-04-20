@@ -14,6 +14,18 @@ function adaptSql(sql: string): string {
   s = s.replace(/\bDEFAULT\s+(true)\b/gi, 'DEFAULT 1')
   s = s.replace(/\bDEFAULT\s+(false)\b/gi, 'DEFAULT 0')
   s = s.replace(/\bFOR\s+UPDATE\s+SKIP\s+LOCKED\b/gi, '')
+  s = s.replace(/\bFOR\s+UPDATE\b/gi, '')
+  // PostgreSQL INTERVAL literals — map to SQLite-compatible datetime modifier
+  //   `NOW() - INTERVAL '15 minutes'` → `datetime('now', '-15 minutes')`
+  //   must run after the NOW()→datetime('now') replacement above to catch
+  //   the pattern pre-substitution as well.
+  s = s.replace(/\bnow\(\)\s*-\s*INTERVAL\s+'(\d+)\s*(\w+)'/gi, (_m, n, unit) => `datetime('now', '-${n} ${unit}')`)
+  s = s.replace(/datetime\('now'\)\s*-\s*INTERVAL\s+'(\d+)\s*(\w+)'/gi, (_m, n, unit) => `datetime('now', '-${n} ${unit}')`)
+  // PostgreSQL type casts `expr::type` — SQLite ignores types for arithmetic
+  // (all integer arithmetic returns INTEGER). Strip common numeric casts; the
+  // caller inspects by shape (count/integer comparisons) so removing the cast
+  // is harmless.
+  s = s.replace(/::\s*(int|integer|bigint|smallint|text|float|numeric|decimal|boolean|bool)\b/gi, '')
   return s
 }
 

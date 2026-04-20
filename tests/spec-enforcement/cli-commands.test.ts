@@ -107,33 +107,34 @@ describe('T4 — `agent-com next` requires AGENT_ID', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T5: agent-com send fans out pg_notify per recipient with `to: <agent_id>`
+// T5: agent-com send fans out message_queue rows per recipient via fanoutToRecipients
 // ─────────────────────────────────────────────────────────────────────────────
-// REGRESSION CLASS: lead-ama follow-up to PR#133 first cut. The original
-// implementation built a single pg_notify with `to: state.channel_id`, but
-// the agent_inbox LISTEN handler routes per-recipient — `to` MUST be an
-// agent_id, and the notify must fire once per mention. Without this, the
-// receiver pipeline never picks the CLI-sent rows up. Pin both invariants:
-//   (a) the notify is emitted inside a `for (... of mentions)` loop
-//   (b) the JSON payload uses `to: recipient`, not `to: state.channel_id`
-describe('T5 — `agent-com send` pg_notify fans out per recipient', () => {
-  test('pg_notify is wrapped in a per-mention loop with to: recipient', () => {
+// REGRESSION CLASS: Phase 2 F cycle 2 (CTO option (a), msg 1495781874977734814).
+// Pre-v2.1.0 the CLI delegated fanout to the daemon via
+// `SELECT pg_notify('agent_inbox', …)`; in SQLite mode no LISTEN-er was
+// attached, so recipients never saw the message (auditor BLOCKER on PR #224).
+// The delegation was replaced with a direct call to `fanoutToRecipients()`
+// which INSERTs one `message_queue` row per recipient and signals their
+// bot-runner, working identically on PG and SQLite. Pin both:
+//   (a) the call is invoked with `recipients: mentions` (per-mention fanout)
+//   (b) the old `SELECT pg_notify('agent_inbox', …)` path is GONE
+describe('T5 — `agent-com send` fans out message_queue rows per recipient', () => {
+  test('sendMessage calls fanoutToRecipients with recipients: mentions', () => {
     // Find the sendMessage function body so the regex doesn't accidentally
-    // match the unrelated pg_notify in the channel/agent admin commands.
+    // match an unrelated fanout site (there's also one in notifyMessage).
     const fnStart = CLI_SRC.indexOf('async function sendMessage')
     expect(fnStart).toBeGreaterThan(-1)
     // Walk to the end of the function (next top-level `async function` or EOF).
     const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
     const body = CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 
-    // (a) Loop header references `mentions`
-    expect(body).toMatch(/for\s*\(\s*const\s+\w+\s+of\s+mentions\s*\)/)
-    // (b) The pg_notify payload uses `to: <loop var>` (not `state.channel_id`).
-    //     We anchor on the loop variable name being either `recipient` (current)
-    //     or any future rename, then assert it's used as the `to` value.
-    expect(body).toMatch(/to:\s*recipient\b/)
-    // Negative: must NOT carry the buggy `to: state.channel_id` shape.
-    expect(body).not.toMatch(/to:\s*state\.channel_id/)
+    // (a) Body invokes fanoutToRecipients and passes `recipients: mentions`.
+    expect(body).toMatch(/fanoutToRecipients\(/)
+    expect(body).toMatch(/recipients:\s*mentions\b/)
+
+    // (b) Negative: the old PG LISTEN delegation must not reappear.
+    expect(body).not.toMatch(/SELECT pg_notify\('agent_inbox'/)
+    expect(body).not.toMatch(/to:\s*recipient\b/)
   })
 })
 

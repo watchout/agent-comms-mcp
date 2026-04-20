@@ -142,6 +142,37 @@ export function migrateSqlite(dbPath?: string): void {
     )
   `)
 
+  // v2.1.0 Phase 2 F: the CLI send tool looks up Discord adapter mappings on
+  // channel_adapters / thread_adapters to decide whether to enqueue an
+  // outbound_queue row. SQLite's original migration omitted these tables
+  // because the SQLite path was not the default when they were introduced;
+  // adding them as CREATE IF NOT EXISTS keeps the schema in parity with PG so
+  // the send tool succeeds (with outbound_skip_reason when no adapter match,
+  // matching PG behaviour).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_adapters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id TEXT NOT NULL REFERENCES channels(id),
+      platform TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      metadata TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(channel_id, platform)
+    )
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS thread_adapters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT NOT NULL REFERENCES threads(id),
+      platform TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      metadata TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(thread_id, platform)
+    )
+  `)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS rate_limits (
       agent_id TEXT NOT NULL,
