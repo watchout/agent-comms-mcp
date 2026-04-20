@@ -27,6 +27,8 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
+import { createMessageBus } from '../core/message-bus'
+import { fanoutToRecipients } from '../core/send-fanout'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -625,32 +627,44 @@ async function sendMessage(args: string[]) {
         [id, channelId, agentId, content, messageType, replyTo, JSON.stringify(metadata), threadId],
       )
 
-      // pg_notify so server.ts (or any LISTENer) picks the row up and runs the
-      // full receiver-side routing (message_queue per-recipient INSERT + outbound_queue
-      // for Discord delivery; legacy channel-server push / SSE fallback removed in PR #193).
+      // Phase 2 F cycle 2 (CTO judgment option (a), msg 1495781874977734814):
+      // CLI-initiated send performs message_queue fanout + MessageBus signal
+      // directly instead of delegating to the daemon's agent_inbox LISTEN
+      // handler. The old `pg_notify('agent_inbox', …)` path dropped silently
+      // in SQLite mode (no LISTEN-er) so recipients never saw the message;
+      // this direct call works for both PG and SQLite backends identically.
       //
-      // The agent_inbox LISTEN handler routes per-recipient: `to` MUST be a
-      // recipient agent_id, NOT the channel id. Fan out one notify per mention so
-      // every push target gets its own routing pass — matches the inbound
-      // pipeline's `to: receiverAgentId` shape (server.ts handleInboundMessage
-      // L1349-1355). lead-ama follow-up to PR#133 first cut.
-      if (process.env.AGENT_COM_PG_NOTIFY !== 'false' && !isSqliteMode()) {
-        for (const recipient of mentions) {
-          try {
-            await db.query(
-              `SELECT pg_notify('agent_inbox', $1)`,
-              [JSON.stringify({
-                event: 'message.created',
-                to: recipient,
-                message_id: id,
-                channel_id: channelId,
-                source: 'cli-send',
-              })],
-            )
-          } catch (err) {
-            process.stderr.write(`agent-com: pg_notify failed for ${recipient} (non-fatal): ${err}\n`)
-          }
+      // The PG LISTEN path is kept in `adapters/inbound-receiver.ts` for
+      // Discord-inbound traffic only (receiver pipeline), not for
+      // CLI-originated sends — those terminate the fanout here.
+      const cliFanoutBus = createMessageBus()
+      try {
+        const fanoutRes = await fanoutToRecipients(
+          {
+            query: async <T = any>(sql: string, params?: any[]) => {
+              const r = await db.query(sql, params)
+              return { rows: r.rows as T[] }
+            },
+          },
+          cliFanoutBus,
+          {
+            messageId: id,
+            channelId,
+            threadId,
+            authorId: agentId,
+            content,
+            recipients: mentions,
+            messageType,
+            source: 'cli-send',
+          },
+        )
+        if (fanoutRes.failed.length > 0) {
+          process.stderr.write(
+            `agent-com: fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
+          )
         }
+      } finally {
+        await cliFanoutBus.close().catch(() => {})
       }
 
       // ─────────────────────────────────────────────────────────────────
@@ -869,23 +883,38 @@ async function notifyMessage(args: string[]) {
       [id, resolvedChannelId, agentId, content, messageType, JSON.stringify(metadata), resolvedThreadId],
     )
 
-    if (process.env.AGENT_COM_PG_NOTIFY !== 'false' && !isSqliteMode()) {
-      for (const recipient of mentions) {
-        try {
-          await db.query(
-            `SELECT pg_notify('agent_inbox', $1)`,
-            [JSON.stringify({
-              event: 'message.created',
-              to: recipient,
-              message_id: id,
-              channel_id: resolvedChannelId,
-              source: 'cli-notify',
-            })],
-          )
-        } catch (err) {
-          process.stderr.write(`agent-com: pg_notify failed for ${recipient} (non-fatal): ${err}\n`)
-        }
+    // Phase 2 F cycle 2: same direct fanout as `sendMessage()` — see rationale
+    // there. Notify is self-originated (no reply_to) but otherwise the
+    // delivery path is identical: per-recipient message_queue INSERT +
+    // bus.signal, no pg_notify delegation.
+    const notifyFanoutBus = createMessageBus()
+    try {
+      const fanoutRes = await fanoutToRecipients(
+        {
+          query: async <T = any>(sql: string, params?: any[]) => {
+            const r = await db.query(sql, params)
+            return { rows: r.rows as T[] }
+          },
+        },
+        notifyFanoutBus,
+        {
+          messageId: id,
+          channelId: resolvedChannelId,
+          threadId: resolvedThreadId,
+          authorId: agentId,
+          content,
+          recipients: mentions,
+          messageType,
+          source: 'cli-notify',
+        },
+      )
+      if (fanoutRes.failed.length > 0) {
+        process.stderr.write(
+          `agent-com: notify fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
+        )
       }
+    } finally {
+      await notifyFanoutBus.close().catch(() => {})
     }
 
     let discordExternalId: string | null = null

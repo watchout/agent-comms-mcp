@@ -177,6 +177,67 @@ describe('F3 — agent-com send (SQLite)', () => {
   })
 })
 
+describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #224 cycle 2)', () => {
+  // Phase 2 F cycle 2 (CTO option (a)): the CLI must fanout to each mentioned
+  // recipient itself instead of delegating to pg_notify — in SQLite mode there
+  // is no LISTEN-er. A recipient's message_queue must grow one row per send.
+  test('probe-f → probe-f2 send enqueues a row on probe-f2.message_queue', () => {
+    // Seed a second agent + add them both as channel members
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-f2', 'probe-f2', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`UPDATE channels SET members = '["probe-f","probe-f2"]' WHERE id = 'probe-f-ch'`)
+    db.close()
+
+    // probe-f receives + replies to probe-f2
+    seedPendingMessage('fanout test')
+    runCli(['next'])
+    const r = runCli(['send', '--content', 'hello from probe-f', '--mentions', 'probe-f2'])
+    expect(r.status).toBe(0)
+    const payload = JSON.parse(r.stdout.trim()) as any
+    expect(payload.ok).toBe(true)
+
+    // probe-f2.message_queue should now have the fanout row. The sender's own
+    // reply turns the in-flight row to 'replied' (status on probe-f), and the
+    // recipient (probe-f2) gets a NEW pending row whose message_id == the new
+    // agent_messages id the sender produced.
+    const recipientRows = dbRead(`SELECT agent_id, message_id, status, payload FROM message_queue WHERE agent_id = 'probe-f2'`)
+    expect(recipientRows.length).toBe(1)
+    expect(recipientRows[0].status).toBe('pending')
+    expect(recipientRows[0].message_id).toBe(payload.message_id)
+    const parsed = JSON.parse(recipientRows[0].payload)
+    expect(parsed.content).toBe('hello from probe-f')
+    expect(parsed.author_id).toBe('probe-f')
+    expect(parsed.source).toBe('cli-send')
+  })
+
+  test('duplicate send for same recipient no-ops via uq_mq_agent_message', () => {
+    // Re-seed agents + inject two identical message_queue rows via direct SQL
+    // to simulate a retry after the first INSERT already committed. The ON
+    // CONFLICT clause must dedupe instead of throwing.
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-f2', 'probe-f2', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`UPDATE channels SET members = '["probe-f","probe-f2"]' WHERE id = 'probe-f-ch'`)
+    // Pre-stage a conflicting row using a known agent_messages id
+    const existingMsgId = randomUUID()
+    db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content) VALUES (?, 'probe-f-ch', 'probe-f', 'first')`).run(existingMsgId)
+    db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('probe-f2', ?, '{"content":"first"}', 'pending')`).run(existingMsgId)
+    db.close()
+
+    // Now perform a normal send — the fanout's ON CONFLICT should skip the
+    // existing probe-f2 row, not throw, and the CLI should still report ok.
+    seedPendingMessage('dup')
+    runCli(['next'])
+    const r = runCli(['send', '--content', 'second send', '--mentions', 'probe-f2'])
+    expect(r.status).toBe(0)
+    // probe-f2.message_queue should now have 2 rows: the pre-staged one and
+    // the new fanout row (different message_id).
+    const rows = dbRead(`SELECT status FROM message_queue WHERE agent_id = 'probe-f2' ORDER BY id`)
+    expect(rows.length).toBe(2)
+    expect(rows[0].status).toBe('pending')
+    expect(rows[1].status).toBe('pending')
+  })
+})
+
 describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
   test('fail sets status=failed + reason + releases the agent', () => {
     const { messageId, queueId } = seedPendingMessage('f4-fail')
