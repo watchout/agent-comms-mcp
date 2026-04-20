@@ -31,11 +31,21 @@ const SCRIPT = readFileSync(join(REPO_ROOT, 'scripts', 'run-bot.sh'), 'utf-8')
 // (1) signal coalescing — drain loop consumes until waiting=0 before sleeping
 // ─────────────────────────────────────────────────────────────────────────────
 describe('(1) signal coalescing — drain inner loop', () => {
-  test('main loop contains an inner while that breaks on waiting=0', () => {
+  test('main loop contains an inner while that exits on empty queue (message_id-absent)', () => {
     // The outer loop runs `wait` on SIGUSR1; the inner loop runs `next` until
     // the queue is drained. Nesting matters — a flat loop re-enters the sleep
     // between every message and re-introduces the "1 signal = 1 message" bug.
-    expect(SCRIPT).toMatch(/while true; do[\s\S]*?while true; do[\s\S]*?if \[ "\$\{waiting:-0\}" = "0" \]; then[\s\S]*?break/)
+    //
+    // The drain exit is gated on `message_id` being empty (queue empty), NOT
+    // on `waiting = 0`. The CLI's `waiting` field is the remaining count AFTER
+    // popping, so a just-popped last row can have waiting=0 AND message_id set
+    // — breaking on `waiting = 0` would strand that row (Phase 1 Primary bug).
+    expect(SCRIPT).toMatch(/while true; do[\s\S]*?while true; do[\s\S]*?if \[ -z "\$message_id" \]; then[\s\S]*?break/)
+  })
+  test('drain does NOT break solely on `waiting = 0` (Phase 1 regression guard)', () => {
+    // Negative pin: the pre-fix `if [ "${waiting:-0}" = "0" ]; then break` is
+    // the exact shape that dropped the last popped row. Guard against reverting.
+    expect(SCRIPT).not.toMatch(/if \[ "\$\{waiting:-0\}" = "0" \]; then\s*\n\s*break\b/)
   })
   test('drain loop calls `next` directly (no sleep between consumes)', () => {
     // A stray `sleep` inside the drain would defeat the coalescing gain.
