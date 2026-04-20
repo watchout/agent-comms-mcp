@@ -5,14 +5,17 @@
  * Connects to Discord Gateway, receives messages, applies access control,
  * and delivers to the webhook bridge for session injection.
  *
- * Access control logic derived from Anthropic's Claude Code Discord plugin
- * Copyright Anthropic, PBC. Licensed under Apache 2.0
- * https://github.com/anthropics/claude-plugins-official
+ * Access control sources (Phase 2 G, v2.1.0):
+ *   - channels.members (DB) — per-channel allowlist (agent_id → discord_user_id)
+ *   - agents.discord_user_id (DB) — DM allowlist (any registered agent)
+ *
+ * Pre-v2.1.0 read these from `access.json`. That file is now ignored; the DB
+ * is the single source of truth (spec §20 廃止: access.json / plugin:discord).
  *
  * Env:
- *   DISCORD_BOT_TOKEN  — Discord bot token (required)
- *   DISCORD_STATE_DIR  — Directory containing access.json
- *   WEBHOOK_PORT       — Webhook bridge port (default: 8789)
+ *   DISCORD_BOT_TOKEN — Discord bot token (required)
+ *   DATABASE_URL      — PostgreSQL URL (required for access lookup)
+ *   WEBHOOK_PORT      — Webhook bridge port (default: 8789)
  */
 
 import {
@@ -27,8 +30,7 @@ import {
   type ThreadChannel,
   type Interaction,
 } from 'discord.js'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { Client as PgClient } from 'pg'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 
 // --- Config ---
@@ -40,12 +42,11 @@ if (IS_MAIN && !TOKEN) {
   process.exit(1)
 }
 
-const STATE_DIR = process.env.DISCORD_STATE_DIR ?? ''
-const ACCESS_FILE = STATE_DIR ? join(STATE_DIR, 'access.json') : ''
+const DATABASE_URL = process.env.DATABASE_URL ?? ''
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
 const OUTBOUND_PORT = WEBHOOK_PORT + 1000  // e.g. 8795 → 9795
 
-// --- Access control types (compatible with Discord plugin's access.json) ---
+// --- Access control types (backed by DB in v2.1.0) ---
 interface GroupPolicy {
   requireMention: boolean
   allowFrom: string[]
@@ -56,33 +57,71 @@ export interface Access {
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
   pending: Record<string, unknown>
-  mentionPatterns?: string[]
 }
 
 function defaultAccess(): Access {
   return {
-    dmPolicy: 'pairing',
+    dmPolicy: 'allowlist',
     allowFrom: [],
     groups: {},
     pending: {},
   }
 }
 
-export function loadAccess(filePath: string): Access {
-  if (!filePath) return defaultAccess()
+// --- DB-backed Access lookup (Phase 2 G) ---
+// The adapter opens one long-lived pg.Client shared across all access
+// refreshes so we do not pay a reconnect on every message. A short-lived
+// per-query client would also work but churns through PG connection slots.
+let accessPgClient: PgClient | null = null
+async function getAccessPgClient(): Promise<PgClient | null> {
+  if (!DATABASE_URL) return null
+  if (accessPgClient) return accessPgClient
+  const c = new PgClient({ connectionString: DATABASE_URL })
   try {
-    const raw = readFileSync(filePath, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-    }
+    await c.connect()
+    accessPgClient = c
+    return c
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
-    process.stderr.write(`discord-adapter: access.json parse error, using defaults\n`)
+    process.stderr.write(`discord-adapter: DB connect failed: ${err}\n`)
+    return null
+  }
+}
+
+/**
+ * Build the Access struct from DB rows (spec §20 廃止: access.json → DB).
+ *   - dmPolicy: `'allowlist'` (any agent with a Discord user id on `agents`)
+ *   - allowFrom: every `agents.discord_user_id` that is non-NULL
+ *   - groups[channel_id]: `{ requireMention: true, allowFrom: <members as discord ids> }`
+ *
+ * `requireMention: true` is the pre-v2.1.0 default — this preserves the
+ * pattern where bots only receive messages they are @mentioned in. There is
+ * no DB column for overriding it; channels that need "accept all" can add
+ * a single member + rely on the webhook bridge's downstream filter.
+ */
+export async function loadAccess(): Promise<Access> {
+  const db = await getAccessPgClient()
+  if (!db) return defaultAccess()
+  try {
+    const agentsRes = await db.query<{ agent_id: string; discord_user_id: string }>(
+      `SELECT agent_id, discord_user_id FROM agents WHERE discord_user_id IS NOT NULL`,
+    )
+    const channelsRes = await db.query<{ id: string; members: string[] | null }>(
+      `SELECT id, members FROM channels`,
+    )
+    const discordByAgent: Record<string, string> = {}
+    for (const a of agentsRes.rows) discordByAgent[a.agent_id] = a.discord_user_id
+    const allowFrom = agentsRes.rows.map((a) => a.discord_user_id)
+    const groups: Record<string, GroupPolicy> = {}
+    for (const ch of channelsRes.rows) {
+      const memberAgentIds = Array.isArray(ch.members) ? ch.members : []
+      const memberDiscordIds = memberAgentIds
+        .map((aid) => discordByAgent[aid])
+        .filter((v): v is string => Boolean(v))
+      groups[ch.id] = { requireMention: true, allowFrom: memberDiscordIds }
+    }
+    return { dmPolicy: 'allowlist', allowFrom, groups, pending: {} }
+  } catch (err) {
+    process.stderr.write(`discord-adapter: loadAccess DB error (using defaults): ${err}\n`)
     return defaultAccess()
   }
 }
@@ -125,24 +164,12 @@ export function gate(
 }
 
 // --- Mention detection ---
-function checkMentioned(
-  msg: Message,
-  botUserId: string,
-  extraPatterns?: string[],
-): boolean {
-  // Direct @mention
-  if (msg.mentions.users.has(botUserId)) return true
-
-  // Extra patterns from access.json
-  if (extraPatterns) {
-    for (const pat of extraPatterns) {
-      try {
-        if (new RegExp(pat, 'i').test(msg.content)) return true
-      } catch {}
-    }
-  }
-
-  return false
+// Discord's native @mention is the single source of truth. The former
+// `mentionPatterns` regex list (from access.json) was dropped in v2.1.0 —
+// agents opt into receiving messages by becoming a member of the channel
+// (channels.members), and only messages that @mention the bot are gated in.
+function checkMentioned(msg: Message, botUserId: string): boolean {
+  return msg.mentions.users.has(botUserId)
 }
 
 // --- Deliver to webhook bridge ---
@@ -264,7 +291,7 @@ if (IS_MAIN && TOKEN) {
     const behavior = action === 'allow' ? 'allow' : 'deny'
 
     // Verify sender is in allowFrom
-    const access = loadAccess(ACCESS_FILE)
+    const access = await loadAccess()
     if (!access.allowFrom.includes(interaction.user.id)) {
       await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {})
       return
@@ -372,7 +399,7 @@ if (IS_MAIN && TOKEN) {
 
         pendingPermissions.set(request_id, { tool_name, description, input_preview })
 
-        const access = loadAccess(ACCESS_FILE)
+        const access = await loadAccess()
         let prettyInput: string
         try {
           prettyInput = JSON.stringify(JSON.parse(input_preview), null, 2)
@@ -507,13 +534,13 @@ if (IS_MAIN && TOKEN) {
 
 // --- Extracted for testability ---
 async function handleInbound(msg: Message, client: Client): Promise<void> {
-  const access = loadAccess(ACCESS_FILE)
+  const access = await loadAccess()
   const isDM = msg.channel.type === ChannelType.DM
   const parentChannelId = msg.channel.isThread()
     ? msg.channel.parentId
     : null
   const isMentioned = client.user
-    ? checkMentioned(msg, client.user.id, access.mentionPatterns)
+    ? checkMentioned(msg, client.user.id)
     : false
 
   const result = gate(
