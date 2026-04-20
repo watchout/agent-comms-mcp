@@ -19,8 +19,9 @@
  * at `/tmp/agent-com-{AGENT_ID}.current`. AGENT_ID env var is required for both.
  */
 
-import { Client } from 'pg'
+import type { Client } from 'pg'
 import { truncateForDiscord } from '../core/truncate'
+import { createDbAdapter, type DbAdapter } from '../core/db'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
@@ -28,6 +29,11 @@ import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 
 // --- DB connection ---
+// `getDatabaseUrl()` is retained for callers that still need the raw PG URL
+// (e.g. passed into `persistInboundDelivery` which opens its own pg.Client for
+// the atomic 7b+7d transaction). The CLI itself no longer instantiates a
+// pg.Client directly — it goes through `createDbAdapter()` so SQLite mode
+// (`AGENT_COM_DB=sqlite`) works without pg being reachable.
 function getDatabaseUrl(): string {
   const fromEnv = process.env.DATABASE_URL
   if (fromEnv) return fromEnv
@@ -41,10 +47,44 @@ function getDatabaseUrl(): string {
   return 'postgresql://localhost/agent_comms'
 }
 
+/**
+ * Phase C v2.1.0 "F": detect SQLite mode so pg-only helpers (pg_notify,
+ * pg_try_advisory_lock) silently no-op instead of throwing "no such function"
+ * when the CLI runs against SQLite. Mirrors `createDbAdapter()`'s detection.
+ */
+function isSqliteMode(): boolean {
+  const explicit = process.env.AGENT_COM_DB
+  if (explicit === 'sqlite') return true
+  if (explicit === 'postgres' || explicit === 'postgresql') return false
+  // No explicit AGENT_COM_DB: default to sqlite unless DATABASE_URL is set.
+  return !process.env.DATABASE_URL
+}
+
+/**
+ * Phase C v2.1.0 "F": return a `pg.Client`-shaped shim backed by the unified
+ * `DbAdapter`. All existing CLI call sites use `.query(sql, params)` and
+ * `.end()`, which we re-expose with matching shapes so the migration is a
+ * single swap at this boundary. For SQLite mode the backing adapter is
+ * `SqliteAdapter` (bun:sqlite, `AGENT_COM_SQLITE_PATH`); for postgres it is
+ * `PgAdapter` (pg.Client, `DATABASE_URL`). pg-only queries (pg_notify /
+ * pg_try_advisory_lock) will throw in SQLite mode — callers either gate on
+ * `isSqliteMode()` or wrap in try/catch, which is how the existing CLI was
+ * already written.
+ */
 async function getDb(): Promise<Client> {
-  const client = new Client({ connectionString: getDatabaseUrl() })
-  await client.connect()
-  return client
+  const adapter = createDbAdapter()
+  const shim = {
+    query: async (sql: string, params?: any[]) => {
+      const rows = await adapter.query(sql, params)
+      return { rows, rowCount: rows.length }
+    },
+    end: async (): Promise<void> => {
+      await adapter.close()
+    },
+    // Raw adapter exposed for callers that need execute()/transaction() semantics.
+    __adapter: adapter,
+  } as unknown as Client & { __adapter: DbAdapter }
+  return shim
 }
 
 // --- Helpers ---
@@ -72,6 +112,7 @@ async function auditLog(db: Client, eventType: string, agentId: string | null, t
 
 async function pgNotify(db: Client, channel: string, payload: Record<string, unknown>) {
   if (process.env.AGENT_COM_PG_NOTIFY === 'false') return
+  if (isSqliteMode()) return  // SQLite has no pg_notify — silently skip
   try {
     await db.query(`SELECT pg_notify($1, $2)`, [channel, JSON.stringify(payload)])
   } catch (err) {
@@ -593,7 +634,7 @@ async function sendMessage(args: string[]) {
       // every push target gets its own routing pass — matches the inbound
       // pipeline's `to: receiverAgentId` shape (server.ts handleInboundMessage
       // L1349-1355). lead-ama follow-up to PR#133 first cut.
-      if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+      if (process.env.AGENT_COM_PG_NOTIFY !== 'false' && !isSqliteMode()) {
         for (const recipient of mentions) {
           try {
             await db.query(
@@ -828,7 +869,7 @@ async function notifyMessage(args: string[]) {
       [id, resolvedChannelId, agentId, content, messageType, JSON.stringify(metadata), resolvedThreadId],
     )
 
-    if (process.env.AGENT_COM_PG_NOTIFY !== 'false') {
+    if (process.env.AGENT_COM_PG_NOTIFY !== 'false' && !isSqliteMode()) {
       for (const recipient of mentions) {
         try {
           await db.query(
