@@ -124,13 +124,22 @@ while true; do
     msg=$(AGENT_ID="$AGENT_ID" bun "$PROJECT_DIR/cli/index.ts" next 2>/dev/null || echo '{"waiting":0}')
     waiting=$(echo "$msg" | (command -v jq >/dev/null && jq -r '.waiting // 0') 2>/dev/null || echo 0)
 
-    if [ "${waiting:-0}" = "0" ]; then
-      break  # drain complete
+    # Drain exit condition: the CLI returns `waiting` = the count of rows
+    # STILL pending AFTER popping, not whether a row was popped. When the
+    # queue is empty the CLI emits `{"waiting": 0}` with no `message_id`
+    # (cli/index.ts row === null path). When the CLI just popped the last
+    # row, `waiting` can still be 0 but `message_id` / `mode: "queue"` is
+    # present — we MUST process that row before exiting the drain.
+    # Breaking on `waiting = 0` would strand the Nth row of an N-pending
+    # batch in status='read' and implicit-fail it on the next iteration
+    # (Phase 1 Primary finding — drain regression in PR #222 / PR #219).
+    message_id=$(echo "$msg" | jq -r '.message_id // ""')
+    if [ -z "$message_id" ]; then
+      break  # queue empty — no row to process this tick
     fi
 
     content=$(echo "$msg" | jq -r '.content // ""')
     reply_chain=$(echo "$msg" | jq -r '.reply_chain // "[]"')
-    message_id=$(echo "$msg" | jq -r '.message_id // ""')
     from=$(echo "$msg" | jq -r '.from // ""')
 
     echo "[run-bot] message from ${from} (waiting=${waiting}, message_id=${message_id})"
