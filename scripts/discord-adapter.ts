@@ -89,21 +89,34 @@ async function getAccessPgClient(): Promise<PgClient | null> {
 
 /**
  * Build the Access struct from DB rows (spec §20 廃止: access.json → DB).
- *   - dmPolicy: `'allowlist'` (any agent with a Discord user id on `agents`)
- *   - allowFrom: every `agents.discord_user_id` that is non-NULL
+ *
+ * Discord user id mapping: `agents.metadata->>'discord_id'` (JSONB text
+ * extraction). ADR-040 D1 self-registers the Discord id at bot connect
+ * time (`adapters/discord.ts:259`), so every online bot has a value here.
+ * An earlier cut of this function queried a non-existent `discord_user_id`
+ * column (SQLite migrate-sqlite.ts had it, PG migrate.ts never did) and
+ * silently fell through to `defaultAccess()` on PG — fail-closed but
+ * functionally broken (Phase C H SQLite E2E G-live finding).
+ *
+ *   - dmPolicy: `'allowlist'` (any agent with `metadata.discord_id`)
+ *   - allowFrom: every registered Discord id
  *   - groups[channel_id]: `{ requireMention: true, allowFrom: <members as discord ids> }`
  *
  * `requireMention: true` is the pre-v2.1.0 default — this preserves the
  * pattern where bots only receive messages they are @mentioned in. There is
  * no DB column for overriding it; channels that need "accept all" can add
  * a single member + rely on the webhook bridge's downstream filter.
+ *
+ * Note: the SQLite adapter's `adaptSql()` rewrites `metadata->>'discord_id'`
+ * into `json_extract(metadata, '$.discord_id')` at query time, so the exact
+ * same query string runs against both PG and SQLite without branching.
  */
 export async function loadAccess(): Promise<Access> {
   const db = await getAccessPgClient()
   if (!db) return defaultAccess()
   try {
     const agentsRes = await db.query<{ agent_id: string; discord_user_id: string }>(
-      `SELECT agent_id, discord_user_id FROM agents WHERE discord_user_id IS NOT NULL`,
+      `SELECT agent_id, metadata->>'discord_id' AS discord_user_id FROM agents WHERE metadata->>'discord_id' IS NOT NULL`,
     )
     const channelsRes = await db.query<{ id: string; members: string[] | null }>(
       `SELECT id, members FROM channels`,
