@@ -128,7 +128,10 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
   test('8. bot-registry.txt every non-comment row does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
     // Phase C I4: dual mode removed. AGENT_COM_RUNTIME=daemon env
     // prefix is no longer needed — every process is daemon-mode.
-    // Verify registry rows use `claude server:agent-comms` directly.
+    // Restart-phantom-prompt fix (2026-04-21): `server:agent-comms` was
+    // being passed as Claude Code CLI's first positional arg and got
+    // interpreted as a user prompt, leaving bots stuck at "what to do?"
+    // on restart. New invocation is `claude --mcp-config ...` directly.
     const registry = readFileSync(join(REPO_ROOT, 'scripts', 'bot-registry.txt'), 'utf-8')
     const rows = registry.split('\n').filter(line => line.trim().length > 0 && !line.trim().startsWith('#'))
     expect(rows.length).toBeGreaterThan(0)
@@ -137,28 +140,31 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
       expect(parts.length).toBeGreaterThanOrEqual(5)
       const command = parts.slice(4).join('|')
       expect(command).not.toContain('AGENT_COM_RUNTIME')
-      expect(command.trimStart()).toMatch(/^claude\s+server:agent-comms/)
+      expect(command).not.toContain('server:agent-comms')
+      expect(command.trimStart()).toMatch(/^claude\s+--mcp-config/)
     }
   })
 
   test('9. restart-bot.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
-    // Phase C I4: dual mode removed. DEFAULT_CMD uses plain
-    // `claude server:agent-comms` without env prefix.
+    // Phase C I4: dual mode removed. Restart-phantom-prompt fix
+    // (2026-04-21): `server:agent-comms` removed from DEFAULT_CMD.
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
     const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
     expect(line).toBeDefined()
     expect(line!).not.toContain('AGENT_COM_RUNTIME')
-    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+server:agent-comms/)
+    expect(line!).not.toContain('server:agent-comms')
+    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
   test('10. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
-    // Phase C I4: dual mode removed. watchdog fallback uses plain
-    // `claude server:agent-comms` without env prefix.
+    // Phase C I4: dual mode removed. Restart-phantom-prompt fix
+    // (2026-04-21): `server:agent-comms` removed from DEFAULT_CMD.
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
     const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
     expect(line).toBeDefined()
     expect(line!).not.toContain('AGENT_COM_RUNTIME')
-    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+server:agent-comms/)
+    expect(line!).not.toContain('server:agent-comms')
+    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
   test('12. stdio postConnect registers AGENT_ID → shared discord in discordClients Map', () => {
@@ -182,14 +188,15 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
   })
 
   test('11. server.ts DEFAULT_CLAUDE_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
-    // Phase C I4: dual mode removed. DEFAULT_CLAUDE_CMD uses plain
-    // `claude server:agent-comms` without env prefix.
+    // Phase C I4: dual mode removed. Restart-phantom-prompt fix
+    // (2026-04-21): `server:agent-comms` removed from DEFAULT_CLAUDE_CMD.
     const line = SERVER_SRC
       .split('\n')
       .find(l => l.trimStart().startsWith('const DEFAULT_CLAUDE_CMD'))
     expect(line).toBeDefined()
     expect(line!).not.toContain('AGENT_COM_RUNTIME')
-    expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']claude\s+server:agent-comms/)
+    expect(line!).not.toContain('server:agent-comms')
+    expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
   test('13. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {

@@ -1,22 +1,22 @@
 # Bot Registry — SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND
 # COMMAND is the exact claude startup command. Watchdog/restart use this verbatim.
 # Restored to stdio + channel plugin mode (Phase 5)
-discord-cto|~/Developer/tech-lead|cto|8789|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-haishin|~/Developer/haishin-puls-hub|haishin-dev|8792|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-nyusatsu|~/Developer/nyusatsu|nyusatsu-dev|8793|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-adf|~/Developer/ai-dev-framework|adf-dev|8794|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-agent-com|~/Developer/agent-comms-mcp|agent-com-dev|8795|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-vice|~/Developer/iyasaka-org|vice|8796|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-auditor|~/Developer/dev-auditor|auditor|8797|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-xmarketing|~/Developer/x-marketing-engine|xmarketing-dev|8798|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-upwork|~/Developer/upwork-automation|upwork-dev|8799|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-orgbuild|~/Developer/org-build|org-build-dev|8800|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-research|~/Developer/research-lead|research-lead|8801|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-arc|~/Developer/iyasaka|arc|8810|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-wbs|~/Developer/wbs|wbs-dev|8804|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-secretary|~/Developer/secretary|secretary|8805|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-webb|~/Developer/webb-dev|webb-dev|8806|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-agent-mem|~/Developer/agent-memory|agent-mem-dev|8802|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-lead-ama|~/Developer/lead-ama|lead-ama|8807|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-lead-sus|~/Developer/lead-sus|lead-sus|8809|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
-discord-lead-tuk|~/Developer/lead-tuk|lead-tuk|8830|claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions
+discord-cto|~/Developer/tech-lead|cto|8789|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-haishin|~/Developer/haishin-puls-hub|haishin-dev|8792|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-nyusatsu|~/Developer/nyusatsu|nyusatsu-dev|8793|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-adf|~/Developer/ai-dev-framework|adf-dev|8794|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-agent-com|~/Developer/agent-comms-mcp|agent-com-dev|8795|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-vice|~/Developer/iyasaka-org|vice|8796|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-auditor|~/Developer/dev-auditor|auditor|8797|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-xmarketing|~/Developer/x-marketing-engine|xmarketing-dev|8798|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-upwork|~/Developer/upwork-automation|upwork-dev|8799|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-orgbuild|~/Developer/org-build|org-build-dev|8800|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-research|~/Developer/research-lead|research-lead|8801|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-arc|~/Developer/iyasaka|arc|8810|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-wbs|~/Developer/wbs|wbs-dev|8804|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-secretary|~/Developer/secretary|secretary|8805|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-webb|~/Developer/webb-dev|webb-dev|8806|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-agent-mem|~/Developer/agent-memory|agent-mem-dev|8802|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-lead-ama|~/Developer/lead-ama|lead-ama|8807|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-lead-sus|~/Developer/lead-sus|lead-sus|8809|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-lead-tuk|~/Developer/lead-tuk|lead-tuk|8830|claude --mcp-config .mcp.json --dangerously-skip-permissions
