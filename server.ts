@@ -2618,7 +2618,7 @@ interface BotEntry {
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
-const DEFAULT_CLAUDE_CMD = 'claude server:agent-comms --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_CLAUDE_CMD = 'claude --mcp-config .mcp.json --dangerously-skip-permissions'
 
 function loadBotRegistry(): BotEntry[] {
   try {

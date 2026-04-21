@@ -9,3 +9,7 @@ logs/
 .claude/
 agent-com-dev-state.md
 dist/
+
+# SQLite test DB
+agent-com.db
+agent-com.db-*
