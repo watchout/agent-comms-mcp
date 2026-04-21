@@ -43,8 +43,16 @@ describe('G2 — DB-backed Access source', () => {
   test('imports pg.Client for DB access lookup', () => {
     expect(SCRIPT).toMatch(/import\s+\{\s*Client as PgClient\s*\}\s+from 'pg'/)
   })
-  test('SELECT pulls discord_user_id from agents table (DM allowlist source)', () => {
-    expect(SCRIPT).toMatch(/SELECT agent_id, discord_user_id FROM agents WHERE discord_user_id IS NOT NULL/)
+  test('SELECT pulls metadata->>discord_id from agents table (DM allowlist source, ADR-040 D1)', () => {
+    // Phase C H G-live regression: the pre-hotfix query referenced a
+    // non-existent `agents.discord_user_id` column on PG (SQLite migrate
+    // had it, PG migrate never did). ADR-040 D1 stores the Discord id in
+    // `agents.metadata.discord_id` (JSONB). The SQLite adapter's adaptSql
+    // auto-rewrites `metadata->>'discord_id'` into `json_extract(metadata,
+    // '$.discord_id')`, so the same query string runs against both DBs.
+    expect(SCRIPT).toMatch(/SELECT agent_id, metadata->>'discord_id' AS discord_user_id FROM agents WHERE metadata->>'discord_id' IS NOT NULL/)
+    // Negative pin: the pre-hotfix column-based query MUST NOT reappear.
+    expect(SCRIPT).not.toMatch(/SELECT agent_id, discord_user_id FROM agents WHERE discord_user_id IS NOT NULL/)
   })
   test('SELECT pulls members from channels table (per-channel allowlist source)', () => {
     expect(SCRIPT).toMatch(/SELECT id, members FROM channels/)
