@@ -111,10 +111,37 @@ case "$LLM_CHOICE" in
     LLM_TIMEOUT_SECONDS=120
     ;;
   codex)
-    LLM_CMD="codex --quiet"
+    # ARC spec §2.2 採択値 (Level 1 smoke e1/f1 PASS verbatim).
+    # `--dangerously-bypass-approvals-and-sandbox` is required so MCP tool
+    # calls do not block on approval prompts. `--ephemeral` prevents
+    # session state leaking across bot replies. `--skip-git-repo-check`
+    # is needed because bot project dirs are not always at a git root.
+    LLM_CMD="codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral"
     LLM_TIMEOUT_SECONDS=180
     ;;
 esac
+
+# ─────────────────────────────────────────────────────────────────────────
+# step 0: agent-com-dev pre-flight (spec §3.3 special case)
+# Self-referential bot: spawning server.ts in agent-comms-mcp/ would run
+# uncommitted code from a dirty tree. Refuse to migrate unless the
+# workspace is clean and HEAD is on main.
+# ─────────────────────────────────────────────────────────────────────────
+if [ "$BOT_ID" = "agent-com-dev" ]; then
+  cd "$BOT_DIR"
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    echo "ERROR: agent-com-dev migration requires a clean workspace ($BOT_DIR)." >&2
+    echo "       Stage / commit / stash before retrying. Run \`git status\` to inspect." >&2
+    exit 1
+  fi
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  if [ "$branch" != "main" ]; then
+    echo "ERROR: agent-com-dev migration requires HEAD on 'main' (currently '$branch')." >&2
+    echo "       Switch with \`git checkout main\` and \`git pull\` before retrying." >&2
+    exit 1
+  fi
+  cd - >/dev/null
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # step 1: stop legacy tmux session(s)
