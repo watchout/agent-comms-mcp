@@ -464,6 +464,39 @@ async function migrate() {
     COMMIT;
   `)
 
+  // PR #0 — mq_enqueued NOTIFY channel for wake-on-insert daemon.
+  //
+  // Fires on every message_queue INSERT within the same transaction as the
+  // originating write, so the notification cannot be lost to a crash between
+  // INSERT and fanout (spec v3 PR #0 §2.2 frozen: "同 transaction で notify").
+  //
+  // Payload shape (frozen § 2.2): {"agent_id": "...", "message_id": "..."}.
+  // Consumers: bin/wake-daemon.ts (LISTEN mq_enqueued → tmux send-keys).
+  //
+  // Idempotent: CREATE OR REPLACE FUNCTION + DROP/CREATE TRIGGER inside a
+  // transaction, safe on re-run.
+  await client.query(`
+    BEGIN;
+
+    CREATE OR REPLACE FUNCTION fn_notify_mq_enqueued() RETURNS TRIGGER AS $$
+    BEGIN
+      PERFORM pg_notify('mq_enqueued', json_build_object(
+        'agent_id', NEW.agent_id,
+        'message_id', NEW.message_id
+      )::text);
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_mq_enqueued_notify ON message_queue;
+    CREATE TRIGGER trg_mq_enqueued_notify
+      AFTER INSERT ON message_queue
+      FOR EACH ROW
+      EXECUTE FUNCTION fn_notify_mq_enqueued();
+
+    COMMIT;
+  `)
+
   // Sync channel settings from config.json if available
   if (existsSync(configPath)) {
     try {
