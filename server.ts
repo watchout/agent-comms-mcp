@@ -3100,6 +3100,15 @@ if (MULTI_BOT_MODE) {
   })
 }
 
+// AGENT_COM_LEGACY_DISCORD_GATEWAY opt-out env (spec v3 §3 / ADR-001, PR #1).
+// Startup-once parse with fail-safe fallback to `1` (enabled) for invalid input.
+export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
+  if (raw === undefined || raw === '1') return true
+  if (raw === '0') return false
+  process.stderr.write(`agent-comms: WARN invalid AGENT_COM_LEGACY_DISCORD_GATEWAY="${raw}", defaulting to 1 (enabled)\n`)
+  return true
+}
+
 // --- 2. Shared startup (unconditional) ---
 ;(async () => {
   // Start pg_notify listener (conditional — disabled when AGENT_COM_PG_NOTIFY=false for SQLite mode).
@@ -3140,7 +3149,10 @@ if (MULTI_BOT_MODE) {
   // onMessage → handleInboundMessage → agent_messages + message_queue.
   // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
   if (DISCORD_BOT_TOKEN) {
-    try {
+    const legacyGateway = parseLegacyGatewayEnv(process.env.AGENT_COM_LEGACY_DISCORD_GATEWAY)
+    if (!legacyGateway) {
+      process.stderr.write('agent-comms: AGENT_COM_LEGACY_DISCORD_GATEWAY=0, legacy Discord WebSocket disabled\n')
+    } else try {
       discord.onMessage((msg) => {
         if (processedIds.has(msg.id)) return
         processedIds.set(msg.id, Date.now())
