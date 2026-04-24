@@ -205,7 +205,7 @@ exec ${JSON.stringify(HOOK_SRC)}
     // Fire the notify via CLI — spec action, but aimed at our probe pair.
     const notifyResult = spawnSync(
       'bun',
-      [CLI, 'notify', '--mentions', RECV_AGENT, '--content', 'test_9 probe'],
+      [CLI, 'notify', '--channel', `pilot-test-${randomUUID().slice(0, 8)}`, '--mentions', RECV_AGENT, '--content', 'test_9 probe'],
       {
         env: { ...process.env, AGENT_ID: SENDER_AGENT, DATABASE_URL },
         encoding: 'utf-8',
