@@ -99,6 +99,7 @@ e2eDescribe('test_9 auto-wake e2e (PR #233, v4 §77/§92 merge gate)', () => {
   let daemon: ChildProcess | null = null
   let client: Client | null = null
   let insertedMessageId: string | null = null
+  let channelId: string | null = null
 
   beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'test9-e2e-'))
@@ -167,6 +168,9 @@ exec ${JSON.stringify(HOOK_SRC)}
           await client.query(`DELETE FROM agent_messages WHERE id = $1`, [insertedMessageId])
         }
         await client.query(`DELETE FROM agents WHERE agent_id = ANY($1::text[])`, [[SENDER_AGENT, RECV_AGENT]])
+        if (channelId) {
+          await client.query(`DELETE FROM channels WHERE id = $1`, [channelId]).catch(() => {})
+        }
       } catch {}
       try { await client.end() } catch {}
     }
@@ -194,6 +198,19 @@ exec ${JSON.stringify(HOOK_SRC)}
     await waitFor(() => daemonStderr, (s) => /listening on pg channel/.test(s), 8000)
     const paneBaseline = tmuxCapture(RECV_SESSION)
 
+    // Create a probe `channels` row so the `notify` CLI's channel routing
+    // validation finds a registered channel with both probe agents as
+    // members. Generated once per test run and cleaned up in afterAll.
+    // Cycle 5 fix: without this row the notify CLI exits non-zero with
+    // `CHANNEL_NOT_FOUND` and conditions (ii)-(v) are never exercised.
+    channelId = `pilot-test-${randomUUID().slice(0, 8)}`
+    await client!.query(
+      `INSERT INTO channels (id, org_id, type, members)
+       VALUES ($1, 'default', 'channel', $2)
+       ON CONFLICT (id) DO NOTHING`,
+      [channelId, [SENDER_AGENT, RECV_AGENT]],
+    )
+
     // Truncate the hook marker file so any `SessionStart` entries emitted
     // during claude's own boot are discarded. Only hook invocations that
     // happen after this point — i.e. the wake-induced `UserPromptSubmit`
@@ -205,7 +222,7 @@ exec ${JSON.stringify(HOOK_SRC)}
     // Fire the notify via CLI — spec action, but aimed at our probe pair.
     const notifyResult = spawnSync(
       'bun',
-      [CLI, 'notify', '--channel', `pilot-test-${randomUUID().slice(0, 8)}`, '--mentions', RECV_AGENT, '--content', 'test_9 probe'],
+      [CLI, 'notify', '--channel', channelId, '--mentions', RECV_AGENT, '--content', 'test_9 probe'],
       {
         env: { ...process.env, AGENT_ID: SENDER_AGENT, DATABASE_URL },
         encoding: 'utf-8',
