@@ -96,6 +96,61 @@ export interface InboundReceiverDeps {
    * Non-fatal: a missing bus or a kill failure defers to polling.
    */
   bus?: MessageBus
+  /**
+   * Spec v5 §2.1 claude/channel push. When set, the listener fires
+   * `notifications/claude/channel` against the local MCP server
+   * immediately after routing confirms this agent is a push target.
+   * On success the listener promotes the message_queue row to 'read'
+   * (step 4); on failure the row stays 'pending' so the wake-daemon
+   * polling fallback picks it up (Issue #8 guard).
+   *
+   * A bot without claude/channel support (Codex/Gemini session) can
+   * leave this undefined; delivery degrades gracefully to the existing
+   * pull-based `next` tool path (Issue #39 fallback).
+   */
+  mcpPush?: (params: ClaudeChannelPushParams) => Promise<void>
+}
+
+export interface ClaudeChannelPushParams {
+  content: string
+  meta: {
+    channel_id: string
+    message_id: string
+    author_id: string
+    thread_id?: string | null
+    message_type?: string
+  }
+}
+
+/**
+ * Promote a message_queue row to 'read' only after the MCP push
+ * succeeds (spec v5 §2.1 transactional order). Exported so the
+ * contract tests can exercise the push/guard decision in isolation
+ * without spinning up the full pg_notify listener.
+ */
+export async function pushClaudeChannelAndPromote(
+  mcpPush: (p: ClaudeChannelPushParams) => Promise<void>,
+  db: DbLike,
+  agentId: string,
+  params: ClaudeChannelPushParams,
+): Promise<{ pushed: boolean; promoted: boolean; error?: unknown }> {
+  try {
+    await mcpPush(params)
+  } catch (err) {
+    return { pushed: false, promoted: false, error: err }
+  }
+  try {
+    await db.query(
+      `UPDATE message_queue SET status = 'read', read_at = now()
+         WHERE agent_id = $1 AND message_id = $2 AND status = 'pending'`,
+      [agentId, params.meta.message_id],
+    )
+    return { pushed: true, promoted: true }
+  } catch (err) {
+    // Push landed but DB promotion failed — log and leave wake-daemon to
+    // re-deliver if needed. We never downgrade a successful push.
+    return { pushed: true, promoted: false, error: err }
+  }
 }
 
 let deps: InboundReceiverDeps | null = null
@@ -252,11 +307,46 @@ export async function startListener(): Promise<void> {
           )
         }
 
-        // Delivery is pull-based via `next` MCP tool (spec §4.1). The listener
-        // only fires an observability event; legacy `notifications/claude/channel`
-        // push was removed with the polling path (spec §20).
+        // Spec v5 §2.1 step 3-4 — fire the claude/channel push before
+        // any status change. `pushClaudeChannelAndPromote` returns the
+        // push landed *and* the promotion succeeded; either-failure path
+        // leaves status='pending' so the wake-daemon polling fallback
+        // keeps the message deliverable (Issue #8 / Issue #39 safety).
+        if (d.mcpPush) {
+          const dbForPush = await d.tryGetDb()
+          if (dbForPush) {
+            const result = await pushClaudeChannelAndPromote(
+              d.mcpPush,
+              dbForPush,
+              d.agentId,
+              {
+                content: row.content,
+                meta: {
+                  channel_id: channelInfo?.channelId ?? row.channel_id,
+                  message_id: row.id,
+                  author_id: senderAgentId,
+                  thread_id: (row as any).thread_id ?? null,
+                  message_type: row.message_type ?? 'chat',
+                },
+              },
+            )
+            if (!result.pushed) {
+              process.stderr.write(
+                `agent-comms: claude/channel push failed (${d.agentId}, msg=${row.id}) — wake-daemon fallback: ${result.error}\n`,
+              )
+            } else if (!result.promoted) {
+              process.stderr.write(
+                `agent-comms: claude/channel push ok but queue promote failed (${d.agentId}, msg=${row.id}): ${result.error}\n`,
+              )
+            }
+          }
+        }
+
+        // Observability signal — always fired, independent of the push
+        // outcome, so `agent_inbox` subscribers keep working even when
+        // claude/channel is unavailable (spec §13.5 pull-based fallback).
         process.stderr.write(
-          `agent-comms: listener signal — ${d.agentId} msg=${row.id} (pull via next)\n`,
+          `agent-comms: listener signal — ${d.agentId} msg=${row.id}\n`,
         )
         const dbClientForEvent = await d.tryGetDb()
         await pgNotifyGuarded(dbClientForEvent, 'agent_inbox', JSON.stringify({
