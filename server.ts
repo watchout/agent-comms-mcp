@@ -1121,6 +1121,19 @@ function gc() {
 setInterval(gc, GC_INTERVAL_MS)
 
 // --- MCP Server ---
+// Spec v5 §1.4 instructions — verbatim system-prompt addition for bots
+// that connect via claude/channel. Wording is a merge gate; drift is
+// caught by the test_handoff_b_communication_invariant test.
+const CLAUDE_CHANNEL_INSTRUCTIONS = [
+  'agent-comms channel events arrive as <channel source="agent-comms" channel_id="..." message_id="..." author_id="..." [thread_id="..."] [message_type="..."]>content</channel>.',
+  '',
+  'To reply: invoke mcp__agent-comms__send (use mcp__agent-comms__notify for self-originated). Pass the channel_id from the inbound tag.',
+  '',
+  'CRITICAL — NEVER use the built-in SendMessage tool. It routes to a different system (Claude Code teams/teammates) and your reply will NOT reach agent-comms peers.',
+  '',
+  'CRITICAL — NEVER reply only via stdout. Every reply MUST go through mcp__agent-comms__send (or notify). This is enforced by a Stop hook; replies without the tool call will be blocked and re-prompted.',
+].join('\n')
+
 function createMcpServer(): Server {
   return new Server(
     { name: 'agent-comms', version: '1.2.0' },
@@ -1134,6 +1147,7 @@ function createMcpServer(): Server {
           'claude/channel/permission': {},
         },
       },
+      instructions: CLAUDE_CHANNEL_INSTRUCTIONS,
     }
   )
 }
@@ -1165,6 +1179,18 @@ setInboundReceiverDeps({
   updateActiveThread,
   hashCode,
   bus: messageBus,
+  // Spec v5 §1.2 / §2.1 — claude/channel push. Thin wrapper so the
+  // receiver doesn't need a direct handle on the MCP Server instance
+  // (keeps the server.ts ↔ inbound-receiver dependency DAG cycle-free).
+  // A `notification()` reject here is contained inside
+  // `pushClaudeChannelAndPromote` and triggers the wake-daemon fallback
+  // path instead of propagating up the listener.
+  mcpPush: async (params) => {
+    await mcp.notification({
+      method: 'notifications/claude/channel',
+      params,
+    })
+  },
 })
 
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---
