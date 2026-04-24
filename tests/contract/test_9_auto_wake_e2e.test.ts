@@ -134,14 +134,14 @@ exec ${JSON.stringify(HOOK_SRC)}
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, status)
-       VALUES ($1, $1, 'dev', 'online')
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
+       VALUES ($1, $1, 'dev', 'claude-code', 'online')
        ON CONFLICT (agent_id) DO NOTHING`,
       [RECV_AGENT],
     )
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, status)
-       VALUES ($1, $1, 'dev', 'online')
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
+       VALUES ($1, $1, 'dev', 'claude-code', 'online')
        ON CONFLICT (agent_id) DO NOTHING`,
       [SENDER_AGENT],
     )
