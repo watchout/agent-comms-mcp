@@ -25,7 +25,8 @@
   "main": "server.ts",
   "bin": {
     "agent-comms-mcp": "entrypoints/main.ts",
-    "agent-com": "cli/index.ts"
+    "agent-com": "cli/index.ts",
+    "aun": "bin/aun.ts"
   },
   "files": [
     "server.ts",
@@ -34,6 +35,8 @@
     "cli/",
     "core/",
     "db/",
+    "bin/",
+    "hooks/",
     "config.example.json",
     "LICENSE",
     "README.md"

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "aun": {
+      "command": "/opt/custom/aun",
+      "args": ["--legacy"],
+      "env": {}
+    }
+  }
+}
