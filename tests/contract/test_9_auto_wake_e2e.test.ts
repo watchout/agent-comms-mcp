@@ -14,15 +14,22 @@ import { Client } from 'pg'
 //   (b) the target tmux session picks up a new LLM turn within 5 s of the
 //       send-keys (visible as new text in the pane buffer — the `check inbox`
 //       prompt itself plus any Claude response)
-//   (c) the `auto-next.sh` hook fires (evidenced by a marker file written by
-//       a test-only variant of the hook that logs `$CLAUDE_HOOK_EVENT_NAME`
-//       alongside calling the same additionalContext)
-//   (d) the queue row's status advances past `pending` within 60 s — i.e. the
-//       recipient session actually drained the queue via
-//       `mcp__agent-comms__next`. A full `pending → read → replied` round
-//       trip requires a responding bot; the automated assertion stops at
-//       `read` (queue drained) and the operator pilot confirms `replied`
-//       against a real bot (see PR body).
+//   (c) the `auto-next.sh` hook fires with event `UserPromptSubmit` after
+//       the wake send-keys (evidenced by a marker file written by a test-
+//       only variant of the hook that logs `$CLAUDE_HOOK_EVENT_NAME`).
+//       The claude session's own `SessionStart` fires at boot and is
+//       explicitly NOT counted toward this condition — the marker file is
+//       truncated after startup settles and before the notify INSERT so
+//       only wake-induced `UserPromptSubmit` entries reach the assertion
+//       (spec v4 §92 (b) / instruction §1.6 (b), cycle 2 BLOCKER-1 fix).
+//   (d) the queue row's status advances to `read` or `replied` within 60 s
+//       — i.e. the recipient session drained the queue via
+//       `mcp__agent-comms__next`. The auto-wake mechanism's success
+//       threshold is `read` (queue pickup); `replied` additionally proves
+//       a full round-trip, but requires a responding bot and is therefore
+//       confirmed by operator pilot (lead-ama / auditor agreement,
+//       cycle 2 🟡-2: `skipped` was removed from the accept list as it
+//       represents operator dismissal rather than auto-wake success).
 //
 // Gate:
 //   CLAUDE_BIN        — the `claude` CLI is available on PATH
@@ -187,6 +194,14 @@ exec ${JSON.stringify(HOOK_SRC)}
     await waitFor(() => daemonStderr, (s) => /listening on pg channel/.test(s), 8000)
     const paneBaseline = tmuxCapture(RECV_SESSION)
 
+    // Truncate the hook marker file so any `SessionStart` entries emitted
+    // during claude's own boot are discarded. Only hook invocations that
+    // happen after this point — i.e. the wake-induced `UserPromptSubmit`
+    // — land in the file and reach the (c) assertion below. Cycle 2
+    // BLOCKER-1 fix: without this reset the regex could satisfy on the
+    // already-fired SessionStart and never exercise the wake path.
+    writeFileSync(hookMarkerFile, '')
+
     // Fire the notify via CLI — spec action, but aimed at our probe pair.
     const notifyResult = spawnSync(
       'bun',
@@ -227,14 +242,18 @@ exec ${JSON.stringify(HOOK_SRC)}
     )
     expect(paneChanged).not.toBeNull()
 
-    // (c) hook fire — the probe wrote an event line to the marker file.
+    // (c) hook fire — the probe wrote a `UserPromptSubmit` marker line
+    // to the truncated-just-before-INSERT marker file. Startup-time
+    // `SessionStart` entries were discarded by the beforeINSERT truncate
+    // so this assertion proves the wake flow (send-keys → new turn →
+    // UserPromptSubmit hook) without a race against claude's own boot.
     const hookFired = await waitFor(
       () => {
         try { return Bun.file(hookMarkerFile).text() } catch { return '' }
       },
       async (contentPromise) => {
         const content = await contentPromise
-        return /UserPromptSubmit|SessionStart/.test(content)
+        return /UserPromptSubmit/.test(content)
       },
       10_000,
     )
@@ -255,6 +274,9 @@ exec ${JSON.stringify(HOOK_SRC)}
       1000,
     )
     expect(drained).not.toBeNull()
-    expect(['read', 'replied', 'skipped']).toContain(drained)
+    // Accept list strict: spec v4 §92 (c) covers pending → read → replied.
+    // `skipped` was removed in cycle 2 🟡-2 (it represents operator
+    // dismissal, not auto-wake success).
+    expect(['read', 'replied']).toContain(drained)
   }, 90_000)
 })
