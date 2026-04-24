@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<channel source=\"agent-comms\" channel_id=\"pilot-test-not\" message_id=\"msg-n1\">broadcast please</channel>"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Broadcasting."},{"type":"tool_use","id":"tu_n","name":"mcp__agent-comms__notify","input":{"channel":"some-channel","mentions":["all"],"content":"announcement"}}]}}

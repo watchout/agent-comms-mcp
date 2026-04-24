@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<channel source=\"agent-comms\" channel_id=\"pilot-test-xyz\" message_id=\"msg-2\">ping</channel>"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}

@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<channel source=\"agent-comms\" channel_id=\"pilot-test-abc\" message_id=\"msg-1\">hello from bot-a</channel>"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Acknowledged, replying via agent-comms."},{"type":"tool_use","id":"tu_1","name":"mcp__agent-comms__send","input":{"reply_to":"msg-1","mentions":["bot-a"],"content":"ok"}}]}}

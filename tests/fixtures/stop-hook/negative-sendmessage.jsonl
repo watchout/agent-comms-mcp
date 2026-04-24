@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<channel source=\"agent-comms\" channel_id=\"pilot-test-qwe\" message_id=\"msg-3\">status?</channel>"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sending reply via built-in."},{"type":"tool_use","id":"tu_2","name":"SendMessage","input":{"to":"bot-a","content":"ok"}}]}}
