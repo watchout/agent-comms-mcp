@@ -28,10 +28,17 @@ import { join, dirname } from 'node:path'
 const DB_TYPE = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
 const PG_NOTIFY_CHANNEL = 'mq_enqueued'
 const DEDUP_WINDOW = 512
+const WAKE_DEDUP_MS = 1000
 const SQLITE_POLL_MS = 500
 const RECONNECT_MIN_MS = 100
 const RECONNECT_MAX_MS = 10_000
 const SHUTDOWN_TIMEOUT_MS = 30_000
+// v4 §77-2: literal sent via `tmux send-keys` on wake. Empty string was
+// observed to fail the xmarketing pilot (2026-04-24 08:19) because Claude
+// Code does not start a new LLM turn on a bare Enter — the prompt must
+// contain visible text. `check inbox` is a natural-language cue that also
+// nudges the session toward the auto-next hook's additionalContext.
+const WAKE_PROMPT = 'check inbox'
 
 const PROJECT_ROOT = dirname(dirname(new URL(import.meta.url).pathname))
 const BOT_REGISTRY = join(PROJECT_ROOT, 'scripts', 'bot-registry.txt')
@@ -57,6 +64,26 @@ export function dedupStats(): { size: number; capacity: number } {
 export function __resetDedup(): void {
   seenIds.clear()
   seenOrder.length = 0
+  lastWakeByAgent.clear()
+}
+
+// ---------- agent-id time-window dedup (v4 §77-1) ----------
+// Second-stage dedup alongside `markSeen(message_id)`. When the same agent
+// receives multiple inserts in < 1 s (e.g. a fanout on a group mention),
+// one wake suffices — further send-keys would just create duplicate "check
+// inbox" prompts in the REPL with no extra value.
+const lastWakeByAgent = new Map<string, number>()
+export function shouldWake(agentId: string, now: number = Date.now()): boolean {
+  const last = lastWakeByAgent.get(agentId)
+  if (last !== undefined && now - last < WAKE_DEDUP_MS) return false
+  lastWakeByAgent.set(agentId, now)
+  return true
+}
+export function wakeDedupStats(): { tracked: number; windowMs: number } {
+  return { tracked: lastWakeByAgent.size, windowMs: WAKE_DEDUP_MS }
+}
+export function __resetWakeDedup(): void {
+  lastWakeByAgent.clear()
 }
 
 // ---------- tmux session resolution ----------
@@ -92,17 +119,22 @@ function resolveSession(agentId: string): string | null {
 
 // ---------- tmux send-keys (wake trigger) ----------
 function tmuxWake(sessionName: string): void {
-  // Send empty literal + Enter — harmless REPL re-render, triggers Claude
-  // to observe the event loop (auto-next hook re-fires on SessionStart /
-  // UserPromptSubmit depending on settings.json registration).
-  spawnSync('tmux', ['send-keys', '-t', sessionName, '', 'Enter'], {
+  // v4 §77-2: send `check inbox` + Enter. A bare Enter does not open a new
+  // LLM turn in Claude Code; the prompt must carry visible text. `check
+  // inbox` is also a direct hint that aligns with the auto-next hook's
+  // additionalContext wording.
+  spawnSync('tmux', ['send-keys', '-t', sessionName, WAKE_PROMPT, 'Enter'], {
     stdio: ['ignore', 'ignore', 'ignore'],
   })
 }
 
 function wake(agentId: string, messageId: string): void {
   if (markSeen(messageId)) {
-    log('debug', `dedup skip: ${agentId}/${messageId}`)
+    log('debug', `dedup skip (message_id): ${agentId}/${messageId}`)
+    return
+  }
+  if (!shouldWake(agentId)) {
+    log('debug', `dedup skip (agent_id 1s): ${agentId}/${messageId}`)
     return
   }
   const session = resolveSession(agentId)
