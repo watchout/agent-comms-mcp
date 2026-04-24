@@ -4,10 +4,18 @@ import { describe, test, expect, beforeEach } from 'bun:test'
 // Capacity exported by the daemon module is DEDUP_WINDOW=512 (§5 choice,
 // meets the N≥100 instruction minimum). We import the internal helpers
 // directly — no tmux / DB / subprocess involvement for this unit slice.
-import { markSeen, dedupStats, __resetDedup } from '../../bin/wake-daemon'
+import {
+  markSeen,
+  dedupStats,
+  __resetDedup,
+  shouldWake,
+  wakeDedupStats,
+  __resetWakeDedup,
+} from '../../bin/wake-daemon'
 
 beforeEach(() => {
   __resetDedup()
+  __resetWakeDedup()
 })
 
 describe('wake-daemon sliding-window de-dup (§2.4, unit)', () => {
@@ -89,3 +97,52 @@ describe('wake-daemon sliding-window de-dup (§2.4, unit)', () => {
     expect(markSeen('e9')).toBe(true)
   })
 })
+
+// PR #233 v4 §77-1 — agent_id time-window de-dup (1 s) sits beside the
+// per-message-id sliding window. These cases exercise only the time-based
+// layer; the `now` parameter lets us pin the clock deterministically.
+describe('wake-daemon agent_id time-window dedup (v4 §77-1, PR #233)', () => {
+  test('first call for an agent returns true, repeat within window returns false', () => {
+    expect(shouldWake('alice', 1000)).toBe(true)
+    expect(shouldWake('alice', 1500)).toBe(false)
+    expect(shouldWake('alice', 1999)).toBe(false)
+  })
+
+  test('distinct agents are tracked independently', () => {
+    expect(shouldWake('alice', 1000)).toBe(true)
+    expect(shouldWake('bob', 1000)).toBe(true)
+    expect(shouldWake('alice', 1200)).toBe(false)
+    expect(shouldWake('bob', 1200)).toBe(false)
+    expect(wakeDedupStats().tracked).toBe(2)
+  })
+
+  test('window boundary: exactly 1000ms later reopens the gate (>= WAKE_DEDUP_MS)', () => {
+    expect(shouldWake('alice', 5000)).toBe(true)
+    // Boundary: now - last === WAKE_DEDUP_MS (1000). The predicate uses
+    // strict less-than, so this moment is the first permitted re-wake.
+    expect(shouldWake('alice', 6000)).toBe(true)
+    // Within the new window again — blocked.
+    expect(shouldWake('alice', 6500)).toBe(false)
+  })
+
+  test('window advertised as 1000 ms (v4 §77-1 contract)', () => {
+    expect(wakeDedupStats().windowMs).toBe(1000)
+  })
+
+  test('stats expose the number of agents tracked and clear on reset', () => {
+    shouldWake('a', 1000)
+    shouldWake('b', 1000)
+    shouldWake('c', 1000)
+    expect(wakeDedupStats().tracked).toBe(3)
+    __resetWakeDedup()
+    expect(wakeDedupStats().tracked).toBe(0)
+  })
+
+  test('late arrivals long after the window act like a fresh wake', () => {
+    expect(shouldWake('alice', 10_000)).toBe(true)
+    // 5 seconds later — well past the 1 s window.
+    expect(shouldWake('alice', 15_000)).toBe(true)
+    expect(shouldWake('alice', 15_500)).toBe(false)
+  })
+})
+

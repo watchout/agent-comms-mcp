@@ -66,17 +66,28 @@ while IFS='|' read -r session project_dir agent_id port command; do
   if command -v jq >/dev/null 2>&1; then
     if [[ -f "$settings_path" ]]; then
       tmp_file="$(mktemp)"
+      # v4-compliance (PR #233 / closes #234): matcher is "" (empty),
+      # matching ai-dev-framework hooks-installer convention. Cleanup
+      # purges both legacy "auto-next-hook" matcher entries and any prior
+      # "" entry whose hooks[] points at our hook file (avoids duplicates
+      # on re-install) while preserving unrelated "" entries from other
+      # installers.
       if jq --arg cmd "${hook_dest}" '
+        def strip_mine:
+          map(select(
+            (.matcher != "auto-next-hook")
+            and (((.hooks // []) | map(.command)) | index($cmd) | not)
+          ));
         .hooks //= {}
         | .hooks.SessionStart //= []
         | .hooks.UserPromptSubmit //= []
         | .hooks.SessionStart |= (
-            map(select(.matcher != "auto-next-hook"))
-            + [{"matcher": "auto-next-hook", "hooks": [{"type": "command", "command": $cmd}]}]
+            strip_mine
+            + [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
           )
         | .hooks.UserPromptSubmit |= (
-            map(select(.matcher != "auto-next-hook"))
-            + [{"matcher": "auto-next-hook", "hooks": [{"type": "command", "command": $cmd}]}]
+            strip_mine
+            + [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
           )
       ' "$settings_path" > "$tmp_file" 2>/dev/null; then
         mv "$tmp_file" "$settings_path"
@@ -92,13 +103,13 @@ while IFS='|' read -r session project_dir agent_id port command; do
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "auto-next-hook",
+        "matcher": "",
         "hooks": [{"type": "command", "command": "${hook_dest}"}]
       }
     ],
     "UserPromptSubmit": [
       {
-        "matcher": "auto-next-hook",
+        "matcher": "",
         "hooks": [{"type": "command", "command": "${hook_dest}"}]
       }
     ]
