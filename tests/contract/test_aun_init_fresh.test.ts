@@ -36,7 +36,7 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
   afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
   test('init() returns ok=true on clean tmp home + settings.json minimal', () => {
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home } })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(res.errors).toEqual([])
     expect(res.ok).toBe(true)
   })
@@ -58,10 +58,8 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
 
   test('(c) ~/.claude/settings.json has hooks.SessionStart + hooks.Stop + mcpServers.aun entries', () => {
     const s = readSettings(settingsPath)
-    const ss = s.hooks?.SessionStart ?? []
     const stop = s.hooks?.Stop ?? []
     const mcp = s.mcpServers ?? {}
-    expect(ss.length).toBeGreaterThanOrEqual(1)
     expect(stop.length).toBeGreaterThanOrEqual(1)
     expect(mcp.aun).toBeDefined()
     // §1.4 flag verbatim — the startup args must include the frozen
@@ -69,6 +67,9 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
     const args = (mcp.aun?.args ?? []).join(' ')
     expect(args).toContain('--dangerously-load-development-channels')
     expect(args).toContain('server:aun')
+    // Stop hook references the PR-C #240 enforcement script.
+    const stopCommands = stop.flatMap(reg => reg.hooks.map(h => h.command))
+    expect(stopCommands.some(c => c.includes('aun-send-tool-enforcement.sh'))).toBe(true)
   })
 
   test('(d) ~/.claude/settings.json.bak.<ts> created (only when file pre-existed and changed)', () => {

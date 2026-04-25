@@ -93,7 +93,13 @@ export function run(argv: string[] = process.argv): number {
       printHelp()
       return 0
     case 'init': {
-      const res = init({ dryRun: !!flags['dry-run'], force: !!flags.force })
+      const res = init({
+        dryRun: !!flags['dry-run'],
+        force: !!flags.force,
+        token: typeof flags.token === 'string' ? (flags.token as string) : undefined,
+        skipVersionCheck: !!flags['skip-version-check'],
+        skipExecutableBitCheck: !!flags['skip-executable-bit-check'],
+      })
       printSummary('aun init', res.summary, res.errors)
       if (res.dryRun && res.dryRunDiff) {
         process.stdout.write('\n--- dry-run diff ---\n')

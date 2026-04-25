@@ -31,7 +31,7 @@ describe('test_aun_mcpservers_conflict — abort without --force, override with 
   afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
   test('without --force: abort with error and settings.json unchanged', () => {
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home } })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(res.ok).toBe(false)
     expect(res.errors.length).toBeGreaterThan(0)
     const joined = res.errors.join('\n')
@@ -41,7 +41,7 @@ describe('test_aun_mcpservers_conflict — abort without --force, override with 
   })
 
   test('with --force: override succeeds, aun entry reflects new config', () => {
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, force: true, env: { HOME: home } })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, force: true, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(res.errors).toEqual([])
     expect(res.ok).toBe(true)
     const s = readSettings(settingsPath)

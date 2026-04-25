@@ -4,7 +4,7 @@
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "bash /home/user/my-own-session-start.sh" }
+          { "type": "command", "command": "echo user-hook" }
         ]
       }
     ]

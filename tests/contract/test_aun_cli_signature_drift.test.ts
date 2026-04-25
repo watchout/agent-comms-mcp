@@ -18,9 +18,16 @@ import {
 describe('test_aun_cli_signature_drift — capture baseline, detect drift vs synthetic baseline', () => {
   let tmpDir: string
   let baselinePath: string
+  // Spec §4.4 / §2.3 — drift detection must cover the CLIs aun depends
+  // on at runtime. `bun` + `node` are guaranteed in CI; `claude --help`
+  // is best-effort (CI without claude on PATH falls through to a
+  // skipped capture, which is graceful degradation, not a failure —
+  // PR #236 cycle 4 catches the real-world drift case the spec calls
+  // out).
   const probes: ClaudeCliProbe[] = [
     { name: 'bun', command: 'bun', args: ['--version'] },
     { name: 'node', command: 'node', args: ['--version'] },
+    { name: 'claude', command: 'claude', args: ['--help'], capture: /Usage[\s\S]{0,2000}/ },
   ]
 
   beforeAll(() => {

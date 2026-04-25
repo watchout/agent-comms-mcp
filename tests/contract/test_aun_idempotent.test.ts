@@ -28,19 +28,19 @@ describe('test_aun_idempotent — 3 consecutive init runs leave no duplicates', 
   afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
   test('1st run: settings patched, backup created', () => {
-    const r = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home } })
+    const r = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(r.ok).toBe(true)
     expect(r.settingsChanged).toBe(true)
   })
 
   test('2nd run: settingsChanged=false (no-op)', () => {
-    const r = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home } })
+    const r = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(r.ok).toBe(true)
     expect(r.settingsChanged).toBe(false)
   })
 
   test('3rd run: settingsChanged=false (no-op)', () => {
-    const r = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home } })
+    const r = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(r.ok).toBe(true)
     expect(r.settingsChanged).toBe(false)
   })

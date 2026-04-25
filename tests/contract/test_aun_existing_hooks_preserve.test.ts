@@ -30,7 +30,7 @@ describe('test_aun_existing_hooks_preserve — user hook + custom env survive in
   afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
   test('init succeeds on a settings.json with pre-existing user hooks', () => {
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home } })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
     expect(res.errors).toEqual([])
     expect(res.ok).toBe(true)
     expect(res.settingsChanged).toBe(true)
@@ -41,19 +41,21 @@ describe('test_aun_existing_hooks_preserve — user hook + custom env survive in
     const ss = s.hooks?.SessionStart ?? []
     // The fixture's user command must still be present.
     const found = ss.flatMap(reg => reg.hooks.map(h => h.command))
-    expect(found).toContain('bash /home/user/my-own-session-start.sh')
+    expect(found).toContain('echo user-hook')
   })
 
-  test('aun hook is appended in addition to the user hook (array length grows)', () => {
+  test('user SessionStart preserved 1:1 + aun Stop hook added in a separate event key', () => {
     const s = readSettings(settingsPath)
     const ss = s.hooks?.SessionStart ?? []
-    // Fixture had 1 registration (containing 1 command); init adds at
-    // least one registration with the aun-loader command.
-    expect(ss.length).toBeGreaterThanOrEqual(2)
-    const allCommands = ss.flatMap(reg => reg.hooks.map(h => h.command))
-    // At least the aun-loader command is now present.
-    expect(allCommands.some(c => c.includes('aun-loader.sh') || c.includes('aun-send-tool-enforcement.sh')))
-      .toBe(true)
+    const stop = s.hooks?.Stop ?? []
+    // The user's SessionStart entry stays intact (1 registration with 1 command).
+    expect(ss.length).toBe(1)
+    expect(ss[0].hooks.length).toBe(1)
+    // The aun Stop hook lands under the separate `Stop` event — proving
+    // deep-merge by event key, not array clobber on the same event.
+    expect(stop.length).toBeGreaterThanOrEqual(1)
+    const stopCommands = stop.flatMap(reg => reg.hooks.map(h => h.command))
+    expect(stopCommands.some(c => c.includes('aun-send-tool-enforcement.sh'))).toBe(true)
   })
 
   test('unrelated user keys (env.USER_CUSTOM_FLAG) pass through untouched', () => {

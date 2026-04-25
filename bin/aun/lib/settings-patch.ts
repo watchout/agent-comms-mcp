@@ -68,6 +68,10 @@ export interface PatchOptions {
   now?: Date
   /** Write cap for rotate (default 5 per §2.1). */
   backupKeep?: number
+  /** Validation `home` override (tests use a tmp HOME). */
+  home?: string
+  /** Validation executable-bit toggle (default true). */
+  requireExecutableBit?: boolean
 }
 
 export interface PatchResult {
@@ -199,13 +203,33 @@ export function mergeAunPatch(
     out.mcpServers = merged
   }
 
-  // --- env: AUN_* prefix merge (user wins, aun fills missing) -----------
+  // --- env: AUN_* prefix merge with fail-fast on value conflict ---------
+  // Spec v6 §2.2 — an existing env key that *differs* from the aun patch
+  // must abort, not silently keep the stale user value. Silent keep
+  // (the previous behaviour) leaves the bot running under a config that
+  // mismatches the documented installer state, which is the exact
+  // confusion class the spec calls out. Identical or missing values
+  // stay idempotent; `--force` lets an operator who knows what they're
+  // doing override after a conscious decision.
   if (patch.env) {
     const baseEnv = (base.env ?? {}) as Record<string, string>
     const merged: Record<string, string> = { ...baseEnv }
     for (const [k, v] of Object.entries(patch.env)) {
-      if (merged[k] === undefined) merged[k] = v
-      // Existing user value wins; AUN_* defaults don't clobber explicit user config.
+      const existing = merged[k]
+      if (existing === undefined) {
+        merged[k] = v
+        continue
+      }
+      if (existing === v) continue // idempotent — same value, no change
+      if (opts.force) {
+        merged[k] = v
+        continue
+      }
+      throw new SettingsPatchError(
+        'E_ENV_CONFLICT',
+        `env.${k} already set to "${existing}" but aun expects "${v}". ` +
+        `Rerun with --force to override, or unset env.${k} in ~/.claude/settings.json before re-running aun init.`,
+      )
     }
     out.env = merged
   }
@@ -256,7 +280,7 @@ export function writePatch(
   }
 
   try {
-    validatePatched(settingsPath)
+    validatePatched(settingsPath, { home: opts.home, requireExecutableBit: opts.requireExecutableBit })
   } catch (err) {
     // Validation is the last checkpoint. Restore from backup if we have one.
     if (backupPath && existsSync(backupPath)) {
@@ -272,13 +296,101 @@ export function writePatch(
   return { patchedPath: settingsPath, backupPath, changed: true }
 }
 
+export interface ValidationOptions {
+  /** Resolve `~` and `$HOME` for absolute-path checks. Defaults to
+   *  `process.env.HOME`. Tests pass an isolated tmp HOME so the
+   *  reachability check exercises the actual file we care about.
+   */
+  home?: string
+  /** When true, bin/script paths must have at least one executable bit
+   *  set. Defaults to true; tests can opt out for portability quirks
+   *  (e.g. WSL DrvFs shows non-x bits even on bash scripts).
+   */
+  requireExecutableBit?: boolean
+}
+
+interface CommandReachability {
+  command: string
+  resolvedPath: string | null
+  reason: 'ok' | 'absolute-missing' | 'absolute-not-executable' | 'shell-prefix-target-missing' | 'unresolvable'
+}
+
+/** Crude tokenizer for hook / mcpServers commands. The shapes we
+ *  see in practice are: `/abs/path/script.sh`,
+ *  `bash /abs/path/script.sh`, `bash ~/.claude/hooks/x.sh`, or
+ *  `bin` alone (e.g. `bun`). Anything else falls through as
+ *  unresolvable, which we treat as a non-fatal warning rather than
+ *  a hard fail (a future shape we can't anticipate shouldn't break
+ *  init).
+ */
+function inspectCommand(command: string, home: string): CommandReachability {
+  const trimmed = command.trim()
+  if (trimmed === '') return { command, resolvedPath: null, reason: 'unresolvable' }
+  const tokens = trimmed.split(/\s+/)
+  // Pattern: `bash <path>` or `sh <path>` or `node <path>` etc.
+  const shellPrefixes = new Set(['bash', 'sh', 'zsh', 'node', 'bun', 'python', 'python3'])
+  if (tokens.length >= 2 && shellPrefixes.has(tokens[0])) {
+    const target = expandHome(tokens[1], home)
+    if (target.startsWith('/') && !existsSync(target)) {
+      return { command, resolvedPath: target, reason: 'shell-prefix-target-missing' }
+    }
+    return { command, resolvedPath: target, reason: 'ok' }
+  }
+  // Single token — could be a bin name on PATH (we don't try to
+  // resolve PATH; that's the user's shell's job) or an absolute
+  // command. Only absolute paths are checked.
+  if (tokens[0].startsWith('/')) {
+    if (!existsSync(tokens[0])) {
+      return { command, resolvedPath: tokens[0], reason: 'absolute-missing' }
+    }
+    return { command, resolvedPath: tokens[0], reason: 'ok' }
+  }
+  if (tokens[0].startsWith('~/')) {
+    const expanded = expandHome(tokens[0], home)
+    if (!existsSync(expanded)) {
+      return { command, resolvedPath: expanded, reason: 'absolute-missing' }
+    }
+    return { command, resolvedPath: expanded, reason: 'ok' }
+  }
+  return { command, resolvedPath: null, reason: 'unresolvable' }
+}
+
+function expandHome(p: string, home: string): string {
+  if (p === '~' || p.startsWith('~/')) return p === '~' ? home : `${home}${p.slice(1)}`
+  return p
+}
+
+function isExecutable(absPath: string): boolean {
+  try {
+    const st = statSync(absPath)
+    return (st.mode & 0o111) !== 0
+  } catch {
+    return false
+  }
+}
+
 /**
  * Post-write validation: re-parse the file and confirm it is valid
- * JSON + every hook command path that looks absolute points to an
- * existing file. (Non-absolute commands — `bash ~/foo` — are trusted
- * to the user's shell.)
+ * JSON, every hook entry has a string `command`, and aun-owned
+ * absolute command targets actually exist + carry an executable bit.
+ *
+ * Spec v6 §2.5 lists three reachability checks:
+ *   - existing hook command paths still resolve
+ *   - mcpServers.aun.command resolves
+ *   - mcpServers.aun.command has the executable bit set
+ *
+ * Failure throws `SettingsPatchError(code='E_VALIDATE')`. The caller
+ * (`writePatch`) catches that and restores the backup, so a broken
+ * patch never lingers on disk.
+ *
+ * Non-absolute commands (bare `bun`, `claude`, etc.) are trusted to
+ * the user's shell PATH — verifying PATH membership is out of scope
+ * because (a) PATH varies per process and (b) it's the operator's
+ * responsibility, not the installer's.
  */
-export function validatePatched(settingsPath: string): void {
+export function validatePatched(settingsPath: string, opts: ValidationOptions = {}): void {
+  const home = opts.home ?? process.env.HOME ?? ''
+  const requireExec = opts.requireExecutableBit ?? true
   let parsed: ClaudeSettings
   try {
     parsed = readSettings(settingsPath)
@@ -300,7 +412,31 @@ export function validatePatched(settingsPath: string): void {
             `post-write validation failed: hooks.${event} entry has non-string command`,
           )
         }
+        const r = inspectCommand(h.command, home)
+        if (r.reason === 'absolute-missing' || r.reason === 'shell-prefix-target-missing') {
+          throw new SettingsPatchError(
+            'E_VALIDATE',
+            `post-write validation failed: hooks.${event} command target not found: ${r.resolvedPath ?? h.command}`,
+          )
+        }
       }
+    }
+  }
+  // mcpServers.aun: command must resolve + carry executable bit.
+  const aunServer = parsed.mcpServers?.aun
+  if (aunServer) {
+    const r = inspectCommand(aunServer.command, home)
+    if (r.reason === 'absolute-missing' || r.reason === 'shell-prefix-target-missing') {
+      throw new SettingsPatchError(
+        'E_VALIDATE',
+        `post-write validation failed: mcpServers.aun.command target not found: ${r.resolvedPath ?? aunServer.command}`,
+      )
+    }
+    if (requireExec && r.resolvedPath && r.resolvedPath.startsWith('/') && !isExecutable(r.resolvedPath)) {
+      throw new SettingsPatchError(
+        'E_VALIDATE',
+        `post-write validation failed: mcpServers.aun.command is not executable: ${r.resolvedPath} (chmod +x to fix)`,
+      )
     }
   }
 }
