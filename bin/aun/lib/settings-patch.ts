@@ -1,5 +1,5 @@
 /**
- * settings.json patch + backup + validate (spec v6 §1.3 / §2 / §3).
+ * settings.json patch + backup + validate (spec v6 v1.2 §1.3 / §2 / §3).
  *
  * This is the single place that touches the user's
  * `~/.claude/settings.json`. Every operation is transactional: either
@@ -7,15 +7,23 @@
  * it, or nothing was changed and the caller gets a thrown error with
  * enough detail to surface to the user.
  *
+ * Cycle 3 (v1.2) scope: this module manages **hooks only**. The
+ * `mcpServers` field is no longer written by aun — `claude mcp add
+ * --scope user` is the official register path and writes
+ * `~/.claude.json` (see init.ts step 5a + spec §1.3.1). Touching
+ * settings.json `mcpServers` is forbidden (§3.1 cycle 3); the
+ * existing `mcpServers` field on a user's settings.json (if any) is
+ * preserved verbatim by the deep merge but never targeted by this
+ * module.
+ *
  * Invariants the tests pin (see §4 / tests/contract/test_aun_*):
  *   - Backup filename is `<path>.bak.YYYYMMDD-HHMMSS` in UTC; the last
  *     5 are retained, older ones are rotated.
  *   - `hooks.<event>` is **array-append**. A matching command string
  *     is deduped so repeated `aun init` calls don't grow the array.
- *   - `mcpServers.aun` conflict with a pre-existing key ABORTs unless
- *     `opts.force === true`; we never silently overwrite user config.
  *   - Unrelated keys in the existing settings.json are copied through
- *     verbatim by deep-merge.
+ *     verbatim by deep-merge — the cycle 3 mcpServers preservation
+ *     mode falls out of this for free.
  *   - Validation runs AFTER the write. If it fails the backup is
  *     automatically restored and an error is thrown.
  *
@@ -182,26 +190,14 @@ export function mergeAunPatch(
     out.hooks = merged
   }
 
-  // --- mcpServers.aun: conflict-abort unless force ----------------------
-  if (patch.mcpServers) {
-    const baseServers = (base.mcpServers ?? {}) as Record<string, McpServerEntry>
-    const merged = { ...baseServers }
-    for (const [name, entry] of Object.entries(patch.mcpServers)) {
-      if (merged[name] !== undefined && !opts.force) {
-        const have = merged[name]
-        if (JSON.stringify(have) !== JSON.stringify(entry)) {
-          throw new SettingsPatchError(
-            'E_MCP_CONFLICT',
-            `mcpServers.${name} already exists with a different value. Rerun with --force to override, or remove the existing entry first.`,
-          )
-        }
-        // Identical config — idempotent, nothing to do.
-        continue
-      }
-      merged[name] = entry
-    }
-    out.mcpServers = merged
-  }
+  // mcpServers patching was deleted in cycle 3 — `~/.claude/settings.json`
+  // mcpServers field is not the official user-scope path. Spec v6 v1.2
+  // (cycle 3) routes user-scope MCP server registration through
+  // `claude mcp add --scope user`, which writes to `~/.claude.json`
+  // (see init.ts step 5a + spec §1.3.1). Touching settings.json
+  // mcpServers is now explicitly Forbidden (§3.1 cycle 3). Any
+  // `patch.mcpServers` value is silently ignored here so a stale
+  // call site can't reintroduce the bug.
 
   // --- env: AUN_* prefix merge with fail-fast on value conflict ---------
   // Spec v6 §2.2 — an existing env key that *differs* from the aun patch
@@ -371,13 +367,16 @@ function isExecutable(absPath: string): boolean {
 
 /**
  * Post-write validation: re-parse the file and confirm it is valid
- * JSON, every hook entry has a string `command`, and aun-owned
- * absolute command targets actually exist + carry an executable bit.
+ * JSON and every hook entry has a string `command` whose absolute or
+ * shell-prefixed target actually exists on disk.
  *
- * Spec v6 §2.5 lists three reachability checks:
+ * Spec v6 v1.2 (cycle 3) reachability scope:
  *   - existing hook command paths still resolve
- *   - mcpServers.aun.command resolves
- *   - mcpServers.aun.command has the executable bit set
+ *
+ * The cycle 1 mcpServers.aun.command + executable-bit checks were
+ * removed in cycle 3: settings.json no longer carries an aun
+ * mcpServers entry — `claude mcp add --scope user` is the path of
+ * record (init.ts step 5a → `~/.claude.json`). See spec §1.3.1.
  *
  * Failure throws `SettingsPatchError(code='E_VALIDATE')`. The caller
  * (`writePatch`) catches that and restores the backup, so a broken
@@ -390,7 +389,6 @@ function isExecutable(absPath: string): boolean {
  */
 export function validatePatched(settingsPath: string, opts: ValidationOptions = {}): void {
   const home = opts.home ?? process.env.HOME ?? ''
-  const requireExec = opts.requireExecutableBit ?? true
   let parsed: ClaudeSettings
   try {
     parsed = readSettings(settingsPath)
@@ -422,30 +420,12 @@ export function validatePatched(settingsPath: string, opts: ValidationOptions = 
       }
     }
   }
-  // mcpServers.aun: command must resolve + carry executable bit.
-  const aunServer = parsed.mcpServers?.aun
-  if (aunServer) {
-    const r = inspectCommand(aunServer.command, home)
-    if (r.reason === 'absolute-missing' || r.reason === 'shell-prefix-target-missing') {
-      throw new SettingsPatchError(
-        'E_VALIDATE',
-        `post-write validation failed: mcpServers.aun.command target not found: ${r.resolvedPath ?? aunServer.command}`,
-      )
-    }
-    if (requireExec && r.resolvedPath && r.resolvedPath.startsWith('/') && !isExecutable(r.resolvedPath)) {
-      throw new SettingsPatchError(
-        'E_VALIDATE',
-        `post-write validation failed: mcpServers.aun.command is not executable: ${r.resolvedPath} (chmod +x to fix)`,
-      )
-    }
-  }
 }
 
 export interface DiffEntry {
-  kind: 'hook-add' | 'mcpserver-add' | 'mcpserver-keep-conflict' | 'env-add'
+  kind: 'hook-add' | 'env-add'
   event?: string
   command?: string
-  serverName?: string
   envKey?: string
   envValue?: string
 }
@@ -453,9 +433,11 @@ export interface DiffEntry {
 /**
  * Compute a structured summary of what would change. Used by
  * `aun init --dry-run` to show the user exactly what the patch
- * would touch, without writing anything.
+ * would touch, without writing anything. Cycle 3: mcpServers diff
+ * branch is removed — settings.json no longer carries an aun
+ * mcpServers entry.
  */
-export function diffPatch(base: ClaudeSettings, patch: AunPatch, opts: PatchOptions = {}): DiffEntry[] {
+export function diffPatch(base: ClaudeSettings, patch: AunPatch, _opts: PatchOptions = {}): DiffEntry[] {
   const entries: DiffEntry[] = []
   if (patch.hooks) {
     const baseHooks = (base.hooks ?? {}) as Partial<Record<string, HookRegistration[]>>
@@ -472,19 +454,6 @@ export function diffPatch(base: ClaudeSettings, patch: AunPatch, opts: PatchOpti
       }
     }
   }
-  if (patch.mcpServers) {
-    const baseServers = (base.mcpServers ?? {}) as Record<string, McpServerEntry>
-    for (const [name, entry] of Object.entries(patch.mcpServers)) {
-      if (baseServers[name] === undefined) {
-        entries.push({ kind: 'mcpserver-add', serverName: name })
-      } else if (
-        !opts.force &&
-        JSON.stringify(baseServers[name]) !== JSON.stringify(entry)
-      ) {
-        entries.push({ kind: 'mcpserver-keep-conflict', serverName: name })
-      }
-    }
-  }
   if (patch.env) {
     const baseEnv = (base.env ?? {}) as Record<string, string>
     for (const [k, v] of Object.entries(patch.env)) {
@@ -497,25 +466,24 @@ export function diffPatch(base: ClaudeSettings, patch: AunPatch, opts: PatchOpti
 }
 
 /**
- * Remove aun-owned entries from a settings object. Two modes:
- *   - 'surgical': drop hook entries whose command exactly matches one
- *     of `aunHookCommandMarkers`, drop `mcpServers.aun`, drop any env
- *     keys with AUN_* prefix. All other content is preserved.
- *   - 'full': drop the entries above AND leave everything else
- *     untouched. In practice the uninstall flow pairs 'full' with a
- *     separate backup-restore call.
+ * Remove aun-owned entries from a settings object. Cycle 3 scope:
+ *   - drop hook entries whose command matches `aunHookCommandMarkers`
+ *   - drop env keys with the AUN_* prefix
  *
- * The caller is responsible for writing the result via `writePatch`
- * (or for passing the output to `renameSync` of a backup file).
+ * `mcpServers.aun` is not touched here — that record lives in
+ * `~/.claude.json` (cycle 3) and is removed by the uninstall flow's
+ * `claude mcp remove aun` shell-out, not by this in-memory helper.
+ *
+ * The caller writes the result via `writePatch` (or pairs the output
+ * with a `renameSync` of a backup file).
  */
 export function removeAunFromSettings(
   base: ClaudeSettings,
-  opts: { aunHookCommandMarkers: string[]; aunMcpServerName?: string; aunEnvPrefix?: string },
+  opts: { aunHookCommandMarkers: string[]; aunEnvPrefix?: string },
 ): ClaudeSettings {
   const out: ClaudeSettings = { ...base }
   const markers = new Set(opts.aunHookCommandMarkers)
   const envPrefix = opts.aunEnvPrefix ?? 'AUN_'
-  const mcpName = opts.aunMcpServerName ?? 'aun'
 
   if (out.hooks) {
     const scrubbed: Partial<Record<string, HookRegistration[]>> = {}
@@ -531,12 +499,6 @@ export function removeAunFromSettings(
       if (kept.length > 0) scrubbed[event] = kept
     }
     out.hooks = scrubbed
-  }
-
-  if (out.mcpServers && out.mcpServers[mcpName]) {
-    const remaining = { ...out.mcpServers }
-    delete remaining[mcpName]
-    out.mcpServers = remaining
   }
 
   if (out.env) {

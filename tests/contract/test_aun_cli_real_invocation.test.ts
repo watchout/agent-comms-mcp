@@ -64,7 +64,7 @@ describe('test_aun_cli_real_invocation — npx-style CLI invocation, not library
   test('aun init --dry-run runs end-to-end, prints diff JSON, writes nothing', () => {
     const before = readFileSync(join(home, '.claude', 'settings.json'), 'utf-8')
     const r = runAun(
-      ['init', '--dry-run', '--token', 'cli-real-token', '--skip-version-check', '--skip-executable-bit-check'],
+      ['init', '--dry-run', '--token', 'cli-real-token', '--skip-version-check', '--skip-executable-bit-check', '--skip-claude-mcp-add'],
       home,
     )
     expect(r.status).toBe(0)
@@ -80,7 +80,7 @@ describe('test_aun_cli_real_invocation — npx-style CLI invocation, not library
   test('aun init without --token aborts with the spec §1.2 step 6 error message', () => {
     // Token absent on every documented surface (flag, env, .env file).
     const r = runAun(
-      ['init', '--skip-version-check'],
+      ['init', '--skip-version-check', '--skip-claude-mcp-add', '--skip-executable-bit-check'],
       home,
     )
     expect(r.status).toBe(1)

@@ -84,15 +84,11 @@ describe('test_aun_validation — malformed input detected, post-write failure r
     }
   })
 
-  test('validatePatched rejects a non-executable mcpServers.aun.command (§2.5)', () => {
-    // Create a real but non-executable file inside the tmp HOME so the
-    // executable-bit check fires deterministically.
-    const target = join(tmpDir, 'fake-bin')
-    writeFileSync(target, '#!/usr/bin/env bash\nexit 0\n')
-    // No chmod +x — leaving mode without exec bits.
-    writeFileSync(settingsPath, JSON.stringify({
-      mcpServers: { aun: { command: target, args: [] } },
-    }, null, 2) + '\n')
-    expect(() => validatePatched(settingsPath, { home, requireExecutableBit: true })).toThrow(SettingsPatchError)
-  })
+  // Cycle 3: mcpServers reachability check removed from settings-patch
+  // validation. settings.json never carries an aun mcpServers entry
+  // anymore — `claude mcp add --scope user` writes ~/.claude.json
+  // instead, and that file is the CLI's own jurisdiction (we don't
+  // re-validate its bytes here). The cycle 1 test that asserted
+  // `validatePatched` rejected a non-executable mcpServers.aun.command
+  // was deleted along with the underlying check.
 })

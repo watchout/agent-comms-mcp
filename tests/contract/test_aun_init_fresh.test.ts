@@ -5,15 +5,19 @@ import { join, resolve } from 'node:path'
 import { init } from '../../bin/aun/init'
 import { readSettings } from '../../bin/aun/lib/settings-patch'
 
-// Spec v6 §4.1 merge gate core — fresh-env init.
+// Spec v6 v1.2 §4.1 merge gate core — fresh-env init (cycle 3).
 // Clean tmp HOME (~/.aun/ absent, settings.json minimal) → `init()` →
 //   (a) ~/.aun/ created with config.json + .env template
 //   (b) ~/.claude/plugins/aun/server.ts placed
-//   (c) ~/.claude/settings.json patched (hooks + mcpServers.aun present)
+//   (c) ~/.claude/settings.json carries the Stop hook and NO mcpServers
+//       field. mcpServers.aun is registered separately in
+//       `~/.claude.json` via `claude mcp add` — see
+//       test_aun_claude_json_register for that path.
 //   (d) ~/.claude/settings.json.bak.<ts> created (pre-patch content)
-//   (e) no errors
+//   (e) CLI signature baseline captured (best-effort)
 //
-// Instruction: lead-ama PR-aun-install §4.1 (msg id 521b6038).
+// Instruction: lead-ama PR-aun-install cycle 3 dispatch (msg ids
+// 759014fb / 2acf9f8c / 600eb5d0).
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 
@@ -36,7 +40,7 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
   afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
   test('init() returns ok=true on clean tmp home + settings.json minimal', () => {
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
     expect(res.errors).toEqual([])
     expect(res.ok).toBe(true)
   })
@@ -56,17 +60,13 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
     expect(placed).toBe(src)
   })
 
-  test('(c) ~/.claude/settings.json has hooks.SessionStart + hooks.Stop + mcpServers.aun entries', () => {
+  test('(c) ~/.claude/settings.json has hooks.Stop and NO mcpServers field (cycle 3)', () => {
     const s = readSettings(settingsPath)
     const stop = s.hooks?.Stop ?? []
-    const mcp = s.mcpServers ?? {}
+    // Cycle 3 forbids any aun-side write to settings.json mcpServers.
+    // The file must NOT carry an mcpServers field as a result of init.
+    expect(s.mcpServers).toBeUndefined()
     expect(stop.length).toBeGreaterThanOrEqual(1)
-    expect(mcp.aun).toBeDefined()
-    // §1.4 flag verbatim — the startup args must include the frozen
-    // dangerously-load-development-channels + server:aun pair.
-    const args = (mcp.aun?.args ?? []).join(' ')
-    expect(args).toContain('--dangerously-load-development-channels')
-    expect(args).toContain('server:aun')
     // Stop hook references the PR-C #240 enforcement script.
     const stopCommands = stop.flatMap(reg => reg.hooks.map(h => h.command))
     expect(stopCommands.some(c => c.includes('aun-send-tool-enforcement.sh'))).toBe(true)

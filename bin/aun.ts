@@ -99,6 +99,7 @@ export function run(argv: string[] = process.argv): number {
         token: typeof flags.token === 'string' ? (flags.token as string) : undefined,
         skipVersionCheck: !!flags['skip-version-check'],
         skipExecutableBitCheck: !!flags['skip-executable-bit-check'],
+        skipClaudeMcpAdd: !!flags['skip-claude-mcp-add'],
       })
       printSummary('aun init', res.summary, res.errors)
       if (res.dryRun && res.dryRunDiff) {
@@ -109,7 +110,15 @@ export function run(argv: string[] = process.argv): number {
     }
     case 'start': {
       const res = start({ extraArgs: extras, spawn: !flags['dry-run'] })
-      printSummary('aun start', ['command: ' + res.commandLine.join(' '), ...res.driftWarnings], res.errors)
+      printSummary('aun start', ['command: ' + res.argv.join(' '), ...res.driftWarnings], res.errors)
+      if (res.spawned) {
+        // The child's `exit` handler in start() owns the eventual
+        // `process.exit(...)`. Returning a non-zero code here would
+        // race that handler and kill the claude process mid-flight.
+        // Hand control to the event loop until the child exits.
+        // -1 is a sentinel the runner below maps to "do not exit yet".
+        return -1
+      }
       return res.ok ? 0 : 1
     }
     case 'uninstall': {
@@ -134,7 +143,10 @@ export function run(argv: string[] = process.argv): number {
         return r.ok ? 0 : 1
       }
       const r = start({})
-      printSummary('aun (auto)', ['command: ' + r.commandLine.join(' '), ...r.driftWarnings], r.errors)
+      printSummary('aun (auto)', ['command: ' + r.argv.join(' '), ...r.driftWarnings], r.errors)
+      // Same -1 sentinel as the explicit `start` subcommand so the
+      // child's exit handler owns process.exit.
+      if (r.spawned) return -1
       return r.ok ? 0 : 1
     }
     default:
@@ -145,5 +157,10 @@ export function run(argv: string[] = process.argv): number {
 
 if (import.meta.main) {
   const code = run(process.argv)
-  process.exit(code)
+  // -1 means a long-running subcommand (currently `aun start`) has
+  // taken over and will call process.exit(...) itself when its child
+  // claude process terminates.
+  if (code !== -1) {
+    process.exit(code)
+  }
 }

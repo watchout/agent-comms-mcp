@@ -34,9 +34,9 @@ describe('test_aun_uninstall — auto / --backup / --surgical', () => {
     afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
     test('init → uninstall (auto) → settings.json matches pre-init content', () => {
-      const initRes = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+      const initRes = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
       expect(initRes.ok).toBe(true)
-      const res = uninstall({ home, claudeHome, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+      const res = uninstall({ home, claudeHome, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
       expect(res.ok).toBe(true)
       expect(res.mode).toBe('auto')
       expect(res.restoredFrom).toBeDefined()
@@ -51,11 +51,11 @@ describe('test_aun_uninstall — auto / --backup / --surgical', () => {
     afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
     test('init creates backup; --backup path restores that exact file', () => {
-      const initRes = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+      const initRes = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
       expect(initRes.ok).toBe(true)
       // The backup path that init created is stored on the result.
       expect(initRes.backupPath).toBeDefined()
-      const res = uninstall({ home, claudeHome, backup: initRes.backupPath!, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+      const res = uninstall({ home, claudeHome, backup: initRes.backupPath!, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
       expect(res.ok).toBe(true)
       expect(res.mode).toBe('backup')
       expect(res.restoredFrom).toBe(initRes.backupPath!)
@@ -73,10 +73,10 @@ describe('test_aun_uninstall — auto / --backup / --surgical', () => {
     afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
     test('init + surgical uninstall: user hook + env preserved, aun entries gone', () => {
-      const initRes = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+      const initRes = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
       expect(initRes.ok).toBe(true)
 
-      const res = uninstall({ home, claudeHome, surgical: true, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+      const res = uninstall({ home, claudeHome, surgical: true, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
       expect(res.ok).toBe(true)
       expect(res.mode).toBe('surgical')
 
@@ -91,8 +91,11 @@ describe('test_aun_uninstall — auto / --backup / --surgical', () => {
 
       // User env preserved.
       expect((s.env as Record<string, string> | undefined)?.USER_CUSTOM_FLAG).toBe('keep-me')
-      // aun mcpServer gone.
-      expect(s.mcpServers?.aun).toBeUndefined()
+      // Cycle 3: settings.json never carried mcpServers.aun, so the
+      // file-level surgical scrub has nothing to remove there. The
+      // ~/.claude.json side is removed by `claude mcp remove aun` in
+      // a follow-up PR (uninstall CLI shell-out, §5 Open scope).
+      expect(s.mcpServers).toBeUndefined()
     })
   })
 })

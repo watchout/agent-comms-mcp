@@ -55,6 +55,10 @@ export interface InitOptions {
    *  filesystems that ignore the mode bit.
    */
   skipExecutableBitCheck?: boolean
+  /** Skip the cycle 3 step 5a `claude mcp add` shell-out (tests that
+   *  don't want the side effect on the host's `~/.claude.json`).
+   */
+  skipClaudeMcpAdd?: boolean
 }
 
 /** Spec v6 §1.2 step 1 — minimum versions of dependency CLIs. */
@@ -202,39 +206,108 @@ function resolveBunPath(opts: InitOptions): string {
 }
 
 export function buildAunPatch(opts: InitOptions): AunPatch {
-  const pluginDir = join(claudeHomeFor(opts), 'plugins', 'aun')
-  const aunEntry = join(pluginDir, 'server.ts')
-  const bunPath = resolveBunPath(opts)
-
+  // Cycle 3: aun owns only the Stop hook + AUN_* env in
+  // ~/.claude/settings.json. mcpServers.aun is registered separately
+  // in ~/.claude.json by `claude mcp add --scope user` (step 5a).
+  // This mirrors spec v6 §1.3.1 verbatim.
   const stopHook: HookRegistration = {
     matcher: '',
     hooks: [{ type: 'command', command: AUN_HOOK_MARKER_STOP }],
   }
-
   return {
-    hooks: {
-      Stop: [stopHook],
-    },
-    mcpServers: {
-      aun: {
-        command: bunPath,
-        // §1.4 frozen — startup flag verbatim.
-        args: [
-          aunEntry,
-          '--dangerously-skip-permissions',
-          '--dangerously-load-development-channels',
-          'server:aun',
-        ],
-        env: {
-          AUN_HOME: aunHomeFor(opts),
-          AUN_LOG_LEVEL: 'info',
-        },
-      },
-    },
+    hooks: { Stop: [stopHook] },
     env: {
       AUN_HOME: aunHomeFor(opts),
       AUN_LOG_LEVEL: 'info',
     },
+  }
+}
+
+// --- Cycle 3: claude mcp add CLI shell-out (spec §1.3.1 + step 5a) -----
+
+export class ClaudeMcpAddError extends Error {
+  constructor(public readonly stderr: string, message: string) {
+    super(message)
+    this.name = 'ClaudeMcpAddError'
+  }
+}
+
+export class ClaudeNotFoundError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ClaudeNotFoundError'
+  }
+}
+
+/**
+ * Step 5a — register the aun server in `~/.claude.json` via the
+ * official Claude Code CLI. Idempotent: pre-removing any existing
+ * `aun` user-scope entry before re-adding makes repeat `aun init`
+ * runs converge on a single, current entry without depending on the
+ * CLI's own --force semantics (which differ across Claude Code
+ * versions). Both pre-remove and add are gated on a 10s timeout
+ * (spec §2.4); a non-zero add exit raises ClaudeMcpAddError so the
+ * caller can surface stderr and abort init cleanly.
+ */
+export function registerAunViaClaude(opts: InitOptions): {
+  command: string
+  bunPath: string
+  serverPath: string
+  preRemoveStderr: string
+} {
+  const pluginDir = join(claudeHomeFor(opts), 'plugins', 'aun')
+  const aunEntry = join(pluginDir, 'server.ts')
+  const bunPath = resolveBunPath(opts)
+
+  const claudeBin = (opts.env ?? process.env).AUN_CLAUDE_BIN || 'claude'
+  const which = spawnSync('which', [claudeBin], { encoding: 'utf-8' })
+  if ((which.stdout ?? '').trim() === '') {
+    throw new ClaudeNotFoundError(
+      `claude CLI not found on PATH (looked up "${claudeBin}"). Install Claude Code (≥ 2.1.80) or set AUN_CLAUDE_BIN to an absolute path before re-running aun init.`,
+    )
+  }
+
+  // Pre-remove (best-effort): ignore non-zero exit because the entry
+  // may legitimately not exist yet on a fresh install.
+  const removeArgs = ['mcp', 'remove', 'aun', '--scope', 'user']
+  const removeResult = spawnSync(claudeBin, removeArgs, {
+    encoding: 'utf-8',
+    timeout: 10_000,
+    env: opts.env ?? process.env,
+  })
+  const preRemoveStderr = (removeResult.stderr ?? '').trim()
+
+  // Add the user-scope entry. command + args mirror the spec §1.3.1
+  // example: `claude mcp add --scope user --transport stdio aun -- <bun> <server.ts>`.
+  // The `--` terminates flag parsing so the server.ts path can't be
+  // mistaken for a CLI option.
+  const addArgs = [
+    'mcp', 'add',
+    '--scope', 'user',
+    '--transport', 'stdio',
+    'aun',
+    '--',
+    bunPath,
+    aunEntry,
+  ]
+  const addResult = spawnSync(claudeBin, addArgs, {
+    encoding: 'utf-8',
+    timeout: 10_000,
+    env: opts.env ?? process.env,
+  })
+  if (addResult.status !== 0) {
+    const stderr = (addResult.stderr ?? '').trim() || (addResult.stdout ?? '').trim() || `exit ${addResult.status}`
+    throw new ClaudeMcpAddError(
+      stderr,
+      `claude mcp add (--scope user) failed with status ${addResult.status}: ${stderr}`,
+    )
+  }
+
+  return {
+    command: `${claudeBin} ${addArgs.join(' ')}`,
+    bunPath,
+    serverPath: aunEntry,
+    preRemoveStderr,
   }
 }
 
@@ -341,7 +414,29 @@ export function init(opts: InitOptions = {}): InitResult {
     }
   }
 
-  // Step 5: settings.json patch (destructive; guarded by backup)
+  // Step 5a: register the aun MCP server in ~/.claude.json via the
+  // official `claude mcp add --scope user` CLI (spec v6 §1.3.1).
+  // Skipped in dry-run + when explicitly opted out for tests.
+  if (!opts.dryRun && !opts.skipClaudeMcpAdd) {
+    try {
+      const r = registerAunViaClaude(opts)
+      summary.push(`claude mcp add (user scope) registered aun → ${r.serverPath}`)
+    } catch (err) {
+      if (err instanceof ClaudeNotFoundError) {
+        errors.push(err.message)
+      } else if (err instanceof ClaudeMcpAddError) {
+        errors.push(err.message)
+      } else {
+        errors.push(`claude mcp add failed: ${(err as Error).message}`)
+      }
+      // Abort early — do not patch settings.json after a CLI-side
+      // register failure, because step 5b would land us in a half-
+      // configured state with hooks pointing at an unregistered server.
+      return { ok: false, dryRun: false, aunHome, claudeSettingsPath, backupPath: null, settingsChanged: false, errors, summary }
+    }
+  }
+
+  // Step 5b: settings.json hooks-only patch (destructive; guarded by backup).
   const patch = buildAunPatch(opts)
   let base: ClaudeSettings = {}
   try {
@@ -424,7 +519,13 @@ export function init(opts: InitOptions = {}): InitResult {
     summary.push('CLI signature baseline capture skipped (non-fatal)')
   }
 
-  // Step 7: summary already accumulated; caller prints.
+  // Step 7: alias remediation message (spec §2.6 verbatim — never
+  // auto-write the user's shell rc; just nudge them).
+  summary.push('')
+  summary.push('To make `claude` invoke the aun-aware launcher, add to your shell rc:')
+  summary.push('    alias claude=\'aun start\'')
+  summary.push('Or call `aun start` directly. See `aun start --help`.')
+
   return {
     ok: errors.length === 0,
     dryRun: false,
