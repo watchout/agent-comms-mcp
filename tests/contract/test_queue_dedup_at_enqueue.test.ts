@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { isQueueContentDup, contentHash } from '../../core/queue-dedup'
+import { isQueueContentDup, contentHash, enqueueWithDedup } from '../../core/queue-dedup'
 
 // Issue #251 (a) — content-level dedup at enqueue.
 //
@@ -157,5 +157,137 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
     expect(a).toMatch(/^[0-9a-f]{16}$/)
     // Different content must produce different hash.
     expect(a).not.toBe(contentHash('different content'))
+  })
+
+  // Issue #251 cycle 3 (CTO `bd9b1a9b` + auditor `1e388095`) —
+  // e2e race tests against the per-call dedicated client helper.
+  // case (6) above only confirms that the SELECT side observes a
+  // committed row; cases (9) / (10) below drive the actual race
+  // through `enqueueWithDedup`, which owns its own `pg.Client` per
+  // call. Two callers racing into the same dedup window must
+  // produce exactly one INSERT.
+
+  test('(9) e2e race — Promise.all of 2 enqueueWithDedup calls produces exactly 1 INSERT', async () => {
+    const RACE_AGENT = `test-race-${randomUUID().slice(0, 8)}`
+    try {
+      const messageIdA = randomUUID()
+      const messageIdB = randomUUID()
+      const content = `e2e race content ${randomUUID().slice(0, 8)}`
+      const hash = contentHash(content)
+      const buildPayload = (mid: string) => JSON.stringify({
+        author_id: 'race', content, content_hash: hash,
+        message_type: 'chat', source: 'agent-comms', ts: new Date().toISOString(), message_id: mid,
+      })
+
+      const [a, b] = await Promise.all([
+        enqueueWithDedup({
+          databaseUrl: DATABASE_URL!,
+          agentId: RACE_AGENT, content, source: 'agent-comms', windowSeconds: 30,
+          insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          insertParams: [RACE_AGENT, messageIdA, buildPayload(messageIdA)],
+        }),
+        enqueueWithDedup({
+          databaseUrl: DATABASE_URL!,
+          agentId: RACE_AGENT, content, source: 'agent-comms', windowSeconds: 30,
+          insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          insertParams: [RACE_AGENT, messageIdB, buildPayload(messageIdB)],
+        }),
+      ])
+
+      // Exactly one of the two callers wrote a row; the other
+      // dedup-skipped. Both possibilities (A wins / B wins) are
+      // valid outcomes — what we assert is the count, not the
+      // ordering.
+      const insertedCount = (a.inserted ? 1 : 0) + (b.inserted ? 1 : 0)
+      const skippedCount = (a.dedupSkipped ? 1 : 0) + (b.dedupSkipped ? 1 : 0)
+      expect(insertedCount).toBe(1)
+      expect(skippedCount).toBe(1)
+
+      // DB row count: exactly 1 row matching this content.
+      const rows = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM message_queue
+         WHERE agent_id = $1 AND (payload::jsonb->>'content_hash') = $2`,
+        [RACE_AGENT, hash],
+      )
+      expect(parseInt(rows.rows[0].n, 10)).toBe(1)
+    } finally {
+      await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [RACE_AGENT])
+    }
+  })
+
+  test('(10) e2e race — different sources race produces 2 INSERTs (cross-source preserved)', async () => {
+    // Cross-source dedup is intentionally NOT collapsed (Issue
+    // #251 §1 verbatim). Two writers with the same content but
+    // different `source` should both write rows even when racing.
+    const RACE_AGENT = `test-race-cross-${randomUUID().slice(0, 8)}`
+    try {
+      const content = `cross-source race ${randomUUID().slice(0, 8)}`
+      const hash = contentHash(content)
+      const buildPayload = (src: string, mid: string) => JSON.stringify({
+        author_id: 'race', content, content_hash: hash,
+        message_type: 'chat', source: src, ts: new Date().toISOString(), message_id: mid,
+      })
+      const midA = randomUUID()
+      const midB = randomUUID()
+
+      const [a, b] = await Promise.all([
+        enqueueWithDedup({
+          databaseUrl: DATABASE_URL!,
+          agentId: RACE_AGENT, content, source: 'agent-comms', windowSeconds: 30,
+          insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          insertParams: [RACE_AGENT, midA, buildPayload('agent-comms', midA)],
+        }),
+        enqueueWithDedup({
+          databaseUrl: DATABASE_URL!,
+          agentId: RACE_AGENT, content, source: 'discord', windowSeconds: 30,
+          insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          insertParams: [RACE_AGENT, midB, buildPayload('discord', midB)],
+        }),
+      ])
+
+      expect(a.inserted).toBe(true)
+      expect(b.inserted).toBe(true)
+      expect(a.dedupSkipped).toBe(false)
+      expect(b.dedupSkipped).toBe(false)
+
+      const rows = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM message_queue WHERE agent_id = $1`,
+        [RACE_AGENT],
+      )
+      expect(parseInt(rows.rows[0].n, 10)).toBe(2)
+    } finally {
+      await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [RACE_AGENT])
+    }
+  })
+
+  test('(11) shared-client transaction hazard avoided — enqueueWithDedup never BEGIN/COMMIT on the caller-supplied client', async () => {
+    // Regression test for the auditor's axis-3 finding (msg
+    // `1e388095`): cycle 2 ran BEGIN/COMMIT on the shared singleton
+    // returned by `tryGetDb()`. cycle 3 moved the transaction onto
+    // a per-call client owned by the helper. We verify that
+    // `enqueueWithDedup` does not require a caller-provided pg
+    // client at all — it builds its own from the URL.
+    //
+    // The caller (`server.ts`) keeps the shared singleton for
+    // non-transaction work (saveMessage, agent_messages writes
+    // around L1779-L1789); only the dedup tx is offloaded.
+    const HAZARD_AGENT = `test-hazard-${randomUUID().slice(0, 8)}`
+    try {
+      const content = `hazard-test ${randomUUID().slice(0, 8)}`
+      const result = await enqueueWithDedup({
+        databaseUrl: DATABASE_URL!,
+        agentId: HAZARD_AGENT, content, source: 'agent-comms', windowSeconds: 30,
+        insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+        insertParams: [HAZARD_AGENT, randomUUID(), JSON.stringify({
+          author_id: 'h', content, content_hash: contentHash(content),
+          message_type: 'chat', source: 'agent-comms', ts: new Date().toISOString(),
+        })],
+      })
+      expect(result.inserted).toBe(true)
+      expect(result.attempts).toBe(1)
+      expect(result.contentHash).toBe(contentHash(content))
+    } finally {
+      await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [HAZARD_AGENT])
+    }
   })
 })

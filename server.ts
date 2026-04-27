@@ -91,7 +91,7 @@ import {
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
-import { isQueueContentDup, contentHash } from './core/queue-dedup'
+import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
@@ -1790,43 +1790,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
-            // Issue #251 cycle 2 v3 final — dedup key is
-            // (agent_id, content_hash, source) per §1 verbatim.
-            // The hash is stamped into the payload above so this
-            // SELECT compares hash-against-hash, not raw content.
-            // BEGIN/COMMIT wrapper isolates the SELECT+INSERT pair
-            // so a concurrent dual-writer either sees the row and
-            // skips, or hits the UNIQUE on commit (we retry up to
-            // 3 times before letting the error propagate).
+            // Issue #251 cycle 3 — dedup transaction is now run on
+            // a per-call dedicated `pg.Client` via `enqueueWithDedup`,
+            // not on the shared singleton (`dbClient`). Concurrent
+            // callers thus cannot interleave BEGIN/COMMIT on one
+            // socket. Mirrors `core/inbound-delivery.ts` pattern.
             const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-            let inserted = false
-            let dedupSkipped = false
-            for (let attempt = 0; attempt < 3 && !inserted && !dedupSkipped; attempt++) {
-              try {
-                await dbClient.query('BEGIN')
-                if (await isQueueContentDup(dbClient, recipient, partContent, 'agent-comms', dedupWindowSec)) {
-                  await dbClient.query('COMMIT')
-                  process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${mqContentHash})\n`)
-                  dedupSkipped = true
-                  continue
-                }
-                const sendIns = await dbClient.query(
-                  `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-                  [recipient, id, mqPayload],
-                )
-                await dbClient.query('COMMIT')
-                inserted = (sendIns.rowCount ?? 0) > 0
-                if (!inserted) {
-                  process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${recipient}, message_id=${id}) skipped by uq_mq_agent_message\n`)
-                  dedupSkipped = true
-                }
-              } catch (txErr) {
-                await dbClient.query('ROLLBACK').catch(() => {})
-                if (attempt === 2) throw txErr
-                process.stderr.write(`agent-comms: queue.dedup.retry — attempt ${attempt + 1}/3 for ${recipient}: ${txErr}\n`)
-              }
+            const result = await enqueueWithDedup({
+              databaseUrl: config.database_url,
+              agentId: recipient,
+              content: partContent,
+              source: 'agent-comms',
+              windowSeconds: dedupWindowSec,
+              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+              insertParams: [recipient, id, mqPayload],
+            })
+            if (result.dedupSkipped) {
+              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
+              continue
             }
-            if (dedupSkipped) continue
           } catch (err) {
             process.stderr.write(`agent-comms: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
           }
@@ -2204,34 +2186,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
       for (const recipient of delivery.pushTargets) {
         try {
-          // Issue #251 cycle 2 v3 final — same dedup contract as
-          // the send-fanout path above (server.ts L1788 area):
-          // (agent_id, content_hash, source) within window, wrapped
-          // in BEGIN/COMMIT with up-to-3 retries on conflict.
+          // Issue #251 cycle 3 — per-call dedicated client via
+          // `enqueueWithDedup`, mirrors send-fanout path (L1790
+          // area). Shared singleton (`client`) is no longer used
+          // for BEGIN/COMMIT; each dedup tx owns its own connection.
           const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-          let inserted = false
-          let dedupSkipped = false
-          for (let attempt = 0; attempt < 3 && !inserted && !dedupSkipped; attempt++) {
-            try {
-              await client.query('BEGIN')
-              if (await isQueueContentDup(client, recipient, partContent, 'agent-comms', dedupWindowSec)) {
-                await client.query('COMMIT')
-                process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${mqContentHash})\n`)
-                dedupSkipped = true
-                continue
-              }
-              const r = await client.query(
-                `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-                [recipient, id, mqPayload],
-              )
-              await client.query('COMMIT')
-              inserted = (r.rowCount ?? 0) > 0
-              if (!inserted) dedupSkipped = true
-            } catch (txErr) {
-              await client.query('ROLLBACK').catch(() => {})
-              if (attempt === 2) throw txErr
-              process.stderr.write(`agent-comms: queue.dedup.retry — attempt ${attempt + 1}/3 for ${recipient} (notify): ${txErr}\n`)
-            }
+          const result = await enqueueWithDedup({
+            databaseUrl: config.database_url,
+            agentId: recipient,
+            content: partContent,
+            source: 'agent-comms',
+            windowSeconds: dedupWindowSec,
+            insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+            insertParams: [recipient, id, mqPayload],
+          })
+          if (result.dedupSkipped) {
+            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
+            continue
           }
         } catch (err) {
           process.stderr.write(`agent-comms: notify message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
