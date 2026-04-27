@@ -177,16 +177,68 @@ function loadConfig(): Config {
 const config = loadConfig()
 const AGENT_ID = config.agent_id
 const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
-const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
+// Issue #248: port 8789 was the CTO bot's port; defaulting every plugin-form
+// install to 8789 caused all bots to fight for the same socket and trigger
+// orphan-kill of each other (cascade-disconnect). Resolution priority:
+//   AUN_WEBHOOK_PORT > WEBHOOK_PORT > free port in PORT_RANGE_START..PORT_RANGE_END
+// Orphan-kill only fires when the port came from explicit env (intent: clean
+// up our own previous instance). For free-port detection the picked port is
+// already vacant, so kill is unnecessary and would never target 8789 by default.
+const PORT_RANGE_START = 8800
+const PORT_RANGE_END = 8900
 
-// Kill orphan process on WEBHOOK_PORT (zombie survival prevention)
-try {
-  const orphanPid = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
-  if (orphanPid && orphanPid !== String(process.pid)) {
-    process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT}\n`)
-    process.kill(parseInt(orphanPid), 'SIGKILL')
+function isPortFreeSync(port: number): boolean {
+  try {
+    const out = execSync(`lsof -ti :${port}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return out.length === 0
+  } catch {
+    // lsof exits non-zero when no process found — port is free
+    return true
   }
-} catch {} // no process on port — expected
+}
+
+function findFreePortSync(start: number, end: number): number | null {
+  for (let p = start; p <= end; p++) {
+    if (isPortFreeSync(p)) return p
+  }
+  return null
+}
+
+function resolveWebhookPort(): { port: number; explicit: boolean } {
+  const raw = process.env.AUN_WEBHOOK_PORT ?? process.env.WEBHOOK_PORT
+  if (raw !== undefined && raw !== '') {
+    const port = parseInt(raw, 10)
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      throw new Error(`agent-comms: invalid port env value "${raw}"`)
+    }
+    process.stderr.write(`agent-comms: bound webhook port ${port} (explicit env)\n`)
+    return { port, explicit: true }
+  }
+  const port = findFreePortSync(PORT_RANGE_START, PORT_RANGE_END)
+  if (port === null) {
+    throw new Error(
+      `agent-comms: no free port available in range ${PORT_RANGE_START}-${PORT_RANGE_END}. ` +
+      `Set AUN_WEBHOOK_PORT to choose explicitly.`
+    )
+  }
+  process.stderr.write(`agent-comms: bound webhook port ${port} (free-port detection)\n`)
+  return { port, explicit: false }
+}
+
+const { port: WEBHOOK_PORT, explicit: WEBHOOK_PORT_EXPLICIT } = resolveWebhookPort()
+
+// Orphan-kill: only when env-explicit (caller's intent is to reuse a known port).
+// For free-port detection we already picked a vacant port, so killing would be
+// at best a no-op and at worst targets an unrelated process.
+if (WEBHOOK_PORT_EXPLICIT) {
+  try {
+    const orphanPid = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
+    if (orphanPid && orphanPid !== String(process.pid)) {
+      process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT}\n`)
+      process.kill(parseInt(orphanPid), 'SIGKILL')
+    }
+  } catch {} // no process on port — expected
+}
 
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
