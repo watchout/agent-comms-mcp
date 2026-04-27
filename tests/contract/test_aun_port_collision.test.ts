@@ -12,7 +12,8 @@ import { resolve } from 'node:path'
 // servers (observed 04-27, CTO directive `ef1f522b`).
 //
 // New resolution priority (§2 Required, frozen):
-//   AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection (8800-8900)
+//   AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection (8801-8900;
+//     8800 reserved for SSE_PORT default since cycle 2)
 // Range exhausted → throw mentioning AUN_WEBHOOK_PORT so the operator
 // knows the escape hatch.
 //
@@ -51,9 +52,16 @@ function closeServer(srv: net.Server): Promise<void> {
   return new Promise((res) => srv.close(() => res()))
 }
 
+// Resolve `bun` ahead of time so case (8) can override PATH inside the spawn
+// without the spawn itself failing to find the bun binary.
+const BUN_PATH = (() => {
+  try { return require('child_process').execSync('command -v bun', { encoding: 'utf-8' }).trim() } catch {}
+  return process.execPath
+})()
+
 function spawnServer(env: Record<string, string | undefined>, observeMs: number): Promise<SpawnResult> {
   return new Promise((res) => {
-    const child = spawn('bun', [SERVER_TS], {
+    const child = spawn(BUN_PATH, [SERVER_TS], {
       env: { ...process.env, ...env } as NodeJS.ProcessEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -107,14 +115,23 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
   })
 
   const ensureBlocked = async (port: number) => {
-    const s = await occupyPort(port)
-    if (s) occupied.push(s)
-    // null = already blocked by an external process; either way the
-    // port is unavailable, which is what the test needs.
+    // First attempt: try to grab the port ourselves.
+    let s = await occupyPort(port)
+    if (s) { occupied.push(s); return }
+    // null can mean (a) external process holds the port (fine — still blocked)
+    // or (b) a previous test's afterEach close is still in flight, in which
+    // case the port will free up momentarily. Retry briefly so case 7 doesn't
+    // race with the preceding test's cleanup.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      s = await occupyPort(port)
+      if (s) { occupied.push(s); return }
+    }
+    // Still null after retries — assume external owner, port is genuinely held.
   }
 
   test.if(OPT_IN)(
-    '(1) free-port detection — env unset + 8789 occupied → listens in 8800-8900',
+    '(1) free-port detection — env unset + 8789 occupied → listens in 8801-8900',
     async () => {
       await ensureBlocked(8789)
       const r = await spawnServer({ ...baseEnv(), WEBHOOK_PORT: undefined }, 4_000)
@@ -146,16 +163,16 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
   )
 
   test.if(OPT_IN)(
-    '(4) range 8800-8900 fully occupied + env unset → exits with AUN_WEBHOOK_PORT hint',
+    '(4) range 8801-8900 fully occupied + env unset → exits with AUN_WEBHOOK_PORT hint',
     async () => {
-      // Cheaper than 101 servers: the resolver shells out to `lsof` per
-      // candidate. Holding every port in the range as a real listener
-      // is the only assertion that matches production semantics.
-      for (let p = 8800; p <= 8900; p++) await ensureBlocked(p)
+      // Holding every port in the 8801-8900 range as a real listener is
+      // the only assertion that matches production semantics — both
+      // lsof-hint and bind-probe paths must observe each port as busy.
+      for (let p = 8801; p <= 8900; p++) await ensureBlocked(p)
       const r = await spawnServer({ ...baseEnv(), WEBHOOK_PORT: undefined, AUN_WEBHOOK_PORT: undefined }, 6_000)
       const combined = r.stdout + '\n' + r.stderr
       expect(combined).toMatch(/AUN_WEBHOOK_PORT/)
-      expect(combined).toMatch(/no free port|range 8800-8900/)
+      expect(combined).toMatch(/no free port|range 8801-8900/)
       // Either the throw exited the process non-zero, or the runtime
       // surfaced the error. We don't care which path — only that the
       // resolver didn't silently fall back to 8789.
@@ -212,12 +229,59 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
     15_000,
   )
 
+  test.if(OPT_IN)(
+    '(7) TOCTOU retry — 8801 pre-occupied → resolver skips 8801 and binds 8802+',
+    async () => {
+      // Cycle 3 — auditor axis 3 BLOCK fix. Pre-fix `findFreePortSync`
+      // trusted lsof, so a process started after the lsof check could
+      // grab the same port. Now `tryBindSync` does a real bind probe;
+      // with 8801 already held by this test's listener, the resolver
+      // must observe EADDRINUSE on its probe and move to 8802.
+      await ensureBlocked(8801)
+      const r = await spawnServer({ ...baseEnv(), WEBHOOK_PORT: undefined, AUN_WEBHOOK_PORT: undefined }, 4_000)
+      const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
+      expect(m).not.toBeNull()
+      const picked = parseInt(m![1], 10)
+      expect(picked).not.toBe(8801)
+      expect(picked).toBeGreaterThanOrEqual(8802)
+      expect(picked).toBeLessThanOrEqual(8900)
+    },
+    15_000,
+  )
+
+  test.if(OPT_IN)(
+    '(8) lsof-failure fallback — PATH stripped of lsof, bind probe still finds a port',
+    async () => {
+      // Cycle 3 — auditor axis 3 secondary concern (lsof failure
+      // returning "free" by default). With lsof unreachable, the
+      // first pass treats every port as "likely free" and falls
+      // through to the bind probe; a free port must still be found
+      // via the bind path alone.
+      const r = await spawnServer({
+        ...baseEnv(),
+        WEBHOOK_PORT: undefined,
+        AUN_WEBHOOK_PORT: undefined,
+        // /tmp has no `lsof`. Empty PATH would also break `bun` itself,
+        // so we point at a directory that contains the bun binary but
+        // not lsof. Caller's `bun` is invoked via absolute path, so
+        // this only blinds the resolver's `execSync('lsof ...')`.
+        PATH: '/tmp',
+      }, 6_000)
+      const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
+      expect(m).not.toBeNull()
+      const picked = parseInt(m![1], 10)
+      expect(picked).toBeGreaterThanOrEqual(8801)
+      expect(picked).toBeLessThanOrEqual(8900)
+    },
+    15_000,
+  )
+
   // Default-run shape check (non-opt-in): make sure the constants and
   // helper symbols aren't accidentally renamed by a future refactor.
   // Cheap, no spawn. Catches the "rename broke the resolver" class of
   // regression that the heavy spawn tests would only catch in CI's
   // opt-in lane.
-  test('source contains AUN_WEBHOOK_PORT priority + 8801-8900 range + SSE collision rationale', async () => {
+  test('source contains AUN_WEBHOOK_PORT priority + 8801-8900 range + SSE collision rationale + bind-probe', async () => {
     const src = await Bun.file(SERVER_TS).text()
     expect(src).toMatch(/AUN_WEBHOOK_PORT/)
     expect(src).toMatch(/PORT_RANGE_START = 8801/)
@@ -227,5 +291,8 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
     expect(src).toMatch(/SSE_PORT|AGENT_COMMS_PORT/)
     // Verify the old default has actually been removed.
     expect(src).not.toMatch(/process\.env\.WEBHOOK_PORT \?\? '8789'/)
+    // Cycle 3 — TOCTOU mitigation: bind probe must be present alongside lsof.
+    expect(src).toMatch(/tryBindSync/)
+    expect(src).toMatch(/Bun\.serve/)
   })
 })

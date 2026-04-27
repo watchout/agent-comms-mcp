@@ -191,19 +191,56 @@ const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-c
 const PORT_RANGE_START = 8801
 const PORT_RANGE_END = 8900
 
-function isPortFreeSync(port: number): boolean {
+// lsof-based hint. May falsely say "free" (lsof binary missing, errno != 1, or
+// the port owner has no listening socket lsof can see). Cycle 3 — never used as
+// the source of truth; tryBindSync is the real authority. lsof here is a
+// fast-skip optimization for the obviously-busy case.
+function isPortLikelyFreeSync(port: number): boolean {
   try {
     const out = execSync(`lsof -ti :${port}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
     return out.length === 0
   } catch {
-    // lsof exits non-zero when no process found — port is free
+    // lsof failed (binary absent, EACCES, etc.) — defer the decision to the
+    // bind probe rather than trusting "free".
     return true
   }
 }
 
+// Real bind probe — opens then immediately stops a listener on `port`. The
+// race between this stop and the eventual bridgeServer bind is the smallest
+// window achievable without restructuring server startup. Auditor cycle 2
+// "best-effort race mitigation via bind retry" framing applies here.
+function tryBindSync(port: number): boolean {
+  try {
+    // reusePort: false disables SO_REUSEPORT so EADDRINUSE actually fires
+    // when something else (test fixture, sibling bot) is already on the port.
+    // Without this, two bots can both "succeed" the probe and pick the same
+    // port — exactly the race the cycle 3 mitigation is trying to close.
+    const probe = Bun.serve({
+      port,
+      hostname: '127.0.0.1',
+      reusePort: false,
+      fetch() { return new Response('') },
+    })
+    probe.stop(true)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Cycle 3 — TOCTOU mitigation. Two passes:
+//   1. lsof-hint + bind verify (fast path; skips obviously busy ports)
+//   2. bind-only sweep (used when every port came back "lsof free" but the
+//      previous bind probes lost the race; this is also the lsof-failure path
+//      since failure is rendered as "likely free" above)
 function findFreePortSync(start: number, end: number): number | null {
   for (let p = start; p <= end; p++) {
-    if (isPortFreeSync(p)) return p
+    if (!isPortLikelyFreeSync(p)) continue
+    if (tryBindSync(p)) return p
+  }
+  for (let p = start; p <= end; p++) {
+    if (tryBindSync(p)) return p
   }
   return null
 }
