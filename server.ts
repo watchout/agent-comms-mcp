@@ -184,7 +184,11 @@ const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-c
 // Orphan-kill only fires when the port came from explicit env (intent: clean
 // up our own previous instance). For free-port detection the picked port is
 // already vacant, so kill is unnecessary and would never target 8789 by default.
-const PORT_RANGE_START = 8800
+// Range starts at 8801 — port 8800 is the AGENT_COMMS_PORT / SSE_PORT
+// default (server.ts L249). If the resolver picked 8800 for the webhook
+// bridge first, the SSE httpServer.listen(8800) later would EADDRINUSE
+// in MULTI_BOT_MODE (lead-ama L1 hidden impact, msg `fdab4db0`).
+const PORT_RANGE_START = 8801
 const PORT_RANGE_END = 8900
 
 function isPortFreeSync(port: number): boolean {

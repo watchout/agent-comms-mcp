@@ -121,7 +121,7 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
       const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
       expect(m).not.toBeNull()
       const picked = parseInt(m![1], 10)
-      expect(picked).toBeGreaterThanOrEqual(8800)
+      expect(picked).toBeGreaterThanOrEqual(8801)
       expect(picked).toBeLessThanOrEqual(8900)
     },
     15_000,
@@ -176,7 +176,7 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
       const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
       expect(m).not.toBeNull()
       const picked = parseInt(m![1], 10)
-      expect(picked).toBeGreaterThanOrEqual(8800)
+      expect(picked).toBeGreaterThanOrEqual(8801)
       // Critically — the orphan-kill log line must NOT have fired
       // against the 8789 owner. Free-port detection is supposed to
       // skip the kill entirely (no env-explicit intent).
@@ -186,17 +186,45 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
     15_000,
   )
 
+  test.if(OPT_IN)(
+    '(6) case 2b: SSE_PORT collision avoidance — EXPECTED_BOTS set + WEBHOOK_PORT unset must not pick 8800',
+    async () => {
+      // Cycle 2 — lead-ama L1 hidden impact (msg `fdab4db0`). When
+      // MULTI_BOT_MODE is on (EXPECTED_BOTS set or AGENT_COMMS_PORT set)
+      // the SSE server later binds AGENT_COMMS_PORT default 8800. If
+      // the webhook resolver had picked 8800 first, SSE startup would
+      // EADDRINUSE. PORT_RANGE_START shifted to 8801 leaves 8800 free
+      // for SSE.
+      const r = await spawnServer({
+        ...baseEnv(),
+        WEBHOOK_PORT: undefined,
+        AUN_WEBHOOK_PORT: undefined,
+        EXPECTED_BOTS: 'foo,bar',
+      }, 4_000)
+      const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
+      expect(m).not.toBeNull()
+      const picked = parseInt(m![1], 10)
+      // Critically — must not be 8800 (SSE_PORT default reservation).
+      expect(picked).not.toBe(8800)
+      expect(picked).toBeGreaterThanOrEqual(8801)
+      expect(picked).toBeLessThanOrEqual(8900)
+    },
+    15_000,
+  )
+
   // Default-run shape check (non-opt-in): make sure the constants and
   // helper symbols aren't accidentally renamed by a future refactor.
   // Cheap, no spawn. Catches the "rename broke the resolver" class of
   // regression that the heavy spawn tests would only catch in CI's
   // opt-in lane.
-  test('source contains AUN_WEBHOOK_PORT priority + 8800-8900 range', async () => {
+  test('source contains AUN_WEBHOOK_PORT priority + 8801-8900 range + SSE collision rationale', async () => {
     const src = await Bun.file(SERVER_TS).text()
     expect(src).toMatch(/AUN_WEBHOOK_PORT/)
-    expect(src).toMatch(/8800/)
-    expect(src).toMatch(/8900/)
+    expect(src).toMatch(/PORT_RANGE_START = 8801/)
+    expect(src).toMatch(/PORT_RANGE_END = 8900/)
     expect(src).toMatch(/free-port detection/)
+    // Cycle 2 — rationale comment for the 8801 shift.
+    expect(src).toMatch(/SSE_PORT|AGENT_COMMS_PORT/)
     // Verify the old default has actually been removed.
     expect(src).not.toMatch(/process\.env\.WEBHOOK_PORT \?\? '8789'/)
   })
