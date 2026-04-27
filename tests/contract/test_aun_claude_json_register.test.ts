@@ -8,7 +8,7 @@ import { init } from '../../bin/aun/init'
 // Spec v6 v1.2 §1.3.1 / §4 — `aun init` registers the aun MCP server
 // in `~/.claude.json` via the official `claude mcp add --scope user`
 // CLI. Cycle 3 frozen contract: command resolves to a bun binary,
-// args is exactly `[<server.ts path>]` (no claude CLI flags inside),
+// args is exactly `[<server.bundled.js path>]` (no claude CLI flags inside,
 // and bin/aun/init.ts must NOT also write to settings.json mcpServers.
 //
 // We don't have the real `claude` CLI on every CI machine, so this
@@ -46,7 +46,7 @@ HOME_JSON="${claudeJsonForMock}"
 if [ ! -f "$HOME_JSON" ]; then echo "{}" > "$HOME_JSON"; fi
 if [ "$cmd" = "mcp" ] && [ "$sub" = "add" ]; then
   shift 2
-  # parse: --scope user --transport stdio aun -- <bun> <server.ts>
+  # parse: --scope user --transport stdio aun -- <bun> <server.bundled.js>
   scope=""; transport=""; name=""; rest=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -110,8 +110,9 @@ exit 0
     const aun = claudeJson.mcpServers.aun
     // command points at a bun binary (resolved or bare).
     expect(aun.command).toMatch(/bun/)
-    // args is exactly `[<server.ts>]` — no claude CLI flags injected.
-    expect(aun.args).toEqual([expect.stringMatching(/server\.ts$/)])
+    // args is exactly `[<server.bundled.js>]` — no claude CLI flags injected.
+    // Cycle 4: bundle replaced source-only placement.
+    expect(aun.args).toEqual([expect.stringMatching(/server\.bundled\.js$/)])
     // Defensive: every arg must be a non-flag, non-server-tag token.
     for (const a of aun.args) {
       expect(a.startsWith('--')).toBe(false)
