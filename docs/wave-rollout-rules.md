@@ -1,11 +1,12 @@
 # Wave Rollout Rules — Phase C aun deployment
 
-> Status: provisional (effective once Issue #251 + Issue #248 PRs merged)
+> **Status: provisional. Effective upon merge of PR #258 (port resolution fix) and PR #260 (cleanup-orphan-ports PPID==1 fix).**
+>
 > Owner: lead-ama (orchestrate), ARC (bot selection + completion judgment), CTO (L3 sanity + merge), CEO (final approval)
 > Source: lead-ama draft v3 (msg `90f125f9`) + ARC review (msg `dac4d418` / `ce856485`) + CTO L3 LGTM (msg `479b9e3e`)
-> Effective: upon merge of #258 (Phase C wave 1 unblock)
+> Effective: see Status above (canonical sentence — same condition repeated to keep frontmatter machine-readable while §2 Entry below references the same).
 
-This document is the operational contract for rolling `aun` out across the 18-bot fleet after Issue #251 (PR #253 + PR #255) and Issue #248 (PR #258) merged. It defines the vocabulary, the wave-by-wave entry / exit / rollback criteria, the evidence-collection protocol, and the completion judgment.
+This document is the operational contract for rolling `aun` out across the 18-bot fleet. It becomes effective per the canonical sentence in the Status line above (provisional. Effective upon merge of PR #258 and PR #260) and defines the vocabulary, the wave-by-wave entry / exit / rollback criteria, the evidence-collection protocol, and the completion judgment.
 
 ---
 
@@ -33,7 +34,7 @@ ARC's rationale for `secretary`: low operational criticality, light send/receive
 
 ### Entry
 
-- `main` HEAD includes Issue #251 (PR #253 + PR #255) and Issue #248 (PR #258) merged (queue health + MCP cascade-disconnect resolved)
+- Per the canonical Status sentence at the top of this document: **provisional. Effective upon merge of PR #258 (port resolution fix) and PR #260 (cleanup-orphan-ports PPID==1 fix).** (Issue #251 / PR #253 + PR #255 are already merged; the remaining gate is PR #258 + PR #260, which together resolve Issue #248 cascade-disconnect.)
 - ARC + CTO + lead-ama 連名 GO
 
 ### Exit (3 條件 AND + 回帰なし, 30-minute observation window)
