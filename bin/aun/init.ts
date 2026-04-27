@@ -449,6 +449,16 @@ export function init(opts: InitOptions = {}): InitResult {
   } else {
     errors.push(`plugin source missing in repo: ${srcServer}`)
   }
+  // Cycle 5 axis 3 — abort before Step 5a if the bundle failed.
+  // Otherwise `claude mcp add` would register a path that doesn't
+  // exist (or a stale leftover from a previous install), and a
+  // failed install would still mutate `~/.claude.json`. The user
+  // would then need a manual cleanup of the broken entry, which
+  // matches the webb-dev pilot pain we're explicitly trying to
+  // avoid. Mirrors the Step 1 early-return pattern.
+  if (errors.length > 0) {
+    return { ok: false, dryRun: !!opts.dryRun, aunHome, claudeSettingsPath, backupPath: null, settingsChanged: false, errors, summary }
+  }
   const hookDir = join(claudeHome, 'hooks')
   mkdirSync(hookDir, { recursive: true })
   for (const spec of AUN_HOOK_FILES) {

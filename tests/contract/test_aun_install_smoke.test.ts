@@ -114,4 +114,45 @@ describe('test_aun_install_smoke — cycle 4 plugin install dir bundle works at 
     },
     10_000,
   )
+
+  // Cycle 5 axis 3 — bundle build failure must abort before Step 5a
+  // (`claude mcp add`). Otherwise `~/.claude.json` would be mutated
+  // to point at a path that doesn't exist, leaving the user to
+  // manually clean up after a failed install. We force the failure
+  // path by handing init a repoRoot that lacks `server.ts`.
+  test('(5) bundle failure aborts init before claude mcp add (no ~/.claude.json mutation)', () => {
+    const failHome = mkdtempSync(join(tmpdir(), 'aun-bundle-fail-'))
+    const failClaudeHome = join(failHome, '.claude')
+    const failClaudeJson = join(failHome, '.claude.json')
+    const fakeRepoRoot = mkdtempSync(join(tmpdir(), 'aun-fake-repo-'))
+    try {
+      mkdirSync(failClaudeHome, { recursive: true })
+      writeFileSync(join(failClaudeHome, 'settings.json'), '{}\n')
+      // Pre-condition: ~/.claude.json absent so we can prove init
+      // didn't write it.
+      expect(existsSync(failClaudeJson)).toBe(false)
+
+      const res = init({
+        home: failHome,
+        claudeHome: failClaudeHome,
+        repoRoot: fakeRepoRoot,           // no server.ts here
+        env: { HOME: failHome, DISCORD_BOT_TOKEN: 'abort-token' },
+        skipVersionCheck: true,
+        skipExecutableBitCheck: true,
+        // skipClaudeMcpAdd intentionally NOT set — we want to prove
+        // that the abort prevents Step 5a from running, not that
+        // we asked it to be skipped.
+      })
+
+      expect(res.ok).toBe(false)
+      expect(res.errors.some((e) => /plugin source missing|plugin bundle failed/.test(e))).toBe(true)
+      // Step 5a was never reached — ~/.claude.json must not exist.
+      expect(existsSync(failClaudeJson)).toBe(false)
+      // settings.json untouched (no patch applied).
+      expect(res.settingsChanged).toBe(false)
+    } finally {
+      rmSync(failHome, { recursive: true, force: true })
+      rmSync(fakeRepoRoot, { recursive: true, force: true })
+    }
+  })
 })
