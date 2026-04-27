@@ -30,7 +30,7 @@ describe('test_aun_existing_hooks_preserve — user hook + custom env survive in
   afterAll(() => { rmSync(home, { recursive: true, force: true }) })
 
   test('init succeeds on a settings.json with pre-existing user hooks', () => {
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
     expect(res.errors).toEqual([])
     expect(res.ok).toBe(true)
     expect(res.settingsChanged).toBe(true)
@@ -63,8 +63,11 @@ describe('test_aun_existing_hooks_preserve — user hook + custom env survive in
     expect((s.env as Record<string, string> | undefined)?.USER_CUSTOM_FLAG).toBe('keep-me')
   })
 
-  test('aun mcpServer added alongside user hooks (no collision)', () => {
+  test('cycle 3: aun does NOT touch settings.json mcpServers field', () => {
     const s = readSettings(settingsPath)
-    expect(s.mcpServers?.aun).toBeDefined()
+    // The fixture has no mcpServers; cycle 3 init also doesn't add any.
+    // (claude mcp add --scope user writes ~/.claude.json instead — see
+    // test_aun_claude_json_register.)
+    expect(s.mcpServers).toBeUndefined()
   })
 })

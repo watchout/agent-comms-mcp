@@ -33,7 +33,7 @@ describe('test_aun_dry_run — --dry-run outputs diff, writes no files, keeps mt
     // A tiny wait to ensure mtime difference is measurable if the
     // dry-run erroneously writes (fs mtime resolution varies).
     await new Promise(r => setTimeout(r, 20))
-    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, dryRun: true, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true })
+    const res = init({ home, claudeHome, repoRoot: REPO_ROOT, dryRun: true, env: { HOME: home, DISCORD_BOT_TOKEN: 'test-token-cycle1' }, skipExecutableBitCheck: true, skipClaudeMcpAdd: true })
     expect(res.ok).toBe(true)
     expect(res.dryRun).toBe(true)
     expect(res.settingsChanged).toBe(false)
