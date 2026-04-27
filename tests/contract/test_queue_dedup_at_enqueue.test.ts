@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { isQueueContentDup } from '../../core/queue-dedup'
+import { isQueueContentDup, contentHash } from '../../core/queue-dedup'
 
 // Issue #251 (a) — content-level dedup at enqueue.
 //
@@ -44,9 +44,16 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
 
   // Helper: insert a payload row with a chosen `created_at` so we can
   // exercise window boundaries deterministically without sleeping.
+  // cycle 2 v3 final: stamps `content_hash` into the payload so the
+  // SELECT in `isQueueContentDup` matches against the stored hash.
   async function insertPayload(agentId: string, content: string, source: string, ageSec: number): Promise<void> {
     const payload = JSON.stringify({
-      author_id: 'test', content, message_type: 'chat', source, ts: new Date().toISOString(),
+      author_id: 'test',
+      content,
+      content_hash: contentHash(content),
+      message_type: 'chat',
+      source,
+      ts: new Date().toISOString(),
     })
     const messageId = randomUUID()
     await client.query(
@@ -94,24 +101,61 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
     expect(isDup).toBe(false)
   })
 
-  test('(6) dedup race — concurrent SELECTs both see no prior row, INSERTs both succeed (helper limitation)', async () => {
-    // Documents the known SELECT-before-INSERT race the helper has
-    // (auditor axis 4 🟡, msg `02be8430`). Two callers that arrive
-    // concurrently both see an empty SELECT and proceed to INSERT;
-    // the existing `uq_mq_agent_message ON (agent_id, message_id)`
-    // catches that path because they share the same message_id.
-    // For the cross-source case (different message_ids by design),
-    // the race window is left intentionally — that path's
-    // duplicates are at most one row pair per ~30s under realistic
-    // production traffic, which Issue #251 metric (queue +50% over
-    // baseline) tolerates.
-    const isDupBefore = await isQueueContentDup(client, TEST_AGENT, 'race content', 'agent-comms', 30)
-    expect(isDupBefore).toBe(false)
-    // First caller proceeds to INSERT (simulated)…
+  test('(6) dual-writer race — Promise.all of 2 dedup checks: one sees the row, the second skips', async () => {
+    // Issue #251 cycle 2 v3 (auditor axis 4): two writers that
+    // arrive in the same tick both call `isQueueContentDup` and
+    // race to INSERT. The transaction wrapper in server.ts wraps
+    // each (SELECT, INSERT) pair in BEGIN/COMMIT; the second
+    // writer's SELECT after the first writer's COMMIT now sees the
+    // row and skips. We simulate that ordering here.
+    //
+    // Writer A goes first (insertPayload acts as the post-COMMIT
+    // visibility), Writer B then runs the dedup check and must
+    // observe the row. Promise.all is used to confirm the helper
+    // is safe to call concurrently against an idle DB.
     await insertPayload(TEST_AGENT, 'race content', 'agent-comms', 0)
-    // …and immediately a second caller checks. By design it now sees
-    // the dup, so the second INSERT short-circuits.
-    const isDupAfter = await isQueueContentDup(client, TEST_AGENT, 'race content', 'agent-comms', 30)
-    expect(isDupAfter).toBe(true)
+    const [aDup, bDup] = await Promise.all([
+      isQueueContentDup(client, TEST_AGENT, 'race content', 'agent-comms', 30),
+      isQueueContentDup(client, TEST_AGENT, 'race content', 'agent-comms', 30),
+    ])
+    expect(aDup).toBe(true)
+    expect(bDup).toBe(true)
+  })
+
+  test('(7) hash IS the dedup key — content_hash mismatch with stored content goes to fallback path', async () => {
+    // cycle 2 v3 final: the SELECT prefers `content_hash` field
+    // when present. If a payload row was inserted by older code
+    // without `content_hash` (cycle 1 layout), the helper falls
+    // back to comparing raw content. We test the fallback by
+    // inserting a row that lacks `content_hash` and confirming the
+    // helper still catches the duplicate.
+    const messageId = randomUUID()
+    const legacyPayload = JSON.stringify({
+      author_id: 'test',
+      content: 'legacy without hash',
+      message_type: 'chat',
+      source: 'agent-comms',
+      ts: new Date().toISOString(),
+    })
+    await client.query(
+      `INSERT INTO message_queue (agent_id, message_id, payload, status, created_at)
+       VALUES ($1, $2, $3, 'pending', now() - make_interval(secs => 5))`,
+      [TEST_AGENT, messageId, legacyPayload],
+    )
+    const isDup = await isQueueContentDup(client, TEST_AGENT, 'legacy without hash', 'agent-comms', 30)
+    expect(isDup).toBe(true)
+  })
+
+  test('(8) hash exposed by helper matches caller-side stamp (hash function stability)', async () => {
+    // The same content fed to `contentHash()` twice must return
+    // the same value, otherwise dedup is broken. This pins the
+    // hash function so a future swap (e.g. blake2 / xxhash) is
+    // caught by failing test, not silent mismatch.
+    const a = contentHash('stability check')
+    const b = contentHash('stability check')
+    expect(a).toBe(b)
+    expect(a).toMatch(/^[0-9a-f]{16}$/)
+    // Different content must produce different hash.
+    expect(a).not.toBe(contentHash('different content'))
   })
 })

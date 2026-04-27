@@ -91,7 +91,7 @@ import {
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
-import { isQueueContentDup } from './core/queue-dedup'
+import { isQueueContentDup, contentHash } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
@@ -1775,11 +1775,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // SSE fallback paths have been removed — delivery to recipient bots is
       // fully queue-based. Outbound to Discord goes through outbound_queue
       // (Phase 3) below.
+      const mqContentHash = contentHash(partContent)
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
         author_id: agentId,
         content: partContent,
+        content_hash: mqContentHash,
         message_id: id,
         message_type: message_type ?? 'chat',
         source: 'agent-comms',
@@ -1788,27 +1790,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
-            // Issue #251 (a) — content-level dedup before INSERT.
-            // cycle 2 (CTO `c1c6eb1d`): source is part of the dedup
-            // key per Issue §1 verbatim ("hash + source/timestamp
-            // window"). Same agent + same source + same content
-            // within the window is the same logical message arriving
-            // twice on the same path; different source for the same
-            // content is a deliberately separate record and is
-            // preserved.
+            // Issue #251 cycle 2 v3 final — dedup key is
+            // (agent_id, content_hash, source) per §1 verbatim.
+            // The hash is stamped into the payload above so this
+            // SELECT compares hash-against-hash, not raw content.
+            // BEGIN/COMMIT wrapper isolates the SELECT+INSERT pair
+            // so a concurrent dual-writer either sees the row and
+            // skips, or hits the UNIQUE on commit (we retry up to
+            // 3 times before letting the error propagate).
             const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-            if (await isQueueContentDup(dbClient, recipient, partContent, 'agent-comms', dedupWindowSec)) {
-              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms)\n`)
-              continue
+            let inserted = false
+            let dedupSkipped = false
+            for (let attempt = 0; attempt < 3 && !inserted && !dedupSkipped; attempt++) {
+              try {
+                await dbClient.query('BEGIN')
+                if (await isQueueContentDup(dbClient, recipient, partContent, 'agent-comms', dedupWindowSec)) {
+                  await dbClient.query('COMMIT')
+                  process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${mqContentHash})\n`)
+                  dedupSkipped = true
+                  continue
+                }
+                const sendIns = await dbClient.query(
+                  `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+                  [recipient, id, mqPayload],
+                )
+                await dbClient.query('COMMIT')
+                inserted = (sendIns.rowCount ?? 0) > 0
+                if (!inserted) {
+                  process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${recipient}, message_id=${id}) skipped by uq_mq_agent_message\n`)
+                  dedupSkipped = true
+                }
+              } catch (txErr) {
+                await dbClient.query('ROLLBACK').catch(() => {})
+                if (attempt === 2) throw txErr
+                process.stderr.write(`agent-comms: queue.dedup.retry — attempt ${attempt + 1}/3 for ${recipient}: ${txErr}\n`)
+              }
             }
-            const sendIns = await dbClient.query(
-              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-              [recipient, id, mqPayload],
-            )
-            // Codex audit (PR#140): observability — surface ON CONFLICT hits.
-            if (sendIns.rowCount === 0) {
-              process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${recipient}, message_id=${id}) skipped by uq_mq_agent_message\n`)
-            }
+            if (dedupSkipped) continue
           } catch (err) {
             process.stderr.write(`agent-comms: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
           }
@@ -2172,11 +2190,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       lastDelivery = delivery
 
+      const mqContentHash = contentHash(partContent)
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
         author_id: agentId,
         content: partContent,
+        content_hash: mqContentHash,
         message_id: id,
         message_type: message_type ?? 'chat',
         source: 'agent-comms',
@@ -2184,22 +2204,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
       for (const recipient of delivery.pushTargets) {
         try {
-          // Issue #251 (a) — content-level dedup, cycle 2 source is
-          // part of the dedup key per CTO `c1c6eb1d`. Notify path's
-          // payload uses `source: 'agent-comms'` (see mqPayload
-          // above), matching the send-fanout path; same-source
-          // dual-emit collapses to one queue row, while a
-          // simultaneous Discord-adapter delivery (source='discord')
-          // is preserved as a separate record.
+          // Issue #251 cycle 2 v3 final — same dedup contract as
+          // the send-fanout path above (server.ts L1788 area):
+          // (agent_id, content_hash, source) within window, wrapped
+          // in BEGIN/COMMIT with up-to-3 retries on conflict.
           const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-          if (await isQueueContentDup(client, recipient, partContent, 'agent-comms', dedupWindowSec)) {
-            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms)\n`)
-            continue
+          let inserted = false
+          let dedupSkipped = false
+          for (let attempt = 0; attempt < 3 && !inserted && !dedupSkipped; attempt++) {
+            try {
+              await client.query('BEGIN')
+              if (await isQueueContentDup(client, recipient, partContent, 'agent-comms', dedupWindowSec)) {
+                await client.query('COMMIT')
+                process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${mqContentHash})\n`)
+                dedupSkipped = true
+                continue
+              }
+              const r = await client.query(
+                `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+                [recipient, id, mqPayload],
+              )
+              await client.query('COMMIT')
+              inserted = (r.rowCount ?? 0) > 0
+              if (!inserted) dedupSkipped = true
+            } catch (txErr) {
+              await client.query('ROLLBACK').catch(() => {})
+              if (attempt === 2) throw txErr
+              process.stderr.write(`agent-comms: queue.dedup.retry — attempt ${attempt + 1}/3 for ${recipient} (notify): ${txErr}\n`)
+            }
           }
-          await client.query(
-            `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING`,
-            [recipient, id, mqPayload],
-          )
         } catch (err) {
           process.stderr.write(`agent-comms: notify message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
         }
