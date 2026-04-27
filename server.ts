@@ -91,6 +91,8 @@ import {
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderOfDeliveryStatus } from './core/sender-feedback'
+import { isQueueContentDup } from './core/queue-dedup'
+import { startQueueTtlSweeper } from './core/queue-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
 
@@ -1786,6 +1788,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
+            // Issue #251 (a) — content-level dedup before INSERT. The
+            // existing `uq_mq_agent_message ON (agent_id, message_id)`
+            // misses dual-path duplicates (Discord adapter inbound +
+            // direct send each generate distinct UUIDs). 30s window
+            // covers Discord adapter race; configurable via env var.
+            const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
+            if (await isQueueContentDup(dbClient, recipient, partContent, dedupWindowSec)) {
+              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s\n`)
+              continue
+            }
             const sendIns = await dbClient.query(
               `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
               [recipient, id, mqPayload],
@@ -2169,6 +2181,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
       for (const recipient of delivery.pushTargets) {
         try {
+          // Issue #251 (a) — content-level dedup, same rationale as
+          // the inbound path above (server.ts L1790 area). Notify is
+          // also subject to dual-path duplicates because the same
+          // Discord-originated event may surface via both the adapter
+          // and a direct re-emit.
+          const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
+          if (await isQueueContentDup(client, recipient, partContent, dedupWindowSec)) {
+            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s\n`)
+            continue
+          }
           await client.query(
             `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING`,
             [recipient, id, mqPayload],
@@ -3148,6 +3170,23 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     }
   } else {
     process.stderr.write('agent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\n')
+  }
+
+  // Issue #251 (c) — install in-process TTL sweeper. Skipped in
+  // SQLite / polling-only mode (no PG client), and skipped when
+  // explicitly disabled via env var (tests / one-shot CLIs).
+  if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
+    try {
+      const ttlDb = await coreDbAdapter()
+      if (ttlDb) {
+        const intervalMs = parseInt(process.env.AGENT_COMMS_TTL_SWEEP_INTERVAL_MS ?? '300000', 10)
+        const ttlHours = parseInt(process.env.AGENT_COMMS_TTL_HOURS ?? '24', 10)
+        startQueueTtlSweeper(ttlDb, { intervalMs, ttlHours })
+        process.stderr.write(`agent-comms: queue ttl sweeper started (interval=${intervalMs}ms, ttl=${ttlHours}h)\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — queue ttl sweeper failed to start (non-fatal): ${err}\n`)
+    }
   }
 
   // Connect Per-Bot Discord Clients for all expected bots at startup

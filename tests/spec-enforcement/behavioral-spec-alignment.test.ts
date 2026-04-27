@@ -216,16 +216,19 @@ describe('notifySenderOfDeliveryStatus — behavior', () => {
     expect(await feedbackRows('sender-a')).toHaveLength(0)
   })
 
-  test('busy target → system_info row lands in sender queue', async () => {
+  test('busy target → emitted=system_info reason=queue-skip, NO row enqueued (Issue #251 b)', async () => {
+    // Issue #251 (b) — the busy / system_info notification used to
+    // INSERT into message_queue (447 such rows observed over 7d in
+    // production, 14 still pending). Cycle 1 short-circuits the
+    // busy branch: the function returns the emitted=system_info
+    // signal without writing to the queue. Disconnected /
+    // system_error rows still INSERT — covered by the next test.
     const res = await notifySenderOfDeliveryStatus(legacy, {
       senderId: 'sender-a', targetId: 'target-busy', messageId: 'msg-2',
     })
     expect(res.emitted).toBe('system_info')
-    const rows = await feedbackRows('sender-a')
-    expect(rows).toHaveLength(1)
-    expect(rows[0].type).toBe('system_info')
-    expect(rows[0].content).toContain('target-busy')
-    expect(rows[0].content).toContain('タスク処理中')
+    expect(res.reason).toBe('queue-skip')
+    expect(await feedbackRows('sender-a')).toHaveLength(0)
   })
 
   test('disconnected target → system_error row lands in sender queue', async () => {
@@ -258,13 +261,16 @@ describe('notifySenderOfDeliveryStatus — behavior', () => {
   })
 
   test('feedback payload carries traceable fields (author_id=system + source_message_id)', async () => {
+    // Issue #251 (b) — the busy path no longer enqueues, so we
+    // assert against the disconnected / system_error branch which
+    // still carries the same traceability contract.
     await notifySenderOfDeliveryStatus(legacy, {
-      senderId: 'sender-a', targetId: 'target-busy', messageId: 'trace-id',
+      senderId: 'sender-a', targetId: 'target-off', messageId: 'trace-id',
     })
     const rows = await db.query<{ payload: string }>(`SELECT payload FROM message_queue WHERE agent_id = 'sender-a'`)
     const payload = JSON.parse(rows[0].payload)
     expect(payload.author_id).toBe('system')
-    expect(payload.target_agent_id).toBe('target-busy')
+    expect(payload.target_agent_id).toBe('target-off')
     expect(payload.source_message_id).toBe('trace-id')
   })
 })
