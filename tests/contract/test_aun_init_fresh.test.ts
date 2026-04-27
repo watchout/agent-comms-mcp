@@ -8,7 +8,7 @@ import { readSettings } from '../../bin/aun/lib/settings-patch'
 // Spec v6 v1.2 §4.1 merge gate core — fresh-env init (cycle 3).
 // Clean tmp HOME (~/.aun/ absent, settings.json minimal) → `init()` →
 //   (a) ~/.aun/ created with config.json + .env template
-//   (b) ~/.claude/plugins/aun/server.ts placed
+//   (b) ~/.claude/plugins/aun/server.bundled.js placed (cycle 4 bundle)
 //   (c) ~/.claude/settings.json carries the Stop hook and NO mcpServers
 //       field. mcpServers.aun is registered separately in
 //       `~/.claude.json` via `claude mcp add` — see
@@ -50,14 +50,20 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
     expect(existsSync(join(home, '.aun', '.env'))).toBe(true)
   })
 
-  test('(b) ~/.claude/plugins/aun/server.ts placed from REPO_ROOT/server.ts', () => {
-    const dest = join(claudeHome, 'plugins', 'aun', 'server.ts')
+  test('(b) ~/.claude/plugins/aun/server.bundled.js placed via bun build of REPO_ROOT/server.ts', () => {
+    // Cycle 4 — placement is now a bundled JS file, not source TS.
+    // Cycle 3 placed `server.ts` standalone, which failed at runtime
+    // because sibling `./core/db`, `./adapters/*` and npm deps were
+    // missing. The bundle inlines all of those.
+    const dest = join(claudeHome, 'plugins', 'aun', 'server.bundled.js')
     expect(existsSync(dest)).toBe(true)
-    // Plugin file is a real copy — size is non-zero and starts with
-    // the same shebang/banner as the source.
-    const src = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8').slice(0, 200)
-    const placed = readFileSync(dest, 'utf-8').slice(0, 200)
-    expect(placed).toBe(src)
+    const placed = readFileSync(dest, 'utf-8')
+    // Bundle is MB-scale (server.ts pulls in 800+ modules).
+    expect(placed.length).toBeGreaterThan(100_000)
+    // The original `server.ts` is no longer placed (cycle 4 retires
+    // the source-only placement).
+    const oldDest = join(claudeHome, 'plugins', 'aun', 'server.ts')
+    expect(existsSync(oldDest)).toBe(false)
   })
 
   test('(c) ~/.claude/settings.json has hooks.Stop and NO mcpServers field (cycle 3)', () => {

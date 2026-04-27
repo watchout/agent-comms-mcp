@@ -239,6 +239,56 @@ export class ClaudeNotFoundError extends Error {
   }
 }
 
+export class BundleBuildError extends Error {
+  constructor(public readonly stderr: string, message: string) {
+    super(message)
+    this.name = 'BundleBuildError'
+  }
+}
+
+// Cycle 4 — `aun init` bundles the MCP server entry into a single
+// JS file so `bun ~/.claude/plugins/aun/server.bundled.js` resolves
+// every relative import (`./core/db`, `./adapters/discord`, ...) and
+// every npm dep (`pg`, `@modelcontextprotocol/sdk`, `zod`, ...) at
+// runtime without needing the source repo or a sibling node_modules
+// at the install dest. cycle 3 placed `server.ts` standalone, which
+// failed at runtime because sibling imports were missing — see PR
+// #243 cycle 4 dispatch (lead-ama 04-27 14:32 JST) for the root
+// cause and the (a) bundle vs (b) tree-copy decision.
+function buildBundle(
+  srcPath: string,
+  destPath: string,
+  repoRoot: string,
+  env?: NodeJS.ProcessEnv,
+): { sizeBytes: number } {
+  // Merge so caller-supplied env (tests) overrides specific vars but
+  // PATH / BUN_INSTALL / etc. stay so `bun build` can find bun.
+  const spawnEnv = env ? { ...process.env, ...env } : process.env
+  const result = spawnSync('bun', [
+    'build',
+    srcPath,
+    '--target=bun',
+    '--outfile', destPath,
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf-8',
+    timeout: 60_000,
+    env: spawnEnv,
+  })
+  if (result.status !== 0) {
+    const stderr = (result.stderr ?? '').trim() || (result.stdout ?? '').trim() || `exit ${result.status}`
+    throw new BundleBuildError(stderr, `bun build failed for ${srcPath}: ${stderr}`)
+  }
+  if (!existsSync(destPath)) {
+    throw new BundleBuildError('output file missing', `bun build returned 0 but output ${destPath} not present`)
+  }
+  const sizeBytes = statSync(destPath).size
+  if (sizeBytes < 1024) {
+    throw new BundleBuildError(`output ${sizeBytes} bytes`, `bun build output suspiciously small (${sizeBytes} bytes), expected MB-scale bundle`)
+  }
+  return { sizeBytes }
+}
+
 /**
  * Step 5a — register the aun server in `~/.claude.json` via the
  * official Claude Code CLI. Idempotent: pre-removing any existing
@@ -256,7 +306,11 @@ export function registerAunViaClaude(opts: InitOptions): {
   preRemoveStderr: string
 } {
   const pluginDir = join(claudeHomeFor(opts), 'plugins', 'aun')
-  const aunEntry = join(pluginDir, 'server.ts')
+  // Cycle 4 — register the bundled JS, not source `server.ts`. The
+  // bundle is self-contained (relative imports + npm deps inlined),
+  // so `bun <bundle>` works without the source repo or an adjacent
+  // node_modules.
+  const aunEntry = join(pluginDir, 'server.bundled.js')
   const bunPath = resolveBunPath(opts)
 
   const claudeBin = (opts.env ?? process.env).AUN_CLAUDE_BIN || 'claude'
@@ -365,22 +419,35 @@ export function init(opts: InitOptions = {}): InitResult {
   //         (Tests rely on DB init being lazy; see test_aun_init_fresh.)
 
   // Step 4: plugin + hook file placement (idempotent).
-  //   plugin: server.ts → ~/.claude/plugins/aun/server.ts
+  //   plugin: bundle of server.ts → ~/.claude/plugins/aun/server.bundled.js
   //   hooks : every entry in AUN_HOOK_FILES → ~/.claude/hooks/<destName>
+  // Cycle 4 — bundle the entry with `bun build --target=bun` so the
+  // placed file resolves `./core/db`, `./adapters/*`, and npm deps
+  // (`pg`, `@modelcontextprotocol/sdk`, `zod`) at runtime without
+  // needing the source repo or an adjacent node_modules at the
+  // install dest. Cycle 3 placed source `server.ts` alone and the
+  // MCP server failed at startup with MODULE_NOT_FOUND on sibling
+  // imports — webb-dev pilot 04-27 14:20 JST root cause.
   // Hook scripts are chmod-executable so spec §2.5 validation (existence
   // + executable bit) passes after the settings.json patch lands.
   const pluginDir = join(claudeHome, 'plugins', 'aun')
   mkdirSync(pluginDir, { recursive: true })
   const repoRoot = opts.repoRoot ?? process.cwd()
   const srcServer = join(repoRoot, 'server.ts')
-  const destServer = join(pluginDir, 'server.ts')
-  if (existsSync(srcServer) && !existsSync(destServer)) {
+  const destBundle = join(pluginDir, 'server.bundled.js')
+  if (existsSync(srcServer)) {
     try {
-      cpSync(srcServer, destServer)
-      summary.push(`placed plugin file at ${destServer}`)
+      const built = buildBundle(srcServer, destBundle, repoRoot, opts.env)
+      summary.push(`bundled plugin entry at ${destBundle} (${built.sizeBytes} bytes)`)
     } catch (err) {
-      errors.push(`plugin copy failed: ${(err as Error).message}`)
+      if (err instanceof BundleBuildError) {
+        errors.push(`plugin bundle failed: ${err.message} (stderr: ${err.stderr.slice(0, 200)})`)
+      } else {
+        errors.push(`plugin bundle failed: ${(err as Error).message}`)
+      }
     }
+  } else {
+    errors.push(`plugin source missing in repo: ${srcServer}`)
   }
   const hookDir = join(claudeHome, 'hooks')
   mkdirSync(hookDir, { recursive: true })
