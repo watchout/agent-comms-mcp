@@ -74,21 +74,18 @@ export async function notifySenderOfDeliveryStatus(
       return { emitted: null, reason: `target-status-${targetStatus}` }
     }
 
-    let content: string
-    let messageType: 'system_info' | 'system_error'
     if (targetStatus === 'busy') {
-      const pendingRow = await db.query<{ n: string | number }>(
-        `SELECT count(*) AS n FROM message_queue WHERE agent_id = $1 AND status IN ('pending', 'read')`,
-        [targetId],
-      )
-      const pendingRaw = pendingRow.rows[0]?.n ?? 0
-      const pending = typeof pendingRaw === 'string' ? parseInt(pendingRaw, 10) : pendingRaw
-      content = `⏳ ${targetId} はタスク処理中、キュー待ち ${pending} 件`
-      messageType = 'system_info'
-    } else {
-      content = `⚠️ ${targetId} はオフラインです、セッション復旧後に配信されます`
-      messageType = 'system_error'
+      // Issue #251 (b) — skip the queue INSERT for the busy /
+      // system_info notification. It's an out-of-band signal to the
+      // sender ("target is processing, N queued"), not an actionable
+      // message; queueing it just to wake the sender bot adds noise
+      // (observed 447 such rows over 7d). The function still returns
+      // emitted='system_info' so any caller observability stays
+      // intact, with reason='queue-skip' to disambiguate.
+      return { emitted: 'system_info', reason: 'queue-skip' }
     }
+    const content = `⚠️ ${targetId} はオフラインです、セッション復旧後に配信されます`
+    const messageType: 'system_error' = 'system_error'
 
     const payload = JSON.stringify({
       author_id: 'system',
