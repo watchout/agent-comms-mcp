@@ -90,7 +90,7 @@ import {
   type InboxCursor,
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
-import { notifySenderOfDeliveryStatus } from './core/sender-feedback'
+import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
@@ -1788,14 +1788,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
-            // Issue #251 (a) — content-level dedup before INSERT. The
-            // existing `uq_mq_agent_message ON (agent_id, message_id)`
-            // misses dual-path duplicates (Discord adapter inbound +
-            // direct send each generate distinct UUIDs). 30s window
-            // covers Discord adapter race; configurable via env var.
+            // Issue #251 (a) — content-level dedup before INSERT.
+            // cycle 2 (CTO `c1c6eb1d`): source is part of the dedup
+            // key per Issue §1 verbatim ("hash + source/timestamp
+            // window"). Same agent + same source + same content
+            // within the window is the same logical message arriving
+            // twice on the same path; different source for the same
+            // content is a deliberately separate record and is
+            // preserved.
             const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-            if (await isQueueContentDup(dbClient, recipient, partContent, dedupWindowSec)) {
-              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s\n`)
+            if (await isQueueContentDup(dbClient, recipient, partContent, 'agent-comms', dedupWindowSec)) {
+              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms)\n`)
               continue
             }
             const sendIns = await dbClient.query(
@@ -1862,7 +1865,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const uniqueRecipients = new Set(delivery.pushTargets)
         for (const recipient of uniqueRecipients) {
           if (recipient === agentId) continue
-          await notifySenderOfDeliveryStatus(feedbackDb, {
+          await notifySenderAndObserve(feedbackDb, {
             senderId: agentId,
             targetId: recipient,
             messageId: partIds[0] ?? null,
@@ -2181,14 +2184,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
       for (const recipient of delivery.pushTargets) {
         try {
-          // Issue #251 (a) — content-level dedup, same rationale as
-          // the inbound path above (server.ts L1790 area). Notify is
-          // also subject to dual-path duplicates because the same
-          // Discord-originated event may surface via both the adapter
-          // and a direct re-emit.
+          // Issue #251 (a) — content-level dedup, cycle 2 source is
+          // part of the dedup key per CTO `c1c6eb1d`. Notify path's
+          // payload uses `source: 'agent-comms'` (see mqPayload
+          // above), matching the send-fanout path; same-source
+          // dual-emit collapses to one queue row, while a
+          // simultaneous Discord-adapter delivery (source='discord')
+          // is preserved as a separate record.
           const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-          if (await isQueueContentDup(client, recipient, partContent, dedupWindowSec)) {
-            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s\n`)
+          if (await isQueueContentDup(client, recipient, partContent, 'agent-comms', dedupWindowSec)) {
+            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms)\n`)
             continue
           }
           await client.query(
@@ -2210,7 +2215,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const uniqueRecipients = new Set(lastDelivery.pushTargets)
         for (const recipient of uniqueRecipients) {
           if (recipient === agentId) continue
-          await notifySenderOfDeliveryStatus(feedbackDb, {
+          await notifySenderAndObserve(feedbackDb, {
             senderId: agentId,
             targetId: recipient,
             messageId: partIds[0] ?? null,

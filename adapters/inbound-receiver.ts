@@ -47,7 +47,7 @@ import {
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
-import { notifySenderOfDeliveryStatus } from '../core/sender-feedback'
+import { notifySenderAndObserve } from '../core/sender-feedback-emit'
 import type { MessageBus } from '../core/message-bus'
 
 // ---- Dependency injection -------------------------------------------------
@@ -603,7 +603,7 @@ export async function handleInboundMessage(params: {
           return { rows: r.rows as T[] }
         },
       }
-      await notifySenderOfDeliveryStatus(feedbackDb, {
+      await notifySenderAndObserve(feedbackDb, {
         senderId: senderAgentId,
         targetId: receiverAgentId,
         messageId,

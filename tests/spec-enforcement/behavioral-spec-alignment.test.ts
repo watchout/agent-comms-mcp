@@ -141,8 +141,12 @@ describe('Behavioral FAIL B5 — sender feedback wired at three call sites', () 
     // symbol went missing the file would fail to load.
     expect(typeof notifySenderOfDeliveryStatus).toBe('function')
   })
-  test('server.ts send calls notifySenderOfDeliveryStatus after message_queue INSERT', () => {
-    expect(SERVER_SRC).toMatch(/notifySenderOfDeliveryStatus\([\s\S]*?senderId: agentId,[\s\S]*?targetId: recipient/)
+  test('server.ts send calls notifySenderOfDeliveryStatus (or its observe wrapper) after message_queue INSERT', () => {
+    // Issue #251 cycle 2 axis 3 — call sites moved to the
+    // `notifySenderAndObserve` wrapper (which still invokes
+    // `notifySenderOfDeliveryStatus` internally) so the `emitted`
+    // signal lands in a counter + stderr line per CTO `c1c6eb1d`.
+    expect(SERVER_SRC).toMatch(/notifySender(?:OfDeliveryStatus|AndObserve)\([\s\S]*?senderId: agentId,[\s\S]*?targetId: recipient/)
   })
   test('server.ts notify calls notifySenderOfDeliveryStatus', () => {
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")
@@ -152,10 +156,10 @@ describe('Behavioral FAIL B5 — sender feedback wired at three call sites', () 
     // loop, so slice the full handler up to the next top-level tool block.
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", notifyIdx)
     const handler = SERVER_SRC.slice(notifyIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
-    expect(handler).toMatch(/notifySenderOfDeliveryStatus/)
+    expect(handler).toMatch(/notifySender(?:OfDeliveryStatus|AndObserve)/)
   })
-  test('adapters/inbound-receiver handleInboundMessage calls notifySenderOfDeliveryStatus', () => {
-    expect(INBOUND_SRC).toMatch(/notifySenderOfDeliveryStatus/)
+  test('adapters/inbound-receiver handleInboundMessage calls notifySenderOfDeliveryStatus (or its observe wrapper)', () => {
+    expect(INBOUND_SRC).toMatch(/notifySender(?:OfDeliveryStatus|AndObserve)/)
   })
 })
 

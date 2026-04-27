@@ -56,31 +56,62 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
     )
   }
 
-  test('(1) same content within 30s window → isQueueContentDup returns true', async () => {
+  test('(1) same content + same source within 30s window → returns true', async () => {
     await insertPayload(TEST_AGENT, 'hello dedup', 'agent-comms', 5)  // 5s ago
-    const isDup = await isQueueContentDup(client, TEST_AGENT, 'hello dedup', 30)
+    const isDup = await isQueueContentDup(client, TEST_AGENT, 'hello dedup', 'agent-comms', 30)
     expect(isDup).toBe(true)
   })
 
-  test('(2) same content but past the window (31s ago, window=30s) → not a duplicate', async () => {
+  test('(2) same content + same source past the window (31s ago) → not a duplicate', async () => {
     await insertPayload(TEST_AGENT, 'hello dedup', 'agent-comms', 31)  // 31s ago
-    const isDup = await isQueueContentDup(client, TEST_AGENT, 'hello dedup', 30)
+    const isDup = await isQueueContentDup(client, TEST_AGENT, 'hello dedup', 'agent-comms', 30)
     expect(isDup).toBe(false)
   })
 
   test('(3) different content within window → not a duplicate (no false positive)', async () => {
     await insertPayload(TEST_AGENT, 'first message', 'agent-comms', 5)
-    const isDup = await isQueueContentDup(client, TEST_AGENT, 'a totally different message', 30)
+    const isDup = await isQueueContentDup(client, TEST_AGENT, 'a totally different message', 'agent-comms', 30)
     expect(isDup).toBe(false)
   })
 
-  test('(4) dual-path duplicate (different source, same content) is caught', async () => {
-    // Path A: agent-comms direct send arrives first.
-    await insertPayload(TEST_AGENT, 'dual-path content', 'agent-comms', 3)
-    // Path B: Discord adapter delivers the same content ~3s later.
-    // The dedup is source-agnostic on purpose — exactly this case is
-    // what the existing UUID-based UNIQUE misses.
-    const isDup = await isQueueContentDup(client, TEST_AGENT, 'dual-path content', 30)
+  test('(4) dual-path: SAME source same content → caught (collapse same-path retry)', async () => {
+    // Same agent-comms direct emit arriving twice within the
+    // window — the cycle 1 case the UUID-based UNIQUE misses
+    // because the second emit gets a fresh UUID.
+    await insertPayload(TEST_AGENT, 'same-path content', 'agent-comms', 3)
+    const isDup = await isQueueContentDup(client, TEST_AGENT, 'same-path content', 'agent-comms', 30)
     expect(isDup).toBe(true)
+  })
+
+  test('(5) dual-path: DIFFERENT source same content → preserved as separate record (cycle 2)', async () => {
+    // Issue #251 §1 verbatim ("hash + source/timestamp window"):
+    // distinct sources with the same content are deliberately
+    // separate records (different reply context). cycle 1's
+    // source-agnostic dedup wrongly collapsed these; cycle 2
+    // restores the correct semantics per CTO `c1c6eb1d`.
+    await insertPayload(TEST_AGENT, 'cross-source content', 'agent-comms', 3)
+    const isDup = await isQueueContentDup(client, TEST_AGENT, 'cross-source content', 'discord', 30)
+    expect(isDup).toBe(false)
+  })
+
+  test('(6) dedup race — concurrent SELECTs both see no prior row, INSERTs both succeed (helper limitation)', async () => {
+    // Documents the known SELECT-before-INSERT race the helper has
+    // (auditor axis 4 🟡, msg `02be8430`). Two callers that arrive
+    // concurrently both see an empty SELECT and proceed to INSERT;
+    // the existing `uq_mq_agent_message ON (agent_id, message_id)`
+    // catches that path because they share the same message_id.
+    // For the cross-source case (different message_ids by design),
+    // the race window is left intentionally — that path's
+    // duplicates are at most one row pair per ~30s under realistic
+    // production traffic, which Issue #251 metric (queue +50% over
+    // baseline) tolerates.
+    const isDupBefore = await isQueueContentDup(client, TEST_AGENT, 'race content', 'agent-comms', 30)
+    expect(isDupBefore).toBe(false)
+    // First caller proceeds to INSERT (simulated)…
+    await insertPayload(TEST_AGENT, 'race content', 'agent-comms', 0)
+    // …and immediately a second caller checks. By design it now sees
+    // the dup, so the second INSERT short-circuits.
+    const isDupAfter = await isQueueContentDup(client, TEST_AGENT, 'race content', 'agent-comms', 30)
+    expect(isDupAfter).toBe(true)
   })
 })

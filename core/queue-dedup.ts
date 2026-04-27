@@ -28,18 +28,27 @@ export function contentHash(content: string): string {
 
 /**
  * Returns true if message_queue already holds a row with the same
- * recipient `agentId` and the same `content` (extracted from the
- * stored payload's `content` field) created within the last
- * `windowSeconds` seconds.
+ * recipient `agentId`, the same `source`, and the same `content`
+ * (extracted from the stored payload's `content` and `source`
+ * fields) created within the last `windowSeconds` seconds.
  *
- * Source-agnostic on purpose: dual-path duplicates carry different
- * `source` values (`agent-comms` vs `discord`) but the same content
- * for the same recipient — those are exactly what we need to skip.
+ * Issue #251 cycle 2 (CTO directive `c1c6eb1d`): source IS part of
+ * the dedup key per Issue §1 verbatim ("hash + source/timestamp
+ * window"). Same agent, same source, same content within the window
+ * is the same logical message arriving twice on the same path —
+ * skip the second INSERT. Different source for the same content is
+ * a deliberately separate record (e.g. Discord-relay vs direct send
+ * carry different reply context) and is preserved.
+ *
+ * cycle 1 used source-agnostic dedup which auditor (msg `02be8430`)
+ * flagged as SSOT non-conformance; this version restores Issue
+ * verbatim semantics.
  */
 export async function isQueueContentDup(
   db: QueueDedupDb,
   agentId: string,
   content: string,
+  source: string,
   windowSeconds: number = 30,
 ): Promise<boolean> {
   const result = await db.query(
@@ -47,8 +56,9 @@ export async function isQueueContentDup(
      WHERE agent_id = $1
        AND created_at > now() - make_interval(secs => $2)
        AND (payload::jsonb->>'content') = $3
+       AND (payload::jsonb->>'source') = $4
      LIMIT 1`,
-    [agentId, windowSeconds, content],
+    [agentId, windowSeconds, content, source],
   )
   return (result.rowCount ?? 0) > 0
 }
