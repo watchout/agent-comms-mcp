@@ -1,11 +1,11 @@
 # Wave Rollout Rules — Phase C aun deployment
 
-> Status: active
+> Status: provisional (effective once Issue #251 + Issue #248 PRs merged)
 > Owner: lead-ama (orchestrate), ARC (bot selection + completion judgment), CTO (L3 sanity + merge), CEO (final approval)
 > Source: lead-ama draft v3 (msg `90f125f9`) + ARC review (msg `dac4d418` / `ce856485`) + CTO L3 LGTM (msg `479b9e3e`)
-> Effective: 2026-04-27
+> Effective: upon merge of #258 (Phase C wave 1 unblock)
 
-This document is the operational contract for rolling `aun` out across the 18-bot fleet after PR #243 (cycle 3) / PR #247 (cycle 4) / PR #251 fix have all merged. It defines the vocabulary, the wave-by-wave entry / exit / rollback criteria, the evidence-collection protocol, and the completion judgment.
+This document is the operational contract for rolling `aun` out across the 18-bot fleet after Issue #251 (PR #253 + PR #255) and Issue #248 (PR #258) merged. It defines the vocabulary, the wave-by-wave entry / exit / rollback criteria, the evidence-collection protocol, and the completion judgment.
 
 ---
 
@@ -33,7 +33,7 @@ ARC's rationale for `secretary`: low operational criticality, light send/receive
 
 ### Entry
 
-- `main` HEAD includes both Issue #251 PR and Issue #248 PR merged (queue health + MCP cascade-disconnect resolved)
+- `main` HEAD includes Issue #251 (PR #253 + PR #255) and Issue #248 (PR #258) merged (queue health + MCP cascade-disconnect resolved)
 - ARC + CTO + lead-ama 連名 GO
 
 ### Exit (3 條件 AND + 回帰なし, 30-minute observation window)
