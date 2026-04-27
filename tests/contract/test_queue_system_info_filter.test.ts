@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:tes
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
 import { notifySenderOfDeliveryStatus } from '../../core/sender-feedback'
+import { notifySenderAndObserve, getSenderFeedbackCounter, _resetSenderFeedbackCounter } from '../../core/sender-feedback-emit'
 
 // Issue #251 (b) — system_info busy notification is skipped at the
 // sender-feedback source.
@@ -92,5 +93,43 @@ dbDescribe('test_queue_system_info_filter — busy / system_info path no longer 
       [SENDER],
     )
     expect(parseInt(rows.rows[0].n, 10)).toBe(0)
+  })
+
+  // Issue #251 cycle 2 axis 3 (CTO `c1c6eb1d`) — caller-side
+  // `emitted` consumption via `notifySenderAndObserve` wrapper.
+  // cycle 1 left the busy signal silently dropped; cycle 2 bumps a
+  // process-local counter + emits a stderr line so the signal is
+  // observable without re-introducing queue noise.
+  test('(4) wrapper bumps systemInfo counter + emits stderr on busy target', async () => {
+    _resetSenderFeedbackCounter()
+    const result = await notifySenderAndObserve(client, {
+      senderId: SENDER, targetId: BUSY_TARGET, messageId: null,
+    })
+    expect(result.emitted).toBe('system_info')
+    expect(result.reason).toBe('queue-skip')
+    const counter = getSenderFeedbackCounter()
+    expect(counter.systemInfo).toBe(1)
+    expect(counter.systemError).toBe(0)
+    // queue still untouched (cycle 1 invariant preserved)
+    const rows = await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM message_queue WHERE agent_id = $1`,
+      [SENDER],
+    )
+    expect(parseInt(rows.rows[0].n, 10)).toBe(0)
+  })
+
+  test('(5) wrapper bumps systemError counter on disconnected target (and queue row stays)', async () => {
+    _resetSenderFeedbackCounter()
+    const result = await notifySenderAndObserve(client, {
+      senderId: SENDER, targetId: OFFLINE_TARGET, messageId: null,
+    })
+    expect(result.emitted).toBe('system_error')
+    expect(getSenderFeedbackCounter().systemError).toBe(1)
+    expect(getSenderFeedbackCounter().systemInfo).toBe(0)
+    const rows = await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM message_queue WHERE agent_id = $1`,
+      [SENDER],
+    )
+    expect(parseInt(rows.rows[0].n, 10)).toBe(1)
   })
 })

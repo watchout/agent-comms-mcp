@@ -90,8 +90,8 @@ import {
   type InboxCursor,
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
-import { notifySenderOfDeliveryStatus } from './core/sender-feedback'
-import { isQueueContentDup } from './core/queue-dedup'
+import { notifySenderAndObserve } from './core/sender-feedback-emit'
+import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
@@ -1775,11 +1775,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // SSE fallback paths have been removed — delivery to recipient bots is
       // fully queue-based. Outbound to Discord goes through outbound_queue
       // (Phase 3) below.
+      const mqContentHash = contentHash(partContent)
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
         author_id: agentId,
         content: partContent,
+        content_hash: mqContentHash,
         message_id: id,
         message_type: message_type ?? 'chat',
         source: 'agent-comms',
@@ -1788,23 +1790,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
-            // Issue #251 (a) — content-level dedup before INSERT. The
-            // existing `uq_mq_agent_message ON (agent_id, message_id)`
-            // misses dual-path duplicates (Discord adapter inbound +
-            // direct send each generate distinct UUIDs). 30s window
-            // covers Discord adapter race; configurable via env var.
+            // Issue #251 cycle 3 — dedup transaction is now run on
+            // a per-call dedicated `pg.Client` via `enqueueWithDedup`,
+            // not on the shared singleton (`dbClient`). Concurrent
+            // callers thus cannot interleave BEGIN/COMMIT on one
+            // socket. Mirrors `core/inbound-delivery.ts` pattern.
             const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-            if (await isQueueContentDup(dbClient, recipient, partContent, dedupWindowSec)) {
-              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s\n`)
+            const result = await enqueueWithDedup({
+              databaseUrl: config.database_url,
+              agentId: recipient,
+              content: partContent,
+              source: 'agent-comms',
+              windowSeconds: dedupWindowSec,
+              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+              insertParams: [recipient, id, mqPayload],
+            })
+            if (result.dedupSkipped) {
+              process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
               continue
-            }
-            const sendIns = await dbClient.query(
-              `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-              [recipient, id, mqPayload],
-            )
-            // Codex audit (PR#140): observability — surface ON CONFLICT hits.
-            if (sendIns.rowCount === 0) {
-              process.stderr.write(`agent-comms: message_queue dedup — duplicate (agent_id=${recipient}, message_id=${id}) skipped by uq_mq_agent_message\n`)
             }
           } catch (err) {
             process.stderr.write(`agent-comms: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
@@ -1862,7 +1865,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const uniqueRecipients = new Set(delivery.pushTargets)
         for (const recipient of uniqueRecipients) {
           if (recipient === agentId) continue
-          await notifySenderOfDeliveryStatus(feedbackDb, {
+          await notifySenderAndObserve(feedbackDb, {
             senderId: agentId,
             targetId: recipient,
             messageId: partIds[0] ?? null,
@@ -2169,11 +2172,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       lastDelivery = delivery
 
+      const mqContentHash = contentHash(partContent)
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
         author_id: agentId,
         content: partContent,
+        content_hash: mqContentHash,
         message_id: id,
         message_type: message_type ?? 'chat',
         source: 'agent-comms',
@@ -2181,20 +2186,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
       for (const recipient of delivery.pushTargets) {
         try {
-          // Issue #251 (a) — content-level dedup, same rationale as
-          // the inbound path above (server.ts L1790 area). Notify is
-          // also subject to dual-path duplicates because the same
-          // Discord-originated event may surface via both the adapter
-          // and a direct re-emit.
+          // Issue #251 cycle 3 — per-call dedicated client via
+          // `enqueueWithDedup`, mirrors send-fanout path (L1790
+          // area). Shared singleton (`client`) is no longer used
+          // for BEGIN/COMMIT; each dedup tx owns its own connection.
           const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-          if (await isQueueContentDup(client, recipient, partContent, dedupWindowSec)) {
-            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s\n`)
+          const result = await enqueueWithDedup({
+            databaseUrl: config.database_url,
+            agentId: recipient,
+            content: partContent,
+            source: 'agent-comms',
+            windowSeconds: dedupWindowSec,
+            insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+            insertParams: [recipient, id, mqPayload],
+          })
+          if (result.dedupSkipped) {
+            process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
             continue
           }
-          await client.query(
-            `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING`,
-            [recipient, id, mqPayload],
-          )
         } catch (err) {
           process.stderr.write(`agent-comms: notify message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
         }
@@ -2210,7 +2219,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const uniqueRecipients = new Set(lastDelivery.pushTargets)
         for (const recipient of uniqueRecipients) {
           if (recipient === agentId) continue
-          await notifySenderOfDeliveryStatus(feedbackDb, {
+          await notifySenderAndObserve(feedbackDb, {
             senderId: agentId,
             targetId: recipient,
             messageId: partIds[0] ?? null,
