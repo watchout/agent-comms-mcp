@@ -34,12 +34,9 @@ tmux kill-session -t "$GW_SESSION"     2>/dev/null || true
 tmux kill-session -t "$RUNBOT_SESSION" 2>/dev/null || true
 
 # also drop any orphan MCP server process still listening on the port
+# (canonical PPID==1 filter — Issue #248 cycle 3, prevents cascade-kill).
 if [ -n "$PORT" ]; then
-  OLD_PID=$(lsof -i :"$PORT" -t 2>/dev/null || true)
-  if [ -n "$OLD_PID" ]; then
-    echo "[rollback-bot] $BOT_ID: killing orphan on port $PORT (PID $OLD_PID)"
-    kill "$OLD_PID" 2>/dev/null || true
-  fi
+  bash "$(dirname "$0")/cleanup-orphan-ports.sh" "$PORT"
 fi
 
 sleep 2

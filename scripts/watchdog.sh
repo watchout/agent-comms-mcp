@@ -57,15 +57,11 @@ restart_session() {
   tmux kill-session -t "$session" 2>/dev/null || true
   sleep 1
 
-  # Kill orphaned MCP process on port
+  # Kill orphaned MCP process on port (canonical PPID==1 filter — Issue #248 cycle 3).
+  # Delegating to scripts/cleanup-orphan-ports.sh so live-parent processes
+  # never get killed (was the cascade-disconnect mechanism pre-cycle-3).
   if [ -n "$port" ]; then
-    local old_pid
-    old_pid=$(lsof -i :"$port" -t 2>/dev/null || true)
-    if [ -n "$old_pid" ]; then
-      echo "${LOG_TAG} ${session}: killing orphaned process PID ${old_pid} on port ${port}" >&2
-      kill "$old_pid" 2>/dev/null || true
-      sleep 1
-    fi
+    bash "$(dirname "$0")/cleanup-orphan-ports.sh" "$port"
   fi
 
   local dir_expanded

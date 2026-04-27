@@ -1005,11 +1005,25 @@ discord-cto|~/Developer/tech-lead|cto|8789|AGENT_COM_RUNTIME=daemon claude serve
 
 **処理フロー:**
 1. bot-registry.txtからセッション情報を検索
-2. 該当ポートの孤立プロセスをkill
+2. 該当ポートの孤立プロセスをkill（**PPID==1 contract** 適用、下記）
 3. tmuxセッションをkill
 4. 新規tmuxセッション作成 → claude起動コマンド送信
 5. 3秒待機 → Enter送信（TUIプロンプト自動確認）
 6. 起動確認（`bun server.ts` が期待ポートで listen 開始を検出。正典: `core/bot-health.ts::checkBotHealth` Check 4）
+
+##### Orphan-port cleanup contract (PPID==1)
+
+Issue #248 cycle 3 — 全 lifecycle path (restart_bot / watchdog / migrate / rollback / server.ts startup orphan-kill) は単一の canonical script `scripts/cleanup-orphan-ports.sh` を呼ぶ。
+
+- **canonical script**: `scripts/cleanup-orphan-ports.sh <port>`
+- **PPID==1 filter rule**: `lsof -ti :<port>` で得た PID のうち `ps -o ppid= -p <pid>` が `1` (= init / launchd 引取済 = 真の orphan) のもののみ `kill -9` 対象。PPID!=1 (= 親 process 健在 = 生きた MCP server / 別 bot) は skip。`ps` 失敗時は false-positive 回避で skip。
+- **rationale**: pre-cycle-3 は port 占有 PID を全 kill していたため、並行起動した別 bot の生きた MCP server まで kill して cascade-disconnect を引き起こしていた (本日の outage 真因)。
+- **invocation pattern**:
+  - shell scripts: `bash "$(dirname "$0")/cleanup-orphan-ports.sh" "$PORT"`
+  - server.ts startup orphan-kill: 同等の inline filter (`lsof -ti :PORT` → `ps -o ppid= -p <pid>` で `1` 判定 → SIGKILL)
+  - server.ts `killPidsOnPort` helper: `isPidOrphan(pid)` で同等の判定 → SIGTERM
+- **hook migration gate**: `~/.claude/settings.json:54` の SessionStart hook が呼ぶ path は merge 後 CTO 反映で本 repo の `scripts/cleanup-orphan-ports.sh` の絶対 path に切替予定。tech-lead repo 側の hotfix copy は反映完了後に削除。
+- **portability follow-up**: PPID==1 ⇔ orphan の同一視は macOS/launchd 前提。Linux subreaper / containers / systemd-user 環境への一般化は Issue #261 で track。
 
 #### bot_status
 

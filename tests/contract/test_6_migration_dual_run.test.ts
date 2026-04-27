@@ -81,9 +81,16 @@ describe('test_6 migration_dual_run (PR #1, spec v3 contract_test test_6, merge 
     let procA: ChildProcess | null = null
     let procB: ChildProcess | null = null
     try {
+      // Issue #248 cycle 3 — cascade-kill removal. Pre-cycle-3 the second
+      // subprocess would SIGKILL the first via the orphan-kill on a shared
+      // port; the test relied on that. Now PPID==1 filter blocks that path,
+      // so we must give each subprocess its own port. Unique high ports avoid
+      // colliding with any running bot on this machine.
+      const portB = 19880 + Math.floor(Math.random() * 100)
+      const portA = 19980 + Math.floor(Math.random() * 100)
       // (b) Spawn subprocess B with env=0 first (fast path, no Discord connect)
       procB = spawn('bun', [SERVER], {
-        env: { ...baseEnv(dbPath), AGENT_COM_LEGACY_DISCORD_GATEWAY: '0' },
+        env: { ...baseEnv(dbPath), AGENT_COM_LEGACY_DISCORD_GATEWAY: '0', WEBHOOK_PORT: String(portB) },
         stdio: ['pipe', 'pipe', 'pipe'],
         cwd: REPO_ROOT,
       })
@@ -99,7 +106,7 @@ describe('test_6 migration_dual_run (PR #1, spec v3 contract_test test_6, merge 
 
       // (a) Spawn subprocess A with env=1 (legacy path enters, fake token → non-fatal fail)
       procA = spawn('bun', [SERVER], {
-        env: { ...baseEnv(dbPath), AGENT_COM_LEGACY_DISCORD_GATEWAY: '1' },
+        env: { ...baseEnv(dbPath), AGENT_COM_LEGACY_DISCORD_GATEWAY: '1', WEBHOOK_PORT: String(portA) },
         stdio: ['pipe', 'pipe', 'pipe'],
         cwd: REPO_ROOT,
       })

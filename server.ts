@@ -271,12 +271,24 @@ const { port: WEBHOOK_PORT, explicit: WEBHOOK_PORT_EXPLICIT } = resolveWebhookPo
 // Orphan-kill: only when env-explicit (caller's intent is to reuse a known port).
 // For free-port detection we already picked a vacant port, so killing would be
 // at best a no-op and at worst targets an unrelated process.
+// Issue #248 cycle 3 — PPID==1 filter. The pre-cycle-3 path SIGKILL'd any
+// PID lsof returned, which is exactly the cascade-disconnect mechanism
+// (concurrent bot startup → each kills the other). Now: only PIDs whose
+// parent is init (PID 1) — true orphans — get the kill. Live-parent PIDs
+// (= running MCP server) are skipped. Matches scripts/cleanup-orphan-ports.sh.
 if (WEBHOOK_PORT_EXPLICIT) {
   try {
-    const orphanPid = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
-    if (orphanPid && orphanPid !== String(process.pid)) {
-      process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT}\n`)
-      process.kill(parseInt(orphanPid), 'SIGKILL')
+    const out = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
+    const candidates = out ? out.split('\n').map(s => s.trim()).filter(Boolean) : []
+    for (const orphanPid of candidates) {
+      if (orphanPid === String(process.pid)) continue
+      let ppid = ''
+      try {
+        ppid = execSync(`ps -o ppid= -p ${orphanPid}`, { encoding: 'utf-8' }).trim()
+      } catch { continue }              // ps failed → can't prove orphan → skip
+      if (ppid !== '1') continue        // live parent → not a real orphan → skip
+      process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT} (PPID==1 only)\n`)
+      try { process.kill(parseInt(orphanPid), 'SIGKILL') } catch {}
     }
   } catch {} // no process on port — expected
 }
@@ -2886,11 +2898,26 @@ function getProcessOnPort(port: number): string[] {
   }
 }
 
+// Issue #248 cycle 3: PPID==1 (init-reparented) filter — only kill PIDs that
+// are real orphans, never PIDs whose parent process is still alive (= a
+// running bot's MCP server). Matches scripts/cleanup-orphan-ports.sh.
+function isPidOrphan(pid: string): boolean {
+  try {
+    const r = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', pid])
+    const ppid = new TextDecoder().decode(r.stdout).trim()
+    return ppid === '1'
+  } catch {
+    // ps failure → can't prove orphan → skip (false-positive avoidance)
+    return false
+  }
+}
+
 function killPidsOnPort(port: number, excludeSelf = true): number {
   const pids = getProcessOnPort(port)
   let killed = 0
   for (const pid of pids) {
     if (excludeSelf && pid === String(process.pid)) continue
+    if (!isPidOrphan(pid)) continue   // PPID==1 only
     try { process.kill(parseInt(pid), 'SIGTERM'); killed++ } catch {}
   }
   if (killed > 0) Bun.sleepSync(500)
