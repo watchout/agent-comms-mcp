@@ -2884,8 +2884,15 @@ function killProcessOnPort(port: number): boolean {
 }
 
 // --- Integrated Bridge: HTTP server for push notifications + permission responses ---
-// Pre-check: kill any stale process occupying our port
-killProcessOnPort(WEBHOOK_PORT)
+// Pre-check: kill any stale process occupying our port — but only when the
+// port came from explicit env (mirrors the cycle 1 contract at L274). For
+// the free-port path the port was already bind-verified vacant by
+// `tryBindSync`; an unconditional kill here would re-introduce the cascade
+// vector by SIGKILL'ing whoever raced into the port between probe.stop()
+// and Bun.serve() (auditor cycle 7 finding, msg `c01e55b6`).
+if (WEBHOOK_PORT_EXPLICIT) {
+  killProcessOnPort(WEBHOOK_PORT)
+}
 
 const bridgeServer = Bun.serve({
   port: WEBHOOK_PORT,

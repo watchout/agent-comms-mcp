@@ -294,5 +294,43 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
     // Cycle 3 — TOCTOU mitigation: bind probe must be present alongside lsof.
     expect(src).toMatch(/tryBindSync/)
     expect(src).toMatch(/Bun\.serve/)
+    // Cycle 8 — bridge startup pre-check kill must be gated on
+    // WEBHOOK_PORT_EXPLICIT (auditor msg `c01e55b6`). Catches the regression
+    // where the unconditional `killProcessOnPort(WEBHOOK_PORT)` reappears.
+    expect(src).toMatch(/if \(WEBHOOK_PORT_EXPLICIT\)\s*{\s*killProcessOnPort/)
   })
+
+  test.if(OPT_IN)(
+    '(9) bridge startup pre-check is gated on env-explicit (cycle 8 — TOCTOU innocent-process protection)',
+    async () => {
+      // Cycle 8 — auditor cycle 7 finding: server.ts:2888's bridge startup
+      // pre-check `killProcessOnPort(WEBHOOK_PORT)` was unconditional, so
+      // a free-port launch could still SIGKILL a process that raced into
+      // the chosen port between `probe.stop()` and `Bun.serve()`. After
+      // cycle 8 the call is gated on WEBHOOK_PORT_EXPLICIT. We exercise
+      // the free-port path with a survivor on a likely-target port and
+      // assert the survivor stays alive.
+      //
+      // The exact picked port depends on what's free; we hold 8801 as the
+      // most likely first pick so the resolver is forced to skip it and
+      // pick 8802+. If it later picks the same port the survivor holds,
+      // the test self-skips (env-dependent, not script bug).
+      const survivor = await occupyPort(8801)
+      if (survivor) occupied.push(survivor)
+
+      const r = await spawnServer({ ...baseEnv(), WEBHOOK_PORT: undefined, AUN_WEBHOOK_PORT: undefined }, 4_000)
+      // Server picked some port via free-port detection.
+      const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
+      expect(m).not.toBeNull()
+      // Critical: even for the free-port path, no killing-orphan-process log
+      // should fire. The cycle 1 path logs "killing orphan process ... on
+      // port N (PPID==1 only)"; the unguarded cycle-7 bridge pre-check
+      // logged via `killPidsOnPort` ("Killed N orphan process(es) on port
+      // N"). Neither should appear because both paths must be env-gated.
+      expect(r.stderr).not.toMatch(/killing orphan process .* on port \d+ \(PPID==1 only\)/)
+      expect(r.stderr).not.toMatch(/Killed \d+ orphan process\(es\) on port \d+/)
+      if (survivor) expect(survivor.listening).toBe(true)
+    },
+    15_000,
+  )
 })
