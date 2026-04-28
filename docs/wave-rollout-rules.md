@@ -19,7 +19,7 @@ The terms `test`, `pilot`, `3 條件 AND PASS`, and `回帰なし` are **not int
 | **test** | `bun test` run inside the PR merge gate (unit / contract / e2e) | dev-bot (writes), L1 / L2 / L3 (verify) |
 | **pilot** | production-environment observation of a real bot under real Discord traffic, with `aun` installed | lead-ama orchestrates; the bot itself is the subject |
 | **3 條件 AND PASS** | the pilot pass criteria (auto-wake AND Stop hook AND queue drain), all observed with `回帰なし` in the same observation window | lead-ama judges |
-| **回帰なし** | no regression of any other bot in the fleet during the pilot — measured by the metric set in §5 | lead-ama judges |
+| **回帰なし** | no regression of any other bot in the fleet during the pilot — measured by the metric set in §2 (`### 回帰なし metric set`) | lead-ama judges |
 | **fast-merge ≠ L2 skip** | the `route:fast-merge` label is a CEO-gate skip (governance-flow.md), **NOT** an auditor L2 skip. L2 6-axis review is mandatory on every PR regardless of label. | every layer |
 
 The `fast-merge ≠ L2 skip` clarification is included verbatim per CTO directive `479b9e3e` (the lesson from PR #253's governance violation).
