@@ -1,6 +1,6 @@
 # Wave Rollout Rules — Phase C aun deployment
 
-> **Status: provisional. Effective upon merge of PR #258 (port resolution fix) and PR #260 (cleanup-orphan-ports PPID==1 fix).** ← canonical effective-condition sentence; the rest of this doc references it rather than restating it.
+> **Status: provisional. Effective upon merge of PR #258 (port resolution fix) and PR #260 (cleanup-orphan-ports PPID==1 fix).** ← this blockquote Status metadata line is the single canonical site of the effective-condition sentence; the rest of this doc references it rather than restating it.
 >
 > Owner: lead-ama (orchestrate), ARC (bot selection + completion judgment), CTO (L3 sanity + merge), CEO (final approval)
 > Source: lead-ama draft v3 (msg `90f125f9`) + ARC review (msg `dac4d418` / `ce856485`) + CTO L3 LGTM (msg `479b9e3e`)
@@ -106,13 +106,27 @@ If more than 3 bots fail, roll back the **whole wave** (re-uninstall on every Wa
 
 ## 5. Phase C completion judgment
 
+This is the **strategic infrastructure-rollout judgment layer** — distinct axis from the per-PR post-merge verification chain in §5a below. The two chains are not a substitute for each other; both run.
+
 After Wave 3 Exit and 24 hours of stability across all 18 bots, **連名直列** sign-off:
 
 ```
 ARC → CTO → auditor → CEO
 ```
 
-Direct sequence, each layer does its own independent verification. CEO is the final approver.
+Direct sequence, each layer does its own independent verification. CEO is the final approver, signing off on the strategic completion of Phase C as a whole, not on individual PR merges (those go through §5a).
+
+### 5a. Per-PR post-merge verification chain
+
+For each PR that lands during the rollout (this doc itself, the gating PRs #258 and #260, future hotfixes), follow `~/.claude/rules/governance-flow.md`:
+
+```
+dev → lead → auditor → CTO
+```
+
+`dev` writes, `lead` (lead-ama for the agent-comms domain) does L1 verify, `auditor` does L2 6-axis review, `CTO` does L3 sanity + merge. CEO sign-off enters this chain only on `route:ceo-approval` PRs (DB schema migrations, public API changes, security policy, pricing — see governance-flow.md §Routine vs Critical). For routine PRs the chain ends at CTO merge.
+
+Section 5 (above) is the orthogonal strategic check at the end of the wave; §5a is the per-merge structural check that runs continuously.
 
 ### Required signals
 
