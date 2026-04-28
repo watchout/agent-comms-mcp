@@ -134,6 +134,8 @@ dev bot が target 環境で全方位テスト実行
   → CTO 三次検証レビュー (governance / framework 適用)
   → 完了判定 ✅
 ```
+critical PR の場合は + CEO 明示承認で完了。
+
 Runs in the target environment (production / staging / dev framework, depending on product type — see governance-flow.md). Verifies unit / integration / e2e / regression / smoke tests pass in target, the bot is online, peripheral bots remain reachable, and no new error patterns appear in logs. **The merge is the start of post-merge verification, not the end of governance.**
 
 §5a applies to every PR landing during the rollout — this hotfix itself, the gating PRs (#258, #260), the rollout-rules doc PRs (#254 + this hotfix), and future hotfixes. §5 (above) is the orthogonal strategic check that fires once at the end of Wave 3, judging the rollout as a whole; §5a is the per-PR continuous check that runs both before and after every merge.
