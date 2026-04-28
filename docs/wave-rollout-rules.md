@@ -116,17 +116,27 @@ ARC → CTO → auditor → CEO
 
 Direct sequence, each layer does its own independent verification. CEO is the final approver, signing off on the strategic completion of Phase C as a whole, not on individual PR merges (those go through §5a).
 
-### 5a. Per-PR post-merge verification chain
+### 5a. Per-PR pre-merge governance + post-merge verification chains
 
-For each PR that lands during the rollout (this doc itself, the gating PRs #258 and #260, future hotfixes), follow `~/.claude/rules/governance-flow.md`:
+`~/.claude/rules/governance-flow.md` defines **two distinct chains** for each PR. Both run; the merge is the boundary, not the endpoint.
 
+**Pre-merge governance** (the 4-layer review that gates the merge button):
 ```
-dev → lead → auditor → CTO
+dev → lead-bot L1 → codex-auditor L2 → CTO L3 → merge
 ```
+ends at `CTO L3 + merge` for `route:fast-merge` PRs. CEO sign-off enters only on `route:ceo-approval` PRs (DB schema, public API, security, pricing — see governance-flow.md §Routine vs Critical).
 
-`dev` writes, `lead` (lead-ama for the agent-comms domain) does L1 verify, `auditor` does L2 6-axis review, `CTO` does L3 sanity + merge. CEO sign-off enters this chain only on `route:ceo-approval` PRs (DB schema migrations, public API changes, security policy, pricing — see governance-flow.md §Routine vs Critical). For routine PRs the chain ends at CTO merge.
+**Post-merge verification** (mandatory after every merge per governance-flow.md §Post-merge 全方位検証, CEO directive 2026-04-09):
+```
+dev bot が target 環境で全方位テスト実行
+  → lead-bot 一次検証レビュー
+  → codex-auditor 二次検証レビュー (6 axes)
+  → CTO 三次検証レビュー (governance / framework 適用)
+  → 完了判定 ✅
+```
+Runs in the target environment (production / staging / dev framework, depending on product type — see governance-flow.md). Verifies unit / integration / e2e / regression / smoke tests pass in target, the bot is online, peripheral bots remain reachable, and no new error patterns appear in logs. **The merge is the start of post-merge verification, not the end of governance.**
 
-Section 5 (above) is the orthogonal strategic check at the end of the wave; §5a is the per-merge structural check that runs continuously.
+§5a applies to every PR landing during the rollout — this hotfix itself, the gating PRs (#258, #260), the rollout-rules doc PRs (#254 + this hotfix), and future hotfixes. §5 (above) is the orthogonal strategic check that fires once at the end of Wave 3, judging the rollout as a whole; §5a is the per-PR continuous check that runs both before and after every merge.
 
 ### Required signals
 
