@@ -946,8 +946,13 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
  *     it in content), skip duplicating it.
  *   - agent_id without a discord_id row: warn-log and skip; never throw.
  *
- * Caller is expected to prepend the result to the FIRST part of a multi-part
- * send so the recipient gets one notification, not one per chunk.
+ * Scope (PR #263 cycle 1, auditor msg `d49ed4d4`): this helper covers the
+ * **single-part outbound** path. Multi-part (split) outbound has its own
+ * mention-rendering responsibility in `core/message-split.ts:44-71` /
+ * `:165-187`, which already inserts per-part `<@discord_id>` markers; on the
+ * multi-part path the dedup check above empties the prefix and the existing
+ * splitMessage renderer handles the mentions. Unifying the two renderers is
+ * tracked in Issue #264 (a feature, not in scope of this helper).
  */
 async function mentionsToDiscordPrefix(
   mentions: string[],
