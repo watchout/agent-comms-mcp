@@ -15,7 +15,16 @@
  * Env:
  *   DISCORD_BOT_TOKEN — Discord bot token (required)
  *   DATABASE_URL      — PostgreSQL URL (required for access lookup)
- *   WEBHOOK_PORT      — Webhook bridge port (default: 8789)
+ *   AUN_WEBHOOK_PORT  — Preferred override (Issue #248 cycle 1).
+ *   WEBHOOK_PORT      — Legacy override. The pre-cycle-1 fixed default of
+ *                        8789 is removed (CTO bot collision cause). New contract:
+ *                        AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection
+ *                        (8801-8900); 8800 reserved for SSE_PORT default. If
+ *                        none of the three sources resolves a port, startup
+ *                        throws with a hint to set AUN_WEBHOOK_PORT.
+ *   DISCORD_OUTBOUND_PORT — Optional override; default = WEBHOOK_PORT + 1000
+ *                        (so implicit launches dynamic-resolve outbound port
+ *                        in lockstep with webhook port, e.g. 9801-9900).
  */
 
 import {
@@ -43,8 +52,29 @@ if (IS_MAIN && !TOKEN) {
 }
 
 const DATABASE_URL = process.env.DATABASE_URL ?? ''
-const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
-const OUTBOUND_PORT = WEBHOOK_PORT + 1000  // e.g. 8795 → 9795
+// Issue #248 cycle 6 — port resolution must match server.ts canonical contract.
+// AUN_WEBHOOK_PORT > WEBHOOK_PORT > error (no implicit 8789). discord-adapter
+// is a standalone helper that doesn't run the bind-probe range scan; an
+// operator is expected to point it at the same port the bridge bound, so we
+// require an explicit env. The pre-cycle-1 implicit 8789 default was the
+// cascade-disconnect mechanism — removing it here is part of the same fix.
+function resolveWebhookPort(): number {
+  const raw = process.env.AUN_WEBHOOK_PORT ?? process.env.WEBHOOK_PORT
+  if (!raw) {
+    throw new Error(
+      'discord-adapter: neither AUN_WEBHOOK_PORT nor WEBHOOK_PORT is set. ' +
+      'Set one of them to the port the agent-comms bridge is listening on ' +
+      '(see server.ts free-port detection in 8801-8900).'
+    )
+  }
+  const port = parseInt(raw, 10)
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+    throw new Error(`discord-adapter: invalid port env value "${raw}"`)
+  }
+  return port
+}
+const WEBHOOK_PORT = IS_MAIN ? resolveWebhookPort() : parseInt(process.env.AUN_WEBHOOK_PORT ?? process.env.WEBHOOK_PORT ?? '0', 10)
+const OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 
 // --- Access control types (backed by DB in v2.1.0) ---
 interface GroupPolicy {

@@ -166,7 +166,8 @@ agent-com MCP Server
 |----------|----------|-------------|
 | `AGENT_ID` | Yes | Agent identifier |
 | `DATABASE_URL` | No | PostgreSQL connection string |
-| `WEBHOOK_PORT` | No | HTTP bridge port (default: 8789) |
+| `AUN_WEBHOOK_PORT` | No | HTTP bridge port (preferred override; Issue #248 cycle 1) |
+| `WEBHOOK_PORT` | No | HTTP bridge port (legacy override). If neither this nor `AUN_WEBHOOK_PORT` is set, the bridge picks a free port via real-bind probe in 8801-8900 (8800 is reserved for `AGENT_COMMS_PORT` / SSE). The pre-cycle-1 fixed default of `8789` was removed because it was the cascade-disconnect cause (Issue #248). |
 | `DISCORD_BOT_TOKEN` | No | Discord bot token for Discord integration |
 | `DISCORD_STATE_DIR` | No | Directory for Discord access control state |
 | `AGENT_COMMS_SECRET` | No | HMAC shared secret (hex-encoded) |

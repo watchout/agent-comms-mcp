@@ -177,16 +177,109 @@ function loadConfig(): Config {
 const config = loadConfig()
 const AGENT_ID = config.agent_id
 const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
-const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT ?? '8789', 10)
+// Issue #248: port 8789 was the CTO bot's port; defaulting every plugin-form
+// install to 8789 caused all bots to fight for the same socket and trigger
+// orphan-kill of each other (cascade-disconnect). Resolution priority:
+//   AUN_WEBHOOK_PORT > WEBHOOK_PORT > free port in PORT_RANGE_START..PORT_RANGE_END
+// Orphan-kill only fires when the port came from explicit env (intent: clean
+// up our own previous instance). For free-port detection the picked port is
+// already vacant, so kill is unnecessary and would never target 8789 by default.
+// Range starts at 8801 — port 8800 is the AGENT_COMMS_PORT / SSE_PORT
+// default (server.ts L249). If the resolver picked 8800 for the webhook
+// bridge first, the SSE httpServer.listen(8800) later would EADDRINUSE
+// in MULTI_BOT_MODE (lead-ama L1 hidden impact, msg `fdab4db0`).
+const PORT_RANGE_START = 8801
+const PORT_RANGE_END = 8900
 
-// Kill orphan process on WEBHOOK_PORT (zombie survival prevention)
-try {
-  const orphanPid = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
-  if (orphanPid && orphanPid !== String(process.pid)) {
-    process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT}\n`)
-    process.kill(parseInt(orphanPid), 'SIGKILL')
+// lsof-based hint. May falsely say "free" (lsof binary missing, errno != 1, or
+// the port owner has no listening socket lsof can see). Cycle 3 — never used as
+// the source of truth; tryBindSync is the real authority. lsof here is a
+// fast-skip optimization for the obviously-busy case.
+function isPortLikelyFreeSync(port: number): boolean {
+  try {
+    const out = execSync(`lsof -ti :${port}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return out.length === 0
+  } catch {
+    // lsof failed (binary absent, EACCES, etc.) — defer the decision to the
+    // bind probe rather than trusting "free".
+    return true
   }
-} catch {} // no process on port — expected
+}
+
+// Real bind probe — opens then immediately stops a listener on `port`. The
+// race between this stop and the eventual bridgeServer bind is the smallest
+// window achievable without restructuring server startup. Auditor cycle 2
+// "best-effort race mitigation via bind retry" framing applies here.
+function tryBindSync(port: number): boolean {
+  try {
+    // reusePort: false disables SO_REUSEPORT so EADDRINUSE actually fires
+    // when something else (test fixture, sibling bot) is already on the port.
+    // Without this, two bots can both "succeed" the probe and pick the same
+    // port — exactly the race the cycle 3 mitigation is trying to close.
+    const probe = Bun.serve({
+      port,
+      hostname: '127.0.0.1',
+      reusePort: false,
+      fetch() { return new Response('') },
+    })
+    probe.stop(true)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Cycle 3 — TOCTOU mitigation. Two passes:
+//   1. lsof-hint + bind verify (fast path; skips obviously busy ports)
+//   2. bind-only sweep (used when every port came back "lsof free" but the
+//      previous bind probes lost the race; this is also the lsof-failure path
+//      since failure is rendered as "likely free" above)
+function findFreePortSync(start: number, end: number): number | null {
+  for (let p = start; p <= end; p++) {
+    if (!isPortLikelyFreeSync(p)) continue
+    if (tryBindSync(p)) return p
+  }
+  for (let p = start; p <= end; p++) {
+    if (tryBindSync(p)) return p
+  }
+  return null
+}
+
+function resolveWebhookPort(): { port: number; explicit: boolean } {
+  const raw = process.env.AUN_WEBHOOK_PORT ?? process.env.WEBHOOK_PORT
+  if (raw !== undefined && raw !== '') {
+    const port = parseInt(raw, 10)
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      throw new Error(`agent-comms: invalid port env value "${raw}"`)
+    }
+    process.stderr.write(`agent-comms: bound webhook port ${port} (explicit env)\n`)
+    return { port, explicit: true }
+  }
+  const port = findFreePortSync(PORT_RANGE_START, PORT_RANGE_END)
+  if (port === null) {
+    throw new Error(
+      `agent-comms: no free port available in range ${PORT_RANGE_START}-${PORT_RANGE_END}. ` +
+      `Set AUN_WEBHOOK_PORT to choose explicitly.`
+    )
+  }
+  process.stderr.write(`agent-comms: bound webhook port ${port} (free-port detection)\n`)
+  return { port, explicit: false }
+}
+
+const { port: WEBHOOK_PORT, explicit: WEBHOOK_PORT_EXPLICIT } = resolveWebhookPort()
+
+// Orphan-kill: only when env-explicit (caller's intent is to reuse a known port).
+// For free-port detection we already picked a vacant port, so killing would be
+// at best a no-op and at worst targets an unrelated process.
+if (WEBHOOK_PORT_EXPLICIT) {
+  try {
+    const orphanPid = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
+    if (orphanPid && orphanPid !== String(process.pid)) {
+      process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT}\n`)
+      process.kill(parseInt(orphanPid), 'SIGKILL')
+    }
+  } catch {} // no process on port — expected
+}
 
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
@@ -2863,8 +2956,15 @@ function killProcessOnPort(port: number): boolean {
 }
 
 // --- Integrated Bridge: HTTP server for push notifications + permission responses ---
-// Pre-check: kill any stale process occupying our port
-killProcessOnPort(WEBHOOK_PORT)
+// Pre-check: kill any stale process occupying our port — but only when the
+// port came from explicit env (mirrors the cycle 1 contract at L274). For
+// the free-port path the port was already bind-verified vacant by
+// `tryBindSync`; an unconditional kill here would re-introduce the cascade
+// vector by SIGKILL'ing whoever raced into the port between probe.stop()
+// and Bun.serve() (auditor cycle 7 finding, msg `c01e55b6`).
+if (WEBHOOK_PORT_EXPLICIT) {
+  killProcessOnPort(WEBHOOK_PORT)
+}
 
 const bridgeServer = Bun.serve({
   port: WEBHOOK_PORT,
