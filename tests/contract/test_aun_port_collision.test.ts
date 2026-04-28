@@ -323,11 +323,13 @@ describe('test_aun_port_collision — Issue #248 port resolution', () => {
       const m = r.stderr.match(/bound webhook port (\d+) \(free-port detection\)/)
       expect(m).not.toBeNull()
       // Critical: even for the free-port path, no killing-orphan-process log
-      // should fire. The cycle 1 path logs "killing orphan process ... on
-      // port N (PPID==1 only)"; the unguarded cycle-7 bridge pre-check
-      // logged via `killPidsOnPort` ("Killed N orphan process(es) on port
-      // N"). Neither should appear because both paths must be env-gated.
-      expect(r.stderr).not.toMatch(/killing orphan process .* on port \d+ \(PPID==1 only\)/)
+      // should fire. The cycle 1 early kill block logs "killing orphan process
+      // <pid> on port <N>"; the unguarded cycle-7 bridge pre-check logged via
+      // `killPidsOnPort` ("Killed N orphan process(es) on port N"). Neither
+      // should appear because both paths must be env-gated. (Cycle 8 only
+      // gates them; the actual filter inside the kill is not part of this
+      // PR — that lives in PR #260.)
+      expect(r.stderr).not.toMatch(/killing orphan process \d+ on port \d+/)
       expect(r.stderr).not.toMatch(/Killed \d+ orphan process\(es\) on port \d+/)
       if (survivor) expect(survivor.listening).toBe(true)
     },
