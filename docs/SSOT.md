@@ -1013,7 +1013,7 @@ discord-cto|~/Developer/tech-lead|cto|8789|AGENT_COM_RUNTIME=daemon claude serve
 
 ##### Orphan-port cleanup contract (PPID==1)
 
-Issue #248 cycle 3 — 全 lifecycle path (restart_bot / watchdog / migrate / rollback / server.ts startup orphan-kill) は単一の canonical script `scripts/cleanup-orphan-ports.sh` を呼ぶ。
+Issue #248 cycle 3 — PPID==1 canonical contract is applied via either script invocation (4 lifecycle scripts: `restart-bot.sh`, `watchdog.sh`, `migrate-bot.sh`, `rollback-bot.sh`) or equivalent inline implementation (`server.ts` startup orphan-kill block + `killPidsOnPort` helper). The 4 shell scripts delegate to the canonical `scripts/cleanup-orphan-ports.sh`; `server.ts` runs the same `lsof -> ps -o ppid= -p` filter inline (it cannot reasonably exec the script at module init or inside MCP-tool handlers). Both routes enforce the same contract; topology is `script × 4 + inline × 2 = 6 sites`.
 
 - **canonical script**: `scripts/cleanup-orphan-ports.sh <port>`
 - **PPID==1 filter rule**: `lsof -ti :<port>` で得た PID のうち `ps -o ppid= -p <pid>` が `1` (= init / launchd 引取済 = 真の orphan) のもののみ `kill -9` 対象。PPID!=1 (= 親 process 健在 = 生きた MCP server / 別 bot) は skip。`ps` 失敗時は false-positive 回避で skip。
