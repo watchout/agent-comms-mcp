@@ -1,6 +1,6 @@
 # Wave Rollout Rules — Phase C aun deployment
 
-> **Status: provisional. Effective upon merge of PR #258 (port resolution fix) and PR #260 (cleanup-orphan-ports PPID==1 fix).** ← canonical effective-condition sentence; the rest of this doc references it rather than restating it.
+> **Status: provisional. Effective upon merge of PR #258 (port resolution fix) and PR #260 (cleanup-orphan-ports PPID==1 fix).** ← this blockquote Status metadata line is the single canonical site of the effective-condition sentence; the rest of this doc references it rather than restating it.
 >
 > Owner: lead-ama (orchestrate), ARC (bot selection + completion judgment), CTO (L3 sanity + merge), CEO (final approval)
 > Source: lead-ama draft v3 (msg `90f125f9`) + ARC review (msg `dac4d418` / `ce856485`) + CTO L3 LGTM (msg `479b9e3e`)
@@ -106,13 +106,39 @@ If more than 3 bots fail, roll back the **whole wave** (re-uninstall on every Wa
 
 ## 5. Phase C completion judgment
 
+This is the **strategic infrastructure-rollout judgment layer** — distinct axis from the per-PR post-merge verification chain in §5a below. The two chains are not a substitute for each other; both run.
+
 After Wave 3 Exit and 24 hours of stability across all 18 bots, **連名直列** sign-off:
 
 ```
 ARC → CTO → auditor → CEO
 ```
 
-Direct sequence, each layer does its own independent verification. CEO is the final approver.
+Direct sequence, each layer does its own independent verification. CEO is the final approver, signing off on the strategic completion of Phase C as a whole, not on individual PR merges (those go through §5a).
+
+### 5a. Per-PR pre-merge governance + post-merge verification chains
+
+`~/.claude/rules/governance-flow.md` defines **two distinct chains** for each PR. Both run; the merge is the boundary, not the endpoint.
+
+**Pre-merge governance** (the 4-layer review that gates the merge button):
+```
+dev → lead-bot L1 → codex-auditor L2 → CTO L3 → merge
+```
+ends at `CTO L3 + merge` for `route:fast-merge` PRs. CEO sign-off enters only on `route:ceo-approval` PRs (DB schema, public API, security, pricing — see governance-flow.md §Routine vs Critical).
+
+**Post-merge verification** (mandatory after every merge per governance-flow.md §Post-merge 全方位検証, CEO directive 2026-04-09):
+```
+dev bot が target 環境で全方位テスト実行
+  → lead-bot 一次検証レビュー
+  → codex-auditor 二次検証レビュー (6 axes)
+  → CTO 三次検証レビュー (governance / framework 適用)
+  → 完了判定 ✅
+```
+critical PR の場合は + CEO 明示承認で完了。
+
+Runs in the target environment (production / staging / dev framework, depending on product type — see governance-flow.md). Verifies unit / integration / e2e / regression / smoke tests pass in target, the bot is online, peripheral bots remain reachable, and no new error patterns appear in logs. **The merge is the start of post-merge verification, not the end of governance.**
+
+§5a applies to every PR landing during the rollout — this hotfix itself, the gating PRs (#258, #260), the rollout-rules doc PRs (#254 + this hotfix), and future hotfixes. §5 (above) is the orthogonal strategic check that fires once at the end of Wave 3, judging the rollout as a whole; §5a is the per-PR continuous check that runs both before and after every merge.
 
 ### Required signals
 
