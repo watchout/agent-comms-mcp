@@ -927,6 +927,59 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
   return [...new Set([...agentIds, ...nativeMentions])]
 }
 
+/**
+ * Issue #248 follow-up — outbound mention transformer.
+ *
+ * The MCP `send` / `notify` tools accept `mentions: [agent_id, ...]` so callers
+ * never type Discord snowflake IDs. The DB recipient routing (message_queue
+ * fanout, push) already uses agent_ids directly, but **the Discord-side post**
+ * needs the literal `<@DISCORD_ID>` markers in the message content for Discord's
+ * native push notifications to fire. Without this transform the recipient bot
+ * sees the message in queue but Discord's mobile / desktop notification doesn't
+ * trigger — the symptom CEO flagged + CTO directive `24a25097`.
+ *
+ * Behavior:
+ *   - For each agent_id in `mentions`, look up `metadata->>'discord_id'` from
+ *     the agents table (same source `convertMentionsToDiscord` uses).
+ *   - Build a space-separated `<@id1> <@id2> ` prefix.
+ *   - If the content already contains the snowflake (e.g. caller pre-rendered
+ *     it in content), skip duplicating it.
+ *   - agent_id without a discord_id row: warn-log and skip; never throw.
+ *
+ * Caller is expected to prepend the result to the FIRST part of a multi-part
+ * send so the recipient gets one notification, not one per chunk.
+ */
+async function mentionsToDiscordPrefix(
+  mentions: string[],
+  client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[] }> },
+  existingContent = '',
+): Promise<string> {
+  if (!mentions || mentions.length === 0) return ''
+  const tokens: string[] = []
+  for (const agentId of mentions) {
+    if (!agentId) continue
+    try {
+      const r = await client.query(
+        "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
+        [agentId],
+      )
+      const discordId = r.rows[0]?.discord_id
+      if (!discordId) {
+        process.stderr.write(`agent-comms: outbound mention skip — no discord_id for agent_id="${agentId}"\n`)
+        continue
+      }
+      const token = `<@${discordId}>`
+      // Skip if already present (caller-rendered or earlier in this loop).
+      if (existingContent.includes(token)) continue
+      if (tokens.includes(token)) continue
+      tokens.push(token)
+    } catch (err) {
+      process.stderr.write(`agent-comms: outbound mention DB lookup failed for "${agentId}": ${err}\n`)
+    }
+  }
+  return tokens.length === 0 ? '' : tokens.join(' ') + ' '
+}
+
 /** Check if agent has observer_mode enabled (server-only helper, kept here for now) */
 async function isObserverMode(agentId: string): Promise<boolean> {
   const client = await tryGetDb()
@@ -1920,9 +1973,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (cr.rows.length > 0) externalId = cr.rows[0].external_id
       }
       if (externalId) {
+        // Issue #248 follow-up — render `mentions` (agent_id list) as Discord
+        // snowflake mentions prepended to the first part. Without this, Discord
+        // never fires its native push notification because the literal
+        // `<@DISCORD_ID>` is missing from the posted content (CTO `24a25097`).
+        const mentionPrefix = await mentionsToDiscordPrefix(mentions, txClient, parts.join('\n'))
         for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
           const partMessageId = partIds[partIdx]
-          const partContent = parts[partIdx]
+          const rawPartContent = parts[partIdx]
+          const partContent = partIdx === 0 && mentionPrefix
+            ? mentionPrefix + rawPartContent
+            : rawPartContent
           try {
             await txClient.query(
               `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
@@ -2245,9 +2306,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (cr.rows.length > 0) externalId = cr.rows[0].external_id
     }
     if (externalId) {
+      // Issue #248 follow-up — same Discord snowflake prefix as the send tool.
+      // notify path uses `client` (no explicit transaction wrapper).
+      const mentionPrefix = await mentionsToDiscordPrefix(mentions, client, parts.join('\n'))
       for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
         const partMessageId = partIds[partIdx]
-        const partContent = parts[partIdx]
+        const rawPartContent = parts[partIdx]
+        const partContent = partIdx === 0 && mentionPrefix
+          ? mentionPrefix + rawPartContent
+          : rawPartContent
         try {
           await client.query(
             `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
