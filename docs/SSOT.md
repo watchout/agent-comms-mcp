@@ -512,8 +512,12 @@ npx agent-comms-mcp status   # health endpoint 問合せ
 
 ```bash
 # 社内 multi-bot 運用（bot-registry.txt 準拠）
+# WEBHOOK_PORT は bot ごとに registry の値を渡す。Issue #248 cycle 1 以降、
+# 暗黙 default の 8789 は撤廃 (CTO bot 衝突源)。env を渡さない場合は
+# server.ts が AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection
+# (8801-8900) の順で解決する。下記は CTO の社内運用例 (port 8889)。
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
-WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
+WEBHOOK_PORT=8889 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
 claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
@@ -741,8 +745,11 @@ npm start
 
 # Claude Code起動コマンド
 # MCPサーバー名 "agent-comms" は .mcp.json で定義 (実態は bot-registry.txt と一致)
+# Issue #248 cycle 1 以降、WEBHOOK_PORT 暗黙 default 8789 は撤廃。
+# 下記は社内運用 CTO bot 例 (port 8889、bot-registry.txt の値を渡す)。
+# env 未指定時は AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port (8801-8900) で解決。
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
-WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
+WEBHOOK_PORT=8889 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
 AGENT_COM_RUNTIME=daemon claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
@@ -1071,8 +1078,10 @@ npx agent-comms-mcp start    # daemon + MCP 起動
 
 **社内 multi-bot 運用（bot-registry.txt と一致）:**
 ```bash
+# Issue #248 cycle 1 以降 WEBHOOK_PORT 暗黙 default 8789 撤廃。
+# 各 bot 固有 port を bot-registry.txt から渡す (CTO 例: 8889)。
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
-WEBHOOK_PORT=8789 DISCORD_BOT_TOKEN='xxx' \
+WEBHOOK_PORT=8889 DISCORD_BOT_TOKEN='xxx' \
 claude server:agent-comms \
        --mcp-config .mcp.json \
        --dangerously-skip-permissions
