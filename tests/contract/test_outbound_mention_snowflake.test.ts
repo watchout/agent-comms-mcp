@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test'
 
-// CTO directive `24a25097` — outbound mention bug fix.
+// CTO directive `24a25097` — outbound mention bug fix (single-part scope only).
 //
 // `mcp__agent-comms__send` and `notify` accept `mentions: [agent_id, ...]`.
 // Pre-fix the agent_ids never reached Discord — the literal `<@DISCORD_ID>`
@@ -8,9 +8,13 @@ import { describe, test, expect } from 'bun:test'
 // from the posted content. Symptom: bot sees the queue row but Discord
 // never pings the user / bot.
 //
-// `mentionsToDiscordPrefix` (server.ts) does the conversion from agent_id
-// to `<@discord_id>` via the agents table lookup and returns a space-
-// separated prefix the outbound INSERT loop prepends to the first part.
+// **Scope (PR #263 cycle 1 per auditor msg `d49ed4d4`)**: this PR fixes the
+// single-part path only. `mentionsToDiscordPrefix` (server.ts) returns a
+// `<@discord_id>` prefix for the outbound INSERT loop to prepend. Multi-part
+// (split) outbound is governed by `core/message-split.ts:44-71` / `:165-187`,
+// which already renders per-part `<@id>` markers under the current SSOT and
+// is intentionally NOT changed by this PR. Unifying the multi-part vs. non-
+// split paths is tracked as a follow-up Issue.
 //
 // We can't import server.ts as a module (heavy startup, DB, MCP transport),
 // so this test exercises the helper through a thin reimplementation that
@@ -108,8 +112,14 @@ describe('outbound mention snowflake conversion (CTO 24a25097)', () => {
     const src = await Bun.file(resolve(REPO_ROOT, 'server.ts')).text()
     expect(src).toMatch(/async function mentionsToDiscordPrefix/)
     expect(src).toMatch(/SELECT metadata->>'discord_id'/)
-    // Both call sites must wire the prefix into the first part. Match the
-    // pattern that wraps the first-part content in `partIdx === 0 &&
+    // Both call sites must wire the prefix into the first part of the
+    // outbound INSERT loop. In the single-part case (no split) this is the
+    // only part; in the multi-part case `core/message-split.ts` already
+    // renders per-part `<@id>` markers and the prefix is dropped by the
+    // dedup check inside the helper, so the wiring is harmless on that
+    // path and the production fix lands on single-part outbound only.
+    //
+    // Match the pattern that wraps the first-part content in `partIdx === 0 &&
     // mentionPrefix ? mentionPrefix + rawPartContent : rawPartContent`.
     const callSiteCount = (src.match(/await mentionsToDiscordPrefix\(/g) ?? []).length
     expect(callSiteCount).toBe(2)  // send tool + notify tool
