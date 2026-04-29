@@ -32,6 +32,13 @@ export function migrateSqlite(dbPath?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_am_discord_id ON agent_messages(discord_message_id) WHERE discord_message_id IS NOT NULL`)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_messages_discord_id ON agent_messages(discord_message_id) WHERE discord_message_id IS NOT NULL`)
 
+  // Issue #266: input_mentions trace column (SQLite stores TEXT[] as JSON string).
+  const amCols = db.query(`PRAGMA table_info(agent_messages)`).all() as Array<{ name: string }>
+  const amColNames = new Set(amCols.map((c) => c.name))
+  if (!amColNames.has('input_mentions')) {
+    db.exec(`ALTER TABLE agent_messages ADD COLUMN input_mentions TEXT`)
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS message_queue (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

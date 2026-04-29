@@ -536,6 +536,8 @@ async function saveMessage(msg: {
   // ADR-026: unified schema fields
   source?: string; thread_id?: string; direction?: string; role?: string
   session_id?: string; project?: string
+  // Issue #266: raw args.mentions snapshot for outbound trace.
+  input_mentions?: string[] | null
 }): Promise<string> {
   const id = randomUUID()
   const client = await tryGetDb()
@@ -551,15 +553,17 @@ async function saveMessage(msg: {
   // the partial unique index dedup mixed-mode race inserts.
   const discordMessageId = (msg.metadata as Record<string, unknown> | undefined)?.discord_message_id as string | undefined ?? null
 
+  const inputMentions = msg.input_mentions && msg.input_mentions.length > 0 ? msg.input_mentions : null
+
   // Path A — outbound or no-discord-id row: plain INSERT (no dedup column).
   if (!discordMessageId) {
     await client.query(
-      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, input_mentions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
        msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
        msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
-       msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null]
+       msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, inputMentions]
     )
     return id
   }
@@ -568,14 +572,14 @@ async function saveMessage(msg: {
   // NOTE: ON CONFLICT must REPEAT the partial-index predicate so the planner matches
   //       uq_agent_messages_discord_id (Spike 2 finding, code 42P10 otherwise).
   const insertResult = await client.query(
-    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, discord_message_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, discord_message_id, input_mentions)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      ON CONFLICT (discord_message_id) WHERE discord_message_id IS NOT NULL DO NOTHING
      RETURNING id`,
     [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
      msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
      msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
-     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, discordMessageId]
+     msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, discordMessageId, inputMentions]
   )
 
   if (insertResult.rows.length > 0) {
@@ -1687,6 +1691,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { content, reply_to, message_type, metadata } = args as any
     // Issue #118 PR-B ③: mentions may be auto-filled below; use let
     let mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
+    // Issue #266: snapshot the raw args.mentions for outbound trace before any
+    // auto-fill / normalization mutates `mentions`. Stored on agent_messages
+    // so recurrences (e.g. PR #263 mention-prepend) can be diagnosed without stderr logs.
+    const rawInputMentions: string[] = mentions.slice()
 
     // Validate content
     if (!content || content.length === 0) {
@@ -1896,6 +1904,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         metadata: fullMetadata, depth: msgDepth,
         source: 'agent-comms', thread_id: dest.threadId ?? null,
         direction: 'outbound', role: 'agent',
+        input_mentions: rawInputMentions,
       })
       partIds.push(id)
 
@@ -2171,6 +2180,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'notify') {
     const { channel, thread_id: threadArg, content, message_type, metadata } = args as any
     const mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
+    // Issue #266: snapshot raw args.mentions for outbound trace.
+    const rawInputMentions: string[] = mentions.slice()
 
     // spec §4.3 step 1 — --channel / --mentions / --content required.
     if (!channel || typeof channel !== 'string') {
@@ -2314,6 +2325,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         metadata: fullMetadata, depth: 0,
         source: 'agent-comms', thread_id: dest.threadId ?? null,
         direction: 'outbound', role: 'agent',
+        input_mentions: rawInputMentions,
       })
       partIds.push(id)
       await client.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
