@@ -63,6 +63,10 @@ async function migrate() {
       ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'agent';
       ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS session_id TEXT;
       ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS project TEXT;
+      -- Issue #266: raw args.mentions trace for outbound send/notify so that
+      -- recurrences (e.g. PR #263 mention-prepend bug) can be diagnosed by
+      -- comparing raw input vs final content without relying on stderr logs.
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS input_mentions TEXT[];
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
 
