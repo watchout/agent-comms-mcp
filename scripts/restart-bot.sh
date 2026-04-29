@@ -36,14 +36,12 @@ fi
 echo "[restart-bot] Restarting ${SESSION}..."
 echo "[restart-bot] Command: ${CLAUDE_CMD}"
 
-# Step 1: Kill orphaned MCP process on port
+# Step 1: Kill orphaned MCP process on port (canonical PPID==1 filter — Issue #248 cycle 3).
+# Pre-cycle-3 inline lsof | kill killed live-parent processes too, which is
+# the cascade-disconnect mechanism. Delegate to the canonical script so the
+# PPID==1 contract is enforced uniformly across every cleanup site.
 if [ -n "${PORT:-}" ]; then
-  OLD_PID=$(lsof -i :"$PORT" -t 2>/dev/null || true)
-  if [ -n "$OLD_PID" ]; then
-    echo "[restart-bot] Killing orphaned MCP process PID ${OLD_PID} on port ${PORT}"
-    kill "$OLD_PID" 2>/dev/null || true
-    sleep 1
-  fi
+  bash "$(dirname "$0")/cleanup-orphan-ports.sh" "$PORT"
 fi
 
 # Step 2: Kill tmux session
