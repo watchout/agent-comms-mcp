@@ -31,12 +31,7 @@
  */
 
 import { Client } from 'pg'
-import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
-
-interface DrainSummary {
-  drained: number
-  skipped: number
-}
+import { drainPendingWithAutoSkip, type DrainSummary } from '../core/drain-with-auto-skip'
 
 // Issue #278 (F-3) — role-differential default drain scope.
 //
@@ -127,55 +122,15 @@ async function main(): Promise<DrainSummary> {
     return { drained: 0, skipped: 0 }
   }
 
-  let drained = 0
-  let skipped = 0
+  let result: DrainSummary = { drained: 0, skipped: 0 }
   try {
-    const pending = await client.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM message_queue
-        WHERE agent_id = $1 AND status = 'pending'`,
-      [agentId],
-    )
-    const pendingCount = pending.rows[0]?.n ?? 0
-    if (pendingCount === 0) {
-      return { drained: 0, skipped: 0 }
-    }
-
-    const rows = await client.query<{
-      id: number | string
-      payload: string
-    }>(
-      `SELECT id, payload FROM message_queue
-        WHERE agent_id = $1 AND status = 'pending'
-        ORDER BY created_at DESC
-        LIMIT $2`,
-      [agentId, limit],
-    )
-
-    for (const row of rows.rows) {
-      drained++
-      let payload: Record<string, unknown> = {}
-      try { payload = JSON.parse(row.payload) } catch {}
-      const content = typeof payload.content === 'string' ? payload.content : ''
-      const messageType = typeof payload.message_type === 'string' ? payload.message_type : 'chat'
-      const authorAgentId = typeof payload.author_id === 'string' ? payload.author_id : null
-
-      const m = matchesAutoSkipPattern({ content, messageType, authorAgentId, recipientAgentId: agentId })
-      if (m.matched) {
-        await client.query(
-          `UPDATE message_queue
-              SET status = 'skipped', failed_reason = $1
-            WHERE id = $2 AND status = 'pending'`,
-          [`AUTO_SKIP_PATTERN:${m.reason ?? 'unknown'}`, row.id],
-        )
-        skipped++
-      }
-    }
+    result = await drainPendingWithAutoSkip(client, agentId, limit)
   } catch (err) {
     process.stderr.write(`session-start-drain: query failed (non-fatal): ${err}\n`)
   } finally {
     await client.end().catch(() => {})
   }
-  return { drained, skipped }
+  return result
 }
 
 try {
