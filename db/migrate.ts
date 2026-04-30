@@ -243,6 +243,28 @@ async function migrate() {
       ON message_queue(agent_id, status, priority DESC, created_at ASC)
       WHERE status = 'pending';
 
+    -- Issue #278 (A) Per-row claim model. Replaces agents.current_message_id
+    -- single-slot guard: a bot now claims individual message_queue rows with
+    -- a TTL, allowing concurrent in-flight processing and structured TTL
+    -- recovery (IMPLICIT_ABANDON sweeper). The columns are nullable so legacy
+    -- pending rows continue to satisfy the existing CHECK / unique pair.
+    DO $$ BEGIN
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_mq_expired_claims
+      ON message_queue(claim_expires_at)
+      WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'read';
+
+    -- Issue #278 (A) Inbound idempotency was already in place as
+    -- uq_mq_agent_message ((agent_id, message_id) WHERE message_id IS NOT NULL,
+    -- created earlier). The Issue body uq_mq_inbound_idem proposal added
+    -- a COALESCE(metadata->>source_path) column that does not
+    -- exist on message_queue, so the existing partial unique index is the
+    -- canonical guard for #272 2-path bloat — no redundant index needed.
+
     -- Codex audit (PR#140) refinement: dedup with quarantine.
     --   1. Move non-safe duplicates (non-identical payload / non-pending
     --      status) to message_queue_dedup_quarantine so the operator can
