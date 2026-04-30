@@ -1672,11 +1672,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         [agentId, String(claimTtlSec), row.id],
       )
       // spec §4.1 step 4 — mark agent busy while processing this message.
-      // Issue #278 (A) segment 3d: per-row claim is now the canonical
-      // in-flight pointer (message_queue.claimed_by stamped above), so
-      // agents.current_message_id is no longer written.
+      // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
+      // semantics, busy/idle is derived from the actual open-claim set,
+      // not blindly stamped. Here we just transitioned a row to 'read'
+      // so the EXISTS predicate is guaranteed true; we still go through
+      // the CASE WHEN derivation so every agents.status writer in this
+      // PR uses the same one-line idempotent shape.
       await client.query(
-        `UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $1`,
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
         [agentId],
       )
       await client.query('COMMIT')
@@ -2109,12 +2116,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
       [id, claimedMqId],
     )
-    // spec §4.2 step 10-11 — flip the agent back to idle (§8.1 busy → idle).
-    // Issue #278 (A) segment 3d: agents.current_message_id is gone — the
-    // per-row claim path's UPDATE message_queue → 'replied' (above) is the
-    // sole record of the in-flight transition.
+    // spec §4.2 step 10-11 — flip the agent based on remaining open
+    // claims (§8.1 busy ↔ idle). Issue #278 cycle 1 (auditor BLOCK 1):
+    // with multi in-flight, this send only closes ONE claim — other
+    // claims may still be open, in which case the agent must remain
+    // busy. EXISTS-derive guarantees observability (sender-feedback /
+    // heartbeat / bot_status all read agents.status) keeps tracking
+    // the true state.
     await txClient.query(
-      `UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
+      `UPDATE agents SET
+         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+         status_updated_at = now()
+       WHERE agent_id = $1`,
       [agentId],
     )
 
@@ -2752,15 +2766,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         const queueId = upd.rows[0].id as number
-        // Issue #278 (A) segment 3d: drop the current_message_id WHERE filter
-        // and SET clause. The message_queue row above is the truth; flipping
-        // the agent to idle here mirrors the send path (§8.1 busy → idle).
+        // Issue #278 cycle 1 (auditor BLOCK 1): EXISTS-derive busy/idle
+        // from the remaining open claims rather than unconditionally
+        // flipping to idle — multi in-flight means fail/skip closes
+        // only ONE claim while others may still be active.
         await client.query(
-          `UPDATE agents
-              SET status = 'idle',
-                  status_detail = NULL,
-                  status_updated_at = now()
-            WHERE agent_id = $1`,
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
           [AGENT_ID],
         )
         await client.query('COMMIT')
@@ -2797,14 +2812,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             RETURNING id`,
           [targetAgent],
         )
-        // Issue #278 (A) segment 3d: drop current_message_id from the SET
-        // clause; the per-row claim model owns in-flight pointers now.
+        // Issue #278 cycle 1 (auditor BLOCK 1): reclaim must respect
+        // the multi in-flight contract. After rolling expired 'read'
+        // rows back to 'pending', the agent may still hold OTHER
+        // active claims that are not orphaned; EXISTS-derive keeps
+        // those visible.
         await client.query(
-          `UPDATE agents
-              SET status = 'idle',
-                  status_detail = NULL,
-                  status_updated_at = now()
-            WHERE agent_id = $1`,
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
           [targetAgent],
         )
         await client.query('COMMIT')

@@ -149,16 +149,19 @@ describe('T4 — server.ts MCP tools: fail / skip / reclaim', () => {
     expect(SERVER_SRC).toMatch(/if \(name === 'reclaim'\)/)
   })
 
-  test('fail/skip handler performs the transactional status + agents idle update', () => {
+  test('fail/skip handler uses the EXISTS-derive open-claim status update (Issue #278 cycle 1)', () => {
     expect(SERVER_SRC).toMatch(/SET status = \$1, failed_reason = \$2/)
-    // Issue #278 segment 3d — agents.current_message_id is gone; the
-    // fail/skip handler now only flips agents.status to 'idle'.
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const failIdx = SERVER_SRC.indexOf("if (name === 'fail' || name === 'skip')")
     const reclaimIdx = SERVER_SRC.indexOf("if (name === 'reclaim')", failIdx)
     expect(failIdx).toBeGreaterThan(sendIdx)
     const handler = SERVER_SRC.slice(failIdx, reclaimIdx === -1 ? SERVER_SRC.length : reclaimIdx)
-    expect(handler).toMatch(/SET\s+status = 'idle'/)
+    // Multi in-flight: closing one claim must not unconditionally
+    // idle the agent; CASE WHEN EXISTS keeps busy while other reads
+    // remain.
+    expect(handler).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
     expect(handler).not.toMatch(/current_message_id = NULL/)
   })
 

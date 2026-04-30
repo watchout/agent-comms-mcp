@@ -202,7 +202,9 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // not on agents.current_message_id. The agents UPDATE only flips
     // status='busy' now.
     expect(body).toMatch(/UPDATE message_queue\s*\n?\s*SET status\s*=\s*'read'[\s\S]*?claimed_by\s*=\s*\$1[\s\S]*?claimed_at\s*=\s*now\(\)[\s\S]*?claim_expires_at\s*=\s*\$2/)
-    expect(body).toMatch(/UPDATE agents SET status\s*=\s*'busy',\s*status_detail\s*=\s*'メッセージ処理中'[\s\S]*?WHERE agent_id/)
+    expect(body).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
     // Negative pin: the legacy single-slot stamp must not coexist.
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1/)
   })
@@ -267,7 +269,9 @@ describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 
     // Issue #278 segment 3d — agents.current_message_id is gone, so the
     // idle-flip UPDATE no longer touches that column. Negative pin
     // catches a refactor that brings the column write back.
-    expect(body).toMatch(/UPDATE agents SET status\s*=\s*'idle'/)
+    expect(body).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
   })
   test('sendMessage wraps the body in BEGIN/COMMIT with FOR UPDATE on the claim row', () => {

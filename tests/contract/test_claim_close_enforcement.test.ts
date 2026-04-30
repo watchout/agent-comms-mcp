@@ -136,6 +136,69 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     rmSync(tmp, { recursive: true, force: true })
   }, 30_000)
 
+  test('(cycle 1 BLOCK 2) escalation key is (agent_id, session_id, claim_id-set) — new claim resets retry budget', async () => {
+    // Issue #278 cycle 1 (auditor BLOCK 2): a fresh claim within the
+    // same Claude session must be eligible for its own retry counter
+    // and its own escalation. The legacy session_id-only key would
+    // either bypass the new claim's escalation or accumulate retries
+    // across unrelated claims; the (agent_id, session_id, claim_key)
+    // key isolates them.
+    const session = `s-${randomUUID().slice(0, 8)}`
+
+    // First claim — block 3 times, then escalate.
+    const claim1 = await seedClaim()
+    for (let i = 0; i < 3; i++) runHook(session)
+    runHook(session) // 4th: escalates claim1.
+    let audit = await client.query(
+      `SELECT count(*)::int AS n FROM audit_log
+        WHERE event_type = 'stop_hook.escalation' AND agent_id = $1
+          AND detail->>'session_id' = $2`,
+      [TEST_AGENT, session],
+    )
+    expect(audit.rows[0].n).toBe(1)
+
+    // Close claim1, open claim2 in the SAME session.
+    await client.query(
+      `UPDATE message_queue SET status = 'replied', replied_at = now() WHERE id = $1`,
+      [claim1.id],
+    )
+    const claim2 = await seedClaim()
+
+    // First Stop with claim2 must NOT trigger immediate escalation —
+    // its (agent, session, claim_key) counter starts at 0.
+    const r1 = runHook(session)
+    expect(r1.status).toBe(2)
+
+    // claim2 needs its own 3 blocks before the 4th passes.
+    runHook(session)
+    runHook(session)
+    runHook(session) // 4th block-cycle on claim2 → exit 0 + escalation.
+
+    audit = await client.query(
+      `SELECT count(*)::int AS n FROM audit_log
+        WHERE event_type = 'stop_hook.escalation' AND agent_id = $1
+          AND detail->>'session_id' = $2`,
+      [TEST_AGENT, session],
+    )
+    expect(audit.rows[0].n).toBe(2)
+
+    // The audit detail records the per-claim key so dashboards can
+    // distinguish them.
+    const detail = await client.query<{ claim_key: string | null }>(
+      `SELECT detail->>'claim_key' AS claim_key FROM audit_log
+        WHERE event_type = 'stop_hook.escalation' AND agent_id = $1
+          AND detail->>'session_id' = $2
+        ORDER BY created_at`,
+      [TEST_AGENT, session],
+    )
+    expect(detail.rows[0].claim_key).toBe(`open=${claim1.id}`)
+    expect(detail.rows[1].claim_key).toBe(`open=${claim2.id}`)
+
+    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    await client.query(`DELETE FROM audit_log WHERE agent_id = $1 AND detail->>'session_id' = $2`, [TEST_AGENT, session])
+    rmSync(tmp, { recursive: true, force: true })
+  }, 30_000)
+
   test('escalation dedupe — repeated post-limit calls only fire one audit_log row + one bypass line', async () => {
     await seedClaim()
     const session = `s-${randomUUID().slice(0, 8)}`

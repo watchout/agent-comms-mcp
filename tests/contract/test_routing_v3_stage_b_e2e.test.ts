@@ -134,4 +134,71 @@ dbDescribe('Issue #278 Stage B — SQL-level integration', () => {
     )
     expect(lookup.rows.length).toBe(0)
   })
+
+  // Issue #278 cycle 1 (auditor BLOCK 1) — multi-claim busy semantic.
+  // The agents.status writers (next/send/fail/skip/reclaim) all use the
+  // same CASE WHEN EXISTS(...) derivation; these tests pin that the
+  // EXISTS predicate produces the right busy/idle outcome under three
+  // concrete multi-claim states.
+  async function statusOf(agentId: string): Promise<{ status: string; status_detail: string | null }> {
+    // Bootstrap the agent row if absent so the UPDATE below has a target.
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
+       VALUES ($1, $1, 'dev', 'mcp', 'idle') ON CONFLICT DO NOTHING`,
+      [agentId],
+    )
+    await client.query(
+      `UPDATE agents SET
+         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+         status_updated_at = now()
+       WHERE agent_id = $1`,
+      [agentId],
+    )
+    const r = await client.query<{ status: string; status_detail: string | null }>(
+      `SELECT status, status_detail FROM agents WHERE agent_id = $1`,
+      [agentId],
+    )
+    return r.rows[0]
+  }
+
+  test('(busy-calc 1) two open claims, one closed → agent stays busy (1 claim still read)', async () => {
+    const m1 = await seedPending(TEST_AGENT_A, 'b1')
+    const m2 = await seedPending(TEST_AGENT_A, 'b2')
+    await claim(TEST_AGENT_A, m1.id)
+    await claim(TEST_AGENT_A, m2.id)
+    // Close m1 only.
+    await client.query(
+      `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
+      [randomUUID(), m1.id],
+    )
+    const after = await statusOf(TEST_AGENT_A)
+    expect(after.status).toBe('busy')
+    expect(after.status_detail).toBe('メッセージ処理中')
+    await client.query(`DELETE FROM agents WHERE agent_id = $1`, [TEST_AGENT_A])
+  })
+
+  test('(busy-calc 2) sole open claim closed → agent flips to idle', async () => {
+    const seed = await seedPending(TEST_AGENT_A, 'lone')
+    await claim(TEST_AGENT_A, seed.id)
+    await client.query(
+      `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
+      [randomUUID(), seed.id],
+    )
+    const after = await statusOf(TEST_AGENT_A)
+    expect(after.status).toBe('idle')
+    expect(after.status_detail).toBe(null)
+    await client.query(`DELETE FROM agents WHERE agent_id = $1`, [TEST_AGENT_A])
+  })
+
+  test('(busy-calc 3) cross-agent isolation — agent B status untouched by agent A claim activity', async () => {
+    const seedA = await seedPending(TEST_AGENT_A, 'A')
+    await claim(TEST_AGENT_A, seedA.id)
+    // Agent B never claimed anything → idle, regardless of A.
+    const a = await statusOf(TEST_AGENT_A)
+    const b = await statusOf(TEST_AGENT_B)
+    expect(a.status).toBe('busy')
+    expect(b.status).toBe('idle')
+    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, [TEST_AGENT_A, TEST_AGENT_B])
+  })
 })

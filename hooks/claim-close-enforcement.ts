@@ -18,15 +18,18 @@
  *   N times in a row (default 3, env override AUN_STOP_HOOK_RETRY_LIMIT),
  *   the (N+1)-th invocation:
  *     1. Writes a bypass log line (legacy, audit trail).
- *     2. INSERTs an audit_log row keyed on the (agent_id, session_id)
- *        pair so dashboards can list bypassed sessions.
+ *     2. INSERTs an audit_log row keyed on the
+ *        (agent_id, session_id, claim_id-set) triple so dashboards
+ *        can list bypassed sessions per-claim.
  *     3. Runs `bun cli/index.ts notify` against the channel
  *        AUN_STOP_HOOK_ESCALATION_TARGET (default: agent-com) with
  *        the CEO mentioned, asking for manual intervention.
  *     4. Returns exit-code 0 so the session isn't permanently stuck.
- *   The escalation only fires once per (agent_id, session_id), keyed
- *   by a sentinel file under $AUN_STATE_DIR — Issue #278 §G-3 重複
- *   alert 抑制.
+ *   Cycle 1 fix (auditor BLOCK 2): the dedup key is the
+ *   (agent_id, session_id, claim_id-set) triple — NOT session_id
+ *   alone. A new claim within the same session resets the retry
+ *   counter and is eligible for its own escalation, while the same
+ *   claim never produces duplicate alerts.
  *
  * Output contract:
  *   - JSON `block` printed to stdout (Claude Code Stop hook shape).
@@ -79,11 +82,31 @@ function safeBaseName(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128)
 }
 
-function counterPath(sessionId: string): string {
-  return join(STATE_DIR, `${safeBaseName(sessionId)}.count`)
+// Issue #278 cycle 1 (auditor BLOCK 2): the retry counter and the
+// escalation sentinel are keyed by (agent_id, session_id, claim_key)
+// where claim_key is a stable derivation of the current claim set.
+// This way, a fresh claim in the same Claude session is eligible for
+// its own retry budget and its own escalation, while a single claim
+// never produces duplicate alerts no matter how many Stop firings
+// happen against it.
+//
+// claim_key shape:
+//   - "open=<id>"     when a single open claim is the block reason
+//   - "pending=<n>"   when no claim but pending count blocks
+//   - "none"          for the no-block early-return path (counter is
+//                     reset under this key, harmless if never written)
+function claimKey(state: { openClaim: { id: number | string } | null; pendingCount: number } | null): string {
+  if (!state) return 'none'
+  if (state.openClaim) return `open=${state.openClaim.id}`
+  if (state.pendingCount > 0) return `pending=${state.pendingCount}`
+  return 'none'
 }
-function escalatedPath(sessionId: string): string {
-  return join(STATE_DIR, `${safeBaseName(sessionId)}.escalated`)
+
+function counterPath(agentId: string, sessionId: string, claimKey: string): string {
+  return join(STATE_DIR, `${safeBaseName(agentId)}__${safeBaseName(sessionId)}__${safeBaseName(claimKey)}.count`)
+}
+function escalatedPath(agentId: string, sessionId: string, claimKey: string): string {
+  return join(STATE_DIR, `${safeBaseName(agentId)}__${safeBaseName(sessionId)}__${safeBaseName(claimKey)}.escalated`)
 }
 
 function readCounter(p: string): number {
@@ -136,15 +159,18 @@ async function escalateOnce(
   sessionId: string,
   agentId: string,
   state: QueueState,
+  ckey: string,
 ): Promise<void> {
   // 1. bypass.log
   const claimDesc = state.openClaim
     ? `claim_id=${state.openClaim.id} message_id=${state.openClaim.messageId ?? 'null'}`
     : `pending_count=${state.pendingCount}`
-  appendLog(BYPASS_LOG, `agent=${agentId} session=${sessionId} retry_limit_reached ${claimDesc}`)
+  appendLog(BYPASS_LOG, `agent=${agentId} session=${sessionId} claim_key=${ckey} retry_limit_reached ${claimDesc}`)
 
-  // 2. dedupe: only escalate once per session
-  const sentinel = escalatedPath(sessionId)
+  // 2. dedupe per (agent_id, session_id, claim_key) — Issue #278 cycle 1
+  // BLOCK 2 fix: a new claim in the same session must be eligible for
+  // its own escalation while a single claim never duplicates alerts.
+  const sentinel = escalatedPath(agentId, sessionId, ckey)
   if (existsSync(sentinel)) return
   ensureDir(STATE_DIR)
   try { writeFileSync(sentinel, new Date().toISOString()) } catch {}
@@ -160,6 +186,7 @@ async function escalateOnce(
           ESCALATION_TARGET,
           JSON.stringify({
             session_id: sessionId,
+            claim_key: ckey,
             retry_limit: RETRY_LIMIT,
             open_claim_id: state.openClaim?.id ?? null,
             open_message_id: state.openClaim?.messageId ?? null,
@@ -220,25 +247,32 @@ async function main(): Promise<number> {
     return 0
   }
 
-  // Pass: no open claim and no pending → reset counter, exit 0.
+  // Issue #278 cycle 1 (auditor BLOCK 2): the retry / escalation key is
+  // the (agent_id, session_id, claim_key) triple, not session_id alone.
+  // claim_key derives from the current block reason so a fresh claim
+  // in the same session resets its own counter.
+  const ckey = claimKey(state)
+
+  // Pass: no open claim and no pending → reset counter for the
+  // current block-reason key (harmless when none exists), exit 0.
   if (!state.openClaim && state.pendingCount === 0) {
-    writeCounter(counterPath(sessionId), 0)
+    writeCounter(counterPath(AGENT_ID, sessionId, ckey), 0)
     if (connected) await client.end().catch(() => {})
     return 0
   }
 
   // Block decision: open claim takes precedence over pending.
   const reason = state.openClaim ? 'open_claim' : 'pending_unclaimed'
-  const cur = readCounter(counterPath(sessionId)) + 1
+  const cur = readCounter(counterPath(AGENT_ID, sessionId, ckey)) + 1
 
   if (cur > RETRY_LIMIT) {
-    await escalateOnce(connected ? client : null, sessionId, AGENT_ID, state)
-    writeCounter(counterPath(sessionId), cur)
+    await escalateOnce(connected ? client : null, sessionId, AGENT_ID, state, ckey)
+    writeCounter(counterPath(AGENT_ID, sessionId, ckey), cur)
     if (connected) await client.end().catch(() => {})
     return 0 // §G-3: pass after escalation, never silently
   }
 
-  writeCounter(counterPath(sessionId), cur)
+  writeCounter(counterPath(AGENT_ID, sessionId, ckey), cur)
   if (connected) await client.end().catch(() => {})
   emitBlock(reason)
   return 2

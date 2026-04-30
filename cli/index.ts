@@ -373,9 +373,15 @@ async function nextMessage() {
             WHERE id = $3`,
           [agentId, claimExpiresAt, popped.id],
         )
-        // spec §4.1 step 4 — mark agent busy while processing this message.
+        // spec §4.1 step 4 — mark agent busy. Issue #278 cycle 1
+        // (auditor BLOCK 1): EXISTS-derive over the open-claim set so
+        // multi in-flight stays visible on agents.status.
         await db.query(
-          `UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $1`,
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
           [agentId],
         )
         await db.query('COMMIT')
@@ -740,12 +746,17 @@ async function sendMessage(args: string[]) {
          WHERE id = $2`,
         [id, target.queue_id],
       )
-      // spec §4.2 step 10-11 — flip the agent back to idle (§8.1 busy → idle).
-      // Issue #278 (A) segment 3d: agents.current_message_id is gone — the
-      // message_queue 'replied' UPDATE above is the sole record of the
-      // in-flight transition.
+      // spec §4.2 step 10-11 — flip the agent based on remaining open
+      // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
+      // the send only closed ONE claim; if other claims are still 'read'
+      // the agent must remain busy. EXISTS-derive keeps observability
+      // (sender-feedback / heartbeat / bot_status) tracking the truth.
       await db.query(
-        `UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
         [agentId],
       )
       await db.query('COMMIT')
@@ -1049,15 +1060,15 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
       }
       const queueId = upd.rows[0].id
 
-      // Issue #278 (A) segment 3d: drop current_message_id from the SET
-      // clause. The message_queue row above already records the terminal
-      // transition; flipping the agent to idle here mirrors the send path.
+      // Issue #278 cycle 1 (auditor BLOCK 1): EXISTS-derive busy/idle
+      // from the remaining open claims. fail/skip closes one claim
+      // only; if others are still 'read' the agent stays busy.
       await db.query(
-        `UPDATE agents
-            SET status = 'idle',
-                status_detail = NULL,
-                status_updated_at = now()
-          WHERE agent_id = $1`,
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
         [agentId],
       )
       await db.query('COMMIT')
@@ -1117,16 +1128,16 @@ async function reclaimMessages(args: string[]) {
         [agentId],
       )
 
-      // Issue #278 (A) segment 3d: drop current_message_id from the SET
-      // clause. Per-row claim sweeper (core/claim-ttl.ts) handles orphan
-      // recovery structurally; reclaim only needs to flip 'read' rows
-      // older than 15 minutes back to 'pending' and idle the agent.
+      // Issue #278 cycle 1 (auditor BLOCK 1): reclaim respects multi
+      // in-flight — after rolling expired 'read' rows back to 'pending',
+      // the agent may still hold OTHER active claims that are not
+      // orphaned. EXISTS-derive keeps the right state visible.
       await db.query(
-        `UPDATE agents
-            SET status = 'idle',
-                status_detail = NULL,
-                status_updated_at = now()
-          WHERE agent_id = $1`,
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
         [agentId],
       )
       await db.query('COMMIT')

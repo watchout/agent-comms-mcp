@@ -92,37 +92,38 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
   })
 })
 
-describe('Behavioral FAIL B1 — next flips agents.status to busy (Issue #278 segment 3d)', () => {
-  test('server.ts next flips agents.status to busy without stamping current_message_id', () => {
-    // The in-flight pointer lives on the message_queue claim row
-    // (claimed_by + claim_expires_at) post-segment-3d; the agents
-    // UPDATE only carries the status flip.
+describe('Behavioral FAIL B1 — next derives agents.status from open-claim EXISTS (Issue #278 cycle 1)', () => {
+  // Cycle 1 (auditor BLOCK 1): the multi in-flight contract requires
+  // agents.status to track the *set* of open claims, not just the most
+  // recent transition. Both next and send/fail/skip/reclaim now write
+  // the same EXISTS-derive shape.
+  test('server.ts next uses CASE WHEN EXISTS open-claim derivation', () => {
     expect(SERVER_SRC).toMatch(
-      /UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now\(\) WHERE agent_id = \$1/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
     )
   })
-  test('cli nextMessage mirrors the same agents UPDATE shape', () => {
+  test('cli nextMessage uses CASE WHEN EXISTS open-claim derivation', () => {
     expect(CLI_SRC).toMatch(
-      /UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now\(\) WHERE agent_id = \$1/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
     )
   })
 })
 
-describe('Behavioral FAIL B4 — send flips agents.status to idle (Issue #278 segment 3d)', () => {
-  test('server.ts send flips agents.status to idle without touching current_message_id', () => {
-    expect(SERVER_SRC).toMatch(
-      /UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/,
-    )
-    // Negative pin: a refactor that re-introduces the legacy column
-    // write would trip this.
+describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time (Issue #278 cycle 1)', () => {
+  test('server.ts send uses CASE WHEN EXISTS open-claim derivation', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
     const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
+    // Negative pins.
     expect(handler).not.toMatch(/UPDATE agents SET current_message_id = NULL/)
+    expect(handler).not.toMatch(/UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/)
   })
-  test('cli sendMessage mirrors the same agents UPDATE shape', () => {
+  test('cli sendMessage uses CASE WHEN EXISTS open-claim derivation', () => {
     expect(CLI_SRC).toMatch(
-      /UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
     )
     expect(CLI_SRC).not.toMatch(/UPDATE agents SET current_message_id = NULL, status = 'idle'/)
   })
