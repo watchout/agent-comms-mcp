@@ -155,3 +155,117 @@ dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
     expect(r.stderr).toContain('drained=2')
   })
 })
+
+// Issue #278 (F-3) — role-differential drain scope.
+//
+// When neither the per-agent nor the global env override is set, the
+// runner picks a default based on the agent's role:
+//   - lead-bot (lead-* prefix or agent_type='lead'): large cap (100)
+//   - dev / org / human (agent_type='dev' | 'org' | 'human'): N=5
+//   - infra (agent_type='system' | 'infra'): 0 (drain disabled)
+//   - unknown / missing row: spec default (5)
+//
+// Cases mirror Issue #278 §4 ext case 13 (lead vs dev differential).
+dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
+  let client: Client
+
+  beforeAll(async () => {
+    client = new Client({ connectionString: DATABASE_URL })
+    await client.connect()
+  })
+
+  afterAll(async () => {
+    await client.end()
+  })
+
+  // Helper — register a probe agent with a given agent_type, seed N
+  // pending chat rows, run the drain runner without env overrides,
+  // and return the runner stdout/stderr/status.
+  async function setupAndRun(opts: { agentType: string; agentIdPrefix: string; seedCount: number }): Promise<{ agentId: string; result: { stdout: string; stderr: string; status: number | null } }> {
+    const agentId = `${opts.agentIdPrefix}-${randomUUID().slice(0, 8)}`
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
+       VALUES ($1, $1, $2, 'mcp', 'idle')
+       ON CONFLICT (agent_id) DO UPDATE SET agent_type = EXCLUDED.agent_type`,
+      [agentId, opts.agentType],
+    )
+    let counter = 0
+    for (let i = 0; i < opts.seedCount; i++) {
+      counter++
+      const ageMs = 60_000 - counter
+      await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
+         VALUES ($1, $2, $3, 'pending', 0, now() - make_interval(secs => $4 / 1000.0))`,
+        [agentId, randomUUID(), JSON.stringify({ author_id: 'someone', content: `r${i}`, message_type: 'chat' }), ageMs],
+      )
+    }
+
+    const env = { ...process.env as Record<string, string>, AGENT_ID: agentId, DATABASE_URL: DATABASE_URL! }
+    // Strip any inherited overrides so the role default is what the
+    // runner falls back to.
+    delete env.AGENT_COMMS_DRAIN_LIMIT
+    for (const k of Object.keys(env)) {
+      if (k.startsWith('AGENT_COMMS_DRAIN_LIMIT_')) delete env[k]
+    }
+    const r = spawnSync('bun', [RUNNER], { env, encoding: 'utf-8' })
+    return { agentId, result: { stdout: r.stdout, stderr: r.stderr, status: r.status } }
+  }
+
+  async function cleanup(agentId: string): Promise<void> {
+    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [agentId])
+    await client.query(`DELETE FROM agents WHERE agent_id = $1`, [agentId])
+  }
+
+  test('lead-bot (lead-* prefix) drains the full backlog (cap=100, plenty of headroom)', async () => {
+    const { agentId, result } = await setupAndRun({ agentType: 'org', agentIdPrefix: 'lead-test', seedCount: 12 })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('drained=12')
+    await cleanup(agentId)
+  })
+
+  test('dev-bot drains only the spec default N=5', async () => {
+    const { agentId, result } = await setupAndRun({ agentType: 'dev', agentIdPrefix: 'dev-test', seedCount: 8 })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('drained=5')
+    await cleanup(agentId)
+  })
+
+  test('org / C-suite bot drains only the spec default N=5', async () => {
+    const { agentId, result } = await setupAndRun({ agentType: 'org', agentIdPrefix: 'cto-test', seedCount: 8 })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('drained=5')
+    await cleanup(agentId)
+  })
+
+  test('infra (agent_type=system) drain is disabled (drained=0 even with backlog)', async () => {
+    const { agentId, result } = await setupAndRun({ agentType: 'system', agentIdPrefix: 'infra-test', seedCount: 8 })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('drained=0')
+    await cleanup(agentId)
+  })
+
+  test('per-agent env override beats role default (lead-* with limit=2 → 2 drained)', async () => {
+    const agentId = `lead-override-${randomUUID().slice(0, 8)}`
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
+       VALUES ($1, $1, 'org', 'mcp', 'idle') ON CONFLICT DO NOTHING`,
+      [agentId],
+    )
+    let counter = 0
+    for (let i = 0; i < 6; i++) {
+      counter++
+      await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
+         VALUES ($1, $2, $3, 'pending', 0, now() - make_interval(secs => $4))`,
+        [agentId, randomUUID(), JSON.stringify({ author_id: 'someone', content: `r${i}`, message_type: 'chat' }), counter],
+      )
+    }
+    const overrideKey = `AGENT_COMMS_DRAIN_LIMIT_${agentId.replace(/-/g, '_').toUpperCase()}`
+    const env = { ...process.env as Record<string, string>, AGENT_ID: agentId, DATABASE_URL: DATABASE_URL!, [overrideKey]: '2' }
+    const r = spawnSync('bun', [RUNNER], { env, encoding: 'utf-8' })
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('drained=2')
+    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [agentId])
+    await client.query(`DELETE FROM agents WHERE agent_id = $1`, [agentId])
+  })
+})
