@@ -81,7 +81,19 @@ describe('T1 — db/migrate.ts ships the message_queue table + per-row claim col
     expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claimed_by TEXT/)
     expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ/)
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_expired_claims/)
-    expect(MIGRATE_SRC).toMatch(/ALTER TABLE agents DROP COLUMN IF EXISTS current_message_id/)
+    // Issue #278 (A) segment 3d hotfix (2026-04-30 incident) — the
+    // DROP COLUMN current_message_id is hosted ONLY in the paired G-2
+    // migration file, not in the auto-applied bootstrap, to prevent
+    // every fleet restart from re-firing the drop while old-code
+    // bots are still reading the column. The bootstrap keeps the
+    // column ADD so fresh DBs match the live fleet shape until a
+    // coordinated cutover.
+    const dropMigration = readFileSync(
+      join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.up.sql'),
+      'utf-8',
+    )
+    expect(dropMigration).toMatch(/ALTER TABLE agents DROP COLUMN IF EXISTS current_message_id/)
+    expect(MIGRATE_SRC).toMatch(/ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id/)
   })
 })
 

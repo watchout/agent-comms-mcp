@@ -332,17 +332,18 @@ async function migrate() {
       ON message_queue(agent_id, message_id)
       WHERE message_id IS NOT NULL;
 
-    -- Issue #278 (A) segment 3d — agents.current_message_id was the
-    -- legacy single-slot in-flight pointer (Issue #128 Phase 2).
-    -- Replaced by the per-row claim model on message_queue
-    -- (claimed_by / claimed_at / claim_expires_at), so the column is
-    -- dropped here. The DROP IF EXISTS lets this block run cleanly on
-    -- both fresh schemas and existing DBs that still carry the column.
-    -- The paired up/down migration files
-    -- (db/migrations/2026-04-30-stage-b-drop-current-message-id.{up,down}.sql)
-    -- expose the same change via "bun db/migrate.ts --down=..." for
-    -- rollback parity with the G-2 framework.
-    ALTER TABLE agents DROP COLUMN IF EXISTS current_message_id;
+    -- Issue #278 (A) segment 3d hotfix (lead-ama incident 2026-04-30) —
+    -- agents.current_message_id is the legacy single-slot in-flight
+    -- pointer (Issue #128 Phase 2). Stage B replaces it with the
+    -- per-row claim model on message_queue, but the DROP must NOT run
+    -- in this auto-applied bootstrap migration: every fleet restart
+    -- would re-fire the DROP and break any old-code bot still reading
+    -- the column. The drop is exposed exclusively through the paired
+    -- file (db/migrations/2026-04-30-stage-b-drop-current-message-id
+    -- .{up,down}.sql), to be applied manually post-merge with a
+    -- coordinated fleet restart. Until then we keep the column in the
+    -- bootstrap so a fresh DB matches the live fleet shape.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id BIGINT;
 
     -- Phase C PR #214: idle/busy state machine (spec §4.1 step 4, §4.2 step 11, §8.1)
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_detail TEXT;
