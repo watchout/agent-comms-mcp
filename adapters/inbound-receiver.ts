@@ -47,6 +47,7 @@ import {
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
+import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
 import { notifySenderAndObserve } from '../core/sender-feedback-emit'
 import type { MessageBus } from '../core/message-bus'
 
@@ -554,12 +555,31 @@ export async function handleInboundMessage(params: {
       ts: timestamp.toISOString(),
       ...(attachments ? { attachments } : {}),
     })
+    // Issue #277 (B) — server-side auto-skip filter. If the content matches a
+    // configured pattern (or sender == recipient), persist the queue row
+    // directly as 'skipped' so `next` never picks it up. agent_messages
+    // history is still saved upstream; only the inbox push is suppressed.
+    const skipMatch = matchesAutoSkipPattern({
+      content,
+      messageType: 'chat',
+      authorAgentId: senderAgentId,
+      recipientAgentId: receiverAgentId,
+    })
+    const skipReason = skipMatch.matched
+      ? `AUTO_SKIP_PATTERN:${skipMatch.reason ?? 'unknown'}`
+      : undefined
+    if (skipReason) {
+      process.stderr.write(
+        `agent-comms: inbound auto-skip — receiver=${receiverAgentId} reason=${skipReason}\n`,
+      )
+    }
     const r = await persistInboundDelivery(d.databaseUrl, {
       receiverAgentId,
       messageId,
       mqPayloadJson: mqPayload,
+      skipReason,
     })
-    inboundCommitted = r.committed
+    inboundCommitted = r.committed && !skipReason
     if (!r.committed) {
       process.stderr.write(
         `agent-comms: inbound 7b+7d transaction failed for ${receiverAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,

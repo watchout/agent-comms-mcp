@@ -55,7 +55,7 @@ describe('PR-B.2 — Source Structure', () => {
 
   test('handleInboundMessage fires receiver-pipeline pg_notify for RECEIVER_PIPELINE_BOTS', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 10000)
     expect(fnBody).toContain('RECEIVER_PIPELINE_BOTS.has(receiverAgentId)')
     expect(fnBody).toContain("pg_notify('agent_inbox'")
     expect(fnBody).toContain("'message.created'")
