@@ -46,8 +46,13 @@ const QUERY = `
          MIN(mq.created_at) FILTER (WHERE mq.status = 'pending') AS oldest_pending_at,
          CASE
            WHEN a.last_seen_at IS NULL THEN 'offline'
-           WHEN a.last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'crashed'
+           -- Order matters: busy_stuck must be checked before crashed, otherwise
+           -- a bot busy for >5min always falls into crashed first (auditor BLOCK
+           -- fix, msg 55f54af5). The CASE arms are evaluated top-to-bottom so a
+           -- busy bot never reaches the generic crashed arm; an idle bot that
+           -- has not heartbeat in 5min still classifies as crashed.
            WHEN a.status = 'busy' AND a.last_seen_at < NOW() - INTERVAL '2 hours' THEN 'busy_stuck'
+           WHEN a.last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'crashed'
            WHEN a.status = 'busy' AND a.last_seen_at > NOW() - INTERVAL '60 seconds' THEN 'busy_active'
            ELSE 'healthy'
          END AS health_state

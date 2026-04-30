@@ -198,6 +198,51 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(ageSec).toBeGreaterThanOrEqual(110)
   })
 
+  test('case D-boundary-1 — status=busy + last_seen 3h ago classifies as busy_stuck (auditor BLOCK fix)', async () => {
+    const stuck = `test-stuck-${randomUUID().slice(0, 8)}`
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
+       VALUES ($1, $1, 'dev', 'claude-code', 'busy', now() - INTERVAL '3 hours')`,
+      [stuck],
+    )
+    try {
+      const m = await fetchBotStatusFromDb(client)
+      expect(m.get(stuck)!.health_state).toBe('busy_stuck')
+    } finally {
+      await client.query(`DELETE FROM agents WHERE agent_id = $1`, [stuck])
+    }
+  })
+
+  test('case D-boundary-2 — status=idle + last_seen 3h ago classifies as crashed', async () => {
+    const dead = `test-dead-${randomUUID().slice(0, 8)}`
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
+       VALUES ($1, $1, 'dev', 'claude-code', 'idle', now() - INTERVAL '3 hours')`,
+      [dead],
+    )
+    try {
+      const m = await fetchBotStatusFromDb(client)
+      expect(m.get(dead)!.health_state).toBe('crashed')
+    } finally {
+      await client.query(`DELETE FROM agents WHERE agent_id = $1`, [dead])
+    }
+  })
+
+  test('case D-boundary-3 — status=busy + recent heartbeat classifies as busy_active', async () => {
+    const active = `test-active-${randomUUID().slice(0, 8)}`
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
+       VALUES ($1, $1, 'dev', 'claude-code', 'busy', now() - INTERVAL '10 seconds')`,
+      [active],
+    )
+    try {
+      const m = await fetchBotStatusFromDb(client)
+      expect(m.get(active)!.health_state).toBe('busy_active')
+    } finally {
+      await client.query(`DELETE FROM agents WHERE agent_id = $1`, [active])
+    }
+  })
+
   test('formatPendingAge reports a human-readable age string', () => {
     const t = new Date(Date.now() - 90 * 1000).toISOString()
     expect(formatPendingAge(t)).toBe('1m')
