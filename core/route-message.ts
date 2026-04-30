@@ -180,6 +180,20 @@ export function routeMessage(
       continue
     }
 
+    // Issue #278 (B) — CEO bypass routing. When a human author posts a
+    // message with no explicit mentions, every (non-observer, non-self)
+    // bot member of the channel is treated as a push target. The CEO
+    // routinely posts directives without listing every bot by name; the
+    // legacy NOT_MENTIONED drop made those messages invisible to the
+    // fleet. DM channels are excluded by the early-return above
+    // (always push). Emergencies are also handled above. Auto-skip
+    // patterns are applied at queue INSERT (Stage A, #276-A) so they
+    // do not need to be re-checked here.
+    if (senderIsHuman && noMentions) {
+      pushTargets.push(agent.agentId)
+      continue
+    }
+
     // Group mentions (@all, @dev, @org)
     if (msg.mentions.includes('all') ||
         (msg.mentions.includes('dev') && agent.agentType === 'dev') ||

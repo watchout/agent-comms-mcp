@@ -15,6 +15,7 @@
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { routeMessage } from '../core/route-message'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
 // FEAT-005: handleInboundMessage + sendHumanWarning moved to
@@ -107,7 +108,7 @@ describe('routeInbound — Pure function (§5.1)', () => {
 
   test('mentions filter checks individual and group mentions', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain("msg.mentions.includes(agent.agentId)")
     expect(fnBody).toContain("msg.mentions.includes('all')")
     expect(fnBody).toContain("msg.mentions.includes('dev')")
@@ -116,28 +117,32 @@ describe('routeInbound — Pure function (§5.1)', () => {
 
   test('NOT_MENTIONED is set in dropTargets', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain("'NOT_MENTIONED'")
   })
 
   test('DM bypass: DM messages always push', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain('isDm')
   })
 
-  test('emergency bypass only (no CEO bypass)', () => {
+  test('emergency bypass + Issue #278 §B CEO bypass (human author + no mentions → fanout)', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain('isEmergency')
     expect(fnBody).not.toContain('isCeo')
-    // senderIsHuman exists in RouteResult but is NOT used as a bypass condition in the filter logic
-    expect(fnBody).not.toContain('if (senderIsHuman)')  // not used as bypass condition
+    // Issue #278 (B) — senderIsHuman + noMentions is now a bypass:
+    // human posts without explicit mentions fan out to every (non-self,
+    // non-observer) bot member of the channel. The legacy negative pin
+    // ("not used as bypass condition") was correct for pre-Stage-B
+    // behavior and is now retired; the new pin is the positive shape.
+    expect(fnBody).toContain('senderIsHuman && noMentions')
   })
 
   test('observer mode agents are dropped', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain('agent.observerMode')
     expect(fnBody).toContain("'OBSERVER_MODE'")
   })
@@ -145,9 +150,110 @@ describe('routeInbound — Pure function (§5.1)', () => {
   // PR-B §C2: sender-side guard for send-tool / cli callers
   test('routeMessage rejects non-member senders for send-tool / cli sourceType', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain("sourceType !== 'inbound'")
     expect(fnBody).toContain("SENDER_NOT_A_MEMBER")
+  })
+})
+
+// Issue #278 (B) — CEO bypass routing behavioral fixture (case 4 in §4).
+// A human poster (authorIsBot=false) with zero mentions must fan out to
+// every (non-self, non-observer) bot member of the channel. This is the
+// behavioral counterpart to the source-level pin above.
+describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
+  const channel = {
+    channelId: 'agent-com',
+    type: 'channel',
+    members: ['ceo', 'cto', 'agent-com-dev', 'lead-ama'],
+  } as const
+  const agents = [
+    { agentId: 'ceo', agentType: 'human', observerMode: false, discordId: '1227059781265653783' },
+    { agentId: 'cto', agentType: 'org', observerMode: false, discordId: null },
+    { agentId: 'agent-com-dev', agentType: 'dev', observerMode: false, discordId: null },
+    { agentId: 'lead-ama', agentType: 'org', observerMode: false, discordId: null },
+  ] as const
+
+  test('case 4 — CEO posts with no mentions → fanout to every non-self bot member', () => {
+    const result = routeMessage(
+      {
+        authorAgentId: 'ceo',
+        authorIsBot: false,
+        content: 'Stage B どうなってる？',
+        mentions: [],
+        messageType: 'chat',
+      },
+      channel as any,
+      agents as any,
+      'inbound',
+    )
+    // Every channel member except the human author must be in pushTargets.
+    expect(result.pushTargets.sort()).toEqual(['agent-com-dev', 'cto', 'lead-ama'])
+    expect(result.dropTargets).toEqual({})
+    expect(result.noMentions).toBe(true)
+    expect(result.senderIsHuman).toBe(true)
+  })
+
+  test('observer-mode bots are dropped from CEO bypass fanout', () => {
+    const agentsWithObserver = [
+      ...agents.slice(0, 3),
+      { ...agents[3], observerMode: true },
+    ]
+    const result = routeMessage(
+      {
+        authorAgentId: 'ceo',
+        authorIsBot: false,
+        content: 'broadcast',
+        mentions: [],
+        messageType: 'chat',
+      },
+      channel as any,
+      agentsWithObserver as any,
+      'inbound',
+    )
+    expect(result.pushTargets.sort()).toEqual(['agent-com-dev', 'cto'])
+    expect(result.dropTargets['lead-ama']).toBe('OBSERVER_MODE')
+  })
+
+  test('bot author + no mentions still drops (CEO bypass is human-only)', () => {
+    // The bypass only fires for senderIsHuman = !authorIsBot. A bot
+    // posting without mentions stays on the legacy NOT_MENTIONED path,
+    // so noisy bot chatter does not silently fan out.
+    const result = routeMessage(
+      {
+        authorAgentId: 'lead-ama',
+        authorIsBot: true,
+        content: 'broadcast',
+        mentions: [],
+        messageType: 'chat',
+      },
+      channel as any,
+      agents as any,
+      'inbound',
+    )
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['cto']).toBe('NOT_MENTIONED')
+    expect(result.dropTargets['agent-com-dev']).toBe('NOT_MENTIONED')
+    expect(result.dropTargets['lead-ama']).toBeUndefined() // self-skip, no entry
+  })
+
+  test('human author + explicit mentions skips the bypass (mention path wins)', () => {
+    // When the human author lists specific mentions, the bypass does
+    // not fire — only the named bots are pushed.
+    const result = routeMessage(
+      {
+        authorAgentId: 'ceo',
+        authorIsBot: false,
+        content: 'cto only',
+        mentions: ['cto'],
+        messageType: 'chat',
+      },
+      channel as any,
+      agents as any,
+      'inbound',
+    )
+    expect(result.pushTargets).toEqual(['cto'])
+    expect(result.dropTargets['agent-com-dev']).toBe('NOT_MENTIONED')
+    expect(result.dropTargets['lead-ama']).toBe('NOT_MENTIONED')
   })
 })
 
