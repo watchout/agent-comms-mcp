@@ -325,39 +325,17 @@ async function nextMessage() {
   const agentId = requireAgentId('next')
   const db = await getDb()
   try {
-    // Step 1: implicit-skip the prior current_message_id (Issue #128 §4.1).
-    // ARC codex audit (PR#134, lead-ama msg 1492279341898272849): wrap the
-    // SELECT + UPDATEs in BEGIN/COMMIT with FOR UPDATE SKIP LOCKED so two
-    // concurrent `agent-com next` invocations for the same agent never pop
-    // the same row. SKIP LOCKED makes a parallel call see the next pending
-    // row instead of blocking.
-    //
-    // The implicit-skip of the prior current_message_id is part of the same
-    // transaction so a crash midway through cannot leave us with a popped
-    // 'read' row and an unsynchronised agents.current_message_id.
+    // Issue #278 (A) segment 3d — per-row claim path. Mirrors the MCP
+    // server next handler post-segment-3c: orphan recovery is structural
+    // via the claim-TTL sweeper (core/claim-ttl.ts), so the legacy
+    // priorId / agents.current_message_id read+lock is gone. Two
+    // concurrent `agent-com next` calls now both succeed in parallel,
+    // each grabbing a distinct message_queue row via FOR UPDATE SKIP
+    // LOCKED — the §A multi in-flight contract.
     let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date } | null = null
-    let priorId: number | null = null
     await db.query('BEGIN')
     try {
-      const prevRow = await db.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
-        [agentId],
-      )
-      priorId = prevRow.rows[0]?.current_message_id ?? null
-      if (priorId !== null) {
-        // v2.1.0: implicit abandon is now status='failed' with
-        // failed_reason='IMPLICIT_ABANDON' (spec §4.1 step 1, §11 failed_reason
-        // 標準値). The older status='skipped' value is reserved for operator-
-        // initiated `agent-com skip` only.
-        await db.query(
-          `UPDATE message_queue
-              SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'
-           WHERE id = $1 AND status = 'read'`,
-          [priorId],
-        )
-      }
-
-      // Step 2: pop the oldest pending row with an exclusive lock so a
+      // Step 1: pop the oldest pending row with an exclusive lock so a
       // concurrent next() never picks the same row.
       const pop = await db.query(
         `SELECT id, message_id, payload, priority, created_at
@@ -370,26 +348,35 @@ async function nextMessage() {
       )
 
       if (pop.rows.length === 0) {
-        // Empty queue under lock — clear current_message_id so a stale value
-        // doesn't trigger a phantom implicit-skip on the next call. Commit
-        // before falling through to the (read-only) signal fallback.
-        if (priorId !== null) {
-          await db.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
-        }
         await db.query('COMMIT')
       } else {
-        // Step 3: mark read + stamp current_message_id inside the same txn.
-        // Both UPDATEs run before COMMIT so a crash mid-step leaves a clean
-        // state (PostgreSQL aborts the txn).
+        // Step 2: mark the popped row 'read' + stamp the per-row claim
+        // (claimed_by / claimed_at / claim_expires_at) inside the same
+        // txn. The TTL window (default 30s, env AGENT_COMMS_CLAIM_TTL_SEC)
+        // bounds how long an orphaned claim can linger before the
+        // sweeper flips it to IMPLICIT_ABANDON.
         const popped = pop.rows[0]
+        const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+        // claim_expires_at is computed in JS rather than via
+        // `now() + ($N || ' seconds')::interval` so this UPDATE works
+        // identically in PG and SQLite modes (the latter is exercised
+        // by the CLI test suite). Both backends accept an ISO-8601
+        // timestamp parameter.
+        const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
         await db.query(
-          `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
-          [popped.id],
+          `UPDATE message_queue
+              SET status = 'read',
+                  read_at = now(),
+                  claimed_by = $1,
+                  claimed_at = now(),
+                  claim_expires_at = $2
+            WHERE id = $3`,
+          [agentId, claimExpiresAt, popped.id],
         )
         // spec §4.1 step 4 — mark agent busy while processing this message.
         await db.query(
-          `UPDATE agents SET current_message_id = $1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $2`,
-          [popped.id, agentId],
+          `UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $1`,
+          [agentId],
         )
         await db.query('COMMIT')
         row = popped
@@ -514,12 +501,14 @@ async function sendMessage(args: string[]) {
     process.exit(2)
   }
 
-  // ARC codex audit follow-up (PR#134, lead-ama msg 1492283029933133874):
-  // wrap the entire DB-touching flow in BEGIN/COMMIT with FOR UPDATE on the
-  // agents row. Two concurrent `agent-com send` calls now serialise on the
-  // agents row lock — the second caller blocks until the first commits, then
-  // sees current_message_id = NULL (cleared by the first) and exits with
-  // NO_CURRENT_MESSAGE instead of double-replying.
+  // ARC codex audit follow-up (PR#134) + Issue #278 (A) segment 3d:
+  // wrap the entire DB-touching flow in BEGIN/COMMIT. The lock has
+  // moved from the agents row to the per-row claim row on
+  // message_queue, so independent claims (multi in-flight) proceed in
+  // parallel; concurrent `agent-com send` calls targeting the SAME
+  // claim still serialise on the message_queue row lock — the second
+  // caller blocks, wakes to status='replied', misses the predicate,
+  // and exits with INVALID_REPLY_TO instead of double-replying.
   //
   // Side effects to note:
   //   - The Discord HTTP call happens INSIDE the transaction (lead-ama's
@@ -544,13 +533,14 @@ async function sendMessage(args: string[]) {
     await db.query('BEGIN')
     try {
       // ─────────────────────────────────────────────────────────────────
-      // Step 1: lock the agents row + read current_message_id
+      // Step 1: resolve the in-flight target via the per-row claim
       // ─────────────────────────────────────────────────────────────────
-      // FOR UPDATE blocks any other session that takes the same row lock,
-      // so concurrent `next`/`send` calls for this agent serialise on this
-      // line. The first caller wins; the second blocks here until the first
-      // commits, then reads the post-commit state (current_message_id = NULL
-      // after a successful send).
+      // FOR UPDATE on the message_queue claim row blocks any other
+      // session that wakes for the same claim. The first caller wins;
+      // the second blocks here until the first commits, then sees the
+      // row in status='replied' and exits with INVALID_REPLY_TO.
+      // Independent claims (multi in-flight) are unaffected — this
+      // lock is per-row, not on the agents row.
       // Issue #130 Phase 4: target resolution is queue-only. The Mixed-Mode
       // signal fallback (Phase 2-3) has been removed.
       type Target = {
@@ -561,35 +551,44 @@ async function sendMessage(args: string[]) {
       }
       let target: Target | null = null
 
-      const cur = await db.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
+      // Issue #278 (A) segment 3d — per-row claim lookup. Replaces the
+      // legacy SELECT current_message_id FROM agents path. The CLI does
+      // not take a --reply-to flag, so we resolve "the in-flight message"
+      // as the most recent active claim owned by this agent: the row
+      // with claimed_by=$agentId AND status='read' ORDER BY claimed_at
+      // DESC LIMIT 1. FOR UPDATE on that row serialises any concurrent
+      // `agent-com send` for the same claim — the second caller wakes
+      // to status='replied' on the locked row, the predicate misses,
+      // and it exits with INVALID_REPLY_TO instead of double-replying.
+      // Independent claims (multi in-flight) are unaffected because the
+      // lock is per-row, not on the agents row.
+      const claimRow = await db.query(
+        `SELECT id, message_id, payload FROM message_queue
+            WHERE claimed_by = $1 AND status = 'read'
+            ORDER BY claimed_at DESC NULLS LAST
+            LIMIT 1
+            FOR UPDATE`,
         [agentId],
       )
-      const currentId: number | null = cur.rows[0]?.current_message_id ?? null
-      if (currentId !== null) {
-        const q = await db.query(
-          `SELECT id, message_id, payload FROM message_queue WHERE id = $1`,
-          [currentId],
-        )
-        if (q.rows.length > 0) {
-          const qrow = q.rows[0]
-          let payload: Record<string, any> = {}
-          try { payload = JSON.parse(qrow.payload) } catch {}
-          target = {
-            reply_to: qrow.message_id ?? payload.message_id,
-            channel_id: payload.channel_id,
-            thread_id: payload.thread_id ?? null,
-            queue_id: qrow.id,
-          }
+      if (claimRow.rows.length > 0) {
+        const qrow = claimRow.rows[0]
+        let payload: Record<string, any> = {}
+        try { payload = JSON.parse(qrow.payload) } catch {}
+        target = {
+          reply_to: qrow.message_id ?? payload.message_id,
+          channel_id: payload.channel_id,
+          thread_id: payload.thread_id ?? null,
+          queue_id: qrow.id,
         }
       }
 
       if (target === null) {
-        // Spec §4.2 step 1: no current message → NO_CURRENT_MESSAGE error.
-        // This branch ALSO catches the "concurrent send raced and won" case:
-        // the first caller has already committed and cleared current_message_id,
-        // so the second caller wakes up here with NO_CURRENT_MESSAGE.
-        console.error(`Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — run 'agent-com next' first`)
+        // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE retired in
+        // favour of INVALID_REPLY_TO. The CLI hits this branch when the
+        // agent has no active claim — either `next` was never called,
+        // the claim TTL expired and the sweeper flipped it to
+        // IMPLICIT_ABANDON, or a concurrent `send` already replied.
+        console.error(`Error [INVALID_REPLY_TO]: no in-flight claim for ${agentId} — run 'agent-com next' first or the claim may have expired`)
         throw new CliSendExit(1)
       }
 
@@ -741,10 +740,12 @@ async function sendMessage(args: string[]) {
          WHERE id = $2`,
         [id, target.queue_id],
       )
-      // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in a
-      // single atomic UPDATE (§8.1 busy → idle on send).
+      // spec §4.2 step 10-11 — flip the agent back to idle (§8.1 busy → idle).
+      // Issue #278 (A) segment 3d: agents.current_message_id is gone — the
+      // message_queue 'replied' UPDATE above is the sole record of the
+      // in-flight transition.
       await db.query(
-        `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
+        `UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
         [agentId],
       )
       await db.query('COMMIT')
@@ -762,7 +763,7 @@ async function sendMessage(args: string[]) {
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
     } finally {
-      // If we threw without committing (validation error, NO_CURRENT_MESSAGE,
+      // If we threw without committing (validation error, INVALID_REPLY_TO,
       // unexpected exception), roll the transaction back. The committed flag
       // is set right after each successful COMMIT above so this is a no-op
       // on the success and queue-failure paths.
@@ -1048,18 +1049,16 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
       }
       const queueId = upd.rows[0].id
 
-      // Clear current_message_id (if this row was the in-flight one) and
-      // flip the agent back to idle. The WHERE clause narrows to the specific
-      // queueId so a concurrent next() that already pointed somewhere else is
-      // untouched.
+      // Issue #278 (A) segment 3d: drop current_message_id from the SET
+      // clause. The message_queue row above already records the terminal
+      // transition; flipping the agent to idle here mirrors the send path.
       await db.query(
         `UPDATE agents
-            SET current_message_id = NULL,
-                status = 'idle',
+            SET status = 'idle',
                 status_detail = NULL,
                 status_updated_at = now()
-          WHERE agent_id = $1 AND current_message_id = $2`,
-        [agentId, queueId],
+          WHERE agent_id = $1`,
+        [agentId],
       )
       await db.query('COMMIT')
 
@@ -1118,13 +1117,13 @@ async function reclaimMessages(args: string[]) {
         [agentId],
       )
 
-      // Always clear current_message_id — even if no row was rolled back, a
-      // stale pointer would trigger a phantom implicit-fail on the next next()
-      // call.
+      // Issue #278 (A) segment 3d: drop current_message_id from the SET
+      // clause. Per-row claim sweeper (core/claim-ttl.ts) handles orphan
+      // recovery structurally; reclaim only needs to flip 'read' rows
+      // older than 15 minutes back to 'pending' and idle the agent.
       await db.query(
         `UPDATE agents
-            SET current_message_id = NULL,
-                status = 'idle',
+            SET status = 'idle',
                 status_detail = NULL,
                 status_updated_at = now()
           WHERE agent_id = $1`,
@@ -1187,7 +1186,17 @@ async function status(args: string[]) {
         [agentId],
       )
       const agent = await db.query(
-        `SELECT status, last_seen_at, current_message_id FROM agents WHERE agent_id = $1`,
+        `SELECT status, last_seen_at FROM agents WHERE agent_id = $1`,
+        [agentId],
+      )
+      // Issue #278 (A) segment 3d — agents.current_message_id is gone.
+      // The "in-flight claim" view is now the most-recent active per-row
+      // claim from message_queue.
+      const claim = await db.query(
+        `SELECT id::text AS id FROM message_queue
+            WHERE claimed_by = $1 AND status = 'read'
+            ORDER BY claimed_at DESC NULLS LAST
+            LIMIT 1`,
         [agentId],
       )
       const row = agent.rows[0]
@@ -1196,7 +1205,7 @@ async function status(args: string[]) {
         pending: pending.rows[0]?.n ?? 0,
         status: row?.status ?? 'unknown',
         last_seen_at: row?.last_seen_at ?? null,
-        current_message_id: row?.current_message_id ?? null,
+        current_message_id: claim.rows[0]?.id ?? null,
       }
       if (format === 'json') {
         process.stdout.write(JSON.stringify(result) + '\n')

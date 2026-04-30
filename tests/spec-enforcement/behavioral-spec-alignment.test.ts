@@ -92,29 +92,39 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
   })
 })
 
-describe('Behavioral FAIL B1 — next flips agents.status to busy', () => {
-  test('server.ts next stamps current_message_id + status busy in one UPDATE', () => {
+describe('Behavioral FAIL B1 — next flips agents.status to busy (Issue #278 segment 3d)', () => {
+  test('server.ts next flips agents.status to busy without stamping current_message_id', () => {
+    // The in-flight pointer lives on the message_queue claim row
+    // (claimed_by + claim_expires_at) post-segment-3d; the agents
+    // UPDATE only carries the status flip.
     expect(SERVER_SRC).toMatch(
-      /UPDATE agents SET current_message_id = \$1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now\(\) WHERE agent_id = \$2/,
+      /UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now\(\) WHERE agent_id = \$1/,
     )
   })
-  test('cli nextMessage mirrors the same atomic UPDATE', () => {
+  test('cli nextMessage mirrors the same agents UPDATE shape', () => {
     expect(CLI_SRC).toMatch(
-      /UPDATE agents SET current_message_id = \$1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now\(\) WHERE agent_id = \$2/,
+      /UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now\(\) WHERE agent_id = \$1/,
     )
   })
 })
 
-describe('Behavioral FAIL B4 — send flips agents.status to idle', () => {
-  test('server.ts send clears current_message_id + flips idle in one UPDATE', () => {
+describe('Behavioral FAIL B4 — send flips agents.status to idle (Issue #278 segment 3d)', () => {
+  test('server.ts send flips agents.status to idle without touching current_message_id', () => {
     expect(SERVER_SRC).toMatch(
-      /UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/,
+      /UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/,
     )
+    // Negative pin: a refactor that re-introduces the legacy column
+    // write would trip this.
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).not.toMatch(/UPDATE agents SET current_message_id = NULL/)
   })
-  test('cli sendMessage mirrors the same atomic UPDATE', () => {
+  test('cli sendMessage mirrors the same agents UPDATE shape', () => {
     expect(CLI_SRC).toMatch(
-      /UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/,
+      /UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/,
     )
+    expect(CLI_SRC).not.toMatch(/UPDATE agents SET current_message_id = NULL, status = 'idle'/)
   })
 })
 

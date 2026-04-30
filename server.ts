@@ -1555,7 +1555,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'reclaim',
-      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'read\' row whose read_at is older than 15 minutes back to pending, and clears agents.current_message_id. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
+      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'read\' row whose read_at is older than 15 minutes back to pending and flips the agent to idle. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1672,10 +1672,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         [agentId, String(claimTtlSec), row.id],
       )
       // spec §4.1 step 4 — mark agent busy while processing this message.
-      // Combined with current_message_id UPDATE so both transitions are atomic.
+      // Issue #278 (A) segment 3d: per-row claim is now the canonical
+      // in-flight pointer (message_queue.claimed_by stamped above), so
+      // agents.current_message_id is no longer written.
       await client.query(
-        `UPDATE agents SET current_message_id = $1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $2`,
-        [row.id, agentId],
+        `UPDATE agents SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $1`,
+        [agentId],
       )
       await client.query('COMMIT')
 
@@ -2107,10 +2109,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
       [id, claimedMqId],
     )
-    // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in
-    // a single UPDATE so the two transitions are always atomic.
+    // spec §4.2 step 10-11 — flip the agent back to idle (§8.1 busy → idle).
+    // Issue #278 (A) segment 3d: agents.current_message_id is gone — the
+    // per-row claim path's UPDATE message_queue → 'replied' (above) is the
+    // sole record of the in-flight transition.
     await txClient.query(
-      `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
+      `UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
       [agentId],
     )
 
@@ -2748,14 +2752,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         const queueId = upd.rows[0].id as number
+        // Issue #278 (A) segment 3d: drop the current_message_id WHERE filter
+        // and SET clause. The message_queue row above is the truth; flipping
+        // the agent to idle here mirrors the send path (§8.1 busy → idle).
         await client.query(
           `UPDATE agents
-              SET current_message_id = NULL,
-                  status = 'idle',
+              SET status = 'idle',
                   status_detail = NULL,
                   status_updated_at = now()
-            WHERE agent_id = $1 AND current_message_id = $2`,
-          [AGENT_ID, queueId],
+            WHERE agent_id = $1`,
+          [AGENT_ID],
         )
         await client.query('COMMIT')
         return {
@@ -2791,10 +2797,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             RETURNING id`,
           [targetAgent],
         )
+        // Issue #278 (A) segment 3d: drop current_message_id from the SET
+        // clause; the per-row claim model owns in-flight pointers now.
         await client.query(
           `UPDATE agents
-              SET current_message_id = NULL,
-                  status = 'idle',
+              SET status = 'idle',
                   status_detail = NULL,
                   status_updated_at = now()
             WHERE agent_id = $1`,

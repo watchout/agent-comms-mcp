@@ -51,7 +51,14 @@ export function migrateSqlite(dbPath?: string): void {
       read_at TEXT,
       replied_at TEXT,
       replied_with TEXT,
-      failed_reason TEXT
+      failed_reason TEXT,
+      -- Issue #278 (A) — per-row claim columns. Mirrors the PG schema so
+      -- the CLI's claim lookup (cli/index.ts sendMessage, segment 3d)
+      -- works in SQLite mode too. claim_expires_at uses TEXT for SQLite
+      -- ISO-8601 timestamps; the actual TTL math runs in JS, not SQL.
+      claimed_by TEXT,
+      claimed_at TEXT,
+      claim_expires_at TEXT
     )
   `)
 
@@ -70,6 +77,31 @@ export function migrateSqlite(dbPath?: string): void {
   const mqColNames = new Set(mqCols.map((c) => c.name))
   if (!mqColNames.has('failed_reason')) {
     db.exec(`ALTER TABLE message_queue ADD COLUMN failed_reason TEXT`)
+  }
+  // Issue #278 (A) segment 3d — backfill the per-row claim columns on
+  // pre-Stage-B SQLite DBs. SQLite lacks ALTER TABLE ADD COLUMN IF NOT
+  // EXISTS, so PRAGMA-check first.
+  if (!mqColNames.has('claimed_by')) {
+    db.exec(`ALTER TABLE message_queue ADD COLUMN claimed_by TEXT`)
+  }
+  if (!mqColNames.has('claimed_at')) {
+    db.exec(`ALTER TABLE message_queue ADD COLUMN claimed_at TEXT`)
+  }
+  if (!mqColNames.has('claim_expires_at')) {
+    db.exec(`ALTER TABLE message_queue ADD COLUMN claim_expires_at TEXT`)
+  }
+  // Issue #278 (A) segment 3d — drop legacy current_message_id from
+  // pre-Stage-B SQLite DBs. SQLite supports DROP COLUMN as of 3.35; for
+  // older DBs we accept the dead column (PG schema is the source of truth).
+  const aCols = db.query(`PRAGMA table_info(agents)`).all() as Array<{ name: string }>
+  const aColNames = new Set(aCols.map((c) => c.name))
+  if (aColNames.has('current_message_id')) {
+    try {
+      db.exec(`ALTER TABLE agents DROP COLUMN current_message_id`)
+    } catch {
+      // SQLite < 3.35 — leave the column in place. Stage B reads /
+      // writes never touch it, so it is dead but harmless.
+    }
   }
 
   db.exec(`
@@ -123,7 +155,9 @@ export function migrateSqlite(dbPath?: string): void {
       heartbeat_interval INTEGER DEFAULT 30,
       heartbeat_at TEXT,
       observer_mode INTEGER NOT NULL DEFAULT 0,
-      current_message_id TEXT,
+      -- Issue #278 (A) segment 3d — current_message_id removed; the per-row
+      -- claim model on message_queue (claimed_by / claimed_at /
+      -- claim_expires_at) replaces it.
       metadata TEXT DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )

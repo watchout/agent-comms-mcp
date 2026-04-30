@@ -104,9 +104,13 @@ describe('T4 — MCP next tool exists in server.ts (spec §4.1)', () => {
     // cadence. The new contract: the next handler never writes
     // status='skipped' synchronously.
     expect(body).not.toMatch(/UPDATE message_queue\s+SET status\s*=\s*'skipped'/)
-    // Stamps current_message_id (preserved until segment 3d for
-    // reclaim / skip / fail / outbound consumer compatibility).
-    expect(body).toMatch(/UPDATE agents SET current_message_id/)
+    // Issue #278 (A) segment 3d — agents.current_message_id is gone.
+    // The claim-row UPDATE (claimed_by + claim_expires_at) is now the
+    // sole record of the in-flight pointer; the agents UPDATE only
+    // flips status='busy'.
+    expect(body).not.toMatch(/UPDATE agents SET current_message_id/)
+    expect(body).toMatch(/claimed_by\s*=\s*\$1/)
+    expect(body).toMatch(/UPDATE agents SET status\s*=\s*'busy'/)
   })
 })
 

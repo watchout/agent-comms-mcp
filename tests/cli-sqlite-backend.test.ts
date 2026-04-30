@@ -109,7 +109,7 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
 })
 
 describe('F2 — agent-com next (SQLite)', () => {
-  test('pops a pending row, marks read, stamps current_message_id, sets busy', () => {
+  test('pops a pending row, marks read, stamps the per-row claim, sets busy', () => {
     const { messageId, queueId } = seedPendingMessage('next test')
     const r = runCli(['next'])
     expect(r.status).toBe(0)
@@ -118,11 +118,15 @@ describe('F2 — agent-com next (SQLite)', () => {
     expect(payload.queue_id).toBe(queueId)
     expect(payload.from).toBe('cto')
     expect(payload.content).toBe('next test')
-    const q = dbRead(`SELECT status FROM message_queue WHERE id = ?`, [queueId])
+    // Issue #278 (A) segment 3d — agents.current_message_id is gone.
+    // The in-flight pointer now lives on the message_queue row itself
+    // via the per-row claim columns.
+    const q = dbRead(`SELECT status, claimed_by, claim_expires_at FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('read')
-    const a = dbRead(`SELECT status, current_message_id FROM agents WHERE agent_id = 'probe-f'`)
+    expect(q[0].claimed_by).toBe('probe-f')
+    expect(q[0].claim_expires_at).not.toBeNull()
+    const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     expect(a[0].status).toBe('busy')
-    expect(Number(a[0].current_message_id)).toBe(queueId)
   })
 
   test('emits {"waiting":0} with no message_id when queue is empty', () => {
@@ -133,22 +137,27 @@ describe('F2 — agent-com next (SQLite)', () => {
     expect(payload.message_id).toBeUndefined()
   })
 
-  test('implicit-fails the prior current_message_id with IMPLICIT_ABANDON', () => {
+  test('multi in-flight: two consecutive `next` calls produce two distinct active claims (no implicit-fail)', () => {
+    // Issue #278 (A) §A — the legacy single-slot guard is gone, so
+    // two `next` calls in succession both succeed and leave both
+    // claims active (status='read'). Orphan recovery is structural
+    // via the claim-TTL sweeper, not via in-line implicit-fail.
     const first = seedPendingMessage('m1')
     const second = seedPendingMessage('m2')
-    runCli(['next']) // pops m1
-    runCli(['next']) // should implicit-fail m1, pop m2
-    const q = dbRead(`SELECT id, status, failed_reason FROM message_queue ORDER BY id`)
+    runCli(['next']) // pops m1, status read
+    runCli(['next']) // pops m2 — m1 STAYS read (segment 3c)
+    const q = dbRead(`SELECT id, status, failed_reason, claimed_by FROM message_queue ORDER BY id`)
     const m1 = q.find((r: any) => r.id === first.queueId)
     const m2 = q.find((r: any) => r.id === second.queueId)
-    expect(m1.status).toBe('failed')
-    expect(m1.failed_reason).toBe('IMPLICIT_ABANDON')
+    expect(m1.status).toBe('read')
+    expect(m1.claimed_by).toBe('probe-f')
     expect(m2.status).toBe('read')
+    expect(m2.claimed_by).toBe('probe-f')
   })
 })
 
 describe('F3 — agent-com send (SQLite)', () => {
-  test('replies to the in-flight row, sets replied, clears current_message_id', () => {
+  test('replies to the in-flight row, sets replied, idles the agent', () => {
     const { queueId } = seedPendingMessage('send test')
     runCli(['next'])
     const r = runCli(['send', '--content', 'F3 reply', '--mentions', 'cto'])
@@ -161,19 +170,21 @@ describe('F3 — agent-com send (SQLite)', () => {
     const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('replied')
     expect(q[0].replied_with).toBe(payload.message_id)
-    const a = dbRead(`SELECT status, current_message_id FROM agents WHERE agent_id = 'probe-f'`)
+    const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     expect(a[0].status).toBe('idle')
-    expect(a[0].current_message_id).toBeNull()
   })
 
-  test('rejects second send without a fresh next — NO_CURRENT_MESSAGE guard', () => {
+  test('rejects second send without a fresh next — INVALID_REPLY_TO guard', () => {
+    // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE retired in
+    // favour of INVALID_REPLY_TO. The CLI hits the same branch when
+    // the agent has no active claim (post-reply, post-TTL, or pre-next).
     seedPendingMessage('dbl-send')
     runCli(['next'])
     const ok = runCli(['send', '--content', 'first', '--mentions', 'cto'])
     expect(ok.status).toBe(0)
     const fail = runCli(['send', '--content', 'second', '--mentions', 'cto'])
     expect(fail.status).not.toBe(0)
-    expect(fail.stderr).toContain('NO_CURRENT_MESSAGE')
+    expect(fail.stderr).toContain('INVALID_REPLY_TO')
   })
 })
 
@@ -247,9 +258,8 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     const q = dbRead(`SELECT status, failed_reason FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('failed')
     expect(q[0].failed_reason).toBe('SQLITE_FAIL_TEST')
-    const a = dbRead(`SELECT status, current_message_id FROM agents WHERE agent_id = 'probe-f'`)
+    const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     expect(a[0].status).toBe('idle')
-    expect(a[0].current_message_id).toBeNull()
   })
 
   test('skip sets status=skipped + reason (operator path)', () => {
@@ -277,8 +287,8 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     const q = dbRead(`SELECT status, read_at FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('pending')
     expect(q[0].read_at).toBeNull()
-    const a = dbRead(`SELECT status, current_message_id FROM agents WHERE agent_id = 'probe-f'`)
-    expect(a[0].current_message_id).toBeNull()
+    const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
+    expect(a[0].status).toBe('idle')
   })
 })
 
