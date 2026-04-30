@@ -97,4 +97,29 @@ describe('test_aun_init_fresh — fresh-env init produces aun home + plugin + pa
     const baselinePath = join(home, '.aun', 'cli-baselines.json')
     expect(existsSync(baselinePath)).toBe(true)
   })
+
+  test('(f) Issue #278 cycle 4 — aun-pre-tool-use-inbox-gate.{sh,ts} copied + PreToolUse wired in settings.json', () => {
+    // Cycle 4 must-fix #1 (auditor verbatim): the inbox gate file pair
+    // ships in `hooks/` but cycle 3 left it off the installer. This
+    // test pins both the file copy and the settings.json wiring so a
+    // future regression that drops either side fails loudly.
+    //
+    // (i) bash wrapper + bun TS runner are both placed in
+    //     ~/.claude/hooks/ as a sibling pair (the wrapper invokes the
+    //     runner via `bun hooks/pre-tool-use-inbox-gate.ts`).
+    const hookDir = join(claudeHome, 'hooks')
+    expect(existsSync(join(hookDir, 'aun-pre-tool-use-inbox-gate.sh'))).toBe(true)
+    expect(existsSync(join(hookDir, 'pre-tool-use-inbox-gate.ts'))).toBe(true)
+
+    // (ii) settings.json carries a PreToolUse matcher pointing at the
+    //      wrapper. The runner owns the allow-list (next/send/notify/
+    //      skip/fail/reclaim) so the matcher itself is empty (every
+    //      tool runs the gate; the runner short-circuits the
+    //      allow-list ones with exit 0).
+    const s = readSettings(settingsPath)
+    const preToolUse = s.hooks?.PreToolUse ?? []
+    expect(preToolUse.length).toBeGreaterThanOrEqual(1)
+    const commands = preToolUse.flatMap(reg => reg.hooks.map(h => h.command))
+    expect(commands.some(c => c.includes('aun-pre-tool-use-inbox-gate.sh'))).toBe(true)
+  })
 })

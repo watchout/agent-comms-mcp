@@ -71,18 +71,23 @@ describe('T2 — cli/index.ts fail / skip / reclaim handlers + dispatch', () => 
     expect(CLI_SRC).toMatch(/command === 'reclaim'[\s\S]{0,200}?reclaimMessages\(/)
   })
 
-  test('fail/skip share a transactional helper that sets status + failed_reason and clears agents state', () => {
+  test('fail/skip share a transactional helper that sets status + failed_reason + idles the agent', () => {
     // Anchor on the shared helper so a future refactor that splits them
     // doesn't silently drop the transactional invariants (status update →
-    // agents clear → COMMIT).
+    // agent idle → COMMIT). Issue #278 segment 3d: the legacy
+    // current_message_id WHERE filter is gone, the agent idle flip is
+    // unconditional once the message_queue UPDATE matched a row.
     expect(CLI_SRC).toMatch(/async function failOrSkipMessage/)
     expect(CLI_SRC).toMatch(/SET status = \$1, failed_reason = \$2/)
-    expect(CLI_SRC).toMatch(/current_message_id = NULL/)
+    expect(CLI_SRC).not.toMatch(/current_message_id = NULL/)
   })
 
-  test('reclaim uses the 15-minute cutoff + clears current_message_id', () => {
+  test('reclaim uses the 15-minute cutoff + idles the agent', () => {
     expect(CLI_SRC).toMatch(/INTERVAL '15 minutes'/)
     expect(CLI_SRC).toMatch(/reclaimed_count/)
+    // Issue #278 segment 3d — agents.current_message_id is gone; the
+    // reclaim path no longer references it.
+    expect(CLI_SRC).not.toMatch(/UPDATE agents[\s\S]{0,200}?current_message_id = NULL/)
   })
 })
 
@@ -90,11 +95,34 @@ describe('T2 — cli/index.ts fail / skip / reclaim handlers + dispatch', () => 
 // T3 — §4.1 implicit-skip renamed to implicit-fail (CLI + server)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('T3 — §4.1 implicit abandon → status=failed, failed_reason=IMPLICIT_ABANDON', () => {
-  test('cli/index.ts next handler uses failed + IMPLICIT_ABANDON', () => {
-    expect(CLI_SRC).toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
+  test('IMPLICIT_ABANDON is emitted by the claim-TTL sweeper only (Issue #278 segment 3d)', () => {
+    // The legacy in-line implicit-abandon UPDATE was hosted in
+    // cli/index.ts nextMessage and server.ts next handler. Both are
+    // gone post-segment-3c/3d; the sole writer of the
+    // 'IMPLICIT_ABANDON' SQL is now core/claim-ttl.ts.
+    expect(CLI_SRC).not.toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
   })
-  test('server.ts next handler uses failed + IMPLICIT_ABANDON', () => {
-    expect(SERVER_SRC).toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
+  test('IMPLICIT_ABANDON is emitted by the claim-TTL sweeper, not the server.ts next handler', () => {
+    // Issue #278 (A) segment 3c — the legacy priorId implicit-skip path
+    // has moved out of the MCP server next handler into the periodic
+    // claim-TTL sweeper (core/claim-ttl.ts). The IMPLICIT_ABANDON write
+    // still exists, but in a different file; assertions that pinned it
+    // to server.ts must follow the move. The sweeper pattern uses a
+    // multi-line UPDATE (status='failed', failed_reason=$1 with a
+    // claim_expires_at predicate) so the original single-line regex no
+    // longer matches; we pin the new shape directly on the sweeper module.
+    const claimTtlSrc = readFileSync(join(REPO_ROOT, 'core/claim-ttl.ts'), 'utf-8')
+    expect(claimTtlSrc).toMatch(/SET status = 'failed', failed_reason = \$1/)
+    expect(claimTtlSrc).toMatch(/IMPLICIT_ABANDON/)
+    // Negative pin: server.ts next handler must not have re-introduced
+    // the synchronous IMPLICIT_ABANDON UPDATE. The sweeper is the only
+    // path now. We pin on the SQL shape rather than the bare keyword
+    // so explanatory comments referencing the failure code do not
+    // accidentally trip the assertion.
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const nextIdx = SERVER_SRC.indexOf("if (name === 'next')")
+    const nextHandler = SERVER_SRC.slice(nextIdx, sendIdx === -1 ? SERVER_SRC.length : sendIdx)
+    expect(nextHandler).not.toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
   })
   test('legacy implicit status="skipped" write is gone', () => {
     // Negative pin: the old code wrote status='skipped' under the exact phrase
@@ -121,9 +149,20 @@ describe('T4 — server.ts MCP tools: fail / skip / reclaim', () => {
     expect(SERVER_SRC).toMatch(/if \(name === 'reclaim'\)/)
   })
 
-  test('fail/skip handler performs the transactional status + agents update', () => {
+  test('fail/skip handler uses the EXISTS-derive open-claim status update (Issue #278 cycle 1)', () => {
     expect(SERVER_SRC).toMatch(/SET status = \$1, failed_reason = \$2/)
-    expect(SERVER_SRC).toMatch(/current_message_id = NULL/)
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const failIdx = SERVER_SRC.indexOf("if (name === 'fail' || name === 'skip')")
+    const reclaimIdx = SERVER_SRC.indexOf("if (name === 'reclaim')", failIdx)
+    expect(failIdx).toBeGreaterThan(sendIdx)
+    const handler = SERVER_SRC.slice(failIdx, reclaimIdx === -1 ? SERVER_SRC.length : reclaimIdx)
+    // Multi in-flight: closing one claim must not unconditionally
+    // idle the agent; CASE WHEN EXISTS keeps busy while other reads
+    // remain.
+    expect(handler).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
+    expect(handler).not.toMatch(/current_message_id = NULL/)
   })
 
   test('reclaim handler uses 15-minute cutoff + returns reclaimed_queue_ids', () => {

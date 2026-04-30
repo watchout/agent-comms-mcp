@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Issue #278 (§G-1) — agent-comms heartbeat launchd config.
+
+  Runs `bun scripts/heartbeat-poll.ts` under launchd. The CTO Gap audit
+  (msg `f5017e78`) flagged that running heartbeat-poll inside a tmux
+  session left it unsupervised: a crash there meant the operator lost
+  visibility AND lost the data feeding stuck-bot detection. Putting
+  the heartbeat under launchd keeps it alive whenever the user is
+  logged in.
+
+  Install:
+    cp infra/launchd/com.aun.heartbeat.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.aun.heartbeat.plist 2>/dev/null
+    launchctl load -w ~/Library/LaunchAgents/com.aun.heartbeat.plist
+
+  Update DATABASE_URL / WorkingDirectory below to match the host before
+  loading.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aun.heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bun</string>
+    <string>scripts/heartbeat-poll.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yuji/Developer/agent-comms-mcp</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DATABASE_URL</key>
+    <string>postgresql://yuji@localhost:5432/agent_comms</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yuji/.aun/logs/heartbeat.out</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/yuji/.aun/logs/heartbeat.err</string>
+</dict>
+</plist>

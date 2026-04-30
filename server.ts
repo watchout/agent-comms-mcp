@@ -98,6 +98,7 @@ import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
+import { startClaimTtlSweeper } from './core/claim-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
 
@@ -1554,7 +1555,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'reclaim',
-      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'read\' row whose read_at is older than 15 minutes back to pending, and clears agents.current_message_id. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
+      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'read\' row whose read_at is older than 15 minutes back to pending and flips the agent to idle. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1579,23 +1580,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     try {
       await client.query('BEGIN')
-      // Lock agents row + implicit-skip prior current
-      const prevRow = await client.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
-        [agentId],
-      )
-      const priorId: number | null = prevRow.rows[0]?.current_message_id ?? null
-      if (priorId !== null) {
-        // v2.1.0: implicit abandon is now status='failed' with
-        // failed_reason='IMPLICIT_ABANDON' (spec §4.1 step 1, §11 failed_reason).
-        // status='skipped' is reserved for operator-initiated `agent-com skip`.
-        await client.query(
-          `UPDATE message_queue
-              SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'
-           WHERE id = $1 AND status = 'read'`,
-          [priorId],
-        )
-      }
+      // Issue #278 (A) segment 3c — legacy priorId IMPLICIT_ABANDON pattern
+      // removed. The previous shape locked the agents row with FOR UPDATE,
+      // read agents.current_message_id, and synchronously flipped any
+      // 'read' row referenced by it to 'failed'/'IMPLICIT_ABANDON'. That
+      // path served two roles: (a) implicit-skip an orphaned claim before
+      // popping a fresh row, and (b) serialise concurrent next calls per
+      // agent on the agents row lock. Both are now obsolete:
+      //   (a) replaced by the periodic claim-TTL sweeper
+      //       (core/claim-ttl.ts, segment 3b) — sweepExpiredClaims fires
+      //       every 5 min and flips the same set of rows out of 'read'
+      //       structurally. The TTL window (default 30s) bounds how long
+      //       an orphan can linger, which is strictly tighter than the
+      //       indefinite linger possible under the legacy pattern (it
+      //       only fired when the same agent called `next` again).
+      //   (b) intentionally dropped — Issue #278 §A promises multi
+      //       in-flight semantics, so two concurrent next calls SHOULD
+      //       succeed in parallel. SELECT ... FOR UPDATE SKIP LOCKED on
+      //       message_queue (below) gives each caller a distinct row;
+      //       agents row serialisation would defeat that.
+      // The agents.current_message_id WRITE at the end of this handler
+      // is preserved until segment 3d, since reclaim / skip / fail / the
+      // outbound consumer still read it. The read here is the only one
+      // safe to drop in this segment.
 
       // v1.0.2 §6.5: try the PollingDriver buffer first. The buffer
       // contains a read-only snapshot of pending rows from the last poll
@@ -1637,22 +1644,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       if (!row) {
-        if (priorId !== null) {
-          await client.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
-        }
+        // Issue #278 (A) segment 3c — the priorId NULL-clear branch is
+        // gone with the priorId path. agents.current_message_id is left
+        // alone here; the value (if any) keeps reflecting the prior
+        // claim until either a new next stamps a fresh id or segment 3d
+        // drops the column entirely.
         await client.query('COMMIT')
         return { content: [{ type: 'text', text: JSON.stringify({ waiting: 0 }) }] }
       }
 
+      // Issue #278 (A) — per-row claim. Stamp claimed_by / claimed_at /
+      // claim_expires_at alongside the status='read' transition so the
+      // TTL sweeper (core/claim-ttl.ts, segment 3b) can flip orphaned
+      // claims to IMPLICIT_ABANDON. With segment 3c the legacy priorId
+      // implicit-skip path is gone — orphan recovery is now exclusively
+      // structural via the sweeper. TTL default 30s, env-overridable
+      // per Issue #278 §5 Open decisions.
+      const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
       await client.query(
-        `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
-        [row.id],
+        `UPDATE message_queue
+            SET status = 'read',
+                read_at = now(),
+                claimed_by = $1,
+                claimed_at = now(),
+                claim_expires_at = now() + ($2 || ' seconds')::interval
+          WHERE id = $3`,
+        [agentId, String(claimTtlSec), row.id],
       )
       // spec §4.1 step 4 — mark agent busy while processing this message.
-      // Combined with current_message_id UPDATE so both transitions are atomic.
+      // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
+      // semantics, busy/idle is derived from the actual open-claim set,
+      // not blindly stamped. Here we just transitioned a row to 'read'
+      // so the EXISTS predicate is guaranteed true; we still go through
+      // the CASE WHEN derivation so every agents.status writer in this
+      // PR uses the same one-line idempotent shape.
       await client.query(
-        `UPDATE agents SET current_message_id = $1, status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now() WHERE agent_id = $2`,
-        [row.id, agentId],
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
+        [agentId],
       )
       await client.query('COMMIT')
 
@@ -1721,23 +1753,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
     }
 
-    // spec §4.2 step 1 — current_message_id guard, atomic. codex-auditor
+    // spec §4.2 step 1 — per-row claim guard (Issue #278 segment 3a, replaces
+    // the legacy single-slot agents.current_message_id guard). codex-auditor
     // Layer 2 BLOCKER (PR #214 cycle 2, CTO judgment msg 89216a72): the
-    // non-transactional SELECT version left a window where two concurrent
-    // MCP `send` calls could both pass the guard before either cleared the
-    // row, producing a double Discord post. CTO 2 択 (a): wrap the entire
-    // send flow in a single BEGIN/COMMIT, acquire the agents row lock via
-    // `SELECT FOR UPDATE`, and clear `current_message_id` at COMMIT. This
-    // matches the CLI pattern (cli/index.ts sendMessage — PR#134 ARC
-    // follow-up, lead-ama msg 1492283029933133874) so a parallel caller
-    // blocks on the row lock, wakes to a NULL `current_message_id`, and
-    // exits with NO_CURRENT_MESSAGE instead of double-replying.
+    // non-transactional version left a window where two concurrent MCP `send`
+    // calls could both pass the guard before either cleared the row,
+    // producing a double Discord post. CTO 2 択 (a): wrap the entire send
+    // flow in a single BEGIN/COMMIT and hold a FOR UPDATE lock on the row
+    // owning the in-flight claim. With per-row claim semantics the locked
+    // row is the message_queue row keyed by (message_id = reply_to,
+    // claimed_by = agentId, status = 'read') — locking message_queue rather
+    // than agents lets independent claims proceed in parallel (Issue #278
+    // §A multi in-flight) while still serialising any concurrent send
+    // attempts targeting the same claim, so a parallel caller blocks on
+    // the row lock, wakes to a row whose status has flipped to 'replied',
+    // misses the predicate, and exits with INVALID_REPLY_TO instead of
+    // double-replying.
     //
     // Transaction flow:
     //   - BEGIN on the singleton client (tryGetDb → pg pool client).
-    //   - `SELECT ... FOR UPDATE` holds the row lock for the duration of
-    //     the handler. The captured value (`claimedMqId`) is used at step
-    //     9 to mark message_queue 'replied' without a second read.
+    //   - `SELECT ... FOR UPDATE` on the message_queue row holds the lock
+    //     for the duration of the handler. The captured `id` (claimedMqId)
+    //     is used at step 9 to mark message_queue 'replied' without a
+    //     second read.
     //   - All existing side effects (agent_messages INSERT, message_queue
     //     INSERT per recipient, outbound_queue INSERT, pg_notify) run
     //     against the same client, so ROLLBACK unwinds everything.
@@ -1753,16 +1791,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let txCommitted = false
     await txClient.query('BEGIN')
     try {
-      const guardRow = await txClient.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
-        [agentId],
+      // The MCP tool schema declares reply_to required; a missing value is
+      // a client bug. Surface INVALID_REPLY_TO directly so the failure mode
+      // is the same as a stale / unknown reply_to (single error class for
+      // "send cannot find a claim to attach to").
+      if (!reply_to) {
+        await txClient.query('ROLLBACK')
+        txCommitted = true
+        return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: reply_to is required for send — call \`next\` first to obtain a claim` }], isError: true }
+      }
+      const claimRow = await txClient.query(
+        `SELECT id FROM message_queue
+            WHERE message_id = $1 AND claimed_by = $2 AND status = 'read'
+            FOR UPDATE`,
+        [reply_to, agentId],
       )
-      claimedMqId = guardRow.rows[0]?.current_message_id ?? null
-      if (!claimedMqId) {
+      if (claimRow.rows.length === 0) {
         await txClient.query('ROLLBACK')
         txCommitted = true // prevent double-ROLLBACK in finally
-        return { content: [{ type: 'text', text: `Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — call \`next\` first` }], isError: true }
+        return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: no in-flight claim for reply_to=${reply_to} by ${agentId} — call \`next\` first or the claim may have expired` }], isError: true }
       }
+      claimedMqId = claimRow.rows[0].id
 
     // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
     // This avoids NOT_MENTIONED errors when LLM forgets mentions but reply_to context is present.
@@ -2067,10 +2116,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
       [id, claimedMqId],
     )
-    // spec §4.2 step 10-11 — clear current_message_id AND flip to idle in
-    // a single UPDATE so the two transitions are always atomic.
+    // spec §4.2 step 10-11 — flip the agent based on remaining open
+    // claims (§8.1 busy ↔ idle). Issue #278 cycle 1 (auditor BLOCK 1):
+    // with multi in-flight, this send only closes ONE claim — other
+    // claims may still be open, in which case the agent must remain
+    // busy. EXISTS-derive guarantees observability (sender-feedback /
+    // heartbeat / bot_status all read agents.status) keeps tracking
+    // the true state.
     await txClient.query(
-      `UPDATE agents SET current_message_id = NULL, status = 'idle', status_detail = NULL, status_updated_at = now() WHERE agent_id = $1`,
+      `UPDATE agents SET
+         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+         status_updated_at = now()
+       WHERE agent_id = $1`,
       [agentId],
     )
 
@@ -2708,14 +2766,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         const queueId = upd.rows[0].id as number
+        // Issue #278 cycle 1 (auditor BLOCK 1): EXISTS-derive busy/idle
+        // from the remaining open claims rather than unconditionally
+        // flipping to idle — multi in-flight means fail/skip closes
+        // only ONE claim while others may still be active.
         await client.query(
-          `UPDATE agents
-              SET current_message_id = NULL,
-                  status = 'idle',
-                  status_detail = NULL,
-                  status_updated_at = now()
-            WHERE agent_id = $1 AND current_message_id = $2`,
-          [AGENT_ID, queueId],
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
+          [AGENT_ID],
         )
         await client.query('COMMIT')
         return {
@@ -2751,13 +2812,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             RETURNING id`,
           [targetAgent],
         )
+        // Issue #278 cycle 1 (auditor BLOCK 1): reclaim must respect
+        // the multi in-flight contract. After rolling expired 'read'
+        // rows back to 'pending', the agent may still hold OTHER
+        // active claims that are not orphaned; EXISTS-derive keeps
+        // those visible.
         await client.query(
-          `UPDATE agents
-              SET current_message_id = NULL,
-                  status = 'idle',
-                  status_detail = NULL,
-                  status_updated_at = now()
-            WHERE agent_id = $1`,
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
           [targetAgent],
         )
         await client.query('COMMIT')
@@ -3426,6 +3491,26 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
       }
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — queue ttl sweeper failed to start (non-fatal): ${err}\n`)
+    }
+  }
+
+  // Issue #278 (A) segment 3b — install expired-claim sweeper. Flips
+  // orphaned `status='read'` rows whose claim_expires_at is in the
+  // past to `failed_reason='IMPLICIT_ABANDON'`. Shares the
+  // AGENT_COMMS_TTL_SWEEP_DISABLED kill switch so tests / one-shot
+  // CLIs disable both sweepers at once. Interval is independently
+  // env-overridable via AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS (default
+  // 5 min) per Issue #278 §5 Open decisions.
+  if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
+    try {
+      const claimDb = await coreDbAdapter()
+      if (claimDb) {
+        const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
+        startClaimTtlSweeper(claimDb, { intervalMs })
+        process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON)\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
     }
   }
 

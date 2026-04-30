@@ -38,13 +38,24 @@ interface AgentSnapshot {
   workdir: string | null
 }
 
+// Issue #278 (A) segment 3d — agents.current_message_id is gone. The
+// "claim" column in the heartbeat line now sources from the most-recent
+// active per-row claim on message_queue (claimed_by + status='read').
+// LATERAL keeps the per-agent subquery cheap.
 const QUERY = `
   SELECT a.agent_id,
          a.status,
          a.status_updated_at AS busy_since,
-         a.current_message_id::text AS current_message_id,
+         claim.id::text AS current_message_id,
          a.metadata->>'workdir' AS workdir
     FROM agents a
+    LEFT JOIN LATERAL (
+      SELECT id FROM message_queue
+       WHERE claimed_by = a.agent_id
+         AND status = 'read'
+       ORDER BY claimed_at DESC NULLS LAST
+       LIMIT 1
+    ) claim ON TRUE
    WHERE a.agent_type IS DISTINCT FROM 'system'
    ORDER BY a.agent_id
 `

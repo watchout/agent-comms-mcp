@@ -243,6 +243,28 @@ async function migrate() {
       ON message_queue(agent_id, status, priority DESC, created_at ASC)
       WHERE status = 'pending';
 
+    -- Issue #278 (A) Per-row claim model. Replaces agents.current_message_id
+    -- single-slot guard: a bot now claims individual message_queue rows with
+    -- a TTL, allowing concurrent in-flight processing and structured TTL
+    -- recovery (IMPLICIT_ABANDON sweeper). The columns are nullable so legacy
+    -- pending rows continue to satisfy the existing CHECK / unique pair.
+    DO $$ BEGIN
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_mq_expired_claims
+      ON message_queue(claim_expires_at)
+      WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'read';
+
+    -- Issue #278 (A) Inbound idempotency was already in place as
+    -- uq_mq_agent_message ((agent_id, message_id) WHERE message_id IS NOT NULL,
+    -- created earlier). The Issue body uq_mq_inbound_idem proposal added
+    -- a COALESCE(metadata->>source_path) column that does not
+    -- exist on message_queue, so the existing partial unique index is the
+    -- canonical guard for #272 2-path bloat — no redundant index needed.
+
     -- Codex audit (PR#140) refinement: dedup with quarantine.
     --   1. Move non-safe duplicates (non-identical payload / non-pending
     --      status) to message_queue_dedup_quarantine so the operator can
@@ -310,10 +332,17 @@ async function migrate() {
       ON message_queue(agent_id, message_id)
       WHERE message_id IS NOT NULL;
 
-    -- Issue #128 Phase 2: agents.current_message_id (BIGINT, references message_queue.id)
-    -- Tracks the in-flight next result so send can resolve reply_to/dest automatically.
-    -- DB-backed (not process-memory) so it survives CLI restarts. ADD COLUMN IF NOT
-    -- EXISTS is idempotent on its own; no DO block needed.
+    -- Issue #278 (A) segment 3d hotfix (lead-ama incident 2026-04-30) —
+    -- agents.current_message_id is the legacy single-slot in-flight
+    -- pointer (Issue #128 Phase 2). Stage B replaces it with the
+    -- per-row claim model on message_queue, but the DROP must NOT run
+    -- in this auto-applied bootstrap migration: every fleet restart
+    -- would re-fire the DROP and break any old-code bot still reading
+    -- the column. The drop is exposed exclusively through the paired
+    -- file (db/migrations/2026-04-30-stage-b-drop-current-message-id
+    -- .{up,down}.sql), to be applied manually post-merge with a
+    -- coordinated fleet restart. Until then we keep the column in the
+    -- bootstrap so a fresh DB matches the live fleet shape.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id BIGINT;
 
     -- Phase C PR #214: idle/busy state machine (spec §4.1 step 4, §4.2 step 11, §8.1)
@@ -522,6 +551,51 @@ async function migrate() {
   await client.end()
 }
 
+// Issue #278 (G-2) — `--down=<file>` rollback mode. The `up` schema is
+// expressed inline in `migrate()`; reversing it requires explicit DROP
+// statements that would clutter the up path. We therefore ship reversible
+// migrations as paired `db/migrations/<id>.{up,down}.sql` files, applied
+// statement-list via the same `pg.Client` that `migrate()` uses. The
+// canonical idempotent up still runs from `migrate()`, so the down path
+// is informational + operator-driven (CTO directive, msg `167415dc`).
+export async function applyDownMigration(filePath: string): Promise<void> {
+  const sql = readFileSync(filePath, 'utf-8')
+  const client = new Client({ connectionString: databaseUrl })
+  await client.connect()
+  try {
+    await client.query(sql)
+    console.log(`Down migration applied: ${filePath}`)
+  } finally {
+    await client.end()
+  }
+}
+
+export async function applyUpMigrationFile(filePath: string): Promise<void> {
+  const sql = readFileSync(filePath, 'utf-8')
+  const client = new Client({ connectionString: databaseUrl })
+  await client.connect()
+  try {
+    await client.query(sql)
+    console.log(`Up migration applied: ${filePath}`)
+  } finally {
+    await client.end()
+  }
+}
+
+function parseDownFlag(argv: readonly string[]): string | null {
+  for (const a of argv) {
+    if (a.startsWith('--down=')) return a.slice('--down='.length)
+  }
+  return null
+}
+
+function parseUpFlag(argv: readonly string[]): string | null {
+  for (const a of argv) {
+    if (a.startsWith('--up=')) return a.slice('--up='.length)
+  }
+  return null
+}
+
 // Guardrail 2 (FEAT-005 CP-6): only run when this file is invoked
 // directly. Prior behaviour — top-level `migrate().catch(...)` — ran
 // the migration on every `import('./db/migrate.ts')` (side effect of
@@ -533,7 +607,13 @@ async function migrate() {
 // Node. Tests / tools that merely import migrate.ts for its exports
 // get no side effect.
 if (import.meta.main) {
-  if (dbType === 'sqlite') {
+  const downFile = parseDownFlag(process.argv)
+  const upFile = parseUpFlag(process.argv)
+  if (downFile) {
+    applyDownMigration(downFile).catch(e => { console.error(e); process.exit(1) })
+  } else if (upFile) {
+    applyUpMigrationFile(upFile).catch(e => { console.error(e); process.exit(1) })
+  } else if (dbType === 'sqlite') {
     migrateSqlite()
   } else {
     migrate().catch(e => { console.error(e); process.exit(1) })

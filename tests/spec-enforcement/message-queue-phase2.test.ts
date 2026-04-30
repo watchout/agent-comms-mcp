@@ -56,7 +56,7 @@ const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
 // REGRESSION CLASS: a future migration cleanup that drops the table or the
 // column would silently break Phase 2. Pin the table DDL, the index DDL, the
 // status CHECK constraint, and the agents column ALTER.
-describe('T1 — db/migrate.ts ships the message_queue table + agents.current_message_id', () => {
+describe('T1 — db/migrate.ts ships the message_queue table + per-row claim columns', () => {
   test('CREATE TABLE message_queue is present', () => {
     expect(MIGRATE_SRC).toMatch(/CREATE TABLE IF NOT EXISTS message_queue/)
   })
@@ -73,8 +73,27 @@ describe('T1 — db/migrate.ts ships the message_queue table + agents.current_me
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_agent_pending/)
     expect(MIGRATE_SRC).toMatch(/ON message_queue\(agent_id, status, priority DESC, created_at ASC\)\s*\n?\s*WHERE status = 'pending'/)
   })
-  test('agents.current_message_id BIGINT column is added', () => {
-    expect(MIGRATE_SRC).toMatch(/ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id BIGINT/)
+  test('Issue #278 (A) per-row claim columns + the legacy current_message_id DROP', () => {
+    // The single-slot agents.current_message_id is gone; the per-row
+    // claim columns on message_queue (claimed_by / claimed_at /
+    // claim_expires_at) are its structural replacement, joined by the
+    // partial index that the TTL sweeper relies on.
+    expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claimed_by TEXT/)
+    expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ/)
+    expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_expired_claims/)
+    // Issue #278 (A) segment 3d hotfix (2026-04-30 incident) — the
+    // DROP COLUMN current_message_id is hosted ONLY in the paired G-2
+    // migration file, not in the auto-applied bootstrap, to prevent
+    // every fleet restart from re-firing the drop while old-code
+    // bots are still reading the column. The bootstrap keeps the
+    // column ADD so fresh DBs match the live fleet shape until a
+    // coordinated cutover.
+    const dropMigration = readFileSync(
+      join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.up.sql'),
+      'utf-8',
+    )
+    expect(dropMigration).toMatch(/ALTER TABLE agents DROP COLUMN IF EXISTS current_message_id/)
+    expect(MIGRATE_SRC).toMatch(/ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id/)
   })
 })
 
@@ -160,14 +179,14 @@ function nextMessageBody(): string {
 }
 
 describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
-  test('reads agents.current_message_id and implicit-fails the prior row (v2.1.0)', () => {
+  test('Issue #278 segment 3c — legacy priorId / IMPLICIT_ABANDON read in `next` is gone', () => {
     const body = nextMessageBody()
-    expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id/)
-    // v2.1.0 (PR #220): implicit abandon is now status='failed' with
-    // failed_reason='IMPLICIT_ABANDON'. `skipped` is reserved for the
-    // operator-issued `agent-com skip` CLI.
-    expect(body).toMatch(/SET status\s*=\s*'failed',\s*failed_reason\s*=\s*'IMPLICIT_ABANDON'[\s\S]*?status\s*=\s*'read'/)
-    // Negative: the pre-v2.1.0 implicit-skip must not coexist.
+    // The pre-Stage-B path read agents.current_message_id and synchronously
+    // flipped any orphaned 'read' row to 'failed'/'IMPLICIT_ABANDON'. Both
+    // are removed; orphan recovery is structural via the claim-TTL sweeper
+    // (core/claim-ttl.ts).
+    expect(body).not.toMatch(/SELECT current_message_id FROM agents/)
+    expect(body).not.toMatch(/SET status\s*=\s*'failed',\s*failed_reason\s*=\s*'IMPLICIT_ABANDON'/)
     expect(body).not.toMatch(/SET status\s*=\s*'skipped'\s+WHERE id\s*=\s*\$1 AND status\s*=\s*'read'/)
   })
   test('SELECTs the oldest pending row with priority/created_at ordering', () => {
@@ -176,13 +195,18 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // lead-ama's prescribed snippet) and FOR UPDATE SKIP LOCKED appended.
     expect(body).toMatch(/FROM message_queue\s*\n?\s*WHERE status = 'pending' AND agent_id = \$1\s*\n?\s*ORDER BY priority DESC, created_at ASC/)
   })
-  test('marks read + stamps current_message_id + flips status to busy atomically', () => {
+  test('marks read + stamps the per-row claim + flips status to busy', () => {
     const body = nextMessageBody()
-    expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'read',\s*read_at\s*=\s*now\(\)/)
-    // spec §4.1 step 4 — the same UPDATE stamps current_message_id AND sets
-    // status='busy' + status_detail so `next` leaves the agent in a consistent
-    // "processing" state (Behavioral FAIL B1).
-    expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1,\s*status\s*=\s*'busy',\s*status_detail\s*=\s*'メッセージ処理中'[\s\S]*?WHERE agent_id/)
+    // Issue #278 segment 3d — the in-flight pointer lives on the
+    // message_queue row (claimed_by + claimed_at + claim_expires_at),
+    // not on agents.current_message_id. The agents UPDATE only flips
+    // status='busy' now.
+    expect(body).toMatch(/UPDATE message_queue\s*\n?\s*SET status\s*=\s*'read'[\s\S]*?claimed_by\s*=\s*\$1[\s\S]*?claimed_at\s*=\s*now\(\)[\s\S]*?claim_expires_at\s*=\s*\$2/)
+    expect(body).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
+    // Negative pin: the legacy single-slot stamp must not coexist.
+    expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1/)
   })
   // PR#134 ARC follow-up (lead-ama msg 1492279341898272849) — concurrency.
   test('SELECT + UPDATEs are wrapped in BEGIN/COMMIT with FOR UPDATE SKIP LOCKED', () => {
@@ -193,11 +217,10 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // ROLLBACK on error so a partial state never leaks
     expect(body).toMatch(/db\.query\(['"]ROLLBACK['"]\)/)
     // FOR UPDATE SKIP LOCKED on the pending-row pop so concurrent next() calls
-    // never pick the same row.
+    // never pick the same row. Issue #278 §A: this is now the SOLE
+    // serialisation point — the agents row lock has been retired.
     expect(body).toMatch(/FOR UPDATE SKIP LOCKED/)
-    // The agents row read also takes a row lock so the implicit-skip and the
-    // current_message_id stamp can't race with another session.
-    expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id\s*=\s*\$1\s*FOR UPDATE/)
+    expect(body).not.toMatch(/SELECT current_message_id FROM agents WHERE agent_id\s*=\s*\$1\s*FOR UPDATE/)
   })
   // Issue #130 Phase 4: Mixed-Mode fallback test removed — signal path abolished.
   test('output payload includes the §4.1 fields (waiting, mode, queue_id)', () => {
@@ -222,44 +245,45 @@ function sendMessageBody(): string {
   return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 }
 
-describe('T5 — `agent-com send` resolves target via agents.current_message_id (Phase 2)', () => {
-  test('reads current_message_id from agents before any state-file fallback', () => {
+describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 segment 3d)', () => {
+  test('reads the most-recent active claim from message_queue, not agents.current_message_id', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id/)
-    // Hydrate from message_queue.payload after we have a non-null id.
-    expect(body).toMatch(/SELECT id, message_id, payload FROM message_queue WHERE id/)
+    // Issue #278 segment 3d — the lookup is now keyed by claimed_by +
+    // status='read' on message_queue, ordered by claimed_at DESC. The
+    // legacy SELECT current_message_id from agents is gone.
+    expect(body).toMatch(/SELECT id, message_id, payload FROM message_queue\s*\n?\s*WHERE claimed_by = \$1 AND status = 'read'/)
+    expect(body).not.toMatch(/SELECT current_message_id FROM agents WHERE agent_id/)
   })
-  // Issue #130 Phase 4: signal-mode fallback test removed — queue-only now.
-  test('NO_CURRENT_MESSAGE error when neither path resolves a target', () => {
+  test('INVALID_REPLY_TO error when no active claim resolves the target', () => {
+    // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE retired in favour
+    // of INVALID_REPLY_TO. Same failure mode (no in-flight claim), same
+    // user-facing remediation (run `agent-com next` first or wait for
+    // sweeper).
     const body = sendMessageBody()
-    expect(body).toMatch(/NO_CURRENT_MESSAGE/)
+    expect(body).toMatch(/Error \[INVALID_REPLY_TO\]/)
+    expect(body).not.toMatch(/Error \[NO_CURRENT_MESSAGE\]/)
   })
-  test('on success, queue mode UPDATEs message_queue to replied + clears current_message_id + flips status to idle', () => {
+  test('on success, queue mode UPDATEs message_queue to replied + idles the agent', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'replied',\s*replied_at\s*=\s*now\(\),\s*replied_with/)
-    // spec §4.2 step 10-11 + §8.1 — the same UPDATE clears current_message_id
-    // AND flips status back to 'idle' so the agent is ready for the next
-    // message (Behavioral FAIL B4).
-    expect(body).toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL,\s*status\s*=\s*'idle'/)
+    // Issue #278 segment 3d — agents.current_message_id is gone, so the
+    // idle-flip UPDATE no longer touches that column. Negative pin
+    // catches a refactor that brings the column write back.
+    expect(body).toMatch(
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+    )
+    expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
   })
-  // Issue #130 Phase 4: signal-mode unlink test removed — queue-only now.
-  // The PR#134 failure-response and queue/signal failure-branch tests were
-  // removed in Phase 3 (Issue #129). Phase 3 has no synchronous Discord-
-  // delivery failure branch in sendMessage — outbound delivery is async via
-  // outbound_queue + the receiver consumer. The consumer's retry logic
-  // (attempts/max_attempts → status='failed') is covered by
-  // tests/spec-enforcement/outbound-queue-phase3.test.ts T2.
-  // PR#134 ARC follow-up (lead-ama msg 1492283029933133874) — concurrent send
-  // race prevention. The entire body must run inside BEGIN/COMMIT with
-  // FOR UPDATE on the agents row, so two parallel `agent-com send` calls
-  // serialise on the lock and the second sees current_message_id = NULL.
-  test('sendMessage wraps the body in BEGIN/COMMIT with FOR UPDATE on agents', () => {
+  test('sendMessage wraps the body in BEGIN/COMMIT with FOR UPDATE on the claim row', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/db\.query\(['"]BEGIN['"]\)/)
     expect(body).toMatch(/db\.query\(['"]COMMIT['"]\)/)
     expect(body).toMatch(/db\.query\(['"]ROLLBACK['"]\)/)
-    // The agents row read takes the row lock so concurrent sends serialise.
-    expect(body).toMatch(/SELECT current_message_id FROM agents WHERE agent_id\s*=\s*\$1\s*FOR UPDATE/)
+    // Issue #278 segment 3d — the FOR UPDATE lock is now on the
+    // message_queue claim row, not the agents row. Independent claims
+    // proceed in parallel (multi in-flight); concurrent sends targeting
+    // the same claim serialise here.
+    expect(body).toMatch(/FOR UPDATE/)
     // Early exits inside the transaction throw CliSendExit instead of calling
     // process.exit (which would bypass the ROLLBACK / db.end() finally chain).
     expect(body).toMatch(/class CliSendExit extends Error/)
