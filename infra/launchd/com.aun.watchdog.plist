@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Issue #278 (§E + §G-1) — agent-comms watchdog launchd config.
+
+  Runs `bun bin/aun-watchdog.ts` under launchd so a watchdog crash is
+  auto-restarted by macOS itself (the meta-supervisor that the spec
+  §G-1 explicitly requires; tmux-only is the failure mode this fixes).
+
+  Install:
+    cp infra/launchd/com.aun.watchdog.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.aun.watchdog.plist 2>/dev/null
+    launchctl load -w ~/Library/LaunchAgents/com.aun.watchdog.plist
+
+  Update DATABASE_URL / WorkingDirectory below to match the host before
+  loading. ProgramArguments use absolute paths because launchd ignores
+  the user's $PATH.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aun.watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bun</string>
+    <string>bin/aun-watchdog.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yuji/Developer/agent-comms-mcp</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DATABASE_URL</key>
+    <string>postgresql://yuji@localhost:5432/agent_comms</string>
+    <key>AUN_WATCHDOG_POLL_SEC</key>
+    <string>30</string>
+    <key>AUN_WATCHDOG_CRASH_THRESHOLD_SEC</key>
+    <string>300</string>
+    <key>AUN_WATCHDOG_RATE_LIMIT_PER_HOUR</key>
+    <string>6</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- KeepAlive=true means launchd respawns the process if it exits.
+       ThrottleInterval avoids a tight crash-loop overwhelming the
+       host while the operator investigates. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yuji/.aun/logs/watchdog.out</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/yuji/.aun/logs/watchdog.err</string>
+</dict>
+</plist>
