@@ -96,9 +96,16 @@ describe('T4 — MCP next tool exists in server.ts (spec §4.1)', () => {
     const body = SERVER_SRC.slice(start, end)
     expect(body).toMatch(/FROM message_queue/)
     expect(body).toMatch(/FOR UPDATE SKIP LOCKED/)
-    // Implicit-skip prior current
-    expect(body).toMatch(/status\s*=\s*'skipped'/)
-    // Stamps current_message_id
+    // Issue #278 (A) segment 3c — the legacy implicit-skip
+    // (status='skipped' UPDATE on the prior current_message_id) is
+    // gone; orphan recovery is structurally handled by the claim-TTL
+    // sweeper (core/claim-ttl.ts) which flips orphans to
+    // status='failed' / failed_reason='IMPLICIT_ABANDON' on a 5 min
+    // cadence. The new contract: the next handler never writes
+    // status='skipped' synchronously.
+    expect(body).not.toMatch(/UPDATE message_queue\s+SET status\s*=\s*'skipped'/)
+    // Stamps current_message_id (preserved until segment 3d for
+    // reclaim / skip / fail / outbound consumer compatibility).
     expect(body).toMatch(/UPDATE agents SET current_message_id/)
   })
 })

@@ -1580,23 +1580,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     try {
       await client.query('BEGIN')
-      // Lock agents row + implicit-skip prior current
-      const prevRow = await client.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
-        [agentId],
-      )
-      const priorId: number | null = prevRow.rows[0]?.current_message_id ?? null
-      if (priorId !== null) {
-        // v2.1.0: implicit abandon is now status='failed' with
-        // failed_reason='IMPLICIT_ABANDON' (spec §4.1 step 1, §11 failed_reason).
-        // status='skipped' is reserved for operator-initiated `agent-com skip`.
-        await client.query(
-          `UPDATE message_queue
-              SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'
-           WHERE id = $1 AND status = 'read'`,
-          [priorId],
-        )
-      }
+      // Issue #278 (A) segment 3c — legacy priorId IMPLICIT_ABANDON pattern
+      // removed. The previous shape locked the agents row with FOR UPDATE,
+      // read agents.current_message_id, and synchronously flipped any
+      // 'read' row referenced by it to 'failed'/'IMPLICIT_ABANDON'. That
+      // path served two roles: (a) implicit-skip an orphaned claim before
+      // popping a fresh row, and (b) serialise concurrent next calls per
+      // agent on the agents row lock. Both are now obsolete:
+      //   (a) replaced by the periodic claim-TTL sweeper
+      //       (core/claim-ttl.ts, segment 3b) — sweepExpiredClaims fires
+      //       every 5 min and flips the same set of rows out of 'read'
+      //       structurally. The TTL window (default 30s) bounds how long
+      //       an orphan can linger, which is strictly tighter than the
+      //       indefinite linger possible under the legacy pattern (it
+      //       only fired when the same agent called `next` again).
+      //   (b) intentionally dropped — Issue #278 §A promises multi
+      //       in-flight semantics, so two concurrent next calls SHOULD
+      //       succeed in parallel. SELECT ... FOR UPDATE SKIP LOCKED on
+      //       message_queue (below) gives each caller a distinct row;
+      //       agents row serialisation would defeat that.
+      // The agents.current_message_id WRITE at the end of this handler
+      // is preserved until segment 3d, since reclaim / skip / fail / the
+      // outbound consumer still read it. The read here is the only one
+      // safe to drop in this segment.
 
       // v1.0.2 §6.5: try the PollingDriver buffer first. The buffer
       // contains a read-only snapshot of pending rows from the last poll
@@ -1638,23 +1644,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       if (!row) {
-        if (priorId !== null) {
-          await client.query(`UPDATE agents SET current_message_id = NULL WHERE agent_id = $1`, [agentId])
-        }
+        // Issue #278 (A) segment 3c — the priorId NULL-clear branch is
+        // gone with the priorId path. agents.current_message_id is left
+        // alone here; the value (if any) keeps reflecting the prior
+        // claim until either a new next stamps a fresh id or segment 3d
+        // drops the column entirely.
         await client.query('COMMIT')
         return { content: [{ type: 'text', text: JSON.stringify({ waiting: 0 }) }] }
       }
 
       // Issue #278 (A) — per-row claim. Stamp claimed_by / claimed_at /
-      // claim_expires_at alongside the legacy status='read' transition so the
-      // TTL sweeper (5min cron) can flip orphaned claims to IMPLICIT_ABANDON
-      // without depending on agents.current_message_id. The single-slot
-      // guard above (priorId IMPLICIT_ABANDON pattern) is intentionally
-      // preserved in this segment commit; subsequent commits in this PR
-      // remove it once every caller (send / fail / skip / outbound consumer)
-      // is migrated to claim-aware semantics. Until then, we write BOTH so
-      // legacy readers see the row + the new sweeper sees its target. TTL
-      // default 30s, env-overridable per Issue #278 §5 Open decisions.
+      // claim_expires_at alongside the status='read' transition so the
+      // TTL sweeper (core/claim-ttl.ts, segment 3b) can flip orphaned
+      // claims to IMPLICIT_ABANDON. With segment 3c the legacy priorId
+      // implicit-skip path is gone — orphan recovery is now exclusively
+      // structural via the sweeper. TTL default 30s, env-overridable
+      // per Issue #278 §5 Open decisions.
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
       await client.query(
         `UPDATE message_queue

@@ -93,8 +93,27 @@ describe('T3 — §4.1 implicit abandon → status=failed, failed_reason=IMPLICI
   test('cli/index.ts next handler uses failed + IMPLICIT_ABANDON', () => {
     expect(CLI_SRC).toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
   })
-  test('server.ts next handler uses failed + IMPLICIT_ABANDON', () => {
-    expect(SERVER_SRC).toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
+  test('IMPLICIT_ABANDON is emitted by the claim-TTL sweeper, not the server.ts next handler', () => {
+    // Issue #278 (A) segment 3c — the legacy priorId implicit-skip path
+    // has moved out of the MCP server next handler into the periodic
+    // claim-TTL sweeper (core/claim-ttl.ts). The IMPLICIT_ABANDON write
+    // still exists, but in a different file; assertions that pinned it
+    // to server.ts must follow the move. The sweeper pattern uses a
+    // multi-line UPDATE (status='failed', failed_reason=$1 with a
+    // claim_expires_at predicate) so the original single-line regex no
+    // longer matches; we pin the new shape directly on the sweeper module.
+    const claimTtlSrc = readFileSync(join(REPO_ROOT, 'core/claim-ttl.ts'), 'utf-8')
+    expect(claimTtlSrc).toMatch(/SET status = 'failed', failed_reason = \$1/)
+    expect(claimTtlSrc).toMatch(/IMPLICIT_ABANDON/)
+    // Negative pin: server.ts next handler must not have re-introduced
+    // the synchronous IMPLICIT_ABANDON UPDATE. The sweeper is the only
+    // path now. We pin on the SQL shape rather than the bare keyword
+    // so explanatory comments referencing the failure code do not
+    // accidentally trip the assertion.
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const nextIdx = SERVER_SRC.indexOf("if (name === 'next')")
+    const nextHandler = SERVER_SRC.slice(nextIdx, sendIdx === -1 ? SERVER_SRC.length : sendIdx)
+    expect(nextHandler).not.toMatch(/SET status = 'failed', failed_reason = 'IMPLICIT_ABANDON'/)
   })
   test('legacy implicit status="skipped" write is gone', () => {
     // Negative pin: the old code wrote status='skipped' under the exact phrase
