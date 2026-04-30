@@ -68,6 +68,11 @@ import {
   type BotHealthResult,
 } from './core/bot-health'
 import {
+  fetchBotStatusFromDb,
+  formatPendingAge,
+  type BotStatusDbRow,
+} from './core/bot-status-db'
+import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
@@ -2608,6 +2613,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (registry.length === 0) {
       return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
     }
+    // Issue #277 (D) — augment process-level health (registry/tmux/port) with
+    // postgres-truth queue + heartbeat metrics in a single SQL.
+    let dbStatus: Map<string, BotStatusDbRow> = new Map()
+    const dbClient = await tryGetDb()
+    if (dbClient) {
+      try {
+        dbStatus = await fetchBotStatusFromDb(dbClient)
+      } catch (err) {
+        process.stderr.write(`agent-comms: bot_status DB query failed (non-fatal): ${err}\n`)
+      }
+    }
     const lines = registry.map(entry => {
       const health = checkBotHealth(entry)
       const icon = health.status === 'healthy' ? '✅' :
@@ -2616,7 +2632,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    health.status === 'crashed' ? '💥' :
                    health.status === 'exited' ? '🚪' :
                    health.status === 'misconfigured' ? '⚠️' : '❓'
-      return `${icon} ${entry.session} (${entry.agentId}) port:${entry.port} — ${health.status}: ${health.details}`
+      const dbRow = dbStatus.get(entry.agentId)
+      const dbSuffix = dbRow
+        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'}`
+        : ' | (no db row)'
+      return `${icon} ${entry.session} (${entry.agentId}) port:${entry.port} — ${health.status}: ${health.details}${dbSuffix}`
     })
     return { content: [{ type: 'text', text: `${registry.length} bot(s):\n${lines.join('\n')}` }] }
   }

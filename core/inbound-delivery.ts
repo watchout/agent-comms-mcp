@@ -94,6 +94,15 @@ export interface InboundDeliveryParams {
    * tests.
    */
   mqPayloadJson: string
+  /**
+   * Issue #277 (B) — auto-skip. When set, the message_queue row is inserted
+   * with `status='skipped'` and `failed_reason=skipReason` instead of the
+   * default `status='pending'`. The 7b metadata.to UPDATE and dedup ON
+   * CONFLICT semantics are unchanged so audit history still reaches the
+   * caller; only `next` delivery is suppressed (callers should also skip
+   * any push signal when this is set).
+   */
+  skipReason?: string
 }
 
 export interface InboundDeliveryResult {
@@ -165,7 +174,7 @@ export async function persistInboundDeliveryOnClient(
   client: InboundDeliveryClient,
   params: InboundDeliveryParams,
 ): Promise<InboundDeliveryResult> {
-  const { receiverAgentId, messageId, mqPayloadJson } = params
+  const { receiverAgentId, messageId, mqPayloadJson, skipReason } = params
   try {
     await client.query('BEGIN')
     // Explicit casts: node-postgres cannot always infer the parameter
@@ -192,11 +201,21 @@ export async function persistInboundDeliveryOnClient(
     }
     // message_queue.(agent_id, message_id, payload) are all `text`
     // columns (see `db/migrate.ts`); no uuid / jsonb cast.
-    const mqIns = await client.query(
-      `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1::text, $2::text, $3::text)
-       ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-      [receiverAgentId, messageId, mqPayloadJson],
-    )
+    // Issue #277 (B) — when skipReason is set, INSERT directly into the
+    // 'skipped' terminal state with failed_reason populated so `next` will
+    // never claim the row. Audit / history stay intact.
+    const mqIns = skipReason
+      ? await client.query(
+          `INSERT INTO message_queue (agent_id, message_id, payload, status, failed_reason)
+           VALUES ($1::text, $2::text, $3::text, 'skipped', $4::text)
+           ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          [receiverAgentId, messageId, mqPayloadJson, skipReason],
+        )
+      : await client.query(
+          `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1::text, $2::text, $3::text)
+           ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          [receiverAgentId, messageId, mqPayloadJson],
+        )
     await client.query('COMMIT')
     return {
       committed: true,
