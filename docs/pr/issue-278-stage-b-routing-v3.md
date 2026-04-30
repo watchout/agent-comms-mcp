@@ -49,9 +49,21 @@ The `19 skip` rows are environment-gated (`describe.skip` when `DATABASE_URL` is
    launchctl load -w ~/Library/LaunchAgents/com.aun.heartbeat.plist
    ```
    Update `WorkingDirectory` / `DATABASE_URL` blocks in the plists before loading.
-5. Wire the new hooks into each bot's `.claude/settings.json`:
-   - `SessionStart` → `hooks/aun-session-start-drain.sh`
-   - `Stop`         → `hooks/aun-claim-close-enforcement.sh`
+5. Hook wiring per bot:
+   - **`PreToolUse` (inbox gate, cycle 4)** — `aun init` now installs both
+     `~/.claude/hooks/aun-pre-tool-use-inbox-gate.sh` and the bun TS
+     runner `~/.claude/hooks/pre-tool-use-inbox-gate.ts`, and registers
+     a `PreToolUse` matcher in `~/.claude/settings.json` pointing at the
+     wrapper. Operators who already have an `aun init`-managed bot need
+     only re-run `aun init` to pick up the wiring.
+   - `SessionStart` → `hooks/aun-session-start-drain.sh` — wire manually
+     in each bot's `.claude/settings.json` until a follow-up Issue
+     extends `aun init` for it (out of scope for this PR per cycle-4
+     auditor must-fix list).
+   - `Stop` → `hooks/aun-claim-close-enforcement.sh` — same manual
+     wiring as SessionStart drain. The existing `aun init` Stop hook
+     (`aun-send-tool-enforcement.sh`) keeps its slot in cycle 4 so
+     in-place upgrades stay non-destructive.
 
 ## 24h pilot (post-merge)
 

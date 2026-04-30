@@ -136,17 +136,34 @@ export interface InitResult {
 // PR-C #240 (merged) ships hooks/aun-send-tool-enforcement.sh in the repo.
 // `aun init` copies it into ~/.claude/hooks/ so the Stop hook reference
 // in settings.json resolves to a real, executable file (validation §2.5
-// requires existence + executable bit). SessionStart is intentionally
-// omitted from the spec v6 §1.3 optional list — claude/channel push
-// (PR-A #241 merged) plus the Stop hook cover Phase C without an
-// aun-owned SessionStart loader; tests for that flow live elsewhere.
+// requires existence + executable bit).
+//
+// Issue #278 cycle 4 (auditor BLOCK 3) — the inbox gate
+// (`aun-pre-tool-use-inbox-gate.sh` + `pre-tool-use-inbox-gate.ts`)
+// must also be installed and wired into PreToolUse via `aun init`.
+// Cycle 3 shipped the hook files in repo `hooks/` but did not extend
+// the installer, so PreToolUse enforcement never ran in production.
+// We therefore: (a) copy both the bash wrapper and the bun runner
+// into `~/.claude/hooks/`, and (b) register a PreToolUse matcher in
+// the AUN patch alongside the existing Stop entry. SessionStart
+// drain + Stop hook v8 (claim-close-enforcement) installer wiring
+// is intentionally NOT touched in this commit (auditor's must-fix
+// list calls out the inbox gate only); a follow-up Issue covers
+// the same upgrade for those hooks.
 const AUN_HOOK_MARKER_STOP = 'bash ~/.claude/hooks/aun-send-tool-enforcement.sh'
+const AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE = 'bash ~/.claude/hooks/aun-pre-tool-use-inbox-gate.sh'
 const AUN_HOOK_FILES = [
   { repoPath: 'hooks/aun-send-tool-enforcement.sh', destName: 'aun-send-tool-enforcement.sh' },
+  // Cycle 4 — wrapper + runner pair for the PreToolUse inbox gate.
+  // The bun TS runner is sibling to the wrapper so the wrapper's
+  // `bun hooks/pre-tool-use-inbox-gate.ts` invocation works after
+  // copy.
+  { repoPath: 'hooks/aun-pre-tool-use-inbox-gate.sh', destName: 'aun-pre-tool-use-inbox-gate.sh' },
+  { repoPath: 'hooks/pre-tool-use-inbox-gate.ts', destName: 'pre-tool-use-inbox-gate.ts' },
 ] as const
 
 export function aunHookCommandMarkers(): string[] {
-  return [AUN_HOOK_MARKER_STOP]
+  return [AUN_HOOK_MARKER_STOP, AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE]
 }
 
 function homeFor(opts: InitOptions): string {
@@ -210,12 +227,25 @@ export function buildAunPatch(opts: InitOptions): AunPatch {
   // ~/.claude/settings.json. mcpServers.aun is registered separately
   // in ~/.claude.json by `claude mcp add --scope user` (step 5a).
   // This mirrors spec v6 §1.3.1 verbatim.
+  //
+  // Issue #278 cycle 4 (auditor BLOCK 3) — also register the
+  // PreToolUse inbox gate so the new hook actually runs after `aun
+  // init`. Empty matcher = applies to every tool; the runner itself
+  // owns the allow-list (next / send / notify / skip / fail /
+  // reclaim) so we don't have to mirror it here in regex form.
   const stopHook: HookRegistration = {
     matcher: '',
     hooks: [{ type: 'command', command: AUN_HOOK_MARKER_STOP }],
   }
+  const preToolUseInboxGate: HookRegistration = {
+    matcher: '',
+    hooks: [{ type: 'command', command: AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE }],
+  }
   return {
-    hooks: { Stop: [stopHook] },
+    hooks: {
+      Stop: [stopHook],
+      PreToolUse: [preToolUseInboxGate],
+    },
     env: {
       AUN_HOME: aunHomeFor(opts),
       AUN_LOG_LEVEL: 'info',
