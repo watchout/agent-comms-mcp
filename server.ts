@@ -98,6 +98,7 @@ import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
+import { startClaimTtlSweeper } from './core/claim-ttl'
 import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
 
@@ -3460,6 +3461,26 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
       }
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — queue ttl sweeper failed to start (non-fatal): ${err}\n`)
+    }
+  }
+
+  // Issue #278 (A) segment 3b — install expired-claim sweeper. Flips
+  // orphaned `status='read'` rows whose claim_expires_at is in the
+  // past to `failed_reason='IMPLICIT_ABANDON'`. Shares the
+  // AGENT_COMMS_TTL_SWEEP_DISABLED kill switch so tests / one-shot
+  // CLIs disable both sweepers at once. Interval is independently
+  // env-overridable via AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS (default
+  // 5 min) per Issue #278 §5 Open decisions.
+  if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
+    try {
+      const claimDb = await coreDbAdapter()
+      if (claimDb) {
+        const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
+        startClaimTtlSweeper(claimDb, { intervalMs })
+        process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON)\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
     }
   }
 
