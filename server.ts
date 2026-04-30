@@ -1738,23 +1738,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
     }
 
-    // spec §4.2 step 1 — current_message_id guard, atomic. codex-auditor
+    // spec §4.2 step 1 — per-row claim guard (Issue #278 segment 3a, replaces
+    // the legacy single-slot agents.current_message_id guard). codex-auditor
     // Layer 2 BLOCKER (PR #214 cycle 2, CTO judgment msg 89216a72): the
-    // non-transactional SELECT version left a window where two concurrent
-    // MCP `send` calls could both pass the guard before either cleared the
-    // row, producing a double Discord post. CTO 2 択 (a): wrap the entire
-    // send flow in a single BEGIN/COMMIT, acquire the agents row lock via
-    // `SELECT FOR UPDATE`, and clear `current_message_id` at COMMIT. This
-    // matches the CLI pattern (cli/index.ts sendMessage — PR#134 ARC
-    // follow-up, lead-ama msg 1492283029933133874) so a parallel caller
-    // blocks on the row lock, wakes to a NULL `current_message_id`, and
-    // exits with NO_CURRENT_MESSAGE instead of double-replying.
+    // non-transactional version left a window where two concurrent MCP `send`
+    // calls could both pass the guard before either cleared the row,
+    // producing a double Discord post. CTO 2 択 (a): wrap the entire send
+    // flow in a single BEGIN/COMMIT and hold a FOR UPDATE lock on the row
+    // owning the in-flight claim. With per-row claim semantics the locked
+    // row is the message_queue row keyed by (message_id = reply_to,
+    // claimed_by = agentId, status = 'read') — locking message_queue rather
+    // than agents lets independent claims proceed in parallel (Issue #278
+    // §A multi in-flight) while still serialising any concurrent send
+    // attempts targeting the same claim, so a parallel caller blocks on
+    // the row lock, wakes to a row whose status has flipped to 'replied',
+    // misses the predicate, and exits with INVALID_REPLY_TO instead of
+    // double-replying.
     //
     // Transaction flow:
     //   - BEGIN on the singleton client (tryGetDb → pg pool client).
-    //   - `SELECT ... FOR UPDATE` holds the row lock for the duration of
-    //     the handler. The captured value (`claimedMqId`) is used at step
-    //     9 to mark message_queue 'replied' without a second read.
+    //   - `SELECT ... FOR UPDATE` on the message_queue row holds the lock
+    //     for the duration of the handler. The captured `id` (claimedMqId)
+    //     is used at step 9 to mark message_queue 'replied' without a
+    //     second read.
     //   - All existing side effects (agent_messages INSERT, message_queue
     //     INSERT per recipient, outbound_queue INSERT, pg_notify) run
     //     against the same client, so ROLLBACK unwinds everything.
@@ -1770,16 +1776,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let txCommitted = false
     await txClient.query('BEGIN')
     try {
-      const guardRow = await txClient.query(
-        `SELECT current_message_id FROM agents WHERE agent_id = $1 FOR UPDATE`,
-        [agentId],
+      // The MCP tool schema declares reply_to required; a missing value is
+      // a client bug. Surface INVALID_REPLY_TO directly so the failure mode
+      // is the same as a stale / unknown reply_to (single error class for
+      // "send cannot find a claim to attach to").
+      if (!reply_to) {
+        await txClient.query('ROLLBACK')
+        txCommitted = true
+        return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: reply_to is required for send — call \`next\` first to obtain a claim` }], isError: true }
+      }
+      const claimRow = await txClient.query(
+        `SELECT id FROM message_queue
+            WHERE message_id = $1 AND claimed_by = $2 AND status = 'read'
+            FOR UPDATE`,
+        [reply_to, agentId],
       )
-      claimedMqId = guardRow.rows[0]?.current_message_id ?? null
-      if (!claimedMqId) {
+      if (claimRow.rows.length === 0) {
         await txClient.query('ROLLBACK')
         txCommitted = true // prevent double-ROLLBACK in finally
-        return { content: [{ type: 'text', text: `Error [NO_CURRENT_MESSAGE]: no in-flight message for ${agentId} — call \`next\` first` }], isError: true }
+        return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: no in-flight claim for reply_to=${reply_to} by ${agentId} — call \`next\` first or the claim may have expired` }], isError: true }
       }
+      claimedMqId = claimRow.rows[0].id
 
     // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
     // This avoids NOT_MENTIONED errors when LLM forgets mentions but reply_to context is present.

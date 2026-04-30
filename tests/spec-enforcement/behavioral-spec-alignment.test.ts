@@ -29,20 +29,31 @@ const INBOUND_SRC = readFileSync(join(REPO_ROOT, 'adapters/inbound-receiver.ts')
 // Part A — source guards
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('Behavioral FAIL B2 — MCP send current_message_id guard', () => {
-  test('send handler rejects with NO_CURRENT_MESSAGE when current_message_id is NULL', () => {
-    expect(SERVER_SRC).toMatch(/Error \[NO_CURRENT_MESSAGE\]:\s*no in-flight message/)
+describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segment 3a)', () => {
+  test('send handler rejects with INVALID_REPLY_TO when reply_to has no in-flight claim', () => {
+    // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE is retired in favour
+    // of INVALID_REPLY_TO once the per-row claim path lands. Both the
+    // missing-reply_to client bug and the no-row-found case must surface
+    // the same error class so callers do not have to special-case them.
+    expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*reply_to is required for send/)
+    expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*no in-flight claim for reply_to=/)
+    // Legacy NO_CURRENT_MESSAGE branch must be gone from the MCP send path.
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).not.toMatch(/Error \[NO_CURRENT_MESSAGE\]/)
   })
-  test('guard reads agents.current_message_id with FOR UPDATE lock (cycle 2 atomic)', () => {
-    // codex-auditor Layer 2 BLOCKER (PR #214 cycle 2): the non-transactional
-    // SELECT version left a race where two concurrent send calls could both
-    // pass the guard. The CTO-ordered fix (a) wraps the handler in
-    // BEGIN/COMMIT and holds the agents row lock via SELECT FOR UPDATE.
+  test('guard locks the message_queue claim row with FOR UPDATE (per-row claim atomic)', () => {
+    // Per-row claim replaces the agents single-slot lock. The handler must
+    // SELECT ... FOR UPDATE the message_queue row keyed by reply_to +
+    // claimed_by + status='read' so two concurrent send calls targeting
+    // the same claim serialise on the row lock, while independent claims
+    // proceed in parallel (Issue #278 §A multi in-flight).
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     expect(sendIdx).toBeGreaterThan(-1)
-    const handler = SERVER_SRC.slice(sendIdx, sendIdx + 3500)
-    expect(handler).toMatch(/spec §4\.2 step 1.*atomic/s)
-    expect(handler).toMatch(/SELECT current_message_id FROM agents WHERE agent_id = \$1 FOR UPDATE/)
+    const handler = SERVER_SRC.slice(sendIdx, sendIdx + 4500)
+    expect(handler).toMatch(/spec §4\.2 step 1.*per-row claim guard/s)
+    expect(handler).toMatch(/SELECT id FROM message_queue[\s\S]*WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'read'[\s\S]*FOR UPDATE/)
     expect(handler).toMatch(/txClient\.query\(['"]BEGIN['"]\)/)
   })
   test('handler COMMITs only on the happy path and ROLLBACKs via finally on early return', () => {
