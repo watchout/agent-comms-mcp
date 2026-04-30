@@ -544,6 +544,51 @@ async function migrate() {
   await client.end()
 }
 
+// Issue #278 (G-2) — `--down=<file>` rollback mode. The `up` schema is
+// expressed inline in `migrate()`; reversing it requires explicit DROP
+// statements that would clutter the up path. We therefore ship reversible
+// migrations as paired `db/migrations/<id>.{up,down}.sql` files, applied
+// statement-list via the same `pg.Client` that `migrate()` uses. The
+// canonical idempotent up still runs from `migrate()`, so the down path
+// is informational + operator-driven (CTO directive, msg `167415dc`).
+export async function applyDownMigration(filePath: string): Promise<void> {
+  const sql = readFileSync(filePath, 'utf-8')
+  const client = new Client({ connectionString: databaseUrl })
+  await client.connect()
+  try {
+    await client.query(sql)
+    console.log(`Down migration applied: ${filePath}`)
+  } finally {
+    await client.end()
+  }
+}
+
+export async function applyUpMigrationFile(filePath: string): Promise<void> {
+  const sql = readFileSync(filePath, 'utf-8')
+  const client = new Client({ connectionString: databaseUrl })
+  await client.connect()
+  try {
+    await client.query(sql)
+    console.log(`Up migration applied: ${filePath}`)
+  } finally {
+    await client.end()
+  }
+}
+
+function parseDownFlag(argv: readonly string[]): string | null {
+  for (const a of argv) {
+    if (a.startsWith('--down=')) return a.slice('--down='.length)
+  }
+  return null
+}
+
+function parseUpFlag(argv: readonly string[]): string | null {
+  for (const a of argv) {
+    if (a.startsWith('--up=')) return a.slice('--up='.length)
+  }
+  return null
+}
+
 // Guardrail 2 (FEAT-005 CP-6): only run when this file is invoked
 // directly. Prior behaviour — top-level `migrate().catch(...)` — ran
 // the migration on every `import('./db/migrate.ts')` (side effect of
@@ -555,7 +600,13 @@ async function migrate() {
 // Node. Tests / tools that merely import migrate.ts for its exports
 // get no side effect.
 if (import.meta.main) {
-  if (dbType === 'sqlite') {
+  const downFile = parseDownFlag(process.argv)
+  const upFile = parseUpFlag(process.argv)
+  if (downFile) {
+    applyDownMigration(downFile).catch(e => { console.error(e); process.exit(1) })
+  } else if (upFile) {
+    applyUpMigrationFile(upFile).catch(e => { console.error(e); process.exit(1) })
+  } else if (dbType === 'sqlite') {
     migrateSqlite()
   } else {
     migrate().catch(e => { console.error(e); process.exit(1) })
