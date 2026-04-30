@@ -1644,9 +1644,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify({ waiting: 0 }) }] }
       }
 
+      // Issue #278 (A) — per-row claim. Stamp claimed_by / claimed_at /
+      // claim_expires_at alongside the legacy status='read' transition so the
+      // TTL sweeper (5min cron) can flip orphaned claims to IMPLICIT_ABANDON
+      // without depending on agents.current_message_id. The single-slot
+      // guard above (priorId IMPLICIT_ABANDON pattern) is intentionally
+      // preserved in this segment commit; subsequent commits in this PR
+      // remove it once every caller (send / fail / skip / outbound consumer)
+      // is migrated to claim-aware semantics. Until then, we write BOTH so
+      // legacy readers see the row + the new sweeper sees its target. TTL
+      // default 30s, env-overridable per Issue #278 §5 Open decisions.
+      const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
       await client.query(
-        `UPDATE message_queue SET status = 'read', read_at = now() WHERE id = $1`,
-        [row.id],
+        `UPDATE message_queue
+            SET status = 'read',
+                read_at = now(),
+                claimed_by = $1,
+                claimed_at = now(),
+                claim_expires_at = now() + ($2 || ' seconds')::interval
+          WHERE id = $3`,
+        [agentId, String(claimTtlSec), row.id],
       )
       // spec §4.1 step 4 — mark agent busy while processing this message.
       // Combined with current_message_id UPDATE so both transitions are atomic.
