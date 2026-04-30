@@ -20,26 +20,32 @@
  *     1. Writes a bypass log line (legacy, audit trail).
  *     2. INSERTs an audit_log row keyed on the
  *        (agent_id, session_id, claim_id-set) triple so dashboards
- *        can list bypassed sessions per-claim.
+ *        can list bypassed sessions per-claim-set.
  *     3. Runs `bun cli/index.ts notify` against the channel
  *        AUN_STOP_HOOK_ESCALATION_TARGET (default: agent-com) with
  *        the CEO mentioned, asking for manual intervention.
  *     4. Returns exit-code 0 so the session isn't permanently stuck.
- *   Cycle 1 fix (auditor BLOCK 2): the dedup key is the
- *   (agent_id, session_id, claim_id-set) triple — NOT session_id
- *   alone. A new claim within the same session resets the retry
- *   counter and is eligible for its own escalation, while the same
- *   claim never produces duplicate alerts.
  *
- * Output contract:
- *   - JSON `block` printed to stdout (Claude Code Stop hook shape).
- *   - exit 2 = block + re-prompt; exit 0 = pass (escalation also exit 0).
- *   - Any unhandled error → exit 0 (fail-safe per spec §3.3 / §G-3).
+ * Cycle 2 fix (auditor BLOCK 2 verbatim, msg `fc38ea68`):
+ *   - `inspectQueue()` returns ALL open claims (no LIMIT 1) so the
+ *     dedup key reflects the full claim_id-set, not just the most
+ *     recent claim.
+ *   - `claimKey()` sorts the open claim ids and hashes them with
+ *     SHA-256 (16-hex prefix) so the key is stable, set-aware, and
+ *     compact. A fresh claim added to or removed from the set
+ *     produces a different key, isolating its retry budget.
+ *   - `counterPath()` / `escalatedPath()` derive the basename from a
+ *     SHA-256 hash of `(agent_id, session_id, claim_key)` (32-hex
+ *     prefix). This is the "filename hash で collision 回避" the PR
+ *     body claimed — basename concat without hashing was vulnerable
+ *     to crafted session_ids producing the same basename across
+ *     different agents.
  */
 
 import { Client } from 'pg'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
 const AGENT_ID = process.env.AGENT_ID
@@ -78,35 +84,42 @@ function readPayload(): StopPayload {
   }
 }
 
-function safeBaseName(s: string): string {
-  return s.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128)
-}
-
-// Issue #278 cycle 1 (auditor BLOCK 2): the retry counter and the
+// Cycle 2 (auditor BLOCK 2 verbatim): the retry counter and the
 // escalation sentinel are keyed by (agent_id, session_id, claim_key)
-// where claim_key is a stable derivation of the current claim set.
-// This way, a fresh claim in the same Claude session is eligible for
-// its own retry budget and its own escalation, while a single claim
-// never produces duplicate alerts no matter how many Stop firings
-// happen against it.
+// where claim_key is a stable hash over the SET of open claim ids.
+// The same set produces the same key on every Stop firing; any
+// addition or removal of a claim within the same session yields a
+// different key and a fresh retry budget.
 //
 // claim_key shape:
-//   - "open=<id>"     when a single open claim is the block reason
-//   - "pending=<n>"   when no claim but pending count blocks
-//   - "none"          for the no-block early-return path (counter is
-//                     reset under this key, harmless if never written)
-function claimKey(state: { openClaim: { id: number | string } | null; pendingCount: number } | null): string {
+//   - "open=<sha256:0..16>" hash of sorted open claim ids
+//   - "pending=<n>"         when no claim but pending count blocks
+//   - "none"                no open claims and no pending (idle pass)
+function claimKey(state: { openClaims: Array<{ id: number | string }>; pendingCount: number } | null): string {
   if (!state) return 'none'
-  if (state.openClaim) return `open=${state.openClaim.id}`
+  if (state.openClaims.length > 0) {
+    const sortedIds = state.openClaims.map(c => String(c.id)).sort()
+    const setHash = createHash('sha256').update(sortedIds.join(',')).digest('hex').slice(0, 16)
+    return `open=${setHash}`
+  }
   if (state.pendingCount > 0) return `pending=${state.pendingCount}`
   return 'none'
 }
 
-function counterPath(agentId: string, sessionId: string, claimKey: string): string {
-  return join(STATE_DIR, `${safeBaseName(agentId)}__${safeBaseName(sessionId)}__${safeBaseName(claimKey)}.count`)
+// Cycle 2 (auditor BLOCK 2 verbatim): basename = SHA-256(triple)[:32]
+// so the path key is collision-safe across (agent_id, session_id,
+// claim_key) tuples. Pre-cycle-2 used safeBaseName concatenation,
+// which left adversarial / unicode-mangled session_ids able to
+// produce the same basename across different agents.
+function pathKey(agentId: string, sessionId: string, ckey: string): string {
+  return createHash('sha256').update(`${agentId}|${sessionId}|${ckey}`).digest('hex').slice(0, 32)
 }
-function escalatedPath(agentId: string, sessionId: string, claimKey: string): string {
-  return join(STATE_DIR, `${safeBaseName(agentId)}__${safeBaseName(sessionId)}__${safeBaseName(claimKey)}.escalated`)
+
+function counterPath(agentId: string, sessionId: string, ckey: string): string {
+  return join(STATE_DIR, `${pathKey(agentId, sessionId, ckey)}.count`)
+}
+function escalatedPath(agentId: string, sessionId: string, ckey: string): string {
+  return join(STATE_DIR, `${pathKey(agentId, sessionId, ckey)}.escalated`)
 }
 
 function readCounter(p: string): number {
@@ -131,16 +144,20 @@ function emitBlock(reason: string): void {
 }
 
 interface QueueState {
-  openClaim: { id: number | string; messageId: string | null } | null
+  // Cycle 2 (auditor BLOCK 2): full claim_id-set, not just the latest.
+  openClaims: Array<{ id: number | string; messageId: string | null }>
   pendingCount: number
 }
 
 async function inspectQueue(client: Client, agentId: string): Promise<QueueState> {
-  const claim = await client.query<{ id: number | string; message_id: string | null }>(
+  // Cycle 2: LIMIT 1 撤去 — return every open claim so claimKey() can
+  // hash the full set. ORDER BY id ASC gives a stable iteration that
+  // matches the sort claimKey() applies, so a debug log can compare
+  // the rows here against the hashed key directly.
+  const claims = await client.query<{ id: number | string; message_id: string | null }>(
     `SELECT id, message_id FROM message_queue
        WHERE claimed_by = $1 AND status = 'read'
-       ORDER BY claimed_at DESC NULLS LAST
-       LIMIT 1`,
+       ORDER BY id ASC`,
     [agentId],
   )
   const pending = await client.query<{ n: number }>(
@@ -149,7 +166,7 @@ async function inspectQueue(client: Client, agentId: string): Promise<QueueState
     [agentId],
   )
   return {
-    openClaim: claim.rows[0] ? { id: claim.rows[0].id, messageId: claim.rows[0].message_id } : null,
+    openClaims: claims.rows.map(r => ({ id: r.id, messageId: r.message_id })),
     pendingCount: pending.rows[0]?.n ?? 0,
   }
 }
@@ -161,15 +178,16 @@ async function escalateOnce(
   state: QueueState,
   ckey: string,
 ): Promise<void> {
-  // 1. bypass.log
-  const claimDesc = state.openClaim
-    ? `claim_id=${state.openClaim.id} message_id=${state.openClaim.messageId ?? 'null'}`
+  // 1. bypass.log — record the full claim_id-set so the operator can
+  // reconstruct what triggered the escalation without re-querying.
+  const claimIds = state.openClaims.map(c => String(c.id)).sort()
+  const claimDesc = state.openClaims.length > 0
+    ? `claim_ids=[${claimIds.join(',')}]`
     : `pending_count=${state.pendingCount}`
   appendLog(BYPASS_LOG, `agent=${agentId} session=${sessionId} claim_key=${ckey} retry_limit_reached ${claimDesc}`)
 
-  // 2. dedupe per (agent_id, session_id, claim_key) — Issue #278 cycle 1
-  // BLOCK 2 fix: a new claim in the same session must be eligible for
-  // its own escalation while a single claim never duplicates alerts.
+  // 2. dedupe per (agent_id, session_id, claim_key) — the path key is
+  // a SHA-256 hash so collision is cryptographically infeasible.
   const sentinel = escalatedPath(agentId, sessionId, ckey)
   if (existsSync(sentinel)) return
   ensureDir(STATE_DIR)
@@ -188,8 +206,7 @@ async function escalateOnce(
             session_id: sessionId,
             claim_key: ckey,
             retry_limit: RETRY_LIMIT,
-            open_claim_id: state.openClaim?.id ?? null,
-            open_message_id: state.openClaim?.messageId ?? null,
+            open_claim_ids: claimIds,
             pending_count: state.pendingCount,
           }),
         ],
@@ -199,10 +216,9 @@ async function escalateOnce(
     }
   }
 
-  // 4. CEO mention via CLI notify (subprocess so the hook stays
-  //    independent of the MCP server lifecycle).
-  const reasonText = state.openClaim
-    ? `claim ${state.openClaim.id} を ${RETRY_LIMIT} 回 close しなかった、要 manual intervention`
+  // 4. CEO mention via CLI notify.
+  const reasonText = state.openClaims.length > 0
+    ? `claim_ids=[${claimIds.join(',')}] を ${RETRY_LIMIT} 回 close しなかった、要 manual intervention`
     : `pending=${state.pendingCount} を ${RETRY_LIMIT} 回 drain しなかった、要 manual intervention`
   const content = `[STOP HOOK ESCALATION] bot ${agentId} session=${sessionId.slice(0, 8)} — ${reasonText}`
   try {
@@ -247,22 +263,17 @@ async function main(): Promise<number> {
     return 0
   }
 
-  // Issue #278 cycle 1 (auditor BLOCK 2): the retry / escalation key is
-  // the (agent_id, session_id, claim_key) triple, not session_id alone.
-  // claim_key derives from the current block reason so a fresh claim
-  // in the same session resets its own counter.
   const ckey = claimKey(state)
 
-  // Pass: no open claim and no pending → reset counter for the
-  // current block-reason key (harmless when none exists), exit 0.
-  if (!state.openClaim && state.pendingCount === 0) {
+  // Pass: no open claims and no pending → reset counter, exit 0.
+  if (state.openClaims.length === 0 && state.pendingCount === 0) {
     writeCounter(counterPath(AGENT_ID, sessionId, ckey), 0)
     if (connected) await client.end().catch(() => {})
     return 0
   }
 
   // Block decision: open claim takes precedence over pending.
-  const reason = state.openClaim ? 'open_claim' : 'pending_unclaimed'
+  const reason = state.openClaims.length > 0 ? 'open_claim' : 'pending_unclaimed'
   const cur = readCounter(counterPath(AGENT_ID, sessionId, ckey)) + 1
 
   if (cur > RETRY_LIMIT) {

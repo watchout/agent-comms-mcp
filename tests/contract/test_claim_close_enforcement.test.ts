@@ -120,7 +120,7 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     expect(existsSync(bypassLog)).toBe(true)
     const bypassContent = readFileSync(bypassLog, 'utf-8')
     expect(bypassContent).toContain(`agent=${TEST_AGENT}`)
-    expect(bypassContent).toContain(`claim_id=${claim.id}`)
+    expect(bypassContent).toContain(`claim_ids=[${claim.id}]`)
 
     // audit_log row exists for this (agent, session) — escalation evidence.
     const audit = await client.query(
@@ -135,6 +135,89 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     await client.query(`DELETE FROM audit_log WHERE agent_id = $1 AND detail->>'session_id' = $2`, [TEST_AGENT, session])
     rmSync(tmp, { recursive: true, force: true })
   }, 30_000)
+
+  test('(cycle 2) simultaneous multi-claim set — adding a new claim mid-session changes claim_key + resets retry counter', async () => {
+    // Issue #278 cycle 2 (auditor BLOCK 2 verbatim): the dedup key is
+    // a SHA-256 hash over the SET of open claim ids, not the latest
+    // single claim. Holding {A} and then expanding to {A,B} must
+    // produce a different claim_key — the new set deserves its own
+    // retry budget.
+    const session = `s-${randomUUID().slice(0, 8)}`
+
+    // Seed claim A and accumulate 2 blocks (no escalation yet).
+    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    const a = await client.query<{ id: number }>(
+      `INSERT INTO message_queue (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
+       VALUES ($1, $2, $3, 'read', $1, now(), now() + interval '30 seconds')
+       RETURNING id`,
+      [TEST_AGENT, randomUUID(), JSON.stringify({ author_id: 'x', content: 'A', message_type: 'chat' })],
+    )
+    const claimA = a.rows[0].id
+    runHook(session)
+    runHook(session)
+
+    // Now ALSO seed claim B — the open-claim set becomes {A,B}.
+    const b = await client.query<{ id: number }>(
+      `INSERT INTO message_queue (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
+       VALUES ($1, $2, $3, 'read', $1, now(), now() + interval '30 seconds')
+       RETURNING id`,
+      [TEST_AGENT, randomUUID(), JSON.stringify({ author_id: 'x', content: 'B', message_type: 'chat' })],
+    )
+    const claimB = b.rows[0].id
+
+    // First Stop on the {A,B} set must NOT immediately escalate —
+    // it's a fresh claim_key (different SHA-256 over the new set),
+    // so its counter starts at 0.
+    expect(runHook(session).status).toBe(2)
+    runHook(session)
+    runHook(session)
+    runHook(session) // 4th block on the {A,B} set → escalation.
+
+    const audit = await client.query<{ open_claim_ids: string[]; claim_key: string }>(
+      `SELECT detail->'open_claim_ids' AS open_claim_ids,
+              detail->>'claim_key' AS claim_key
+         FROM audit_log
+        WHERE event_type = 'stop_hook.escalation' AND agent_id = $1
+          AND detail->>'session_id' = $2`,
+      [TEST_AGENT, session],
+    )
+    // Exactly one escalation row for this session, and its
+    // open_claim_ids reflects the FULL set, not just one claim.
+    expect(audit.rows.length).toBe(1)
+    const ids = audit.rows[0].open_claim_ids
+    expect(ids).toContain(String(claimA))
+    expect(ids).toContain(String(claimB))
+    expect(audit.rows[0].claim_key).toMatch(/^open=[0-9a-f]{16}$/)
+
+    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    await client.query(`DELETE FROM audit_log WHERE agent_id = $1 AND detail->>'session_id' = $2`, [TEST_AGENT, session])
+    rmSync(tmp, { recursive: true, force: true })
+  }, 30_000)
+
+  test('(cycle 2) basename is a SHA-256 hex prefix — collision-safe path key', async () => {
+    // Pre-cycle-2 path was `safeBaseName(agent)__safeBaseName(session)__safeBaseName(ckey)`
+    // which let crafted session_ids match concatenations from a
+    // different (agent, session) tuple. Cycle 2 hashes the triple
+    // with SHA-256 and uses the 32-hex prefix as the basename, so
+    // basename collision is cryptographically infeasible AND the
+    // raw inputs never appear in the filename.
+    await seedClaim()
+    const session = 'collide__test__id'
+    runHook(session)
+    const fs = require('node:fs')
+    const names = fs.readdirSync(join(tmp, 'state'))
+    expect(names.length).toBeGreaterThan(0)
+    for (const name of names) {
+      // No raw inputs leak into the basename.
+      expect(name).not.toContain(session)
+      expect(name).not.toContain(TEST_AGENT)
+      // 32-hex prefix + extension shape.
+      expect(name).toMatch(/^[0-9a-f]{32}\.(count|escalated)$/)
+    }
+
+    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    rmSync(tmp, { recursive: true, force: true })
+  })
 
   test('(cycle 1 BLOCK 2) escalation key is (agent_id, session_id, claim_id-set) — new claim resets retry budget', async () => {
     // Issue #278 cycle 1 (auditor BLOCK 2): a fresh claim within the
@@ -182,8 +265,9 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     )
     expect(audit.rows[0].n).toBe(2)
 
-    // The audit detail records the per-claim key so dashboards can
-    // distinguish them.
+    // Cycle 2: the per-claim key is a SHA-256 hash over the open claim
+    // id-set; a single-claim set still hashes (it's not the literal id).
+    // We pin both audit rows have a distinct, well-formed key.
     const detail = await client.query<{ claim_key: string | null }>(
       `SELECT detail->>'claim_key' AS claim_key FROM audit_log
         WHERE event_type = 'stop_hook.escalation' AND agent_id = $1
@@ -191,8 +275,9 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
         ORDER BY created_at`,
       [TEST_AGENT, session],
     )
-    expect(detail.rows[0].claim_key).toBe(`open=${claim1.id}`)
-    expect(detail.rows[1].claim_key).toBe(`open=${claim2.id}`)
+    expect(detail.rows[0].claim_key).toMatch(/^open=[0-9a-f]{16}$/)
+    expect(detail.rows[1].claim_key).toMatch(/^open=[0-9a-f]{16}$/)
+    expect(detail.rows[0].claim_key).not.toBe(detail.rows[1].claim_key)
 
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
     await client.query(`DELETE FROM audit_log WHERE agent_id = $1 AND detail->>'session_id' = $2`, [TEST_AGENT, session])
