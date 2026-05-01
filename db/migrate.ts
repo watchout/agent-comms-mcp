@@ -362,11 +362,13 @@ async function migrate() {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_detail TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
 
-    -- Issue #287 — DB-persisted inbox cursor.
-    -- Per PR-0 dispatch (msg 79562919) §3 Forbidden, the ALTER TABLE is
-    -- INTENTIONALLY NOT placed here (Stage B 反省、paired migration manual
-    -- --up apply のみ). Operators apply the columns by running:
-    --   psql -d agent_comms -f db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
+    -- Issue #287 — DB-persisted inbox cursor. The cursor columns are
+    -- now part of the canonical bootstrap (PR-0 cycle 12 — see the
+    -- agents CREATE TABLE above and the idempotent ALTER block).
+    -- The paired migration `db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql`
+    -- remains the operational rollback artifact, but a fresh
+    -- `bun db/migrate.ts` now produces a parity-correct schema
+    -- without manual `--up` apply.
 
     -- v2.1.0 PR 1/3: message_queue.failed_reason + extend status CHECK to include 'failed'.
     -- fail/skip CLIs store the abandonment reason so operators can distinguish

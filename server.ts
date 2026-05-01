@@ -761,7 +761,15 @@ async function persistInboxCursorToDb(
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
   const client = await tryGetDb()
-  if (!client) return [] // DBなしモード: 空配列
+  // PR-0 cycle 13 axis 1+3+4+5+6 BLOCK fix — fail-closed at the
+  // orchestrator entry point. Cycle 12 left a silent `[]` return
+  // here, which masked DB outages as `(no new messages)` and
+  // bypassed the fail-closed contract that cycle 11 established for
+  // Load/Persist wrappers. Per spec §4.8.1 / §5.3, DB unavailable
+  // must surface, not appear as success with empty results.
+  if (!client) {
+    throw new Error('agent-comms: inbox fetch — DB unavailable')
+  }
   // Issue #287 — restore cursor from DB on first call after restart.
   await loadInboxCursorFromDb(forAgent)
   const { rows, nextCursor } = await fetchNewMessagesCore(

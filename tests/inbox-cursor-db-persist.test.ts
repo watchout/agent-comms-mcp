@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 26-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 27-case merge gate.
  *
  * Cumulative case map across cycles 4–8:
  *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
@@ -758,5 +758,26 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(alterBlockIdx).toBeGreaterThan(0)
     const alterIdIdx = migrateSrc.indexOf('ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_id UUID')
     expect(alterIdIdx).toBeGreaterThan(0)
+  })
+
+  // PR-0 cycle 13 axis 1+3+4+5+6 BLOCK fix — `fetchNewMessages`
+  // (the orchestrator entry point for `inbox`) must fail-closed when
+  // the DB is unavailable. Cycle 12 left a silent `[]` return there
+  // which masked DB outages as `(no new messages)`. We pin the
+  // contract at source level: the function must throw, not return
+  // the empty array, on a `tryGetDb()` null result.
+  test('case 27 — fetchNewMessages throws on tryGetDb null (no silent empty return)', () => {
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
+    const fnIdx = serverSrc.indexOf('async function fetchNewMessages(forAgent: string, limit: number)')
+    expect(fnIdx).toBeGreaterThan(0)
+    // Inspect a window covering the function's null-client guard.
+    const windowEnd = serverSrc.indexOf('await loadInboxCursorFromDb', fnIdx)
+    expect(windowEnd).toBeGreaterThan(fnIdx)
+    const window = serverSrc.slice(fnIdx, windowEnd)
+    // The throw must be the path on null client; no `return []`
+    // fallback may remain.
+    expect(window).toContain("throw new Error('agent-comms: inbox fetch — DB unavailable')")
+    expect(window).not.toContain('return []')
   })
 })
