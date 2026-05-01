@@ -1740,16 +1740,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          WHERE agent_id = $1`,
         [agentId],
       )
-      // PR-0 (Issue #287) §1 verbatim — `UPDATE agents SET inbox_cursor_at=NOW()
-      // WHERE agent_id=$1` で cursor 進行. Fires on every successful `next` pop
-      // so a session restart resumes from "this point in time" instead of
-      // replaying the oldest 20 stale pending rows. Coarse (timestamp-only) by
-      // design — the precise composite cursor on the `inbox` tool path uses
-      // inbox_cursor_id + inbox_cursor_at together.
-      await client.query(
-        `UPDATE agents SET inbox_cursor_at = now() WHERE agent_id = $1`,
-        [agentId],
-      )
+      // PR-0 (Issue #287) cycle 6 — composite cursor (at, id) verbatim per
+      // spec §4.8.1 (CTO judgment 2026-05-01, auditor cycle 5 axis 1/5/6
+      // BLOCK fix). Advance both `inbox_cursor_at` and `inbox_cursor_id` to
+      // the popped agent_messages row's (created_at, id) so the next
+      // session restart resumes from the same composite cursor the `inbox`
+      // tool advances. The previous `inbox_cursor_at = now()` left
+      // `inbox_cursor_id` stale and the restored cursor mixed a fresh `at`
+      // with an old `id`, breaking the composite > comparison.
+      //
+      // `row.message_id` is `agent_messages.id` (UUID). When NULL the queue
+      // row is a system-originated entry without an `agent_messages`
+      // backing — it never appears in the `inbox` cursor stream, so we skip
+      // the cursor advance for that case.
+      if (row.message_id) {
+        await client.query(
+          `UPDATE agents
+              SET inbox_cursor_at = (SELECT created_at FROM agent_messages WHERE id = $2),
+                  inbox_cursor_id = $2
+            WHERE agent_id = $1
+              AND EXISTS (SELECT 1 FROM agent_messages WHERE id = $2)`,
+          [agentId, row.message_id],
+        )
+      }
       await client.query('COMMIT')
 
       let payload: Record<string, unknown> = {}
