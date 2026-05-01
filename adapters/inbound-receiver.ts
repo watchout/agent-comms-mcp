@@ -47,6 +47,7 @@ import {
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
+import { applyMentionsAutoFill } from '../core/agent-cache'
 import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
 import { notifySenderAndObserve } from '../core/sender-feedback-emit'
 import type { MessageBus } from '../core/message-bus'
@@ -445,11 +446,41 @@ export async function handleInboundMessage(params: {
     receiverAgentId, externalChannelId, externalMessageId,
     authorExternalId, authorName, authorIsBot,
     content, attachments, timestamp, platform, mentions,
+    replyToMessageId, // PR-β §1: destructure (was previously declared on params but never read)
   } = params
 
   // Step 1: Resolve channel → core channel_id + members.
   const coreDb = await d.coreDbAdapter()
   const resolved = await resolveInboundChannel(coreDb, externalChannelId)
+
+  // PR-β §1: resolve replyToMessageId (Discord snowflake) → internal
+  // agent_messages.id (UUID) + capture parent author_id for mentions
+  // auto-fill. Orphan reference (no row matching the snowflake) → NULL +
+  // stderr log per §1; we never write a Discord snowflake into the
+  // reply_to UUID column (§3 Forbidden).
+  let resolvedReplyToUuid: string | null = null
+  let resolvedReplyToAuthor: string | null = null
+  if (replyToMessageId && coreDb) {
+    try {
+      // coreDbAdapter (server.ts:539) returns the LEGACY shape `{rows}` for
+      // both pg.Client and toLegacy(SqliteAdapter) — see route-message-db.ts.
+      const r: any = await (coreDb as any).query(
+        `SELECT id, author_id FROM agent_messages WHERE discord_message_id = $1 LIMIT 1`,
+        [replyToMessageId],
+      )
+      const rows: Array<{ id: string; author_id: string }> = (r?.rows ?? r) as any
+      if (rows.length > 0) {
+        resolvedReplyToUuid = rows[0].id
+        resolvedReplyToAuthor = rows[0].author_id ?? null
+      } else {
+        process.stderr.write(
+          `agent-comms: inbound reply_to orphan — no agent_messages row for ${platform}_message_id=${replyToMessageId}, storing NULL\n`,
+        )
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: reply_to UUID lookup failed (non-fatal): ${err}\n`)
+    }
+  }
 
   // Step 2: DB save (always) — non-fatal. 'to' is NOT set here; it is
   // set ONLY after routeInbound confirms delivery (prevents poll bypass
@@ -459,6 +490,9 @@ export async function handleInboundMessage(params: {
     author_id: authorExternalId,
     content,
     message_type: 'chat',
+    // PR-β §2: reply_to MUST be the resolved UUID (or NULL), never the
+    // Discord snowflake from msg.replyTo (§3 Forbidden).
+    ...(resolvedReplyToUuid ? { reply_to: resolvedReplyToUuid } : {}),
     source: platform,
     thread_id: resolved?.threadId ?? null,
     direction: 'inbound',
@@ -496,7 +530,17 @@ export async function handleInboundMessage(params: {
   const senderAgentId = await resolveAgentFromDiscordId(coreDb, authorExternalId)
 
   // Step 6: Pure routing decision (§5.1).
-  const resolvedMentions = mentions ?? []
+  // PR-β §1/§2: apply mentions auto-fill BEFORE routeInbound. When the
+  // sender omitted explicit mentions but the reply_to chain identifies a
+  // known parent author, route the reply to that author. §3 Forbidden:
+  // applyMentionsAutoFill must not be bypassed on any inbound path.
+  const incomingMentions = mentions ?? []
+  const autoFilled = applyMentionsAutoFill(
+    incomingMentions,
+    resolvedReplyToUuid,
+    resolvedReplyToAuthor,
+  )
+  const resolvedMentions = autoFilled ?? incomingMentions
   const result = routeInbound(
     {
       authorAgentId: senderAgentId,

@@ -280,7 +280,10 @@ describe('handleInboundMessage — Full flow wrapper', () => {
 
   test('returns humanWarning flag for Pattern A', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    // Window widened for PR-β (Issue #230): handleInboundMessage now
+    // resolves replyToMessageId → UUID before the routing decision, so the
+    // body grew past the original 5000-char window.
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
     expect(fnBody).toContain('humanWarning:')
     expect(fnBody).toContain('result.senderIsHuman && result.noMentions')
   })

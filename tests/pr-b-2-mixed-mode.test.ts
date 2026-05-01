@@ -55,7 +55,9 @@ describe('PR-B.2 — Source Structure', () => {
 
   test('handleInboundMessage fires receiver-pipeline pg_notify for RECEIVER_PIPELINE_BOTS', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 10000)
+    // PR-β: window widened (handleInboundMessage grew from ~9K to ~11K chars
+    // when the reply_to UUID resolution + mentions auto-fill blocks landed).
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 12000)
     expect(fnBody).toContain('RECEIVER_PIPELINE_BOTS.has(receiverAgentId)')
     expect(fnBody).toContain("pg_notify('agent_inbox'")
     expect(fnBody).toContain("'message.created'")
