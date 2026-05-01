@@ -349,13 +349,11 @@ async function migrate() {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_detail TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
 
-    -- Issue #287: DB-persisted inbox cursor so session restart does NOT
-    -- replay the oldest 20 pending rows. The composite (created_at, id)
-    -- cursor lives in two columns; the inbox tool advances them per pop and
-    -- on startup we restore the in-memory cursor from these values. Paired
-    -- migration: db/migrations/2026-05-01-inbox-cursor-db-persist.{up,down}.sql.
-    ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_at TIMESTAMPTZ;
-    ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_id UUID;
+    -- Issue #287 — DB-persisted inbox cursor.
+    -- Per PR-0 dispatch (msg 79562919) §3 Forbidden, the ALTER TABLE is
+    -- INTENTIONALLY NOT placed here (Stage B 反省、paired migration manual
+    -- --up apply のみ). Operators apply the columns by running:
+    --   psql -d agent_comms -f db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
 
     -- v2.1.0 PR 1/3: message_queue.failed_reason + extend status CHECK to include 'failed'.
     -- fail/skip CLIs store the abandonment reason so operators can distinguish
