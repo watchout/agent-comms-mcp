@@ -552,6 +552,25 @@ async function coreDbAdapter(): Promise<DbAdapter | null> {
   }
 }
 
+/**
+ * PR-0 (Issue #287) cycle 9 axis 1+2 BLOCK fix — strict variant of
+ * `coreDbAdapter()` for startup paths. Throws when the underlying DB
+ * is unreachable so the failure propagates to the top-level
+ * `mcp.connect(...).catch(err => process.exit(1))` boundary instead
+ * of silently skipping startup self-reclaim + sweepers (cycle 8 had
+ * `coreDbAdapter()` returning null on connection failure, leaving
+ * own claims permanently in `status='read'`). Callers must use this
+ * helper for any startup-time DB acquisition that the bot cannot
+ * boot without.
+ */
+export async function requireDbForStartup(): Promise<DbAdapter> {
+  const adapter = await coreDbAdapter()
+  if (!adapter) {
+    throw new Error('agent-comms: startup DB unavailable — refusing to boot with self-reclaim + sweepers offline')
+  }
+  return adapter
+}
+
 async function saveMessage(msg: {
   channel_id: string; author_id: string; content: string
   message_type?: string; reply_to?: string
@@ -680,15 +699,42 @@ async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
   inboxCursorLoadedFromDb = true
 }
 
-async function persistInboxCursorToDb(forAgent: string, cursor: InboxCursor | null): Promise<void> {
+/**
+ * PR-0 (Issue #287) cycle 9 — single cursor advance entry point.
+ * After a successful DB persist, **synchronously update the
+ * module-level `inboxCursor` cache** so subsequent same-session
+ * `inbox` reads (which run off the in-memory cache, see
+ * `fetchNewMessages` below) see the advance the `next` path made.
+ *
+ * Without this sync the same-session sequence `inbox → next → inbox`
+ * regressed: `inbox` loaded the cursor once from DB, the `next`
+ * advance only updated DB, and the second `inbox` read the stale
+ * in-memory cursor and replayed already-delivered rows. CTO judgment
+ * 2026-05-01 (Fix 1A): the `persistInboxCursorToDb` helper carries
+ * the cache-sync responsibility itself, so neither writer can forget.
+ *
+ * `caller` may pass an already-acquired db client (the `next` path
+ * runs inside an open transaction); when omitted the helper grabs a
+ * fresh `tryGetDb()` client.
+ */
+async function persistInboxCursorToDb(
+  forAgent: string,
+  cursor: InboxCursor | null,
+  caller?: { client: { query: (sql: string, params?: any[]) => Promise<any> } },
+): Promise<void> {
   if (!cursor) return
-  const client = await tryGetDb()
+  const client = caller?.client ?? (await tryGetDb())
   if (!client) return
   await persistInboxCursorToDbCore(
     { query: (sql, params) => client.query(sql, params) as any },
     forAgent,
     cursor,
   )
+  // Cache sync — only after the DB write resolves, so a thrown
+  // persist leaves the cache untouched. Callers can still observe a
+  // monotonic-guard no-op via `inboxCursor` being unchanged when an
+  // older cursor is rejected by the SQL `WHERE` clause.
+  inboxCursor = cursor
 }
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
@@ -1761,10 +1807,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           [row.message_id],
         )
         if (amRow.rows.length > 0) {
-          await persistInboxCursorToDbCore(
-            { query: (sql, params) => client.query(sql, params) as any },
+          // PR-0 cycle 9 axis 1 BLOCK fix — go through the unified
+          // `persistInboxCursorToDb` wrapper so the in-memory
+          // `inboxCursor` cache stays in sync with DB. Calling the
+          // core helper directly (cycle 8) bypassed the cache, so a
+          // same-session `inbox` after `next` reverted to the stale
+          // pre-next cursor and replayed delivered rows.
+          await persistInboxCursorToDb(
             agentId,
             { createdAt: String(amRow.rows[0].created_at), id: String(row.message_id) },
+            { client },
           )
         }
       }
@@ -3605,17 +3657,19 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     // skip would defeat the entire PR. launchd/systemd restart on
     // exit covers transient DB hiccups; persistent failures surface
     // loudly for root-cause work.
-    const reclaimDb = await coreDbAdapter()
-    if (reclaimDb) {
-      const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)
-      process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${AGENT_ID})\n`)
-      const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
-      startSelfReclaimSweeper(reclaimDb, AGENT_ID, { intervalMs: reclaimIntervalMs })
-      process.stderr.write(`agent-comms: self-reclaim sweeper started (interval=${reclaimIntervalMs}ms)\n`)
-      const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
-      startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentId: AGENT_ID })
-      process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentId=${AGENT_ID})\n`)
-    }
+    // PR-0 cycle 9 axis 1+2 BLOCK fix — `requireDbForStartup` throws
+    // on null instead of silently skipping. The throw propagates to
+    // the top-level `.catch(err => process.exit(1))`, so connection
+    // failure at boot is loud rather than hidden.
+    const reclaimDb = await requireDbForStartup()
+    const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)
+    process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${AGENT_ID})\n`)
+    const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
+    startSelfReclaimSweeper(reclaimDb, AGENT_ID, { intervalMs: reclaimIntervalMs })
+    process.stderr.write(`agent-comms: self-reclaim sweeper started (interval=${reclaimIntervalMs}ms)\n`)
+    const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
+    startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentId: AGENT_ID })
+    process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentId=${AGENT_ID})\n`)
   }
 
   // Connect Per-Bot Discord Clients for all expected bots at startup
