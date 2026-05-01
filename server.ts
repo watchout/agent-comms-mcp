@@ -1744,28 +1744,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          WHERE agent_id = $1`,
         [agentId],
       )
-      // PR-0 (Issue #287) cycle 6 — composite cursor (at, id) verbatim per
-      // spec §4.8.1 (CTO judgment 2026-05-01, auditor cycle 5 axis 1/5/6
-      // BLOCK fix). Advance both `inbox_cursor_at` and `inbox_cursor_id` to
-      // the popped agent_messages row's (created_at, id) so the next
-      // session restart resumes from the same composite cursor the `inbox`
-      // tool advances. The previous `inbox_cursor_at = now()` left
-      // `inbox_cursor_id` stale and the restored cursor mixed a fresh `at`
-      // with an old `id`, breaking the composite > comparison.
+      // PR-0 (Issue #287) cycle 8 — single cursor writer per spec §4.8.1
+      // (CTO judgment 2026-05-01, auditor cycle 7 axis 1/2/4/5 BLOCK fix).
+      // Both `inbox` and `next` cursor advances now go through
+      // `persistInboxCursorToDb`, which carries the composite monotonic
+      // guard. The previous cycle 6/7 implementation embedded a raw
+      // UPDATE here that bypassed the guard, allowing an older `next` to
+      // regress a cursor that `inbox` had already advanced.
       //
-      // `row.message_id` is `agent_messages.id` (UUID). When NULL the queue
-      // row is a system-originated entry without an `agent_messages`
-      // backing — it never appears in the `inbox` cursor stream, so we skip
-      // the cursor advance for that case.
+      // `row.message_id` is `agent_messages.id` (UUID). When NULL the
+      // queue row has no agent_messages backing — it never appears in
+      // the `inbox` cursor stream, so we skip the cursor advance.
       if (row.message_id) {
-        await client.query(
-          `UPDATE agents
-              SET inbox_cursor_at = (SELECT created_at FROM agent_messages WHERE id = $2),
-                  inbox_cursor_id = $2
-            WHERE agent_id = $1
-              AND EXISTS (SELECT 1 FROM agent_messages WHERE id = $2)`,
-          [agentId, row.message_id],
+        const amRow = await client.query(
+          `SELECT created_at::text AS created_at FROM agent_messages WHERE id = $1`,
+          [row.message_id],
         )
+        if (amRow.rows.length > 0) {
+          await persistInboxCursorToDbCore(
+            { query: (sql, params) => client.query(sql, params) as any },
+            agentId,
+            { createdAt: String(amRow.rows[0].created_at), id: String(row.message_id) },
+          )
+        }
       }
       await client.query('COMMIT')
 
@@ -3594,27 +3595,26 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
   //       `startSelfReclaimSweeper`, own rows are not flipped to
   //       `failed`.
   if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
-    try {
-      const reclaimDb = await coreDbAdapter()
-      if (reclaimDb) {
-        const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)
-        process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${AGENT_ID})\n`)
-        const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
-        startSelfReclaimSweeper(reclaimDb, AGENT_ID, { intervalMs: reclaimIntervalMs })
-        process.stderr.write(`agent-comms: self-reclaim sweeper started (interval=${reclaimIntervalMs}ms)\n`)
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — self-reclaim startup failed (non-fatal): ${err}\n`)
-    }
-    try {
-      const claimDb = await coreDbAdapter()
-      if (claimDb) {
-        const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
-        startClaimTtlSweeper(claimDb, { intervalMs, selfAgentId: AGENT_ID })
-        process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentId=${AGENT_ID})\n`)
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
+    // PR-0 cycle 8 axis 3 BLOCK fix — fail-closed startup. The
+    // `await reclaimSelfOrphanedClaims(...)` is no longer wrapped in a
+    // local try/catch that swallows the error; its rejection
+    // propagates to the top-level startup catch and exits the process
+    // with code 1. Allowing the bot to continue boot when reclaim
+    // fails leaves own queue rows in `status='read'` forever
+    // (claim-ttl sweeper excludes self via `selfAgentId`), so a silent
+    // skip would defeat the entire PR. launchd/systemd restart on
+    // exit covers transient DB hiccups; persistent failures surface
+    // loudly for root-cause work.
+    const reclaimDb = await coreDbAdapter()
+    if (reclaimDb) {
+      const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)
+      process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${AGENT_ID})\n`)
+      const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
+      startSelfReclaimSweeper(reclaimDb, AGENT_ID, { intervalMs: reclaimIntervalMs })
+      process.stderr.write(`agent-comms: self-reclaim sweeper started (interval=${reclaimIntervalMs}ms)\n`)
+      const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
+      startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentId: AGENT_ID })
+      process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentId=${AGENT_ID})\n`)
     }
   }
 

@@ -1,23 +1,27 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 7-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 15-case merge gate.
  *
- * Hermetic SQLite tests against minimal `agents` + `message_queue` schemas.
- * The behaviors under test:
+ * Cumulative case map across cycles 4–8:
+ *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
+ *   - case 4 (cycle 6): SQLite migration executes and adds inbox_cursor columns
+ *   - case 7: server.ts wires startup hook + sweepers, paired migration files exist
+ *   - case 8 (cycle 6): `next` cursor advance writes composite (at, id) — now
+ *     funneled through `persistInboxCursorToDb` after cycle 8 axis 1 fix, so
+ *     this case implicitly verifies that the single-writer monotonic guard
+ *     fires on the `next` path too
+ *   - case 9 (cycle 6): `next` cursor advance is no-op when agent_messages row
+ *     is missing
+ *   - case 10 (cycle 7): startup order — reclaim await BEFORE claim-ttl
+ *     sweeper, plus claim-ttl `selfAgentId` predicate skips own rows
+ *   - cases 11–12 (cycle 7): reclaim updates `agents.status` to idle/busy
+ *   - case 13 (cycle 7): `persistInboxCursorToDb` is monotonic — covers BOTH
+ *     `inbox` and `next` writers after cycle 8 unified them
+ *   - case 14 (cycle 8): `reclaimSelfOrphanedClaims` throws on DB error
+ *     (fail-closed) — startup propagates to top-level catch → process.exit(1)
  *
- *   1. Migration up: adds `agents.inbox_cursor_at` + `agents.inbox_cursor_id`
- *      columns and re-flips stale `read` claims (>15min) back to `pending`.
- *   2. Migration down: drops the cursor columns idempotently.
- *   3. `reclaimSelfOrphanedClaims`: rolls THIS agent's `status='read'` rows
- *      back to `pending` regardless of TTL state (startup-time aggressive).
- *   4. `reclaimSelfOrphanedClaims`: leaves OTHER agents' claims alone.
- *   5. `startSelfReclaimSweeper`: only reclaims expired claims (TTL past)
- *      during periodic runs, not active ones.
- *   6. Cursor restore: reading from `agents.inbox_cursor_*` produces a
- *      cursor matching the persisted shape.
- *   7. Source-level pin: server.ts wires the startup hook + periodic sweeper
- *      after `setInboundReceiverDeps()` (regression guard for boot-order
- *      regressions, mirrors the §5.3 obligations).
+ * Hermetic: SQLite-backed in-memory DB, no `server.ts` import (so
+ * `bun test tests/inbox-cursor-db-persist.test.ts` runs standalone).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
@@ -329,7 +333,7 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
     const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
     const reclaimIdx = serverSrc.indexOf('await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)')
-    const sweeperIdx = serverSrc.indexOf('startClaimTtlSweeper(claimDb, { intervalMs, selfAgentId: AGENT_ID })')
+    const sweeperIdx = serverSrc.indexOf('startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentId: AGENT_ID })')
     expect(reclaimIdx).toBeGreaterThan(0)
     expect(sweeperIdx).toBeGreaterThan(0)
     // reclaim must appear BEFORE the claim-ttl sweeper start in source order.
@@ -420,5 +424,29 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     )
     expect(row[0].inbox_cursor_at).toBe(cursor60.createdAt)
     expect(row[0].inbox_cursor_id).toBe(cursor60.id)
+  })
+
+  // PR-0 cycle 8 axis 3 BLOCK fix — reclaimSelfOrphanedClaims must
+  // surface DB errors instead of swallowing them. The cycle 7
+  // implementation returned 0 on any failure, leaving own claims
+  // permanently orphaned (claim-ttl sweeper excludes self via
+  // `selfAgentId`). With fail-closed semantics the function throws,
+  // server.ts startup catches the rejection at the
+  // `mcp.connect(...).catch(err => process.exit(1))` boundary, and
+  // launchd/systemd surfaces the failure for restart + diagnosis.
+  test('case 14 — reclaimSelfOrphanedClaims throws on DB error (fail-closed)', async () => {
+    const failingDb: import('../core/inbox-cursor').ReclaimDb = {
+      query: async () => {
+        throw new Error('simulated DB unreachable')
+      },
+    }
+    let caught: Error | null = null
+    try {
+      await reclaimSelfOrphanedClaims(failingDb, 'me')
+    } catch (err) {
+      caught = err as Error
+    }
+    expect(caught).not.toBeNull()
+    expect(caught?.message).toContain('simulated DB unreachable')
   })
 })

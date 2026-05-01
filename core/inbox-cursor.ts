@@ -146,39 +146,45 @@ export interface ReclaimDb {
  * claim_expires_at < now()`) no longer matches them. Other agents'
  * truly-abandoned claims still flow through claim-ttl → `failed`.
  */
+/**
+ * PR-0 cycle 8 axis 3 BLOCK fix — fail-closed on DB errors. The cycle
+ * 7 implementation swallowed any error and returned 0, leaving
+ * orphaned own claims permanently in `status='read'` (claim-ttl
+ * sweeper excludes self via `selfAgentId`, so nothing else recovers
+ * them). Per CTO directive 2026-05-01 + governance-flow.md fail-closed
+ * principle, the function now throws; the server startup caller
+ * catches and exits with code 1, surfacing the failure loudly so
+ * launchd/systemd can restart and persistent failures stay visible
+ * instead of silently rotting the queue.
+ */
 export async function reclaimSelfOrphanedClaims(
   db: ReclaimDb,
   agentId: string,
 ): Promise<number> {
-  try {
-    const r: any = await db.query(
-      `UPDATE message_queue
-         SET status = 'pending',
-             claimed_by = NULL,
-             claimed_at = NULL,
-             claim_expires_at = NULL,
-             read_at = NULL
-       WHERE agent_id = $1
-         AND claimed_by = $1
-         AND status = 'read'
-         AND (claim_expires_at IS NULL OR claim_expires_at < now())
-       RETURNING id`,
-      [agentId],
-    )
-    const rows = r?.rows ?? []
-    if (rows.length > 0) {
-      process.stderr.write(`agent-comms: startup self-reclaim — ${rows.length} orphaned claims rolled back to 'pending' for ${agentId}\n`)
-    }
-    // PR-0 cycle 7 axis 2/3 BLOCK fix — derive agents.status from the
-    // post-reclaim claim set so callers (sender-feedback busy/idle
-    // branch) see consistent state. Mirrors the pattern in next/send/
-    // fail/skip/manual-reclaim handlers (server.ts:1735 / :2897).
-    await syncAgentStatusFromClaims(db, agentId)
-    return rows.length
-  } catch (err) {
-    process.stderr.write(`agent-comms: startup self-reclaim failed (non-fatal): ${err}\n`)
-    return 0
+  const r: any = await db.query(
+    `UPDATE message_queue
+       SET status = 'pending',
+           claimed_by = NULL,
+           claimed_at = NULL,
+           claim_expires_at = NULL,
+           read_at = NULL
+     WHERE agent_id = $1
+       AND claimed_by = $1
+       AND status = 'read'
+       AND (claim_expires_at IS NULL OR claim_expires_at < now())
+     RETURNING id`,
+    [agentId],
+  )
+  const rows = r?.rows ?? []
+  if (rows.length > 0) {
+    process.stderr.write(`agent-comms: startup self-reclaim — ${rows.length} orphaned claims rolled back to 'pending' for ${agentId}\n`)
   }
+  // PR-0 cycle 7 axis 2/3 BLOCK fix — derive agents.status from the
+  // post-reclaim claim set so callers (sender-feedback busy/idle
+  // branch) see consistent state. Mirrors the pattern in next/send/
+  // fail/skip/manual-reclaim handlers (server.ts:1735 / :2897).
+  await syncAgentStatusFromClaims(db, agentId)
+  return rows.length
 }
 
 /**
