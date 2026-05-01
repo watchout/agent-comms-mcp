@@ -682,11 +682,17 @@ let inboxCursorLoadedFromDb = false
 
 async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
   if (inboxCursorLoadedFromDb) return
+  // PR-0 cycle 11 axis 1+5+6 BLOCK fix — fail-closed on DB
+  // unavailability. Cycle 10 returned silently here, which combined
+  // with the now-removed core try/catch meant the cursor was never
+  // loaded yet `inboxCursorLoadedFromDb` could still latch on a
+  // subsequent successful call. The contract is now:
+  //   - tryGetDb null → throw, caller's catch decides retry
+  //   - core throw  → propagate, no latch (retry on next call)
+  //   - core null   → legitimate "row absent" → latch to skip future loads
   const client = await tryGetDb()
   if (!client) {
-    // DB unavailable — leave the in-memory cursor null and try again on the
-    // next call. Don't latch the loaded flag so we keep retrying.
-    return
+    throw new Error('agent-comms: inbox cursor load — DB unavailable')
   }
   const restored = await loadInboxCursorFromDbCore(
     { query: (sql, params) => client.query(sql, params) as any },
@@ -724,7 +730,16 @@ async function persistInboxCursorToDb(
 ): Promise<{ updated: boolean }> {
   if (!cursor) return { updated: false }
   const client = caller?.client ?? (await tryGetDb())
-  if (!client) return { updated: false }
+  if (!client) {
+    // PR-0 cycle 11 axis 1+5+6 BLOCK fix — fail-closed when DB is
+    // unavailable mid-session. The cycle 10 silent `{updated:false}`
+    // return allowed the caller (fetchNewMessages) to hand rows to
+    // the user without ever advancing the cursor, so the next inbox
+    // call re-delivered the same rows. Now the throw bubbles up to
+    // the orchestrator which rejects the whole call so the client
+    // never sees rows whose advance was lost.
+    throw new Error('agent-comms: inbox cursor persist — DB unavailable')
+  }
   // PR-0 cycle 10 axis 1+5+6 BLOCK fix — gate the in-memory cache
   // sync on the DB write actually taking effect. The core helper
   // returns `{ updated: boolean }` from the UPDATE's RETURNING /

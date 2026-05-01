@@ -254,33 +254,43 @@ export function startSelfReclaimSweeper(
 }
 
 /**
- * Issue #287 — load `agents.inbox_cursor_{at,id}` from the DB into the
- * caller-supplied state container. Returns the loaded cursor (or null
- * if the row is missing / DB unavailable / cursor is unset).
+ * Issue #287 — load `agents.inbox_cursor_{at,id}` from the DB.
+ *
+ * PR-0 cycle 11 axis 1+5+6 BLOCK fix — fail-closed contract: SELECT
+ * errors propagate via throw (no swallow), so the wrapper can avoid
+ * latching `inboxCursorLoadedFromDb = true` on failure and keep
+ * retrying on subsequent calls. The previous cycle-10 implementation
+ * caught the error and returned null, which the wrapper could not
+ * distinguish from "row absent (legitimate first boot)" — once
+ * latched the process never re-attempted restore, indefinitely
+ * replaying stale rows after a transient DB blip.
+ *
+ * Return semantics:
+ *   - `InboxCursor` — row + cursor columns populated; restore from DB.
+ *   - `null` — row absent OR cursor columns NULL; legitimate first
+ *     boot for this agent. Caller MAY latch.
+ *   - `throw` — DB query error; caller MUST NOT latch. Re-attempt on
+ *     the next call so a transient failure doesn't permanently kill
+ *     restore.
  */
 export async function loadInboxCursorFromDb(
   db: ReclaimDb | null | undefined,
   agentId: string,
 ): Promise<InboxCursor | null> {
   if (!db) return null
-  try {
-    const r: any = await db.query(
-      `SELECT inbox_cursor_at::text AS inbox_cursor_at, inbox_cursor_id
-         FROM agents WHERE agent_id = $1`,
-      [agentId],
-    )
-    const row = r?.rows?.[0]
-    if (row?.inbox_cursor_at && row?.inbox_cursor_id) {
-      return {
-        createdAt: String(row.inbox_cursor_at),
-        id: String(row.inbox_cursor_id),
-      }
+  const r: any = await db.query(
+    `SELECT inbox_cursor_at::text AS inbox_cursor_at, inbox_cursor_id
+       FROM agents WHERE agent_id = $1`,
+    [agentId],
+  )
+  const row = r?.rows?.[0]
+  if (row?.inbox_cursor_at && row?.inbox_cursor_id) {
+    return {
+      createdAt: String(row.inbox_cursor_at),
+      id: String(row.inbox_cursor_id),
     }
-    return null
-  } catch (err) {
-    process.stderr.write(`agent-comms: inbox cursor DB load failed (non-fatal): ${err}\n`)
-    return null
   }
+  return null
 }
 
 /**
