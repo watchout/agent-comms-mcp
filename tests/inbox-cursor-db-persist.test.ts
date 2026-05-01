@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 30-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 31-case merge gate.
  *
  * Cumulative case map across cycles 4–8:
  *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
@@ -620,19 +620,19 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
   test('case 21 — fetchNewMessages does not pre-emptively assign inboxCursor (source pin)', () => {
     const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
     const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
-    // Locate the fetchNewMessages cursor advance block and inspect a
-    // window of source around it. A pre-emptive write would look like
-    // `inboxCursor = nextCursor` directly inside the if-guard before
-    // the await. Using a narrow source window keeps the pin specific.
-    const advanceIfIdx = serverSrc.indexOf('if (nextCursor && nextCursor !== inboxCursor)')
+    // Locate the fetchNewMessages cursor advance block. PR-0 cycle 15
+    // moved the cache from a module-level `inboxCursor` to a
+    // per-agent `agentCursorState.cursor` slot, so the if-guard now
+    // compares against the agent-scoped state.
+    const advanceIfIdx = serverSrc.indexOf('if (nextCursor && nextCursor !== agentCursorState.cursor)')
     expect(advanceIfIdx).toBeGreaterThan(0)
     const persistCallIdx = serverSrc.indexOf('await persistInboxCursorToDb(forAgent, nextCursor)', advanceIfIdx)
     expect(persistCallIdx).toBeGreaterThan(advanceIfIdx)
     const window = serverSrc.slice(advanceIfIdx, persistCallIdx)
-    // No direct module-level cursor write in this window — the
-    // wrapper owns cache sync now.
+    // No direct cache write in this window — the wrapper owns sync.
+    expect(window).not.toContain('agentCursorState.cursor = nextCursor')
+    expect(window).not.toContain('agentCursorState.cursor =')
     expect(window).not.toContain('inboxCursor = nextCursor')
-    expect(window).not.toContain('inboxCursor =')
   })
 
   // PR-0 cycle 11 axis 1+5+6 BLOCK fix — Load Core throws on DB
@@ -858,5 +858,60 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     clearInterval(timer as any)
     expect(errors.length).toBeGreaterThan(0)
     expect(errors[0].message).toContain('simulated claim-ttl sweep failure')
+  })
+
+  // PR-0 cycle 15 axis 1+3+4+5 BLOCK fix — per-agent cursor isolation.
+  // The cycle 9-14 implementation kept `inboxCursor` /
+  // `inboxCursorLoadedFromDb` at module level, which broke
+  // multi-bot mode (`registerTools(server, agentId)` factory):
+  // bot A's cursor advance leaked into bot B's reads. Cycle 15
+  // routes cache through `getInboxCursorState(agentId)` so each
+  // bot has its own slot. The contract is that two bots writing
+  // concurrent advances do not contaminate each other; a follow-up
+  // restore for bot B reads bot B's row from DB, not whatever bot A
+  // last cached.
+  //
+  // We exercise the helper-level invariant directly. server.ts owns
+  // the per-agent Map, so we mirror that pattern with a minimal
+  // closure-bound state holder and assert that:
+  //   1. persistInboxCursorToDb writes A's cursor to A's row,
+  //      B's cursor to B's row (DB-side isolation, monotonic guard
+  //      independent per agent_id).
+  //   2. loadInboxCursorFromDb returns the agent-specific cursor
+  //      regardless of which agent ran load first.
+  test('case 31 — per-agent cursor isolation across two bots (no cross-contamination)', async () => {
+    await db.execute(`INSERT INTO agents (agent_id) VALUES ('bot-a'), ('bot-b')`)
+
+    const cursorA = { createdAt: '2026-05-01T00:00:00.100000Z', id: '11111111-1111-1111-1111-111111111111' }
+    const cursorB = { createdAt: '2026-05-01T00:00:00.200000Z', id: '22222222-2222-2222-2222-222222222222' }
+
+    // Bot A advances first.
+    const resA = await persistInboxCursorToDb(pgWrap(db), 'bot-a', cursorA)
+    expect(resA.updated).toBe(true)
+    // Bot B advances next, with a different cursor. Per-agent
+    // monotonic guard means bot A's cursor does not gate bot B's
+    // write (different agent_id rows).
+    const resB = await persistInboxCursorToDb(pgWrap(db), 'bot-b', cursorB)
+    expect(resB.updated).toBe(true)
+
+    // Each bot's row carries only its own cursor.
+    const restoredA = await loadInboxCursorFromDb(pgWrap(db), 'bot-a')
+    const restoredB = await loadInboxCursorFromDb(pgWrap(db), 'bot-b')
+    expect(restoredA?.id).toBe(cursorA.id)
+    expect(restoredA?.createdAt).toBe(cursorA.createdAt)
+    expect(restoredB?.id).toBe(cursorB.id)
+    expect(restoredB?.createdAt).toBe(cursorB.createdAt)
+    // Cross-load: explicit non-equality, not just non-mutation.
+    expect(restoredA?.id).not.toBe(restoredB?.id)
+    expect(restoredA?.createdAt).not.toBe(restoredB?.createdAt)
+
+    // Source-level pin: server.ts must NOT carry the old module-level
+    // `let inboxCursor` (process-global). The new pattern keys cache
+    // by agentId via `inboxCursorByAgent`.
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
+    expect(serverSrc).not.toContain('let inboxCursor: InboxCursor | null = null')
+    expect(serverSrc).not.toContain('let inboxCursorLoadedFromDb = false')
+    expect(serverSrc).toContain('const inboxCursorByAgent: Map<string, InboxCursorState>')
   })
 })

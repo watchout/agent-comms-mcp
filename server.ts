@@ -673,23 +673,38 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
 // returns `created_at::text AS created_at_text` so the cursor value
 // preserves µs (PG timestamptz) and the next WHERE compares µs-precisely.
 // The id UUID tiebreaker covers µs-tied bursts.
-let inboxCursor: InboxCursor | null = null
-// Issue #287 — track whether we have already loaded the cursor from
-// `agents.inbox_cursor_{at,id}`. The first inbox/next call after a session
-// restart restores the cursor; subsequent calls keep it in memory and write
-// it back to the row on each advance.
-let inboxCursorLoadedFromDb = false
+// PR-0 cycle 15 axis 1+3+4+5 BLOCK fix — per-agent cursor cache.
+// The earlier module-level `let inboxCursor` / `let
+// inboxCursorLoadedFromDb` were process-global, which broke the
+// per-agent cursor contract whenever a single process serves more
+// than one bot via the `registerTools(server, agentId)` factory /
+// `botContexts` (multi-bot mode). The first agent's `inbox` call
+// occupied the module-level cache and latched the loaded flag, so
+// later agents either replayed stale rows from the wrong cursor or
+// skipped their own unread entirely. This Map keys cache state by
+// agentId so each bot reads/writes its own slot.
+interface InboxCursorState {
+  cursor: InboxCursor | null
+  loaded: boolean
+}
+const inboxCursorByAgent: Map<string, InboxCursorState> = new Map()
+function getInboxCursorState(agentId: string): InboxCursorState {
+  let state = inboxCursorByAgent.get(agentId)
+  if (!state) {
+    state = { cursor: null, loaded: false }
+    inboxCursorByAgent.set(agentId, state)
+  }
+  return state
+}
 
 async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
-  if (inboxCursorLoadedFromDb) return
+  const state = getInboxCursorState(forAgent)
+  if (state.loaded) return
   // PR-0 cycle 11 axis 1+5+6 BLOCK fix — fail-closed on DB
-  // unavailability. Cycle 10 returned silently here, which combined
-  // with the now-removed core try/catch meant the cursor was never
-  // loaded yet `inboxCursorLoadedFromDb` could still latch on a
-  // subsequent successful call. The contract is now:
+  // unavailability. The contract is:
   //   - tryGetDb null → throw, caller's catch decides retry
   //   - core throw  → propagate, no latch (retry on next call)
-  //   - core null   → legitimate "row absent" → latch to skip future loads
+  //   - core null   → legitimate "row absent" → latch per-agent
   const client = await tryGetDb()
   if (!client) {
     throw new Error('agent-comms: inbox cursor load — DB unavailable')
@@ -699,10 +714,10 @@ async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
     forAgent,
   )
   if (restored) {
-    inboxCursor = restored
+    state.cursor = restored
     process.stderr.write(`agent-comms: inbox cursor restored from DB for ${forAgent} (at=${restored.createdAt} id=${restored.id})\n`)
   }
-  inboxCursorLoadedFromDb = true
+  state.loaded = true
 }
 
 /**
@@ -754,7 +769,10 @@ async function persistInboxCursorToDb(
     cursor,
   )
   if (result.updated) {
-    inboxCursor = cursor
+    // PR-0 cycle 15 — per-agent cache slot. Cycle 9 wrote to the
+    // module-level cache here, which was visible to every bot in
+    // the process (cross-agent contamination on multi-bot factories).
+    getInboxCursorState(forAgent).cursor = cursor
   }
   return result
 }
@@ -772,13 +790,16 @@ async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]>
   }
   // Issue #287 — restore cursor from DB on first call after restart.
   await loadInboxCursorFromDb(forAgent)
+  // PR-0 cycle 15 — read this agent's slot, not the (now-removed)
+  // module-level cache. Multi-bot factory each gets its own cursor.
+  const agentCursorState = getInboxCursorState(forAgent)
   const { rows, nextCursor } = await fetchNewMessagesCore(
     forAgent,
     limit,
-    inboxCursor,
+    agentCursorState.cursor,
     { query: (sql, params) => client.query(sql, params) as any },
   )
-  if (nextCursor && nextCursor !== inboxCursor) {
+  if (nextCursor && nextCursor !== agentCursorState.cursor) {
     // PR-0 cycle 10 axis 1+5+6 BLOCK fix — delegate cache sync to the
     // wrapper, which only updates the module-level cursor when the DB
     // write actually took effect (RETURNING-confirmed). The cycle 9
