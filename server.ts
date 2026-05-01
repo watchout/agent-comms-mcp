@@ -92,7 +92,12 @@ import {
 import { splitMessage } from './core/message-split'
 import {
   fetchNewMessages as fetchNewMessagesCore,
+  reclaimSelfOrphanedClaims as reclaimSelfOrphanedClaimsCore,
+  startSelfReclaimSweeper as startSelfReclaimSweeperCore,
+  loadInboxCursorFromDb as loadInboxCursorFromDbCore,
+  persistInboxCursorToDb as persistInboxCursorToDbCore,
   type InboxCursor,
+  type ReclaimDb,
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
@@ -547,6 +552,25 @@ async function coreDbAdapter(): Promise<DbAdapter | null> {
   }
 }
 
+/**
+ * PR-0 (Issue #287) cycle 9 axis 1+2 BLOCK fix — strict variant of
+ * `coreDbAdapter()` for startup paths. Throws when the underlying DB
+ * is unreachable so the failure propagates to the top-level
+ * `mcp.connect(...).catch(err => process.exit(1))` boundary instead
+ * of silently skipping startup self-reclaim + sweepers (cycle 8 had
+ * `coreDbAdapter()` returning null on connection failure, leaving
+ * own claims permanently in `status='read'`). Callers must use this
+ * helper for any startup-time DB acquisition that the bot cannot
+ * boot without.
+ */
+export async function requireDbForStartup(): Promise<DbAdapter> {
+  const adapter = await coreDbAdapter()
+  if (!adapter) {
+    throw new Error('agent-comms: startup DB unavailable — refusing to boot with self-reclaim + sweepers offline')
+  }
+  return adapter
+}
+
 async function saveMessage(msg: {
   channel_id: string; author_id: string; content: string
   message_type?: string; reply_to?: string
@@ -649,20 +673,152 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
 // returns `created_at::text AS created_at_text` so the cursor value
 // preserves µs (PG timestamptz) and the next WHERE compares µs-precisely.
 // The id UUID tiebreaker covers µs-tied bursts.
-let inboxCursor: InboxCursor | null = null
+// PR-0 cycle 15 axis 1+3+4+5 BLOCK fix — per-agent cursor cache.
+// The earlier module-level `let inboxCursor` / `let
+// inboxCursorLoadedFromDb` were process-global, which broke the
+// per-agent cursor contract whenever a single process serves more
+// than one bot via the `registerTools(server, agentId)` factory /
+// `botContexts` (multi-bot mode). The first agent's `inbox` call
+// occupied the module-level cache and latched the loaded flag, so
+// later agents either replayed stale rows from the wrong cursor or
+// skipped their own unread entirely. This Map keys cache state by
+// agentId so each bot reads/writes its own slot.
+interface InboxCursorState {
+  cursor: InboxCursor | null
+  loaded: boolean
+}
+const inboxCursorByAgent: Map<string, InboxCursorState> = new Map()
+function getInboxCursorState(agentId: string): InboxCursorState {
+  let state = inboxCursorByAgent.get(agentId)
+  if (!state) {
+    state = { cursor: null, loaded: false }
+    inboxCursorByAgent.set(agentId, state)
+  }
+  return state
+}
+
+async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
+  const state = getInboxCursorState(forAgent)
+  if (state.loaded) return
+  // PR-0 cycle 11 axis 1+5+6 BLOCK fix — fail-closed on DB
+  // unavailability. The contract is:
+  //   - tryGetDb null → throw, caller's catch decides retry
+  //   - core throw  → propagate, no latch (retry on next call)
+  //   - core null   → legitimate "row absent" → latch per-agent
+  const client = await tryGetDb()
+  if (!client) {
+    throw new Error('agent-comms: inbox cursor load — DB unavailable')
+  }
+  const restored = await loadInboxCursorFromDbCore(
+    { query: (sql, params) => client.query(sql, params) as any },
+    forAgent,
+  )
+  if (restored) {
+    state.cursor = restored
+    process.stderr.write(`agent-comms: inbox cursor restored from DB for ${forAgent} (at=${restored.createdAt} id=${restored.id})\n`)
+  }
+  state.loaded = true
+}
+
+/**
+ * PR-0 (Issue #287) cycle 9 — single cursor advance entry point.
+ * After a successful DB persist, **synchronously update the
+ * module-level `inboxCursor` cache** so subsequent same-session
+ * `inbox` reads (which run off the in-memory cache, see
+ * `fetchNewMessages` below) see the advance the `next` path made.
+ *
+ * Without this sync the same-session sequence `inbox → next → inbox`
+ * regressed: `inbox` loaded the cursor once from DB, the `next`
+ * advance only updated DB, and the second `inbox` read the stale
+ * in-memory cursor and replayed already-delivered rows. CTO judgment
+ * 2026-05-01 (Fix 1A): the `persistInboxCursorToDb` helper carries
+ * the cache-sync responsibility itself, so neither writer can forget.
+ *
+ * `caller` may pass an already-acquired db client (the `next` path
+ * runs inside an open transaction); when omitted the helper grabs a
+ * fresh `tryGetDb()` client.
+ */
+async function persistInboxCursorToDb(
+  forAgent: string,
+  cursor: InboxCursor | null,
+  caller?: { client: { query: (sql: string, params?: any[]) => Promise<any> } },
+): Promise<{ updated: boolean }> {
+  if (!cursor) return { updated: false }
+  const client = caller?.client ?? (await tryGetDb())
+  if (!client) {
+    // PR-0 cycle 11 axis 1+5+6 BLOCK fix — fail-closed when DB is
+    // unavailable mid-session. The cycle 10 silent `{updated:false}`
+    // return allowed the caller (fetchNewMessages) to hand rows to
+    // the user without ever advancing the cursor, so the next inbox
+    // call re-delivered the same rows. Now the throw bubbles up to
+    // the orchestrator which rejects the whole call so the client
+    // never sees rows whose advance was lost.
+    throw new Error('agent-comms: inbox cursor persist — DB unavailable')
+  }
+  // PR-0 cycle 10 axis 1+5+6 BLOCK fix — gate the in-memory cache
+  // sync on the DB write actually taking effect. The core helper
+  // returns `{ updated: boolean }` from the UPDATE's RETURNING /
+  // rowCount, so older cursors rejected by the monotonic guard
+  // (rowCount = 0) leave the cache untouched. A thrown query also
+  // bypasses the cache write — the rejection bubbles up to the
+  // caller's catch (and ultimately the top-level startup catch for
+  // fail-closed behaviour).
+  const result = await persistInboxCursorToDbCore(
+    { query: (sql, params) => client.query(sql, params) as any },
+    forAgent,
+    cursor,
+  )
+  if (result.updated) {
+    // PR-0 cycle 15 — per-agent cache slot. Cycle 9 wrote to the
+    // module-level cache here, which was visible to every bot in
+    // the process (cross-agent contamination on multi-bot factories).
+    getInboxCursorState(forAgent).cursor = cursor
+  }
+  return result
+}
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
   const client = await tryGetDb()
-  if (!client) return [] // DBなしモード: 空配列
+  // PR-0 cycle 13 axis 1+3+4+5+6 BLOCK fix — fail-closed at the
+  // orchestrator entry point. Cycle 12 left a silent `[]` return
+  // here, which masked DB outages as `(no new messages)` and
+  // bypassed the fail-closed contract that cycle 11 established for
+  // Load/Persist wrappers. Per spec §4.8.1 / §5.3, DB unavailable
+  // must surface, not appear as success with empty results.
+  if (!client) {
+    throw new Error('agent-comms: inbox fetch — DB unavailable')
+  }
+  // Issue #287 — restore cursor from DB on first call after restart.
+  await loadInboxCursorFromDb(forAgent)
+  // PR-0 cycle 15 — read this agent's slot, not the (now-removed)
+  // module-level cache. Multi-bot factory each gets its own cursor.
+  const agentCursorState = getInboxCursorState(forAgent)
   const { rows, nextCursor } = await fetchNewMessagesCore(
     forAgent,
     limit,
-    inboxCursor,
+    agentCursorState.cursor,
     { query: (sql, params) => client.query(sql, params) as any },
   )
-  inboxCursor = nextCursor
+  if (nextCursor && nextCursor !== agentCursorState.cursor) {
+    // PR-0 cycle 10 axis 1+5+6 BLOCK fix — delegate cache sync to the
+    // wrapper, which only updates the module-level cursor when the DB
+    // write actually took effect (RETURNING-confirmed). The cycle 9
+    // version pre-emptively advanced the cache here before the await
+    // resolved, allowing concurrent / older cursors to leave the
+    // cache ahead of the DB and replay rows after a same-session
+    // monotonic-rejected write. See case 21 source pin.
+    await persistInboxCursorToDb(forAgent, nextCursor)
+  }
   return rows
 }
+
+// Issue #287 self-reclaim helpers live in core/inbox-cursor.ts (PR-0
+// cycle 5 axis 2 — extracted so tests can import them without
+// triggering server.ts module-level side effects like
+// resolveWebhookPort()). server.ts re-exports for back-compat with
+// any existing import sites.
+export const reclaimSelfOrphanedClaims = reclaimSelfOrphanedClaimsCore
+export const startSelfReclaimSweeper = startSelfReclaimSweeperCore
 
 // --- Rate Limiting (DB-persistent with in-memory fallback) ---
 async function checkRateLimit(agentId: string): Promise<{ allowed: boolean; remaining: number }> {
@@ -1686,6 +1842,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          WHERE agent_id = $1`,
         [agentId],
       )
+      // PR-0 (Issue #287) cycle 8 — single cursor writer per spec §4.8.1
+      // (CTO judgment 2026-05-01, auditor cycle 7 axis 1/2/4/5 BLOCK fix).
+      // Both `inbox` and `next` cursor advances now go through
+      // `persistInboxCursorToDb`, which carries the composite monotonic
+      // guard. The previous cycle 6/7 implementation embedded a raw
+      // UPDATE here that bypassed the guard, allowing an older `next` to
+      // regress a cursor that `inbox` had already advanced.
+      //
+      // `row.message_id` is `agent_messages.id` (UUID). When NULL the
+      // queue row has no agent_messages backing — it never appears in
+      // the `inbox` cursor stream, so we skip the cursor advance.
+      if (row.message_id) {
+        const amRow = await client.query(
+          `SELECT created_at::text AS created_at FROM agent_messages WHERE id = $1`,
+          [row.message_id],
+        )
+        if (amRow.rows.length > 0) {
+          // PR-0 cycle 9 axis 1 BLOCK fix — go through the unified
+          // `persistInboxCursorToDb` wrapper so the in-memory
+          // `inboxCursor` cache stays in sync with DB. Calling the
+          // core helper directly (cycle 8) bypassed the cache, so a
+          // same-session `inbox` after `next` reverted to the stale
+          // pre-next cursor and replayed delivered rows.
+          await persistInboxCursorToDb(
+            agentId,
+            { createdAt: String(amRow.rows[0].created_at), id: String(row.message_id) },
+            { client },
+          )
+        }
+      }
       await client.query('COMMIT')
 
       let payload: Record<string, unknown> = {}
@@ -3494,24 +3680,63 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     }
   }
 
-  // Issue #278 (A) segment 3b — install expired-claim sweeper. Flips
-  // orphaned `status='read'` rows whose claim_expires_at is in the
-  // past to `failed_reason='IMPLICIT_ABANDON'`. Shares the
-  // AGENT_COMMS_TTL_SWEEP_DISABLED kill switch so tests / one-shot
-  // CLIs disable both sweepers at once. Interval is independently
-  // env-overridable via AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS (default
-  // 5 min) per Issue #278 §5 Open decisions.
+  // Issue #287 cycle 7 axis 1 BLOCK fix — startup order: self-reclaim FIRST,
+  // claim-ttl SECOND. The previous order (claim-ttl first, with
+  // `setTimeout(fire, 0)` immediate sweep in core/claim-ttl.ts) raced
+  // ahead of self-reclaim and converted own expired claims to
+  // `failed/IMPLICIT_ABANDON` before the self-reclaim path could roll
+  // them back to `pending`, defeating the restart-recovery contract.
+  //
+  // Order:
+  //   (1) `await reclaimSelfOrphanedClaims(...)` — synchronous, must
+  //       complete before any sweeper starts.
+  //   (2) `startSelfReclaimSweeper(...)` — periodic 60s self-reclaim
+  //       for claims that expire mid-session.
+  //   (3) `startClaimTtlSweeper(... selfAgentId: AGENT_ID)` — the
+  //       `selfAgentId` predicate excludes own rows from the
+  //       IMPLICIT_ABANDON sweep. Belt-and-braces: even if the
+  //       sweeper's `setTimeout(fire, 0)` races ahead of
+  //       `startSelfReclaimSweeper`, own rows are not flipped to
+  //       `failed`.
   if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
-    try {
-      const claimDb = await coreDbAdapter()
-      if (claimDb) {
-        const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
-        startClaimTtlSweeper(claimDb, { intervalMs })
-        process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON)\n`)
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
+    // PR-0 cycle 8 axis 3 BLOCK fix — fail-closed startup. The
+    // `await reclaimSelfOrphanedClaims(...)` is no longer wrapped in a
+    // local try/catch that swallows the error; its rejection
+    // propagates to the top-level startup catch and exits the process
+    // with code 1. Allowing the bot to continue boot when reclaim
+    // fails leaves own queue rows in `status='read'` forever
+    // (claim-ttl sweeper excludes self via `selfAgentId`), so a silent
+    // skip would defeat the entire PR. launchd/systemd restart on
+    // exit covers transient DB hiccups; persistent failures surface
+    // loudly for root-cause work.
+    // PR-0 cycle 9 axis 1+2 BLOCK fix — `requireDbForStartup` throws
+    // on null instead of silently skipping. The throw propagates to
+    // the top-level `.catch(err => process.exit(1))`, so connection
+    // failure at boot is loud rather than hidden.
+    const reclaimDb = await requireDbForStartup()
+    // PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — per-bot recovery wiring.
+    // The cycle 7-15 implementation only ran startup self-reclaim +
+    // periodic sweeper for the primary `AGENT_ID`. In multi-bot
+    // factory mode (`EXPECTED_BOTS` / `createBotServer(botId)`) one
+    // process hosts up to 18 bots; each one must own-reclaim
+    // independently and the shared claim-TTL sweep must exclude
+    // every hosted bot's claims (otherwise the other bots' expired
+    // claims land in `failed/IMPLICIT_ABANDON` rather than
+    // `pending`). Build the list once (`AGENT_ID` deduped against
+    // `EXPECTED_BOTS`), loop per-bot for self-reclaim + periodic
+    // sweeper install, then install one shared claim-TTL sweeper
+    // with the full `selfAgentIds` exclusion list.
+    const hostedAgentIds = Array.from(new Set([AGENT_ID, ...EXPECTED_BOTS])).filter((id) => !!id && id !== 'unknown')
+    const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
+    for (const botId of hostedAgentIds) {
+      const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, botId)
+      process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${botId})\n`)
+      startSelfReclaimSweeper(reclaimDb, botId, { intervalMs: reclaimIntervalMs })
+      process.stderr.write(`agent-comms: self-reclaim sweeper started for ${botId} (interval=${reclaimIntervalMs}ms)\n`)
     }
+    const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
+    startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentIds: hostedAgentIds })
+    process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentIds=[${hostedAgentIds.join(',')}])\n`)
   }
 
   // Connect Per-Bot Discord Clients for all expected bots at startup

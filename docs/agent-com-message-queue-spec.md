@@ -460,7 +460,7 @@ ORDER BY created_at ASC, id ASC
 
 1. `created_at` を主キー (µs 粒度) に、`id` を同 µs 内行の tiebreaker として用いる。UUID v4 は時系列順でないため単独 cursor としては使わない。cursor は `created_at_text` companion column 経由で µs 精度を保持する (JS `Date` は ms 粒度に丸めるため)
 2. cursor 進める条件は rows.length > 0 のみ。empty 結果では cursor を保持 (再試行で取りこぼさない)
-3. cursor は process 単位の in-memory state、restart で null に戻る (restart 直後は全 unread を返すためカーソル overrun リスクなし)
+3. **cursor は DB persisted** (`agents.inbox_cursor_at TIMESTAMPTZ` + `agents.inbox_cursor_id UUID`、Issue #287 / PR-0 #291)。in-memory コピーは process cache 扱いで、`fetchNewMessages` 初回呼出で DB から復元、advance 毎に `UPDATE agents SET inbox_cursor_at=$1, inbox_cursor_id=$2 WHERE agent_id=$3` で write-back。restart 直後でも前 session の最終 cursor から再開し、stale pending を再配信しない (Stage B 4 cycle で再発した restart→stale-redelivery 問題の真因対処)
 4. 行の `metadata->>'to' = $agent_id` filter は cursor と独立。route 判定は handleInboundMessage Step 7b で確定済
 
 **SQL 形式の注意**: 行値比較 `(created_at, id) > ROW($3, $4)` は node-postgres で型推論エラーを誘発するため **expanded form** で書く (`created_at > $3 OR (created_at = $3 AND id > $4)`)。同値。
@@ -593,7 +593,11 @@ SIGTERM/SIGINT で SHUTDOWN flag → drain loop の次 iteration で break。現
 
 #### orphan reclaim
 
-daemon heartbeat monitor (30s 間隔) が `status='read' AND read_at < NOW() - 15 minutes` の行を pending に戻す。同時に `agents.current_message_id` もクリア (transaction 内)。
+**self-reclaim (Issue #287 / PR-0 #291)**: 各 bot の server.ts 起動時、**(a) `await reclaimSelfOrphanedClaims(...)` で同期 startup reclaim を完了させてから** (b) 60s 間隔の periodic sweeper、(c) claim-ttl sweeper の順で起動する (`AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS` で上書き可、kill switch `AGENT_COMMS_TTL_SWEEP_DISABLED=1`)。(a)/(b) とも自分の `claimed_by = $self AND status='read'` 行のみ対象、(a) は `claim_expires_at IS NULL OR claim_expires_at < now()` (TTL 内の active claim は yank 禁止 — 二重起動 / 遅延起動が legitimate worker から msg を奪うのを防ぐ)、(b) は `claim_expires_at IS NOT NULL AND claim_expires_at < now()` (TTL 経過必須)。`status='read' → 'pending'` 遷移直後に `agents.status` を `CASE WHEN EXISTS(...) THEN 'busy' ELSE 'idle' END` で派生 update する (sender-feedback の busy/idle 分岐を狂わせない、Issue #287 cycle 7 axis 2/3 BLOCK fix)。cursor も DB persist (§4.8.1) で復元されるため再配信が正しく届く。`agents.current_message_id` は Issue #278 (A) segment 3d で削除済 (per-row claim model に移行)。
+
+`core/claim-ttl.ts` の `sweepExpiredClaims` (5min 間隔、`status='read' AND claim_expires_at < now()` を `failed/IMPLICIT_ABANDON`) は **`selfAgentId` predicate で own 行を構造的に除外** する (Issue #287 cycle 7 axis 1)。startup 順序入替 + own 行除外の二重 guard により、sweeper の `setTimeout(fire, 0)` が self-reclaim より早く発火しても own claim が `failed/IMPLICIT_ABANDON` に流れることはない。other agents の真の abandon は claim-ttl 経由で `failed` に確定する。
+
+**sweeper も fail-closed** (PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix): periodic self-reclaim sweeper + claim-TTL sweeper 双方の `fire()` ループで例外を non-fatal log だけして継続する pattern を廃止。production path は `process.exit(1)` で run-bot.sh / launchd / systemd 経由 restart に委譲、test path は `onError` callback inject で観測。silent skip による "stuck read" / "stale busy-idle" 回帰を構造排除。
 
 #### heartbeat (run-bot.sh 責務)
 
@@ -924,7 +928,7 @@ function routeInbound(
 offline → idle:          heartbeat受信時
 idle → busy:             next実行時
 busy → idle:             send / fail / skip CLI 実行時
-busy → idle:             orphan reclaim (15分 timeout) 時
+busy → idle:             orphan reclaim (self-reclaim 60s periodic / claim-ttl 5min sweep、Issue #287 PR-0 #291 で 15min daemon polling から差替え)
 idle/busy → disconnected: heartbeat 90秒途絶
 disconnected → idle:      heartbeat再開時
 ```

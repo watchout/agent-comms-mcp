@@ -159,9 +159,23 @@ export function migrateSqlite(dbPath?: string): void {
       -- claim model on message_queue (claimed_by / claimed_at /
       -- claim_expires_at) replaces it.
       metadata TEXT DEFAULT '{}',
+      -- Issue #287 (PR-0 cycle 5 axis 4) — inbox cursor persistence
+      -- mirrors PG schema added in db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
+      -- so SQLite-backed deployments survive session restarts identically.
+      inbox_cursor_at TEXT,
+      inbox_cursor_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
+  // Idempotent ADD COLUMN for pre-#287 SQLite DBs.
+  const agentsCols = db.query(`PRAGMA table_info(agents)`).all() as Array<{ name: string }>
+  const agentsColNames = new Set(agentsCols.map((c) => c.name))
+  if (!agentsColNames.has('inbox_cursor_at')) {
+    db.exec(`ALTER TABLE agents ADD COLUMN inbox_cursor_at TEXT`)
+  }
+  if (!agentsColNames.has('inbox_cursor_id')) {
+    db.exec(`ALTER TABLE agents ADD COLUMN inbox_cursor_id TEXT`)
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS channels (

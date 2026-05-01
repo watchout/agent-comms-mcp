@@ -25,7 +25,7 @@ function adaptSql(sql: string): string {
   // (all integer arithmetic returns INTEGER). Strip common numeric casts; the
   // caller inspects by shape (count/integer comparisons) so removing the cast
   // is harmless.
-  s = s.replace(/::\s*(int|integer|bigint|smallint|text|float|numeric|decimal|boolean|bool)\b/gi, '')
+  s = s.replace(/::\s*(int|integer|bigint|smallint|text|float|numeric|decimal|boolean|bool|timestamptz|timestamp|date|uuid|jsonb)\b/gi, '')
   return s
 }
 

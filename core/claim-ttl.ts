@@ -30,6 +30,28 @@ export interface ClaimTtlDb {
 
 export interface ClaimTtlOptions {
   reason?: string
+  /**
+   * PR-0 (Issue #287) cycle 7 axis 1 BLOCK fix: when set, the sweeper
+   * excludes this agent's own claims from the IMPLICIT_ABANDON predicate.
+   * Self-owned expired claims are reclaimed (read → pending) by
+   * `core/inbox-cursor.ts:startSelfReclaimSweeper` instead, which is the
+   * authoritative path for own-orphan recovery after Issue #287.
+   * Without this exclusion the claim-ttl sweep races the self-reclaim
+   * path on startup (claim-ttl `setTimeout(fire, 0)` fires before
+   * self-reclaim) and own claims land in `failed/IMPLICIT_ABANDON`
+   * instead of `pending`, defeating the restart-recovery contract.
+   */
+  selfAgentId?: string
+  /**
+   * PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — multi-bot fleet support.
+   * In factory mode (`createBotServer(botId)` / `EXPECTED_BOTS`) one
+   * process hosts many bots; the single-process claim-TTL sweeper
+   * must exclude *all* of them from the IMPLICIT_ABANDON predicate,
+   * not just the primary `AGENT_ID`. When provided, this list takes
+   * precedence over `selfAgentId` (which remains for legacy
+   * single-agent callers).
+   */
+  selfAgentIds?: string[]
 }
 
 /**
@@ -37,6 +59,9 @@ export interface ClaimTtlOptions {
  * `claim_expires_at` is in the past to `status='failed'` with
  * `failed_reason` (default 'IMPLICIT_ABANDON'). Idempotent: rows that
  * have already been flipped no longer match the predicate.
+ *
+ * When `opts.selfAgentId` is set, rows owned by that agent are
+ * excluded (handled by self-reclaim, see Issue #287 cycle 7).
  *
  * Returns the number of rows updated, useful for observability /
  * test assertions.
@@ -46,6 +71,44 @@ export async function sweepExpiredClaims(
   opts: ClaimTtlOptions = {},
 ): Promise<number> {
   const reason = opts.reason ?? 'IMPLICIT_ABANDON'
+  // PR-0 cycle 16 — prefer the multi-bot list when provided. The
+  // `selfAgentIds` array is funneled into a single SQL `<> ALL($2)`
+  // predicate so all hosted bots are excluded in one pass without
+  // serialising per-bot sweeps.
+  if (opts.selfAgentIds && opts.selfAgentIds.length > 0) {
+    // PR-0 cycle 16 — generate `NOT IN ($2, $3, ...)` dynamically so
+    // both pg and SQLite accept the predicate (`<> ALL($2)` is a
+    // PG-only array form). The placeholder offset starts at $2 since
+    // $1 holds the failure reason.
+    const placeholders = opts.selfAgentIds.map((_, i) => `$${i + 2}`).join(', ')
+    const result: any = await db.query(
+      `UPDATE message_queue
+       SET status = 'failed', failed_reason = $1
+       WHERE status = 'read'
+         AND claimed_by IS NOT NULL
+         AND claimed_by NOT IN (${placeholders})
+         AND claim_expires_at IS NOT NULL
+         AND claim_expires_at < now()
+       RETURNING id`,
+      [reason, ...opts.selfAgentIds],
+    )
+    const rc = result?.rowCount
+    if (typeof rc === 'number') return rc
+    return Array.isArray(result?.rows) ? result.rows.length : 0
+  }
+  if (opts.selfAgentId) {
+    const result = await db.query(
+      `UPDATE message_queue
+       SET status = 'failed', failed_reason = $1
+       WHERE status = 'read'
+         AND claimed_by IS NOT NULL
+         AND claimed_by <> $2
+         AND claim_expires_at IS NOT NULL
+         AND claim_expires_at < now()`,
+      [reason, opts.selfAgentId],
+    )
+    return result.rowCount ?? 0
+  }
   const result = await db.query(
     `UPDATE message_queue
      SET status = 'failed', failed_reason = $1
@@ -75,8 +138,20 @@ export function startClaimTtlSweeper(
         process.stderr.write(`agent-comms: claim ttl sweep — ${failed} expired claims flipped to IMPLICIT_ABANDON\n`)
       }
     } catch (err) {
+      // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — fail-closed instead
+      // of log-and-continue. A continuously-failing claim-TTL sweep
+      // lets other agents' truly-abandoned claims pile up in
+      // `status='read'`, which is the very stuck-read regression
+      // this PR is supposed to prevent. Tests inject `onError` to
+      // inspect; production exits with code 1 so the supervisor
+      // restarts into a clean state.
       const e = err instanceof Error ? err : new Error(String(err))
-      opts.onError ? opts.onError(e) : process.stderr.write(`agent-comms: claim ttl sweep failed: ${e.message}\n`)
+      process.stderr.write(`agent-comms: claim ttl sweep FAILED: ${e.message}\n`)
+      if (opts.onError) {
+        opts.onError(e)
+      } else {
+        process.exit(1)
+      }
     }
   }
   const timer = setInterval(fire, intervalMs)
