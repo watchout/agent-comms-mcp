@@ -103,8 +103,20 @@ export function startClaimTtlSweeper(
         process.stderr.write(`agent-comms: claim ttl sweep — ${failed} expired claims flipped to IMPLICIT_ABANDON\n`)
       }
     } catch (err) {
+      // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — fail-closed instead
+      // of log-and-continue. A continuously-failing claim-TTL sweep
+      // lets other agents' truly-abandoned claims pile up in
+      // `status='read'`, which is the very stuck-read regression
+      // this PR is supposed to prevent. Tests inject `onError` to
+      // inspect; production exits with code 1 so the supervisor
+      // restarts into a clean state.
       const e = err instanceof Error ? err : new Error(String(err))
-      opts.onError ? opts.onError(e) : process.stderr.write(`agent-comms: claim ttl sweep failed: ${e.message}\n`)
+      process.stderr.write(`agent-comms: claim ttl sweep FAILED: ${e.message}\n`)
+      if (opts.onError) {
+        opts.onError(e)
+      } else {
+        process.exit(1)
+      }
     }
   }
   const timer = setInterval(fire, intervalMs)

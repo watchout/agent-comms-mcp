@@ -191,20 +191,23 @@ export async function reclaimSelfOrphanedClaims(
  * PR-0 cycle 7 axis 2/3 BLOCK fix — derive `agents.status` from the
  * agent's open-claim set. Idempotent: callers should invoke after any
  * status='read' transition (claim or reclaim).
+ *
+ * PR-0 cycle 14 axis 1/2/3/5/6 BLOCK fix — try/catch removed.
+ * `reclaimSelfOrphanedClaims` and the periodic sweepers must surface
+ * a status-sync failure rather than masking it as success: a stale
+ * `agents.status` causes sender-feedback's busy/idle branch to
+ * misroute notifications, so the right move is fail-closed
+ * propagation, not non-fatal log.
  */
 async function syncAgentStatusFromClaims(db: ReclaimDb, agentId: string): Promise<void> {
-  try {
-    await db.query(
-      `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
-         status_updated_at = now()
-       WHERE agent_id = $1`,
-      [agentId],
-    )
-  } catch (err) {
-    process.stderr.write(`agent-comms: agents.status sync after reclaim failed (non-fatal): ${err}\n`)
-  }
+  await db.query(
+    `UPDATE agents SET
+       status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+       status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+       status_updated_at = now()
+     WHERE agent_id = $1`,
+    [agentId],
+  )
 }
 
 /**
@@ -216,7 +219,7 @@ async function syncAgentStatusFromClaims(db: ReclaimDb, agentId: string): Promis
 export function startSelfReclaimSweeper(
   db: ReclaimDb,
   agentId: string,
-  opts: { intervalMs?: number } = {},
+  opts: { intervalMs?: number; onError?: (err: Error) => void } = {},
 ): NodeJS.Timer {
   const intervalMs = opts.intervalMs ?? 60_000  // 60s
   const fire = async () => {
@@ -245,7 +248,21 @@ export function startSelfReclaimSweeper(
       // the cached agents.status in sync with the live claim set.
       await syncAgentStatusFromClaims(db, agentId)
     } catch (err) {
-      process.stderr.write(`agent-comms: periodic self-reclaim failed (non-fatal): ${err}\n`)
+      // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — fail-closed instead
+      // of swallowing. With self-claim excluded from the claim-TTL
+      // sweep (`selfAgentId` predicate), a continuously-failing
+      // periodic self-reclaim leaves own expired claims stuck in
+      // `read` forever. Surface the failure: tests can inject
+      // `onError` to inspect; production logs the error and exits
+      // with code 1 so run-bot.sh / launchd / systemd restart cycles
+      // the bot into a clean state.
+      const e = err instanceof Error ? err : new Error(String(err))
+      process.stderr.write(`agent-comms: periodic self-reclaim FAILED for ${agentId}: ${e.message}\n`)
+      if (opts.onError) {
+        opts.onError(e)
+      } else {
+        process.exit(1)
+      }
     }
   }
   const timer = setInterval(fire, intervalMs)

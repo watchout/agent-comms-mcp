@@ -597,6 +597,8 @@ SIGTERM/SIGINT で SHUTDOWN flag → drain loop の次 iteration で break。現
 
 `core/claim-ttl.ts` の `sweepExpiredClaims` (5min 間隔、`status='read' AND claim_expires_at < now()` を `failed/IMPLICIT_ABANDON`) は **`selfAgentId` predicate で own 行を構造的に除外** する (Issue #287 cycle 7 axis 1)。startup 順序入替 + own 行除外の二重 guard により、sweeper の `setTimeout(fire, 0)` が self-reclaim より早く発火しても own claim が `failed/IMPLICIT_ABANDON` に流れることはない。other agents の真の abandon は claim-ttl 経由で `failed` に確定する。
 
+**sweeper も fail-closed** (PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix): periodic self-reclaim sweeper + claim-TTL sweeper 双方の `fire()` ループで例外を non-fatal log だけして継続する pattern を廃止。production path は `process.exit(1)` で run-bot.sh / launchd / systemd 経由 restart に委譲、test path は `onError` callback inject で観測。silent skip による "stuck read" / "stale busy-idle" 回帰を構造排除。
+
 #### heartbeat (run-bot.sh 責務)
 
 background process で 30 秒ごとに `agent-com heartbeat` を送信。LLM 処理中も heartbeat 継続。daemon から disconnected と誤判定されない。

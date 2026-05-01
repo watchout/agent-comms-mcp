@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 27-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 30-case merge gate.
  *
  * Cumulative case map across cycles 4–8:
  *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
@@ -779,5 +779,84 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     // fallback may remain.
     expect(window).toContain("throw new Error('agent-comms: inbox fetch — DB unavailable')")
     expect(window).not.toContain('return []')
+  })
+
+  // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — `syncAgentStatusFromClaims`
+  // (called inside `reclaimSelfOrphanedClaims` and the periodic sweeper)
+  // no longer swallows DB errors. A throw must bubble up through the
+  // caller so a status-sync failure surfaces rather than masking
+  // sender-feedback / bot_status as healthy. Test contract: when the
+  // status UPDATE throws, the caller (reclaimSelfOrphanedClaims)
+  // also throws and the message_queue UPDATE that ran first is left
+  // visible for diagnosis (no rollback semantics here — the contract
+  // is "errors are loud").
+  test('case 28 — syncAgentStatusFromClaims errors propagate through reclaimSelfOrphanedClaims', async () => {
+    let queryCount = 0
+    const partialDb: import('../core/inbox-cursor').ReclaimDb = {
+      async query(sql: string, _params?: any[]): Promise<any> {
+        queryCount += 1
+        if (queryCount === 1) {
+          // First call = the message_queue UPDATE. Pretend the
+          // reclaim itself succeeded (no rows affected, but no error).
+          return { rows: [], rowCount: 0 }
+        }
+        // Second call = syncAgentStatusFromClaims's UPDATE. Throw to
+        // simulate a transient DB error during status derivation.
+        throw new Error('simulated agents.status sync failure')
+      },
+    }
+    let caught: Error | null = null
+    try {
+      await reclaimSelfOrphanedClaims(partialDb, 'me')
+    } catch (err) {
+      caught = err as Error
+    }
+    expect(caught).not.toBeNull()
+    expect(caught?.message).toContain('simulated agents.status sync failure')
+  })
+
+  // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — periodic self-reclaim
+  // sweeper fail-closed contract. When the underlying query throws
+  // inside `fire()`, the sweeper invokes `opts.onError` (inject point
+  // for tests) instead of silently logging-and-continuing. Production
+  // path falls through to `process.exit(1)` so run-bot.sh restarts.
+  test('case 29 — startSelfReclaimSweeper invokes onError on query failure (fail-closed)', async () => {
+    const failingDb: import('../core/inbox-cursor').ReclaimDb = {
+      query: async () => {
+        throw new Error('simulated periodic self-reclaim failure')
+      },
+    }
+    const errors: Error[] = []
+    const timer = startSelfReclaimSweeper(failingDb, 'me', {
+      intervalMs: 30,
+      onError: (err) => { errors.push(err) },
+    })
+    await new Promise((r) => setTimeout(r, 80))
+    clearInterval(timer as any)
+    expect(errors.length).toBeGreaterThan(0)
+    expect(errors[0].message).toContain('simulated periodic self-reclaim failure')
+  })
+
+  // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — claim-TTL sweeper
+  // fail-closed contract, mirror of case 29 for the other-agent
+  // claim recovery path. A continuously-failing claim-TTL sweep
+  // would leave truly-abandoned claims piling up in `status='read'`;
+  // production exits, tests inject `onError`.
+  test('case 30 — startClaimTtlSweeper invokes onError on query failure (fail-closed)', async () => {
+    const failingDb = {
+      query: async () => {
+        throw new Error('simulated claim-ttl sweep failure')
+      },
+    }
+    const { startClaimTtlSweeper } = await import('../core/claim-ttl')
+    const errors: Error[] = []
+    const timer = startClaimTtlSweeper(failingDb as any, {
+      intervalMs: 30,
+      onError: (err) => { errors.push(err) },
+    })
+    await new Promise((r) => setTimeout(r, 80))
+    clearInterval(timer as any)
+    expect(errors.length).toBeGreaterThan(0)
+    expect(errors[0].message).toContain('simulated claim-ttl sweep failure')
   })
 })
