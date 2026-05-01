@@ -1830,6 +1830,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          WHERE agent_id = $1`,
         [agentId],
       )
+      // PR-0 (Issue #287) §1 verbatim — `UPDATE agents SET inbox_cursor_at=NOW()
+      // WHERE agent_id=$1` で cursor 進行. Fires on every successful `next` pop
+      // so a session restart resumes from "this point in time" instead of
+      // replaying the oldest 20 stale pending rows. Coarse (timestamp-only) by
+      // design — the precise composite cursor on the `inbox` tool path uses
+      // inbox_cursor_id + inbox_cursor_at together.
+      await client.query(
+        `UPDATE agents SET inbox_cursor_at = now() WHERE agent_id = $1`,
+        [agentId],
+      )
       await client.query('COMMIT')
 
       let payload: Record<string, unknown> = {}
