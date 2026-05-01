@@ -284,38 +284,65 @@ export async function loadInboxCursorFromDb(
 }
 
 /**
- * PR-0 cycle 7 axis 4 BLOCK fix — write the cursor atomically with a
- * monotonic guard. Earlier `cursor20` UPDATEs that arrive after a
- * `cursor40` UPDATE (concurrent inbox reads) are no-ops because the
- * `WHERE` clause demands strictly-greater composite (at, id) than what
- * is already stored. NULL stored cursor = first write wins
- * unconditionally. The previous fire-and-forget `.catch()` allowed an
- * older UPDATE to overwrite a newer one, regressing the DB cursor and
- * causing duplicate replay after restart.
+ * PR-0 cycle 7+10 — write the cursor atomically with a monotonic guard.
+ * Earlier `cursor20` UPDATEs that arrive after a `cursor40` UPDATE
+ * (concurrent reads) are no-ops because the `WHERE` clause demands
+ * strictly-greater composite (at, id) than what is already stored.
+ * NULL stored cursor = first write wins unconditionally.
+ *
+ * Cycle 10 axis 1+5+6 BLOCK fix — the helper now returns
+ * `{ updated: boolean }` and propagates query errors via throw
+ * (no more error-swallowing try/catch). Callers use the boolean to
+ * gate any in-memory cache update so that:
+ *   - DB UPDATE no-op (older cursor monotonic-rejected) ⇒
+ *     `updated === false` ⇒ caller leaves cache unchanged.
+ *   - DB query error ⇒ helper throws ⇒ caller never reaches the
+ *     cache write path; the rejection bubbles up to the top-level
+ *     startup catch (`mcp.connect(...).catch(err => process.exit(1))`)
+ *     for fail-closed behaviour.
+ *
+ * `rowCount` semantics:
+ *   - `pg`'s node-postgres returns rows-affected via `result.rowCount`.
+ *   - SQLite via `core/db/sqlite-adapter.ts` exposes the same field
+ *     (the adapter's `query` wraps `Database.prepare(sql).run()` for
+ *     non-SELECTs; `pgWrap` in tests promotes the rows array to
+ *     `{ rows, rowCount: rows.length }`). For UPDATE returning no
+ *     rows, both engines yield rowCount 0 / falsy, which we treat as
+ *     `updated: false`.
  */
 export async function persistInboxCursorToDb(
   db: ReclaimDb | null | undefined,
   agentId: string,
   cursor: InboxCursor | null,
-): Promise<void> {
-  if (!db || !cursor) return
-  try {
-    await db.query(
-      `UPDATE agents SET
-         inbox_cursor_at = $1::timestamptz,
-         inbox_cursor_id = $2::uuid
-       WHERE agent_id = $3
-         AND (
-           inbox_cursor_at IS NULL
-           OR inbox_cursor_at < $1::timestamptz
-           OR (inbox_cursor_at = $1::timestamptz
-               AND (inbox_cursor_id IS NULL OR inbox_cursor_id < $2::uuid))
-         )`,
-      [cursor.createdAt, cursor.id, agentId],
-    )
-  } catch (err) {
-    process.stderr.write(`agent-comms: inbox cursor DB persist failed (non-fatal): ${err}\n`)
+): Promise<{ updated: boolean }> {
+  if (!db || !cursor) return { updated: false }
+  // `RETURNING agent_id` lets both pg (rowCount) and SQLite (rows
+  // array via .all()) report success uniformly: the row is in the
+  // result iff the monotonic guard accepted the write. Without
+  // RETURNING the SQLite adapter's `.all()` always returns `[]` for
+  // an UPDATE and we could not distinguish "guard rejected" from
+  // "row updated".
+  const result: any = await db.query(
+    `UPDATE agents SET
+       inbox_cursor_at = $1::timestamptz,
+       inbox_cursor_id = $2::uuid
+     WHERE agent_id = $3
+       AND (
+         inbox_cursor_at IS NULL
+         OR inbox_cursor_at < $1::timestamptz
+         OR (inbox_cursor_at = $1::timestamptz
+             AND (inbox_cursor_id IS NULL OR inbox_cursor_id < $2::uuid))
+       )
+     RETURNING agent_id`,
+    [cursor.createdAt, cursor.id, agentId],
+  )
+  const rowCount: number | null | undefined = result?.rowCount
+  if (typeof rowCount === 'number') {
+    return { updated: rowCount > 0 }
   }
+  // Fallback: count rows when adapter doesn't surface rowCount.
+  const rows = result?.rows
+  return { updated: Array.isArray(rows) && rows.length > 0 }
 }
 
 export async function fetchNewMessages(

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 18-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 21-case merge gate.
  *
  * Cumulative case map across cycles 4–8:
  *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
@@ -569,5 +569,69 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     // the wrapper's post-await assignment).
     expect(after[0].inbox_cursor_at).toBe(cursor.createdAt)
     expect(after[0].inbox_cursor_id).toBe(cursor.id)
+  })
+
+  // PR-0 cycle 10 axis 1+5+6 BLOCK fix — `persistInboxCursorToDb` now
+  // returns `{ updated: boolean }` and propagates query errors via
+  // throw (no error-swallowing try/catch). A throwing query MUST
+  // surface to the caller so downstream cache-sync code is skipped.
+  test('case 19 — persistInboxCursorToDb throws when DB query throws (cache untouched)', async () => {
+    const failingDb: import('../core/inbox-cursor').ReclaimDb = {
+      query: async () => {
+        throw new Error('simulated persist DB error')
+      },
+    }
+    const cursor = { createdAt: '2026-05-01T00:00:00.500000Z', id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }
+    let caught: Error | null = null
+    try {
+      await persistInboxCursorToDb(failingDb, 'me', cursor)
+    } catch (err) {
+      caught = err as Error
+    }
+    expect(caught).not.toBeNull()
+    expect(caught?.message).toContain('simulated persist DB error')
+  })
+
+  // PR-0 cycle 10 axis 1+5+6 BLOCK fix — when the monotonic guard
+  // rejects an older cursor (UPDATE 0 rows), `{ updated: false }` is
+  // returned so the wrapper leaves the in-memory cache unchanged.
+  // The DB stored cursor must remain on the newer value.
+  test('case 20 — persistInboxCursorToDb returns updated:false when monotonic guard rejects', async () => {
+    await db.execute(`INSERT INTO agents (agent_id) VALUES ('me')`)
+    const newer = { createdAt: '2026-05-01T00:00:00.400000Z', id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }
+    const older = { createdAt: '2026-05-01T00:00:00.200000Z', id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }
+    const first = await persistInboxCursorToDb(pgWrap(db), 'me', newer)
+    expect(first.updated).toBe(true)
+    const second = await persistInboxCursorToDb(pgWrap(db), 'me', older)
+    expect(second.updated).toBe(false)
+    const stored = await db.query<{ inbox_cursor_at: string; inbox_cursor_id: string }>(
+      `SELECT inbox_cursor_at, inbox_cursor_id FROM agents WHERE agent_id = 'me'`,
+    )
+    expect(stored[0].inbox_cursor_at).toBe(newer.createdAt)
+    expect(stored[0].inbox_cursor_id).toBe(newer.id)
+  })
+
+  // PR-0 cycle 10 axis 1+5+6 BLOCK fix — `fetchNewMessages` no longer
+  // pre-emptively writes the in-memory cache before awaiting the
+  // persist. The cache sync is delegated to the wrapper, which only
+  // advances `inboxCursor` after RETURNING confirms the DB write took
+  // effect. Source-level pin: between the cursor advance check and
+  // the persist call, there must be no `inboxCursor =` assignment.
+  test('case 21 — fetchNewMessages does not pre-emptively assign inboxCursor (source pin)', () => {
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
+    // Locate the fetchNewMessages cursor advance block and inspect a
+    // window of source around it. A pre-emptive write would look like
+    // `inboxCursor = nextCursor` directly inside the if-guard before
+    // the await. Using a narrow source window keeps the pin specific.
+    const advanceIfIdx = serverSrc.indexOf('if (nextCursor && nextCursor !== inboxCursor)')
+    expect(advanceIfIdx).toBeGreaterThan(0)
+    const persistCallIdx = serverSrc.indexOf('await persistInboxCursorToDb(forAgent, nextCursor)', advanceIfIdx)
+    expect(persistCallIdx).toBeGreaterThan(advanceIfIdx)
+    const window = serverSrc.slice(advanceIfIdx, persistCallIdx)
+    // No direct module-level cursor write in this window — the
+    // wrapper owns cache sync now.
+    expect(window).not.toContain('inboxCursor = nextCursor')
+    expect(window).not.toContain('inboxCursor =')
   })
 })

@@ -721,20 +721,27 @@ async function persistInboxCursorToDb(
   forAgent: string,
   cursor: InboxCursor | null,
   caller?: { client: { query: (sql: string, params?: any[]) => Promise<any> } },
-): Promise<void> {
-  if (!cursor) return
+): Promise<{ updated: boolean }> {
+  if (!cursor) return { updated: false }
   const client = caller?.client ?? (await tryGetDb())
-  if (!client) return
-  await persistInboxCursorToDbCore(
+  if (!client) return { updated: false }
+  // PR-0 cycle 10 axis 1+5+6 BLOCK fix — gate the in-memory cache
+  // sync on the DB write actually taking effect. The core helper
+  // returns `{ updated: boolean }` from the UPDATE's RETURNING /
+  // rowCount, so older cursors rejected by the monotonic guard
+  // (rowCount = 0) leave the cache untouched. A thrown query also
+  // bypasses the cache write — the rejection bubbles up to the
+  // caller's catch (and ultimately the top-level startup catch for
+  // fail-closed behaviour).
+  const result = await persistInboxCursorToDbCore(
     { query: (sql, params) => client.query(sql, params) as any },
     forAgent,
     cursor,
   )
-  // Cache sync — only after the DB write resolves, so a thrown
-  // persist leaves the cache untouched. Callers can still observe a
-  // monotonic-guard no-op via `inboxCursor` being unchanged when an
-  // older cursor is rejected by the SQL `WHERE` clause.
-  inboxCursor = cursor
+  if (result.updated) {
+    inboxCursor = cursor
+  }
+  return result
 }
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
@@ -749,12 +756,13 @@ async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]>
     { query: (sql, params) => client.query(sql, params) as any },
   )
   if (nextCursor && nextCursor !== inboxCursor) {
-    inboxCursor = nextCursor
-    // PR-0 cycle 7 axis 4 BLOCK fix — await the persistence write. The
-    // UPDATE itself carries a monotonic guard (composite (at, id) <
-    // $new) so concurrent inbox calls cannot regress the DB cursor: an
-    // older write whose payload is < the stored cursor matches zero
-    // rows and is a no-op, never overwriting a newer cursor.
+    // PR-0 cycle 10 axis 1+5+6 BLOCK fix — delegate cache sync to the
+    // wrapper, which only updates the module-level cursor when the DB
+    // write actually took effect (RETURNING-confirmed). The cycle 9
+    // version pre-emptively advanced the cache here before the await
+    // resolved, allowing concurrent / older cursors to leave the
+    // cache ahead of the DB and replay rows after a same-session
+    // monotonic-rejected write. See case 21 source pin.
     await persistInboxCursorToDb(forAgent, nextCursor)
   }
   return rows
