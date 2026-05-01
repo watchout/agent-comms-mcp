@@ -650,18 +650,162 @@ async function fetchMessages(channel_id: string, limit: number, since?: string):
 // preserves µs (PG timestamptz) and the next WHERE compares µs-precisely.
 // The id UUID tiebreaker covers µs-tied bursts.
 let inboxCursor: InboxCursor | null = null
+// Issue #287 — track whether we have already loaded the cursor from
+// `agents.inbox_cursor_{at,id}`. The first inbox/next call after a session
+// restart restores the cursor; subsequent calls keep it in memory and write
+// it back to the row on each advance.
+let inboxCursorLoadedFromDb = false
+
+async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
+  if (inboxCursorLoadedFromDb) return
+  const client = await tryGetDb()
+  if (!client) {
+    // DB unavailable — leave the in-memory cursor null and try again on the
+    // next call. Don't latch the loaded flag so we keep retrying.
+    return
+  }
+  try {
+    const r: any = await client.query(
+      `SELECT inbox_cursor_at::text AS inbox_cursor_at, inbox_cursor_id
+         FROM agents WHERE agent_id = $1`,
+      [forAgent],
+    )
+    const row = r?.rows?.[0]
+    if (row?.inbox_cursor_at && row?.inbox_cursor_id) {
+      inboxCursor = {
+        createdAt: String(row.inbox_cursor_at),
+        id: String(row.inbox_cursor_id),
+      }
+      process.stderr.write(`agent-comms: inbox cursor restored from DB for ${forAgent} (at=${inboxCursor.createdAt} id=${inboxCursor.id})\n`)
+    }
+    inboxCursorLoadedFromDb = true
+  } catch (err) {
+    process.stderr.write(`agent-comms: inbox cursor DB load failed (non-fatal): ${err}\n`)
+  }
+}
+
+async function persistInboxCursorToDb(forAgent: string, cursor: InboxCursor | null): Promise<void> {
+  if (!cursor) return
+  const client = await tryGetDb()
+  if (!client) return
+  try {
+    await client.query(
+      `UPDATE agents SET
+         inbox_cursor_at = $1::timestamptz,
+         inbox_cursor_id = $2::uuid
+       WHERE agent_id = $3`,
+      [cursor.createdAt, cursor.id, forAgent],
+    )
+  } catch (err) {
+    process.stderr.write(`agent-comms: inbox cursor DB persist failed (non-fatal): ${err}\n`)
+  }
+}
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
   const client = await tryGetDb()
   if (!client) return [] // DBなしモード: 空配列
+  // Issue #287 — restore cursor from DB on first call after restart.
+  await loadInboxCursorFromDb(forAgent)
   const { rows, nextCursor } = await fetchNewMessagesCore(
     forAgent,
     limit,
     inboxCursor,
     { query: (sql, params) => client.query(sql, params) as any },
   )
-  inboxCursor = nextCursor
+  if (nextCursor && nextCursor !== inboxCursor) {
+    inboxCursor = nextCursor
+    // Persist asynchronously; don't block the inbox response on the UPDATE.
+    persistInboxCursorToDb(forAgent, nextCursor).catch(() => {})
+  }
   return rows
+}
+
+/**
+ * Issue #287 — startup self-reclaim. Any `message_queue` row this agent has
+ * left in `status='read'` from the previous session (claim_expires_at NULL or
+ * already past) is rolled back to `status='pending'` so the new session
+ * receives it via the normal `next` path. Idempotent + safe: rows currently
+ * being processed by another agent are excluded by the `claimed_by = $1`
+ * predicate.
+ *
+ * This complements the periodic claim-ttl-sweeper (`core/claim-ttl.ts`),
+ * which flips truly-abandoned claims to `failed`. The startup hook is
+ * AGGRESSIVE: it reclaims our own orphaned claims on the assumption that
+ * a session restart means the previous incarnation cannot complete them.
+ */
+export async function reclaimSelfOrphanedClaims(
+  db: { query: (sql: string, params?: any[]) => Promise<any> },
+  agentId: string,
+): Promise<number> {
+  try {
+    const r: any = await db.query(
+      `UPDATE message_queue
+         SET status = 'pending',
+             claimed_by = NULL,
+             claimed_at = NULL,
+             claim_expires_at = NULL,
+             read_at = NULL
+       WHERE agent_id = $1
+         AND claimed_by = $1
+         AND status = 'read'
+       RETURNING id`,
+      [agentId],
+    )
+    const rows = r?.rows ?? []
+    if (rows.length > 0) {
+      process.stderr.write(`agent-comms: startup self-reclaim — ${rows.length} orphaned claims rolled back to 'pending' for ${agentId}\n`)
+    }
+    return rows.length
+  } catch (err) {
+    process.stderr.write(`agent-comms: startup self-reclaim failed (non-fatal): ${err}\n`)
+    return 0
+  }
+}
+
+/**
+ * Issue #287 — periodic self-reclaim sweeper. Same predicate as the startup
+ * hook but runs on an interval so claims that expire mid-session (rare —
+ * indicates the LLM walked away from a `next` without calling `send` /
+ * `skip` / `fail`) get re-pushed to the agent's `next` instead of waiting
+ * for the next session restart.
+ */
+export function startSelfReclaimSweeper(
+  db: { query: (sql: string, params?: any[]) => Promise<any> },
+  agentId: string,
+  opts: { intervalMs?: number } = {},
+): NodeJS.Timer {
+  const intervalMs = opts.intervalMs ?? 60_000  // 60s
+  const fire = async () => {
+    try {
+      // Only reclaim claims past their TTL — don't yank rows the bot is
+      // actively working on. The periodic sweeper has a stricter predicate
+      // than the startup hook for this reason.
+      const r: any = await db.query(
+        `UPDATE message_queue
+           SET status = 'pending',
+               claimed_by = NULL,
+               claimed_at = NULL,
+               claim_expires_at = NULL,
+               read_at = NULL
+         WHERE agent_id = $1
+           AND claimed_by = $1
+           AND status = 'read'
+           AND claim_expires_at IS NOT NULL
+           AND claim_expires_at < now()
+         RETURNING id`,
+        [agentId],
+      )
+      const n = r?.rows?.length ?? 0
+      if (n > 0) {
+        process.stderr.write(`agent-comms: periodic self-reclaim — ${n} expired claims for ${agentId} → 'pending'\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: periodic self-reclaim failed (non-fatal): ${err}\n`)
+    }
+  }
+  const timer = setInterval(fire, intervalMs)
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+  return timer
 }
 
 // --- Rate Limiting (DB-persistent with in-memory fallback) ---
@@ -3511,6 +3655,27 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
       }
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
+    }
+  }
+
+  // Issue #287 — startup self-reclaim + periodic auto-reclaim sweeper.
+  // The startup hook reclaims THIS agent's orphaned claims (status='read'
+  // owned by self) back to 'pending' so the new session receives them on
+  // the next `next` call. The periodic sweeper (60s default) reclaims
+  // claims whose TTL expired mid-session. Disabled by the same kill switch
+  // as the claim-ttl sweeper.
+  if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
+    try {
+      const reclaimDb = await coreDbAdapter()
+      if (reclaimDb) {
+        const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)
+        process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${AGENT_ID})\n`)
+        const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
+        startSelfReclaimSweeper(reclaimDb, AGENT_ID, { intervalMs: reclaimIntervalMs })
+        process.stderr.write(`agent-comms: self-reclaim sweeper started (interval=${reclaimIntervalMs}ms)\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — self-reclaim startup failed (non-fatal): ${err}\n`)
     }
   }
 
