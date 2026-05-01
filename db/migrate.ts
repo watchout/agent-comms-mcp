@@ -130,8 +130,8 @@ async function migrate() {
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_received_thread TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS default_channel TEXT;
       -- Issue #287 (PR-0 cycle 12) — idempotent ALTER for pre-#287 PG
-      -- environments. Mirrors the paired-migration up.sql columns; this
-      -- canonical add ensures `bun db/migrate.ts` (CI / fresh PG /
+      -- environments. Mirrors the paired-migration up.sql columns;
+      -- this canonical add ensures bun db/migrate.ts (CI / fresh PG /
       -- rebuilt env) leaves the schema parity-correct without manual
       -- paired migration.
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_at TIMESTAMPTZ;
@@ -365,10 +365,10 @@ async function migrate() {
     -- Issue #287 — DB-persisted inbox cursor. The cursor columns are
     -- now part of the canonical bootstrap (PR-0 cycle 12 — see the
     -- agents CREATE TABLE above and the idempotent ALTER block).
-    -- The paired migration `db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql`
+    -- The paired migration db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
     -- remains the operational rollback artifact, but a fresh
-    -- `bun db/migrate.ts` now produces a parity-correct schema
-    -- without manual `--up` apply.
+    -- bun db/migrate.ts now produces a parity-correct schema
+    -- without manual --up apply.
 
     -- v2.1.0 PR 1/3: message_queue.failed_reason + extend status CHECK to include 'failed'.
     -- fail/skip CLIs store the abandonment reason so operators can distinguish
