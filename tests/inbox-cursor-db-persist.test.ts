@@ -21,7 +21,11 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
-import { reclaimSelfOrphanedClaims, startSelfReclaimSweeper } from '../server'
+// PR-0 cycle 5 axis 2 — import the reclaim helpers from core/inbox-cursor.ts,
+// not from server.ts. Importing server.ts triggers resolveWebhookPort() and
+// other module-level side effects that prevent `bun test <file>` running this
+// suite hermetically (auditor cycle 0 BLOCK regression).
+import { reclaimSelfOrphanedClaims, startSelfReclaimSweeper } from '../core/inbox-cursor'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 

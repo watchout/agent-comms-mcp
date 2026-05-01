@@ -92,7 +92,12 @@ import {
 import { splitMessage } from './core/message-split'
 import {
   fetchNewMessages as fetchNewMessagesCore,
+  reclaimSelfOrphanedClaims as reclaimSelfOrphanedClaimsCore,
+  startSelfReclaimSweeper as startSelfReclaimSweeperCore,
+  loadInboxCursorFromDb as loadInboxCursorFromDbCore,
+  persistInboxCursorToDb as persistInboxCursorToDbCore,
   type InboxCursor,
+  type ReclaimDb,
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
@@ -664,41 +669,26 @@ async function loadInboxCursorFromDb(forAgent: string): Promise<void> {
     // next call. Don't latch the loaded flag so we keep retrying.
     return
   }
-  try {
-    const r: any = await client.query(
-      `SELECT inbox_cursor_at::text AS inbox_cursor_at, inbox_cursor_id
-         FROM agents WHERE agent_id = $1`,
-      [forAgent],
-    )
-    const row = r?.rows?.[0]
-    if (row?.inbox_cursor_at && row?.inbox_cursor_id) {
-      inboxCursor = {
-        createdAt: String(row.inbox_cursor_at),
-        id: String(row.inbox_cursor_id),
-      }
-      process.stderr.write(`agent-comms: inbox cursor restored from DB for ${forAgent} (at=${inboxCursor.createdAt} id=${inboxCursor.id})\n`)
-    }
-    inboxCursorLoadedFromDb = true
-  } catch (err) {
-    process.stderr.write(`agent-comms: inbox cursor DB load failed (non-fatal): ${err}\n`)
+  const restored = await loadInboxCursorFromDbCore(
+    { query: (sql, params) => client.query(sql, params) as any },
+    forAgent,
+  )
+  if (restored) {
+    inboxCursor = restored
+    process.stderr.write(`agent-comms: inbox cursor restored from DB for ${forAgent} (at=${restored.createdAt} id=${restored.id})\n`)
   }
+  inboxCursorLoadedFromDb = true
 }
 
 async function persistInboxCursorToDb(forAgent: string, cursor: InboxCursor | null): Promise<void> {
   if (!cursor) return
   const client = await tryGetDb()
   if (!client) return
-  try {
-    await client.query(
-      `UPDATE agents SET
-         inbox_cursor_at = $1::timestamptz,
-         inbox_cursor_id = $2::uuid
-       WHERE agent_id = $3`,
-      [cursor.createdAt, cursor.id, forAgent],
-    )
-  } catch (err) {
-    process.stderr.write(`agent-comms: inbox cursor DB persist failed (non-fatal): ${err}\n`)
-  }
+  await persistInboxCursorToDbCore(
+    { query: (sql, params) => client.query(sql, params) as any },
+    forAgent,
+    cursor,
+  )
 }
 
 async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]> {
@@ -720,93 +710,13 @@ async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]>
   return rows
 }
 
-/**
- * Issue #287 — startup self-reclaim. Any `message_queue` row this agent has
- * left in `status='read'` from the previous session (claim_expires_at NULL or
- * already past) is rolled back to `status='pending'` so the new session
- * receives it via the normal `next` path. Idempotent + safe: rows currently
- * being processed by another agent are excluded by the `claimed_by = $1`
- * predicate.
- *
- * This complements the periodic claim-ttl-sweeper (`core/claim-ttl.ts`),
- * which flips truly-abandoned claims to `failed`. The startup hook is
- * AGGRESSIVE: it reclaims our own orphaned claims on the assumption that
- * a session restart means the previous incarnation cannot complete them.
- */
-export async function reclaimSelfOrphanedClaims(
-  db: { query: (sql: string, params?: any[]) => Promise<any> },
-  agentId: string,
-): Promise<number> {
-  try {
-    const r: any = await db.query(
-      `UPDATE message_queue
-         SET status = 'pending',
-             claimed_by = NULL,
-             claimed_at = NULL,
-             claim_expires_at = NULL,
-             read_at = NULL
-       WHERE agent_id = $1
-         AND claimed_by = $1
-         AND status = 'read'
-       RETURNING id`,
-      [agentId],
-    )
-    const rows = r?.rows ?? []
-    if (rows.length > 0) {
-      process.stderr.write(`agent-comms: startup self-reclaim — ${rows.length} orphaned claims rolled back to 'pending' for ${agentId}\n`)
-    }
-    return rows.length
-  } catch (err) {
-    process.stderr.write(`agent-comms: startup self-reclaim failed (non-fatal): ${err}\n`)
-    return 0
-  }
-}
-
-/**
- * Issue #287 — periodic self-reclaim sweeper. Same predicate as the startup
- * hook but runs on an interval so claims that expire mid-session (rare —
- * indicates the LLM walked away from a `next` without calling `send` /
- * `skip` / `fail`) get re-pushed to the agent's `next` instead of waiting
- * for the next session restart.
- */
-export function startSelfReclaimSweeper(
-  db: { query: (sql: string, params?: any[]) => Promise<any> },
-  agentId: string,
-  opts: { intervalMs?: number } = {},
-): NodeJS.Timer {
-  const intervalMs = opts.intervalMs ?? 60_000  // 60s
-  const fire = async () => {
-    try {
-      // Only reclaim claims past their TTL — don't yank rows the bot is
-      // actively working on. The periodic sweeper has a stricter predicate
-      // than the startup hook for this reason.
-      const r: any = await db.query(
-        `UPDATE message_queue
-           SET status = 'pending',
-               claimed_by = NULL,
-               claimed_at = NULL,
-               claim_expires_at = NULL,
-               read_at = NULL
-         WHERE agent_id = $1
-           AND claimed_by = $1
-           AND status = 'read'
-           AND claim_expires_at IS NOT NULL
-           AND claim_expires_at < now()
-         RETURNING id`,
-        [agentId],
-      )
-      const n = r?.rows?.length ?? 0
-      if (n > 0) {
-        process.stderr.write(`agent-comms: periodic self-reclaim — ${n} expired claims for ${agentId} → 'pending'\n`)
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: periodic self-reclaim failed (non-fatal): ${err}\n`)
-    }
-  }
-  const timer = setInterval(fire, intervalMs)
-  ;(timer as unknown as { unref?: () => void }).unref?.()
-  return timer
-}
+// Issue #287 self-reclaim helpers live in core/inbox-cursor.ts (PR-0
+// cycle 5 axis 2 — extracted so tests can import them without
+// triggering server.ts module-level side effects like
+// resolveWebhookPort()). server.ts re-exports for back-compat with
+// any existing import sites.
+export const reclaimSelfOrphanedClaims = reclaimSelfOrphanedClaimsCore
+export const startSelfReclaimSweeper = startSelfReclaimSweeperCore
 
 // --- Rate Limiting (DB-persistent with in-memory fallback) ---
 async function checkRateLimit(agentId: string): Promise<{ allowed: boolean; remaining: number }> {

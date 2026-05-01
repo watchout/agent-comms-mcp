@@ -118,6 +118,155 @@ export interface FetchNewMessagesResult {
   nextCursor: InboxCursor | null
 }
 
+/**
+ * Generic db handle accepted by the reclaim/persist helpers below.
+ * `query()` returns a `{rows}` shape so the helpers can interrogate
+ * `RETURNING` output uniformly across the pg and sqlite adapters.
+ */
+export interface ReclaimDb {
+  query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }>
+}
+
+/**
+ * Issue #287 — startup self-reclaim. Rolls THIS agent's `status='read'`
+ * rows back to `pending` so the new session re-receives them via the
+ * normal `next` path. Idempotent.
+ *
+ * PR-0 cycle 5 (auditor BLOCK axis 1) — TTL 経過確認必須化:
+ *   `claim_expires_at IS NULL OR claim_expires_at < now()`. A claim
+ *   still WITHIN TTL is left alone — a delayed/duplicate process must
+ *   not yank a row from the legitimate active worker. NULL is treated
+ *   as "no TTL set" → eligible for reclaim (covers the legacy rows
+ *   where claim_expires_at was never written).
+ *
+ * Conflict with `core/claim-ttl.ts` `sweepExpiredClaims` is resolved
+ * by predicate ordering: self-reclaim runs first (startup + 60s
+ * periodic) and flips own expired/null-TTL rows from `read` → `pending`,
+ * after which the claim-ttl sweeper's predicate (`status='read' AND
+ * claim_expires_at < now()`) no longer matches them. Other agents'
+ * truly-abandoned claims still flow through claim-ttl → `failed`.
+ */
+export async function reclaimSelfOrphanedClaims(
+  db: ReclaimDb,
+  agentId: string,
+): Promise<number> {
+  try {
+    const r: any = await db.query(
+      `UPDATE message_queue
+         SET status = 'pending',
+             claimed_by = NULL,
+             claimed_at = NULL,
+             claim_expires_at = NULL,
+             read_at = NULL
+       WHERE agent_id = $1
+         AND claimed_by = $1
+         AND status = 'read'
+         AND (claim_expires_at IS NULL OR claim_expires_at < now())
+       RETURNING id`,
+      [agentId],
+    )
+    const rows = r?.rows ?? []
+    if (rows.length > 0) {
+      process.stderr.write(`agent-comms: startup self-reclaim — ${rows.length} orphaned claims rolled back to 'pending' for ${agentId}\n`)
+    }
+    return rows.length
+  } catch (err) {
+    process.stderr.write(`agent-comms: startup self-reclaim failed (non-fatal): ${err}\n`)
+    return 0
+  }
+}
+
+/**
+ * Issue #287 — periodic self-reclaim sweeper. Same predicate as the
+ * startup hook but stricter on `claim_expires_at` (must be set + past),
+ * so mid-session claims still in flight (NULL TTL → pending was never
+ * `next`'d) are not yanked.
+ */
+export function startSelfReclaimSweeper(
+  db: ReclaimDb,
+  agentId: string,
+  opts: { intervalMs?: number } = {},
+): NodeJS.Timer {
+  const intervalMs = opts.intervalMs ?? 60_000  // 60s
+  const fire = async () => {
+    try {
+      const r: any = await db.query(
+        `UPDATE message_queue
+           SET status = 'pending',
+               claimed_by = NULL,
+               claimed_at = NULL,
+               claim_expires_at = NULL,
+               read_at = NULL
+         WHERE agent_id = $1
+           AND claimed_by = $1
+           AND status = 'read'
+           AND claim_expires_at IS NOT NULL
+           AND claim_expires_at < now()
+         RETURNING id`,
+        [agentId],
+      )
+      const n = r?.rows?.length ?? 0
+      if (n > 0) {
+        process.stderr.write(`agent-comms: periodic self-reclaim — ${n} expired claims for ${agentId} → 'pending'\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: periodic self-reclaim failed (non-fatal): ${err}\n`)
+    }
+  }
+  const timer = setInterval(fire, intervalMs)
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+  return timer
+}
+
+/**
+ * Issue #287 — load `agents.inbox_cursor_{at,id}` from the DB into the
+ * caller-supplied state container. Returns the loaded cursor (or null
+ * if the row is missing / DB unavailable / cursor is unset).
+ */
+export async function loadInboxCursorFromDb(
+  db: ReclaimDb | null | undefined,
+  agentId: string,
+): Promise<InboxCursor | null> {
+  if (!db) return null
+  try {
+    const r: any = await db.query(
+      `SELECT inbox_cursor_at::text AS inbox_cursor_at, inbox_cursor_id
+         FROM agents WHERE agent_id = $1`,
+      [agentId],
+    )
+    const row = r?.rows?.[0]
+    if (row?.inbox_cursor_at && row?.inbox_cursor_id) {
+      return {
+        createdAt: String(row.inbox_cursor_at),
+        id: String(row.inbox_cursor_id),
+      }
+    }
+    return null
+  } catch (err) {
+    process.stderr.write(`agent-comms: inbox cursor DB load failed (non-fatal): ${err}\n`)
+    return null
+  }
+}
+
+export async function persistInboxCursorToDb(
+  db: ReclaimDb | null | undefined,
+  agentId: string,
+  cursor: InboxCursor | null,
+): Promise<void> {
+  if (!db || !cursor) return
+  try {
+    await db.query(
+      `UPDATE agents SET
+         inbox_cursor_at = $1::timestamptz,
+         inbox_cursor_id = $2::uuid
+       WHERE agent_id = $3`,
+      [cursor.createdAt, cursor.id, agentId],
+    )
+  } catch (err) {
+    process.stderr.write(`agent-comms: inbox cursor DB persist failed (non-fatal): ${err}\n`)
+  }
+}
+
 export async function fetchNewMessages(
   forAgent: string,
   limit: number,
