@@ -3714,14 +3714,29 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     // the top-level `.catch(err => process.exit(1))`, so connection
     // failure at boot is loud rather than hidden.
     const reclaimDb = await requireDbForStartup()
-    const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)
-    process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${AGENT_ID})\n`)
+    // PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — per-bot recovery wiring.
+    // The cycle 7-15 implementation only ran startup self-reclaim +
+    // periodic sweeper for the primary `AGENT_ID`. In multi-bot
+    // factory mode (`EXPECTED_BOTS` / `createBotServer(botId)`) one
+    // process hosts up to 18 bots; each one must own-reclaim
+    // independently and the shared claim-TTL sweep must exclude
+    // every hosted bot's claims (otherwise the other bots' expired
+    // claims land in `failed/IMPLICIT_ABANDON` rather than
+    // `pending`). Build the list once (`AGENT_ID` deduped against
+    // `EXPECTED_BOTS`), loop per-bot for self-reclaim + periodic
+    // sweeper install, then install one shared claim-TTL sweeper
+    // with the full `selfAgentIds` exclusion list.
+    const hostedAgentIds = Array.from(new Set([AGENT_ID, ...EXPECTED_BOTS])).filter((id) => !!id && id !== 'unknown')
     const reclaimIntervalMs = parseInt(process.env.AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS ?? '60000', 10)
-    startSelfReclaimSweeper(reclaimDb, AGENT_ID, { intervalMs: reclaimIntervalMs })
-    process.stderr.write(`agent-comms: self-reclaim sweeper started (interval=${reclaimIntervalMs}ms)\n`)
+    for (const botId of hostedAgentIds) {
+      const reclaimed = await reclaimSelfOrphanedClaims(reclaimDb, botId)
+      process.stderr.write(`agent-comms: startup self-reclaim complete (${reclaimed} rows for ${botId})\n`)
+      startSelfReclaimSweeper(reclaimDb, botId, { intervalMs: reclaimIntervalMs })
+      process.stderr.write(`agent-comms: self-reclaim sweeper started for ${botId} (interval=${reclaimIntervalMs}ms)\n`)
+    }
     const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
-    startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentId: AGENT_ID })
-    process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentId=${AGENT_ID})\n`)
+    startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentIds: hostedAgentIds })
+    process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentIds=[${hostedAgentIds.join(',')}])\n`)
   }
 
   // Connect Per-Bot Discord Clients for all expected bots at startup

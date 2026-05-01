@@ -42,6 +42,16 @@ export interface ClaimTtlOptions {
    * instead of `pending`, defeating the restart-recovery contract.
    */
   selfAgentId?: string
+  /**
+   * PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — multi-bot fleet support.
+   * In factory mode (`createBotServer(botId)` / `EXPECTED_BOTS`) one
+   * process hosts many bots; the single-process claim-TTL sweeper
+   * must exclude *all* of them from the IMPLICIT_ABANDON predicate,
+   * not just the primary `AGENT_ID`. When provided, this list takes
+   * precedence over `selfAgentId` (which remains for legacy
+   * single-agent callers).
+   */
+  selfAgentIds?: string[]
 }
 
 /**
@@ -61,6 +71,31 @@ export async function sweepExpiredClaims(
   opts: ClaimTtlOptions = {},
 ): Promise<number> {
   const reason = opts.reason ?? 'IMPLICIT_ABANDON'
+  // PR-0 cycle 16 — prefer the multi-bot list when provided. The
+  // `selfAgentIds` array is funneled into a single SQL `<> ALL($2)`
+  // predicate so all hosted bots are excluded in one pass without
+  // serialising per-bot sweeps.
+  if (opts.selfAgentIds && opts.selfAgentIds.length > 0) {
+    // PR-0 cycle 16 — generate `NOT IN ($2, $3, ...)` dynamically so
+    // both pg and SQLite accept the predicate (`<> ALL($2)` is a
+    // PG-only array form). The placeholder offset starts at $2 since
+    // $1 holds the failure reason.
+    const placeholders = opts.selfAgentIds.map((_, i) => `$${i + 2}`).join(', ')
+    const result: any = await db.query(
+      `UPDATE message_queue
+       SET status = 'failed', failed_reason = $1
+       WHERE status = 'read'
+         AND claimed_by IS NOT NULL
+         AND claimed_by NOT IN (${placeholders})
+         AND claim_expires_at IS NOT NULL
+         AND claim_expires_at < now()
+       RETURNING id`,
+      [reason, ...opts.selfAgentIds],
+    )
+    const rc = result?.rowCount
+    if (typeof rc === 'number') return rc
+    return Array.isArray(result?.rows) ? result.rows.length : 0
+  }
   if (opts.selfAgentId) {
     const result = await db.query(
       `UPDATE message_queue

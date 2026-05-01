@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 31-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 32-case merge gate.
  *
  * Cumulative case map across cycles 4–8:
  *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
@@ -304,8 +304,11 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
   test('case 7 — server.ts wires startup self-reclaim + periodic sweeper, paired migration files exist', () => {
     const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
     const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
-    expect(serverSrc).toContain('reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)')
-    expect(serverSrc).toContain('startSelfReclaimSweeper(reclaimDb, AGENT_ID')
+    // PR-0 cycle 16 — recovery wiring is per-bot now (loop variable
+    // `botId`), not the single primary `AGENT_ID`. The pin checks
+    // for the looped call shape.
+    expect(serverSrc).toContain('reclaimSelfOrphanedClaims(reclaimDb, botId)')
+    expect(serverSrc).toContain('startSelfReclaimSweeper(reclaimDb, botId')
     expect(serverSrc).toContain('AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS')
 
     // Migration files
@@ -332,8 +335,10 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
   test('case 10 — startup order: reclaim awaited before claim-ttl sweeper', async () => {
     const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
     const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
-    const reclaimIdx = serverSrc.indexOf('await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)')
-    const sweeperIdx = serverSrc.indexOf('startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentId: AGENT_ID })')
+    // PR-0 cycle 16 — per-bot loop wires reclaim + periodic sweeper
+    // for every hosted bot before the shared claim-TTL sweeper starts.
+    const reclaimIdx = serverSrc.indexOf('await reclaimSelfOrphanedClaims(reclaimDb, botId)')
+    const sweeperIdx = serverSrc.indexOf('startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentIds: hostedAgentIds })')
     expect(reclaimIdx).toBeGreaterThan(0)
     expect(sweeperIdx).toBeGreaterThan(0)
     // reclaim must appear BEFORE the claim-ttl sweeper start in source order.
@@ -913,5 +918,50 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(serverSrc).not.toContain('let inboxCursor: InboxCursor | null = null')
     expect(serverSrc).not.toContain('let inboxCursorLoadedFromDb = false')
     expect(serverSrc).toContain('const inboxCursorByAgent: Map<string, InboxCursorState>')
+  })
+
+  // PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — multi-bot recovery wiring.
+  // server.ts startup loops over `hostedAgentIds` (AGENT_ID +
+  // EXPECTED_BOTS deduped) and runs `reclaimSelfOrphanedClaims` +
+  // `startSelfReclaimSweeper` per bot. The shared claim-TTL sweeper
+  // gets the full `selfAgentIds` list so every hosted bot's expired
+  // own claim is excluded from `failed/IMPLICIT_ABANDON`. We verify
+  // both the source-level wiring (per-bot loop + selfAgentIds list
+  // passing) and the SQL-level guarantee that
+  // `sweepExpiredClaims({selfAgentIds})` skips every member of the
+  // list, leaving their rows for self-reclaim recovery.
+  test('case 32 — multi-bot recovery wiring + claim-TTL selfAgentIds protects every hosted bot', async () => {
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
+    // Per-bot loop pin: hostedAgentIds builds AGENT_ID + EXPECTED_BOTS,
+    // and the loop body invokes reclaim + sweeper with `botId`.
+    expect(serverSrc).toContain('const hostedAgentIds = Array.from(new Set([AGENT_ID, ...EXPECTED_BOTS]))')
+    expect(serverSrc).toContain('for (const botId of hostedAgentIds)')
+    expect(serverSrc).toContain('reclaimSelfOrphanedClaims(reclaimDb, botId)')
+    expect(serverSrc).toContain('startSelfReclaimSweeper(reclaimDb, botId')
+    expect(serverSrc).toContain('startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentIds: hostedAgentIds })')
+
+    // Behavioral SQL pin: claim-TTL sweep with selfAgentIds skips
+    // every member's own expired claim. Insert one expired claim
+    // per bot, run sweep with [bot-a, bot-b] in selfAgentIds, and
+    // assert neither row was flipped to 'failed'.
+    const { sweepExpiredClaims } = await import('../core/claim-ttl')
+    await db.execute(
+      `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
+       VALUES ('a-expired', 'bot-a', 'read', 'bot-a', datetime('now', '-1 hour'), datetime('now')),
+              ('b-expired', 'bot-b', 'read', 'bot-b', datetime('now', '-1 hour'), datetime('now')),
+              ('foreign-expired', 'other-bot', 'read', 'other-bot', datetime('now', '-1 hour'), datetime('now'))`,
+    )
+    const swept = await sweepExpiredClaims(pgWrap(db), { selfAgentIds: ['bot-a', 'bot-b'] })
+    // Only the foreign claim is flipped to failed; the two hosted
+    // bots' claims stay in 'read' for self-reclaim to handle.
+    expect(swept).toBe(1)
+    const after = await db.query<{ id: string; status: string }>(
+      `SELECT id, status FROM message_queue WHERE id IN ('a-expired', 'b-expired', 'foreign-expired') ORDER BY id`,
+    )
+    const byId = Object.fromEntries(after.map((r) => [r.id, r.status]))
+    expect(byId['a-expired']).toBe('read')      // protected
+    expect(byId['b-expired']).toBe('read')      // protected
+    expect(byId['foreign-expired']).toBe('failed')  // foreign abandon
   })
 })
