@@ -110,7 +110,13 @@ async function migrate() {
       status TEXT DEFAULT 'offline',
       last_seen_at TIMESTAMPTZ,
       registered_at TIMESTAMPTZ DEFAULT now(),
-      metadata JSONB
+      metadata JSONB,
+      -- Issue #287 (PR-0 cycle 12) — DB-persisted inbox cursor mirrors
+      -- the SQLite parity added in cycle 5 (db/migrate-sqlite.ts).
+      -- NULL on first boot = legitimate "row absent / cursor unset"
+      -- signal per cycle 11 contract; first inbox/next call populates.
+      inbox_cursor_at TIMESTAMPTZ,
+      inbox_cursor_id UUID
     );
 
     -- v0.1.0: Add org_id, active_thread, observer_mode, channel_port to agents
@@ -123,6 +129,13 @@ async function migrate() {
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_received_channel TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_received_thread TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS default_channel TEXT;
+      -- Issue #287 (PR-0 cycle 12) — idempotent ALTER for pre-#287 PG
+      -- environments. Mirrors the paired-migration up.sql columns; this
+      -- canonical add ensures `bun db/migrate.ts` (CI / fresh PG /
+      -- rebuilt env) leaves the schema parity-correct without manual
+      -- paired migration.
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_at TIMESTAMPTZ;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_id UUID;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
 

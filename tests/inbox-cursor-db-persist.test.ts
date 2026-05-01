@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Issue #287 — DB-persisted inbox cursor + self-reclaim, 25-case merge gate.
+ * Issue #287 — DB-persisted inbox cursor + self-reclaim, 26-case merge gate.
  *
  * Cumulative case map across cycles 4–8:
  *   - cases 1–3, 5–6: reclaim semantics + source-level pins (cycle 4)
@@ -726,5 +726,37 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(result3).not.toBeNull()
     expect(result3?.createdAt).toBe('2026-05-01T00:00:00.123456Z')
     expect(result3?.id).toBe('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  })
+
+  // PR-0 cycle 12 axis 2/3/4/5/6 BLOCK fix — PG canonical bootstrap
+  // schema must include the inbox cursor columns. Cycle 11 only had
+  // them in the paired migration up.sql, leaving fresh PG installs
+  // (CI, rebuilt envs, new ops) without the columns and breaking
+  // first inbox/next on those environments. SQLite parity added in
+  // cycle 5 (db/migrate-sqlite.ts); cycle 12 is the PG canonical
+  // sibling. We can't spin a Postgres in this hermetic test, so we
+  // pin the canonical migration source — both the CREATE TABLE and
+  // the idempotent ALTER block must reference the cursor columns so
+  // a fresh `bun db/migrate.ts` produces a parity-correct schema.
+  test('case 26 — db/migrate.ts PG canonical schema declares inbox_cursor columns', () => {
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const migrateSrc = readFileSync(join(projectRoot, 'db/migrate.ts'), 'utf-8')
+
+    // Locate the agents CREATE TABLE block.
+    const agentsCreateIdx = migrateSrc.indexOf('CREATE TABLE IF NOT EXISTS agents')
+    expect(agentsCreateIdx).toBeGreaterThan(0)
+    const createBlockEnd = migrateSrc.indexOf(');', agentsCreateIdx)
+    expect(createBlockEnd).toBeGreaterThan(agentsCreateIdx)
+    const createBlock = migrateSrc.slice(agentsCreateIdx, createBlockEnd)
+    expect(createBlock).toContain('inbox_cursor_at TIMESTAMPTZ')
+    expect(createBlock).toContain('inbox_cursor_id UUID')
+
+    // Idempotent ALTER block must also list the cursor columns so
+    // existing pre-#287 PG environments pick them up on next migrate
+    // run.
+    const alterBlockIdx = migrateSrc.indexOf('ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_at TIMESTAMPTZ')
+    expect(alterBlockIdx).toBeGreaterThan(0)
+    const alterIdIdx = migrateSrc.indexOf('ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_id UUID')
+    expect(alterIdIdx).toBeGreaterThan(0)
   })
 })
