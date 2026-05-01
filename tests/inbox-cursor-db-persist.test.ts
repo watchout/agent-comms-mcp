@@ -181,6 +181,18 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(await reclaimSelfOrphanedClaims(pgWrap(db), 'test-bot')).toBe(0)
   })
 
+  // PR-0 §4 case 4 (frozen, verbatim): cleanup migration up.sql 内で
+  // 24h 以上経過した stale pending row を read mark.
+  test('PR-0 §4 case 4 — cleanup migration up.sql carries 24h pending → read flip', () => {
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const upPath = join(projectRoot, 'db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql')
+    const up = readFileSync(upPath, 'utf-8')
+    expect(up).toContain("status = 'read'")
+    expect(up).toContain("read_at = COALESCE(read_at, created_at)")
+    expect(up).toContain("status = 'pending'")
+    expect(up).toContain("interval '24 hours'")
+  })
+
   // case 7: source-level pin — server.ts wires the startup hook + periodic
   // sweeper, and the migration paired files exist. Regression guard for
   // boot-order or accidental removal.

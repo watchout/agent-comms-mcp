@@ -10,10 +10,15 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
--- C: one-shot cleanup — claims orphaned past their TTL get reclaimed back to
--- 'pending' so the next session-restart receives them. We do NOT flip them to
--- 'failed' here (claim-ttl-sweeper still owns that path with its longer TTL);
--- this is the pre-fix snapshot drain.
+-- C: one-shot cleanup — drain the pre-fix snapshot.
+-- Two paths:
+--   (1) Stale 'read' rows with expired claims → reclaim to 'pending' (the new
+--       session will re-pop them via `next`).
+--   (2) PR-0 §4 case 4 verbatim — `agent_messages` で discord 受信から 24h
+--       以上経過した stale pending 相当 = `message_queue` row が 24h+ pending
+--       のままの履歴 (lead-ama / cto / agent-com-dev session が drain しなかっ
+--       た queue 残骸) を `status='read'`, `read_at=created_at` に flip。
+--       実態的には 50-200 行想定 (本日 chain stall の沈殿)。
 UPDATE message_queue
 SET status = 'pending',
     claimed_by = NULL,
@@ -23,3 +28,9 @@ SET status = 'pending',
 WHERE status = 'read'
   AND claim_expires_at IS NOT NULL
   AND claim_expires_at < now() - interval '15 minutes';
+
+UPDATE message_queue
+SET status = 'read',
+    read_at = COALESCE(read_at, created_at)
+WHERE status = 'pending'
+  AND created_at < now() - interval '24 hours';
