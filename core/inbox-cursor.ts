@@ -169,10 +169,35 @@ export async function reclaimSelfOrphanedClaims(
     if (rows.length > 0) {
       process.stderr.write(`agent-comms: startup self-reclaim — ${rows.length} orphaned claims rolled back to 'pending' for ${agentId}\n`)
     }
+    // PR-0 cycle 7 axis 2/3 BLOCK fix — derive agents.status from the
+    // post-reclaim claim set so callers (sender-feedback busy/idle
+    // branch) see consistent state. Mirrors the pattern in next/send/
+    // fail/skip/manual-reclaim handlers (server.ts:1735 / :2897).
+    await syncAgentStatusFromClaims(db, agentId)
     return rows.length
   } catch (err) {
     process.stderr.write(`agent-comms: startup self-reclaim failed (non-fatal): ${err}\n`)
     return 0
+  }
+}
+
+/**
+ * PR-0 cycle 7 axis 2/3 BLOCK fix — derive `agents.status` from the
+ * agent's open-claim set. Idempotent: callers should invoke after any
+ * status='read' transition (claim or reclaim).
+ */
+async function syncAgentStatusFromClaims(db: ReclaimDb, agentId: string): Promise<void> {
+  try {
+    await db.query(
+      `UPDATE agents SET
+         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
+         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+         status_updated_at = now()
+       WHERE agent_id = $1`,
+      [agentId],
+    )
+  } catch (err) {
+    process.stderr.write(`agent-comms: agents.status sync after reclaim failed (non-fatal): ${err}\n`)
   }
 }
 
@@ -209,6 +234,10 @@ export function startSelfReclaimSweeper(
       if (n > 0) {
         process.stderr.write(`agent-comms: periodic self-reclaim — ${n} expired claims for ${agentId} → 'pending'\n`)
       }
+      // PR-0 cycle 7 axis 2/3 — derive agents.status whether or not rows
+      // were reclaimed: even an idempotent zero-row sweep should leave
+      // the cached agents.status in sync with the live claim set.
+      await syncAgentStatusFromClaims(db, agentId)
     } catch (err) {
       process.stderr.write(`agent-comms: periodic self-reclaim failed (non-fatal): ${err}\n`)
     }
@@ -248,6 +277,16 @@ export async function loadInboxCursorFromDb(
   }
 }
 
+/**
+ * PR-0 cycle 7 axis 4 BLOCK fix — write the cursor atomically with a
+ * monotonic guard. Earlier `cursor20` UPDATEs that arrive after a
+ * `cursor40` UPDATE (concurrent inbox reads) are no-ops because the
+ * `WHERE` clause demands strictly-greater composite (at, id) than what
+ * is already stored. NULL stored cursor = first write wins
+ * unconditionally. The previous fire-and-forget `.catch()` allowed an
+ * older UPDATE to overwrite a newer one, regressing the DB cursor and
+ * causing duplicate replay after restart.
+ */
 export async function persistInboxCursorToDb(
   db: ReclaimDb | null | undefined,
   agentId: string,
@@ -259,7 +298,13 @@ export async function persistInboxCursorToDb(
       `UPDATE agents SET
          inbox_cursor_at = $1::timestamptz,
          inbox_cursor_id = $2::uuid
-       WHERE agent_id = $3`,
+       WHERE agent_id = $3
+         AND (
+           inbox_cursor_at IS NULL
+           OR inbox_cursor_at < $1::timestamptz
+           OR (inbox_cursor_at = $1::timestamptz
+               AND (inbox_cursor_id IS NULL OR inbox_cursor_id < $2::uuid))
+         )`,
       [cursor.createdAt, cursor.id, agentId],
     )
   } catch (err) {

@@ -25,7 +25,7 @@ import { SqliteAdapter } from '../core/db/sqlite-adapter'
 // not from server.ts. Importing server.ts triggers resolveWebhookPort() and
 // other module-level side effects that prevent `bun test <file>` running this
 // suite hermetically (auditor cycle 0 BLOCK regression).
-import { reclaimSelfOrphanedClaims, startSelfReclaimSweeper } from '../core/inbox-cursor'
+import { reclaimSelfOrphanedClaims, startSelfReclaimSweeper, persistInboxCursorToDb } from '../core/inbox-cursor'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
@@ -38,6 +38,9 @@ beforeEach(async () => {
   await db.execute(`
     CREATE TABLE agents (
       agent_id TEXT PRIMARY KEY,
+      status TEXT,
+      status_detail TEXT,
+      status_updated_at TEXT,
       inbox_cursor_at TEXT,
       inbox_cursor_id TEXT
     )
@@ -52,6 +55,7 @@ beforeEach(async () => {
       claimed_at TEXT,
       claim_expires_at TEXT,
       read_at TEXT,
+      failed_reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
@@ -310,5 +314,111 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(up).toContain("status = 'pending'")  // cleanup re-flip
     expect(down).toContain('DROP COLUMN IF EXISTS inbox_cursor_id')
     expect(down).toContain('DROP COLUMN IF EXISTS inbox_cursor_at')
+  })
+
+  // PR-0 cycle 7 axis 1 BLOCK fix — startup order: reclaimSelfOrphanedClaims
+  // must complete (await) before the claim-ttl sweeper begins. We exercise
+  // server.ts's startup block via a structural pin: the source order is
+  // `await reclaimSelfOrphanedClaims(...)` then `startSelfReclaimSweeper(...)`
+  // then `startClaimTtlSweeper(...)`. A behavioral assertion on the live
+  // server boot sequence would require booting MCP+DB+Discord stack, so we
+  // pin the canonical ordering at source level (cheap, deterministic) PLUS
+  // verify the claim-ttl sweeper accepts a `selfAgentId` predicate (the
+  // belt-and-braces structural defense).
+  test('case 10 — startup order: reclaim awaited before claim-ttl sweeper', async () => {
+    const projectRoot = join(dirname(new URL(import.meta.url).pathname), '..')
+    const serverSrc = readFileSync(join(projectRoot, 'server.ts'), 'utf-8')
+    const reclaimIdx = serverSrc.indexOf('await reclaimSelfOrphanedClaims(reclaimDb, AGENT_ID)')
+    const sweeperIdx = serverSrc.indexOf('startClaimTtlSweeper(claimDb, { intervalMs, selfAgentId: AGENT_ID })')
+    expect(reclaimIdx).toBeGreaterThan(0)
+    expect(sweeperIdx).toBeGreaterThan(0)
+    // reclaim must appear BEFORE the claim-ttl sweeper start in source order.
+    expect(reclaimIdx).toBeLessThan(sweeperIdx)
+
+    // Behavioral check on the claim-ttl predicate exclusion: a sweep with
+    // selfAgentId set must skip the self's own expired claim, leaving it
+    // available for self-reclaim to convert to 'pending'.
+    const { sweepExpiredClaims } = await import('../core/claim-ttl')
+    await db.execute(`INSERT INTO agents (agent_id) VALUES ('me')`)
+    await db.execute(
+      `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
+       VALUES ('expired-self', 'me', 'read', 'me', datetime('now', '-1 hour'), datetime('now'))`,
+    )
+    const swept = await sweepExpiredClaims(pgWrap(db), { selfAgentId: 'me' })
+    expect(swept).toBe(0)
+    const after = await db.query<{ status: string }>(
+      `SELECT status FROM message_queue WHERE id = 'expired-self'`,
+    )
+    expect(after[0].status).toBe('read') // not flipped to 'failed' — protected for self-reclaim
+  })
+
+  // PR-0 cycle 7 axis 2/3 BLOCK fix — reclaim path derives agents.status
+  // from the live claim set. Two scenarios:
+  //   (a) all reclaimed → no remaining 'read' claim → status='idle'
+  //   (b) one row left in 'read' (other agent / fresh claim) → status='busy'
+  test('case 11 — reclaim updates agents.status to idle when no claims remain', async () => {
+    await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('me', 'busy')`)
+    await db.execute(
+      `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
+       VALUES ('orph', 'me', 'read', 'me', datetime('now'))`,
+    )
+    await reclaimSelfOrphanedClaims(pgWrap(db), 'me')
+    const after = await db.query<{ status: string; status_detail: string | null }>(
+      `SELECT status, status_detail FROM agents WHERE agent_id = 'me'`,
+    )
+    expect(after[0].status).toBe('idle')
+    expect(after[0].status_detail).toBeNull()
+  })
+
+  test('case 12 — reclaim leaves agents.status busy when other claim remains', async () => {
+    await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('me', 'busy')`)
+    await db.execute(
+      `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
+       VALUES ('orph', 'me', 'read', 'me', datetime('now'))`,
+    )
+    // A second claim outside the reclaim predicate (claim_expires_at in
+    // the future = active TTL, not eligible for startup reclaim).
+    await db.execute(
+      `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
+       VALUES ('active', 'me', 'read', 'me', datetime('now', '+1 hour'), datetime('now'))`,
+    )
+    await reclaimSelfOrphanedClaims(pgWrap(db), 'me')
+    const after = await db.query<{ status: string }>(
+      `SELECT status FROM agents WHERE agent_id = 'me'`,
+    )
+    expect(after[0].status).toBe('busy')
+  })
+
+  // PR-0 cycle 7 axis 4 BLOCK fix — concurrent inbox cursor advances must
+  // not regress the DB cursor. We persist a "cursor40" then attempt to
+  // overwrite it with an older "cursor20" — the monotonic guard in the
+  // SQL WHERE clause must reject the older write as a no-op.
+  test('case 13 — persistInboxCursorToDb is monotonic (older write is no-op)', async () => {
+    await db.execute(`INSERT INTO agents (agent_id) VALUES ('me')`)
+    const cursor40 = { createdAt: '2026-05-01T00:00:00.400000Z', id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }
+    const cursor20 = { createdAt: '2026-05-01T00:00:00.200000Z', id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }
+    await persistInboxCursorToDb(pgWrap(db), 'me', cursor40)
+    let row = await db.query<{ inbox_cursor_at: string; inbox_cursor_id: string }>(
+      `SELECT inbox_cursor_at, inbox_cursor_id FROM agents WHERE agent_id = 'me'`,
+    )
+    expect(row[0].inbox_cursor_at).toBe(cursor40.createdAt)
+    expect(row[0].inbox_cursor_id).toBe(cursor40.id)
+
+    // Older write — must be rejected by the monotonic WHERE guard.
+    await persistInboxCursorToDb(pgWrap(db), 'me', cursor20)
+    row = await db.query<{ inbox_cursor_at: string; inbox_cursor_id: string }>(
+      `SELECT inbox_cursor_at, inbox_cursor_id FROM agents WHERE agent_id = 'me'`,
+    )
+    expect(row[0].inbox_cursor_at).toBe(cursor40.createdAt)
+    expect(row[0].inbox_cursor_id).toBe(cursor40.id)
+
+    // Newer write — must succeed.
+    const cursor60 = { createdAt: '2026-05-01T00:00:00.600000Z', id: 'cccccccc-cccc-cccc-cccc-cccccccccccc' }
+    await persistInboxCursorToDb(pgWrap(db), 'me', cursor60)
+    row = await db.query<{ inbox_cursor_at: string; inbox_cursor_id: string }>(
+      `SELECT inbox_cursor_at, inbox_cursor_id FROM agents WHERE agent_id = 'me'`,
+    )
+    expect(row[0].inbox_cursor_at).toBe(cursor60.createdAt)
+    expect(row[0].inbox_cursor_id).toBe(cursor60.id)
   })
 })

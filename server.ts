@@ -704,8 +704,12 @@ async function fetchNewMessages(forAgent: string, limit: number): Promise<any[]>
   )
   if (nextCursor && nextCursor !== inboxCursor) {
     inboxCursor = nextCursor
-    // Persist asynchronously; don't block the inbox response on the UPDATE.
-    persistInboxCursorToDb(forAgent, nextCursor).catch(() => {})
+    // PR-0 cycle 7 axis 4 BLOCK fix — await the persistence write. The
+    // UPDATE itself carries a monotonic guard (composite (at, id) <
+    // $new) so concurrent inbox calls cannot regress the DB cursor: an
+    // older write whose payload is < the stored cursor matches zero
+    // rows and is a no-op, never overwriting a newer cursor.
+    await persistInboxCursorToDb(forAgent, nextCursor)
   }
   return rows
 }
@@ -3571,32 +3575,24 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     }
   }
 
-  // Issue #278 (A) segment 3b — install expired-claim sweeper. Flips
-  // orphaned `status='read'` rows whose claim_expires_at is in the
-  // past to `failed_reason='IMPLICIT_ABANDON'`. Shares the
-  // AGENT_COMMS_TTL_SWEEP_DISABLED kill switch so tests / one-shot
-  // CLIs disable both sweepers at once. Interval is independently
-  // env-overridable via AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS (default
-  // 5 min) per Issue #278 §5 Open decisions.
-  if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
-    try {
-      const claimDb = await coreDbAdapter()
-      if (claimDb) {
-        const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
-        startClaimTtlSweeper(claimDb, { intervalMs })
-        process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON)\n`)
-      }
-    } catch (err) {
-      process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
-    }
-  }
-
-  // Issue #287 — startup self-reclaim + periodic auto-reclaim sweeper.
-  // The startup hook reclaims THIS agent's orphaned claims (status='read'
-  // owned by self) back to 'pending' so the new session receives them on
-  // the next `next` call. The periodic sweeper (60s default) reclaims
-  // claims whose TTL expired mid-session. Disabled by the same kill switch
-  // as the claim-ttl sweeper.
+  // Issue #287 cycle 7 axis 1 BLOCK fix — startup order: self-reclaim FIRST,
+  // claim-ttl SECOND. The previous order (claim-ttl first, with
+  // `setTimeout(fire, 0)` immediate sweep in core/claim-ttl.ts) raced
+  // ahead of self-reclaim and converted own expired claims to
+  // `failed/IMPLICIT_ABANDON` before the self-reclaim path could roll
+  // them back to `pending`, defeating the restart-recovery contract.
+  //
+  // Order:
+  //   (1) `await reclaimSelfOrphanedClaims(...)` — synchronous, must
+  //       complete before any sweeper starts.
+  //   (2) `startSelfReclaimSweeper(...)` — periodic 60s self-reclaim
+  //       for claims that expire mid-session.
+  //   (3) `startClaimTtlSweeper(... selfAgentId: AGENT_ID)` — the
+  //       `selfAgentId` predicate excludes own rows from the
+  //       IMPLICIT_ABANDON sweep. Belt-and-braces: even if the
+  //       sweeper's `setTimeout(fire, 0)` races ahead of
+  //       `startSelfReclaimSweeper`, own rows are not flipped to
+  //       `failed`.
   if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
     try {
       const reclaimDb = await coreDbAdapter()
@@ -3609,6 +3605,16 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
       }
     } catch (err) {
       process.stderr.write(`agent-comms: WARNING — self-reclaim startup failed (non-fatal): ${err}\n`)
+    }
+    try {
+      const claimDb = await coreDbAdapter()
+      if (claimDb) {
+        const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
+        startClaimTtlSweeper(claimDb, { intervalMs, selfAgentId: AGENT_ID })
+        process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentId=${AGENT_ID})\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: WARNING — claim ttl sweeper failed to start (non-fatal): ${err}\n`)
     }
   }
 

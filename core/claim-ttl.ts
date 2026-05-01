@@ -30,6 +30,18 @@ export interface ClaimTtlDb {
 
 export interface ClaimTtlOptions {
   reason?: string
+  /**
+   * PR-0 (Issue #287) cycle 7 axis 1 BLOCK fix: when set, the sweeper
+   * excludes this agent's own claims from the IMPLICIT_ABANDON predicate.
+   * Self-owned expired claims are reclaimed (read → pending) by
+   * `core/inbox-cursor.ts:startSelfReclaimSweeper` instead, which is the
+   * authoritative path for own-orphan recovery after Issue #287.
+   * Without this exclusion the claim-ttl sweep races the self-reclaim
+   * path on startup (claim-ttl `setTimeout(fire, 0)` fires before
+   * self-reclaim) and own claims land in `failed/IMPLICIT_ABANDON`
+   * instead of `pending`, defeating the restart-recovery contract.
+   */
+  selfAgentId?: string
 }
 
 /**
@@ -37,6 +49,9 @@ export interface ClaimTtlOptions {
  * `claim_expires_at` is in the past to `status='failed'` with
  * `failed_reason` (default 'IMPLICIT_ABANDON'). Idempotent: rows that
  * have already been flipped no longer match the predicate.
+ *
+ * When `opts.selfAgentId` is set, rows owned by that agent are
+ * excluded (handled by self-reclaim, see Issue #287 cycle 7).
  *
  * Returns the number of rows updated, useful for observability /
  * test assertions.
@@ -46,6 +61,19 @@ export async function sweepExpiredClaims(
   opts: ClaimTtlOptions = {},
 ): Promise<number> {
   const reason = opts.reason ?? 'IMPLICIT_ABANDON'
+  if (opts.selfAgentId) {
+    const result = await db.query(
+      `UPDATE message_queue
+       SET status = 'failed', failed_reason = $1
+       WHERE status = 'read'
+         AND claimed_by IS NOT NULL
+         AND claimed_by <> $2
+         AND claim_expires_at IS NOT NULL
+         AND claim_expires_at < now()`,
+      [reason, opts.selfAgentId],
+    )
+    return result.rowCount ?? 0
+  }
   const result = await db.query(
     `UPDATE message_queue
      SET status = 'failed', failed_reason = $1
