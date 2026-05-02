@@ -419,6 +419,11 @@ async function nextMessage() {
     // (spec `$current_message_id`). Non-fatal on query failure.
     const currentMessageId = (row.message_id as string | null) ?? (payload.message_id as string | null | undefined) ?? null
     let replyChain: Awaited<ReturnType<typeof fetchReplyChain>> = []
+    // Issue #257 — light by default. CLI opt-back is via env var only
+    // (`AGENT_COM_REPLY_CHAIN_MODE=full`) for legacy shell scripts; MCP path
+    // uses `next({full: true})` arg. The asymmetry is intentional.
+    const replyChainMode: 'light' | 'full' =
+      (process.env.AGENT_COM_REPLY_CHAIN_MODE === 'full') ? 'full' : 'light'
     if (currentMessageId) {
       const depth = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
       try {
@@ -427,7 +432,7 @@ async function nextMessage() {
             const r = await db.query(sql, params)
             return r.rows as T[]
           },
-        } as any)
+        } as any, replyChainMode)
       } catch (err) {
         process.stderr.write(`agent-com: fetchReplyChain failed (non-fatal): ${err}\n`)
       }

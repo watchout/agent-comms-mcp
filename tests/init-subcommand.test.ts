@@ -28,6 +28,9 @@ describe('init subcommand', () => {
       expect(env).toContain('# DATABASE_URL=postgresql://localhost/agent_comms')
       expect(env).toContain('AGENT_COM_POLL_INTERVAL_MS=3000')
       expect(env).toContain('AGENT_COM_REPLY_CHAIN_DEPTH=5')
+      // Issue #257 — opt-back env must be exposed (commented) so users can
+      // discover the legacy CLI path without re-reading docs.
+      expect(env).toContain('# AGENT_COM_REPLY_CHAIN_MODE=full')
     })
 
     it('generates .env with postgres settings', () => {

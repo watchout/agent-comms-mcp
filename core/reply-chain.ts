@@ -1,9 +1,36 @@
 import type { DbAdapter } from './db/adapter'
 
+/**
+ * Issue #257 — light/full reply_chain shape (default break, route:ceo-approval).
+ *
+ * `light` (default): each entry carries an 80-char `preview` of the message
+ *   content instead of the full body. Caller fetches full content on demand
+ *   via the `expand_msg` MCP tool. Keeps `next` / `inbox` payload <2KB so
+ *   18-bot Phase C wave does not exhaust the 200K context window.
+ *
+ * `full`: legacy shape — full `content` is included on every chain entry.
+ *   Recovery path is *transport-asymmetric*:
+ *     MCP  → `next({full: true})` / `inbox({full: true})` (arg only)
+ *     CLI  → `AGENT_COM_REPLY_CHAIN_MODE=full` (env only)
+ *   The asymmetry is intentional and documented in the PR migration note.
+ */
+export type ReplyChainMode = 'light' | 'full'
+
+export const REPLY_CHAIN_PREVIEW_CHARS = 80
+
 export interface ReplyChainEntry {
+  /** Spec PR-α §1 — message's own UUID. Kept for run-bot.sh self-count. */
   id: string
+  /** §2.2 — preserved across light/full so run-bot LOOP_DETECTED jq path still resolves. */
   from: string
-  content: string
+  /** Spec §1.4 — `reply_to` of this entry, exposed under the canonical `parent_id` name. null at chain root. */
+  parent_id: string | null
+  /** Spec §1.4 — distance from the seed (current) message. seed = 0; each `reply_to` step toward older ancestors increments by 1. */
+  depth: number
+  /** Always present. First {@link REPLY_CHAIN_PREVIEW_CHARS} chars of content. */
+  preview: string
+  /** Only present in `full` mode (opt-in). */
+  content?: string
   created_at: string
 }
 
@@ -30,6 +57,7 @@ export async function fetchReplyChain(
   messageId: string | null | undefined,
   depth: number,
   db: DbAdapter,
+  mode: ReplyChainMode = 'light',
 ): Promise<ReplyChainEntry[]> {
   if (!messageId) return []
   if (depth <= 0) return []
@@ -38,7 +66,9 @@ export async function fetchReplyChain(
     id: string
     author_id: string
     content: string
+    reply_to: string | null
     created_at: string
+    depth: number
   }>(
     `WITH RECURSIVE chain(id, channel_id, author_id, content, reply_to, created_at, depth) AS (
        SELECT id, channel_id, author_id, content, reply_to, created_at, 0
@@ -48,23 +78,33 @@ export async function fetchReplyChain(
        FROM agent_messages m JOIN chain c ON m.id = c.reply_to
        WHERE c.depth + 1 < $2
      )
-     SELECT id, author_id, content, created_at FROM chain ORDER BY created_at ASC`,
+     SELECT id, author_id, content, reply_to, created_at, depth FROM chain ORDER BY created_at ASC`,
     [messageId, depth],
   )
 
-  return rows.map((row) => ({
-    id: row.id,
-    from: row.author_id,
-    content: row.content,
-    created_at:
-      row.created_at instanceof Date
-        ? (row.created_at as Date).toISOString()
-        : String(row.created_at),
-  }))
+  return rows.map((row) => {
+    const content = String(row.content ?? '')
+    const entry: ReplyChainEntry = {
+      id: row.id,
+      from: row.author_id,
+      parent_id: row.reply_to ?? null,
+      depth: typeof row.depth === 'number' ? row.depth : Number(row.depth),
+      preview: content.slice(0, REPLY_CHAIN_PREVIEW_CHARS),
+      created_at:
+        row.created_at instanceof Date
+          ? (row.created_at as Date).toISOString()
+          : String(row.created_at),
+    }
+    if (mode === 'full') entry.content = content
+    return entry
+  })
 }
 
+/** Spec §18.1 / §19 — single SSOT default depth = 5. */
+export const REPLY_CHAIN_DEFAULT_DEPTH = 5
+
 export function parseReplyChainDepth(raw: string | undefined): number {
-  const parsed = parseInt(raw ?? '5', 10)
-  if (!Number.isFinite(parsed) || parsed <= 0) return 5
+  const parsed = parseInt(raw ?? String(REPLY_CHAIN_DEFAULT_DEPTH), 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return REPLY_CHAIN_DEFAULT_DEPTH
   return parsed
 }

@@ -99,7 +99,7 @@ import {
   type InboxCursor,
   type ReclaimDb,
 } from './core/inbox-cursor'
-import { fetchReplyChain, parseReplyChainDepth } from './core/reply-chain'
+import { fetchReplyChain, parseReplyChainDepth, REPLY_CHAIN_PREVIEW_CHARS } from './core/reply-chain'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
@@ -1538,10 +1538,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Used by bots to receive messages via the MCP tool interface instead
       // of polling the CLI. The internal flow mirrors cli/index.ts nextMessage.
       name: 'next',
-      description: 'Pop the next pending message from the queue. Returns the message content, channel, and sender info. Call send to reply.',
+      description: 'Pop the next pending message from the queue. Returns the message content, channel, and sender info. The reply_chain is light by default (preview only); pass {full: true} to opt in to legacy full content. Call send to reply.',
       inputSchema: {
         type: 'object' as const,
-        properties: {},
+        properties: {
+          full: { type: 'boolean', description: 'Opt-in to legacy full reply_chain[].content (default: false = light preview only).' },
+        },
       },
     },
     {
@@ -1615,11 +1617,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'inbox',
-      description: 'Messages are automatically pushed to your session. Use this only to re-check history or filter by channel.',
+      description: 'Messages are automatically pushed to your session. Use this only to re-check history or filter by channel. Each row body is a 80-char preview by default; pass {full: true} to opt in to the legacy verbatim row body.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           limit: { type: 'number', description: 'Max messages (default: 20)' },
+          full: { type: 'boolean', description: 'Opt-in to legacy verbatim row body (default: false = 80-char preview + truncation suffix).' },
+        },
+      },
+    },
+    {
+      // Issue #257 — opt-in companion to next/inbox light shape: fetch the
+      // full body of one message by id. Error taxonomy: INVALID_ARG /
+      // MSG_NOT_FOUND / DB_UNAVAILABLE / EXPAND_MSG_FAILED.
+      name: 'expand_msg',
+      description: 'Fetch the full body and metadata of a single message by id. Pair with `next` / `inbox` (light default) when you need the full content of a specific message.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          id: { type: 'string', description: 'Message UUID (canonical input).' },
+          message_id: { type: 'string', description: 'Alias for id; either is accepted.' },
         },
       },
     },
@@ -1889,9 +1906,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const currentMessageId: string | null =
         (row.message_id as string | null) ?? (payload.message_id as string | null | undefined) ?? null
       let replyChain: Awaited<ReturnType<typeof fetchReplyChain>> = []
+      // Issue #257 — light by default (preview only). MCP recovery path:
+      // `next({full: true})` opt-in. (CLI uses AGENT_COM_REPLY_CHAIN_MODE env;
+      // these are intentionally asymmetric — see PR migration note.)
+      const replyChainMode: 'light' | 'full' =
+        (args && (args as any).full === true) ? 'full' : 'light'
       if (currentMessageId) {
         try {
-          replyChain = await fetchReplyChain(currentMessageId, REPLY_CHAIN_DEPTH, getDbAdapter())
+          replyChain = await fetchReplyChain(currentMessageId, REPLY_CHAIN_DEPTH, getDbAdapter(), replyChainMode)
         } catch (err) {
           process.stderr.write(`agent-comms: fetchReplyChain failed (non-fatal): ${err}\n`)
         }
@@ -2779,14 +2801,79 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     process.stderr.write(`[agent-com] WARN: check_inbox is deprecated, use inbox instead\n`)
   }
   if (name === 'inbox' || name === 'check_inbox') {
-    const { limit } = (args ?? {}) as any
-    // Issue #130 Phase 4: countAndClearSignals removed (filesystem signals abolished).
+    const { limit, full } = (args ?? {}) as any
+    // Issue #257 — light by default (80-char preview + truncation suffix).
+    // MCP opt-in via `{full: true}` (CLI uses env var, intentionally asymmetric).
     const rows = await fetchNewMessages(agentId, Math.min(limit ?? 20, 100))
-    if (rows.length === 0) return { content: [{ type: 'text', text: '(no new messages)' }] }
-    const text = rows.map((r: any) =>
-      `[${r.created_at}] ${r.author_id} → #${r.channel_id}: ${r.content}  (id: ${r.id})`
-    ).join('\n\n')
-    return { content: [{ type: 'text', text: `${rows.length} message(s):\n\n${text}` }] }
+    if (rows.length === 0) {
+      return { content: [{ type: 'text', text: JSON.stringify({ count: 0, messages: [] }) }] }
+    }
+    const isFull = full === true
+    const messages = rows.map((r: any) => {
+      const body = String(r.content ?? '')
+      const out: Record<string, unknown> = {
+        id: r.id,
+        from: r.author_id,
+        channel_id: r.channel_id,
+        created_at: r.created_at,
+      }
+      if (isFull) {
+        out.content = body
+      } else {
+        const isTruncated = body.length > REPLY_CHAIN_PREVIEW_CHARS
+        out.preview = isTruncated
+          ? body.slice(0, REPLY_CHAIN_PREVIEW_CHARS) + ` … [truncated, call expand_msg with id=${r.id}]`
+          : body
+      }
+      return out
+    })
+    return { content: [{ type: 'text', text: JSON.stringify({ count: rows.length, messages }) }] }
+  }
+
+  // Issue #257 — opt-in companion to next/inbox light shape. Returns the
+  // full body and metadata of one message by id.
+  if (name === 'expand_msg') {
+    const { id, message_id } = (args ?? {}) as any
+    const targetId = (typeof id === 'string' && id.length > 0)
+      ? id
+      : (typeof message_id === 'string' && message_id.length > 0 ? message_id : null)
+    const isUuidLike = (s: string) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s)
+    if (!targetId || !isUuidLike(targetId)) {
+      return { content: [{ type: 'text', text: 'Error [INVALID_ARG]: expand_msg requires `id` or `message_id` as a UUID string' }], isError: true }
+    }
+    let dbInst
+    try {
+      dbInst = getDbAdapter()
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error [DB_UNAVAILABLE]: ${err}` }], isError: true }
+    }
+    try {
+      const rows = await dbInst.query<{ id: string; channel_id: string | null; author_id: string; content: string; reply_to: string | null; metadata: unknown; created_at: unknown; message_type: string | null }>(
+        `SELECT id, channel_id, author_id, content, reply_to, metadata, created_at, message_type
+         FROM agent_messages WHERE id = $1 LIMIT 1`,
+        [targetId],
+      )
+      if (rows.length === 0) {
+        return { content: [{ type: 'text', text: `Error [MSG_NOT_FOUND]: no agent_messages row with id=${targetId}` }], isError: true }
+      }
+      const r = rows[0]
+      const created = r.created_at instanceof Date
+        ? (r.created_at as Date).toISOString()
+        : String(r.created_at)
+      const result = {
+        id: r.id,
+        channel_id: r.channel_id,
+        from: r.author_id,
+        content: String(r.content ?? ''),
+        reply_to: r.reply_to,
+        message_type: r.message_type ?? null,
+        metadata: r.metadata ?? null,
+        created_at: created,
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error [EXPAND_MSG_FAILED]: ${err}` }], isError: true }
+    }
   }
 
   // reply is handled above via redirect to send (SSOT-3 compliant)
