@@ -100,6 +100,7 @@ import {
   type ReclaimDb,
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth, REPLY_CHAIN_PREVIEW_CHARS } from './core/reply-chain'
+import { resolvePhase5 } from './core/routing/server-integration'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
@@ -1548,12 +1549,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'send',
-      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. To reply to a message, set reply_to to the original message UUID. mentions must contain agent_id strings (e.g. "ceo", "cto"), NOT Discord snowflake IDs.${agentListStr}`,
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Phase 5: prefer \`mention\` (1 primary recipient) + \`cc\` (queue 非投入、body 末尾に [CC: <@id>] 注入). Legacy \`mentions[]\` is auto-converted with deprecation warning.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. Required (empty array is rejected).' },
+          mention: { type: 'string', description: 'Phase 5: 1 primary recipient (agent_id). Empty string → INVALID_MENTION reject; unknown → UNKNOWN_AGENT reject.' },
+          cc: { type: 'array', items: { type: 'string' }, description: 'Phase 5: reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入). Unknown agents are stripped + warning.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning. Required for backward compat.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
@@ -1566,14 +1569,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // reply_to is intentionally absent: notify does not mark any
       // message_queue row 'replied' and does not touch agents.current_message_id.
       name: 'notify',
-      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. mentions must contain agent_id strings.${agentListStr}`,
+      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. Phase 5: prefer \`mention\` + \`cc\`; legacy \`mentions[]\` auto-converted.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           channel: { type: 'string', description: 'Channel id (or name) to post into. Required.' },
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. Required (empty array is rejected).' },
+          mention: { type: 'string', description: 'Phase 5: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          cc: { type: 'array', items: { type: 'string' }, description: 'Phase 5: reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入).' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning. Required for backward compat.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
@@ -1945,9 +1950,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ============================================================
 
   if (name === 'send') {
-    const { content, reply_to, message_type, metadata } = args as any
+    let { content, reply_to, message_type, metadata } = args as any
     // Issue #118 PR-B ③: mentions may be auto-filled below; use let
     let mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
+    // Phase 5 wiring runs AFTER the per-row claim acquisition so the channel
+    // is resolved; see resolvePhase5(...) call site below.
     // Issue #266: snapshot the raw args.mentions for outbound trace before any
     // auto-fill / normalization mutates `mentions`. Stored on agent_messages
     // so recurrences (e.g. PR #263 mention-prepend) can be diagnosed without stderr logs.
@@ -2020,6 +2027,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: no in-flight claim for reply_to=${reply_to} by ${agentId} — call \`next\` first or the claim may have expired` }], isError: true }
       }
       claimedMqId = claimRow.rows[0].id
+
+    // Phase 5 — opt-in mention/cc validation + outbound ACL + cc[] body
+    // decoration (Issues #305/#306/#308/#250). Resolves channel from claim,
+    // applies validation, decorates content. Activates only when Phase 5
+    // fields (`mention` / `cc`) are passed; legacy `mentions[]` path is
+    // unchanged unless auto-convert kicks in.
+    {
+      const claimChannelRow = await txClient.query(
+        `SELECT channel_id FROM agent_messages WHERE id = $1 LIMIT 1`,
+        [reply_to],
+      )
+      const phase5Channel: string = claimChannelRow.rows[0]?.channel_id ?? ''
+      const usesPhase5 = (args as any).mention !== undefined ||
+        (Array.isArray((args as any).cc) && (args as any).cc.length > 0)
+      if (usesPhase5 || mentions.length > 0) {
+        const phase5 = resolvePhase5({
+          sender: agentId,
+          channel_id: phase5Channel,
+          mention: (args as any).mention,
+          cc: (args as any).cc,
+          mentions,
+          content,
+          isKnownAgent: () => true,
+        })
+        if (phase5 && !phase5.ok) {
+          if (phase5.error === 'INVALID_MENTION') {
+            await txClient.query('ROLLBACK'); txCommitted = true
+            return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          }
+          if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
+            await txClient.query('ROLLBACK'); txCommitted = true
+            return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
+          }
+        }
+        if (phase5 && phase5.ok) {
+          content = phase5.content
+          mentions = phase5.mentions
+          for (const w of phase5.warnings) {
+            process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
+          }
+        }
+      }
+    }
 
     // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
     // This avoids NOT_MENTIONED errors when LLM forgets mentions but reply_to context is present.
@@ -2461,8 +2511,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // conceptually with send; we replicate the minimum necessary to satisfy
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
-    const { channel, thread_id: threadArg, content, message_type, metadata } = args as any
-    const mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
+    let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
+    let mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
     // Issue #266: snapshot raw args.mentions for outbound trace.
     const rawInputMentions: string[] = mentions.slice()
 

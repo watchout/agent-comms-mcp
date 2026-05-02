@@ -57,6 +57,7 @@ npx agent-comms-mcp
 - チャンネル内の無関係メッセージは含めない (複数話題混在問題の解決)
 - 設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 5)
 - Issue #257: `next` / `inbox` の reply_chain default は light shape (preview のみ)、`full: true` arg (MCP) または `AGENT_COM_REPLY_CHAIN_MODE=full` env (CLI) で legacy 復旧 — default break adopted (route:ceo-approval)
+- Phase 5 (Issues #305 / #306 / #308 / #250、PR #309): channel routing 契約を `config/bot-routing.json` で一本化。`mention` (1 主 recipient) + `cc[]` (queue 非投入 body 注入) + `primary` fallback + `outboundAllowlist` ACL を 4 port abstraction で提供。restart-only reload。
 
 ### 3. Init / Start: 単一コマンド兼用
 
