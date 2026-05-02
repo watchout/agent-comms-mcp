@@ -222,11 +222,41 @@ describe('PR-α cycle 1 — §4 source-pin tests', () => {
     expect(text).toMatch(/default break adopted|default break/)
   })
 
-  // §4.4 docs/SSOT.md exists (umbrella stale 整理 / 現状記述)
-  test('§4.4 docs/SSOT.md exists as umbrella reference', async () => {
+  // §4.4 docs/SSOT.md is updated to new contract (cycle 2-revised §2.7a + §2.8)
+  test('§4.4 docs/SSOT.md — cycle 2-revised §2.7a/§2.8 updated to new contract', async () => {
     const text = await readFileSyncSafe('docs/SSOT.md')
-    // Defensive: SSOT.md may be brief; we only require presence + non-empty.
-    expect(text.length).toBeGreaterThan(0)
+    // §3.7 merge gate: 0 hits of legacy keyword
+    expect(text).not.toContain('check_inbox')
+    // §2.8 negative pins (legacy artefacts must not remain)
+    expect(text).not.toContain('No new messages')
+    expect(text).not.toContain('シグナルファイル')
+    // §2.8 positive pins (new contract keywords must be present)
+    expect(text).toContain('expand_msg')
+    expect(text).toMatch(/full\??:\s*boolean|\|\s*full\s*\|\s*boolean\s*\|/)
+    expect(text).toContain('light/full')
+    // §2.7a: max_depth=5 (was 10)
+    expect(text).toContain('max_depth: 5')
+    expect(text).not.toContain('max_depth: 10')
+  })
+
+  // §4.4b SSOT-3 API CONTRACT — cycle 2-revised §2.7b + §2.8 + §3.7
+  test('§4.4b SSOT-3_API_CONTRACT — new contract literal + grep gate (§3.7)', async () => {
+    const text = await readFileSyncSafe('docs/design/core/SSOT-3_API_CONTRACT.md')
+    // §3.7 merge gate: 0 hits of `^| to | string |` / `No new messages` / シグナルファイル / `to="channel:`
+    expect(text).not.toMatch(/^\| to \| string \|/m)
+    expect(text).not.toContain('No new messages')
+    expect(text).not.toContain('シグナルファイル')
+    expect(text).not.toContain('to="channel:')
+    // §2.8 positive pins
+    expect(text).toContain('expand_msg')
+    // SSOT-3 declares the `full` arg in the inbox/next param tables (`| full | boolean |`)
+    expect(text).toMatch(/\|\s*full\s*\|\s*boolean\s*\|/)
+    expect(text).toContain('INVALID_ARG')
+    expect(text).toContain('MSG_NOT_FOUND')
+    expect(text).toContain('DB_UNAVAILABLE')
+    expect(text).toContain('EXPAND_MSG_FAILED')
+    // 深度制限 = 5 (was 10)
+    expect(text).toContain('reply_chain の最大深度 | 5')
   })
 
   // §4.5 全 5 SSOT (code default / spec §19 / phase-c-redef / .env.example / cli/init.ts) で depth=5 整合

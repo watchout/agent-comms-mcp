@@ -347,7 +347,7 @@ CREATE TABLE rate_limits (
 
 | レイヤー | チェック内容 | デフォルト |
 |---------|------------|-----------|
-| 深度制限 | メッセージチェーンの深さ | max_depth: 10 |
+| 深度制限 | メッセージチェーンの深さ | max_depth: 5 |
 | 交換カウンター | 2エージェント間の往復回数/時間窓 | max_count: 20 / window: 300秒 |
 
 ```sql
@@ -471,7 +471,7 @@ cron・外部スクリプトは不要。
   },
   "rate_limit": { "max_per_minute": 30 },
   "loop_detection": {
-    "max_depth": 10,
+    "max_depth": 5,
     "max_count": 20,
     "window_seconds": 300
   },
@@ -568,19 +568,26 @@ agent_messagesテーブル（DB）ではなく、Discordプラットフォーム
 
 **実装方式:** 統合版ではDiscordAdapterの `fetchHistory()` メソッドを直接呼び出し、Discord APIの `GET /channels/{id}/messages` で履歴を取得する。
 
-### 9.4 check_inbox
+### 9.4 next / inbox / expand_msg (Issue #257 light/full 契約)
 
-Messages are automatically pushed to your session. Use this only to re-check history or filter by channel.
+`next` / `inbox` の default response は **light shape** (preview のみ)、full body は opt-in。
+`expand_msg(id)` で個別 message の full body + metadata を取得。
 
-| パラメータ | 型 | 必須 | 説明 |
-|-----------|------|------|------|
-| limit | number | No | 取得件数（default: 20） |
+| tool | パラメータ | default | full opt-in |
+|------|-----------|---------|-------------|
+| `next` | `full?: boolean` | reply_chain[] entries に preview のみ (80 char) | `next({full: true})` で legacy shape (content + preview) |
+| `inbox` | `limit?: number, full?: boolean` | row body 80-char preview + `… [truncated, call expand_msg with id={id}]` suffix | `inbox({full: true})` で legacy verbatim row body |
+| `expand_msg` | `id?: string \| message_id?: string` | full body + metadata 1 件 | n/a (default で full) |
 
-**既読管理（カーソルベース）:**
-- エージェントごとに `last_read_id`（最後に読んだメッセージID）をメモリ内で保持
-- `check_inbox` 呼び出し時、`last_read_id` より後のメッセージのみ返す
-- 取得したメッセージの最大IDで `last_read_id` を更新
-- プロセス再起動時はカーソルがリセットされるが、push通知が主経路のため問題なし
+**Recovery path 非対称** (transport 慣例ごとの opt-in):
+- MCP: arg 専用 (`next({full: true})` / `inbox({full: true})`)
+- CLI: env 専用 (`AGENT_COM_REPLY_CHAIN_MODE=full`)
+
+**Error taxonomy (`expand_msg`)**: `INVALID_ARG` / `MSG_NOT_FOUND` / `DB_UNAVAILABLE` / `EXPAND_MSG_FAILED`
+
+**ReplyChainEntry shape**: `{ id, from, parent_id, depth, preview, content?, created_at }` (depth は seed = 0、ancestors increment、seed-inclusive oldest-first chronological)
+
+**既読管理（カーソルベース）**: `inbox_cursor_id` / `inbox_cursor_at` を `agents` テーブルに永続化 (PR-0 / Issue #287)。プロセス再起動でも次回 `next` 呼び出しで重複配信なし。
 
 ---
 
@@ -625,7 +632,7 @@ Messages are automatically pushed to your session. Use this only to re-check his
 - [x] notifications/claude/channel MCP通知送信
 - [x] 重複注入防止（processedIds Set）
 - [x] ポーリングのライフサイクル管理（起動時start、shutdown時clear）
-- [x] check_inboxツール説明文の更新（補助ツールへ格下げ）
+- [x] next ツール light/full 契約 (Issue #257、§9.4 参照)
 - [ ] 実地テスト（CTO↔Dev Bot間push通知確認）
 - **注記:** MCP通知方式はchannel plugin allowlist制約により単独では機能しない。Phase 4でhook方式に移行
 
@@ -1120,7 +1127,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 | 2026-04-19 | Phase C I6: §8.1 を OSS Quick Start に書き換え（`npx agent-comms-mcp init/start/status`）。§8.2 を社内運用に限定。§16.5 起動コマンドに OSS 版を追加。 |
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
 | 2026-03-28 | 追記：§5レート制限/ループ検出のDB永続化、§12エージェントID管理、§13 bot間認証、§14退行テスト |
-| 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 check_inbox説明更新 |
+| 2026-03-28 | 追記：§4.4 push通知詳細化（DBポーリング方式）、§11 Phase 3ロードマップ詳細化、§9.3 next 説明更新 |
 | 2026-03-29 | 更新：§11 Phase 4詳細化（channel plugin化）、§8.2 起動コマンドをPhase 4形式に更新 |
 | 2026-03-29 | 変更：Phase 4をWebhookチャネル方式に変更。§4.4 push通知仕様を全面改訂（LISTEN/NOTIFY + Webhook MCP server）。§8.2 起動コマンド更新 |
 | 2026-03-29 | 追記：§3.2 Discordアダプター詳細仕様（受信/送信フロー、access制御）。§11 Phase 4.5追加 |
@@ -1129,5 +1136,5 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 | 2026-03-30 | 更新：§11 Phase 4残項目完了、Phase 4.5全項目完了、Phase 5全9bot統合展開完了 |
 | 2026-03-30 | 追記：§9.3 fetch_discord_history ツール仕様追加（Discord API経由の履歴取得） |
 | 2026-03-30 | 大幅更新：§2.1 全体構造をPhase 5統合版に改訂。§11 Phase 5を5.1〜5.6に詳細化（アダプターIF、Discord統合、listener統合、channel mapping、起動方式、削除対象）。§15 移行手順追加 |
-| 2026-03-30 | 追記：§9.4 check_inbox にカーソルベース既読管理（last_read_id）の仕様追加。重複配信バグ修正 |
+| 2026-03-30 | 追記：§9.4 next にカーソルベース既読管理（last_read_id）の仕様追加。重複配信バグ修正 |
 | 2026-04-02 | 追記：§16 Botライフサイクル管理。MCPツール4種（restart_bot, bot_status, watchdog_check, cleanup_ports）追加。ポート割当をbot-registry.txt準拠に更新 |
