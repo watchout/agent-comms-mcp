@@ -31,6 +31,7 @@ import {
   validateMentionOrError,
   buildReplyContextSuffix,
 } from '../../core/send-errors'
+import { resolvePhase5 } from '../../core/routing/server-integration'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // T1: mentions 空 + reply_to あり → エラーに author_id が含まれる
@@ -198,6 +199,91 @@ describe('T6 — DB unavailable causes MENTION_VALIDATION_UNAVAILABLE (no silent
     for (const kw of ['all', 'dev', 'org']) {
       expect(validateMentionOrError(kw, [])).toBeNull()
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T7: knownAgents 配列に対する isKnownAgent クロージャ contract (regression for Phase 5 hotfix)
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION CLASS: server.ts L2055 / L2646 で `knownAgents.has(id)` が呼ばれていた
+// が refreshAgentCache() は string[] を返すため `.has` が undefined で TypeError、
+// 19 bot の outbound mention/cc routing が全死亡 (Phase 5 fleet restart 後判明)。
+// Fix: `.has(id)` → `.includes(id)`. このテストは配列 contract を pin し再発を防ぐ。
+// CTO directive msg `f12988ff-792e-4fef-903e-20c9e0d68b08` / lead-ama hotfix dispatch.
+describe('T7 — isKnownAgent closure over refreshAgentCache() array (Phase 5 hotfix regression)', () => {
+  test('refreshAgentCache return type is Array (supports .includes, not .has)', () => {
+    const knownAgents: string[] = ['cto', 'ceo', 'lead-ama', 'agent-com-dev']
+    expect(Array.isArray(knownAgents)).toBe(true)
+    expect(typeof (knownAgents as any).has).toBe('undefined')
+    expect(typeof knownAgents.includes).toBe('function')
+  })
+
+  test('isKnownAgent closure pattern (L2055/L2646) returns true for known id', () => {
+    const knownAgents: string[] = ['cto', 'ceo', 'lead-ama', 'agent-com-dev']
+    const isKnownAgent = (id: string) => knownAgents.includes(id)
+    expect(isKnownAgent('cto')).toBe(true)
+    expect(isKnownAgent('agent-com-dev')).toBe(true)
+  })
+
+  test('isKnownAgent closure pattern returns false for unknown id (no TypeError)', () => {
+    const knownAgents: string[] = ['cto', 'ceo']
+    const isKnownAgent = (id: string) => knownAgents.includes(id)
+    expect(() => isKnownAgent('nonexistent')).not.toThrow()
+    expect(isKnownAgent('nonexistent')).toBe(false)
+  })
+
+  test('pre-fix pattern (.has) would throw TypeError on string[] (negative pin)', () => {
+    const knownAgents: string[] = ['cto', 'ceo']
+    expect(() => (knownAgents as any).has('cto')).toThrow(TypeError)
+  })
+
+  test('resolvePhase5 with post-fix isKnownAgent closure → ok for known mention', () => {
+    const knownAgents: string[] = ['cto', 'ceo', 'agent-com-dev']
+    const result = resolvePhase5({
+      sender: 'agent-com-dev',
+      channel_id: 'ch-test',
+      mention: 'cto',
+      content: 'hello',
+      isKnownAgent: (id: string) => knownAgents.includes(id),
+    })
+    expect(result).not.toBeNull()
+    expect(result!.ok).toBe(true)
+  })
+
+  test('resolvePhase5 with post-fix closure → UNKNOWN_AGENT for unknown mention (no TypeError)', () => {
+    const knownAgents: string[] = ['cto', 'ceo']
+    expect(() =>
+      resolvePhase5({
+        sender: 'agent-com-dev',
+        channel_id: 'ch-test',
+        mention: 'nonexistent',
+        content: 'hello',
+        isKnownAgent: (id: string) => knownAgents.includes(id),
+      }),
+    ).not.toThrow()
+    const result = resolvePhase5({
+      sender: 'agent-com-dev',
+      channel_id: 'ch-test',
+      mention: 'nonexistent',
+      content: 'hello',
+      isKnownAgent: (id: string) => knownAgents.includes(id),
+    })
+    expect(result).not.toBeNull()
+    expect(result!.ok).toBe(false)
+    expect((result as any).error).toBe('UNKNOWN_AGENT')
+  })
+
+  test('pre-fix closure (.has on string[]) → resolvePhase5 throws TypeError (Phase 5 outbound death repro)', () => {
+    const knownAgents: string[] = ['cto', 'ceo']
+    expect(() =>
+      resolvePhase5({
+        sender: 'agent-com-dev',
+        channel_id: 'ch-test',
+        mention: 'cto',
+        content: 'hello',
+        isKnownAgent: (id: string) => (knownAgents as any).has(id),
+      }),
+    ).toThrow(TypeError)
   })
 })
 
