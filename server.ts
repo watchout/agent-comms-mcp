@@ -2052,7 +2052,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cc: (args as any).cc,
           mentions,
           content,
-          isKnownAgent: (id: string) => knownAgents.has(id),
+          isKnownAgent: (id: string) => knownAgents.includes(id),
         })
         if (phase5 && !phase5.ok) {
           if (phase5.error === 'INVALID_MENTION') {
@@ -2643,7 +2643,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cc: (args as any).cc,
           mentions,
           content,
-          isKnownAgent: (id: string) => knownAgentsN.has(id),
+          isKnownAgent: (id: string) => knownAgentsN.includes(id),
         })
         if (phase5 && !phase5.ok) {
           if (phase5.error === 'INVALID_MENTION') {
