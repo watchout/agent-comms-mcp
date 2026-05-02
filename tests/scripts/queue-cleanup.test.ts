@@ -15,6 +15,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { Client } from 'pg'
+import { join } from 'node:path'
 import { runQueueCleanup, _internal } from '../../scripts/queue-cleanup'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
@@ -179,5 +180,69 @@ describe('PR-Q1 queue-cleanup script', () => {
     expect(_internal.parseMode(['--dry-run'])).toBe('dry-run')
     expect(_internal.parseMode(['--execute'])).toBe('execute')
     expect(_internal.parseMode(['--something', '--execute'])).toBe('execute')
+  })
+})
+
+describe('PR-Q1 cycle 2 — resolveDatabaseUrl precedence (env > config.json > default)', () => {
+  const { resolveDatabaseUrl } = _internal
+  const tmpDir = join(import.meta.dir, '.qc-tmp')
+  const tmpConfig = join(tmpDir, 'config.json')
+
+  beforeAll(() => {
+    require('node:fs').mkdirSync(tmpDir, { recursive: true })
+  })
+
+  afterAll(() => {
+    try {
+      require('node:fs').rmSync(tmpDir, { recursive: true, force: true })
+    } catch {}
+  })
+
+  function writeConfig(url: string | null) {
+    const fs = require('node:fs')
+    if (url === null) {
+      try { fs.unlinkSync(tmpConfig) } catch {}
+      return
+    }
+    fs.writeFileSync(tmpConfig, JSON.stringify({ database_url: url }))
+  }
+
+  test('case A: env set + config present → env wins', () => {
+    writeConfig('postgresql://from-config/db')
+    const url = resolveDatabaseUrl(
+      { DATABASE_URL: 'postgresql://from-env/db' } as any,
+      tmpConfig,
+    )
+    expect(url).toBe('postgresql://from-env/db')
+  })
+
+  test('case B: env unset + config present → config wins', () => {
+    writeConfig('postgresql://from-config/db')
+    const url = resolveDatabaseUrl({} as any, tmpConfig)
+    expect(url).toBe('postgresql://from-config/db')
+  })
+
+  test('case C: env empty string + config present → config wins (empty = absent)', () => {
+    writeConfig('postgresql://from-config/db')
+    const url = resolveDatabaseUrl(
+      { DATABASE_URL: '' } as any,
+      tmpConfig,
+    )
+    expect(url).toBe('postgresql://from-config/db')
+  })
+
+  test('case D: env set + config absent → env wins', () => {
+    writeConfig(null)
+    const url = resolveDatabaseUrl(
+      { DATABASE_URL: 'postgresql://from-env/db' } as any,
+      tmpConfig,
+    )
+    expect(url).toBe('postgresql://from-env/db')
+  })
+
+  test('case E: both absent → built-in default', () => {
+    writeConfig(null)
+    const url = resolveDatabaseUrl({} as any, tmpConfig)
+    expect(url).toBe('postgresql://localhost/agent_comms')
   })
 })

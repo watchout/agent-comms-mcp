@@ -27,20 +27,42 @@ const REASON =
   'BULK_CLEANUP: pre-Phase 5 obsolete chatter (lead-ama 2026-05-02)'
 const AGE_INTERVAL = "INTERVAL '12 hours'"
 
-function resolveDatabaseUrl(): string {
-  let url = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
-  const configPath = join(
+/**
+ * Resolve the Postgres connection string with explicit precedence:
+ *   1. process.env.DATABASE_URL (truthy = non-empty string) — wins
+ *   2. config.json `database_url` — fallback when env is unset / empty
+ *   3. built-in default `postgresql://localhost/agent_comms`
+ *
+ * The cycle 1 implementation read config.json unconditionally and let it
+ * override env, which inverted operator expectations (env should win on
+ * Unix). config.json fallback is preserved per CTO directive to keep the
+ * existing operator workflow that relies on it.
+ */
+function defaultConfigPath(): string {
+  return join(
     dirname(new URL(import.meta.url).pathname),
     '..',
     'config.json',
   )
+}
+
+function resolveDatabaseUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  configPath: string = defaultConfigPath(),
+): string {
+  const fromEnv = env.DATABASE_URL
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+    return fromEnv
+  }
   if (existsSync(configPath)) {
     try {
       const config = JSON.parse(readFileSync(configPath, 'utf-8'))
-      url = config.database_url ?? url
+      if (typeof config.database_url === 'string' && config.database_url.length > 0) {
+        return config.database_url
+      }
     } catch {}
   }
-  return url
+  return 'postgresql://localhost/agent_comms'
 }
 
 function parseMode(argv: string[]): 'dry-run' | 'execute' {
@@ -185,6 +207,7 @@ export const _internal = {
   AGE_INTERVAL,
   parseMode,
   resolveDatabaseUrl,
+  defaultConfigPath,
   gatherCandidates,
 }
 
