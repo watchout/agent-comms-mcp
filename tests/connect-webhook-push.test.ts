@@ -19,7 +19,12 @@ describe('Webhook Channel push — handleInboundMessage + caller push', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
     // Slice widened to cover spec §8.2 sender-feedback block (Behavioral FAIL
     // B5) that sits between persistInboundDelivery and Step 7c.
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 9000)
+    // PR-β (Issue #230): window widened from 9000 to 12000 chars after the
+    // reply_to UUID resolution + mentions auto-fill blocks were added at the
+    // top of handleInboundMessage.
+    // PR-β cycle 3 (Issue #230): bumped 12000 → 14000 to cover the new
+    // early-capture + 2-step lookup commentary added at the top.
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 14000)
     expect(fnBody).toContain('delivered: true, messageId, pushMeta')
   })
 

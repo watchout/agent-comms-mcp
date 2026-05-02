@@ -264,9 +264,18 @@ describe('handleInboundMessage — Full flow wrapper', () => {
 
   test('DB save happens before routing', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    // PR-β cycle 2 §1.2: cycle 2 added comment lines around the dispatch
+    // site so the original 5000-char window fell short of the routeInbound
+    // call. Bumped to 8000 chars (still well within the function body).
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
     const dbSaveIdx = fnBody.indexOf('saveMessage(')
-    const routeIdx = fnBody.indexOf('routeInbound(')
+    // PR-β cycle 2 §1.2: routeInbound is now dispatched via
+    // `(d.routeInbound ?? routeInbound)(...)`. Match the wrapped form
+    // (`routeInbound)(`) preferentially; fall back to bare call which
+    // still applies elsewhere in the file (e.g. listener path line 281).
+    const wrappedIdx = fnBody.indexOf('routeInbound)(')
+    const bareIdx = fnBody.indexOf('routeInbound(')
+    const routeIdx = wrappedIdx >= 0 ? wrappedIdx : bareIdx
     expect(dbSaveIdx).toBeGreaterThan(-1)
     expect(routeIdx).toBeGreaterThan(-1)
     expect(dbSaveIdx).toBeLessThan(routeIdx)
@@ -280,7 +289,10 @@ describe('handleInboundMessage — Full flow wrapper', () => {
 
   test('returns humanWarning flag for Pattern A', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    // Window widened for PR-β (Issue #230): handleInboundMessage now
+    // resolves replyToMessageId → UUID before the routing decision, so the
+    // body grew past the original 5000-char window.
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
     expect(fnBody).toContain('humanWarning:')
     expect(fnBody).toContain('result.senderIsHuman && result.noMentions')
   })

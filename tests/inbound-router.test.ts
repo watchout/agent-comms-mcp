@@ -85,9 +85,15 @@ describe('Inbound Router — Source Structure', () => {
 
   test('handleInboundMessage always saves to DB before routing', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
+    // PR-β cycle 2 §1.2: bumped from 5000 → 8000 to cover dispatch
+    // wrapper comments while staying within the function body.
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
     const saveIdx = body.indexOf('saveMessage(')
-    const routeIdx = body.indexOf('routeInbound(')
+    // PR-β cycle 2 §1.2: routeInbound now dispatched via
+    // `(d.routeInbound ?? routeInbound)(...)`; match either form.
+    const wrappedIdx = body.indexOf('routeInbound)(')
+    const bareIdx = body.indexOf('routeInbound(')
+    const routeIdx = wrappedIdx >= 0 ? wrappedIdx : bareIdx
     expect(saveIdx).toBeGreaterThan(-1)
     expect(routeIdx).toBeGreaterThan(-1)
     expect(saveIdx).toBeLessThan(routeIdx)
