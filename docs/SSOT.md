@@ -242,12 +242,21 @@ interface AccessConfig {
 ### 4.2 メッセージルーティング
 
 > 詳細仕様: docs/agent-com-message-queue-spec.md §4 / §8 / §10-12 (旧 channel-thread-control-spec から統合、SPEC-INDEX.md:70 参照)
+> Phase 5 (Issues #305 / #306 / #308 / #250、PR-Phase5): mention/cc 分離 + primary fallback + outbound ACL = `config/bot-routing.json` を共通 source とする 4 port 抽象 (`InboundResolver` / `PrimaryFallback` / `OutboundPolicyValidator` / `MessageBodyDecorator`、`core/routing/ports/`)。reload は restart-only。
+
+#### Phase 5 routing contract (Issues #305/#306/#308/#250)
+- **mention** (1 主 recipient、queue 投入): 空文字 → `INVALID_MENTION` reject、unknown agent → `UNKNOWN_AGENT` reject
+- **cc[]** (queue 投入なし、body 末尾に `[CC: <@id>]` 注入): unknown agent は strip + warning (degradation safe)
+- **mentions[]** (deprecated): auto-convert (`mentions[0]` → `mention`、rest → `cc`) + 必須 warning log、1-2 sprint で removal
+- **primary fallback** (channel.primary): mention 不在時の inbound default 宛先、両方不在は skip + warning
+- **outbound ACL** (channel.outboundAllowlist): server-side 違反は `OUTBOUND_ACL_VIOLATION` reject 一本化 (cc[] strip 削除); allowlist 不在 channel は legacy compat (全 sender 許可)
 
 #### 設計原則
 1. botが宛先を選択する手段を物理的に持たない
 2. 受信した場所に返信する（Discordのデフォルト動作）
 3. 自発的発言（cron等）はCLIでchannel/thread必須指定
 4. 全制御はコード側で強制。CLAUDE.mdルールに依存しない
+5. **routing contract は `core/channel-policy.ts` の `getChannelPolicy(channel_id)` 1 expression に集約**、server / client / test が同 source を参照 (Phase 5 §1.8)
 
 #### Outbound（bot → 外部）
 1. botがsend(mentions, content, reply_to?)で送信 — **toパラメータなし**

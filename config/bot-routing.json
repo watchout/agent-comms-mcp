@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "channels": {
+    "1487368919613444156": {
+      "primary": "agent-com-dev",
+      "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "ceo", "auditor", "arc"]
+    }
+  }
+}

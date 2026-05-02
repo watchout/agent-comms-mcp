@@ -512,6 +512,23 @@ async function sendMessage(args: string[]) {
     process.exit(2)
   }
 
+  // Phase 5 — best-effort client-side warning (server is canonical, §1.4).
+  try {
+    const { resolvePhase5 } = await import('../core/routing/server-integration')
+    const phase5Warn = resolvePhase5({
+      sender: agentId,
+      channel_id: '',
+      mentions,
+      content,
+      isKnownAgent: () => true,
+    })
+    if (phase5Warn && phase5Warn.ok) {
+      for (const w of phase5Warn.warnings) {
+        process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
+      }
+    }
+  } catch {}
+
   // ARC codex audit follow-up (PR#134) + Issue #278 (A) segment 3d:
   // wrap the entire DB-touching flow in BEGIN/COMMIT. The lock has
   // moved from the agents row to the per-row claim row on
@@ -838,6 +855,23 @@ async function notifyMessage(args: string[]) {
     console.error('Error: --mentions must contain at least one agent ID')
     process.exit(2)
   }
+
+  // Phase 5 — best-effort client-side warning (server is canonical, §1.4).
+  try {
+    const { resolvePhase5 } = await import('../core/routing/server-integration')
+    const phase5Warn = resolvePhase5({
+      sender: agentId,
+      channel_id: '',
+      mentions,
+      content,
+      isKnownAgent: () => true,
+    })
+    if (phase5Warn && phase5Warn.ok) {
+      for (const w of phase5Warn.warnings) {
+        process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
+      }
+    }
+  } catch {}
 
   const db = await getDb()
   try {

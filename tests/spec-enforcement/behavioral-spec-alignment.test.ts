@@ -130,14 +130,21 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
 })
 
 describe('Behavioral FAIL B3 — notify tool implemented', () => {
-  test('MCP notify tool is listed with channel + mentions + content required', () => {
+  test('MCP notify tool is listed with channel + content required (Phase 5 cycle 3 — mentions DEPRECATED, accepts mention/cc instead)', () => {
     expect(SERVER_SRC).toMatch(/name:\s*'notify'/)
-    expect(SERVER_SRC).toMatch(/required:\s*\[['"]channel['"],\s*['"]mentions['"],\s*['"]content['"]\]/)
+    // Phase 5 cycle 3 fix #2 — `mentions` is removed from `required`; the
+    // schema accepts either Phase 5 `mention`/`cc` or legacy `mentions[]`
+    // (auto-converted with deprecation warning by resolvePhase5).
+    expect(SERVER_SRC).toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"]\]/)
   })
   test('MCP notify handler exists and does NOT touch reply_to / current_message_id', () => {
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")
     expect(notifyIdx).toBeGreaterThan(-1)
-    const handler = SERVER_SRC.slice(notifyIdx, notifyIdx + 8000)
+    // Slice extended (cycle 3 Phase 5 wiring): notify handler grew with the
+    // resolvePhase5() block; bound the slice at the next top-level tool
+    // block instead of a fixed offset.
+    const fetchHistoryIdx = SERVER_SRC.indexOf("if (name === 'fetch_discord_history')", notifyIdx)
+    const handler = SERVER_SRC.slice(notifyIdx, fetchHistoryIdx === -1 ? notifyIdx + 12000 : fetchHistoryIdx)
     expect(handler).toMatch(/reply_to:\s*undefined/)
     expect(handler).not.toMatch(/current_message_id\s*=\s*NULL/)
   })

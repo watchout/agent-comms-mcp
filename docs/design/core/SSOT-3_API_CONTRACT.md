@@ -9,15 +9,24 @@
 
 ### send
 
-統合メッセージ送信ツール。宛先は `reply_to` (元メッセージの location) で自動決定、`mentions[]` で push 対象 agent を指定。
+統合メッセージ送信ツール。宛先は `reply_to` (元メッセージの location) で自動決定、Phase 5 では `mention` (1 主 recipient) + `cc[]` (queue 投入なし、body 末尾 `[CC: <@id>]` 注入) で push 対象を指定。legacy `mentions[]` は auto-convert + deprecation warning。
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|-----|------|------|
 | content | string | ✅ | メッセージ本文（最大 50,000 chars） |
-| mentions | string[] | ✅ | push 通知対象 agent_id 配列（空配列は reject） |
+| mention | string | (1) | Phase 5: 1 主 recipient (agent_id)。空文字 → `INVALID_MENTION` reject、unknown → `UNKNOWN_AGENT` reject |
+| cc | string[] | - | Phase 5: 参照 recipients (queue 投入なし、body 末尾に `[CC: <@id>]` 注入)。unknown は strip + warning |
+| mentions | string[] | (1) | DEPRECATED — Phase 5 auto-convert (`mentions[0]` → mention, rest → cc) + warning。1-2 sprint で removal |
 | reply_to | string | ✅ | 元メッセージ UUID（destination 自動決定） |
 | message_type | string | - | `instruction` / `report` / `approval` / `chat` / `emergency`（デフォルト: `chat`） |
 | metadata | object | - | カスタムメタデータ（JSONB） |
+
+(1) mention / mentions のいずれか必須 (Phase 5 推奨は mention)。
+
+**Phase 5 outbound ACL (Issue #250、§2.4 reject 一本化):**
+- `config/bot-routing.json` の `channel.outboundAllowlist` で sender / recipients を gate
+- 違反は `OUTBOUND_ACL_VIOLATION` reject (cc[] strip は削除)
+- allowlist 不在 channel は legacy compat (全 sender 許可)
 
 **処理フロー:**
 1. `reply_to` から元メッセージの channel_id / thread_id / source 取得（in-flight claim 検証）
