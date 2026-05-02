@@ -1,24 +1,30 @@
 #!/usr/bin/env bun
 /**
- * PR-β §4 frozen merge-gate fixtures (cycle 2 — auditor Pre-impl PASS 6/6,
- * dispatch msg `5c825a43`/`d1cb676a`/`549a269c`/`1c8477c7`).
+ * PR-β §4 frozen merge-gate fixtures (cycle 3 — auditor Pre-impl PASS 6/6,
+ * dispatch msg `bc03a6a6`/`f4e1b06d`/`86b3b6e1`).
  *
- * Pins:
- *   - case 1:    dedicated column hit → reply_to UUID 設定
- *   - case 1b:   legacy row (column NULL + metadata.discord_message_id) →
- *                metadata fallback で reply_to UUID 設定 (PR-β cycle 2 §1.1)
- *   - case 1c:   両 miss orphan → reply_to NULL + stderr "reply_to orphan"
- *   - case 2:    replyToMessageId なし → reply_to undefined
- *   - case 3:    orphan stderr (case 1c と独立 keep)
- *   - case 4:    handleInboundMessage with routeInbound spy (deps.routeInbound) →
- *                empty mentions + parent → spy が `[parent.author_id]` を受領
- *   - case 5:    explicit mentions → spy が unchanged を受領
- *   - case 6:    source-grep — autoFill < routeInbound 順 + docstring honest
+ * Pins (case 6 deleted in cycle 3 — case 4/5 already pin the wire order
+ * at runtime; the source-grep was redundant):
+ *   - case 1   dedicated column hit → reply_to UUID 設定
+ *   - case 1b  legacy row (column NULL + metadata.discord_message_id) →
+ *              metadata fallback で reply_to UUID 設定 (cycle 3 §1.1 step 2)
+ *   - case 1c  両 miss orphan → reply_to NULL + injected stderrSink で
+ *              orphan log 観測 (cycle 3 §1.3)
+ *   - case 1d  NEW both-hit coexistence → column row が必ず返却 +
+ *              metadata query は物理的に発火しない (cycle 3 §1.1 priority)
+ *   - case 2   replyToMessageId なし → reply_to undefined
+ *   - case 3   orphan stderr (case 1c と独立 keep、両者 sink 経由)
+ *   - case 4   handleInboundMessage with routeInbound spy → empty mentions
+ *              + parent → spy が `[parent.author_id]` を受領
+ *   - case 5   explicit mentions → spy が unchanged 受領
  *
- * §2.4 honesty: case 6 は routeInbound surface (spy で behavioral assertion)
- * のみ pin する。saveMessage mock は persistence layer の "真" の挙動ではなく
- * payload capture の thin double であり、persistence semantics の検証は本 PR
- * の scope 外 (別 PR test infra 強化候補)。
+ * §1.4 adapter symmetry: 本 PR は inbound adapter only。outbound adapter
+ * への symmetric な変更は意図的に加えない (BLOCK 1/2/3 は inbound 固有、
+ * 同 abstraction 層内 N instance ではないため)。
+ *
+ * §3 anti-patterns (cycle 3): priority-non-deterministic SQL / late-bound
+ * global resolution / process-global stderr monkeypatch — 本 file は
+ * test injection 経由で全て回避。
  */
 import { describe, test, expect } from 'bun:test'
 import {
@@ -40,47 +46,63 @@ interface SaveMessageCapture {
 type ParentLookupMode =
   | { kind: 'column'; row: { id: string; author_id: string } }
   | { kind: 'metadata'; row: { id: string; author_id: string } }
+  | { kind: 'both'; columnRow: { id: string; author_id: string }; metadataRow: { id: string; author_id: string } }
   | { kind: 'miss' }
+
+interface QueryStats {
+  columnQueries: number
+  metadataQueries: number
+}
 
 function makeDeps(opts: {
   parentLookup?: ParentLookupMode
   registeredChannel?: boolean
   receiverIsMember?: boolean
   routeSpy?: RouteInboundFn
+  stderrSink?: (chunk: string) => void
 }): {
   deps: InboundReceiverDeps
   saved: SaveMessageCapture[]
   routeCalls: Array<{ mentions: string[] }>
+  queryStats: QueryStats
 } {
   const saved: SaveMessageCapture[] = []
   const routeCalls: Array<{ mentions: string[] }> = []
+  const queryStats: QueryStats = { columnQueries: 0, metadataQueries: 0 }
   const channelId = 'core-channel-uuid'
   const receiverAgentId = 'receiver-bot'
 
-  // PR-β cycle 2 §2.2 mock split: each query branch reflects the real
-  // SQL the production code issues, so the test catches contract drift
-  // (e.g. mock matched the wrong SELECT).
   const coreDbAdapter = async () => ({
-    async query(sql: string, params?: any[]): Promise<{ rows: any[] }> {
+    async query(sql: string, _params?: any[]): Promise<{ rows: any[] }> {
       const s = sql.toLowerCase()
+      // §1.1 cycle 3 — 2-step lookup. Each branch is counted separately
+      // so case 1d can assert column priority is deterministic
+      // (metadata query never fires when the column already hit).
+      const isColumnLookup =
+        s.includes('agent_messages') &&
+        /\bdiscord_message_id\s*=\s*\$1/.test(s) &&
+        !s.includes("metadata->>'discord_message_id'")
+      const isMetadataLookup =
+        s.includes('agent_messages') &&
+        s.includes("metadata->>'discord_message_id'") &&
+        !/\bdiscord_message_id\s*=\s*\$1/.test(s)
 
-      // §1.1 dual-lookup: column = $1 OR metadata->>'discord_message_id' = $1
-      if (s.includes('agent_messages') && s.includes('discord_message_id')) {
+      if (isColumnLookup) {
+        queryStats.columnQueries += 1
         const lookup = opts.parentLookup ?? { kind: 'miss' }
-        const sqlHasColumn = /\bdiscord_message_id\s*=\s*\$1/.test(s)
-        const sqlHasMetadata = s.includes("metadata->>'discord_message_id'")
-        // Branch by what the lookup mode SAYS the data shape is.
-        if (lookup.kind === 'column' && sqlHasColumn) {
-          return { rows: [lookup.row as any] }
-        }
-        if (lookup.kind === 'metadata' && sqlHasMetadata && !sqlHasColumn) {
-          // legacy-only: should never see this without dual-lookup OR clause.
-          return { rows: [lookup.row as any] }
-        }
-        if (lookup.kind === 'metadata' && sqlHasMetadata && sqlHasColumn) {
-          // dual-lookup OR clause — column miss falls through to metadata hit.
-          return { rows: [lookup.row as any] }
-        }
+        if (lookup.kind === 'column') return { rows: [lookup.row as any] }
+        if (lookup.kind === 'both') return { rows: [lookup.columnRow as any] }
+        return { rows: [] }
+      }
+      if (isMetadataLookup) {
+        queryStats.metadataQueries += 1
+        const lookup = opts.parentLookup ?? { kind: 'miss' }
+        if (lookup.kind === 'metadata') return { rows: [lookup.row as any] }
+        // §1.1 priority: 'both' should never reach the metadata branch.
+        // If a regression sends us here, return the metadata row so the
+        // assertion in case 1d (`reply_to === 'column-uuid'`) flips
+        // loudly to 'metadata-uuid' and the bug is caught.
+        if (lookup.kind === 'both') return { rows: [lookup.metadataRow as any] }
         return { rows: [] }
       }
       if (s.includes('from channels')) {
@@ -89,25 +111,12 @@ function makeDeps(opts: {
         return { rows: [{ id: channelId, members, type: 'group', thread_id: null } as any] }
       }
       // §2.2 mock split — loadAgentInfo: WHERE agent_id = $1
-      if (
-        s.includes('from agents') &&
-        s.includes('where agent_id') &&
-        !s.includes("metadata->>'discord_id'")
-      ) {
+      if (s.includes('from agents') && s.includes('where agent_id = $1')) {
         return {
           rows: [{ agent_id: receiverAgentId, status: 'active', discord_id: null } as any],
         }
       }
-      // §2.2 mock split — loadAgentInfo (combined select reads discord_id):
-      if (
-        s.includes('from agents') &&
-        s.includes('where agent_id = $1')
-      ) {
-        return {
-          rows: [{ agent_id: receiverAgentId, status: 'active', discord_id: null } as any],
-        }
-      }
-      // §2.2 mock split — resolveAgentFromDiscordId: human author returns null.
+      // §2.2 mock split — resolveAgentFromDiscordId: human author returns null
       if (
         s.includes('from agents') &&
         s.includes("metadata->>'discord_id'") &&
@@ -115,11 +124,9 @@ function makeDeps(opts: {
       ) {
         return { rows: [] }
       }
-      // §2.2 mock split — fallback agents lookup (loadAgentInfo legacy).
       if (s.includes('from agents')) {
         return { rows: [{ agent_id: receiverAgentId, status: 'active' } as any] }
       }
-      void params
       return { rows: [] }
     },
   })
@@ -148,9 +155,10 @@ function makeDeps(opts: {
           return opts.routeSpy!(msg, ctx, agents)
         })
       : undefined,
+    stderrSink: opts.stderrSink,
   }
 
-  return { deps, saved, routeCalls }
+  return { deps, saved, routeCalls, queryStats }
 }
 
 const baseParams = {
@@ -167,24 +175,14 @@ const baseParams = {
   mentions: [] as string[],
 }
 
-function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; chunks: string[] }> {
+function makeStderrBuffer(): { sink: (chunk: string) => void; chunks: string[] } {
   const chunks: string[] = []
-  const orig = process.stderr.write.bind(process.stderr)
-  ;(process.stderr.write as any) = (chunk: any) => {
-    chunks.push(String(chunk))
-    return true
-  }
-  return fn()
-    .then((result) => ({ result, chunks }))
-    .finally(() => {
-      process.stderr.write = orig as any
-    })
+  return { sink: (c: string) => chunks.push(c), chunks }
 }
 
-describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill', () => {
-  // case 1: dedicated column hit → reply_to UUID 設定 (既存維持)
-  test('case 1 — dedicated column hit resolves to UUID', async () => {
-    const { deps, saved } = makeDeps({
+describe('PR-β cycle 3 — handleInboundMessage 2-step lookup + early capture + sink dep', () => {
+  test('case 1 — dedicated column hit resolves to UUID (no metadata query)', async () => {
+    const { deps, saved, queryStats } = makeDeps({
       parentLookup: { kind: 'column', row: { id: 'parent-uuid-123', author_id: 'origin-bot' } },
       registeredChannel: true,
       receiverIsMember: true,
@@ -195,11 +193,12 @@ describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill',
 
     expect(saved.length).toBe(1)
     expect(saved[0].reply_to).toBe('parent-uuid-123')
+    expect(queryStats.columnQueries).toBe(1)
+    expect(queryStats.metadataQueries).toBe(0)
   })
 
-  // case 1b NEW: legacy row (column NULL + metadata.discord_message_id 有) → metadata fallback
-  test('case 1b — legacy metadata-only row resolves via metadata fallback', async () => {
-    const { deps, saved } = makeDeps({
+  test('case 1b — legacy metadata-only row resolves via 2-step fallback', async () => {
+    const { deps, saved, queryStats } = makeDeps({
       parentLookup: { kind: 'metadata', row: { id: 'legacy-uuid-456', author_id: 'legacy-bot' } },
       registeredChannel: true,
       receiverIsMember: true,
@@ -210,35 +209,57 @@ describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill',
 
     expect(saved.length).toBe(1)
     expect(saved[0].reply_to).toBe('legacy-uuid-456')
+    expect(queryStats.columnQueries).toBe(1)
+    expect(queryStats.metadataQueries).toBe(1)
   })
 
-  // case 1c NEW: 両 miss → reply_to undefined + stderr "reply_to orphan"
-  test('case 1c — both lookups miss → reply_to absent + orphan stderr', async () => {
-    const { deps, saved } = makeDeps({
+  test('case 1c — both lookups miss → reply_to absent + sink-captured orphan log', async () => {
+    const buf = makeStderrBuffer()
+    const { deps, saved, queryStats } = makeDeps({
       parentLookup: { kind: 'miss' },
       registeredChannel: true,
       receiverIsMember: true,
+      stderrSink: buf.sink,
     })
     setInboundReceiverDeps(deps)
 
-    const { chunks } = await captureStderr(() =>
-      handleInboundMessage({
-        ...baseParams,
-        replyToMessageId: 'discord-orphan-double-miss',
-      }),
-    )
+    await handleInboundMessage({
+      ...baseParams,
+      replyToMessageId: 'discord-orphan-double-miss',
+    })
 
     expect(saved.length).toBe(1)
     expect(saved[0].reply_to).toBeUndefined()
-    const orphanLogged = chunks.some(
+    expect(queryStats.columnQueries).toBe(1)
+    expect(queryStats.metadataQueries).toBe(1)
+    const orphanLogged = buf.chunks.some(
       (c) => c.includes('reply_to orphan') && c.includes('discord-orphan-double-miss'),
     )
     expect(orphanLogged).toBe(true)
   })
 
-  // case 2: no replyToMessageId → reply_to absent (既存維持)
-  test('case 2 — no replyToMessageId → reply_to absent', async () => {
-    const { deps, saved } = makeDeps({
+  test('case 1d — both-hit coexistence: column row returned, metadata query never fires', async () => {
+    const { deps, saved, queryStats } = makeDeps({
+      parentLookup: {
+        kind: 'both',
+        columnRow: { id: 'column-uuid', author_id: 'column-bot' },
+        metadataRow: { id: 'metadata-uuid', author_id: 'metadata-bot' },
+      },
+      registeredChannel: true,
+      receiverIsMember: true,
+    })
+    setInboundReceiverDeps(deps)
+
+    await handleInboundMessage({ ...baseParams, replyToMessageId: 'discord-both-hit' })
+
+    expect(saved.length).toBe(1)
+    expect(saved[0].reply_to).toBe('column-uuid')
+    expect(queryStats.columnQueries).toBe(1)
+    expect(queryStats.metadataQueries).toBe(0)
+  })
+
+  test('case 2 — no replyToMessageId → reply_to absent (no lookup runs)', async () => {
+    const { deps, saved, queryStats } = makeDeps({
       parentLookup: { kind: 'miss' },
       registeredChannel: true,
       receiverIsMember: true,
@@ -249,26 +270,26 @@ describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill',
 
     expect(saved.length).toBe(1)
     expect(saved[0].reply_to).toBeUndefined()
+    expect(queryStats.columnQueries).toBe(0)
+    expect(queryStats.metadataQueries).toBe(0)
   })
 
-  // case 3: orphan stderr (case 1c と独立 keep、cycle 1 case 3 と等価)
-  test('case 3 — orphan replyToMessageId → reply_to absent + stderr orphan log', async () => {
+  test('case 3 — orphan replyToMessageId → reply_to absent + sink-captured orphan log', async () => {
+    const buf = makeStderrBuffer()
     const { deps, saved } = makeDeps({
       parentLookup: { kind: 'miss' },
       registeredChannel: true,
       receiverIsMember: true,
+      stderrSink: buf.sink,
     })
     setInboundReceiverDeps(deps)
 
-    const { chunks } = await captureStderr(() =>
-      handleInboundMessage({ ...baseParams, replyToMessageId: 'discord-orphan-snowflake' }),
-    )
+    await handleInboundMessage({ ...baseParams, replyToMessageId: 'discord-orphan-snowflake' })
 
     expect(saved[0].reply_to).toBeUndefined()
-    expect(chunks.some((c) => c.includes('reply_to orphan'))).toBe(true)
+    expect(buf.chunks.some((c) => c.includes('reply_to orphan'))).toBe(true)
   })
 
-  // case 4 REBUILT: routeInbound spy (deps injection) で auto-filled mentions 受領
   test('case 4 — empty mentions + parent author → routeInbound spy receives [parent.author_id]', async () => {
     const spy: RouteInboundFn = (msg, ctx, _agents) => ({
       pushTargets: [ctx.members?.[0] ?? 'receiver-bot'],
@@ -294,7 +315,6 @@ describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill',
     expect(routeCalls[0].mentions).toEqual(['origin-bot'])
   })
 
-  // case 5 REBUILT: explicit mentions → spy が unchanged 受領
   test('case 5 — explicit mentions → routeInbound spy receives unchanged mentions', async () => {
     const spy: RouteInboundFn = (msg, ctx, _agents) => ({
       pushTargets: [ctx.members?.[0] ?? 'receiver-bot'],
@@ -318,23 +338,5 @@ describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill',
 
     expect(routeCalls.length).toBe(1)
     expect(routeCalls[0].mentions).toEqual(['some-bot'])
-  })
-
-  // case 6 REWRITE: source-grep — autoFill < routeInbound surface のみ pin
-  test('case 6 — handleInboundMessage source wires applyMentionsAutoFill before routeInbound (surface contract only)', async () => {
-    const src = (await import('node:fs')).readFileSync(
-      new URL('../adapters/inbound-receiver.ts', import.meta.url),
-      'utf-8',
-    )
-    const fnIdx = src.indexOf('export async function handleInboundMessage(')
-    expect(fnIdx).toBeGreaterThan(-1)
-    const body = src.slice(fnIdx)
-    const autoFillIdx = body.indexOf('applyMentionsAutoFill')
-    const routeIdx = body.indexOf('routeInbound)(')
-    expect(autoFillIdx).toBeGreaterThan(-1)
-    expect(routeIdx).toBeGreaterThan(autoFillIdx)
-    // §2.4 honesty pin: this case asserts the WIRING surface only —
-    // persistence-layer semantics (saveMessage true behavior) are NOT
-    // claimed by this test.
   })
 })

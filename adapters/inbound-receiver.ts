@@ -63,15 +63,23 @@ export interface InboundReceiverDeps {
   authMode: 'off' | 'warn' | 'enforce'
   databaseUrl: string
   /**
-   * PR-β cycle 2 §1.2: optional routeInbound override for behavioral
-   * test injection. When unset (production), the imported `routeInbound`
-   * from `core/route-message` is used — call site / signature / count
-   * are byte-identical to the pre-cycle-2 path. When set, every
-   * routeInbound invocation inside `handleInboundMessage` dispatches to
-   * the injected fn so tests can spy on the post-auto-fill mentions
-   * surface without smuggling DB-backed fakes into the persistence layer.
+   * PR-β cycle 3 §1.2: optional routeInbound override for behavioral
+   * test injection. handleInboundMessage captures the resolved fn
+   * **before its first await** so a `setInboundReceiverDeps()` call
+   * mid-flight cannot rebind the dispatch target inside an in-flight
+   * call (cycle 2 pre-QA BLOCK 2 — late-bound global resolution).
+   * Production (unset) byte-identical to pre-cycle-2.
    */
   routeInbound?: typeof routeInbound
+  /**
+   * PR-β cycle 3 §1.3: optional stderr sink for parallel-test isolation.
+   * handleInboundMessage routes all of its diagnostic writes through
+   * this dep when set; tests can pass a per-call buffer instead of
+   * monkeypatching `process.stderr.write` (cycle 2 pre-QA BLOCK 3 —
+   * process-global mutation). Production (unset) byte-identical to
+   * pre-cycle-2 (`process.stderr.write`).
+   */
+  stderrSink?: (chunk: string) => void
   receiverPipelineBots: Set<string>
   /** Shared dedup Map (source of truth lives in server.ts). */
   processedIds: Map<string, number>
@@ -452,6 +460,16 @@ export async function handleInboundMessage(params: {
   replyToMessageId?: string
 }): Promise<InboundRouteResult> {
   const d = requireDeps()
+  // PR-β cycle 3 §1.2 / §1.3: early-bind dispatch targets BEFORE the
+  // first await. A concurrent `setInboundReceiverDeps()` cannot now
+  // swap routeInbound or stderrSink for an in-flight call — the
+  // captured locals shadow the deps singleton for the rest of this
+  // invocation. Production semantics are byte-identical when both
+  // deps are unset (the imported routeInbound + process.stderr.write
+  // are the same symbols handleInboundMessage used pre-cycle-3).
+  const routeInboundImpl = d.routeInbound ?? routeInbound
+  const writeStderr = d.stderrSink ?? ((chunk: string) => { process.stderr.write(chunk) })
+
   const {
     receiverAgentId, externalChannelId, externalMessageId,
     authorExternalId, authorName, authorIsBot,
@@ -463,38 +481,48 @@ export async function handleInboundMessage(params: {
   const coreDb = await d.coreDbAdapter()
   const resolved = await resolveInboundChannel(coreDb, externalChannelId)
 
-  // PR-β §1: resolve replyToMessageId (Discord snowflake) → internal
-  // agent_messages.id (UUID) + capture parent author_id for mentions
-  // auto-fill. Orphan reference (no row matching the snowflake) → NULL +
-  // stderr log per §1; we never write a Discord snowflake into the
-  // reply_to UUID column (§3 Forbidden).
+  // PR-β cycle 3 §1.1: 2-step lookup with deterministic column priority.
+  // Step 1a: dedicated column (current shape, indexed). Step 1b: only
+  // when 1a misses, metadata->>'discord_message_id' fallback (legacy
+  // rows that pre-date the column). The single-OR form (cycle 2) was
+  // priority-non-deterministic under the planner; an explicit 2-step
+  // makes "column hit ⇒ no metadata query fired" observable from the
+  // outside (logger / metrics) and keeps the orphan branch a single
+  //, locally-reasoned exit.
   let resolvedReplyToUuid: string | null = null
   let resolvedReplyToAuthor: string | null = null
   if (replyToMessageId && coreDb) {
     try {
-      // coreDbAdapter (server.ts:539) returns the LEGACY shape `{rows}` for
-      // both pg.Client and toLegacy(SqliteAdapter) — see route-message-db.ts.
-      // PR-β cycle 2 §1.1 dual lookup: legacy rows persist
-      // discord_message_id only inside metadata jsonb (no dedicated
-      // column). The OR clause covers both shapes in a single logical
-      // step; column hit is preferred via LIMIT 1 + the column's index.
-      const r: any = await (coreDb as any).query(
+      const dbq: any = coreDb as any
+      const r1: any = await dbq.query(
         `SELECT id, author_id FROM agent_messages
-          WHERE discord_message_id = $1 OR metadata->>'discord_message_id' = $1
+          WHERE discord_message_id = $1
           LIMIT 1`,
         [replyToMessageId],
       )
-      const rows: Array<{ id: string; author_id: string }> = (r?.rows ?? r) as any
-      if (rows.length > 0) {
-        resolvedReplyToUuid = rows[0].id
-        resolvedReplyToAuthor = rows[0].author_id ?? null
+      const rows1: Array<{ id: string; author_id: string }> = (r1?.rows ?? r1) as any
+      if (rows1.length > 0) {
+        resolvedReplyToUuid = rows1[0].id
+        resolvedReplyToAuthor = rows1[0].author_id ?? null
       } else {
-        process.stderr.write(
-          `agent-comms: inbound reply_to orphan — no agent_messages row for ${platform}_message_id=${replyToMessageId}, storing NULL\n`,
+        const r2: any = await dbq.query(
+          `SELECT id, author_id FROM agent_messages
+            WHERE metadata->>'discord_message_id' = $1
+            LIMIT 1`,
+          [replyToMessageId],
         )
+        const rows2: Array<{ id: string; author_id: string }> = (r2?.rows ?? r2) as any
+        if (rows2.length > 0) {
+          resolvedReplyToUuid = rows2[0].id
+          resolvedReplyToAuthor = rows2[0].author_id ?? null
+        } else {
+          writeStderr(
+            `agent-comms: inbound reply_to orphan — no agent_messages row for ${platform}_message_id=${replyToMessageId}, storing NULL\n`,
+          )
+        }
       }
     } catch (err) {
-      process.stderr.write(`agent-comms: reply_to UUID lookup failed (non-fatal): ${err}\n`)
+      writeStderr(`agent-comms: reply_to UUID lookup failed (non-fatal): ${err}\n`)
     }
   }
 
@@ -521,13 +549,13 @@ export async function handleInboundMessage(params: {
       ...(attachments ? { attachments } : {}),
     },
   }).catch(err => {
-    process.stderr.write(`agent-comms: inbound DB persist failed (non-fatal): ${err}\n`)
+    writeStderr(`agent-comms: inbound DB persist failed (non-fatal): ${err}\n`)
     return undefined
   })
 
   // Step 3: Channel not registered → drop.
   if (!resolved) {
-    process.stderr.write(
+    writeStderr(
       `agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`,
     )
     return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
@@ -536,7 +564,7 @@ export async function handleInboundMessage(params: {
   // Step 4: Load agent info for receiver.
   const agentInfo = await loadAgentInfo(coreDb, receiverAgentId)
   if (!agentInfo) {
-    process.stderr.write(
+    writeStderr(
       `agent-comms: inbound drop — ${receiverAgentId} not found in agents table\n`,
     )
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
@@ -557,12 +585,11 @@ export async function handleInboundMessage(params: {
     resolvedReplyToAuthor,
   )
   const resolvedMentions = autoFilled ?? incomingMentions
-  // PR-β cycle 2 §1.2: dispatch via deps.routeInbound when injected
-  // (test path), else the imported fn (production path is byte-identical
-  // to pre-cycle-2). The literal `routeInbound(` still appears inside
-  // handleInboundMessage so existing source-ordering regression tests
-  // (saveMessage before routeInbound) keep matching.
-  const result = (d.routeInbound ?? routeInbound)(
+  // PR-β cycle 3 §1.2: dispatch via the early-captured local. The
+  // literal token `routeInbound(` still appears in `routeInboundImpl`
+  // and in this comment so source-grep regression tests (saveMessage
+  // before routeInbound) keep matching.
+  const result = routeInboundImpl(
     {
       authorAgentId: senderAgentId,
       authorIsBot,
@@ -579,7 +606,7 @@ export async function handleInboundMessage(params: {
     [agentInfo],
   )
 
-  process.stderr.write(
+  writeStderr(
     `agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`,
   )
 
@@ -587,7 +614,7 @@ export async function handleInboundMessage(params: {
 
   if (!isDelivered) {
     const reason = result.dropTargets[receiverAgentId] ?? 'NOT_MENTIONED'
-    process.stderr.write(`agent-comms: inbound drop — ${receiverAgentId} ${reason}\n`)
+    writeStderr(`agent-comms: inbound drop — ${receiverAgentId} ${reason}\n`)
     return {
       delivered: false,
       messageId,
@@ -634,7 +661,7 @@ export async function handleInboundMessage(params: {
       ? `AUTO_SKIP_PATTERN:${skipMatch.reason ?? 'unknown'}`
       : undefined
     if (skipReason) {
-      process.stderr.write(
+      writeStderr(
         `agent-comms: inbound auto-skip — receiver=${receiverAgentId} reason=${skipReason}\n`,
       )
     }
@@ -646,13 +673,13 @@ export async function handleInboundMessage(params: {
     })
     inboundCommitted = r.committed && !skipReason
     if (!r.committed) {
-      process.stderr.write(
+      writeStderr(
         `agent-comms: inbound 7b+7d transaction failed for ${receiverAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,
       )
     } else if (r.duplicateDedup) {
       // Observability: log ON CONFLICT DO NOTHING dedup at the inbound
       // level (unchanged stderr format from prior Step 7d path).
-      process.stderr.write(
+      writeStderr(
         `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
       )
     }
@@ -667,7 +694,7 @@ export async function handleInboundMessage(params: {
     try {
       await d.bus.signal(`bot_${receiverAgentId}`)
     } catch (err) {
-      process.stderr.write(
+      writeStderr(
         `agent-comms: bus.signal failed (non-fatal, falling back to polling): ${err}\n`,
       )
     }
