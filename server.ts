@@ -1556,12 +1556,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'Phase 5: 1 primary recipient (agent_id). Empty string → INVALID_MENTION reject; unknown → UNKNOWN_AGENT reject.' },
           cc: { type: 'array', items: { type: 'string' }, description: 'Phase 5: reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入). Unknown agents are stripped + warning.' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning. Required for backward compat.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['content', 'mentions', 'reply_to'],
+        required: ['content', 'reply_to'],
       },
     },
     {
@@ -1578,11 +1578,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'Phase 5: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
           cc: { type: 'array', items: { type: 'string' }, description: 'Phase 5: reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入).' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning. Required for backward compat.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['channel', 'mentions', 'content'],
+        required: ['channel', 'content'],
       },
     },
     // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
@@ -2042,6 +2042,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const usesPhase5 = (args as any).mention !== undefined ||
         (Array.isArray((args as any).cc) && (args as any).cc.length > 0)
       if (usesPhase5 || mentions.length > 0) {
+        // Phase 5 cycle 3 fix #3 — UNKNOWN_AGENT reject: real agent registry
+        // lookup via refreshAgentCache() (replaces hardcode `() => true`).
+        const knownAgents = await refreshAgentCache()
         const phase5 = resolvePhase5({
           sender: agentId,
           channel_id: phase5Channel,
@@ -2049,12 +2052,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cc: (args as any).cc,
           mentions,
           content,
-          isKnownAgent: () => true,
+          isKnownAgent: (id: string) => knownAgents.has(id),
         })
         if (phase5 && !phase5.ok) {
           if (phase5.error === 'INVALID_MENTION') {
             await txClient.query('ROLLBACK'); txCommitted = true
             return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          }
+          if (phase5.error === 'UNKNOWN_AGENT') {
+            await txClient.query('ROLLBACK'); txCommitted = true
+            return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
           }
           if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
             await txClient.query('ROLLBACK'); txCommitted = true
@@ -2618,6 +2625,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (!checkBurst()) {
       await new Promise(r => setTimeout(r, BURST_MIN_INTERVAL_MS))
+    }
+
+    // Phase 5 cycle 3 fix #1 — notify wiring (resolvePhase5 + 4 ports).
+    // Runs after channel resolution + permission/rate/dup gates, before
+    // content sanitisation so cc[] body suffix is included in the saved
+    // message. UNKNOWN_AGENT reject (fix #3) via refreshAgentCache.
+    {
+      const usesPhase5N = (args as any).mention !== undefined ||
+        (Array.isArray((args as any).cc) && (args as any).cc.length > 0)
+      if (usesPhase5N || mentions.length > 0) {
+        const knownAgentsN = await refreshAgentCache()
+        const phase5 = resolvePhase5({
+          sender: agentId,
+          channel_id: dest.channelId,
+          mention: (args as any).mention,
+          cc: (args as any).cc,
+          mentions,
+          content,
+          isKnownAgent: (id: string) => knownAgentsN.has(id),
+        })
+        if (phase5 && !phase5.ok) {
+          if (phase5.error === 'INVALID_MENTION') {
+            return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          }
+          if (phase5.error === 'UNKNOWN_AGENT') {
+            return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+          }
+          if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
+            return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
+          }
+        }
+        if (phase5 && phase5.ok) {
+          content = phase5.content
+          mentions = phase5.mentions
+          for (const w of phase5.warnings) {
+            process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
+          }
+        }
+      }
     }
 
     const safeContent = sanitizeContent(content)
