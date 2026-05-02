@@ -1,27 +1,32 @@
 #!/usr/bin/env bun
 /**
- * PR-β §4 frozen merge-gate fixtures (lead-ama dispatch msg `cd461f92`).
+ * PR-β §4 frozen merge-gate fixtures (cycle 2 — auditor Pre-impl PASS 6/6,
+ * dispatch msg `5c825a43`/`d1cb676a`/`549a269c`/`1c8477c7`).
  *
  * Pins:
- *   - case 1: inbound msg with reference.messageId → resolved UUID で reply_to 設定
- *   - case 2: inbound msg without reference → reply_to NULL
- *   - case 3: inbound msg with orphan reference.messageId → reply_to NULL + stderr 記録
- *   - case 4: human reply (mentions empty) + 親 row 存在 → mentions auto-fill で
- *             親 author_agent_id 入る
- *   - case 5: bot reply (mentions explicit) + applyMentionsAutoFill no-op
- *   - case 6: smoke — Discord 引用返信 → DB reply_to + mentions 両方確認
+ *   - case 1:    dedicated column hit → reply_to UUID 設定
+ *   - case 1b:   legacy row (column NULL + metadata.discord_message_id) →
+ *                metadata fallback で reply_to UUID 設定 (PR-β cycle 2 §1.1)
+ *   - case 1c:   両 miss orphan → reply_to NULL + stderr "reply_to orphan"
+ *   - case 2:    replyToMessageId なし → reply_to undefined
+ *   - case 3:    orphan stderr (case 1c と独立 keep)
+ *   - case 4:    handleInboundMessage with routeInbound spy (deps.routeInbound) →
+ *                empty mentions + parent → spy が `[parent.author_id]` を受領
+ *   - case 5:    explicit mentions → spy が unchanged を受領
+ *   - case 6:    source-grep — autoFill < routeInbound 順 + docstring honest
  *
- * Tests are hermetic: a mocked `coreDbAdapter` returns canned `agent_messages`
- * lookup rows and a mocked `saveMessage` captures the insert payload so we
- * can assert the resolved `reply_to` UUID + applied `mentions` reach the
- * persistence layer (= the §1/§2 contract surface).
+ * §2.4 honesty: case 6 は routeInbound surface (spy で behavioral assertion)
+ * のみ pin する。saveMessage mock は persistence layer の "真" の挙動ではなく
+ * payload capture の thin double であり、persistence semantics の検証は本 PR
+ * の scope 外 (別 PR test infra 強化候補)。
  */
-import { describe, test, expect, beforeEach } from 'bun:test'
+import { describe, test, expect } from 'bun:test'
 import {
   handleInboundMessage,
   setInboundReceiverDeps,
   type InboundReceiverDeps,
 } from '../adapters/inbound-receiver'
+import type { routeInbound as RouteInboundFn } from '../core/route-message'
 
 interface SaveMessageCapture {
   channel_id: string
@@ -32,42 +37,89 @@ interface SaveMessageCapture {
   metadata?: Record<string, unknown>
 }
 
+type ParentLookupMode =
+  | { kind: 'column'; row: { id: string; author_id: string } }
+  | { kind: 'metadata'; row: { id: string; author_id: string } }
+  | { kind: 'miss' }
+
 function makeDeps(opts: {
-  parentLookup?: { id: string; author_id: string } | null
+  parentLookup?: ParentLookupMode
   registeredChannel?: boolean
   receiverIsMember?: boolean
-  routeDelivers?: boolean
+  routeSpy?: RouteInboundFn
 }): {
   deps: InboundReceiverDeps
   saved: SaveMessageCapture[]
-  routedMentions: string[][]
+  routeCalls: Array<{ mentions: string[] }>
 } {
   const saved: SaveMessageCapture[] = []
-  const routedMentions: string[][] = []
+  const routeCalls: Array<{ mentions: string[] }> = []
   const channelId = 'core-channel-uuid'
   const receiverAgentId = 'receiver-bot'
 
-  // Mocked coreDbAdapter responds to:
-  //   - resolveInboundChannel (SELECT FROM channels) → 1 row when registeredChannel
-  //   - reply_to lookup (SELECT FROM agent_messages WHERE discord_message_id) → opts.parentLookup
-  //   - loadAgentInfo (SELECT FROM agents WHERE agent_id) → receiver agent row
-  //   - resolveAgentFromDiscordId (SELECT FROM agents WHERE discord_id) → null (human author)
-  // coreDbAdapter at runtime returns the LEGACY shape `{rows}` (see
-  // server.ts:539). Mock matches that contract.
+  // PR-β cycle 2 §2.2 mock split: each query branch reflects the real
+  // SQL the production code issues, so the test catches contract drift
+  // (e.g. mock matched the wrong SELECT).
   const coreDbAdapter = async () => ({
-    async query(sql: string, _params?: any[]): Promise<{ rows: any[] }> {
+    async query(sql: string, params?: any[]): Promise<{ rows: any[] }> {
       const s = sql.toLowerCase()
+
+      // §1.1 dual-lookup: column = $1 OR metadata->>'discord_message_id' = $1
       if (s.includes('agent_messages') && s.includes('discord_message_id')) {
-        return { rows: opts.parentLookup ? [opts.parentLookup as any] : [] }
+        const lookup = opts.parentLookup ?? { kind: 'miss' }
+        const sqlHasColumn = /\bdiscord_message_id\s*=\s*\$1/.test(s)
+        const sqlHasMetadata = s.includes("metadata->>'discord_message_id'")
+        // Branch by what the lookup mode SAYS the data shape is.
+        if (lookup.kind === 'column' && sqlHasColumn) {
+          return { rows: [lookup.row as any] }
+        }
+        if (lookup.kind === 'metadata' && sqlHasMetadata && !sqlHasColumn) {
+          // legacy-only: should never see this without dual-lookup OR clause.
+          return { rows: [lookup.row as any] }
+        }
+        if (lookup.kind === 'metadata' && sqlHasMetadata && sqlHasColumn) {
+          // dual-lookup OR clause — column miss falls through to metadata hit.
+          return { rows: [lookup.row as any] }
+        }
+        return { rows: [] }
       }
       if (s.includes('from channels')) {
         if (!opts.registeredChannel) return { rows: [] }
         const members = opts.receiverIsMember ? [receiverAgentId] : []
         return { rows: [{ id: channelId, members, type: 'group', thread_id: null } as any] }
       }
+      // §2.2 mock split — loadAgentInfo: WHERE agent_id = $1
+      if (
+        s.includes('from agents') &&
+        s.includes('where agent_id') &&
+        !s.includes("metadata->>'discord_id'")
+      ) {
+        return {
+          rows: [{ agent_id: receiverAgentId, status: 'active', discord_id: null } as any],
+        }
+      }
+      // §2.2 mock split — loadAgentInfo (combined select reads discord_id):
+      if (
+        s.includes('from agents') &&
+        s.includes('where agent_id = $1')
+      ) {
+        return {
+          rows: [{ agent_id: receiverAgentId, status: 'active', discord_id: null } as any],
+        }
+      }
+      // §2.2 mock split — resolveAgentFromDiscordId: human author returns null.
+      if (
+        s.includes('from agents') &&
+        s.includes("metadata->>'discord_id'") &&
+        !s.includes('where agent_id')
+      ) {
+        return { rows: [] }
+      }
+      // §2.2 mock split — fallback agents lookup (loadAgentInfo legacy).
       if (s.includes('from agents')) {
         return { rows: [{ agent_id: receiverAgentId, status: 'active' } as any] }
       }
+      void params
       return { rows: [] }
     },
   })
@@ -90,21 +142,15 @@ function makeDeps(opts: {
     hashCode: (s: string) => s.length,
     bus: undefined,
     mcpPush: undefined,
+    routeInbound: opts.routeSpy
+      ? ((msg, ctx, agents) => {
+          routeCalls.push({ mentions: [...msg.mentions] })
+          return opts.routeSpy!(msg, ctx, agents)
+        })
+      : undefined,
   }
 
-  // Spy: routeInbound is pure; we observe the mentions it sees by intercepting
-  // saveMessage's metadata.mentions field and the saved record. The contract
-  // we care about is "mentions reach routeInbound auto-filled" — that's
-  // observable via the saved metadata.mentions which is recorded BEFORE the
-  // route call (Step 2 of handleInboundMessage), so we can't observe the
-  // post-fill mentions there. To pin it, we let the routing step run; for
-  // these unit tests we don't care about the delivery outcome — only that
-  // saveMessage saw the resolved reply_to UUID. The mentions auto-fill
-  // surface is exercised by the dedicated agent-cache tests + the PR-β
-  // smoke (case 6) which threads the whole flow.
-  void routedMentions
-
-  return { deps, saved, routedMentions }
+  return { deps, saved, routeCalls }
 }
 
 const baseParams = {
@@ -121,15 +167,25 @@ const baseParams = {
   mentions: [] as string[],
 }
 
-describe('PR-β §4 fixtures — handleInboundMessage reply_to + mentions auto-fill', () => {
-  beforeEach(() => {
-    // Reset deps between tests so spies don't bleed.
-  })
+function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; chunks: string[] }> {
+  const chunks: string[] = []
+  const orig = process.stderr.write.bind(process.stderr)
+  ;(process.stderr.write as any) = (chunk: any) => {
+    chunks.push(String(chunk))
+    return true
+  }
+  return fn()
+    .then((result) => ({ result, chunks }))
+    .finally(() => {
+      process.stderr.write = orig as any
+    })
+}
 
-  // case 1: inbound msg with reference.messageId → resolved UUID で reply_to 設定
-  test('case 1 — replyToMessageId resolves to UUID + saveMessage receives reply_to', async () => {
+describe('PR-β cycle 2 — handleInboundMessage reply_to + mentions auto-fill', () => {
+  // case 1: dedicated column hit → reply_to UUID 設定 (既存維持)
+  test('case 1 — dedicated column hit resolves to UUID', async () => {
     const { deps, saved } = makeDeps({
-      parentLookup: { id: 'parent-uuid-123', author_id: 'origin-bot' },
+      parentLookup: { kind: 'column', row: { id: 'parent-uuid-123', author_id: 'origin-bot' } },
       registeredChannel: true,
       receiverIsMember: true,
     })
@@ -141,10 +197,49 @@ describe('PR-β §4 fixtures — handleInboundMessage reply_to + mentions auto-f
     expect(saved[0].reply_to).toBe('parent-uuid-123')
   })
 
-  // case 2: inbound msg without reference → reply_to NULL (= absent from saveMessage payload)
-  test('case 2 — no replyToMessageId → reply_to is NOT set on saveMessage', async () => {
+  // case 1b NEW: legacy row (column NULL + metadata.discord_message_id 有) → metadata fallback
+  test('case 1b — legacy metadata-only row resolves via metadata fallback', async () => {
     const { deps, saved } = makeDeps({
-      parentLookup: null,
+      parentLookup: { kind: 'metadata', row: { id: 'legacy-uuid-456', author_id: 'legacy-bot' } },
+      registeredChannel: true,
+      receiverIsMember: true,
+    })
+    setInboundReceiverDeps(deps)
+
+    await handleInboundMessage({ ...baseParams, replyToMessageId: 'discord-legacy-snowflake' })
+
+    expect(saved.length).toBe(1)
+    expect(saved[0].reply_to).toBe('legacy-uuid-456')
+  })
+
+  // case 1c NEW: 両 miss → reply_to undefined + stderr "reply_to orphan"
+  test('case 1c — both lookups miss → reply_to absent + orphan stderr', async () => {
+    const { deps, saved } = makeDeps({
+      parentLookup: { kind: 'miss' },
+      registeredChannel: true,
+      receiverIsMember: true,
+    })
+    setInboundReceiverDeps(deps)
+
+    const { chunks } = await captureStderr(() =>
+      handleInboundMessage({
+        ...baseParams,
+        replyToMessageId: 'discord-orphan-double-miss',
+      }),
+    )
+
+    expect(saved.length).toBe(1)
+    expect(saved[0].reply_to).toBeUndefined()
+    const orphanLogged = chunks.some(
+      (c) => c.includes('reply_to orphan') && c.includes('discord-orphan-double-miss'),
+    )
+    expect(orphanLogged).toBe(true)
+  })
+
+  // case 2: no replyToMessageId → reply_to absent (既存維持)
+  test('case 2 — no replyToMessageId → reply_to absent', async () => {
+    const { deps, saved } = makeDeps({
+      parentLookup: { kind: 'miss' },
       registeredChannel: true,
       receiverIsMember: true,
     })
@@ -156,64 +251,77 @@ describe('PR-β §4 fixtures — handleInboundMessage reply_to + mentions auto-f
     expect(saved[0].reply_to).toBeUndefined()
   })
 
-  // case 3: orphan reference.messageId → reply_to NULL + stderr 記録
-  test('case 3 — orphan replyToMessageId → reply_to NULL + stderr orphan log', async () => {
+  // case 3: orphan stderr (case 1c と独立 keep、cycle 1 case 3 と等価)
+  test('case 3 — orphan replyToMessageId → reply_to absent + stderr orphan log', async () => {
     const { deps, saved } = makeDeps({
-      parentLookup: null, // lookup misses
+      parentLookup: { kind: 'miss' },
       registeredChannel: true,
       receiverIsMember: true,
     })
     setInboundReceiverDeps(deps)
 
-    // Capture stderr
-    const stderrChunks: string[] = []
-    const origWrite = process.stderr.write.bind(process.stderr)
-    ;(process.stderr.write as any) = (chunk: any) => {
-      stderrChunks.push(String(chunk))
-      return true
-    }
-
-    try {
-      await handleInboundMessage({
-        ...baseParams,
-        replyToMessageId: 'discord-orphan-snowflake',
-      })
-    } finally {
-      process.stderr.write = origWrite as any
-    }
-
-    expect(saved.length).toBe(1)
-    expect(saved[0].reply_to).toBeUndefined()
-    const orphanLogged = stderrChunks.some((c) =>
-      c.includes('reply_to orphan') && c.includes('discord-orphan-snowflake'),
+    const { chunks } = await captureStderr(() =>
+      handleInboundMessage({ ...baseParams, replyToMessageId: 'discord-orphan-snowflake' }),
     )
-    expect(orphanLogged).toBe(true)
+
+    expect(saved[0].reply_to).toBeUndefined()
+    expect(chunks.some((c) => c.includes('reply_to orphan'))).toBe(true)
   })
 
-  // case 4: human reply (mentions empty) + 親 row → mentions auto-fill で
-  // 親 author_agent_id 入る
-  // We pin the contract via the imported helper directly: applyMentionsAutoFill
-  // is the function the inbound path now calls (verified by case 1's reply_to
-  // resolution), and its [parent.author_id] return value is what feeds
-  // routeInbound. The full E2E is exercised by case 6.
-  test('case 4 — applyMentionsAutoFill returns [parent.author_id] for empty mentions + parent', async () => {
-    const { applyMentionsAutoFill } = await import('../core/agent-cache')
-    expect(applyMentionsAutoFill([], 'parent-uuid', 'origin-bot')).toEqual(['origin-bot'])
-    expect(applyMentionsAutoFill(undefined, 'parent-uuid', 'origin-bot')).toEqual(['origin-bot'])
+  // case 4 REBUILT: routeInbound spy (deps injection) で auto-filled mentions 受領
+  test('case 4 — empty mentions + parent author → routeInbound spy receives [parent.author_id]', async () => {
+    const spy: RouteInboundFn = (msg, ctx, _agents) => ({
+      pushTargets: [ctx.members?.[0] ?? 'receiver-bot'],
+      dropTargets: {},
+      senderIsHuman: !msg.authorAgentId,
+      noMentions: msg.mentions.length === 0,
+    })
+    const { deps, routeCalls } = makeDeps({
+      parentLookup: { kind: 'column', row: { id: 'parent-uuid', author_id: 'origin-bot' } },
+      registeredChannel: true,
+      receiverIsMember: true,
+      routeSpy: spy,
+    })
+    setInboundReceiverDeps(deps)
+
+    await handleInboundMessage({
+      ...baseParams,
+      replyToMessageId: 'discord-parent',
+      mentions: [],
+    })
+
+    expect(routeCalls.length).toBe(1)
+    expect(routeCalls[0].mentions).toEqual(['origin-bot'])
   })
 
-  // case 5: bot reply with explicit mentions → applyMentionsAutoFill no-op
-  test('case 5 — explicit mentions + applyMentionsAutoFill returns null (no override)', async () => {
-    const { applyMentionsAutoFill } = await import('../core/agent-cache')
-    expect(applyMentionsAutoFill(['some-bot'], 'parent-uuid', 'origin-bot')).toBeNull()
+  // case 5 REBUILT: explicit mentions → spy が unchanged 受領
+  test('case 5 — explicit mentions → routeInbound spy receives unchanged mentions', async () => {
+    const spy: RouteInboundFn = (msg, ctx, _agents) => ({
+      pushTargets: [ctx.members?.[0] ?? 'receiver-bot'],
+      dropTargets: {},
+      senderIsHuman: !msg.authorAgentId,
+      noMentions: msg.mentions.length === 0,
+    })
+    const { deps, routeCalls } = makeDeps({
+      parentLookup: { kind: 'column', row: { id: 'parent-uuid', author_id: 'origin-bot' } },
+      registeredChannel: true,
+      receiverIsMember: true,
+      routeSpy: spy,
+    })
+    setInboundReceiverDeps(deps)
+
+    await handleInboundMessage({
+      ...baseParams,
+      replyToMessageId: 'discord-parent',
+      mentions: ['some-bot'],
+    })
+
+    expect(routeCalls.length).toBe(1)
+    expect(routeCalls[0].mentions).toEqual(['some-bot'])
   })
 
-  // case 6: smoke — Discord 引用返信 → DB reply_to + mentions 両方確認.
-  // We assert on the save payload's reply_to (case 1) AND on the source-level
-  // wiring that applyMentionsAutoFill is called in the inbound path before
-  // routeInbound (grep). End-to-end push outcome depends on routeInbound which
-  // is exhaustively covered by tests/inbound-router.test.ts.
-  test('case 6 — handleInboundMessage source wires applyMentionsAutoFill before routeInbound', async () => {
+  // case 6 REWRITE: source-grep — autoFill < routeInbound surface のみ pin
+  test('case 6 — handleInboundMessage source wires applyMentionsAutoFill before routeInbound (surface contract only)', async () => {
     const src = (await import('node:fs')).readFileSync(
       new URL('../adapters/inbound-receiver.ts', import.meta.url),
       'utf-8',
@@ -222,8 +330,11 @@ describe('PR-β §4 fixtures — handleInboundMessage reply_to + mentions auto-f
     expect(fnIdx).toBeGreaterThan(-1)
     const body = src.slice(fnIdx)
     const autoFillIdx = body.indexOf('applyMentionsAutoFill')
-    const routeIdx = body.indexOf('routeInbound(')
+    const routeIdx = body.indexOf('routeInbound)(')
     expect(autoFillIdx).toBeGreaterThan(-1)
     expect(routeIdx).toBeGreaterThan(autoFillIdx)
+    // §2.4 honesty pin: this case asserts the WIRING surface only —
+    // persistence-layer semantics (saveMessage true behavior) are NOT
+    // claimed by this test.
   })
 })

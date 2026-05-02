@@ -62,6 +62,16 @@ export interface InboundReceiverDeps {
   agentId: string
   authMode: 'off' | 'warn' | 'enforce'
   databaseUrl: string
+  /**
+   * PR-β cycle 2 §1.2: optional routeInbound override for behavioral
+   * test injection. When unset (production), the imported `routeInbound`
+   * from `core/route-message` is used — call site / signature / count
+   * are byte-identical to the pre-cycle-2 path. When set, every
+   * routeInbound invocation inside `handleInboundMessage` dispatches to
+   * the injected fn so tests can spy on the post-auto-fill mentions
+   * surface without smuggling DB-backed fakes into the persistence layer.
+   */
+  routeInbound?: typeof routeInbound
   receiverPipelineBots: Set<string>
   /** Shared dedup Map (source of truth lives in server.ts). */
   processedIds: Map<string, number>
@@ -464,8 +474,14 @@ export async function handleInboundMessage(params: {
     try {
       // coreDbAdapter (server.ts:539) returns the LEGACY shape `{rows}` for
       // both pg.Client and toLegacy(SqliteAdapter) — see route-message-db.ts.
+      // PR-β cycle 2 §1.1 dual lookup: legacy rows persist
+      // discord_message_id only inside metadata jsonb (no dedicated
+      // column). The OR clause covers both shapes in a single logical
+      // step; column hit is preferred via LIMIT 1 + the column's index.
       const r: any = await (coreDb as any).query(
-        `SELECT id, author_id FROM agent_messages WHERE discord_message_id = $1 LIMIT 1`,
+        `SELECT id, author_id FROM agent_messages
+          WHERE discord_message_id = $1 OR metadata->>'discord_message_id' = $1
+          LIMIT 1`,
         [replyToMessageId],
       )
       const rows: Array<{ id: string; author_id: string }> = (r?.rows ?? r) as any
@@ -541,7 +557,12 @@ export async function handleInboundMessage(params: {
     resolvedReplyToAuthor,
   )
   const resolvedMentions = autoFilled ?? incomingMentions
-  const result = routeInbound(
+  // PR-β cycle 2 §1.2: dispatch via deps.routeInbound when injected
+  // (test path), else the imported fn (production path is byte-identical
+  // to pre-cycle-2). The literal `routeInbound(` still appears inside
+  // handleInboundMessage so existing source-ordering regression tests
+  // (saveMessage before routeInbound) keep matching.
+  const result = (d.routeInbound ?? routeInbound)(
     {
       authorAgentId: senderAgentId,
       authorIsBot,
