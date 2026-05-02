@@ -53,9 +53,10 @@ npx agent-comms-mcp
 ### 4. Reply Chain Context (CEO 口頭承認 2026-04-17)
 
 - Push Enrichment (チャンネル履歴付与) を廃止し、reply_to chain による会話文脈付与に置換
-- next_message が返すメッセージに reply_to を再帰的に辿った祖先メッセージを付加
+- next_message が返すメッセージに、seed (current message) を含めて reply_to を再帰的に辿った chain を seed-inclusive (oldest-first chronological) で付加
 - チャンネル内の無関係メッセージは含めない (複数話題混在問題の解決)
-- 設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 10)
+- 設定: AGENT_COM_REPLY_CHAIN_DEPTH (default: 5)
+- Issue #257: `next` / `inbox` の reply_chain default は light shape (preview のみ)、`full: true` arg (MCP) または `AGENT_COM_REPLY_CHAIN_MODE=full` env (CLI) で legacy 復旧 — default break adopted (route:ceo-approval)
 
 ### 3. Init / Start: 単一コマンド兼用
 

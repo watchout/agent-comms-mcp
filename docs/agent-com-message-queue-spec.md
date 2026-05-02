@@ -262,8 +262,9 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
   "content": "テスト結果�d���",
   "attachments": [],
   "reply_chain": [
-    { "from": "agent-com-dev", "content": "テスト開始します", "created_at": "2026-04-08T10:00:00Z" },
-    { "from": "ceo", "content": "テスト結果を報告して", "created_at": "2026-04-08T10:01:00Z" }
+    { "id": "msg-A", "from": "agent-com-dev", "parent_id": null, "depth": 2, "preview": "テスト開始します", "created_at": "2026-04-08T10:00:00Z" },
+    { "id": "msg-B", "from": "ceo", "parent_id": "msg-A", "depth": 1, "preview": "テスト結果を報告して", "created_at": "2026-04-08T10:01:00Z" },
+    { "id": "msg-C", "from": "ceo", "parent_id": "msg-B", "depth": 0, "preview": "テスト結果ど���", "created_at": "2026-04-08T10:02:00Z" }
   ],
   "waiting": 12,
   "hint": "search_memory()で過去の決定事項を確認してから返信してください"
@@ -1487,7 +1488,40 @@ next_message が返すメッセージに reply_to chain を辿った会話文脈
 ```typescript
 interface NextMessageResponse {
   message: AgentMessage;
-  reply_chain: AgentMessage[];  // reply_to 祖先 (最大 REPLY_CHAIN_DEPTH)
+  reply_chain: ReplyChainEntry[];  // seed-inclusive: seed (current message) と
+                                   // reply_to を辿る ancestor を chronological (oldest-first) で並べる、
+                                   // 最大 REPLY_CHAIN_DEPTH 件
+}
+
+// Issue #257 — light/full shape (default break, route:ceo-approval).
+// `next` / `inbox` は default で `preview` のみを返す (default break,
+// intentionally adopted; existing callers lose full body unless opt-in)。
+// 復旧経路は transport 非対称:
+//   MCP  → `next({full: true})` / `inbox({full: true})` (arg only)
+//   CLI  → `AGENT_COM_REPLY_CHAIN_MODE=full` (env only)
+// 個別 message の full content が必要な場合は `expand_msg(id)` で取得。
+interface ReplyChainEntry {
+  id: string;                // message UUID
+  from: string;              // author_id (run-bot loop detection 互換)
+  parent_id: string | null;  // reply_to of this entry; null at chain root (oldest ancestor)
+  depth: number;             // distance from seed (current) message: seed = 0,
+                             // each reply_to step toward older ancestors increments by 1
+  preview: string;           // 先頭 80 char (REPLY_CHAIN_PREVIEW_CHARS)
+  content?: string;          // full mode 時のみ存在
+  created_at: string;
+}
+
+// expand_msg returns the full body of one message; metadata included.
+// Error taxonomy: INVALID_ARG / MSG_NOT_FOUND / DB_UNAVAILABLE / EXPAND_MSG_FAILED.
+interface ExpandMsgResponse {
+  id: string;
+  channel_id: string | null;
+  from: string;
+  content: string;
+  reply_to: string | null;
+  message_type: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }
 ```
 
@@ -1530,6 +1564,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_PRESENCE` | `false` | presence client起動 |
 | `AGENT_COM_PG_NOTIFY` | `true` | pg_notify 加速 on/off (false で polling only、SQLite mode 用) |
 | `AGENT_COM_REPLY_CHAIN_DEPTH` | `5` | Reply Chain Context の最大遡り深度（§18.1） |
+| `AGENT_COM_REPLY_CHAIN_MODE` | `light` | CLI `agent-com next` 用 reply_chain 形 — `full` で legacy 復旧（MCP は `next({full: true})` arg、非対称） |
 | `AGENT_COM_ATTACHMENT_TTL_HOURS` | `24` | 添付ファイル保持時間 |
 | `AGENT_COM_ATTACHMENT_MAX_SIZE` | `52428800` | 添付1ファイル上限(bytes) |
 | `AGENT_COM_ATTACHMENT_DISK_LIMIT_MB` | `1024` | temp領域ディスク上限 |

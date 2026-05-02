@@ -44,6 +44,9 @@ export function generateEnv(opts: {
   lines.push(
     `AGENT_COM_POLL_INTERVAL_MS=3000`,
     `AGENT_COM_REPLY_CHAIN_DEPTH=5`,
+    `# Issue #257 — uncomment to opt-back into legacy full reply_chain shape (CLI only;`,
+    `# MCP uses \`next({full: true})\` arg, intentionally asymmetric).`,
+    `# AGENT_COM_REPLY_CHAIN_MODE=full`,
     '', // trailing newline
   )
   return lines.join('\n')
