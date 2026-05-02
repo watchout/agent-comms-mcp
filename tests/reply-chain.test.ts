@@ -239,7 +239,7 @@ describe('PR-α cycle 1 — §4 source-pin tests', () => {
     expect(text).not.toContain('max_depth: 10')
   })
 
-  // §4.4b SSOT-3 API CONTRACT — cycle 2-revised §2.7b + §2.8 + §3.7
+  // §4.4b SSOT-3 API CONTRACT — cycle 2-revised §2.7b + §2.8 + §3.7 + cycle 3 minimal
   test('§4.4b SSOT-3_API_CONTRACT — new contract literal + grep gate (§3.7)', async () => {
     const text = await readFileSyncSafe('docs/design/core/SSOT-3_API_CONTRACT.md')
     // §3.7 merge gate: 0 hits of `^| to | string |` / `No new messages` / シグナルファイル / `to="channel:`
@@ -247,6 +247,9 @@ describe('PR-α cycle 1 — §4 source-pin tests', () => {
     expect(text).not.toContain('No new messages')
     expect(text).not.toContain('シグナルファイル')
     expect(text).not.toContain('to="channel:')
+    // cycle 3 minimal direct dispatch (msg `ec22cbfd`): SSOT-3 全 file 対象で
+    // legacy `check_inbox` literal 不在 (line 186 rephrase 後の永続 pin)
+    expect(text).not.toMatch(/check_inbox/)
     // §2.8 positive pins
     expect(text).toContain('expand_msg')
     // SSOT-3 declares the `full` arg in the inbox/next param tables (`| full | boolean |`)

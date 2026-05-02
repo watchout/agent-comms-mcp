@@ -183,7 +183,7 @@ Discord API から直接履歴取得（DB 補完用）。
 | 旧 tool | 状態 | 備考 |
 |--------|------|------|
 | reply / send_message | 廃止 → `send` | reply_to を必須化、destination は元 message から自動決定 |
-| check_inbox | 廃止 → `inbox` | パラメータ互換。signal-file count&clear は廃止（cursor 永続化 = `agents.inbox_cursor_id` で代替） |
+| **legacy inbox tool (廃止)** | `inbox` (新契約) | パラメータ互換。signal-file count&clear は廃止（cursor 永続化 = `agents.inbox_cursor_id` で代替） |
 | fetch_messages | 廃止 → `history` | |
 | list_agents | 廃止 → `agents` | |
 | focus / unfocus | 廃止 (v0.2.0) | active_thread 経由のフィルタは routing v3 (per-row claim) で機能廃止 |
