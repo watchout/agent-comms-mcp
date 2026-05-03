@@ -211,6 +211,61 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.violations).toContain('bob')
   })
+
+  // PR-routing-acl-extend: pin the channel `1487368919613444156` (#agent-com)
+  // outboundAllowlist after lead-sus + hotel-dev were added to unblock the
+  // routing drops observed at 2026-05-03 07:01 (lead-sus) and 10:03
+  // (hotel-dev) JST. The full allowed sender set is the merge gate; any
+  // future addition / removal must update this fixture.
+  test('§4.4 channel 1487368919613444156 — full 8-bot allowlist (lead-sus + hotel-dev included)', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const cfg = JSON.parse(
+      fs.readFileSync(
+        path.join(new URL('../..', import.meta.url).pathname, 'config/bot-routing.json'),
+        'utf-8',
+      ),
+    )
+    const allowed = cfg.channels['1487368919613444156']?.outboundAllowlist
+    expect(Array.isArray(allowed)).toBe(true)
+    for (const a of [
+      'agent-com-dev',
+      'lead-ama',
+      'cto',
+      'ceo',
+      'auditor',
+      'arc',
+      'lead-sus',
+      'hotel-dev',
+    ]) {
+      expect(allowed).toContain(a)
+    }
+  })
+
+  test('§4.4 channel 1487368919613444156 — lead-sus / hotel-dev sender + recipient ok, unknown denied', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const cfg = JSON.parse(
+      fs.readFileSync(
+        path.join(new URL('../..', import.meta.url).pathname, 'config/bot-routing.json'),
+        'utf-8',
+      ),
+    )
+    setRoutingConfig({
+      '1487368919613444156': {
+        primary: cfg.channels['1487368919613444156']?.primary ?? 'agent-com-dev',
+        outboundAllowlist: cfg.channels['1487368919613444156'].outboundAllowlist,
+      },
+    })
+    const v = createOutboundPolicyValidator()
+    // lead-sus → lead-ama: ok
+    expect(v.validate('lead-sus', '1487368919613444156', ['lead-ama']).ok).toBe(true)
+    // hotel-dev → cto: ok
+    expect(v.validate('hotel-dev', '1487368919613444156', ['cto']).ok).toBe(true)
+    // unknown sender (regression case for routing drop): deny
+    const r = v.validate('nonexistent-foo', '1487368919613444156', ['lead-ama'])
+    expect(r.ok).toBe(false)
+  })
 })
 
 // ============================================================
