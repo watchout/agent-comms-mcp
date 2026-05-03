@@ -211,6 +211,69 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.violations).toContain('bob')
   })
+
+  // PR-routing-acl-extend: pin the channel `1487368919613444156` (#agent-com)
+  // outboundAllowlist after lead-sus + hotel-dev were added to unblock the
+  // routing drops observed at 2026-05-03 07:01 (lead-sus) and 10:03
+  // (hotel-dev) JST.
+  //
+  // cycle 2 rigor (auditor BLOCK 3 axes解消): use `toEqual` exact match so
+  // length / order / forbidden additions are all gated by a single
+  // assertion (cycle 1 `toContain` only verified inclusion, missed
+  // contamination + reorder regressions).
+  test('§4.4 channel 1487368919613444156 — exact 8-bot allowlist', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const cfg = JSON.parse(
+      fs.readFileSync(
+        path.join(new URL('../..', import.meta.url).pathname, 'config/bot-routing.json'),
+        'utf-8',
+      ),
+    )
+    const allowed = cfg.channels['1487368919613444156']?.outboundAllowlist
+    expect(allowed).toEqual([
+      'agent-com-dev',
+      'lead-ama',
+      'cto',
+      'ceo',
+      'auditor',
+      'arc',
+      'lead-sus',
+      'hotel-dev',
+    ])
+  })
+
+  test('§4.4 channel 1487368919613444156 — lead-sus / hotel-dev ok, unknown sender → violations contains it', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const cfg = JSON.parse(
+      fs.readFileSync(
+        path.join(new URL('../..', import.meta.url).pathname, 'config/bot-routing.json'),
+        'utf-8',
+      ),
+    )
+    setRoutingConfig({
+      '1487368919613444156': {
+        primary: cfg.channels['1487368919613444156']?.primary ?? 'agent-com-dev',
+        outboundAllowlist: cfg.channels['1487368919613444156'].outboundAllowlist,
+      },
+    })
+    const v = createOutboundPolicyValidator()
+    // lead-sus → lead-ama: ok
+    expect(v.validate('lead-sus', '1487368919613444156', ['lead-ama']).ok).toBe(true)
+    // hotel-dev → cto: ok
+    expect(v.validate('hotel-dev', '1487368919613444156', ['cto']).ok).toBe(true)
+    // cycle 2 rigor: unknown sender must reject AND surface the offender in
+    // `violations` (the OutboundPolicyValidator's violation kind field).
+    // The integration layer maps this to the `OUTBOUND_ACL_VIOLATION` error
+    // class (core/routing/server-integration.ts:92), so pinning `violations`
+    // here is equivalent to pinning the violation kind at this port.
+    const r = v.validate('nonexistent-foo', '1487368919613444156', ['lead-ama'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.violations).toContain('nonexistent-foo')
+    }
+  })
 })
 
 // ============================================================
