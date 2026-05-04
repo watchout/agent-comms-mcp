@@ -51,7 +51,11 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // proceed in parallel (Issue #278 §A multi in-flight).
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     expect(sendIdx).toBeGreaterThan(-1)
-    const handler = SERVER_SRC.slice(sendIdx, sendIdx + 4500)
+    // Bound the slice at the next top-level handler instead of a fixed
+    // offset so handler-body refactors (e.g. PR-mention-required removed
+    // ~30 lines of mentions[] parsing) don't silently truncate the slice.
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
     expect(handler).toMatch(/spec §4\.2 step 1.*per-row claim guard/s)
     expect(handler).toMatch(/SELECT id FROM message_queue[\s\S]*WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'read'[\s\S]*FOR UPDATE/)
     expect(handler).toMatch(/txClient\.query\(['"]BEGIN['"]\)/)
@@ -130,12 +134,11 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
 })
 
 describe('Behavioral FAIL B3 — notify tool implemented', () => {
-  test('MCP notify tool is listed with channel + content required (Phase 5 cycle 3 — mentions DEPRECATED, accepts mention/cc instead)', () => {
+  test('MCP notify tool is listed with channel + content + mention required (ADR-041 amendment 2026-05-05 — mentions[] removed, mention required)', () => {
     expect(SERVER_SRC).toMatch(/name:\s*'notify'/)
-    // Phase 5 cycle 3 fix #2 — `mentions` is removed from `required`; the
-    // schema accepts either Phase 5 `mention`/`cc` or legacy `mentions[]`
-    // (auto-converted with deprecation warning by resolvePhase5).
-    expect(SERVER_SRC).toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"]\]/)
+    // ADR-041 amendment 2026-05-05 (CEO directive 5e2d9235) — legacy
+    // `mentions[]` removed; `mention` (1 primary) is now schema-required.
+    expect(SERVER_SRC).toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"],\s*['"]mention['"]\]/)
   })
   test('MCP notify handler exists and does NOT touch reply_to / current_message_id', () => {
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")

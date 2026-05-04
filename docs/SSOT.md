@@ -244,10 +244,10 @@ interface AccessConfig {
 > 詳細仕様: docs/agent-com-message-queue-spec.md §4 / §8 / §10-12 (旧 channel-thread-control-spec から統合、SPEC-INDEX.md:70 参照)
 > Phase 5 (Issues #305 / #306 / #308 / #250、PR-Phase5): mention/cc 分離 + primary fallback + outbound ACL = `config/bot-routing.json` を共通 source とする 4 port 抽象 (`InboundResolver` / `PrimaryFallback` / `OutboundPolicyValidator` / `MessageBodyDecorator`、`core/routing/ports/`)。reload は restart-only。
 
-#### Phase 5 routing contract (Issues #305/#306/#308/#250)
-- **mention** (1 主 recipient、queue 投入): 空文字 → `INVALID_MENTION` reject、unknown agent → `UNKNOWN_AGENT` reject
+#### Phase 5 routing contract (Issues #305/#306/#308/#250; ADR-041 amendment 2026-05-05)
+- **mention** (1 主 recipient、queue 投入、**required**): 空文字 → `INVALID_MENTION` reject、unknown agent → `UNKNOWN_AGENT` reject
 - **cc[]** (queue 投入なし、body 末尾に `[CC: <@id>]` 注入): unknown agent は strip + warning (degradation safe)
-- **mentions[]** (deprecated): auto-convert (`mentions[0]` → `mention`、rest → `cc`) + 必須 warning log、1-2 sprint で removal
+- ~~**mentions[]** (deprecated)~~: **REMOVED 2026-05-05** (CEO directive `5e2d9235`). Callers still passing `mentions[]` get `INVALID_MENTION` with migration hint. See `docs/adr/041-routing-phase5.md`.
 - **primary fallback** (channel.primary): mention 不在時の inbound default 宛先、両方不在は skip + warning
 - **outbound ACL** (channel.outboundAllowlist): server-side 違反は `OUTBOUND_ACL_VIOLATION` reject 一本化 (cc[] strip 削除); allowlist 不在 channel は legacy compat (全 sender 許可)
 
@@ -259,7 +259,7 @@ interface AccessConfig {
 5. **routing contract は `core/channel-policy.ts` の `getChannelPolicy(channel_id)` 1 expression に集約**、server / client / test が同 source を参照 (Phase 5 §1.8)
 
 #### Outbound（bot → 外部）
-1. botがsend(mentions, content, reply_to?)で送信 — **toパラメータなし**
+1. botがsend(mention, cc?, content, reply_to)で送信 — **toパラメータなし**、mention は required (ADR-041 amendment 2026-05-05)
 2. 宛先自動決定:
    - reply_toあり → 元メッセージのchannel_id/thread_idに送信
    - reply_toなし → last_received_channel/threadに送信（警告付き）
@@ -545,9 +545,12 @@ claude server:agent-comms \
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|------|------|------|
-| mentions | string[] | Yes | push通知先agent_id配列（空配列は拒否） |
+| mention | string | Yes | 1 primary recipient agent_id（required、ADR-041 amendment 2026-05-05）|
+| cc | string[] | No | reference recipients（queue 投入なし、body 末尾に `[CC: <@id>]` 注入）|
 | content | string | Yes | メッセージ本文（50,000文字上限） |
-| reply_to | string | No | 返信先メッセージID（UUID） |
+| reply_to | string | Yes | 返信先メッセージID（UUID、destination 自動決定）|
+
+> ~~mentions: string[]~~ は **REMOVED 2026-05-05**（CEO directive `5e2d9235`、`docs/adr/041-routing-phase5.md` amendment）
 
 **宛先決定ロジック（コアRouter内部）:**
 1. reply_toあり → 元メッセージのchannel_id/thread_idに送信

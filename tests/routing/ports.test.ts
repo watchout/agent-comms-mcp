@@ -89,29 +89,12 @@ describe('InboundResolver (§1.7 Port A) — §2.1 dedup', () => {
   })
 })
 
-describe('InboundResolver — §2.2 sender 制限 + auto-convert', () => {
-  const primaryFallback = createPrimaryFallback()
-  const resolver = createInboundResolver({ isKnownAgent: isKnown, primaryFallback })
-
-  test('§4.2 legacy mentions[] → mention=mentions[0], rest → cc + warning', () => {
-    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['alice', 'bob', 'carol'] })
-    expect(r.ok).toBe(true)
-    if (r.ok) {
-      expect(r.enqueue).toContain('alice')
-      expect(r.cc.sort()).toEqual(['bob', 'carol'])
-      expect(r.warnings.some((w) => w.includes('auto-converted'))).toBe(true)
-    }
-  })
-
-  test('§4.5 mention+mentions both supplied → mention wins + warning', () => {
-    const r = resolver.resolve({ channel_id: 'ch1', mention: 'alice', mentions: ['bob'] })
-    expect(r.ok).toBe(true)
-    if (r.ok) {
-      expect(r.enqueue).toContain('alice')
-      expect(r.warnings.some((w) => w.includes('mention+mentions'))).toBe(true)
-    }
-  })
-})
+// ADR-041 amendment 2026-05-05 — legacy mentions[] auto-convert is removed.
+// The InboundResolveInput interface no longer accepts a `mentions` field at
+// the type level; callers MUST use `mention` (required) + `cc[]`. The
+// behavioral contract for the removed cases is now covered in
+// tests/contract/test_no_mentions_array_remnant.test.ts at the MCP-server
+// layer (where the schema-level reject lives).
 
 describe('InboundResolver — §2.3 primary routing fallback', () => {
   test('§4.3 no mention + channel.primary → primary enqueue', () => {
@@ -319,9 +302,13 @@ describe('Phase 5 §3 anti-pattern source-pin', () => {
     expect(text).not.toMatch(/@arc-team|virtual.*group|expandGroup/)
   })
 
-  test('§3.2 silent auto-convert — auto-convert path emits a deprecation warning', async () => {
+  test('§3.2 ADR-041 amendment 2026-05-05 — auto-convert path is removed (no silent conversion)', async () => {
     const text = await readRepo('core/routing/ports/inbound-resolver.ts')
-    expect(text).toContain('auto-converted')
-    expect(text).toMatch(/deprecated|please migrate/)
+    // Auto-convert runtime branch must be gone (the resolver no longer
+    // accepts a `mentions` field at the input type level).
+    expect(text).not.toMatch(/input\.mentions\s*&&\s*input\.mentions\.length/)
+    expect(text).not.toMatch(/auto-converted/)
+    // The amendment marker should be present so future readers see why.
+    expect(text).toMatch(/ADR-041 amendment 2026-05-05/)
   })
 })
