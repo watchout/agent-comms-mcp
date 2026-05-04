@@ -318,12 +318,62 @@ export async function consumeOneOutboundRow(): Promise<void> {
     }
 
     if (deliveryError === null) {
-      await client.query(
-        `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
-        [discordMessageId, row.id],
-      ).catch(err => {
-        process.stderr.write(`agent-comms: outbound consumer mark-sent failed for id=${row.id}: ${err}\n`)
-      })
+      // Bug 2 root fix (CEO approval msg c40b8dc9, dispatch 40829fa4):
+      // Atomically write back the Discord message id to BOTH outbound_queue
+      // AND the originating agent_messages row. Prior to this fix only
+      // outbound_queue.discord_message_id was populated, leaving
+      // agent_messages.discord_message_id NULL — when a human later
+      // replied to the bot-authored Discord message, inbound-receiver's
+      // 2-step lookup (column → metadata) missed both, the row took the
+      // orphan path, reply_to was stored as NULL, and the reply_chain CTE
+      // returned only the seed row. See docs/SSOT.md §6 + PR #290.
+      //
+      // Transactional contract:
+      //   - BEGIN / COMMIT around both UPDATEs on the same singleton
+      //     pg client (same pattern as server.ts:2007 send handler).
+      //   - Idempotent: agent_messages UPDATE includes
+      //     `discord_message_id IS NULL` so a re-run is a no-op.
+      //   - Skipped when discordMessageId is null (40062 duplicate-nonce
+      //     idempotent collapse — Discord did not return an id, so we
+      //     cannot back-fill agent_messages and outbound_queue still
+      //     records NULL as the documented observability trade-off).
+      //   - Failure (e.g. UNIQUE violation on a foreign agent_messages
+      //     row already holding the same discord_message_id) → ROLLBACK,
+      //     log, return early WITHOUT marking sent. The row stays
+      //     'claimed' and orphan reclaim returns it to 'pending' after
+      //     OUTBOUND_ORPHAN_TIMEOUT_SEC for retry.
+      let txCommitted = false
+      try {
+        await client.query('BEGIN')
+        await client.query(
+          `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
+          [discordMessageId, row.id],
+        )
+        if (discordMessageId !== null && row.message_id) {
+          // message_id stores agent_messages.id as text (UUID). Cast to
+          // uuid for the join. Idempotency clause prevents overwriting a
+          // value already populated by a prior consumer run or by a
+          // concurrent code path (defence-in-depth against races even
+          // though the consumer is single-flight).
+          await client.query(
+            `UPDATE agent_messages
+                SET discord_message_id = $1
+              WHERE id = $2::uuid
+                AND discord_message_id IS NULL`,
+            [discordMessageId, row.message_id],
+          )
+        }
+        await client.query('COMMIT')
+        txCommitted = true
+      } catch (err) {
+        if (!txCommitted) {
+          await client.query('ROLLBACK').catch(() => {})
+        }
+        process.stderr.write(
+          `agent-comms: outbound consumer mark-sent transaction failed for id=${row.id} (row stays claimed; orphan reclaim will retry): ${err}\n`,
+        )
+        return
+      }
       void duplicateNonceIdempotent
       return
     }
