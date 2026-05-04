@@ -181,6 +181,122 @@ describe('PR-Q1 queue-cleanup script', () => {
     expect(_internal.parseMode(['--execute'])).toBe('execute')
     expect(_internal.parseMode(['--something', '--execute'])).toBe('execute')
   })
+
+  test('case 7: --max-age 30d skips 24h-old rows but catches 31d-old rows', async () => {
+    if (!available) return
+    const recentId = await seedRow({
+      agent_id: `${TEST_AGENT_PREFIX}c7r`,
+      ageHours: 24,
+    })
+    const staleId = await seedRow({
+      agent_id: `${TEST_AGENT_PREFIX}c7s`,
+      ageHours: 31 * 24,
+    })
+
+    await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+
+    const recent = await statusOf(recentId)
+    const stale = await statusOf(staleId)
+    expect(recent.status).toBe('pending')
+    expect(stale.status).toBe('skipped')
+    expect(stale.failed_reason ?? '').toMatch(/^STALE_BULK_DRAIN_2026-05-04:/)
+  })
+
+  test('case 8: --max-age 30d execute → idempotent rerun (no-op)', async () => {
+    if (!available) return
+    await seedRow({
+      agent_id: `${TEST_AGENT_PREFIX}c8`,
+      ageHours: 31 * 24,
+    })
+
+    const first = await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+    expect(first).toBeGreaterThanOrEqual(1)
+    const second = await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+    expect(second).toBe(0)
+  })
+
+  test('case 9: default behavior unchanged when maxAge omitted (12h floor, BULK_CLEANUP reason)', async () => {
+    if (!available) return
+    const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c9`, ageHours: 24 })
+
+    await runQueueCleanup('execute', DATABASE_URL)
+
+    const post = await statusOf(id)
+    expect(post.status).toBe('skipped')
+    expect(post.failed_reason).toBe(_internal.DEFAULT_REASON)
+  })
+})
+
+describe('PR-Q1 cycle 3 — --max-age flag parsing & floor', () => {
+  const { parseMaxAge, parseDurationToHours, validateMaxAge, ageIntervalSql, reasonFor } =
+    _internal
+
+  test('parseMaxAge: default = 12h when flag absent', () => {
+    expect(parseMaxAge([])).toBe('12h')
+    expect(parseMaxAge(['--execute'])).toBe('12h')
+  })
+
+  test('parseMaxAge: extracts value when flag present', () => {
+    expect(parseMaxAge(['--max-age', '30d'])).toBe('30d')
+    expect(parseMaxAge(['--execute', '--max-age', '7d'])).toBe('7d')
+  })
+
+  test('parseMaxAge: missing value throws', () => {
+    expect(() => parseMaxAge(['--max-age'])).toThrow(/requires a value/)
+  })
+
+  test('parseDurationToHours: <n>h and <n>d forms', () => {
+    expect(parseDurationToHours('12h')).toBe(12)
+    expect(parseDurationToHours('30d')).toBe(720)
+    expect(parseDurationToHours('1d')).toBe(24)
+  })
+
+  test('parseDurationToHours: malformed → NaN', () => {
+    expect(parseDurationToHours('30')).toBeNaN()
+    expect(parseDurationToHours('1w')).toBeNaN()
+    expect(parseDurationToHours('abc')).toBeNaN()
+    expect(parseDurationToHours('0h')).toBeNaN()
+    expect(parseDurationToHours('-5h')).toBeNaN()
+  })
+
+  test('validateMaxAge: accepts 12h floor exactly', () => {
+    expect(validateMaxAge('12h').hours).toBe(12)
+  })
+
+  test('validateMaxAge: accepts 30d', () => {
+    expect(validateMaxAge('30d').hours).toBe(720)
+  })
+
+  test('validateMaxAge: rejects < 12h', () => {
+    expect(() => validateMaxAge('1h')).toThrow(/safety floor/)
+    expect(() => validateMaxAge('11h')).toThrow(/safety floor/)
+  })
+
+  test('validateMaxAge: rejects malformed', () => {
+    expect(() => validateMaxAge('1w')).toThrow(/Invalid --max-age/)
+    expect(() => validateMaxAge('forever')).toThrow(/Invalid --max-age/)
+  })
+
+  test('ageIntervalSql: yields the right INTERVAL literal', () => {
+    expect(ageIntervalSql('12h')).toBe(`INTERVAL '12 hours'`)
+    expect(ageIntervalSql('30d')).toBe(`INTERVAL '30 days'`)
+  })
+
+  test('reasonFor: 12h default keeps BULK_CLEANUP marker', () => {
+    expect(reasonFor('12h')).toBe(_internal.DEFAULT_REASON)
+  })
+
+  test('reasonFor: longer windows get STALE_BULK_DRAIN_2026-05-04 prefix', () => {
+    expect(reasonFor('30d')).toMatch(/^STALE_BULK_DRAIN_2026-05-04:/)
+    expect(reasonFor('30d')).toContain('max-age=30d')
+  })
+
+  test('runQueueCleanup: rejects --max-age < 12h before connecting', async () => {
+    // Should reject from validateMaxAge before any DB call (uses bogus URL on purpose).
+    await expect(
+      runQueueCleanup('dry-run', 'postgresql://nowhere:1/none', { maxAge: '1h' }),
+    ).rejects.toThrow(/safety floor/)
+  })
 })
 
 describe('PR-Q1 cycle 2 — resolveDatabaseUrl precedence (env > config.json > default)', () => {
