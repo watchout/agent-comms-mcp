@@ -78,7 +78,6 @@ import {
   buildReplyContextSuffix,
 } from './core/send-errors'
 import { isDuplicateNonceError } from './core/outbound-delivery'
-import { applyMentionsAutoFill } from './core/agent-cache'
 import {
   getMessageById,
   isHumanAgent,
@@ -1549,19 +1548,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'send',
-      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Phase 5: prefer \`mention\` (1 primary recipient) + \`cc\` (queue 非投入、body 末尾に [CC: <@id>] 注入). Legacy \`mentions[]\` is auto-converted with deprecation warning.${agentListStr}`,
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Phase 5: \`mention\` (1 primary recipient, required) + \`cc\` (queue 非投入、body 末尾に [CC: <@id>] 注入).${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mention: { type: 'string', description: 'Phase 5: 1 primary recipient (agent_id). Empty string → INVALID_MENTION reject; unknown → UNKNOWN_AGENT reject.' },
-          cc: { type: 'array', items: { type: 'string' }, description: 'Phase 5: reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入). Unknown agents are stripped + warning.' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning.' },
+          mention: { type: 'string', description: 'Required: 1 primary recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          cc: { type: 'array', items: { type: 'string' }, description: 'Reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入). Unknown agents are stripped + warning.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['content', 'reply_to'],
+        required: ['content', 'reply_to', 'mention'],
       },
     },
     {
@@ -1569,20 +1567,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // reply_to is intentionally absent: notify does not mark any
       // message_queue row 'replied' and does not touch agents.current_message_id.
       name: 'notify',
-      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. Phase 5: prefer \`mention\` + \`cc\`; legacy \`mentions[]\` auto-converted.${agentListStr}`,
+      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. Phase 5: \`mention\` (required) + \`cc\` (queue 非投入).${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           channel: { type: 'string', description: 'Channel id (or name) to post into. Required.' },
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mention: { type: 'string', description: 'Phase 5: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
-          cc: { type: 'array', items: { type: 'string' }, description: 'Phase 5: reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入).' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Agent IDs to push-notify. DEPRECATED in Phase 5 — auto-converted to mention/cc[] with warning.' },
+          mention: { type: 'string', description: 'Required: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          cc: { type: 'array', items: { type: 'string' }, description: 'Reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入).' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['channel', 'content'],
+        required: ['channel', 'content', 'mention'],
       },
     },
     // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
@@ -1951,14 +1948,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'send') {
     let { content, reply_to, message_type, metadata } = args as any
-    // Issue #118 PR-B ③: mentions may be auto-filled below; use let
-    let mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
+    // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
+    // argument is removed. Callers MUST use `mention` (1 primary, required) +
+    // `cc[]` (reference, queue 非投入). A caller still passing `mentions` is
+    // surfaced as INVALID_MENTION with a migration hint instead of silent
+    // auto-conversion. See ADR-041 amendment 2026-05-05.
+    if (args.mentions !== undefined) {
+      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary', cc: ['observers'] } instead" }], isError: true }
+    }
     // Phase 5 wiring runs AFTER the per-row claim acquisition so the channel
     // is resolved; see resolvePhase5(...) call site below.
-    // Issue #266: snapshot the raw args.mentions for outbound trace before any
-    // auto-fill / normalization mutates `mentions`. Stored on agent_messages
-    // so recurrences (e.g. PR #263 mention-prepend) can be diagnosed without stderr logs.
-    const rawInputMentions: string[] = mentions.slice()
+    // mentions[] is the resolved enqueue list produced by resolvePhase5(); it
+    // starts empty and is populated from { mention, cc } via the routing port.
+    let mentions: string[] = []
+    // Issue #266: snapshot the raw mention(s) for outbound trace. After the
+    // mentions[] removal this is just [args.mention] (or [] when missing —
+    // the INVALID_MENTION reject below catches that case).
+    const rawInputMentions: string[] = typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
 
     // Validate content
     if (!content || content.length === 0) {
@@ -2028,74 +2034,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       claimedMqId = claimRow.rows[0].id
 
-    // Phase 5 — opt-in mention/cc validation + outbound ACL + cc[] body
-    // decoration (Issues #305/#306/#308/#250). Resolves channel from claim,
-    // applies validation, decorates content. Activates only when Phase 5
-    // fields (`mention` / `cc`) are passed; legacy `mentions[]` path is
-    // unchanged unless auto-convert kicks in.
+    // Phase 5 cleanup — mention/cc validation + outbound ACL + cc[] body
+    // decoration (Issues #305/#306/#308/#250 + ADR-041 amendment 2026-05-05).
+    // Resolves channel from claim, applies validation, decorates content.
+    // mention is now schema-required (CEO directive 5e2d9235); resolvePhase5
+    // always runs and the legacy mentions[] auto-convert path is gone.
     {
       const claimChannelRow = await txClient.query(
         `SELECT channel_id FROM agent_messages WHERE id = $1 LIMIT 1`,
         [reply_to],
       )
       const phase5Channel: string = claimChannelRow.rows[0]?.channel_id ?? ''
-      const usesPhase5 = (args as any).mention !== undefined ||
-        (Array.isArray((args as any).cc) && (args as any).cc.length > 0)
-      if (usesPhase5 || mentions.length > 0) {
-        // Phase 5 cycle 3 fix #3 — UNKNOWN_AGENT reject: real agent registry
-        // lookup via refreshAgentCache() (replaces hardcode `() => true`).
-        const knownAgents = await refreshAgentCache()
-        const phase5 = resolvePhase5({
-          sender: agentId,
-          channel_id: phase5Channel,
-          mention: (args as any).mention,
-          cc: (args as any).cc,
-          mentions,
-          content,
-          isKnownAgent: (id: string) => knownAgents.includes(id),
-        })
-        if (phase5 && !phase5.ok) {
-          if (phase5.error === 'INVALID_MENTION') {
-            await txClient.query('ROLLBACK'); txCommitted = true
-            return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
-          }
-          if (phase5.error === 'UNKNOWN_AGENT') {
-            await txClient.query('ROLLBACK'); txCommitted = true
-            return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
-          }
-          if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
-            await txClient.query('ROLLBACK'); txCommitted = true
-            return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
-          }
+      // UNKNOWN_AGENT reject: real agent registry lookup via refreshAgentCache().
+      const knownAgents = await refreshAgentCache()
+      const phase5 = resolvePhase5({
+        sender: agentId,
+        channel_id: phase5Channel,
+        mention: (args as any).mention,
+        cc: (args as any).cc,
+        content,
+        isKnownAgent: (id: string) => knownAgents.includes(id),
+      })
+      if (phase5 && !phase5.ok) {
+        if (phase5.error === 'INVALID_MENTION') {
+          await txClient.query('ROLLBACK'); txCommitted = true
+          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
         }
-        if (phase5 && phase5.ok) {
-          content = phase5.content
-          mentions = phase5.mentions
-          for (const w of phase5.warnings) {
-            process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
-          }
+        if (phase5.error === 'UNKNOWN_AGENT') {
+          await txClient.query('ROLLBACK'); txCommitted = true
+          return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+        }
+        if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
+          await txClient.query('ROLLBACK'); txCommitted = true
+          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
+        }
+      }
+      if (phase5 && phase5.ok) {
+        content = phase5.content
+        mentions = phase5.mentions
+        for (const w of phase5.warnings) {
+          process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
         }
       }
     }
 
-    // Issue #118 PR-B ③: mentions auto-fill — if empty + reply_to, try to fill from original message author.
-    // This avoids NOT_MENTIONED errors when LLM forgets mentions but reply_to context is present.
-    if (mentions.length === 0 && reply_to) {
-      const orig = await getMessageById(await coreDbAdapter(), reply_to)
-      const autoFilled = applyMentionsAutoFill(mentions, reply_to, orig?.author_id)
-      if (autoFilled) mentions = autoFilled
-    }
-
-    // Validate mentions (required, non-empty)
-    // Issue #118 PR-A ①: suggestive error — include original message author + known agent IDs from cache.
+    // mention is schema-required, but the runtime guard catches the case
+    // where the MCP runtime somehow bypassed schema (defensive). Use
+    // the suggestive error (buildNotMentionedErrorMsg) so callers still get
+    // a usable agent list for migration.
     if (mentions.length === 0) {
       let authorId: string | null = null
-      const knownAgents = await refreshAgentCache()
+      const knownAgentsForErr = await refreshAgentCache()
       if (reply_to) {
         const orig = await getMessageById(await coreDbAdapter(), reply_to)
         if (orig?.author_id) authorId = orig.author_id
       }
-      return { content: [{ type: 'text', text: buildNotMentionedErrorMsg(authorId, knownAgents) }], isError: true }
+      await txClient.query('ROLLBACK'); txCommitted = true
+      return { content: [{ type: 'text', text: buildNotMentionedErrorMsg(authorId, knownAgentsForErr) }], isError: true }
     }
 
     // Self-send prevention
@@ -2519,11 +2514,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
     let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
-    let mentions: string[] = Array.isArray(args.mentions) ? args.mentions : (args.mentions ? [args.mentions] : [])
-    // Issue #266: snapshot raw args.mentions for outbound trace.
-    const rawInputMentions: string[] = mentions.slice()
+    // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
+    // argument is removed. Callers MUST use `mention` + `cc[]`. See ADR-041
+    // amendment 2026-05-05.
+    if (args.mentions !== undefined) {
+      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary', cc: ['observers'] } instead" }], isError: true }
+    }
+    // mentions[] is the resolved enqueue list; populated by resolvePhase5().
+    let mentions: string[] = []
+    // Issue #266: snapshot raw mention for outbound trace.
+    const rawInputMentions: string[] = typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
 
-    // spec §4.3 step 1 — --channel / --mentions / --content required.
+    // spec §4.3 step 1 — channel / mention / content required.
     if (!channel || typeof channel !== 'string') {
       return { content: [{ type: 'text', text: 'Error [CHANNEL_REQUIRED]: channel is required for notify' }], isError: true }
     }
@@ -2533,10 +2535,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
     }
-    if (mentions.length === 0) {
-      return { content: [{ type: 'text', text: 'Error [NOT_MENTIONED]: mentions is required (at least one agent_id)' }], isError: true }
+    // mention is schema-required, but defensive check (matches send).
+    if (typeof args.mention !== 'string' || args.mention.length === 0) {
+      return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
     }
-    if (mentions.length === 1 && mentions[0] === agentId) {
+    if (args.mention === agentId) {
       return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
@@ -2603,13 +2606,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
     }
 
-    // spec §4.3 step 3 — mentions validation (same as send).
+    // spec §4.3 step 3 — single-mention validation (legacy mentions[] path
+    // removed in Phase 5 cleanup). resolvePhase5(...) below handles the
+    // canonical UNKNOWN_AGENT / INVALID_MENTION / OUTBOUND_ACL_VIOLATION
+    // rejects, so this guard is just a defense-in-depth check that the
+    // mention agent_id passes the validateMentionOrError shape filter.
     const validAgentIds = await refreshAgentCache()
-    for (const mention of mentions) {
-      const mentionErr = validateMentionOrError(mention, validAgentIds)
-      if (mentionErr) {
-        return { content: [{ type: 'text', text: mentionErr }], isError: true }
-      }
+    const mentionErr = validateMentionOrError(args.mention, validAgentIds)
+    if (mentionErr) {
+      return { content: [{ type: 'text', text: mentionErr }], isError: true }
     }
 
     // Rate limit + duplicate guards (same posture as send; notify is
@@ -2627,41 +2632,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await new Promise(r => setTimeout(r, BURST_MIN_INTERVAL_MS))
     }
 
-    // Phase 5 cycle 3 fix #1 — notify wiring (resolvePhase5 + 4 ports).
-    // Runs after channel resolution + permission/rate/dup gates, before
-    // content sanitisation so cc[] body suffix is included in the saved
-    // message. UNKNOWN_AGENT reject (fix #3) via refreshAgentCache.
+    // Phase 5 cleanup — notify wiring (resolvePhase5 + 4 ports). Runs after
+    // channel resolution + permission/rate/dup gates, before content
+    // sanitisation so cc[] body suffix is included in the saved message.
+    // mention is schema-required so resolvePhase5 always runs (legacy
+    // mentions[]-only branch is gone). ADR-041 amendment 2026-05-05.
     {
-      const usesPhase5N = (args as any).mention !== undefined ||
-        (Array.isArray((args as any).cc) && (args as any).cc.length > 0)
-      if (usesPhase5N || mentions.length > 0) {
-        const knownAgentsN = await refreshAgentCache()
-        const phase5 = resolvePhase5({
-          sender: agentId,
-          channel_id: dest.channelId,
-          mention: (args as any).mention,
-          cc: (args as any).cc,
-          mentions,
-          content,
-          isKnownAgent: (id: string) => knownAgentsN.includes(id),
-        })
-        if (phase5 && !phase5.ok) {
-          if (phase5.error === 'INVALID_MENTION') {
-            return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
-          }
-          if (phase5.error === 'UNKNOWN_AGENT') {
-            return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
-          }
-          if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
-            return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
-          }
+      const knownAgentsN = await refreshAgentCache()
+      const phase5 = resolvePhase5({
+        sender: agentId,
+        channel_id: dest.channelId,
+        mention: (args as any).mention,
+        cc: (args as any).cc,
+        content,
+        isKnownAgent: (id: string) => knownAgentsN.includes(id),
+      })
+      if (phase5 && !phase5.ok) {
+        if (phase5.error === 'INVALID_MENTION') {
+          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
         }
-        if (phase5 && phase5.ok) {
-          content = phase5.content
-          mentions = phase5.mentions
-          for (const w of phase5.warnings) {
-            process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
-          }
+        if (phase5.error === 'UNKNOWN_AGENT') {
+          return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+        }
+        if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
+          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
+        }
+      }
+      if (phase5 && phase5.ok) {
+        content = phase5.content
+        mentions = phase5.mentions
+        for (const w of phase5.warnings) {
+          process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
         }
       }
     }

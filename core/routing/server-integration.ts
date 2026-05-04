@@ -5,10 +5,9 @@
  * Both server.ts (canonical enforcement) and cli/index.ts (best-effort warning)
  * route through here so the contract has exactly one expression (§1.8).
  *
- * The helper is **opt-in**: it kicks in only when the caller supplies the
- * Phase 5 fields (`mention` or `cc`). When neither is present, the legacy
- * `mentions[]` path is preserved so existing callers see no behavior change
- * until they migrate.
+ * ADR-041 amendment 2026-05-05 (CEO directive 5e2d9235): the legacy
+ * `mentions[]` field is removed. Callers MUST supply `mention` (required) +
+ * optional `cc[]`. The MCP server schema rejects missing `mention` upstream.
  */
 import {
   createInboundResolver,
@@ -23,12 +22,10 @@ export interface Phase5ResolveInput {
   sender: AgentId
   /** Channel id of the destination (server-side: derived from reply_to lookup or `channel` arg). */
   channel_id: string
-  /** §1.2 — 1 主 recipient. */
+  /** §1.2 — 1 主 recipient (required at MCP layer). */
   mention?: AgentId
   /** §1.2 — 参照 recipients (queue 投入なし、body 注入対象). */
   cc?: AgentId[]
-  /** §1.2 — DEPRECATED, auto-converted to mention + cc. */
-  mentions?: AgentId[]
   /** Original message content (will be decorated with cc[] suffix when applicable). */
   content: string
   /** Used by the resolver for UNKNOWN_AGENT validation. */
@@ -37,7 +34,7 @@ export interface Phase5ResolveInput {
 
 export interface Phase5ResolveOk {
   ok: true
-  /** Final enqueue list (for downstream `mentions[]` field of legacy fanout). */
+  /** Final enqueue list (resolved from `mention` + `cc[]`; consumed by downstream fanout). */
   mentions: AgentId[]
   /** Decorated content (cc[] suffix appended when applicable). */
   content: string
@@ -64,7 +61,7 @@ export type Phase5ResolveResult = Phase5ResolveOk | Phase5ResolveErr
  */
 export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | null {
   const usesPhase5Fields = input.mention !== undefined || (input.cc && input.cc.length > 0)
-  if (!usesPhase5Fields && (input.mentions === undefined || input.mentions.length === 0)) {
+  if (!usesPhase5Fields) {
     return null
   }
 
@@ -79,7 +76,6 @@ export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | 
     channel_id: input.channel_id,
     mention: input.mention,
     cc: input.cc,
-    mentions: input.mentions,
   })
 
   if (!resolved.ok) {

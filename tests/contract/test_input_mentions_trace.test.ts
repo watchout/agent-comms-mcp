@@ -28,46 +28,36 @@ import { resolve } from 'node:path'
 // (c) **Source-shape grep** — fails fast if server.ts loses the
 //     `rawInputMentions` snapshot or its propagation into saveMessage.
 
-describe('input_mentions snapshot semantics (Issue #266 (A))', () => {
-  // Ported verbatim from server.ts send/notify handler (lines 1689 / 2173).
-  // Kept in sync via the source-shape grep below.
-  function parseMentions(args: { mentions?: unknown }): string[] {
-    return Array.isArray(args.mentions)
-      ? (args.mentions as string[])
-      : (args.mentions ? [args.mentions as string] : [])
+describe('input_mentions snapshot semantics (Issue #266 (A); ADR-041 amendment 2026-05-05)', () => {
+  // After the Phase 5 cleanup the MCP handlers no longer accept `mentions[]`.
+  // The handler snapshot pattern is now:
+  //   const rawInputMentions = typeof args.mention === 'string' && args.mention.length > 0
+  //     ? [args.mention] : []
+  // Then `mentions: string[]` is populated by resolvePhase5(...) (which may
+  // expand cc[] entries into the enqueue list). The snapshot is taken from
+  // the raw `args.mention` BEFORE resolvePhase5 mutates the working list.
+  function snapshotInputMentions(args: { mention?: unknown }): string[] {
+    return typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
   }
 
-  test('case A — explicit mentions=["ceo"] survives subsequent auto-fill mutation', () => {
-    const args = { mentions: ['ceo'] }
-    const mentions = parseMentions(args)
-    const rawInputMentions = mentions.slice()  // snapshot before auto-fill
-
-    // Simulate the send-handler auto-fill (e.g. reply_to back-fill that
-    // appends the original author to `mentions` after PR-B ③).
-    mentions.push('autofilled-cto')
-
+  test('case A — explicit mention="ceo" survives subsequent enqueue expansion', () => {
+    const args = { mention: 'ceo' }
+    const rawInputMentions = snapshotInputMentions(args)
+    let mentions: string[] = []  // populated below by resolvePhase5
+    mentions = ['ceo', 'cc-target-1', 'cc-target-2']  // simulate enqueue expansion
     expect(rawInputMentions).toEqual(['ceo'])
-    expect(mentions).toEqual(['ceo', 'autofilled-cto'])
+    expect(mentions).toEqual(['ceo', 'cc-target-1', 'cc-target-2'])
   })
 
-  test('case B — empty mentions=[] (reply_to flow) snapshot stays empty even after auto-fill', () => {
-    const args = { mentions: undefined }  // user passed nothing
-    const mentions = parseMentions(args)
-    expect(mentions).toEqual([])
-
-    const rawInputMentions = mentions.slice()
-    // reply_to-based auto-fill kicks in
-    mentions.push('autofilled-from-reply-target')
-
+  test('case B — missing mention (defensive) snapshot stays empty', () => {
+    const args = { mention: undefined }  // schema-required but defensive
+    const rawInputMentions = snapshotInputMentions(args)
     expect(rawInputMentions).toEqual([])
-    expect(mentions).toEqual(['autofilled-from-reply-target'])
   })
 
-  test('case C — single string mentions get wrapped to array (parsing parity)', () => {
-    const mentions = parseMentions({ mentions: 'ceo' })
-    expect(mentions).toEqual(['ceo'])
-    const rawInputMentions = mentions.slice()
-    expect(rawInputMentions).toEqual(['ceo'])
+  test('case C — empty-string mention snapshot stays empty (matches INVALID_MENTION reject)', () => {
+    const rawInputMentions = snapshotInputMentions({ mention: '' })
+    expect(rawInputMentions).toEqual([])
   })
 })
 
@@ -133,9 +123,12 @@ describe('source-shape regression — server.ts retains the snapshot pattern', (
   // the trace; this grep catches that.
   test('server.ts contains rawInputMentions snapshot + propagation', () => {
     const src = readFileSync(resolve(import.meta.dir, '../../server.ts'), 'utf8')
-    // Snapshot pattern: `const rawInputMentions: string[] = mentions.slice()` (or via spread)
-    expect(src).toMatch(/rawInputMentions[^\n]*=\s*mentions\.(slice|concat)\(\)|rawInputMentions[^\n]*=\s*\[\.\.\.mentions\]/)
-    // Propagation: passed into saveMessage as input_mentions (at least 2 sites — send + notify)
+    // ADR-041 amendment 2026-05-05 — snapshot is now built from the singular
+    // `args.mention` arg (legacy `args.mentions` array removed). At least 2
+    // call sites (send + notify) should construct `[args.mention]`.
+    const snapshotHits = src.match(/rawInputMentions[^\n]*=\s*typeof\s+args\.mention\s*===/g) ?? []
+    expect(snapshotHits.length).toBeGreaterThanOrEqual(2)
+    // Propagation: passed into saveMessage as input_mentions (send + notify)
     const propagationHits = src.match(/input_mentions:\s*rawInputMentions/g) ?? []
     expect(propagationHits.length).toBeGreaterThanOrEqual(2)
   })

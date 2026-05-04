@@ -7,16 +7,17 @@
  * Contract:
  *   - `mention?: AgentId` (1 主 recipient、§1.1)
  *   - `cc?: AgentId[]` (queue 投入なし、body 注入対象、§1.5)
- *   - `mentions?: AgentId[]` (DEPRECATED、auto-convert: mentions[0] → mention,
- *     rest → cc、§2.2 + warning log § 3.2)
  *
- * Validation (§1.6 NEW):
+ * Note (ADR-041 amendment 2026-05-05, CEO directive 5e2d9235):
+ *   The legacy `mentions?: AgentId[]` field with auto-convert
+ *   (`mentions[0]` → mention, rest → cc) was removed. Callers must supply
+ *   `mention` (1 primary, required at MCP schema layer) + optional `cc[]`.
+ *
+ * Validation (§1.6):
  *   - mention: empty string → INVALID_MENTION; unknown agent_id → UNKNOWN_AGENT
  *   - cc: each entry validated; unknown agents are stripped + warning (§4.5)
  *
- * Dedup (§2.1): `Array.from(new Set([mention, ...cc, ...(mentions ?? [])]))`.
- * mention takes precedence when both `mention` and `mentions` are supplied
- * (§1.2 Q1d + warning).
+ * Dedup (§2.1): `Array.from(new Set([mention, ...cc]))`.
  */
 import type { AgentId } from '../../channel-policy'
 import type { PrimaryFallback } from './primary-fallback'
@@ -27,7 +28,6 @@ export interface InboundResolveInput {
   channel_id: string
   mention?: AgentId
   cc?: AgentId[]
-  mentions?: AgentId[]
 }
 
 export interface InboundResolveOk {
@@ -61,22 +61,12 @@ export function createInboundResolver(deps: InboundResolverDeps): InboundResolve
     resolve(input: InboundResolveInput): InboundResolveResult {
       const warnings: string[] = []
       let mention = input.mention?.trim()
-      let cc = (input.cc ?? []).map((id) => id.trim()).filter((id) => id.length > 0)
+      const cc = (input.cc ?? []).map((id) => id.trim()).filter((id) => id.length > 0)
 
-      // §2.2 — auto-convert legacy `mentions[]` (mentions[0] → mention, rest → cc)
-      if (input.mentions && input.mentions.length > 0) {
-        const converted = input.mentions.map((id) => id.trim()).filter((id) => id.length > 0)
-        if (mention) {
-          // §1.2 Q1d — mention 優先 + warning
-          warnings.push(`mention+mentions both supplied; mention="${mention}" wins, mentions[] ignored`)
-        } else if (converted.length > 0) {
-          mention = converted[0]
-          if (converted.length > 1) cc = [...cc, ...converted.slice(1)]
-          warnings.push('legacy mentions[] auto-converted to mention + cc[]; deprecated, please migrate')
-        }
-      }
+      // ADR-041 amendment 2026-05-05 — legacy `mentions[]` auto-convert removed.
+      // Callers must use `mention` (required) + `cc[]`.
 
-      // §1.6 NEW — mention validation
+      // §1.6 — mention validation
       if (mention !== undefined) {
         if (mention.length === 0) {
           return { ok: false, error: 'INVALID_MENTION' }
