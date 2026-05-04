@@ -69,39 +69,48 @@ const mockAdapter: any = {
 }
 
 beforeAll(async () => {
+  client = new Client({ connectionString: DATABASE_URL })
   try {
-    client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
-    const { rows } = await client.query(
-      `SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'agent_messages'
-          AND column_name = 'discord_message_id'`,
-    )
-    available = rows.length === 1
-
-    if (available) {
-      // Reuse a real channel row to satisfy any FK on agent_messages.channel_id.
-      // We pick the most recent registered channel; if none, create one.
-      const ch = await client.query(
-        `SELECT id FROM channels ORDER BY created_at DESC NULLS LAST LIMIT 1`,
-      )
-      if (ch.rows.length > 0) {
-        testChannelUuid = ch.rows[0].id
-      } else {
-        const newChan = await client.query(
-          `INSERT INTO channels (id, channel_name, created_at)
-           VALUES ($1, $2, now())
-           RETURNING id`,
-          [randomUUID(), `bug2-test-channel-${process.pid}`],
-        ).catch(() => null)
-        testChannelUuid = newChan?.rows[0]?.id ?? null
-      }
-
-      await cleanFixtures()
-    }
   } catch {
+    // DB unreachable in this env — skip the whole suite (e.g. local without Postgres).
     available = false
+    // Still inject the DB getter + mock adapter to preserve outer behavior.
+    setDbGetter(async () => client as any, TEST_AGENT)
+    discordClients.set(TEST_AGENT, mockAdapter)
+    return
   }
+  const { rows } = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'agent_messages'
+        AND column_name = 'discord_message_id'`,
+  )
+  available = rows.length === 1
+  if (!available) {
+    // schema doesn't have the column we're testing — skip.
+    setDbGetter(async () => client as any, TEST_AGENT)
+    discordClients.set(TEST_AGENT, mockAdapter)
+    return
+  }
+
+  // From here on, errors are real and MUST surface, not be swallowed.
+  // Reuse a real channel row to satisfy any FK on agent_messages.channel_id.
+  // We pick the most recent registered channel; if none, create one.
+  const ch = await client.query(
+    `SELECT id FROM channels ORDER BY created_at DESC NULLS LAST LIMIT 1`,
+  )
+  if (ch.rows.length > 0) {
+    testChannelUuid = ch.rows[0].id
+  } else {
+    const chanId = randomUUID()
+    await client.query(
+      `INSERT INTO channels (id, name, created_at) VALUES ($1, $2, now())`,
+      [chanId, `bug2-test-channel-${process.pid}`],
+    )
+    testChannelUuid = chanId
+  }
+
+  await cleanFixtures()
 
   // Inject the DB getter + agent id used by consumeOneOutboundRow.
   setDbGetter(async () => client as any, TEST_AGENT)
