@@ -147,7 +147,6 @@ function makeDeps(opts: {
     buildQuoteBlock: async () => null,
     updateActiveThread: async () => {},
     hashCode: (s: string) => s.length,
-    bus: undefined,
     mcpPush: undefined,
     routeInbound: opts.routeSpy
       ? ((msg, ctx, agents) => {

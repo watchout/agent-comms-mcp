@@ -1,21 +1,23 @@
 /**
- * Send-side fanout: per-recipient `message_queue` INSERT + MessageBus signal.
+ * Send-side fanout: per-recipient `message_queue` INSERT.
  *
  * Phase 2 F cycle 2 — the CLI used to delegate fanout to the daemon via
  * `SELECT pg_notify('agent_inbox', …)`; in SQLite mode there is no daemon
  * LISTEN-ing on `agent_inbox`, so the notify payload was dropped and
  * recipients never saw the message (auditor BLOCKER on PR #224). This
- * helper replaces the pg_notify delegation with a direct INSERT + signal
- * so the CLI is self-sufficient on either backend.
+ * helper replaces the pg_notify delegation with a direct INSERT so the
+ * CLI is self-sufficient on either backend.
  *
- * Matches the server.ts send-tool shape (server.ts ~L1740-1775): build one
- * canonical JSON payload, insert one `message_queue` row per recipient,
- * and signal each recipient's bot-runner via `UnixSignalBus` (spec §13.1).
- * The ON CONFLICT clause is idempotent against the partial UNIQUE index
+ * ADR-050 (2026-05-05): legacy in-process signaling removed — wake-daemon
+ * (tmux send-keys, see bin/wake-daemon.ts) is the de jure primary delivery
+ * mechanism. Fanout no longer signals recipients; wake-daemon polls
+ * message_queue and injects prompts to the recipient bot's LLM session.
+ *
+ * Matches the server.ts send-tool shape: build one canonical JSON
+ * payload, insert one `message_queue` row per recipient. The ON CONFLICT
+ * clause is idempotent against the partial UNIQUE index
  * `uq_mq_agent_message` so a retried fanout does not double-enqueue.
  */
-import type { MessageBus } from './message-bus'
-
 export interface FanoutDb {
   query<T = any>(sql: string, params?: any[]): Promise<{ rows: T[] }>
 }
@@ -46,13 +48,13 @@ export interface FanoutResult {
 }
 
 /**
- * Insert one `message_queue` row per recipient and signal their bot-runner.
- * Errors on individual recipients are logged to stderr but never throw —
- * partial-success is preferred over losing the whole fanout.
+ * Insert one `message_queue` row per recipient. Errors on individual
+ * recipients are logged to stderr but never throw — partial-success is
+ * preferred over losing the whole fanout. wake-daemon (ADR-050 primary)
+ * picks up newly-inserted rows by polling and wakes the recipient bot.
  */
 export async function fanoutToRecipients(
   db: FanoutDb,
-  bus: MessageBus | null,
   params: FanoutParams,
 ): Promise<FanoutResult> {
   const mqPayload = JSON.stringify({
@@ -72,7 +74,6 @@ export async function fanoutToRecipients(
   const failed: string[] = []
 
   for (const recipient of params.recipients) {
-    let rowInserted = false
     try {
       // `ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL`
       // targets the partial UNIQUE index `uq_mq_agent_message`. PG requires
@@ -85,8 +86,7 @@ export async function fanoutToRecipients(
          RETURNING id`,
         [recipient, params.messageId, mqPayload],
       )
-      rowInserted = r.rows.length > 0
-      if (rowInserted) {
+      if (r.rows.length > 0) {
         inserted.push(recipient)
       } else {
         deduped.push(recipient)
@@ -96,22 +96,6 @@ export async function fanoutToRecipients(
         `fanoutToRecipients: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`,
       )
       failed.push(recipient)
-      continue
-    }
-
-    // Primary-path MessageBus signal (spec §13.5.1). Silent no-op when the
-    // recipient is offline / no PID file; the polling fallback handles
-    // recovery. Only signal when we actually inserted a fresh row — a
-    // deduped INSERT means the recipient already has a copy queued and may
-    // have been signaled by the original sender.
-    if (rowInserted && bus) {
-      try {
-        await bus.signal(`bot_${recipient}`)
-      } catch (err) {
-        process.stderr.write(
-          `fanoutToRecipients: bus.signal failed for ${recipient} (non-fatal): ${err}\n`,
-        )
-      }
     }
   }
 

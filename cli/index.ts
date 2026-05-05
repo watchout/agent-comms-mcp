@@ -27,7 +27,6 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
-import { createMessageBus } from '../core/message-bus'
 import { fanoutToRecipients } from '../core/send-fanout'
 
 // --- DB connection ---
@@ -655,17 +654,16 @@ async function sendMessage(args: string[]) {
       )
 
       // Phase 2 F cycle 2 (CTO judgment option (a), msg 1495781874977734814):
-      // CLI-initiated send performs message_queue fanout + MessageBus signal
-      // directly instead of delegating to the daemon's agent_inbox LISTEN
-      // handler. The old `pg_notify('agent_inbox', …)` path dropped silently
-      // in SQLite mode (no LISTEN-er) so recipients never saw the message;
-      // this direct call works for both PG and SQLite backends identically.
+      // CLI-initiated send performs message_queue fanout directly instead of
+      // delegating to the daemon's agent_inbox LISTEN handler. The old
+      // `pg_notify('agent_inbox', …)` path dropped silently in SQLite mode
+      // (no LISTEN-er) so recipients never saw the message; this direct call
+      // works for both PG and SQLite backends identically.
       //
-      // The PG LISTEN path is kept in `adapters/inbound-receiver.ts` for
-      // Discord-inbound traffic only (receiver pipeline), not for
-      // CLI-originated sends — those terminate the fanout here.
-      const cliFanoutBus = createMessageBus()
-      try {
+      // ADR-050 (2026-05-05): wake-daemon (bin/wake-daemon.ts) handles
+      // recipient wake-up by polling message_queue + tmux send-keys; the
+      // CLI no longer needs an in-process signal bus.
+      {
         const fanoutRes = await fanoutToRecipients(
           {
             query: async <T = any>(sql: string, params?: any[]) => {
@@ -673,7 +671,6 @@ async function sendMessage(args: string[]) {
               return { rows: r.rows as T[] }
             },
           },
-          cliFanoutBus,
           {
             messageId: id,
             channelId,
@@ -690,8 +687,6 @@ async function sendMessage(args: string[]) {
             `agent-com: fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
           )
         }
-      } finally {
-        await cliFanoutBus.close().catch(() => {})
       }
 
       // ─────────────────────────────────────────────────────────────────
@@ -936,10 +931,9 @@ async function notifyMessage(args: string[]) {
 
     // Phase 2 F cycle 2: same direct fanout as `sendMessage()` — see rationale
     // there. Notify is self-originated (no reply_to) but otherwise the
-    // delivery path is identical: per-recipient message_queue INSERT +
-    // bus.signal, no pg_notify delegation.
-    const notifyFanoutBus = createMessageBus()
-    try {
+    // delivery path is identical: per-recipient message_queue INSERT, no
+    // pg_notify delegation. ADR-050: wake-daemon handles recipient wake-up.
+    {
       const fanoutRes = await fanoutToRecipients(
         {
           query: async <T = any>(sql: string, params?: any[]) => {
@@ -947,7 +941,6 @@ async function notifyMessage(args: string[]) {
             return { rows: r.rows as T[] }
           },
         },
-        notifyFanoutBus,
         {
           messageId: id,
           channelId: resolvedChannelId,
@@ -964,8 +957,6 @@ async function notifyMessage(args: string[]) {
           `agent-com: notify fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
         )
       }
-    } finally {
-      await notifyFanoutBus.close().catch(() => {})
     }
 
     let discordExternalId: string | null = null
