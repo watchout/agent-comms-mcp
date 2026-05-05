@@ -73,7 +73,10 @@ describe('InboundResolver (§1.7 Port A) — §2.1 dedup', () => {
   const primaryFallback = createPrimaryFallback()
   const resolver = createInboundResolver({ isKnownAgent: isKnown, primaryFallback })
 
-  test('§4.1 same mention twice → 1 enqueue', () => {
+  // PR #315 follow-up — cc[] non-enqueue invariant (§1.5).
+  // enqueue MUST contain only the primary mention; cc[] are surfaced via
+  // body suffix (MessageBodyDecorator), never via queue rows.
+  test('§1.5 cc duplicates mention → enqueue=[mention], cc preserved for body', () => {
     const r = resolver.resolve({ channel_id: 'ch1', mention: 'alice', cc: ['alice'] })
     expect(r.ok).toBe(true)
     if (r.ok) {
@@ -82,10 +85,13 @@ describe('InboundResolver (§1.7 Port A) — §2.1 dedup', () => {
     }
   })
 
-  test('§4.1 different mentions → distinct enqueue', () => {
+  test('§1.5 mention + distinct cc → enqueue=[mention] only (cc NOT enqueued)', () => {
     const r = resolver.resolve({ channel_id: 'ch1', mention: 'alice', cc: ['bob'] })
     expect(r.ok).toBe(true)
-    if (r.ok) expect(r.enqueue.sort()).toEqual(['alice', 'bob'])
+    if (r.ok) {
+      expect(r.enqueue).toEqual(['alice'])
+      expect(r.cc).toEqual(['bob'])
+    }
   })
 })
 

@@ -17,7 +17,15 @@
  *   - mention: empty string → INVALID_MENTION; unknown agent_id → UNKNOWN_AGENT
  *   - cc: each entry validated; unknown agents are stripped + warning (§4.5)
  *
- * Dedup (§2.1): `Array.from(new Set([mention, ...cc]))`.
+ * Enqueue (§1.5, §2.1): cc[] are NOT enqueued. enqueue = [mention] only when
+ * mention is present (or after primary fallback resolution); cc[] are surfaced
+ * to readers via `[CC: <@id>]` body suffix injection (MessageBodyDecorator port).
+ *
+ * Note (PR #315 follow-up, ADR-041 amendment 2026-05-05): the previous
+ * `enqueue = Array.from(new Set([mention, ...ccValid]))` violated §1.5 by
+ * enqueuing cc[] recipients. The cc[] non-enqueue invariant is the multiplicity
+ * reduction goal (2.20 → 1.0). See msg `fad41c69` (auditor BLOCK), `6b079a0c`
+ * (ARC Option b), `ea7bc5cf` (CTO ratify).
  */
 import type { AgentId } from '../../channel-policy'
 import type { PrimaryFallback } from './primary-fallback'
@@ -94,18 +102,20 @@ export function createInboundResolver(deps: InboundResolverDeps): InboundResolve
           mention = primary
         } else {
           warnings.push(`no mention and no channel.primary; recipient skipped`)
-          // §2.1 — dedup: empty enqueue, cc still injected if present
+          // §1.5 — cc[] non-enqueue invariant: empty enqueue (cc never enqueued).
+          // cc[] still surfaces via body suffix.
           return {
             ok: true,
-            enqueue: Array.from(new Set(ccValid)),
+            enqueue: [],
             cc: ccValid,
             warnings,
           }
         }
       }
 
-      // §2.1 — dedup
-      const enqueue = Array.from(new Set([mention, ...ccValid]))
+      // §1.5 — cc[] non-enqueue invariant: enqueue = [mention] only.
+      // cc[] are surfaced via MessageBodyDecorator suffix, not via queue rows.
+      const enqueue: AgentId[] = mention ? [mention] : []
 
       return { ok: true, enqueue, cc: ccValid, warnings }
     },
