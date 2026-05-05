@@ -264,10 +264,6 @@ describe.skip('(e) repo-wide CI grep — no `mentions: [` MCP-shape remnant (TOD
       './server.ts',
       // This test file (self).
       './tests/contract/test_no_mentions_array_remnant.test.ts',
-      // ADR-050 integration test — `mentions: [...]` here is the internal
-      // handleInboundMessage() params shape (post-resolver enqueue list),
-      // not the MCP send/notify tool argument.
-      './tests/integration/test_adr050_bot_starts_without_pidfile.test.ts',
     ])
 
     const offenders = hits.filter((p) => !INTERNAL_API_ALLOWLIST.has(p))

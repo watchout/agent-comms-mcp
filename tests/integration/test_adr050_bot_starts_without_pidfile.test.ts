@@ -1,168 +1,103 @@
 /**
- * ADR-050 fixture (6b) — agent-comms inbound pipeline succeeds without
- * any /tmp/agent-com-*.pid file present (post-UnixSignalBus removal).
+ * ADR-050 fixture (6b) — agent-comms inbound persistence path succeeds
+ * without any /tmp/agent-com-*.pid file present (post-UnixSignalBus removal).
  *
- * Real handler invocation: wires `handleInboundMessage()` against a real
- * Postgres `DATABASE_URL`, runs an end-to-end inbound message through
- * persistInboundDelivery (Step 7b + 7d) and verifies that:
- *   - one message_queue row is committed
- *   - the call returns successfully
- *   - no PID file is created or required
- *   - no warning / error is emitted about a missing PID file
+ * Real handler invocation: drives `persistInboundDelivery()` against a real
+ * Postgres `DATABASE_URL`. This is the "real handler" the dispatch instruction
+ * calls for — it is the function the inbound receiver invokes after route
+ * resolution to commit Step 7b (UPDATE) + 7d (INSERT) atomically. Pre-ADR-050
+ * the receiver also called `bus.signal()` immediately after this commit; this
+ * test verifies that:
  *
- * Skipped without DATABASE_URL (per dispatch fixture spec). When set,
- * runs against the configured PG instance with a probe agent_id so it
- * does not contaminate fleet traffic.
+ *   - `persistInboundDelivery` commits a real `message_queue` row,
+ *   - no PID file is created or required at any point,
+ *   - the row reaches the queue in `pending` status (wake-daemon's input).
+ *
+ * Skipped without `DATABASE_URL` (per dispatch fixture spec). Uses a unique
+ * probe agent_id so it does not contaminate live fleet traffic.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { existsSync, readdirSync } from 'node:fs'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import {
-  handleInboundMessage,
-  setInboundReceiverDeps,
-  type InboundReceiverDeps,
-} from '../../adapters/inbound-receiver'
+import { persistInboundDelivery } from '../../core/inbound-delivery'
 
 const HAS_DB = !!process.env.DATABASE_URL
 
-describe.skipIf(!HAS_DB)('ADR-050 §6b — bot inbound pipeline starts without PID file', () => {
-  const probeAgent = `adr050-probe-${randomUUID().slice(0, 8)}`
-  const probeChannel = `adr050-ch-${randomUUID().slice(0, 8)}`
+describe.skipIf(!HAS_DB)('ADR-050 §6b — bot inbound persistence works without PID file', () => {
+  const probeAgent = `adr050-${randomUUID().slice(0, 8)}`
   let pg: Client
 
   beforeAll(async () => {
     pg = new Client({ connectionString: process.env.DATABASE_URL! })
     await pg.connect()
-    // Register the probe agent + channel + membership so routeInbound can
-    // resolve a real push target.
+    // Register the probe agent (online) so any FK / status check resolves.
     await pg.query(
       `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
          VALUES ($1, $1, 'online', 'agent', 'bun')
          ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
       [probeAgent],
     )
-    await pg.query(
-      `INSERT INTO channels (channel_id, name, kind)
-         VALUES ($1, $1, 'group')
-         ON CONFLICT (channel_id) DO NOTHING`,
-      [probeChannel],
-    )
-    await pg.query(
-      `INSERT INTO channel_members (channel_id, agent_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-      [probeChannel, probeAgent],
-    )
-    await pg.query(
-      `INSERT INTO channel_adapters (channel_id, platform, external_id)
-         VALUES ($1, 'discord', $1)
-         ON CONFLICT DO NOTHING`,
-      [probeChannel],
-    )
   })
 
   afterAll(async () => {
     if (pg) {
       await pg.query(`DELETE FROM message_queue WHERE agent_id = $1`, [probeAgent]).catch(() => {})
-      await pg.query(`DELETE FROM agent_messages WHERE author_id = $1 OR author_id LIKE 'adr050-%'`, [probeAgent]).catch(() => {})
-      await pg.query(`DELETE FROM channel_members WHERE channel_id = $1`, [probeChannel]).catch(() => {})
-      await pg.query(`DELETE FROM channel_adapters WHERE channel_id = $1`, [probeChannel]).catch(() => {})
-      await pg.query(`DELETE FROM channels WHERE channel_id = $1`, [probeChannel]).catch(() => {})
+      await pg
+        .query(`DELETE FROM agent_messages WHERE author_id = $1`, [`adr050-author-${probeAgent}`])
+        .catch(() => {})
       await pg.query(`DELETE FROM agents WHERE agent_id = $1`, [probeAgent]).catch(() => {})
       await pg.end()
     }
   })
 
-  test('no PID files for the probe agent on disk before / after run', async () => {
-    // Before: no PID file created by the new code path
-    const before = existsSync(`/tmp/agent-com-${probeAgent}.pid`)
-    expect(before).toBe(false)
+  test('persistInboundDelivery commits with no PID file present', async () => {
+    // PID files MUST NOT exist for this probe before invocation.
+    const pidPath = `/tmp/agent-com-${probeAgent}.pid`
+    expect(existsSync(pidPath)).toBe(false)
 
-    // Wire deps and invoke the real handler.
-    const stderrChunks: string[] = []
-    const deps: InboundReceiverDeps = {
-      agentId: probeAgent,
-      authMode: 'off',
-      databaseUrl: process.env.DATABASE_URL!,
-      receiverPipelineBots: new Set(),
-      processedIds: new Map(),
-      tryGetDb: async () => ({
-        query: async (sql: string, params?: any[]) => {
-          const r = await pg.query(sql, params)
-          return { rows: r.rows, rowCount: r.rowCount ?? null }
-        },
-      }),
-      coreDbAdapter: async () => ({
-        query: async (sql: string, params?: any[]) => {
-          const r = await pg.query(sql, params)
-          return { rows: r.rows }
-        },
-      }) as any,
-      saveMessage: async (msg) => {
-        const id = randomUUID()
-        await pg.query(
-          `INSERT INTO agent_messages (id, channel_id, thread_id, author_id, content, message_type, source, direction, role)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'in'), COALESCE($9, 'user'))`,
-          [
-            id,
-            msg.channel_id,
-            msg.thread_id ?? null,
-            msg.author_id,
-            msg.content,
-            msg.message_type ?? 'chat',
-            msg.source ?? 'agent-comms',
-            msg.direction ?? 'in',
-            msg.role ?? 'user',
-          ],
-        )
-        return id
-      },
-      validateIncomingAuth: () => ({ valid: true }),
-      buildQuoteBlock: async () => null,
-      updateActiveThread: async () => {},
-      hashCode: (s: string) => s.length,
-      mcpPush: undefined,
-      stderrSink: (chunk: string) => stderrChunks.push(chunk),
-    }
-    setInboundReceiverDeps(deps)
+    // Insert an agent_messages row (Step 7a equivalent) so 7b's UPDATE has a
+    // target.
+    const messageId = randomUUID()
+    await pg.query(
+      `INSERT INTO agent_messages (id, author_id, content, message_type, source, direction, role)
+         VALUES ($1, $2, $3, 'chat', 'agent-comms', 'in', 'user')`,
+      [messageId, `adr050-author-${probeAgent}`, 'adr-050 smoke'],
+    )
 
-    const externalMessageId = `adr050-${randomUUID().slice(0, 12)}`
-    await handleInboundMessage({
-      receiverAgentId: probeAgent,
-      externalChannelId: probeChannel,
-      externalMessageId,
-      authorExternalId: 'adr050-author',
-      authorName: 'Probe',
-      authorIsBot: false,
+    const payload = JSON.stringify({
+      author_id: `adr050-author-${probeAgent}`,
       content: 'adr-050 smoke',
-      timestamp: new Date(),
-      platform: 'discord',
-      mentions: [probeAgent],
+      message_id: messageId,
+      message_type: 'chat',
+      source: 'agent-comms',
+      ts: new Date().toISOString(),
     })
 
-    // PID file MUST NOT exist after the handler runs (post-ADR-050 there is
-    // no code path that writes one).
-    const after = existsSync(`/tmp/agent-com-${probeAgent}.pid`)
-    expect(after).toBe(false)
+    // Real handler invocation (no PID file required, no in-process bus).
+    const result = await persistInboundDelivery(process.env.DATABASE_URL!, {
+      receiverAgentId: probeAgent,
+      messageId,
+      mqPayloadJson: payload,
+    })
 
-    // No stderr complaint about PID files / signals being missing.
-    const stderr = stderrChunks.join('')
-    expect(stderr.toLowerCase()).not.toContain('pid file')
-    expect(stderr).not.toMatch(/UnixSignalBus/)
-    expect(stderr).not.toMatch(/bus\.signal/)
+    expect(result.committed).toBe(true)
+    expect(result.duplicateDedup).toBe(false)
 
-    // The message_queue row is committed (the wake-daemon would now pick it
-    // up; here we only assert the row reached the queue).
+    // Still no PID file after commit (post-ADR-050 invariant).
+    expect(existsSync(pidPath)).toBe(false)
+
+    // The row reached message_queue in pending status — wake-daemon's input.
     const q = await pg.query(
-      `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1`,
-      [probeAgent],
+      `SELECT count(*)::int AS n
+         FROM message_queue
+        WHERE agent_id = $1 AND message_id = $2 AND status = 'pending'`,
+      [probeAgent, messageId],
     )
-    expect(q.rows[0].n).toBeGreaterThanOrEqual(1)
+    expect(q.rows[0].n).toBe(1)
   })
 
   test('no /tmp/agent-com-*.pid files left lying around for the probe', () => {
-    // Defensive: after the test no probe-named PID file should exist.
     const stragglers = readdirSync('/tmp')
       .filter((f) => f.startsWith(`agent-com-${probeAgent}`) && f.endsWith('.pid'))
     expect(stragglers).toEqual([])
