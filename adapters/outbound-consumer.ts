@@ -318,43 +318,61 @@ export async function consumeOneOutboundRow(): Promise<void> {
     }
 
     if (deliveryError === null) {
-      // Bug 2 root fix (CEO approval msg c40b8dc9, dispatch 40829fa4):
-      // Atomically write back the Discord message id to BOTH outbound_queue
-      // AND the originating agent_messages row. Prior to this fix only
-      // outbound_queue.discord_message_id was populated, leaving
-      // agent_messages.discord_message_id NULL — when a human later
-      // replied to the bot-authored Discord message, inbound-receiver's
-      // 2-step lookup (column → metadata) missed both, the row took the
-      // orphan path, reply_to was stored as NULL, and the reply_chain CTE
-      // returned only the seed row. See docs/SSOT.md §6 + PR #290.
+      // 2-stage split (lead-ama dispatch msg 63ac0391, frozen §2 B-1):
+      // The previous BEGIN..COMMIT around both UPDATEs was the root cause
+      // of the 2026-05-06 outbound retry-loop incident — when stage 2
+      // (agent_messages) threw, the ROLLBACK reverted stage 1's
+      // status='sent' write, leaving the row 'claimed'. Orphan reclaim
+      // (~600 s) then returned it to 'pending' and the consumer re-posted
+      // it to Discord, producing the observed 11-minute duplicate
+      // interval. The single transaction violated the rule that a
+      // successful Discord post MUST imply a durable status='sent'.
       //
-      // Transactional contract:
-      //   - BEGIN / COMMIT around both UPDATEs on the same singleton
-      //     pg client (same pattern as server.ts:2007 send handler).
-      //   - Idempotent: agent_messages UPDATE includes
-      //     `discord_message_id IS NULL` so a re-run is a no-op.
-      //   - Skipped when discordMessageId is null (40062 duplicate-nonce
-      //     idempotent collapse — Discord did not return an id, so we
-      //     cannot back-fill agent_messages and outbound_queue still
-      //     records NULL as the documented observability trade-off).
-      //   - Failure (e.g. UNIQUE violation on a foreign agent_messages
-      //     row already holding the same discord_message_id) → ROLLBACK,
-      //     log, return early WITHOUT marking sent. The row stays
-      //     'claimed' and orphan reclaim returns it to 'pending' after
-      //     OUTBOUND_ORPHAN_TIMEOUT_SEC for retry.
-      let txCommitted = false
+      // Forbidden (F-1): BEGIN..COMMIT around the two UPDATEs.
+      // Forbidden (F-5): status='sent' transition without a non-null
+      //                  discord_message_id, except for the 40062
+      //                  duplicate-nonce idempotent collapse where
+      //                  Discord rejected the retry but the message
+      //                  reached the channel on the first attempt.
+      //
+      // F-5 enforcement: discordMessageId may legitimately be null when
+      // duplicateNonceIdempotent === true (the retry was rejected with
+      // 40062, so we never receive an id). Any other null path is an
+      // unexpected control-flow gap that we refuse to mark sent.
+      if (discordMessageId === null && !duplicateNonceIdempotent) {
+        process.stderr.write(
+          `agent-comms: outbound stage 1 refused — discord_message_id null without 40062 collapse (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}); row stays claimed for orphan reclaim\n`,
+        )
+        return
+      }
+
+      // Stage 1: outbound_queue mark-sent — single standalone statement.
+      // No BEGIN/COMMIT. On success the row is durably 'sent' and will
+      // not be re-claimed even if stage 2 throws.
       try {
-        await client.query('BEGIN')
         await client.query(
           `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
           [discordMessageId, row.id],
         )
-        if (discordMessageId !== null && row.message_id) {
-          // message_id stores agent_messages.id as text (UUID). Cast to
-          // uuid for the join. Idempotency clause prevents overwriting a
-          // value already populated by a prior consumer run or by a
-          // concurrent code path (defence-in-depth against races even
-          // though the consumer is single-flight).
+      } catch (err) {
+        process.stderr.write(
+          `agent-comms: outbound stage 1 mark-sent failed for id=${row.id} (row stays claimed; orphan reclaim will retry): ${err}\n`,
+        )
+        return
+      }
+
+      // Stage 2: agent_messages back-fill — best-effort. Failure is
+      // logged with the 6 forensic tokens (id, message_id, typeof,
+      // discord_message_id, code, err.message) per spec amendment
+      // (lead-ama dispatch msg 706324a9, auditor v2 BLOCK note). The
+      // consumer continues — stage 1 is already committed, so the row
+      // will not be re-posted to Discord regardless of this stage's
+      // outcome. Idempotency clause (`discord_message_id IS NULL`)
+      // ensures a re-run is a no-op when stage 2 succeeded but stage
+      // 1's transaction-less retry semantics caused us to enter here
+      // twice.
+      if (discordMessageId !== null && row.message_id) {
+        try {
           await client.query(
             `UPDATE agent_messages
                 SET discord_message_id = $1
@@ -362,18 +380,17 @@ export async function consumeOneOutboundRow(): Promise<void> {
                 AND discord_message_id IS NULL`,
             [discordMessageId, row.message_id],
           )
+        } catch (err) {
+          const errTypeof = typeof err
+          const errCode = (err as any)?.code ?? 'unknown'
+          const errMsg = String((err as any)?.message ?? err).slice(0, 500)
+          process.stderr.write(
+            `agent-comms: outbound stage 2 agent_messages back-fill failed (non-fatal) — id=${row.id} message_id=${row.message_id} typeof=${errTypeof} discord_message_id=${discordMessageId} code=${errCode} err.message=${errMsg}\n`,
+          )
+          // continue — outbound_queue is already 'sent', no re-post risk
         }
-        await client.query('COMMIT')
-        txCommitted = true
-      } catch (err) {
-        if (!txCommitted) {
-          await client.query('ROLLBACK').catch(() => {})
-        }
-        process.stderr.write(
-          `agent-comms: outbound consumer mark-sent transaction failed for id=${row.id} (row stays claimed; orphan reclaim will retry): ${err}\n`,
-        )
-        return
       }
+
       void duplicateNonceIdempotent
       return
     }
@@ -417,16 +434,24 @@ export async function consumeOneOutboundRow(): Promise<void> {
 
 // §3.5 Orphan reclaim: rows stuck at 'claimed' beyond
 // OUTBOUND_ORPHAN_TIMEOUT_SEC (default 600 — Discord nonce dedup 5 min +
-// 5 min buffer) likely belong to a crashed consumer. Return them to
-// 'pending' with next_retry_at honoring the regular backoff schedule.
+// 5 min buffer) likely belong to a crashed consumer.
+//
+// §2 B-2 (lead-ama dispatch msg 63ac0391): the reclaim path now respects
+// `attempts < max_attempts`. Rows under the attempts cap return to
+// 'pending' with next_retry_at honoring the regular backoff schedule;
+// rows that have already exhausted their attempts transition to
+// 'failed' with last_error='exhausted_via_orphan_reclaim'. This closes
+// the adversarial loop where an exhausted row could be reclaimed
+// indefinitely without ever hitting the failure path.
 export async function reclaimOrphanOutboundRows(): Promise<void> {
   const client = getDb ? await getDb() : null
   if (!client) return
   const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '600', 10) || 600)
   try {
+    // Stage A: rows under the attempts cap return to 'pending'.
     // Inline SQL mirrors computeOutboundRetryDelayMs():
     //   delay = min(30s, 2^(attempts-1) s) + jitter(0..500ms).
-    const res = await client.query(
+    const reclaimed = await client.query(
       `UPDATE outbound_queue
           SET status = 'pending',
               last_error = 'orphan_reclaim',
@@ -440,12 +465,34 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
         WHERE status = 'claimed'
           AND agent_id = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
+          AND attempts < max_attempts
         RETURNING id, attempts`,
       [AGENT_ID, timeoutSec],
     )
-    if (res.rowCount && res.rowCount > 0) {
+    if (reclaimed.rowCount && reclaimed.rowCount > 0) {
       process.stderr.write(
-        `agent-comms: outbound orphan reclaim — ${res.rowCount} row(s) returned to pending (agent=${AGENT_ID}, timeout=${timeoutSec}s)\n`,
+        `agent-comms: outbound orphan reclaim — ${reclaimed.rowCount} row(s) returned to pending (agent=${AGENT_ID}, timeout=${timeoutSec}s)\n`,
+      )
+    }
+
+    // Stage B: rows that have exhausted max_attempts transition to
+    // 'failed' with the exhausted-via-reclaim sentinel so they leave the
+    // claimed state permanently and never re-enter the consumer.
+    const exhausted = await client.query(
+      `UPDATE outbound_queue
+          SET status = 'failed',
+              last_error = 'exhausted_via_orphan_reclaim',
+              claimed_at = NULL
+        WHERE status = 'claimed'
+          AND agent_id = $1
+          AND claimed_at < now() - ($2::int || ' seconds')::interval
+          AND attempts >= max_attempts
+        RETURNING id, attempts, max_attempts`,
+      [AGENT_ID, timeoutSec],
+    )
+    if (exhausted.rowCount && exhausted.rowCount > 0) {
+      process.stderr.write(
+        `agent-comms: outbound orphan reclaim — ${exhausted.rowCount} row(s) exhausted via orphan reclaim, marked failed (agent=${AGENT_ID})\n`,
       )
     }
   } catch (err) {
