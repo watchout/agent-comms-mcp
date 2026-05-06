@@ -308,5 +308,5 @@ describe('Bug 2 root fix — outbound writeback to agent_messages.discord_messag
   // independently of stage 2 (writeback) under the 2-stage split, so a
   // UNIQUE collision on agent_messages no longer rolls back the queue
   // row. Equivalent coverage lives in tests/outbound-consumer.test.ts
-  // T-1〜T-5 (B-1/B-2 spec).
+  // T-1 (UNIQUE-collision scenario, B-1).
 })
