@@ -44,13 +44,16 @@ describe('test_aun_existing_hooks_preserve — user hook + custom env survive in
     expect(found).toContain('echo user-hook')
   })
 
-  test('user SessionStart preserved 1:1 + aun Stop hook added in a separate event key', () => {
+  test('user SessionStart preserved + aun SessionStart self-kick + Stop hook coexist', () => {
     const s = readSettings(settingsPath)
     const ss = s.hooks?.SessionStart ?? []
     const stop = s.hooks?.Stop ?? []
-    // The user's SessionStart entry stays intact (1 registration with 1 command).
-    expect(ss.length).toBe(1)
-    expect(ss[0].hooks.length).toBe(1)
+    // The user's SessionStart entry stays intact verbatim.
+    const ssCommands = ss.flatMap(reg => reg.hooks.map(h => h.command))
+    expect(ssCommands).toContain('echo user-hook')
+    // CTO P0 cold-start kick — aun installs a SessionStart self-kick
+    // alongside any user-supplied SessionStart entry. Append, not clobber.
+    expect(ssCommands.some(c => c.includes('aun-session-start-self-kick.sh'))).toBe(true)
     // The aun Stop hook lands under the separate `Stop` event — proving
     // deep-merge by event key, not array clobber on the same event.
     expect(stop.length).toBeGreaterThanOrEqual(1)
