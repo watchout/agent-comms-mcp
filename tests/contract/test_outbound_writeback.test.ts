@@ -21,11 +21,15 @@
  *      Both missed → orphan branch → reply_to stored as NULL →
  *      core/reply-chain.ts CTE returned only the seed row.
  *
- * Fix: wrap the existing outbound_queue UPDATE and a new
- * agent_messages UPDATE in BEGIN / COMMIT, so the bot's row in
- * agent_messages carries the snowflake the moment the post lands.
+ * Fix (current — PR #318): split the writeback into two independent
+ * stages. Stage 1 marks `outbound_queue` as `sent` and persists the
+ * snowflake on the queue row; stage 2 best-effort writes the snowflake
+ * back to `agent_messages.discord_message_id` and logs a 6-field stderr
+ * record on failure without rolling stage 1 back. The earlier
+ * `BEGIN..COMMIT` single-transaction model has been removed because it
+ * caused `claimed` wedge on writeback failure (see PR #318 §2 B-1).
  *
- * These four tests exercise the REAL outbound consumer
+ * These three tests exercise the REAL outbound consumer
  * (`consumeOneOutboundRow`) with a mocked DiscordAdapter swapped into
  * `discordClients`. No fixture pre-populates
  * agent_messages.discord_message_id; every assertion follows from the
