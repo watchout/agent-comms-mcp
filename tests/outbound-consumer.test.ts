@@ -195,9 +195,23 @@ async function cleanupHardFixtures(c: Client): Promise<void> {
   await c.query(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, [HARD_AGENT_T1, HARD_AGENT_T2]).catch(() => {})
 }
 
+// Hard merge gate (lead-ama dispatch §4 frozen, cycle 2 BLOCK-2 fix):
+// T-1〜T-5 must FAIL — not skip — when DATABASE_URL is unreachable, so
+// CI surfaces missing-infra as a real signal instead of silent green.
+// The §4.5 reclaim tests above retain skip-on-no-DB (NOT in scope).
+function requireHardDb(): void {
+  if (!available) {
+    throw new Error(
+      'DATABASE_URL must be reachable for hard merge gate (T-1〜T-5). ' +
+      'Run with a live Postgres connection (e.g. via .env or env var) ' +
+      'before invoking outbound-consumer.test.ts.',
+    )
+  }
+}
+
 describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row sent)', () => {
   test('stage 2 UNIQUE violation does NOT roll back stage 1; stderr emits 6-field log', async () => {
-    if (!available) return
+    requireHardDb()
 
     await cleanupHardFixtures(client!)
 
@@ -273,15 +287,17 @@ describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row se
     expect(rows[0].discord_message_id).toBe(conflictDiscordId)
 
     // Verify stderr emitted the stage 2 failure log with all 6 forensic
-    // fields (the merge gate established by the dispatch amendment).
+    // tokens (cycle 2 spec amendment msg 706324a9): id / message_id /
+    // typeof / discord_message_id / code / err.message — must all be
+    // present on a single log line, in any order.
     const log = stderrChunks.join('')
     expect(log).toContain('stage 2 agent_messages back-fill failed')
     expect(log).toMatch(new RegExp(`id=${outboundRowId}\\b`))
-    expect(log).toContain('attempts=')
-    expect(log).toContain('max_attempts=')
     expect(log).toMatch(new RegExp(`message_id=${rowBId}`))
+    expect(log).toContain('typeof=')
     expect(log).toContain('discord_message_id=')
-    expect(log).toContain('last_error=')
+    expect(log).toContain('code=')
+    expect(log).toContain('err.message=')
 
     await cleanupHardFixtures(client!)
   })
@@ -289,7 +305,7 @@ describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row se
 
 describe('§2 B-2 — orphan reclaim attempts cap (T-2: exhausted rows go to failed)', () => {
   test('claimed row with attempts=max_attempts and stale claimed_at transitions to failed', async () => {
-    if (!available) return
+    requireHardDb()
 
     await cleanupHardFixtures(client!)
     await client!.query(
@@ -328,7 +344,7 @@ describe('§2 B-2 — orphan reclaim attempts cap (T-2: exhausted rows go to fai
   })
 
   test('claimed row with attempts<max_attempts still returns to pending', async () => {
-    if (!available) return
+    requireHardDb()
 
     await cleanupHardFixtures(client!)
     await client!.query(

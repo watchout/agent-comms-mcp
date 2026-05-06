@@ -362,13 +362,15 @@ export async function consumeOneOutboundRow(): Promise<void> {
       }
 
       // Stage 2: agent_messages back-fill — best-effort. Failure is
-      // logged with the 6 forensic fields (id, attempts, max_attempts,
-      // message_id, discord_message_id, last_error) and the consumer
-      // continues. Stage 1 is already committed, so the row will not be
-      // re-posted to Discord regardless of this stage's outcome.
-      // Idempotency clause (`discord_message_id IS NULL`) ensures a
-      // re-run is a no-op when stage 2 succeeded but stage 1's
-      // transaction-less retry semantics caused us to enter here twice.
+      // logged with the 6 forensic tokens (id, message_id, typeof,
+      // discord_message_id, code, err.message) per spec amendment
+      // (lead-ama dispatch msg 706324a9, auditor v2 BLOCK note). The
+      // consumer continues — stage 1 is already committed, so the row
+      // will not be re-posted to Discord regardless of this stage's
+      // outcome. Idempotency clause (`discord_message_id IS NULL`)
+      // ensures a re-run is a no-op when stage 2 succeeded but stage
+      // 1's transaction-less retry semantics caused us to enter here
+      // twice.
       if (discordMessageId !== null && row.message_id) {
         try {
           await client.query(
@@ -379,8 +381,11 @@ export async function consumeOneOutboundRow(): Promise<void> {
             [discordMessageId, row.message_id],
           )
         } catch (err) {
+          const errTypeof = typeof err
+          const errCode = (err as any)?.code ?? 'unknown'
+          const errMsg = String((err as any)?.message ?? err).slice(0, 500)
           process.stderr.write(
-            `agent-comms: outbound stage 2 agent_messages back-fill failed (non-fatal) — id=${row.id} attempts=${row.attempts} max_attempts=${row.max_attempts} message_id=${row.message_id} discord_message_id=${discordMessageId} last_error=${String(err).slice(0, 500)}\n`,
+            `agent-comms: outbound stage 2 agent_messages back-fill failed (non-fatal) — id=${row.id} message_id=${row.message_id} typeof=${errTypeof} discord_message_id=${discordMessageId} code=${errCode} err.message=${errMsg}\n`,
           )
           // continue — outbound_queue is already 'sent', no re-post risk
         }
