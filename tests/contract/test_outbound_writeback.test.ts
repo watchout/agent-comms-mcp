@@ -299,53 +299,10 @@ describe('Bug 2 root fix — outbound writeback to agent_messages.discord_messag
     expect(am2.rows[0].discord_message_id).toBe(snowflake1)
   })
 
-  test('(d) transaction failure: UNIQUE violation rolls back, no half-write', async () => {
-    if (!available) return
-
-    // Pre-seed an UNRELATED agent_messages row holding the snowflake we
-    // are about to "receive" from Discord. The outbound row's writeback
-    // will collide with the partial unique index on
-    // agent_messages.discord_message_id and the transaction must
-    // ROLLBACK (both UPDATEs undone).
-    const collidingSnowflake = `bug2-snowflake-d-${Date.now()}`
-    const collidingUuid = randomUUID()
-    await client!.query(
-      `INSERT INTO agent_messages
-         (id, channel_id, author_id, content, message_type, direction,
-          source, role, discord_message_id, created_at)
-       VALUES ($1, $2, 'unrelated-author', 'bug2-fixture-d-pre',
-               'chat', 'inbound', 'agent-comms', 'agent', $3, now())`,
-      [collidingUuid, testChannelUuid, collidingSnowflake],
-    )
-
-    mockResponse = collidingSnowflake
-    const { messageUuid, queueId } = await seedOutboundPair({ content: 'bug2-fixture-d' })
-    await consumeOneOutboundRow()
-
-    // Post-rollback expectations:
-    //   - outbound_queue row stays in a not-sent state. Because the
-    //     atomic claim already flipped status to 'claimed' and the
-    //     mark-sent UPDATE was rolled back, the row is left at
-    //     'claimed' (orphan reclaim will return it to 'pending' after
-    //     OUTBOUND_ORPHAN_TIMEOUT_SEC for retry).
-    const oq = await client!.query(
-      `SELECT status, discord_message_id, sent_at FROM outbound_queue WHERE id = $1`,
-      [queueId],
-    )
-    expect(oq.rows[0].status).not.toBe('sent')
-    expect(oq.rows[0].discord_message_id).toBeNull()
-    expect(oq.rows[0].sent_at).toBeNull()
-
-    //   - The original agent_messages row stays untouched: its
-    //     discord_message_id is still NULL because the UPDATE was
-    //     rolled back.
-    const am = await client!.query(
-      `SELECT discord_message_id FROM agent_messages WHERE id = $1`,
-      [messageUuid],
-    )
-    expect(am.rows[0].discord_message_id).toBeNull()
-
-    // Cleanup the colliding row so afterAll cleanup is straightforward.
-    await client!.query(`DELETE FROM agent_messages WHERE id = $1`, [collidingUuid])
-  })
+  // Test (d) removed in PR #318 follow-up: the old single-transaction
+  // rollback contract no longer applies. Stage 1 (mark-sent) commits
+  // independently of stage 2 (writeback) under the 2-stage split, so a
+  // UNIQUE collision on agent_messages no longer rolls back the queue
+  // row. Equivalent coverage lives in tests/outbound-consumer.test.ts
+  // T-1〜T-5 (B-1/B-2 spec).
 })
