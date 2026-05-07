@@ -13,8 +13,10 @@
  *   - Layer 2 (pair_bounce):    ordered (from[i], from[i+1]) pair count
  *                               with self pairs excluded — Layer 3's
  *                               territory.
- *   - Layer 3 (self_chain):     consecutive same-`from` count, the
- *                               legacy `MAX_SELF_IN_CHAIN` semantic.
+ *   - Layer 3 (self_chain):     occurrence count of the receiving bot's
+ *                               own `agent_id` in the resolved chain,
+ *                               the legacy `MAX_SELF_IN_CHAIN` semantic
+ *                               (run-bot.sh:152 pre-B8: `jq | length`).
  *
  * Layer evaluation order is L1 → L2 → L3; the first layer to trip
  * short-circuits and its `subReason` is returned. The companion
@@ -64,14 +66,15 @@ export type LoopVerdict =
  *                     or empty `from` are skipped before evaluation
  *                     (the parser cannot identify the author, so the
  *                     entry contributes nothing to bounce detection).
- * @param currentAgent The receiving bot's `agent_id`. Reserved for
- *                     future per-agent tuning; the v0.2 layers do not
- *                     consult it directly.
+ * @param currentAgent The receiving bot's `agent_id`. Layer 3 counts
+ *                     its occurrences in the resolved chain to preserve
+ *                     the legacy `MAX_SELF_IN_CHAIN` guard (single-agent
+ *                     self-loop fail-safe).
  * @param env          Threshold env, already normalized by the caller.
  */
 export function detectLoop(
   replyChain: ReplyChainEntry[],
-  _currentAgent: string,
+  currentAgent: string,
   env: LoopDetectorEnv,
 ): LoopVerdict {
   // Skip entries the parser could not attribute to an agent. The
@@ -115,25 +118,20 @@ export function detectLoop(
     }
   }
 
-  // Layer 3 — self_chain. Consecutive same-from run length cap. spec
-  // §3 Layer 3 + §2 (f) — strict-consecutive semantic preserves the
-  // legacy MAX_SELF_IN_CHAIN guard for the single-agent self-loop
-  // failure mode.
-  let run = 0
-  let prev: string | null = null
+  // Layer 3 — self_chain. Count of `currentAgent` occurrences in the
+  // resolved chain. spec §3 Layer 3 + §2 (f): preserves the legacy
+  // `MAX_SELF_IN_CHAIN` guard bit-exact (run-bot.sh:152 pre-B8 was
+  // `jq '[.reply_chain[]? | select(.from==$a)] | length'` against the
+  // bot's own agent_id) — the single-agent self-loop fail-safe.
+  let selfCount = 0
   for (const from of valid) {
-    if (from === prev) {
-      run++
-    } else {
-      run = 1
-      prev = from
-    }
-    if (run >= env.maxSelfInChain) {
-      return {
-        ok: false,
-        subReason: 'self_chain',
-        detail: `consecutive ${from} run ${run} >= maxSelfInChain ${env.maxSelfInChain}`,
-      }
+    if (from === currentAgent) selfCount++
+  }
+  if (selfCount >= env.maxSelfInChain) {
+    return {
+      ok: false,
+      subReason: 'self_chain',
+      detail: `agent ${currentAgent} appears ${selfCount} times >= maxSelfInChain ${env.maxSelfInChain}`,
     }
   }
 

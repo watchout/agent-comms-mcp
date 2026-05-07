@@ -148,6 +148,22 @@ describe('(5) bot-to-bot loop detection', () => {
     expect(llmIdx).toBeGreaterThan(loopCheckIdx)
     expect(SCRIPT).toMatch(/--reason LOOP_DETECTED/)
   })
+
+  test('RUN_BOT_LOG_FILE caller-level override is honored (spec §6.4 L2)', () => {
+    // spec §6.4 L2 + auditor cycle 2 Axis 5 (msg `852f9036`): the
+    // caller (run-bot.sh) must respect a `RUN_BOT_LOG_FILE` env
+    // override so operators can redirect the log without touching
+    // helper internals. The shell script consumes the env in three
+    // places: (a) declaration with a fallback default, (b) the
+    // LOOP_DETECTED branch's `mkdir -p` + append, and (c) the
+    // send-error helper invocation. All three must reference the
+    // same env name (no hardcoded fallback path leaking past the
+    // declaration line).
+    expect(SCRIPT).toMatch(/RUN_BOT_LOG_FILE="\$\{RUN_BOT_LOG_FILE:-/)
+    expect(SCRIPT).toMatch(/mkdir -p "\$\(dirname "\$RUN_BOT_LOG_FILE"\)"/)
+    expect(SCRIPT).toMatch(/>> "\$RUN_BOT_LOG_FILE"/)
+    expect(SCRIPT).toMatch(/send-error-log-cli\.ts"[\s\S]{0,80}?"\$RUN_BOT_LOG_FILE"/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

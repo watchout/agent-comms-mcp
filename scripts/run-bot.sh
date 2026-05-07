@@ -105,6 +105,12 @@ cleanup() {
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true
   fi
+  # B8 send-error tempfile (allocated per-iteration during retry). May
+  # be unset if the script exits before the first send attempt — that's
+  # fine, `rm -f` tolerates an empty path under the `[ -n ... ]` guard.
+  if [ -n "${send_stderr_tmp:-}" ]; then
+    rm -f "$send_stderr_tmp" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -220,7 +226,12 @@ Message: ${content}"
     # SEND_FAILED_AFTER_N_RETRIES root-cause-blind without it.
     send_ok=0
     send_stderr_tmp=$(mktemp -t run-bot-send-stderr.XXXXXX)
-    trap 'rm -f "$send_stderr_tmp"' EXIT
+    # NOTE: cleanup of $send_stderr_tmp is handled by the single
+    # `cleanup` exit handler at the top of this script. Do NOT register
+    # a second per-iteration handler here — doing so overwrites the
+    # heartbeat-kill / PID-file-rm cleanup and leaks heartbeat children
+    # + PID files on bot termination (auditor cycle 2 Axis 3,
+    # agent-comms msg `852f9036`).
     for attempt in 1 2 3; do
       send_exit=0
       AGENT_ID="$AGENT_ID" bun "$PROJECT_DIR/cli/index.ts" send \

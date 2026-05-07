@@ -64,8 +64,13 @@ describe('B8 detectLoop — Layer 1 / 2 / 3 detection', () => {
     if (!v.ok) expect(v.subReason).toBe('pair_bounce')
   })
 
-  test('T3 — A→A→A→A self consecutive 4 ⇒ self_chain', () => {
-    const v = detectLoop(chain('A', 'A', 'A', 'A'), 'me', DEFAULT_ENV)
+  test('T3 — A appears 4× in chain (current=A) ⇒ self_chain (legacy MAX_SELF_IN_CHAIN)', () => {
+    // L3 semantic per spec §3 Layer 3 + §4 line 109 ("現行維持/後方互換"):
+    // count of currentAgent's own occurrences in the resolved chain
+    // (run-bot.sh:152 pre-B8 was `jq '[.reply_chain[]? |
+    // select(.from==$a)] | length'` against the bot's own agent_id).
+    // Chain is 4 A's, currentAgent='A' → count 4 >= maxSelfInChain 3.
+    const v = detectLoop(chain('A', 'A', 'A', 'A'), 'A', DEFAULT_ENV)
     expect(v.ok).toBe(false)
     if (!v.ok) expect(v.subReason).toBe('self_chain')
   })
@@ -77,18 +82,42 @@ describe('B8 detectLoop — Layer 1 / 2 / 3 detection', () => {
     if (!v.ok) expect(v.subReason).toBe('depth_exceeded')
   })
 
-  test('T5 — incident pattern arc↔adf-lead 5+ bounce ⇒ pair_bounce', () => {
+  test('T5 — incident pattern arc↔adf-lead bounce ⇒ pair_bounce (L2 single)', () => {
+    // 8 entries strictly alternating arc/adf-lead. Length 8 < L1 cap 10,
+    // so L1 cannot trip — L2 is the only layer that can fire. Pair
+    // (arc, adf-lead) appears at indices 0,2,4,6 = 4 times; the third
+    // occurrence (i=4) trips L2 with maxPairBounce=3. Currentagent is
+    // a non-participant so L3 sees 0 self-count. SSOT pin (Axis 5,
+    // auditor msg `852f9036`): expected subReason is `pair_bounce`
+    // SINGLE, not OR'd with depth_exceeded.
     const c = chain(
-      'arc', 'adf-lead', 'arc', 'adf-lead', 'arc', 'adf-lead',
+      'arc', 'adf-lead', 'arc', 'adf-lead',
       'arc', 'adf-lead', 'arc', 'adf-lead',
     )
-    const v = detectLoop(c, 'arc', DEFAULT_ENV)
+    const v = detectLoop(c, 'me', DEFAULT_ENV)
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.subReason).toBe('pair_bounce')
+  })
+
+  test('T6 (regression cycle 3) — non-consecutive self count trips self_chain', () => {
+    // Auditor cycle 2 Axis 1+4 regression case (msg `852f9036`):
+    // `[lead-ama, cto, lead-ama, auditor, lead-ama]` with
+    // currentAgent='lead-ama'. The legacy MAX_SELF_IN_CHAIN guard
+    // (run-bot.sh:152 pre-B8) counted occurrences of the bot's own
+    // agent_id and tripped at >= 3 — non-consecutive interleaving did
+    // NOT mask the loop. The cycle 2 helper used a strict-consecutive
+    // run cap, missing this case (bit-exact regression). This pin
+    // ensures the count-based semantic is preserved.
+    const v = detectLoop(
+      chain('lead-ama', 'cto', 'lead-ama', 'auditor', 'lead-ama'),
+      'lead-ama',
+      DEFAULT_ENV,
+    )
     expect(v.ok).toBe(false)
     if (!v.ok) {
-      // Either L1 or L2 may trip first depending on threshold ordering;
-      // the spec eval order is L1 → L2 → L3, so depth 10 entries means
-      // L1 trips first (length 10 >= maxReplyChainDepth 10).
-      expect(['depth_exceeded', 'pair_bounce']).toContain(v.subReason)
+      expect(v.subReason).toBe('self_chain')
+      expect(v.detail).toMatch(/lead-ama/)
+      expect(v.detail).toMatch(/3/)
     }
   })
 
