@@ -166,6 +166,11 @@ const AUN_HOOK_FILES = [
   { repoPath: 'hooks/pre-tool-use-inbox-gate.ts', destName: 'pre-tool-use-inbox-gate.ts' },
   // CTO P0 cold-start kick — standalone bash, no bun runner needed.
   { repoPath: 'hooks/aun-session-start-self-kick.sh', destName: 'aun-session-start-self-kick.sh' },
+  // PR #321 cycle 3 — adapter-port helpers sourced by the kick hook.
+  // destName preserves the `lib/` subdir so the relative source path
+  // `$(dirname "$0")/lib/aun-self-kick-helpers.sh` resolves at the
+  // install location too.
+  { repoPath: 'hooks/lib/aun-self-kick-helpers.sh', destName: 'lib/aun-self-kick-helpers.sh' },
 ] as const
 
 export function aunHookCommandMarkers(): string[] {
@@ -518,6 +523,9 @@ export function init(opts: InitOptions = {}): InitResult {
     }
     if (!existsSync(dest)) {
       try {
+        // Some destNames include a subdir (e.g. `lib/...`); ensure it
+        // exists before cpSync. Idempotent — recursive: true.
+        mkdirSync(resolve(dest, '..'), { recursive: true })
         cpSync(src, dest)
       } catch (err) {
         errors.push(`hook copy failed (${spec.destName}): ${(err as Error).message}`)
