@@ -561,11 +561,32 @@ export async function handleInboundMessage(params: {
     return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
   }
 
-  // Step 4: Load agent info for receiver.
-  const agentInfo = await loadAgentInfo(coreDb, receiverAgentId)
-  if (!agentInfo) {
+  // Step 4: Load agent info for **all channel members**, not just the
+  // receiver daemon's own AGENT_ID. spec §13.1: inbound is one shared
+  // adapter that fans out to N bot-indexed message_queue rows. Pre-fix
+  // we passed `[agentInfo]` (the receiver only) which made
+  // routeInboundImpl emit at most one pushTarget — when a Discord
+  // message mentioned bots B and C and the receiving daemon was A,
+  // B and C never got a queue row. Now every member is a candidate
+  // and the route decides which subset to push.
+  const memberAgents = (
+    await Promise.all(
+      resolved.members.map(id => loadAgentInfo(coreDb, id)),
+    )
+  ).filter((a): a is NonNullable<typeof a> => a != null)
+  if (memberAgents.length === 0) {
     writeStderr(
-      `agent-comms: inbound drop — ${receiverAgentId} not found in agents table\n`,
+      `agent-comms: inbound drop — channel ${resolved.channelId} has no resolvable agents\n`,
+    )
+    return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
+  }
+  // The receiver daemon must itself be a registered agent so its
+  // diagnostic logs / sender-feedback paths still resolve. If it's
+  // not a member of this channel, that's the legacy NOT_A_MEMBER drop.
+  const receiverIsMember = memberAgents.some(a => a.agentId === receiverAgentId)
+  if (!receiverIsMember) {
+    writeStderr(
+      `agent-comms: inbound drop — ${receiverAgentId} not in channel ${resolved.channelId} members\n`,
     )
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
   }
@@ -603,18 +624,19 @@ export async function handleInboundMessage(params: {
       members: resolved.members,
       type: resolved.type,
     },
-    [agentInfo],
+    memberAgents,
   )
 
   writeStderr(
     `agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`,
   )
 
-  const isDelivered = result.pushTargets.includes(receiverAgentId)
-
-  if (!isDelivered) {
+  // Fanout: at least one pushTarget = delivered. The pre-fix shape only
+  // checked `pushTargets.includes(receiverAgentId)`, which dropped legitimate
+  // mentions of other bots in the same channel.
+  if (result.pushTargets.length === 0) {
     const reason = result.dropTargets[receiverAgentId] ?? 'NOT_MENTIONED'
-    writeStderr(`agent-comms: inbound drop — ${receiverAgentId} ${reason}\n`)
+    writeStderr(`agent-comms: inbound drop — no pushTargets (receiver=${receiverAgentId} reason=${reason})\n`)
     return {
       delivered: false,
       messageId,
@@ -633,7 +655,14 @@ export async function handleInboundMessage(params: {
   // by `tryGetDb()` would let concurrent callers interleave their
   // transactions on one socket, defeating atomicity). Rollback restores
   // pre-call state. See `core/inbound-delivery.ts` and SSOT §7.3.1.
+  //
+  // Fanout (CEO P0 wave 2 blocker): every pushTarget gets its own row.
+  // Failures on individual bots do not roll the others back — at least
+  // one committed row is sufficient to consider the inbound `delivered`,
+  // and partial failures are logged for observability. spec §3 forbids
+  // dedup-by-message_id across bots; each bot has an independent queue.
   let inboundCommitted = false
+  const committedReceivers: string[] = []
   if (messageId) {
     const mqPayload = JSON.stringify({
       channel_id: resolved.channelId,
@@ -647,56 +676,65 @@ export async function handleInboundMessage(params: {
       ts: timestamp.toISOString(),
       ...(attachments ? { attachments } : {}),
     })
-    // Issue #277 (B) — server-side auto-skip filter. If the content matches a
-    // configured pattern (or sender == recipient), persist the queue row
-    // directly as 'skipped' so `next` never picks it up. agent_messages
-    // history is still saved upstream; only the inbox push is suppressed.
-    const skipMatch = matchesAutoSkipPattern({
-      content,
-      messageType: 'chat',
-      authorAgentId: senderAgentId,
-      recipientAgentId: receiverAgentId,
-    })
-    const skipReason = skipMatch.matched
-      ? `AUTO_SKIP_PATTERN:${skipMatch.reason ?? 'unknown'}`
-      : undefined
-    if (skipReason) {
-      writeStderr(
-        `agent-comms: inbound auto-skip — receiver=${receiverAgentId} reason=${skipReason}\n`,
-      )
-    }
-    const r = await persistInboundDelivery(d.databaseUrl, {
-      receiverAgentId,
-      messageId,
-      mqPayloadJson: mqPayload,
-      skipReason,
-    })
-    inboundCommitted = r.committed && !skipReason
-    if (!r.committed) {
-      writeStderr(
-        `agent-comms: inbound 7b+7d transaction failed for ${receiverAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,
-      )
-    } else if (r.duplicateDedup) {
-      // Observability: log ON CONFLICT DO NOTHING dedup at the inbound
-      // level (unchanged stderr format from prior Step 7d path).
-      writeStderr(
-        `agent-comms: message_queue dedup — duplicate (agent_id=${receiverAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
-      )
+    for (const targetAgentId of result.pushTargets) {
+      // Issue #277 (B) — auto-skip filter is per-(sender, recipient),
+      // so a pushTarget that matches sender == recipient (self-mention
+      // echoes) is suppressed independently of the others. The check
+      // therefore moves inside the loop.
+      const skipMatch = matchesAutoSkipPattern({
+        content,
+        messageType: 'chat',
+        authorAgentId: senderAgentId,
+        recipientAgentId: targetAgentId,
+      })
+      const skipReason = skipMatch.matched
+        ? `AUTO_SKIP_PATTERN:${skipMatch.reason ?? 'unknown'}`
+        : undefined
+      if (skipReason) {
+        writeStderr(
+          `agent-comms: inbound auto-skip — receiver=${targetAgentId} reason=${skipReason}\n`,
+        )
+      }
+      const r = await persistInboundDelivery(d.databaseUrl, {
+        receiverAgentId: targetAgentId,
+        messageId,
+        mqPayloadJson: mqPayload,
+        skipReason,
+      })
+      const thisCommitted = r.committed && !skipReason
+      if (thisCommitted) {
+        committedReceivers.push(targetAgentId)
+        inboundCommitted = true
+      }
+      if (!r.committed) {
+        writeStderr(
+          `agent-comms: inbound 7b+7d transaction failed for ${targetAgentId} (msg=${messageId}, rolled back): ${r.error}\n`,
+        )
+      } else if (r.duplicateDedup) {
+        // Observability: log ON CONFLICT DO NOTHING dedup at the inbound
+        // level (unchanged stderr format from prior Step 7d path).
+        writeStderr(
+          `agent-comms: message_queue dedup — duplicate (agent_id=${targetAgentId}, message_id=${messageId}) skipped by uq_mq_agent_message\n`,
+        )
+      }
     }
   }
 
-  // spec §13.5.1 primary — MessageBus signal. Fire SIGUSR1 to the receiver
-  // bot runner as soon as the 7b+7d commit is durable. A missing PID file
-  // (bot offline) or kill failure is a no-op inside UnixSignalBus, so the
-  // polling fallback still covers recovery. We skip on duplicate-dedup /
-  // rollback to avoid announcing a delivery that is not actually queued.
-  if (inboundCommitted && d.bus) {
-    try {
-      await d.bus.signal(`bot_${receiverAgentId}`)
-    } catch (err) {
-      writeStderr(
-        `agent-comms: bus.signal failed (non-fatal, falling back to polling): ${err}\n`,
-      )
+  // spec §13.5.1 primary — MessageBus signal. Fire SIGUSR1 to every
+  // committed receiver so each bot's polling driver wakes
+  // independently. A missing PID file (bot offline) or kill failure
+  // is a no-op inside UnixSignalBus, so the polling fallback still
+  // covers recovery. We skip rollback / dedup-only entries to avoid
+  // announcing deliveries that are not actually queued.
+  if (d.bus && committedReceivers.length > 0) {
+    for (const targetAgentId of committedReceivers) {
+      try {
+        await d.bus.signal(`bot_${targetAgentId}`)
+      } catch (err) {
+        writeStderr(
+          `agent-comms: bus.signal failed for ${targetAgentId} (non-fatal, falling back to polling): ${err}\n`,
+        )
+      }
     }
   }
 

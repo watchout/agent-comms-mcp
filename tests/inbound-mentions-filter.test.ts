@@ -267,7 +267,7 @@ describe('handleInboundMessage — Full flow wrapper', () => {
     // PR-β cycle 2 §1.2: cycle 2 added comment lines around the dispatch
     // site so the original 5000-char window fell short of the routeInbound
     // call. Bumped to 8000 chars (still well within the function body).
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 12000)
     const dbSaveIdx = fnBody.indexOf('saveMessage(')
     // PR-β cycle 2 §1.2: routeInbound is now dispatched via
     // `(d.routeInbound ?? routeInbound)(...)`. Match the wrapped form
@@ -292,7 +292,7 @@ describe('handleInboundMessage — Full flow wrapper', () => {
     // Window widened for PR-β (Issue #230): handleInboundMessage now
     // resolves replyToMessageId → UUID before the routing decision, so the
     // body grew past the original 5000-char window.
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 8000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 12000)
     expect(fnBody).toContain('humanWarning:')
     expect(fnBody).toContain('result.senderIsHuman && result.noMentions')
   })

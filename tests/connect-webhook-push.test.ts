@@ -24,7 +24,7 @@ describe('Webhook Channel push — handleInboundMessage + caller push', () => {
     // top of handleInboundMessage.
     // PR-β cycle 3 (Issue #230): bumped 12000 → 14000 to cover the new
     // early-capture + 2-step lookup commentary added at the top.
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 14000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 18000)
     expect(fnBody).toContain('delivered: true, messageId, pushMeta')
   })
 
