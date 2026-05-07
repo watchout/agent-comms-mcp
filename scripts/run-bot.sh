@@ -17,7 +17,10 @@
 #   LLM_CMD                    — LLM CLI command (default: claude --print)
 #   AGENT_COM_BUS_WAIT_SECONDS — polling fallback interval (default 30)
 #   LLM_TIMEOUT_SECONDS        — per-call LLM timeout (default 120)
-#   MAX_SELF_IN_CHAIN          — bot-to-bot loop threshold (default 3)
+#   MAX_SELF_IN_CHAIN          — Layer 3 self-chain threshold (default 3)
+#   MAX_REPLY_CHAIN_DEPTH      — Layer 1 hard cap on chain length (default 10, B8)
+#   MAX_PAIR_BOUNCE            — Layer 2 ordered-pair bounce cap (default 3, B8)
+#   RUN_BOT_LOG_FILE           — send-error log path (default logs/run-bot-${AGENT_ID}.log, B8)
 #   AGENT_COM_SYSTEM_PROMPT    — USER_RULES, appended after CORE_RULES
 #
 # Signals:
@@ -49,6 +52,9 @@ WAIT_SECONDS="${AGENT_COM_BUS_WAIT_SECONDS:-30}"
 LLM_CMD="${LLM_CMD:-claude --print}"
 LLM_TIMEOUT_SECONDS="${LLM_TIMEOUT_SECONDS:-120}"
 MAX_SELF_IN_CHAIN="${MAX_SELF_IN_CHAIN:-3}"
+MAX_REPLY_CHAIN_DEPTH="${MAX_REPLY_CHAIN_DEPTH:-10}"
+MAX_PAIR_BOUNCE="${MAX_PAIR_BOUNCE:-3}"
+RUN_BOT_LOG_FILE="${RUN_BOT_LOG_FILE:-${PROJECT_DIR}/logs/run-bot-${AGENT_ID}.log}"
 MAX_SEND_RETRIES=3
 
 # ── (8) consumer 排他 (PID kill -0 alive check) ─────────────────────────────
@@ -99,6 +105,12 @@ cleanup() {
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true
   fi
+  # B8 send-error tempfile (allocated per-iteration during retry). May
+  # be unset if the script exits before the first send attempt — that's
+  # fine, `rm -f` tolerates an empty path under the `[ -n ... ]` guard.
+  if [ -n "${send_stderr_tmp:-}" ]; then
+    rm -f "$send_stderr_tmp" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -144,14 +156,29 @@ while true; do
 
     echo "[run-bot] message from ${from} (waiting=${waiting}, message_id=${message_id})"
 
-    # (5) bot-to-bot loop detection (spec §5.3、§11 LOOP_DETECTED)
-    # The reply_chain emitted by `next` is a JSON array of {from,content,...}
-    # objects. If this bot's own agent_id appears MAX_SELF_IN_CHAIN times or
-    # more we assume an infinite reply loop and fail fast instead of calling
-    # the LLM.
-    self_count=$(echo "$msg" | jq --arg a "$AGENT_ID" '[.reply_chain[]? | select(.from == $a)] | length' 2>/dev/null || echo 0)
-    if [ "${self_count:-0}" -ge "$MAX_SELF_IN_CHAIN" ]; then
-      echo "[run-bot] LOOP_DETECTED (self=${self_count} >= ${MAX_SELF_IN_CHAIN}), failing"
+    # (5) bot-to-bot loop detection (spec §5.3, §11 LOOP_DETECTED;
+    # B8 amendment v0.2 §3 layers 1-3). Detector logic lives in
+    # `scripts/lib/loop-detector.ts` per §2.5 module boundary —
+    # `run-bot.sh` is the thin caller that builds the env, hands the
+    # `reply_chain` JSON to the helper, and acts on the verdict. See
+    # docs/B8-loop-detection-spec-amendment-v0.md.
+    loop_input=$(jq -nc \
+      --argjson chain "$reply_chain" \
+      --arg current "$AGENT_ID" \
+      --argjson maxDepth "$MAX_REPLY_CHAIN_DEPTH" \
+      --argjson maxPair "$MAX_PAIR_BOUNCE" \
+      --argjson maxSelf "$MAX_SELF_IN_CHAIN" \
+      '{chain: $chain, current: $current, env: {maxReplyChainDepth: $maxDepth, maxPairBounce: $maxPair, maxSelfInChain: $maxSelf}}')
+    loop_verdict=$(echo "$loop_input" | bun "$PROJECT_DIR/scripts/lib/loop-detector-cli.ts" 2>/dev/null || echo '{"ok":true}')
+    loop_ok=$(echo "$loop_verdict" | jq -r '.ok // false')
+    if [ "$loop_ok" != "true" ]; then
+      sub_reason=$(echo "$loop_verdict" | jq -r '.subReason // "unknown"')
+      detail=$(echo "$loop_verdict" | jq -r '.detail // ""')
+      echo "[run-bot] LOOP_DETECTED (subReason=${sub_reason}, ${detail}), failing"
+      mkdir -p "$(dirname "$RUN_BOT_LOG_FILE")" 2>/dev/null || true
+      printf '[%s] [loop-detected] [subReason=%s] %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$sub_reason" "$detail" \
+        >> "$RUN_BOT_LOG_FILE" 2>/dev/null || true
       AGENT_ID="$AGENT_ID" bun "$PROJECT_DIR/cli/index.ts" fail \
         --message-id "$message_id" --reason LOOP_DETECTED >/dev/null 2>&1 || true
       continue
@@ -192,22 +219,41 @@ Message: ${content}"
     # The CLI's send command is transactional — it will either commit the
     # reply and clear current_message_id, or leave both untouched. We retry
     # up to MAX_SEND_RETRIES times before declaring permanent failure.
+    #
+    # B8 §5 (B6 観測性): each attempt's stderr + exit code is appended to
+    # ${RUN_BOT_LOG_FILE} via the `appendSendError` helper. The legacy
+    # `>/dev/null 2>&1` redirection is gone — RC3 in spec §2 made
+    # SEND_FAILED_AFTER_N_RETRIES root-cause-blind without it.
     send_ok=0
+    send_stderr_tmp=$(mktemp -t run-bot-send-stderr.XXXXXX)
+    # NOTE: cleanup of $send_stderr_tmp is handled by the single
+    # `cleanup` exit handler at the top of this script. Do NOT register
+    # a second per-iteration handler here — doing so overwrites the
+    # heartbeat-kill / PID-file-rm cleanup and leaks heartbeat children
+    # + PID files on bot termination (auditor cycle 2 Axis 3,
+    # agent-comms msg `852f9036`).
     for attempt in 1 2 3; do
-      if AGENT_ID="$AGENT_ID" bun "$PROJECT_DIR/cli/index.ts" send \
+      send_exit=0
+      AGENT_ID="$AGENT_ID" bun "$PROJECT_DIR/cli/index.ts" send \
             --content "$response" \
             --reply-to "$message_id" \
-            --mentions "$from" >/dev/null 2>&1; then
+            --mentions "$from" >/dev/null 2>"$send_stderr_tmp" || send_exit=$?
+      if [ "$send_exit" -eq 0 ]; then
         send_ok=1
         echo "[run-bot] replied to ${from} (attempt ${attempt})"
         break
       fi
+      send_stderr=$(cat "$send_stderr_tmp" 2>/dev/null || echo "")
+      bun "$PROJECT_DIR/scripts/lib/send-error-log-cli.ts" \
+        "$RUN_BOT_LOG_FILE" "$attempt" "$send_exit" "$send_stderr" \
+        >/dev/null 2>&1 || true
       case $attempt in
         1) sleep 2 ;;
         2) sleep 4 ;;
         3) sleep 8 ;;
       esac
     done
+    rm -f "$send_stderr_tmp"
 
     if [ "$send_ok" != "1" ]; then
       echo "[run-bot] send failed after ${MAX_SEND_RETRIES} retries, fail SEND_FAILED_AFTER_N_RETRIES"
