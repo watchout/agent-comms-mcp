@@ -30,35 +30,43 @@ const INBOUND_SRC = readFileSync(join(REPO_ROOT, 'adapters/inbound-receiver.ts')
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segment 3a)', () => {
-  test('send handler rejects with INVALID_REPLY_TO when reply_to has no in-flight claim', () => {
-    // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE is retired in favour
-    // of INVALID_REPLY_TO once the per-row claim path lands. Both the
-    // missing-reply_to client bug and the no-row-found case must surface
-    // the same error class so callers do not have to special-case them.
+  test('send handler rejects with INVALID_REPLY_TO only when reply_to is missing or unresolvable (CEO P1)', () => {
+    // CEO P1 (2026-05-07): the strict "no in-flight claim → reject"
+    // path was retired. The handler now silently falls back to a
+    // notify-equivalent dispatch when the claim is missing/expired
+    // and only rejects with INVALID_REPLY_TO when the reply_to UUID
+    // itself cannot be resolved (absent or no channel_id).
     expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*reply_to is required for send/)
-    expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*no in-flight claim for reply_to=/)
-    // Legacy NO_CURRENT_MESSAGE branch must be gone from the MCP send path.
+    expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*reply_to=\$\{reply_to\} not found in agent_messages or has no channel/)
+    // The legacy "no in-flight claim for reply_to=" reject string must
+    // be gone — its presence would mean we're still rejecting calls
+    // that the P1 spec wants to fall back instead.
+    expect(SERVER_SRC).not.toMatch(/Error \[INVALID_REPLY_TO\]:\s*no in-flight claim for reply_to=/)
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
     const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
     expect(handler).not.toMatch(/Error \[NO_CURRENT_MESSAGE\]/)
+    // CEO P1: the handler must surface the fallback in the return
+    // value — silent reject is forbidden.
+    expect(handler).toMatch(/fallback: notify \(reason: \$\{fallbackReason\}\)/)
   })
-  test('guard locks the message_queue claim row with FOR UPDATE (per-row claim atomic)', () => {
-    // Per-row claim replaces the agents single-slot lock. The handler must
-    // SELECT ... FOR UPDATE the message_queue row keyed by reply_to +
-    // claimed_by + status='read' so two concurrent send calls targeting
-    // the same claim serialise on the row lock, while independent claims
-    // proceed in parallel (Issue #278 §A multi in-flight).
+  test('claim guard delegates to decideSendFallback helper with FOR UPDATE atomicity', () => {
+    // Per-row claim replaces the agents single-slot lock. CEO P1
+    // refactored the SELECT ... FOR UPDATE into core/send-fallback-decision
+    // so the decision tree (claim_present / fallback / invalid_reply_to)
+    // is unit-testable. The FOR UPDATE clause still lives in the helper
+    // so two concurrent send calls targeting the same claim serialise
+    // on the row lock.
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     expect(sendIdx).toBeGreaterThan(-1)
-    // Bound the slice at the next top-level handler instead of a fixed
-    // offset so handler-body refactors (e.g. PR-mention-required removed
-    // ~30 lines of mentions[] parsing) don't silently truncate the slice.
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
     const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
-    expect(handler).toMatch(/spec §4\.2 step 1.*per-row claim guard/s)
-    expect(handler).toMatch(/SELECT id FROM message_queue[\s\S]*WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'read'[\s\S]*FOR UPDATE/)
+    expect(handler).toMatch(/decideSendFallback\(txClient, reply_to, agentId\)/)
     expect(handler).toMatch(/txClient\.query\(['"]BEGIN['"]\)/)
+    // Invariant: the helper holds the FOR UPDATE clause.
+    const helperSrc = readFileSync(join(REPO_ROOT, 'core', 'send-fallback-decision.ts'), 'utf-8')
+    expect(helperSrc).toMatch(/FOR UPDATE/)
+    expect(helperSrc).toMatch(/WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'read'/)
   })
   test('handler COMMITs only on the happy path and ROLLBACKs via finally on early return', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
