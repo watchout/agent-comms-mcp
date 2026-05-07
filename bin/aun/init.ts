@@ -152,6 +152,10 @@ export interface InitResult {
 // the same upgrade for those hooks.
 const AUN_HOOK_MARKER_STOP = 'bash ~/.claude/hooks/aun-send-tool-enforcement.sh'
 const AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE = 'bash ~/.claude/hooks/aun-pre-tool-use-inbox-gate.sh'
+// CTO P0 cold-start kick — drives the TUI via `tmux send-keys` on
+// SessionStart when a pending backlog exists but no new inbound has
+// arrived to fire the wake-daemon.
+const AUN_HOOK_MARKER_SESSION_START_SELF_KICK = 'bash ~/.claude/hooks/aun-session-start-self-kick.sh'
 const AUN_HOOK_FILES = [
   { repoPath: 'hooks/aun-send-tool-enforcement.sh', destName: 'aun-send-tool-enforcement.sh' },
   // Cycle 4 — wrapper + runner pair for the PreToolUse inbox gate.
@@ -160,10 +164,21 @@ const AUN_HOOK_FILES = [
   // copy.
   { repoPath: 'hooks/aun-pre-tool-use-inbox-gate.sh', destName: 'aun-pre-tool-use-inbox-gate.sh' },
   { repoPath: 'hooks/pre-tool-use-inbox-gate.ts', destName: 'pre-tool-use-inbox-gate.ts' },
+  // CTO P0 cold-start kick — standalone bash, no bun runner needed.
+  { repoPath: 'hooks/aun-session-start-self-kick.sh', destName: 'aun-session-start-self-kick.sh' },
+  // PR #321 cycle 3 — adapter-port helpers sourced by the kick hook.
+  // destName preserves the `lib/` subdir so the relative source path
+  // `$(dirname "$0")/lib/aun-self-kick-helpers.sh` resolves at the
+  // install location too.
+  { repoPath: 'hooks/lib/aun-self-kick-helpers.sh', destName: 'lib/aun-self-kick-helpers.sh' },
 ] as const
 
 export function aunHookCommandMarkers(): string[] {
-  return [AUN_HOOK_MARKER_STOP, AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE]
+  return [
+    AUN_HOOK_MARKER_STOP,
+    AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE,
+    AUN_HOOK_MARKER_SESSION_START_SELF_KICK,
+  ]
 }
 
 function homeFor(opts: InitOptions): string {
@@ -241,10 +256,21 @@ export function buildAunPatch(opts: InitOptions): AunPatch {
     matcher: '',
     hooks: [{ type: 'command', command: AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE }],
   }
+  // CTO P0 cold-start kick. Empty matcher so it fires on every
+  // SessionStart event; the script itself is no-op when pending=0,
+  // when $TMUX is unset, or when the per-session lock file is fresh.
+  // The user's existing SessionStart entries are preserved verbatim
+  // — this hook is appended as a separate registration, not merged
+  // into a user array.
+  const sessionStartSelfKick: HookRegistration = {
+    matcher: '',
+    hooks: [{ type: 'command', command: AUN_HOOK_MARKER_SESSION_START_SELF_KICK }],
+  }
   return {
     hooks: {
       Stop: [stopHook],
       PreToolUse: [preToolUseInboxGate],
+      SessionStart: [sessionStartSelfKick],
     },
     env: {
       AUN_HOME: aunHomeFor(opts),
@@ -500,6 +526,9 @@ export function init(opts: InitOptions = {}): InitResult {
     }
     if (!existsSync(dest)) {
       try {
+        // Some destNames include a subdir (e.g. `lib/...`); ensure it
+        // exists before cpSync. Idempotent — recursive: true.
+        mkdirSync(resolve(dest, '..'), { recursive: true })
         cpSync(src, dest)
       } catch (err) {
         errors.push(`hook copy failed (${spec.destName}): ${(err as Error).message}`)
