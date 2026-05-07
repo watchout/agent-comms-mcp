@@ -234,6 +234,10 @@ describe('(e) repo-wide CI grep — no `mentions: [` MCP-shape remnant', () => {
       './tests/inbound-router.test.ts',
       './tests/inbound-mentions-filter.test.ts',
       './tests/inbound-reply-chain-resolution.test.ts',
+      // CEO P0 wave 2 fanout — drives the internal handleInboundMessage
+      // entry point with parsed `mentions: [...]` (the same internal
+      // routing argument the receiver feeds to routeInbound).
+      './tests/inbound-multi-bot-fanout.test.ts',
       // buildSendMentions() — internal helper that takes the resolved
       // enqueue list and returns a Discord-snowflake list. The `mentions`
       // arg is server-internal, not the MCP tool argument.

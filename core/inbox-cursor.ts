@@ -378,8 +378,18 @@ export async function fetchNewMessages(
   cursor: InboxCursor | null,
   deps: InboxQueryDeps,
 ): Promise<FetchNewMessagesResult> {
+  // CEO P0 wave 2 fanout (Finding 1) — inbox visibility is now keyed on
+  // `message_queue` rather than `agent_messages.metadata->>'to'`. The
+  // legacy single-target `metadata.to` was overwritten per-target by
+  // `persistInboundDeliveryOnClient`, so a fanout that committed N
+  // queue rows still left only the last UPDATE's target visible here
+  // (auditor BLOCK axis 3). Switching to a `message_queue` JOIN keeps
+  // shared-inbound (1 agent_messages row) per spec §13.1 while letting
+  // every queue receiver observe the same message via their own row.
   const params: any[] = [forAgent, limit]
-  let whereClause = `metadata->>'to' = $1 AND author_id != $1`
+  let whereClause =
+    `mq.agent_id = $1 AND mq.message_id IS NOT NULL ` +
+    `AND am.author_id != $1`
   if (cursor) {
     // Explicit expansion of the composite (created_at, id) > cursor
     // comparison. Row-value form `(created_at, id) > ROW($3, $4)`
@@ -389,18 +399,26 @@ export async function fetchNewMessages(
     // semantically identical and uses plain column comparisons that
     // the planner types unambiguously.
     whereClause +=
-      ` AND (created_at > $3::timestamptz` +
-      ` OR (created_at = $3::timestamptz AND id > $4::uuid))`
+      ` AND (am.created_at > $3::timestamptz` +
+      ` OR (am.created_at = $3::timestamptz AND am.id > $4::uuid))`
     params.push(cursor.createdAt, cursor.id)
   }
   // `created_at::text AS created_at_text` preserves µs precision for
   // cursor advancement — see the Precision section in the module
   // docstring for why this is required to avoid duplicate delivery.
+  // The (agent_id, message_id) uniqueness on message_queue guarantees
+  // at most one queue row per agent_messages id for a given agent, so
+  // the JOIN does not multiply rows.
   const r = await deps.query(
-    `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, depth,
-            created_at, created_at::text AS created_at_text
-     FROM agent_messages WHERE ${whereClause}
-     ORDER BY created_at ASC, id ASC LIMIT $2`,
+    `SELECT am.id, am.channel_id, am.author_id, am.content, am.message_type,
+            am.reply_to, am.metadata, am.depth,
+            am.created_at, am.created_at::text AS created_at_text
+       FROM agent_messages am
+       INNER JOIN message_queue mq
+              ON mq.message_id = am.id::text
+      WHERE ${whereClause}
+      ORDER BY am.created_at ASC, am.id ASC
+      LIMIT $2`,
     params,
   )
   if (r.rows.length === 0) {

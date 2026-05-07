@@ -156,7 +156,13 @@ describe('T3 — handleInboundMessage writes a message_queue row for the receive
     //     (auditor BLOCKER 1): the first arg is `d.databaseUrl` so the
     //     helper owns a transaction-private pg.Client, not the shared
     //     singleton from tryGetDb().
-    expect(body).toMatch(/persistInboundDelivery\s*\(\s*d\.databaseUrl\s*,\s*\{[\s\S]{0,300}?receiverAgentId\s*,[\s\S]{0,200}?messageId\s*,[\s\S]{0,200}?mqPayloadJson\s*:\s*mqPayload/)
+    //
+    //     CEO P0 wave 2 fanout: the call is now inside a `for (... of
+    //     result.pushTargets)` loop, and the named field uses the
+    //     loop-local `targetAgentId` instead of the daemon's
+    //     `receiverAgentId`. The pin is unchanged in shape — only the
+    //     identifier renamed — so we accept either form here.
+    expect(body).toMatch(/persistInboundDelivery\s*\(\s*d\.databaseUrl\s*,\s*\{[\s\S]{0,300}?receiverAgentId\s*:\s*(?:receiverAgentId|targetAgentId)\s*,[\s\S]{0,200}?messageId\s*,[\s\S]{0,200}?mqPayloadJson\s*:\s*mqPayload/)
 
     // (b) helper body holds the INSERT + ON CONFLICT DO NOTHING pin.
     //     SERVER_SRC is concatenated with core/inbound-delivery.ts above,

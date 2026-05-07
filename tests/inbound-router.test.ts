@@ -73,9 +73,14 @@ describe('Inbound Router — Source Structure', () => {
 
   test('handleInboundMessage checks channel members via loadAgentInfo', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 5000)
-    // PR-A: loadAgentInfo now takes a DbAdapter as the first argument
-    expect(body).toContain('loadAgentInfo(coreDb, receiverAgentId)')
+    const body = SERVER_SOURCE.slice(fnIdx, fnIdx + 12000)
+    // PR-A: loadAgentInfo takes a DbAdapter as the first argument.
+    // CEO P0 wave 2 fanout: receiver no longer loads only its own agent
+    // info — it loads every channel member so routeInbound can return
+    // multiple pushTargets. The pin is now the loader call inside the
+    // .map(id => ...) over `resolved.members`.
+    expect(body).toContain('loadAgentInfo(coreDb, id)')
+    expect(body).toContain('resolved.members.map')
   })
 
   test('last_received_context abolished (reply_to required, §4.2)', () => {
