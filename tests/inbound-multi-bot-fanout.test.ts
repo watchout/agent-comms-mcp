@@ -35,11 +35,25 @@ const TEST_CHANNEL = `test-channel-${SUFFIX}`
 let dbReachable = false
 let client: Client
 
+// Cycle 3 (PR #325) — test fixture must be idempotent against any
+// prior contaminated DB state. Earlier cycles trusted that the
+// pid-suffixed agent / channel keys would isolate runs, but cross-PR
+// state from sibling tests (or stale rows from prior workspace runs)
+// could leave a `channels` row with stale members or a stray
+// `agent_messages` row that broke `resolveInboundChannel`. The fix is
+// hard cleanup (DELETE WHERE LIKE 'test-fanout-%') in beforeAll AND
+// afterAll so each test run starts and ends with a known-clean slate.
 beforeAll(async () => {
   try {
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
-    // Seed agents.
+    // Hard cleanup of every prefix-matching row so a contaminated DB
+    // cannot give a false PASS (CTO + auditor cycle 2 root cause).
+    await client.query(`DELETE FROM message_queue WHERE agent_id LIKE 'test-fanout-%'`)
+    await client.query(`DELETE FROM agent_messages WHERE author_id LIKE 'test-fanout-%' OR channel_id LIKE 'test-channel-fanout-%'`)
+    await client.query(`DELETE FROM channels WHERE id LIKE 'test-channel-fanout-%'`)
+    await client.query(`DELETE FROM agents WHERE agent_id LIKE 'test-fanout-%'`)
+    // Seed agents (clean state guaranteed by the DELETE above).
     for (const id of [AGENT_A, AGENT_B, AGENT_C]) {
       await client.query(
         `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
@@ -48,11 +62,10 @@ beforeAll(async () => {
         [id, JSON.stringify({ discord_id: `discord-${id}` })],
       )
     }
-    // Cycle 2 Finding 2 — register the channel up-front so
-    // `resolveInboundChannel` succeeds before each test's
-    // `handleInboundMessage` call. Per-test seedChannel() still tweaks
-    // the members array (T-3 narrows it), but the row is guaranteed to
-    // exist by the time the receiver looks it up.
+    // Register the channel with the full default member set. Per-test
+    // seedChannel() still tweaks the members array via ON CONFLICT
+    // DO UPDATE; the row is guaranteed to exist when the receiver
+    // calls resolveInboundChannel.
     await client.query(
       `INSERT INTO channels (id, org_id, type, members)
        VALUES ($1, 'default', 'channel', $2)
@@ -60,7 +73,8 @@ beforeAll(async () => {
       [TEST_CHANNEL, [AGENT_A, AGENT_B, AGENT_C]],
     )
     dbReachable = true
-  } catch {
+  } catch (err) {
+    process.stderr.write(`[test-debug] beforeAll setup failed: ${err}\n`)
     dbReachable = false
   }
 })
@@ -68,10 +82,12 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!dbReachable) return
   try {
-    await client.query(`DELETE FROM message_queue WHERE agent_id = ANY($1)`, [[AGENT_A, AGENT_B, AGENT_C]])
-    await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [TEST_CHANNEL])
-    await client.query(`DELETE FROM channels WHERE id = $1`, [TEST_CHANNEL])
-    await client.query(`DELETE FROM agents WHERE agent_id = ANY($1)`, [[AGENT_A, AGENT_B, AGENT_C]])
+    // Hard cleanup keyed on the test prefix so the next run (or a
+    // sibling test file) starts clean.
+    await client.query(`DELETE FROM message_queue WHERE agent_id LIKE 'test-fanout-%'`)
+    await client.query(`DELETE FROM agent_messages WHERE author_id LIKE 'test-fanout-%' OR channel_id LIKE 'test-channel-fanout-%'`)
+    await client.query(`DELETE FROM channels WHERE id LIKE 'test-channel-fanout-%'`)
+    await client.query(`DELETE FROM agents WHERE agent_id LIKE 'test-fanout-%'`)
     await client.end()
   } catch {}
 })
@@ -85,11 +101,32 @@ function requireDb() {
 }
 
 async function seedChannel(members: string[]) {
-  await client.query(
+  // Cycle 3 — fail-fast diagnostics. Silent INSERT failure (rowCount
+  // 0) was the cycle 2 mystery; a follow-up SELECT proves the row is
+  // both present and carries the requested members so a downstream
+  // `channel not registered` failure can no longer hide a malformed
+  // upsert.
+  const upsert = await client.query(
     `INSERT INTO channels (id, org_id, type, members)
      VALUES ($1, 'default', 'channel', $2)
-     ON CONFLICT (id) DO UPDATE SET members = EXCLUDED.members`,
+     ON CONFLICT (id) DO UPDATE SET members = EXCLUDED.members
+     RETURNING id, members`,
     [TEST_CHANNEL, members],
+  )
+  if ((upsert.rowCount ?? 0) === 0) {
+    throw new Error(
+      `seedChannel upsert returned rowCount=0 for ${TEST_CHANNEL} (expected ON CONFLICT path)`,
+    )
+  }
+  const verify = await client.query<{ id: string; members: string[] }>(
+    `SELECT id, members FROM channels WHERE id = $1`,
+    [TEST_CHANNEL],
+  )
+  if (verify.rowCount === 0) {
+    throw new Error(`seedChannel post-upsert verify failed for ${TEST_CHANNEL}`)
+  }
+  process.stderr.write(
+    `[test-debug] seedChannel ${TEST_CHANNEL} verified, members=${JSON.stringify(verify.rows[0].members)}\n`,
   )
 }
 
