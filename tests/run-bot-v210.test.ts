@@ -124,14 +124,25 @@ describe('(5) bot-to-bot loop detection', () => {
   test('MAX_SELF_IN_CHAIN env with default 3', () => {
     expect(SCRIPT).toMatch(/MAX_SELF_IN_CHAIN="\$\{MAX_SELF_IN_CHAIN:-3\}"/)
   })
-  test('self-count uses jq on reply_chain with --arg a "$AGENT_ID"', () => {
-    expect(SCRIPT).toMatch(/jq --arg a "\$AGENT_ID"/)
-    expect(SCRIPT).toMatch(/\.reply_chain\[\]\?\s*\|\s*select\(\.from == \$a\)/)
+  test('loop detection delegates to scripts/lib/loop-detector-cli.ts (B8 §2.5)', () => {
+    // B8 amendment v0.2 §2.5: detector logic lives in
+    // `scripts/lib/loop-detector.ts` as a pure helper; run-bot.sh is
+    // a thin caller that hands the reply_chain JSON to the helper
+    // and acts on the verdict. The legacy inline jq self-count was
+    // removed by the same instruction (§3 forbidden 1).
+    expect(SCRIPT).toMatch(/scripts\/lib\/loop-detector-cli\.ts/)
+    // The thin caller assembles the env via jq before invoking bun.
+    expect(SCRIPT).toMatch(/maxReplyChainDepth/)
+    expect(SCRIPT).toMatch(/maxPairBounce/)
+    expect(SCRIPT).toMatch(/maxSelfInChain/)
   })
   test('threshold check fails with LOOP_DETECTED before the LLM call', () => {
     // LOOP_DETECTED must fire BEFORE the LLM invocation so we don't pay
-    // compute on a doomed loop. Pin the relative ordering.
-    const loopCheckIdx = SCRIPT.indexOf('LOOP_DETECTED (self=')
+    // compute on a doomed loop. The B8 refactor moved the inline log
+    // line ('LOOP_DETECTED (self=...)') to a helper-driven verdict
+    // ('LOOP_DETECTED (subReason=...)') — the relative ordering pin
+    // is what we still need.
+    const loopCheckIdx = SCRIPT.indexOf('LOOP_DETECTED (subReason=')
     const llmIdx = SCRIPT.indexOf('timeout "$LLM_TIMEOUT_SECONDS"')
     expect(loopCheckIdx).toBeGreaterThan(-1)
     expect(llmIdx).toBeGreaterThan(loopCheckIdx)

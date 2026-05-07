@@ -281,8 +281,8 @@ describe('PR-α cycle 1 — §4 source-pin tests', () => {
     expect(init).toContain('AGENT_COM_REPLY_CHAIN_MODE=full')
   })
 
-  // AMEND-1 §4.11 — run-bot loop detection 互換 source-pin
-  test('§4.11 run-bot loop detection — light shape preserves `.from`, scripts/run-bot.sh self-count path intact', async () => {
+  // AMEND-1 §4.11 — run-bot loop detection 互換 source-pin (B8 v0.2 refactor)
+  test('§4.11 run-bot loop detection — light shape preserves `.from`, scripts/run-bot.sh delegates to loop-detector helper', async () => {
     // Light mode primitive must retain `.from`.
     await insert('m1', 'alice', 'one', null, '2026-04-30T00:00:00Z')
     await insert('m2', 'bob', 'two', 'm1', '2026-04-30T00:00:01Z')
@@ -292,12 +292,16 @@ describe('PR-α cycle 1 — §4 source-pin tests', () => {
       expect(entry.from.length).toBeGreaterThan(0)
       expect(entry.content).toBeUndefined() // light, no content
     }
-    // run-bot.sh self-count path source-pin: `.reply_chain[].from` reference
-    // must remain in scripts/run-bot.sh so jq `select(.from == $a)` keeps
-    // working under light shape.
+    // B8 amendment v0.2 §2.5 — detector logic moved to
+    // `scripts/lib/loop-detector.ts`; run-bot.sh is the thin caller
+    // that piles the reply_chain JSON into the bun helper. The
+    // light-shape `.from` field is still what the helper reads, and
+    // the run-bot script still references `.reply_chain` (now via
+    // `--argjson chain "$reply_chain"` in the jq composer for the
+    // helper input). Pin both.
     const runbot = await readFileSyncSafe('scripts/run-bot.sh')
-    expect(runbot).toContain('.reply_chain[]')
-    expect(runbot).toContain('.from')
+    expect(runbot).toContain('reply_chain')
+    expect(runbot).toContain('scripts/lib/loop-detector-cli.ts')
   })
 })
 
