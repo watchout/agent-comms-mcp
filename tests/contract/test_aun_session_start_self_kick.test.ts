@@ -95,15 +95,35 @@ function runHook(env: Record<string, string>, stubDir: string, stdin = '{}'): { 
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
 
+// axis 6 BLOCK resolve: the prior `if (!dbReachable) return` made T-1/T-2/T-4
+// silent skips when the merge gate could not reach Postgres, which let CI
+// pass on a non-test. The hook's whole point is exercising the real DB
+// path, so any environment that runs this contract test without DB must
+// fail loudly. CI always has DATABASE_URL; local dev without Postgres
+// should still see the failure rather than a silent green.
+function requireDb() {
+  if (!dbReachable) {
+    throw new Error(
+      `DB unreachable at ${DATABASE_URL}. ` +
+      `This contract test requires a real Postgres — silent skip would ` +
+      `let the merge gate pass on a non-test (auditor cycle 1 axis 6 BLOCK).`,
+    )
+  }
+}
+
+// Lock path now keys on (agent, tmux session) per axis 3 BLOCK resolve.
+// The stub `tmux display-message` returns "test-session" so every test
+// shares the same session-scoped lock filename.
+const LOCK_PATH = `/tmp/aun-self-kick-${TEST_AGENT}-test-session.lock`
+
 describe('test_aun_session_start_self_kick — cold-start LLM kick contract', () => {
   beforeEach(() => {
     // Always clear stale lock between tests so T-4 owns its semantics.
-    const lock = `/tmp/aun-self-kick-${TEST_AGENT}.lock`
-    if (existsSync(lock)) rmSync(lock, { force: true })
+    if (existsSync(LOCK_PATH)) rmSync(LOCK_PATH, { force: true })
   })
 
   test('T-1: pending=0 → tmux send-keys NOT called', async () => {
-    if (!dbReachable) return
+    requireDb()
     const stub = makeStubDir()
     try {
       const r = runHook({
@@ -123,7 +143,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
   })
 
   test('T-2: pending>0 → send-keys called with prompt + Enter', async () => {
-    if (!dbReachable) return
+    requireDb()
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
     try {
@@ -184,7 +204,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
   })
 
   test('T-4: lock file <5min stale → send-keys NOT called', async () => {
-    if (!dbReachable) return
+    requireDb()
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
     try {
@@ -197,11 +217,10 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       await c.end()
     }
 
-    const lock = `/tmp/aun-self-kick-${TEST_AGENT}.lock`
-    writeFileSync(lock, '')
+    writeFileSync(LOCK_PATH, '')
     // Fresh mtime guarantees the <5min stale check fires.
     const now = new Date()
-    utimesSync(lock, now, now)
+    utimesSync(LOCK_PATH, now, now)
 
     const stub = makeStubDir()
     try {
@@ -216,7 +235,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       expect(log).not.toMatch(/send-keys/)
     } finally {
       stub.cleanup()
-      rmSync(lock, { force: true })
+      rmSync(LOCK_PATH, { force: true })
       const c2 = new Client({ connectionString: DATABASE_URL })
       await c2.connect()
       await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
