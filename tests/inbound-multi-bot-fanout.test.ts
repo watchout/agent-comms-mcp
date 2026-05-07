@@ -48,6 +48,17 @@ beforeAll(async () => {
         [id, JSON.stringify({ discord_id: `discord-${id}` })],
       )
     }
+    // Cycle 2 Finding 2 — register the channel up-front so
+    // `resolveInboundChannel` succeeds before each test's
+    // `handleInboundMessage` call. Per-test seedChannel() still tweaks
+    // the members array (T-3 narrows it), but the row is guaranteed to
+    // exist by the time the receiver looks it up.
+    await client.query(
+      `INSERT INTO channels (id, org_id, type, members)
+       VALUES ($1, 'default', 'channel', $2)
+       ON CONFLICT (id) DO UPDATE SET members = EXCLUDED.members`,
+      [TEST_CHANNEL, [AGENT_A, AGENT_B, AGENT_C]],
+    )
     dbReachable = true
   } catch {
     dbReachable = false

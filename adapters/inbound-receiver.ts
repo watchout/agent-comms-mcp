@@ -738,13 +738,13 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // spec §8.2 — sender feedback. Inbound handler represents the tail of
-  // step 6's "push対象のmessage_queue INSERT → 対象botのstatusに応じて
-  // senderにフィードバック". We only fire feedback on a successful 7b+7d
-  // commit and only when the sender resolved to an agent_id (human-only
-  // Discord authors are not addressable via message_queue, so skipping them
-  // avoids phantom feedback rows). Non-fatal inside the helper.
-  if (inboundCommitted && senderAgentId && messageId) {
+  // spec §8.2 + §2(e) per cycle 2 Finding 3 — sender feedback fans out
+  // to every committed receiver, not just the daemon's own agent_id.
+  // Pre-fix this was keyed on `receiverAgentId` (one bot), so a fanout
+  // that committed rows for B and C only reported B's status to the
+  // sender (or A's if A == receiver). Looping over `committedReceivers`
+  // makes the busy/idle decision per-target match the queue write.
+  if (committedReceivers.length > 0 && senderAgentId && messageId) {
     const feedbackClient = await d.tryGetDb()
     if (feedbackClient) {
       const feedbackDb = {
@@ -753,11 +753,13 @@ export async function handleInboundMessage(params: {
           return { rows: r.rows as T[] }
         },
       }
-      await notifySenderAndObserve(feedbackDb, {
-        senderId: senderAgentId,
-        targetId: receiverAgentId,
-        messageId,
-      })
+      for (const targetAgentId of committedReceivers) {
+        await notifySenderAndObserve(feedbackDb, {
+          senderId: senderAgentId,
+          targetId: targetAgentId,
+          messageId,
+        })
+      }
     }
   }
 

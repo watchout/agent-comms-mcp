@@ -68,7 +68,13 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
       },
     })
 
-    expect(capturedSql).toContain(`metadata->>'to' = $1`)
+    // Cycle 2 Finding 1 (PR #325) — visibility moved from
+    // `metadata->>'to'` to a `message_queue` JOIN so fanout fans
+    // visibility to every committed receiver, not just the last
+    // metadata UPDATE's target.
+    expect(capturedSql).toContain('mq.agent_id = $1')
+    expect(capturedSql).toContain('INNER JOIN message_queue mq')
+    expect(capturedSql).not.toContain(`metadata->>'to' = $1`)
     expect(capturedSql).not.toContain('created_at, id) >')
     expect(capturedParams).toEqual(['lead-ama', 20])
     expect(result.rows).toHaveLength(1)
@@ -95,10 +101,13 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
     // Composite cursor comparison (created_at first, id as tiebreaker)
     // — the #179 regression guard. Expanded form, not ROW() (see
     // core/inbox-cursor.ts comment on the PG 42P18 rationale).
-    expect(capturedSql).toContain('created_at > $3::timestamptz')
-    expect(capturedSql).toContain('created_at = $3::timestamptz AND id > $4::uuid')
+    // Cycle 2 Finding 1 — columns now reference `am.` (agent_messages
+    // alias) since the FROM is a JOIN. Composite cursor semantics
+    // unchanged.
+    expect(capturedSql).toContain('am.created_at > $3::timestamptz')
+    expect(capturedSql).toContain('am.created_at = $3::timestamptz AND am.id > $4::uuid')
     // Must NOT degrade back to the bare lex cursor on the UUID column.
-    expect(capturedSql).not.toMatch(/\bAND\s+id\s*>\s*\$3\b/)
+    expect(capturedSql).not.toMatch(/\bAND\s+(?:am\.)?id\s*>\s*\$3\b/)
     // Params passed in the same order as the placeholders.
     expect(capturedParams).toEqual([
       'lead-ama', 20,
@@ -197,7 +206,7 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
         return { rows: [] }
       },
     })
-    expect(capturedSql).toContain('ORDER BY created_at ASC, id ASC')
+    expect(capturedSql).toContain('ORDER BY am.created_at ASC, am.id ASC')
   })
 
   test('8. cursor advance handles ISO string created_at (DB driver returning text)', async () => {
@@ -277,6 +286,15 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
          VALUES ($1::uuid, 'ch-test', $2, 'later post', jsonb_build_object('to', $3::text), '2026-01-02T00:00:00Z')`,
         [LATER_CREATED_EARLIER_UUID, agentA, agentB],
       )
+      // Cycle 2 Finding 1 — fetchNewMessages now joins through
+      // message_queue, so the visibility row must exist for agentB
+      // before the SELECT returns either agent_messages row.
+      await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status)
+         VALUES ($1, $2::text, '{}'::jsonb, 'pending'),
+                ($1, $3::text, '{}'::jsonb, 'pending')`,
+        [agentB, EARLIER_CREATED_LATER_UUID, LATER_CREATED_EARLIER_UUID],
+      )
 
       // First fetch with no cursor: expect both rows, cursor advances to row 2.
       const first = await fetchNewMessages(agentB, 10, null, {
@@ -326,6 +344,12 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
          VALUES ($1::uuid, 'ch-test', $2, 'us-precise post', jsonb_build_object('to', $3::text),
                  '2026-01-03 00:00:00.123456+00'::timestamptz)`,
         [rowId, sender, agent],
+      )
+      // Cycle 2 Finding 1 — visibility row in message_queue.
+      await client.query(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status)
+         VALUES ($1, $2::text, '{}'::jsonb, 'pending')`,
+        [agent, rowId],
       )
 
       // fetch1: no cursor → row returned.
