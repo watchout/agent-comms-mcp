@@ -256,16 +256,21 @@ export function buildAunPatch(opts: InitOptions): AunPatch {
     matcher: '',
     hooks: [{ type: 'command', command: AUN_HOOK_MARKER_PRE_TOOL_USE_INBOX_GATE }],
   }
-  // Note: the cold-start kick hook file ships via AUN_HOOK_FILES, but
-  // its SessionStart registration in `~/.claude/settings.json` is
-  // intentionally NOT injected by `aun init`. Per
-  // test_aun_existing_hooks_preserve, aun must keep the user's
-  // SessionStart array verbatim (no append). Operators that want the
-  // self-kick behavior add the entry to their own settings.json.
+  // CTO P0 cold-start kick. Empty matcher so it fires on every
+  // SessionStart event; the script itself is no-op when pending=0,
+  // when $TMUX is unset, or when the per-session lock file is fresh.
+  // The user's existing SessionStart entries are preserved verbatim
+  // — this hook is appended as a separate registration, not merged
+  // into a user array.
+  const sessionStartSelfKick: HookRegistration = {
+    matcher: '',
+    hooks: [{ type: 'command', command: AUN_HOOK_MARKER_SESSION_START_SELF_KICK }],
+  }
   return {
     hooks: {
       Stop: [stopHook],
       PreToolUse: [preToolUseInboxGate],
+      SessionStart: [sessionStartSelfKick],
     },
     env: {
       AUN_HOME: aunHomeFor(opts),

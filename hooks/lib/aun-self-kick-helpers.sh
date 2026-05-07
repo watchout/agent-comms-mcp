@@ -66,7 +66,11 @@ aun_self_kick_check_lock() {
     return 0
   fi
   local age
-  age=$(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0) ))
+  # GNU-first ordering — `stat -c %Y` works on Linux (CI) and silently
+  # fails on macOS, where the BSD `stat -f %m` fallback then resolves.
+  # Reverse order would have `-f %m` fire on Linux against a `%m`
+  # format token that has a different meaning under GNU coreutils.
+  age=$(( $(date +%s) - $(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0) ))
   if [ "$age" -ge 0 ] && [ "$age" -lt 300 ]; then
     return 1
   fi
