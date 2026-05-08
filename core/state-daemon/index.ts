@@ -230,8 +230,23 @@ export class StateDaemon {
       result.abandonReset++
     }
 
+    // §4.3 row 5+6: stuck pending OR stuck read both → STALE_DISPATCH (v0.5
+    // 単一固定 per α). The schema has no `attempts` column, so the "attempts
+    // >= max" clause from row 5 is interpreted age-based (read row that has
+    // been parked beyond stuckAfter is functionally indistinguishable from a
+    // max-attempts loop and tripping the same terminal handles both).
     const stuck = await this.fetchStuck()
+    const seenStuckIds = new Set<number>()
     for (const row of stuck) {
+      if (seenStuckIds.has(row.id)) continue
+      seenStuckIds.add(row.id)
+      // Skip rows we already terminally handled this tick via reclaim/abandon
+      // paths — they're already in `pending` again, the stuck branch should
+      // not bounce them straight to failed.
+      if (
+        expired.some((e) => e.id === row.id) ||
+        abandon.some((a) => a.id === row.id)
+      ) continue
       result.scanned++
       await this.failPermanently(row, 'STALE_DISPATCH', `stale beyond ${this.config.stuckAfter}`)
       result.permanentlyFailed++
@@ -249,8 +264,7 @@ export class StateDaemon {
 
   async refreshClaims(): Promise<RefreshResult> {
     if (this.status !== 'running') return { refreshed: 0, skipped: 0 }
-    const { rowCount } = await this.dbQuery(
-      `UPDATE message_queue mq
+    let sql = `UPDATE message_queue mq
           SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
               last_heartbeat_at = $1::timestamptz
         WHERE mq.status = 'read'
@@ -258,9 +272,13 @@ export class StateDaemon {
           AND EXISTS (
             SELECT 1 FROM agents a
              WHERE a.agent_id = mq.agent_id AND a.status = 'online'
-          )`,
-      [this.clock.now(), this.config.claimTtlSec],
-    )
+          )`
+    const params: unknown[] = [this.clock.now(), this.config.claimTtlSec]
+    if (this.config.agentIdPrefix) {
+      sql += ` AND mq.agent_id LIKE $3`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
     return { refreshed: rowCount, skipped: 0 }
   }
@@ -269,9 +287,13 @@ export class StateDaemon {
 
   async checkBotLiveness(): Promise<LivenessResult> {
     if (this.status !== 'running') return { checked: 0, restarted: 0, escalated: 0 }
-    const { rows } = await this.dbQuery<AgentRow>(
-      `SELECT agent_id, runtime, status, (metadata->>'tmux_session') AS tmux_session, last_seen_at FROM agents`,
-    )
+    let sql = `SELECT agent_id, runtime, status, (metadata->>'tmux_session') AS tmux_session, last_seen_at FROM agents`
+    const params: unknown[] = []
+    if (this.config.agentIdPrefix) {
+      sql += ` WHERE agent_id LIKE $1`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    const { rows } = await this.dbQuery<AgentRow>(sql, params)
     const result: LivenessResult = { checked: 0, restarted: 0, escalated: 0 }
     const now = this.clock.now().getTime()
     for (const bot of rows) {
@@ -336,11 +358,14 @@ export class StateDaemon {
         return false
       }
     }
-    const wakePromise = this.executeWake(row, now)
-    this.inflightWakes.add(wakePromise)
-    wakePromise.finally(() => this.inflightWakes.delete(wakePromise))
-    await this.wakePool.run({ exec: () => wakePromise })
-    return true
+    const runPromise = this.wakePool.run({ exec: () => this.executeWake(row, now) })
+    this.inflightWakes.add(runPromise)
+    try {
+      await runPromise
+      return true
+    } finally {
+      this.inflightWakes.delete(runPromise)
+    }
   }
 
   private async executeWake(row: QueueRow, now: Date): Promise<void> {
@@ -404,57 +429,80 @@ export class StateDaemon {
 
   // ── Sweep fetch helpers ────────────────────────────────────────────────────
 
+  /**
+   * Test-only scope filter. Returns the SQL fragment + params suffix so each
+   * fetch helper can append it. In production (`agentIdPrefix` null) returns
+   * `''` and no extra params — zero behavioural impact.
+   */
+  private prefixClause(): { sql: string; params: unknown[] } {
+    if (!this.config.agentIdPrefix) return { sql: '', params: [] }
+    return { sql: ` AND agent_id LIKE $__::text`, params: [this.config.agentIdPrefix + '%'] }
+  }
+
   private async fetchPendingStale(): Promise<QueueRow[]> {
-    const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, status, claim_expires_at, created_at,
+    const prefix = this.config.agentIdPrefix ? ` AND agent_id LIKE $3` : ''
+    const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit]
+    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at, failed_reason
          FROM message_queue
         WHERE status='pending'
-          AND created_at < $1::timestamptz - ($2)::interval
-        ORDER BY created_at
-        LIMIT $3`,
-      [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit],
-    )
+          AND created_at < $1::timestamptz - ($2)::interval`
+    if (this.config.agentIdPrefix) {
+      sql += ` AND agent_id LIKE $4`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    sql += ` ORDER BY created_at LIMIT $3`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
 
   private async fetchReadExpired(): Promise<QueueRow[]> {
-    const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, status, claim_expires_at, created_at,
+    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at, failed_reason
          FROM message_queue
-        WHERE status='read' AND claim_expires_at < $1::timestamptz
-        ORDER BY claim_expires_at
-        LIMIT $2`,
-      [this.clock.now(), this.config.batchLimit],
-    )
+        WHERE status='read' AND claim_expires_at < $1::timestamptz`
+    const params: unknown[] = [this.clock.now(), this.config.batchLimit]
+    if (this.config.agentIdPrefix) {
+      sql += ` AND agent_id LIKE $3`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    sql += ` ORDER BY claim_expires_at LIMIT $2`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
 
   private async fetchAbandonRecent(): Promise<QueueRow[]> {
-    const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, status, claim_expires_at, created_at,
+    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at, failed_reason
          FROM message_queue
         WHERE status='failed'
           AND failed_reason='IMPLICIT_ABANDON'
-          AND claim_expires_at > $1::timestamptz - ($2)::interval
-        LIMIT $3`,
-      [this.clock.now(), this.config.abandonRecent, this.config.batchLimit],
-    )
+          AND claim_expires_at > $1::timestamptz - ($2)::interval`
+    const params: unknown[] = [this.clock.now(), this.config.abandonRecent, this.config.batchLimit]
+    if (this.config.agentIdPrefix) {
+      sql += ` AND agent_id LIKE $4`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    sql += ` LIMIT $3`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
 
   private async fetchStuck(): Promise<QueueRow[]> {
-    const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, status, claim_expires_at, created_at,
+    // §4.3 row 5 (read stale, max_attempts proxy via age) + row 6 (pending
+    // stuck) — both terminate as STALE_DISPATCH (v0.5 単一固定).
+    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at, failed_reason
          FROM message_queue
-        WHERE status='pending'
-          AND created_at < $1::timestamptz - ($2)::interval
-        LIMIT $3`,
-      [this.clock.now(), this.config.stuckAfter, this.config.batchLimit],
-    )
+        WHERE status IN ('pending', 'read')
+          AND created_at < $1::timestamptz - ($2)::interval`
+    const params: unknown[] = [this.clock.now(), this.config.stuckAfter, this.config.batchLimit]
+    if (this.config.agentIdPrefix) {
+      sql += ` AND agent_id LIKE $4`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    sql += ` LIMIT $3`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
 

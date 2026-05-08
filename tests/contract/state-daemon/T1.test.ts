@@ -60,6 +60,7 @@ describe('T1 new_pending_dispatched', () => {
       clock,
       metrics,
       alert,
+      config: { agentIdPrefix: 'sd-test-' },
     })
     await daemon.start()
     try {

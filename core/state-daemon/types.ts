@@ -40,6 +40,15 @@ export interface StateDaemonConfig {
 
   // §8 alert thresholds
   dbErrorAlertThreshold: number      // default 5 (consecutive)
+
+  /**
+   * Test-only scope guard. When set, every queue / agents query the daemon
+   * issues is filtered to `agent_id LIKE prefix||'%'`. Production MUST leave
+   * this `null` so the daemon scans the full fleet — the field exists only so
+   * contract tests on a shared dev DB cannot interfere with live fleet rows.
+   * §5 Open decision (test infrastructure / fixture builder).
+   */
+  agentIdPrefix: string | null
 }
 
 /** Defaults per spec v0.6 §9 + §13.2 CEO 採択 (O2-O8). */
@@ -65,6 +74,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   abnormalActivityWindowMs: 300_000,
   abnormalActivityThreshold: 5,
   dbErrorAlertThreshold: 5,
+  agentIdPrefix: null,
 }
 
 /** pg_notify('queue_event', ...) JSON payload (§7.3). */
