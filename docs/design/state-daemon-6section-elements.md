@@ -163,7 +163,7 @@ T#:
 | T9 | pending_stale_duplicate_suppress | §4.3 row 2 + duplicate suppression |
 | T10 | read_expired_reclaim | §4.3 row 3 |
 | T11 | abandon_recent_reset | §4.3 row 4 |
-| T12 | max_attempts_failed_permanently | §4.3 row 5 |
+| T12 | stale_dispatch_age_based (v0.7 rename) | §4.3 row 5 (age-based proxy、`attempts` 列不在に対応) |
 | T13 | db_connection_retry | §8 |
 | T14 | sweep_budget_warn | §10.1 |
 | T15 | dual_state_priority_order | §4.3 row 2 + 3 priority |

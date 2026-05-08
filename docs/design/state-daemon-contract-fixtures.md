@@ -98,18 +98,20 @@
 
 ---
 
-## T12: max_attempts_failed_permanently
+## T12: stale_dispatch_age_based
+
+[文献確認: lead-ama `b76bccff` / agent-com-dev `\d message_queue` 検証済] production schema に `attempts` column 不在。v0.7 で age-based proxy 単一表現に統一 (旧 fixture 名 `max_attempts_failed_permanently` から rename)。
 
 **precondition**:
-- R1 = `(status='read', attempts=10 (= max), age=6min)`
+- R1 = `(status='read', age=6min)` (= stuckAfter 5min 超過)
 
 **trigger**:
 - cron sweep
 
 **expected**:
 - DB: R1.status='failed'、failed_reason='STALE_DISPATCH' (v0.4 単一固定、auditor I1 解消)
-- alert 1 回 (`max_attempts` 含む string)
-- metric: `state_daemon_wake_actions_total{result='permanently_failed'}` += 1
+- alert 1 回 (`stale_dispatch` 含む string、v0.7 で `max_attempts` 文言削除)
+- metric: `state_daemon_wake_actions_total{result='stale_dispatched'}` += 1
 
 ---
 

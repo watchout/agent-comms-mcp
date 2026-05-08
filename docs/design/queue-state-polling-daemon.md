@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.6 — supersedes v0.5)
+> **Status**: ARC 起草 (Draft v0.7 — supersedes v0.6)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6)
-> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (v0.3 GO)、CTO directive `70050419` (v0.4)、lead-ama `1abdf00d` (v0.5)、CEO `cfb32b4a` α 採択 + CTO `1b7464ee` (v0.6 patch、auditor v3 BLOCK A2 残 3 箇所解消)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7)
+> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO `1d402109` (v0.3 GO)、CTO `70050419` (v0.4)、lead-ama `1abdf00d` (v0.5)、CEO `cfb32b4a` α + CTO `1b7464ee` (v0.6)、lead-ama `b76bccff` (v0.7、PR #330 auditor Axis 5(b) schema drift 解消、ARC α 採択)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,26 @@
 
 ---
 
-## 0. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
+## 0. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
+
+[文献確認 lead-ama `b76bccff` / agent-com-dev `\d message_queue` 検証済]:
+
+| 旧表現 | v0.7 fix | 採択 |
+|---|---|---|
+| §4.3 row 5: `read AND attempts >= max_attempts AND age > 5min` | `status IN ('pending','read') AND age > stuckAfter` (age-based proxy 単一表現) | **α** (CEO `cfb32b4a` α 採択スタイル継承、impl 実態と整合) |
+
+**理由**: production schema (実検証 [agent-com-dev psql `\d message_queue`] per) に `attempts` column 不在。v0.5 で row 5 / row 6 とも `STALE_DISPATCH` 単一固定済み (機能的に age-based proxy で structurally 同等、loop prevention 目的維持)。v0.7 は **spec literal を impl 実態に realign** する rephrase patch、抽象 leak (schema 実態未確認 で書いた v0.1 の残り) の最終解消。
+
+T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`attempts=max` precondition は age-based proxy (`age > stuckAfter`) に統一。
+
+選択肢比較:
+- (α) spec rephrase: 採択、最小 risk、impl との一致
+- (β) schema migration `attempts` 列追加: route:ceo-approval、本 PR scope 超過、却下
+- (γ) spec 注釈で「age proxy 代替」明記: residue 残存、却下
+
+---
+
+## 0a. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
 
 [文献確認 lead-ama `e8abbf0e` / auditor v3 `21beddd8` / CEO `cfb32b4a` α 採択]:
 
@@ -28,7 +47,7 @@
 
 ---
 
-## 0a. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
+## 0b. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
 
 [文献確認 lead-ama `1abdf00d` / auditor v2 `b7398912`]:
 
@@ -40,7 +59,7 @@
 
 ---
 
-## 0b. v0.3 → v0.4 patch (auditor BLOCK 解消)
+## 0c. v0.3 → v0.4 patch (auditor BLOCK 解消)
 
 [文献確認 CTO directive `70050419` / lead-ama `d0161ad6`]:
 
@@ -55,7 +74,7 @@
 
 ---
 
-## 0c. v0.2 → v0.3 主要変更点
+## 0d. v0.2 → v0.3 主要変更点
 
 [文献確認 CTO directive `1d402109` / `907b7e9b`]:
 
@@ -149,7 +168,7 @@ INSERT → [pending] → [read] → [replied] (terminal: success)        │
               │         │                                          │
               │         └──→ [failed: IMPLICIT_ABANDON] ────────────┘ (claim_expires_at recent)
               │                  │
-              │                  └──→ [failed: PERMANENTLY] (terminal: max_attempts 超)
+              │                  └──→ [failed: STALE_DISPATCH] (terminal: age > stuckAfter、v0.7 age-based proxy 統一)
               │
               └──→ [failed: STALE_DISPATCH] (terminal: 5min 以上 pickup されず)
 ```
@@ -173,8 +192,8 @@ state-daemon は 5 transition の action を実行 (v0.2 から prevention seman
 | 2 | pending AND age > PENDING_STALE_AFTER (10s) | re-wake | 取りこぼし救済 (v0.1 継承) |
 | 3 | read AND claim_expires_at < now() | self-reclaim → re-wake | proactive reclaim (v0.1 継承) |
 | 4 | failed AND failed_reason='IMPLICIT_ABANDON' AND claim_expires_at > now() - 60s | reset to pending | recent abandon は recoverable (v0.1 継承) |
-| 5 | read AND attempts >= max_attempts AND age > 5min | status='failed'、failed_reason='STALE_DISPATCH' + alert | infinite reclaim loop 防止 (v0.1 継承)、failed_reason は v0.5 で STALE_DISPATCH 単一固定 (α 採択) |
-| 6 | stuck pending > 5min | status='failed'、failed_reason='STALE_DISPATCH' | (v0.2 継承、v0.5 で row 5 と統一) |
+| 5 | status='read' AND age > stuckAfter (default 5min) | status='failed'、failed_reason='STALE_DISPATCH' + alert | infinite reclaim loop 防止 (v0.1 継承)。v0.7 で `attempts` column 言及削除、age-based proxy 単一表現 (production schema 実態整合、CEO α `cfb32b4a` style) |
+| 6 | status='pending' AND age > stuckAfter (default 5min) | status='failed'、failed_reason='STALE_DISPATCH' | (v0.2 継承、v0.5 / v0.7 で row 5 と age-based 統一) |
 
 各 action は idempotent。`last_wake_attempt_at` で 5s 以内重複 wake 抑制 (heartbeat と区別)。
 
@@ -523,7 +542,7 @@ abnormal activity 検出ルール (operator alert を Discord に送出):
 | T9 | pending row、age=15s、last_wake_attempt 3s 前 | skip wake (duplicate suppression、prevention とは別) |
 | T10 | read row、claim_expires_at 5s 前、age=40s | self-reclaim + re-wake |
 | T11 | failed row、IMPLICIT_ABANDON、claim_expires_at 30s 前 | reset to pending |
-| T12 | read row、attempts=max | status='failed'、failed_reason='STALE_DISPATCH' (v0.4 単一固定)、metric inc |
+| T12 | read row、age > stuckAfter (`attempts` 列不在の production schema、age-based proxy v0.7 採択) | status='failed'、failed_reason='STALE_DISPATCH' (v0.4 単一固定)、metric inc |
 | T13 | DB connection error | retry with backoff、5 連続失敗で alert (v0.4 一本化) |
 | T14 | sweep 周期 budget 250ms 消費 | warn log、次周期 skip しない |
 | T15 | 同 row が pending-stale + read-expired 両方該当 | 1 action のみ実行 (read-expired > pending-stale) |
