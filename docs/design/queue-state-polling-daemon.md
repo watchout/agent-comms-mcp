@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.5 — supersedes v0.4)
+> **Status**: ARC 起草 (Draft v0.6 — supersedes v0.5)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5)
-> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (v0.3 GO)、CTO directive `70050419` (v0.4)、lead-ama `1abdf00d` (v0.5 patch、auditor v2 BLOCK 残 3 件解消)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6)
+> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (v0.3 GO)、CTO directive `70050419` (v0.4)、lead-ama `1abdf00d` (v0.5)、CEO `cfb32b4a` α 採択 + CTO `1b7464ee` (v0.6 patch、auditor v3 BLOCK A2 残 3 箇所解消)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,22 @@
 
 ---
 
-## 0. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
+## 0. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
+
+[文献確認 lead-ama `e8abbf0e` / auditor v3 `21beddd8` / CEO `cfb32b4a` α 採択]:
+
+| 旧 line | 旧表現 | v0.6 fix |
+|---|---|---|
+| §3.1 (旧 line 107) | 「`registry runtime` 列で abstract」 | 「`agents.runtime` 既存 column で abstract、新規追加なし」 |
+| §3.2 (旧 line 122) | 「Discord token + `registry` 拡張」 | 「Discord token + `agents` table 既存 column 利用」 |
+| §12 Phase 6 (旧 line 540) | 「SIG runtime 全廃 (`registry` から削除)」 | 「SIG runtime 全廃 (`agents.runtime` 既存 column を TUI のみに収束)」 |
+
+= spec 全 grep `registry` で **agents SoT 整合のみ残存** (新規 table 提案なし、legacy registry 表現完全削除)。
+§4.3 row 5/6 は v0.5 で `STALE_DISPATCH` 単一固定済 (α 維持)、v0.6 で再確認のみ。
+
+---
+
+## 0a. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
 
 [文献確認 lead-ama `1abdf00d` / auditor v2 `b7398912`]:
 
@@ -40,7 +55,7 @@
 
 ---
 
-## 0a. v0.2 → v0.3 主要変更点
+## 0c. v0.2 → v0.3 主要変更点
 
 [文献確認 CTO directive `1d402109` / `907b7e9b`]:
 
@@ -104,7 +119,7 @@ v0.2 起草時 (本日早朝) に挙げた追加 incident:
 
 - `message_queue.status='pending'` を hook 起点とした **state machine driven dispatch** (= 単純 wake)
 - pg_notify (即時 trigger) + cron 30s (sweep / fallback) の hybrid
-- TUI bot の wake = tmux send-keys (registry runtime 列で abstract)
+- TUI bot の wake = tmux send-keys (`agents.runtime` 既存 column で abstract、新規追加なし)
 - 既存 wake-daemon の機能を完全包含、置換
 - claim refresh (heartbeat 30s 毎 UPDATE)、補強 #1
 - subprocess pool 動的拡張、補強 #2
@@ -119,7 +134,7 @@ v0.2 起草時 (本日早朝) に挙げた追加 incident:
 - spec §13.5.1 delivery layer の根本書換 (本 daemon は補完層)
 - inbound dedup の修正 (PR #318 別件)
 - B4 (LLM system prompt rules) — CEO `2c8c0428` deferred
-- adf-lead / dev-001 TUI 化 (別 task、Discord token + registry 拡張)
+- adf-lead / dev-001 TUI 化 (別 task、Discord token + `agents` table 既存 column 利用)
 - openclaw integration (別 architecture、参考のみ)
 - chain interruption handling (補強 #4 削除)
 
@@ -537,7 +552,7 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除。
 | 3 | dev fleet で **wake-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で wake-daemon 同等動作確認 |
 | 4 | wake 抑制 mode 解除、1 bot ずつ rollout (5 bot づつ wave)、補強 #1/#2/#5 を観測 | metric / log 確認 |
 | 5 | wake-daemon 停止、state-daemon 単独運用、launchd 切替 (補強 #3) | abnormal activity / restart loop metric alert 連携 |
-| 6 | SIG runtime 全廃 (registry から削除、adf-lead / dev-001 TUI 化完了後) | CEO 別途承認 |
+| 6 | SIG runtime 全廃 (`agents.runtime` 既存 column を TUI のみに収束、adf-lead / dev-001 TUI 化完了後) | CEO 別途承認 |
 
 ## 13. Open decisions (implementer 自由 + CEO 採択待ち)
 
