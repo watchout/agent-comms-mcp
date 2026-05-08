@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  state-daemon launchd manifest (Issue #323 spec v0.6 §5.3, 補強 #3).
+
+  Install:
+    cp config/launchd/com.agent-comms.state-daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
+
+  Operator notes:
+    - WorkingDirectory must point at the repo checkout the daemon should run
+      against. Adjust before installing if your path differs.
+    - DATABASE_URL is required; it is left blank here so the operator must
+      set it explicitly before loading. Loading without it makes the daemon
+      crash-loop into the KeepAlive throttle until the env is fixed.
+    - StandardErrorPath is the canonical alert sink (see CompositeAlertSink
+      in bin/state-daemon.ts).
+    - ThrottleInterval=10 prevents tight-loop crashes from saturating the
+      logs / DB.
+    - SIG runtime bots are not restarted by this daemon (spec §6.3 / R8 / F5);
+      they emit alerts only.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agent-comms.state-daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/bun</string>
+    <string>/Users/yuji/Developer/agent-comms-mcp/bin/state-daemon.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yuji/Developer/agent-comms-mcp</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yuji/Developer/agent-comms-mcp/logs/state-daemon.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/yuji/Developer/agent-comms-mcp/logs/state-daemon.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>DATABASE_URL</key>
+    <string>postgresql://localhost/agent_comms</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
