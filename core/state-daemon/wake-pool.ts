@@ -79,9 +79,19 @@ export class WakePool {
   private maybeGrow(): void {
     const { wakePoolMaxCapacity, wakePoolGrowStep } = this.deps.config
     if (this.capacity < wakePoolMaxCapacity) {
+      const before = this.capacity
       this.capacity = Math.min(this.capacity + wakePoolGrowStep, wakePoolMaxCapacity)
       this.deps.log?.('wake_pool_grown', { new_capacity: this.capacity })
       this.alertedSaturated = false
+      // Release waiters into the freshly-created slots so the added headroom
+      // takes effect now, not after in-flight jobs finish — matches CTO
+      // intent ("load 応じた wake 並列度") and the T24 fixture expectation.
+      const slots = this.capacity - before
+      for (let i = 0; i < slots; i++) {
+        const next = this.waiters.shift()
+        if (!next) break
+        next()
+      }
     } else if (!this.alertedSaturated) {
       this.deps.metrics.inc('state_daemon_wake_pool_saturated_total')
       void this.deps.alert.alert(
