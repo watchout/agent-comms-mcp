@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.3 — supersedes v0.2)
+> **Status**: ARC 起草 (Draft v0.4 — supersedes v0.3)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3)
-> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (CEO greenlight `e4bfe41c`)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4)
+> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (v0.3 GO)、CTO directive `70050419` (v0.4 patch、auditor BLOCK 解消)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,22 @@
 
 ---
 
-## 0. v0.2 → v0.3 主要変更点
+## 0. v0.3 → v0.4 patch (auditor BLOCK 解消)
+
+[文献確認 CTO directive `70050419` / lead-ama `d0161ad6`]:
+
+| Issue | v0.3 状態 | v0.4 fix |
+|---|---|---|
+| Q1 (lead-ama §1 改訂と同期) | public API pre/post 不足 | 6-section 元素 §1.2 で各 API (start/stop/handleQueueEvent/sweepStale/refreshClaims/checkBotLiveness) に pre/post/invariants 明記 |
+| A2 (bot_registry 抽象 drift) | spec §7.1 で bot_registry に新規 column / §13.2 O6 で「当面 txt」と矛盾 | **DB primary 一本化**: 既存 `agents` table (21 列、`runtime`/`status`/`channel_port`/`metadata` 等) を SoT 採用、`bot-registry.txt` は tmux 起動補助 op tool only と明記、§13.2 O6 削除 |
+| I1 T12 (二択許容) | `failed_reason='STALE_DISPATCH' or 'MAX_ATTEMPTS'` | **`STALE_DISPATCH` 単一固定** |
+| I1 T13 (alert 閾値 drift) | spec §11「3 回目で alert」 / fixture「5 連続未満は alert なし」 | **5 連続で alert に一本化** (spec / fixture / 6-section 元素 §2 R10 揃える) |
+
+[検証済 CTO `70050419` evidence]: `agents` table が既に DB primary、`bot-registry.txt` は tmux launcher 補助のみ。v0.3 が新規 `bot_registry` table を提案していたのは誤前提。
+
+---
+
+## 0a. v0.2 → v0.3 主要変更点
 
 [文献確認 CTO directive `1d402109` / `907b7e9b`]:
 
@@ -145,22 +160,22 @@ state-daemon は 5 transition の action を実行 (v0.2 から prevention seman
 [文献確認 CTO `1d402109`]: long task の TTL 維持に必須。
 
 ```ts
-// daemon 側
+// daemon 側 (v0.4: agents table 参照に修正)
 setInterval(async () => {
   await db.query(`
     UPDATE message_queue
        SET claim_expires_at = now() + interval '${CLAIM_TTL_SEC} seconds',
            last_heartbeat_at = now()
      WHERE status = 'read'
-       AND agent_id IN (SELECT agent_id FROM bot_registry WHERE alive = true)
+       AND agent_id IN (SELECT agent_id FROM agents WHERE status = 'online')
        AND claim_expires_at > now()  -- 既 expired は対象外、self-reclaim 経路で処理
   `);
 }, HEARTBEAT_INTERVAL_MS);  // default 30_000
 ```
 
 - `last_heartbeat_at` 列を新設 (§7.1 参照)
-- bot が alive かつ claim 有効な間、daemon 側で TTL を 1 分ずつ延長 (claim_ttl=60s 想定)
-- bot が die すると alive=false → heartbeat 停止 → 自然に TTL 失効 → §4.3 row 4 / 5 の救済へ
+- bot が `agents.status='online'` かつ claim 有効な間、daemon 側で TTL を 1 分ずつ延長 (claim_ttl=60s 想定)
+- bot が die → `agents.status` が `online` 以外に遷移 → heartbeat 停止 → 自然に TTL 失効 → §4.3 row 4 / 5 の救済へ
 
 ### 5.2 補強 #2: subprocess pool 動的拡張
 
@@ -244,7 +259,8 @@ class WakePool {
 
 ```ts
 async function checkBotLiveness() {
-  const bots = await db.query(`SELECT agent_id, last_seen_at, runtime, tmux_session FROM bot_registry`);
+  // v0.4: agents table を SoT として参照
+  const bots = await db.query(`SELECT agent_id, last_seen_at, runtime, tmux_session FROM agents`);
   const now = Date.now();
   for (const bot of bots) {
     const stale = now - bot.last_seen_at.getTime();
@@ -266,7 +282,7 @@ async function checkBotLiveness() {
 setInterval(checkBotLiveness, BOT_LIVENESS_CHECK_INTERVAL_MS);  // default 30_000
 ```
 
-- `bot_registry.last_seen_at` は bot の inbox polling 時 / send 時に UPDATE (既存 or 新規 hook)
+- `agents.last_seen_at` は bot の inbox polling 時 / send 時に UPDATE (既存 hook 経由、本 spec 範囲外)
 - restartTmuxSession は **本 daemon の責務外**、既存 launcher (例: `bin/start-bot.sh`) を呼び出す薄い wrapper
 - restart 上限 (例: 1 時間 3 回) を超えたら restart 停止 + operator escalate (CEO 介入)
 
@@ -336,10 +352,19 @@ async function wakeBot(agentId: string): Promise<void> {
 |---|---|---|---|
 | `message_queue` | `last_wake_attempt_at` | TIMESTAMPTZ | 重複 wake 抑制 (v0.1 継承) |
 | `message_queue` | `last_heartbeat_at` | TIMESTAMPTZ | 補強 #1 claim refresh 観測用 |
-| `bot_registry` (新 table) or `bot-registry.txt` | `runtime` | enum('TUI','SIG') | wake mechanism abstract |
-| `bot_registry` | `last_seen_at` | TIMESTAMPTZ | 補強 #5 死活監視 |
-| `bot_registry` | `tmux_session` | TEXT nullable | TUI bot の tmux target |
-| `bot_registry` | `alive` | BOOLEAN | 補強 #1 heartbeat 対象判定 |
+
+[検証済 CTO `70050419`、v0.4 patch]: bot 情報は **既存 `agents` table (DB primary、21 列)** を SoT として再利用:
+
+| 既存 agents.column | 役割 (v0.4 で再利用) |
+|---|---|
+| `runtime` (TUI/SIG) | wake mechanism abstract |
+| `status` | 補強 #1 heartbeat 対象判定 (例: `online` のみ refresh、`offline` は対象外) |
+| `last_seen_at` (既存 or 同等列) | 補強 #5 死活監視 |
+| `tmux_session` (既存 or `metadata` JSONB key) | TUI bot の tmux target |
+
+v0.3 が提案した「`bot_registry` 新 table」は v0.4 で **撤回** (誤前提)。`agents` table に新規 column 追加が必要なら別 migration として立てるが、現状 21 列で要件 cover 可能。
+
+`bot-registry.txt` は **tmux 起動補助の operational tool** であり、bot info SoT ではない (CTO `70050419` per)。本 daemon は読み込まない。
 
 v0.2 の `dispatch_decision` JSONB 列は v0.3 で削除 (prevention 廃止に伴い不要)。
 
@@ -470,8 +495,8 @@ abnormal activity 検出ルール (operator alert を Discord に送出):
 | T9 | pending row、age=15s、last_wake_attempt 3s 前 | skip wake (duplicate suppression、prevention とは別) |
 | T10 | read row、claim_expires_at 5s 前、age=40s | self-reclaim + re-wake |
 | T11 | failed row、IMPLICIT_ABANDON、claim_expires_at 30s 前 | reset to pending |
-| T12 | read row、attempts=max | mark FAILED_PERMANENTLY + metric inc |
-| T13 | DB connection error | retry with backoff、3 回目で alert |
+| T12 | read row、attempts=max | status='failed'、failed_reason='STALE_DISPATCH' (v0.4 単一固定)、metric inc |
+| T13 | DB connection error | retry with backoff、5 連続失敗で alert (v0.4 一本化) |
 | T14 | sweep 周期 budget 250ms 消費 | warn log、次周期 skip しない |
 | T15 | 同 row が pending-stale + read-expired 両方該当 | 1 action のみ実行 (read-expired > pending-stale) |
 | T16 | pg_notify INSERT 受信 | 即時 wake |
@@ -494,7 +519,7 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除。
 | Phase | 内容 | gate |
 |---|---|---|
 | 0 | spec freeze (本 doc v0.3)、CEO + CTO + lead-ama review | CEO accept |
-| 1 | DB schema migration: `last_wake_attempt_at`, `last_heartbeat_at`, `bot_registry.{runtime, last_seen_at, tmux_session, alive}` 列、`failed_reason` enum 拡張、pg_notify trigger | `route:ceo-approval` |
+| 1 | DB schema migration: `message_queue.last_wake_attempt_at`, `last_heartbeat_at` 追加、`failed_reason` enum 拡張 (`STALE_DISPATCH`)、pg_notify trigger。bot 情報は既存 `agents` table 利用 (新規 column 追加なし、v0.4 patch) | `route:ceo-approval` |
 | 2 | state-daemon impl (6-section dispatch 経由 agent-com-dev)、unit + contract test (T1, T8-T17, T19-T26) | auditor pre-impl gate (7 項目) |
 | 3 | dev fleet で **wake-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で wake-daemon 同等動作確認 |
 | 4 | wake 抑制 mode 解除、1 bot ずつ rollout (5 bot づつ wave)、補強 #1/#2/#5 を観測 | metric / log 確認 |
@@ -509,7 +534,6 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除。
 - pg_notify reconnect の具体 backoff 戦略 (exponential / linear)
 - subprocess pool の実装 (in-process queue / worker thread)
 - log 形式 (JSON / pino / winston)、CI 互換ならよし
-- `bot_registry` の txt → DB table 移行手順 (data backfill 戦略)
 - launchd plist の log path / env (本 spec sample は参考)
 
 ### 13.2 CEO 採択待ち (本 spec freeze 前に確定)
@@ -519,11 +543,11 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除。
 | O2 | claim TTL default 60s? | 60 | 値変更要否 |
 | O3 | heartbeat interval default 30s? | 30 | 値変更要否 |
 | O5 | wake 抑制 mode rollout phase 3 で必須? | 必須 (canary) | 同意 / より長期間 / より短期間 |
-| O6 | bot_registry を txt 維持 or DB table 化? | 当面 txt 拡張、後日 DB 化検討 | 同意 / 即 DB 化 |
 | O7 (v0.3) | bot restart 上限 1h/3 回? | 3/hour | 値変更要否 |
 | O8 (v0.3) | abnormal activity threshold 5msg/5min? | 5/5min | 値変更要否 |
 
 v0.2 の O1 (ack pattern detection) / O4 (TUI rate limit) は v0.3 で削除 (prevention 廃止)。
+v0.3 の O6 (bot_registry txt vs DB) は v0.4 で削除 (CTO `70050419` 検証済、`agents` table SoT が既存設計、議論余地なし)。
 
 ## 14. 後続 chain
 

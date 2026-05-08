@@ -43,7 +43,6 @@ export class StateDaemon {
   constructor(deps: { db: DBClient; pgListen: PgListenClient; tmux: TmuxClient; clock: Clock; metrics: Metrics; alert: AlertSink });
   start(): Promise<void>;
   stop(): Promise<void>;
-  // public for test
   handleQueueEvent(event: QueueEvent): Promise<void>;
   sweepStale(): Promise<SweepResult>;
   refreshClaims(): Promise<RefreshResult>;
@@ -51,8 +50,20 @@ export class StateDaemon {
 }
 ```
 
+#### 1.2.1 各 public method の pre/post/invariants (v0.4 Q1 patch)
+
+| method | pre-condition | post-condition | invariants |
+|---|---|---|---|
+| `start()` | DB / pg LISTEN client に接続可能、tmux client 利用可能、daemon 未起動 | LISTEN 確立、cron / heartbeat / liveness インターバル全て稼働、`status='running'` | 重複起動禁止 (二重 call は throw `AlreadyStartedError`) |
+| `stop()` | daemon 起動済 | 全インターバル停止、in-flight wake は最大 5s 待機、LISTEN 切断、`status='stopped'` | graceful shutdown 中の新規 wake は受け付けない、idempotent (二重 call OK) |
+| `handleQueueEvent(event)` | `event.id` は `message_queue` row 存在、daemon 稼働中 | §4.3 表に従い 0 or 1 action 実行、`last_wake_attempt_at` 更新 (wake 時のみ)、metric inc | idempotent (同 event 再投入で副作用なし)、duplicate suppression (last_wake_attempt 5s 以内) で skip 可、prevention check は持たない (F1) |
+| `sweepStale()` | daemon 稼働中、cron tick または手動 call | §4.3 row 2-6 を **batch** で評価、各 row 独立に 0 or 1 action、SweepResult に処理件数 / 各 result 集計 | budget=200ms 超過で warn log、次 tick は skip しない、order 保証なし (idempotent 前提) |
+| `refreshClaims()` | daemon 稼働中、heartbeat tick | `agents.status='online'` AND `claim_expires_at > now()` の row のみ TTL を `now() + claim_ttl_sec` に延長、`last_heartbeat_at = now()` | 既 expired (`claim_expires_at <= now()`) は対象外 (self-reclaim 経路に委ねる、F7)、bot offline 時は対象外 (= TTL 自然失効) |
+| `checkBotLiveness()` | daemon 稼働中、liveness tick | `agents.last_seen_at` が threshold 超過 + `runtime='TUI'` + tmux session 不在 の bot を restart、上限到達は抑止 + escalate alert | restart 実行は 1h 内 N 回上限 (F8)、SIG runtime は restart 試行不可 (alert のみ)、idempotent |
+
 - 全 public method idempotent
 - DI で test 容易性確保 (clock / metrics / alert は fake 注入可)
+- pre 違反は throw、post 違反は merge gate (contract test) で検出
 
 ### 1.3 DB schema 契約 (migration 必須)
 
@@ -61,10 +72,10 @@ export class StateDaemon {
 | `message_queue.last_wake_attempt_at` | TIMESTAMPTZ | YES | NULL |
 | `message_queue.last_heartbeat_at` | TIMESTAMPTZ | YES | NULL |
 | `message_queue.failed_reason` (enum 拡張) | enum | — | 既存値 + `'STALE_DISPATCH'` |
-| `bot_registry.runtime` | enum('TUI','SIG') | NO | 'TUI' |
-| `bot_registry.last_seen_at` | TIMESTAMPTZ | YES | NULL |
-| `bot_registry.tmux_session` | TEXT | YES | NULL |
-| `bot_registry.alive` | BOOLEAN | NO | true |
+
+[v0.4 patch]: bot 情報は **既存 `agents` table を SoT として再利用** (CTO `70050419` 検証済)。本 spec は新規 column 追加を提案しない (`agents.runtime` / `status` / `last_seen_at` / `tmux_session` 等は既存)。bot 関連 column 追加が必要になった場合は別 migration として分離。
+
+`bot-registry.txt` は tmux 起動補助の operational tool であり、本 daemon は読み込まない。F も参照。
 
 trigger: `message_queue` の AFTER INSERT OR UPDATE OF (status, claim_expires_at) で `pg_notify('queue_event', ...)`。
 
@@ -79,7 +90,7 @@ trigger: `message_queue` の AFTER INSERT OR UPDATE OF (status, claim_expires_at
 | error class | trigger | recovery |
 |---|---|---|
 | `DBConnectionError` | LISTEN socket / query 失敗 | exponential backoff、5 連続で alert |
-| `TmuxSendKeysError` | wake 対象 tmux session 不在 | bot_registry.alive=false 設定、補強 #5 で restart 試行 |
+| `TmuxSendKeysError` | wake 対象 tmux session 不在 | `agents.status` を online 以外に遷移、補強 #5 で restart 試行 |
 | `WakePoolSaturatedError` | wake_pool が MAX_CAPACITY 到達 + queue 溢れ | metric inc、alert |
 | `BotRestartLimitError` | 同 bot 1h 内 restart 4 回目 | 抑止 + CEO escalate alert |
 
@@ -184,7 +195,7 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 削除。
 - pg_notify reconnect の backoff 戦略 (exponential / linear)
 - subprocess pool 実装方式 (in-process queue / worker thread / async semaphore)
 - log library 選定 (pino / winston / 構造化 JSON 直書き)、CI 互換ならよし
-- bot_registry の txt → DB table migration の data backfill 手順
+- (v0.4 削除: bot_registry txt→DB migration は誤前提、`agents` table 既存利用)
 - launchd plist の log path / env 詳細 (sample は spec §5.3 のまま使ってよい、path 調整可)
 - restart 実行のため呼び出す既存 launcher script の選定 (例: `bin/start-bot.sh`)
 - alert sink (Discord channel) の具体接続実装 (既存 `mcp__agent-comms__send` 利用 or 別 path)
@@ -200,7 +211,6 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 削除。
 | O2 | claim TTL default 60s | 60 |
 | O3 | heartbeat interval default 30s | 30 |
 | O5 | wake 抑制 mode rollout phase 3 で必須 | 必須 |
-| O6 | bot_registry を txt 維持 or DB table 化 | 当面 txt |
 | O7 | bot restart 上限 1h/3 回 | 3/hour |
 | O8 | abnormal activity threshold 5msg/5min | 5/5min |
 

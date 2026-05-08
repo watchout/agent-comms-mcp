@@ -24,7 +24,7 @@
 ## T1: new_pending_dispatched
 
 **precondition**:
-- bot_registry: `(agent_id='alpha', runtime='TUI', tmux_session='alpha-session', alive=true, last_seen_at=T0)`
+- agents: `(agent_id='alpha', runtime='TUI', tmux_session='alpha-session', status='online', last_seen_at=T0)`
 - message_queue: 空
 
 **trigger**:
@@ -40,7 +40,7 @@
 ## T8: pending_stale_rewake
 
 **precondition**:
-- bot_registry: alpha alive
+- agents: alpha status='online'
 - message_queue: R1 = `(agent_id='alpha', status='pending', created_at=T0, last_wake_attempt_at=NULL)`
 
 **trigger**:
@@ -71,7 +71,7 @@
 ## T10: read_expired_reclaim
 
 **precondition**:
-- bot_registry: alpha alive
+- agents: alpha status='online'
 - R1 = `(status='read', claim_expires_at = T0-5s, agent_id='alpha', created_at = T0-40s)`
 
 **trigger**:
@@ -107,7 +107,7 @@
 - cron sweep
 
 **expected**:
-- DB: R1.status='failed'、failed_reason='STALE_DISPATCH' or 'MAX_ATTEMPTS' (impl 選択、Open §5)
+- DB: R1.status='failed'、failed_reason='STALE_DISPATCH' (v0.4 単一固定、auditor I1 解消)
 - alert 1 回 (`max_attempts` 含む string)
 - metric: `state_daemon_wake_actions_total{result='permanently_failed'}` += 1
 
@@ -190,7 +190,7 @@
 ## T19: sig_runtime_wake_throws
 
 **precondition**:
-- bot_registry: `(agent_id='legacy', runtime='SIG')`
+- agents: `(agent_id='legacy', runtime='SIG')`
 
 **trigger**:
 - INSERT R1 (`agent_id='legacy'`)、wake 試行
@@ -219,7 +219,7 @@
 ## T21 (v0.3 新規): heartbeat_refresh_extends_claim
 
 **precondition**:
-- bot_registry: alpha alive
+- agents: alpha status='online'
 - R1 = `(status='read', agent_id='alpha', claim_expires_at = T0+30s)`
 - claim_ttl_sec=60
 
@@ -241,7 +241,7 @@
 ## T22 (v0.3 新規): dead_bot_tmux_missing_restart
 
 **precondition**:
-- bot_registry: `(agent_id='zombie', runtime='TUI', tmux_session='zombie-sess', last_seen_at=T0-3min, alive=true)`
+- agents: `(agent_id='zombie', runtime='TUI', tmux_session='zombie-sess', last_seen_at=T0-3min, status='online')`
 - tmux mock: `sessionExists('zombie-sess')` = false
 
 **trigger**:
@@ -251,14 +251,14 @@
 - restart launcher 呼出 1 回 (target='zombie')
 - metric: `state_daemon_bot_restarts_total{agent_id='zombie'}` += 1
 - alert 1 回 (`zombie restarted` 含む)
-- DB: bot_registry.zombie.alive = false (restart 完了通知で alive=true へ別 path で復帰)
+- DB: `agents.zombie.status` を online 以外に遷移 (restart 完了通知で online 復帰、別 path)
 
 ---
 
 ## T23 (v0.3 新規): bot_restart_loop_limit_escalate
 
 **precondition**:
-- bot_registry: `(agent_id='flapping', runtime='TUI', last_seen_at=T0-3min)`
+- agents: `(agent_id='flapping', runtime='TUI', last_seen_at=T0-3min)`
 - restart 履歴: 直近 1h で 3 回 restart 済
 
 **trigger**:
