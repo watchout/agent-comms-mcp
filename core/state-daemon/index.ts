@@ -89,6 +89,18 @@ export class StateDaemon {
   private readonly inflightWakes = new Set<Promise<void>>()
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
+  /**
+   * §10.3 / R9 abnormal activity rolling window. Per agent, keeps a list of
+   * recent dispatch timestamps; when the count within
+   * `abnormalActivityWindowMs` reaches `abnormalActivityThreshold` we inc
+   * `state_daemon_abnormal_activity_total{agent_id, kind='dispatch'}` and
+   * fire an operator alert. Reactive control — wake itself still happens
+   * (= 「出てから制御」 spirit, F1).
+   */
+  private readonly dispatchHistory = new Map<string, Date[]>()
+  /** One-shot per-agent latch so we don't re-alert on every event past threshold. */
+  private readonly abnormalAlerted = new Set<string>()
+
   constructor(deps: StateDaemonDeps) {
     this.db = deps.db
     this.pgListen = deps.pgListen
@@ -187,9 +199,39 @@ export class StateDaemon {
     if (!row) return // row may have been deleted
 
     if (row.status === 'pending') {
+      this.recordDispatchForAbnormalCheck(row.agent_id)
       await this.runWakeIfNotSuppressed(row, /* dedupResult */ 'dedup_skipped')
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
+  }
+
+  /**
+   * §10.3 / R9 abnormal activity detection (auditor cycle 1 Axis 1). Counts
+   * dispatch events per agent in a rolling window; on threshold cross, emit
+   * one alert + metric (latched to avoid alert flooding). Reset when the
+   * agent's window quietens (count drops below threshold).
+   */
+  private recordDispatchForAbnormalCheck(agentId: string): void {
+    const now = this.clock.now()
+    const windowStart = now.getTime() - this.config.abnormalActivityWindowMs
+    const history = this.dispatchHistory.get(agentId) ?? []
+    const recent = history.filter((t) => t.getTime() > windowStart)
+    recent.push(now)
+    this.dispatchHistory.set(agentId, recent)
+
+    if (recent.length >= this.config.abnormalActivityThreshold) {
+      if (!this.abnormalAlerted.has(agentId)) {
+        this.metrics.inc('state_daemon_abnormal_activity_total', {
+          agent_id: agentId, kind: 'dispatch',
+        })
+        void this.alert.alert(
+          `${agentId} abnormal activity: ${recent.length} dispatches in window (= 5 min default), 5+ msg threshold tripped — operator review`,
+        )
+        this.abnormalAlerted.add(agentId)
+      }
+    } else {
+      this.abnormalAlerted.delete(agentId)
+    }
   }
 
   // ── Cron sweep (§4.3 row 2-6) ──────────────────────────────────────────────
@@ -301,14 +343,24 @@ export class StateDaemon {
       const lastSeen = bot.last_seen_at ? new Date(bot.last_seen_at).getTime() : 0
       const stale = now - lastSeen
       if (stale <= this.config.botDeadThresholdMs) continue
-      if (bot.runtime !== 'TUI' || !bot.tmux_session) {
+      // §5.4 / R7: TUI bot with stale last_seen_at gets restart attempted
+      // regardless of whether the tmux_session field is currently populated
+      // — the launcher (start-runbot.sh) reattaches or recreates the session
+      // by agent_id, so a missing tmux_session value is not a blocker; it is
+      // exactly the case we want restarted. Non-TUI runtimes are still alert-
+      // only (cycle 1 auditor Axis 1: tmux_session 欠落 path も restart 試行へ).
+      if (bot.runtime !== 'TUI') {
         await this.alert.alert(
           `bot ${bot.agent_id} dead (runtime=${bot.runtime}, manual intervention)`,
         )
         result.escalated++
         continue
       }
-      const exists = await this.tmux.sessionExists(bot.tmux_session)
+      // tmux_session may be NULL (per-agent metadata not yet seeded) — when
+      // it is, treat the session as absent and let the restart path run.
+      const exists = bot.tmux_session
+        ? await this.tmux.sessionExists(bot.tmux_session)
+        : false
       if (exists) continue
 
       if (this.exceededRestartLimit(bot.agent_id)) {

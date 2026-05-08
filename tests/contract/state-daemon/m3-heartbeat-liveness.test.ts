@@ -315,34 +315,70 @@ describe('T25 wake_pool_shrink_on_idle', () => {
 })
 
 // ── T26 ───────────────────────────────────────────────────────────────────────
-describe('T26 abnormal_activity_alert', () => {
-  test('reactive control alert path is wired (smoke — emit alert via alert sink)', async () => {
-    // The full §10.3 detection (monitoring agent_messages send rate) is impl
-    // detail of a future hook. This fixture pins the alert sink path so the
-    // reactive-control wire is present and exercised end-to-end. When the
-    // detection rule lands, it consumes this same alert sink with the
-    // `5+ msg` content marker.
+describe('T26 abnormal_activity_alert (R9 daemon detection path)', () => {
+  test('threshold reached → metric inc + alert + wake still fires (cycle 2 R9 body)', async () => {
+    // Spec §10.3 / R9: threshold-many dispatch events for the same agent
+    // within the configured window → state_daemon_abnormal_activity_total
+    // inc + operator alert. The wake itself MUST still fire — reactive
+    // control does not block dispatch (= 「出てから制御」 spirit, F1).
+    // Cycle 2 (auditor Axis 1+5(c)): drives the daemon's detection path
+    // end-to-end, not a direct alert smoke.
     const T0 = new Date('2026-05-08T00:00:00.000Z')
-    const h = buildHarness(T0)
+    const agent = makeAgentId('t26-chatty')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+
+    const h = buildHarness(T0, {
+      abnormalActivityWindowMs: 300_000,
+      abnormalActivityThreshold: 5,
+    })
     await h.daemon.start()
     try {
-      // Direct alert path (the rule itself, when it lands, will call this)
-      await h.alert.alert('chatty 5min 5+ msg send rate observed (sd-test-chatty)')
+      for (let i = 0; i < 5; i++) {
+        const ins = await pg.query(
+          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', '{}', $2) RETURNING id`,
+          [agent, T0],
+        )
+        const id = Number((ins.rows as Array<{ id: number }>)[0].id)
+        await h.daemon.__testHandleEvent({
+          op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+        })
+        h.clock.advance(1_000)
+      }
+      // 5th event trips the latched alert + metric.
+      expect(h.metrics.countInc('state_daemon_abnormal_activity_total', { agent_id: agent, kind: 'dispatch' })).toBe(1)
+      expect(h.alert.contains(`${agent} abnormal activity`)).toBe(true)
       expect(h.alert.contains('5+ msg')).toBe(true)
-      // No prevention applied: handleQueueEvent path remains an immediate wake
-      // on a fresh row — confirming the reactive (post-fact) flavour, not
-      // pre-emptive blocking. (= §10.3 「出てから制御」 spirit.)
-      const agent = makeAgentId('t26-chatty')
-      await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
-      const ins = await pg.query(
-        `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', '{}', $2) RETURNING id`,
-        [agent, T0],
-      )
-      const id = Number((ins.rows as Array<{ id: number }>)[0].id)
-      await h.daemon.__testHandleEvent({
-        op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
-      })
-      expect(h.tmux.sentKeys.length).toBe(1)
+      // Wake still fires (at least one ok) — F1 reactive, not preventive.
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'ok' })).toBeGreaterThanOrEqual(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('T26b — sub-threshold count: no metric inc, no alert', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t26-quiet')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+
+    const h = buildHarness(T0, {
+      abnormalActivityWindowMs: 300_000,
+      abnormalActivityThreshold: 5,
+    })
+    await h.daemon.start()
+    try {
+      for (let i = 0; i < 4; i++) {
+        const ins = await pg.query(
+          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', '{}', $2) RETURNING id`,
+          [agent, T0],
+        )
+        const id = Number((ins.rows as Array<{ id: number }>)[0].id)
+        await h.daemon.__testHandleEvent({
+          op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+        })
+        h.clock.advance(1_000)
+      }
+      expect(h.metrics.countInc('state_daemon_abnormal_activity_total', { agent_id: agent, kind: 'dispatch' })).toBe(0)
+      expect(h.alert.contains('abnormal activity')).toBe(false)
     } finally {
       await h.daemon.stop()
     }

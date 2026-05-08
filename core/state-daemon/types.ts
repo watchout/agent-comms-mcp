@@ -77,12 +77,18 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   agentIdPrefix: null,
 }
 
-/** pg_notify('queue_event', ...) JSON payload (§7.3). */
+/** pg_notify('queue_event', ...) JSON payload (§7.3).
+ *
+ * `'skipped'` is intentionally absent — the v0.3 simplification removed it
+ * as an enum value (CEO `e4bfe41c` per spec §0c, F3 forbidden line).
+ * Listing it here would invite silent re-introduction of the prevention
+ * path that v0.3 deleted. Auditor cycle 1 Axis 5(a) BLOCK.
+ */
 export interface QueueEvent {
   op: 'INSERT' | 'UPDATE'
   id: number
   agent_id: string
-  status: 'pending' | 'read' | 'replied' | 'failed' | 'skipped'
+  status: 'pending' | 'read' | 'replied' | 'failed'
   claim_expires_at: string | null
 }
 
