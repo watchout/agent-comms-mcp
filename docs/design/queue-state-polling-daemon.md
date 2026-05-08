@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.4 — supersedes v0.3)
+> **Status**: ARC 起草 (Draft v0.5 — supersedes v0.4)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4)
-> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (v0.3 GO)、CTO directive `70050419` (v0.4 patch、auditor BLOCK 解消)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5)
+> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO directive `1d402109` (v0.3 GO)、CTO directive `70050419` (v0.4)、lead-ama `1abdf00d` (v0.5 patch、auditor v2 BLOCK 残 3 件解消)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,19 @@
 
 ---
 
-## 0. v0.3 → v0.4 patch (auditor BLOCK 解消)
+## 0. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
+
+[文献確認 lead-ama `1abdf00d` / auditor v2 `b7398912`]:
+
+| Issue | v0.4 状態 | v0.5 fix |
+|---|---|---|
+| Q3 (F12 file drift) | lead-ama dispatch text に「F12 追加」と書いたが翻訳元素 file 未反映 | `state-daemon-6section-elements.md` §3 Forbidden に F12 追加 (新規 `bot_registry` table 提案禁止 / `bot-registry.txt` 読込禁止) |
+| A2 残 (§6.3 drift) | §7.1 修正済、§6.3 で `registry.get()` / `registry.runtime` / `bot-registry.txt` 列追加表現が残存 | §6.3 を `agents.findByAgentId()` / `agents.runtime` 経由 SoT 表記に修正、legacy registry 表現削除 |
+| I1 残 (§4.3 row 5/6 drift) | T12 fixture / §11 で STALE_DISPATCH 単一固定済、§4.3 で row 5=`FAILED_PERMANENTLY` / row 6=`STALE_DISPATCH` 残存 | (α) row 5/6 とも `STALE_DISPATCH` 単一固定 (CEO 採択 `α`、最簡整合) |
+
+---
+
+## 0b. v0.3 → v0.4 patch (auditor BLOCK 解消)
 
 [文献確認 CTO directive `70050419` / lead-ama `d0161ad6`]:
 
@@ -146,8 +158,8 @@ state-daemon は 5 transition の action を実行 (v0.2 から prevention seman
 | 2 | pending AND age > PENDING_STALE_AFTER (10s) | re-wake | 取りこぼし救済 (v0.1 継承) |
 | 3 | read AND claim_expires_at < now() | self-reclaim → re-wake | proactive reclaim (v0.1 継承) |
 | 4 | failed AND failed_reason='IMPLICIT_ABANDON' AND claim_expires_at > now() - 60s | reset to pending | recent abandon は recoverable (v0.1 継承) |
-| 5 | read AND attempts >= max_attempts AND age > 5min | mark FAILED_PERMANENTLY + alert | infinite reclaim loop 防止 (v0.1 継承) |
-| 6 | stuck pending > 5min | mark failed STALE_DISPATCH | (v0.2 継承) |
+| 5 | read AND attempts >= max_attempts AND age > 5min | status='failed'、failed_reason='STALE_DISPATCH' + alert | infinite reclaim loop 防止 (v0.1 継承)、failed_reason は v0.5 で STALE_DISPATCH 単一固定 (α 採択) |
+| 6 | stuck pending > 5min | status='failed'、failed_reason='STALE_DISPATCH' | (v0.2 継承、v0.5 で row 5 と統一) |
 
 各 action は idempotent。`last_wake_attempt_at` で 5s 以内重複 wake 抑制 (heartbeat と区別)。
 
@@ -319,8 +331,9 @@ setInterval(checkBotLiveness, BOT_LIVENESS_CHECK_INTERVAL_MS); // 補強 #5
 [文献確認 CEO `7670b33f` Q3=i]:
 
 ```ts
+// v0.5: agents table SoT 経由に修正、legacy registry 削除
 async function wakeBot(agentId: string): Promise<void> {
-  const bot = registry.get(agentId);
+  const bot = await agents.findByAgentId(agentId);  // agents table が SoT (§7.1 / v0.4)
   if (bot.runtime !== 'TUI') {
     throw new Error(`SIG mode 廃止済、TUI のみ allowed (got ${bot.runtime})`);
   }
@@ -329,7 +342,7 @@ async function wakeBot(agentId: string): Promise<void> {
 }
 ```
 
-`registry.runtime` は既存 bot-registry.txt に新規列追加 (TUI / SIG)、SIG は migration 後削除予定。
+`agents.runtime` は既存 column (TUI / SIG)、SIG は migration 後削除予定。`bot-registry.txt` は tmux 起動補助の operational tool であり、本 daemon は読み込まない (v0.4 §7.1 と一貫)。
 
 ### 6.4 subprocess pool 制御
 

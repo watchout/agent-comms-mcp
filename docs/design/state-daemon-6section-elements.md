@@ -127,6 +127,7 @@ spec 章を section 番号で参照させる:
 - **F9**: spec §13.2 CEO 採択待ち項目 (O2/O3/O5/O6/O7/O8) を CEO 確定前に default 値で hard-code しないこと、config 経由で上書き可能に
 - **F10**: agent-memory MCP 呼出時 `project` 引数を省略しないこと、必ず `agent-comms-mcp` を explicit 渡し (memory partition 越境禁止)
 - **F11**: log や metric label に PII / 全文 message body を含めないこと (`row_id`、`agent_id` のみ)
+- **F12** (v0.5 patch): 新規 `bot_registry` table 提案を追加しないこと (`agents` table が SoT、CTO `70050419` 検証済)。`bot-registry.txt` を daemon 経路から読み込む path 追加禁止 (txt は tmux 起動補助 operational tool のみ)。再導入 PR は **block**
 
 過去 incident 参照:
 - B8 type loop / "Idle 維持" 連射 → v0.2 で prevention 検討、v0.3 で却下 (TUI 統一 + B4 で対応)
