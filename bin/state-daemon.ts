@@ -85,13 +85,21 @@ class TmuxShellAdapter implements TmuxClient {
     }
   }
   async sendKeys(session: string, payload: string): Promise<void> {
-    await execFileAsync('tmux', ['send-keys', '-t', session, payload, 'Enter'])
+    // The daemon's contract format (used by core/state-daemon/index.ts and the
+    // T1/T16 fixtures) is the payload already including its trailing newline,
+    // e.g. 'check inbox\n'. We send the string through tmux send-keys as-is;
+    // appending an extra `Enter` literal would double-press and is therefore
+    // intentionally omitted. tmux interprets the embedded newline as the
+    // Return key under the default key-syntax mode.
+    await execFileAsync('tmux', ['send-keys', '-t', session, payload])
   }
   async restartSession(agentId: string): Promise<void> {
-    // Calls existing launcher script. The scripts/start-bot.sh path is the
-    // contract here — if the script doesn't exist this throws and the daemon
-    // emits the "restart failed" alert via checkBotLiveness's catch block.
-    await execFileAsync('bash', ['scripts/start-bot.sh', agentId])
+    // Existing launcher: scripts/start-runbot.sh (the only start script
+    // present in this repo as of #323 m4 — spec §13.2 referenced
+    // `scripts/start-bot.sh` as a "例" but the actual file in tree is
+    // start-runbot.sh; if a different launcher is required for state-daemon
+    // restarts, an Open-decision §5 PR will swap this single line).
+    await execFileAsync('bash', ['scripts/start-runbot.sh', agentId])
   }
 }
 

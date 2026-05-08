@@ -38,10 +38,13 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
     expect(SRC).toMatch(/LISTEN \$\{channel\}/)
     // The actual channel name is supplied by daemon.start() per types.ts.
   })
-  test('tmux adapter: has-session check + send-keys with Enter + restart launcher', () => {
+  test('tmux adapter: has-session check + send-keys (payload-as-is) + restart launcher', () => {
     expect(SRC).toMatch(/tmux.*has-session/)
-    expect(SRC).toMatch(/send-keys.*Enter/)
-    expect(SRC).toMatch(/scripts\/start-bot\.sh/)
+    expect(SRC).toMatch(/send-keys.*-t/)
+    // Restart launcher = scripts/start-runbot.sh (the existing launcher in
+    // tree; spec §13.2 referenced `scripts/start-bot.sh` as an example name
+    // only — see CTO L3 prep finding 2 in the PR description).
+    expect(SRC).toMatch(/scripts\/start-runbot\.sh/)
   })
   test('env → config mapping covers all StateDaemonConfig knobs', () => {
     // Every public knob must have a STATE_DAEMON_* env mapping. Pin a sample.
