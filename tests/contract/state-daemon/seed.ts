@@ -7,6 +7,8 @@
  * schema. The contract is: `cleanFixture` removes everything the fixture wrote.
  */
 import { Client } from 'pg'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export const TEST_PREFIX = 'sd-test-'
 
@@ -14,10 +16,39 @@ export function makeAgentId(suffix: string): string {
   return `${TEST_PREFIX}${suffix}`
 }
 
+const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
+const MIGRATION_FILE = 'db/migrations/2026-05-08-state-daemon-323.up.sql'
+let migrationApplied = false
+
+/**
+ * Apply the state-daemon migration once per test process. The CI workflow
+ * runs `bun run db/migrate.ts` which only installs the inline core schema
+ * (paired files under `db/migrations/` are operator-driven per the migrate.ts
+ * comment, so the workflow never reaches them). The migration is idempotent
+ * — every statement is guarded — so re-applying on a dev DB that already
+ * has the schema from PR #329 is a no-op.
+ */
+async function ensureStateDaemonMigration(client: Client): Promise<void> {
+  if (migrationApplied) return
+  try {
+    const sql = readFileSync(join(REPO_ROOT, MIGRATION_FILE), 'utf-8')
+    await client.query(sql)
+    migrationApplied = true
+  } catch (err) {
+    // The migration file may not be present on a branch that has rebased
+    // past it; keep the seed helper resilient so other branches can still
+    // run unrelated DB tests.
+    process.stderr.write(
+      `[state-daemon test seed] migration apply skipped: ${(err as Error).message}\n`,
+    )
+  }
+}
+
 export async function openClient(): Promise<Client> {
   const url = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const c = new Client({ connectionString: url })
   await c.connect()
+  await ensureStateDaemonMigration(c)
   return c
 }
 
