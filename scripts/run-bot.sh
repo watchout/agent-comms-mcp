@@ -53,11 +53,6 @@ LLM_CMD="${LLM_CMD:-claude --print}"
 LLM_TIMEOUT_SECONDS="${LLM_TIMEOUT_SECONDS:-120}"
 MAX_SELF_IN_CHAIN="${MAX_SELF_IN_CHAIN:-3}"
 MAX_REPLY_CHAIN_DEPTH="${MAX_REPLY_CHAIN_DEPTH:-10}"
-# B8 hotfix: align next CLI's chain depth with B8 detector threshold so L1/L2 are not dead code.
-# next CLI uses AGENT_COM_REPLY_CHAIN_DEPTH (default 5) for SQL recursion truncation; without
-# this export, MAX_REPLY_CHAIN_DEPTH=10 detector threshold is unreachable. (post-merge smoke
-# discovery 2026-05-08, agent-com-dev TASK:block msg 662c2af2)
-export AGENT_COM_REPLY_CHAIN_DEPTH="${AGENT_COM_REPLY_CHAIN_DEPTH:-$MAX_REPLY_CHAIN_DEPTH}"
 MAX_PAIR_BOUNCE="${MAX_PAIR_BOUNCE:-3}"
 RUN_BOT_LOG_FILE="${RUN_BOT_LOG_FILE:-${PROJECT_DIR}/logs/run-bot-${AGENT_ID}.log}"
 MAX_SEND_RETRIES=3
