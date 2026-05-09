@@ -211,7 +211,6 @@
 - `state_daemon_wake_actions_total{result='non_tui_skipped'}` += 5 (5 回 inc)
 - `state_daemon_abnormal_activity_total` += 0 (rolling window 不参加)
 - alert sink 呼出 = 0 (cycle 2 Axis 3 PASS 検証済 [文献確認: auditor msg `1503bed5`])
-- alert 1 回
 
 ---
 
