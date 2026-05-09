@@ -1,5 +1,10 @@
 /**
- * State-daemon m2 fixtures: T8-T17, T19, T20.
+ * State-daemon m2 fixtures: T8-T17, T19b, T20.
+ *
+ * (T19 `sig_runtime_wake_throws` was replaced by T19b
+ * `non_tui_runtime_wake_silent_skip` per re-chain Bug 3 — see header
+ * comment on the T19b describe block below. The numeric "T19" slot in
+ * the spec is now permanently re-assigned to the silent-skip semantic.)
  *
  * Each test seeds a clean slate (`cleanAll`) and exercises one §4.3 transition
  * or §6.x dispatch path. The daemon is started/stopped per-test so cron and
@@ -475,6 +480,50 @@ describe('T19b non_tui_runtime_wake_silent_skip', () => {
       expect(
         h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
       ).toBe(4)
+      expect(h.alert.alerts.length).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('T19b — 5-event threshold case: still no alert, no abnormal_activity metric (cycle 2 Axis 1)', async () => {
+    // Cycle 2 fix (auditor Axis 1): the original T19b stopped at 4 events,
+    // so the actual abnormal-activity threshold (default 5) was never
+    // exercised on a non-TUI agent. Silent-skip semantic must hold AT
+    // and ABOVE the threshold — 5 dispatches against `runtime='discord'`
+    // should still produce zero alerts and zero abnormal_activity metric
+    // ticks (recording is gated behind the TUI runtime check in
+    // executeWake; non-TUI never enters the rolling window).
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t19b-5x')
+    await seedAgent(pg, { agent_id: agent, runtime: 'discord' })
+    const ids: number[] = []
+    for (let i = 0; i < 5; i++) {
+      ids.push(
+        await seedQueueRow(pg, { agent_id: agent, status: 'pending', created_at: T0 }),
+      )
+    }
+
+    const h = buildHarness(T0, {
+      abnormalActivityThreshold: 5, // default, but pin explicit for the assertion
+    })
+    await h.daemon.start()
+    try {
+      for (const id of ids) {
+        await h.daemon.__testHandleEvent({
+          op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+        })
+      }
+      // 5 silent-skips, 0 abnormal-activity metric ticks (gated behind TUI check),
+      // 0 alerts. The dispatch counter must NOT advance for non-TUI agents.
+      expect(
+        h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
+      ).toBe(5)
+      expect(
+        h.metrics.countInc('state_daemon_abnormal_activity_total', {
+          agent_id: agent, kind: 'dispatch',
+        }),
+      ).toBe(0)
       expect(h.alert.alerts.length).toBe(0)
     } finally {
       await h.daemon.stop()

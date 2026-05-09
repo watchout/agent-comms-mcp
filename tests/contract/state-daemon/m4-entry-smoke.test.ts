@@ -84,12 +84,35 @@ describe('m4 — launchd plist source-pin', () => {
     expect(PLIST).toMatch(/bin\/state-daemon\.ts/)
     expect(PLIST).toMatch(/bun/)
   })
+  test('Bug 1 / F14 / R13 — bun is referenced by absolute path (no PATH lookup)', () => {
+    // Cycle 2 fix (auditor Axis 4): pin the exact host-correct absolute
+    // bun path. Earlier `/usr/local/bin/bun` did not exist on this
+    // Apple-Silicon host and the daemon crash-looped. Loose `bun`
+    // matching is not enough — the regression must be pinned.
+    expect(PLIST).toMatch(
+      /<key>ProgramArguments<\/key>\s*<array>\s*<string>\/Users\/yuji\/\.bun\/bin\/bun<\/string>/,
+    )
+    // Negative pin: forbid the legacy /usr/local/bin/bun string.
+    expect(PLIST).not.toMatch(/<string>\/usr\/local\/bin\/bun<\/string>/)
+  })
   test('Stdout + Stderr paths declared (operator alert sink anchor)', () => {
     expect(PLIST).toMatch(/StandardOutPath/)
     expect(PLIST).toMatch(/StandardErrorPath/)
   })
   test('DATABASE_URL is in EnvironmentVariables (operator must set before load)', () => {
     expect(PLIST).toMatch(/DATABASE_URL/)
+  })
+  test('Bug 2 / F15 / R14 — EnvironmentVariables.PATH is non-empty and includes Homebrew', () => {
+    // Cycle 2 fix (auditor Axis 4): launchd does not inherit a login
+    // PATH, so subprocess spawns (`tmux send-keys`, restart launcher)
+    // need an explicit PATH that contains the Homebrew prefix(es). Pin
+    // the key + value so a future plist edit cannot silently drop it.
+    expect(PLIST).toMatch(/<key>PATH<\/key>\s*<string>([^<]+)<\/string>/)
+    const pathMatch = PLIST.match(/<key>PATH<\/key>\s*<string>([^<]+)<\/string>/)
+    expect(pathMatch).not.toBeNull()
+    const pathValue = pathMatch![1]
+    expect(pathValue.length).toBeGreaterThan(0)
+    expect(pathValue).toContain('/opt/homebrew/bin')
   })
 })
 

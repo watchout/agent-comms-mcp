@@ -199,7 +199,10 @@ export class StateDaemon {
     if (!row) return // row may have been deleted
 
     if (row.status === 'pending') {
-      this.recordDispatchForAbnormalCheck(row.agent_id)
+      // Cycle 2 fix (auditor Axis 1+3): abnormal-activity recording must
+      // happen AFTER the runtime gate so non-TUI rows (e.g. CEO's Discord
+      // human account) cannot trip the threshold + alert. The recording
+      // moved into `executeWake` where it sits behind the TUI guard.
       await this.runWakeIfNotSuppressed(row, /* dedupResult */ 'dedup_skipped')
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
@@ -441,9 +444,17 @@ export class StateDaemon {
       // sender feedback channel. Silent skip instead — the row stays
       // `pending` so the actual delivery path (Discord push, etc.)
       // handles it; the only side effect here is a metric tick.
+      // Cycle 2 fix (auditor Axis 1+3): the abnormal-activity counter
+      // is also gated behind this branch — recording it here means a
+      // burst of non-TUI dispatches (e.g. human CEO chatter) cannot
+      // trip the operator alert. F13 covers BOTH the throw path AND
+      // the alert side-channel.
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })
       return
     }
+    // R9 abnormal-activity recording sits AFTER the runtime gate so
+    // only real wake attempts (TUI bots) feed the rolling window.
+    this.recordDispatchForAbnormalCheck(row.agent_id)
     if (!bot.tmux_session) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })
       return
