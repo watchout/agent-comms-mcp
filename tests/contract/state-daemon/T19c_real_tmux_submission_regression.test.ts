@@ -8,16 +8,25 @@
  * submits, no LLM turn starts. The daemon's metric reads `result='ok'`
  * while the bot is silently stalled.
  *
- * This fixture launches an actual tmux session, drives the daemon's real
- * `TmuxShellAdapter.sendKeys`, then captures the input field and asserts
- * the submission actually fired (= the line cleared, OR the pane is now
- * sitting in `esc to interrupt` state). Cleanup tears the session down
- * even on failure.
+ * This fixture launches an actual tmux session and reproduces the
+ * daemon's tmux send-keys argv shape — strip trailing `\n` from the
+ * payload, then pass `'Enter'` as a separate argv. It captures the
+ * pane and asserts the submission actually fired (BASE-MARKER and
+ * SUBMIT-MARKER both visible as command output). Cleanup tears the
+ * session down even on failure.
  *
- * Skipped automatically when `tmux` is not on PATH (e.g. CI without tmux
- * installed) — the test logs a warning and exits 0 so the rest of the
- * suite still runs. CI runners that have tmux available exercise this
- * path as a real regression gate.
+ * The fixture does NOT instantiate the production `TmuxShellAdapter`
+ * class — that adapter would require wiring its DI shape into a fake
+ * StateDaemon, and the regression we care about is the argv shape, not
+ * the class instantiation. Re-issuing the same argv shape via
+ * `execFileAsync('tmux', ['send-keys', ...])` is the most direct gate
+ * against the B1 class of bugs.
+ *
+ * Skipped automatically (via `describe.skip`) when `tmux` is not on
+ * PATH — e.g. CI runners without tmux installed. No warning is logged;
+ * the skip is silent so the rest of the suite output stays clean. CI
+ * runners that have tmux available exercise this path as a real
+ * regression gate.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { execFile, execFileSync } from 'node:child_process'
@@ -53,14 +62,14 @@ dDescribe('T19c — real tmux Enter-submission regression (PR #335 hotfix)', () 
   })
 
   test('sendKeys with trailing \\n payload submits the line (input field clears)', async () => {
-    // Import via dynamic import so the module loads even on hosts without
-    // tmux (the dDescribe skip would still cover that, but defense-in-depth).
+    // Import the entry module just to confirm it loads on this host
+    // (production-shape adapters compile + wire). The TmuxShellAdapter
+    // class itself is internal and would require a full DaemonDeps
+    // wiring to instantiate; the regression we want to gate is the argv
+    // SHAPE, so we re-issue the exact two-arg call below. If the
+    // production class signature drifts, the m4 source-pin catches it.
     const mod = await import('../../../bin/state-daemon')
-    // The TmuxShellAdapter is internal — we exercise it through a thin probe
-    // that mirrors its shape. If the production class signature drifts, the
-    // m4 source-pin catches it; here we re-implement the exact two-arg call
-    // shape so the regression assertion is direct.
-    const _ = mod // module loaded successfully
+    expect(typeof (mod as { main: () => unknown }).main).toBe('function')
 
     // Pre-populate the pane with a recognizable prompt baseline.
     execFileSync('tmux', ['send-keys', '-t', session, 'echo BASE-MARKER', 'Enter'])
