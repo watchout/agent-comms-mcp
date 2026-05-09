@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.7 — supersedes v0.6)
+> **Status**: ARC 起草 (Draft v0.8 — supersedes v0.7)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7)
-> **Trigger**: CEO directive 2026-05-05 〜 2026-05-08、CTO `1d402109` (v0.3 GO)、CTO `70050419` (v0.4)、lead-ama `1abdf00d` (v0.5)、CEO `cfb32b4a` α + CTO `1b7464ee` (v0.6)、lead-ama `b76bccff` (v0.7、PR #330 auditor Axis 5(b) schema drift 解消、ARC α 採択)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7) / 2026-05-09 (v0.8)
+> **Trigger**: ..., lead-ama `0171600a` (v0.8、PR #333 auditor Axis 5 SSOT drift 解消、ARC α 採択、T19 → T19b semantic 反転、non-TUI silent skip 化)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,27 @@
 
 ---
 
-## 0. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
+## 0. v0.7 → v0.8 patch (PR #333 auditor Axis 5 SSOT drift 解消、T19 semantic 反転)
+
+[文献確認 lead-ama `0171600a` / auditor PR #333 cycle 1 `196cceb2`]:
+
+| 旧表現 | v0.8 fix | 採択 |
+|---|---|---|
+| §6.3 wakeBot: `if (bot.runtime !== 'TUI') throw new Error('SIG mode 廃止済')` | `if (bot.runtime !== 'TUI') return (silent skip + warn log)` | **α** (impl 実態整合、SIG 廃止 path で error throw → bot 再起動 loop の risk 回避) |
+| §3 Forbidden F5: 「SIG runtime に wake 試行する path を追加しない」 | 「non-TUI runtime に対する wake は **silent skip** で実装すること、error throw は禁止」 | α |
+| T19 `sig_runtime_wake_throws` (error throw expected) | T19b `non_tui_silent_skip` (silent skip + 0 metric / 0 alert expected) | α |
+| §4.3 row table | (変更なし) | — |
+
+**理由**: v0.7 までは SIG runtime 廃止前提で error throw 採用していたが、PR #333 cycle 2 で agent-com-dev が **non-TUI silent skip** 実装で alert spam (5 回 case で metric=0 / alert=0) 検証済 [auditor cycle 2 Axis 3 PASS] = silent skip が production 整合解。spec 側を impl 実態に realign。
+
+選択肢比較:
+- (α) spec rephrase + T19→T19b rename: 採択、impl との一致、alert spam 構造的回避
+- (β) PR #333 scope に spec/fixtures/elements 含める: ARC scope (F-5) 違反、却下
+- (γ) error throw 維持: production で alert spam 発生 risk、impl 既 silent skip 実装で次 cycle 修正コスト > 維持コスト、却下
+
+---
+
+## 0a. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
 
 [文献確認 lead-ama `b76bccff` / agent-com-dev `\d message_queue` 検証済]:
 
@@ -32,7 +52,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0a. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
+## 0b. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
 
 [文献確認 lead-ama `e8abbf0e` / auditor v3 `21beddd8` / CEO `cfb32b4a` α 採択]:
 
@@ -47,7 +67,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0b. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
+## 0c. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
 
 [文献確認 lead-ama `1abdf00d` / auditor v2 `b7398912`]:
 
@@ -59,7 +79,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0c. v0.3 → v0.4 patch (auditor BLOCK 解消)
+## 0d. v0.3 → v0.4 patch (auditor BLOCK 解消)
 
 [文献確認 CTO directive `70050419` / lead-ama `d0161ad6`]:
 
@@ -74,7 +94,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0d. v0.2 → v0.3 主要変更点
+## 0e. v0.2 → v0.3 主要変更点
 
 [文献確認 CTO directive `1d402109` / `907b7e9b`]:
 
@@ -366,10 +386,12 @@ setInterval(checkBotLiveness, BOT_LIVENESS_CHECK_INTERVAL_MS); // 補強 #5
 
 ```ts
 // v0.5: agents table SoT 経由に修正、legacy registry 削除
+// v0.8: non-TUI runtime は silent skip + warn log (error throw → bot 再起動 loop 回避)
 async function wakeBot(agentId: string): Promise<void> {
   const bot = await agents.findByAgentId(agentId);  // agents table が SoT (§7.1 / v0.4)
   if (bot.runtime !== 'TUI') {
-    throw new Error(`SIG mode 廃止済、TUI のみ allowed (got ${bot.runtime})`);
+    log.warn({ agentId, runtime: bot.runtime }, 'wake skipped: non-TUI runtime');
+    return;  // silent skip、no metric inc / no alert
   }
   await execTmuxSendKeys(bot.tmuxSession, 'check inbox\n');
   await db.update('message_queue', row.id, { last_wake_attempt_at: now() });
@@ -548,7 +570,7 @@ abnormal activity 検出ルール (operator alert を Discord に送出):
 | T15 | 同 row が pending-stale + read-expired 両方該当 | 1 action のみ実行 (read-expired > pending-stale) |
 | T16 | pg_notify INSERT 受信 | 即時 wake |
 | T17 | pg_notify 取りこぼし → cron sweep | 30s 以内に pickup |
-| T19 | SIG mode bot に wake 試行 | error throw "SIG mode 廃止済" |
+| T19b | non-TUI runtime bot に wake 試行 (v0.8 で T19 sig_runtime_wake_throws から rename + semantic 反転) | silent skip + warn log、metric=0 / alert=0、status 変更なし |
 | T20 | wake pool default capacity 5、6 件目 INSERT | 6 件目は queue、saturation で grow |
 | T21 (v0.3 新規) | read 状態 30s 経過、bot alive、heartbeat tick | claim_expires_at 延長、`last_heartbeat_at` 更新 (補強 #1) |
 | T22 (v0.3 新規) | bot last_seen_at が 3min 前、tmux session なし、TUI runtime | restart 実行、metric inc、operator alert (補強 #5) |

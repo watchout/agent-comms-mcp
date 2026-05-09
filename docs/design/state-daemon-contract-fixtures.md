@@ -189,7 +189,9 @@
 
 ---
 
-## T19: sig_runtime_wake_throws
+## T19b: non_tui_silent_skip (v0.8 で T19 sig_runtime_wake_throws から rename + semantic 反転)
+
+[文献確認: lead-ama `0171600a` / auditor PR #333 cycle 2 Axis 3 PASS]: production で SIG runtime に対する error throw は alert spam を引き起こすため、silent skip + warn log に変更。spec を impl 実態に realign。
 
 **precondition**:
 - agents: `(agent_id='legacy', runtime='SIG')`
@@ -198,8 +200,13 @@
 - INSERT R1 (`agent_id='legacy'`)、wake 試行
 
 **expected**:
-- error throw `"SIG mode 廃止済、TUI のみ allowed (got SIG)"`
-- DB: R1.status='failed'、failed_reason='WAKE_FAILED' (impl が catch)
+- error throw なし
+- warn log 1 行 (`wake skipped: non-TUI runtime` 含む)
+- DB: R1 変更なし (`last_wake_attempt_at` 未更新、status 未変更)
+- metric: `state_daemon_wake_actions_total{result='ok'}` の inc なし
+- alert sink: 呼出なし
+
+派生 T19c (5 回連続 case): 同 bot に 5 回連続 INSERT で metric=0 / alert=0 (rolling window 不参加、cycle 2 Axis 3 検証済)。
 - alert 1 回
 
 ---
