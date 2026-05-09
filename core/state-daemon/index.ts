@@ -432,11 +432,17 @@ export class StateDaemon {
       return
     }
     if (bot.runtime !== 'TUI') {
-      // §6.3 / R8 / F5 — SIG runtime に wake 試行は throw + DB fail.
-      await this.failPermanently(row, 'WAKE_FAILED', `SIG mode 廃止済、TUI のみ allowed (got ${bot.runtime})`)
-      await this.alert.alert(`SIG mode wake attempt blocked: ${row.agent_id} (runtime=${bot.runtime})`)
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'sig_blocked' })
-      throw new Error(`SIG mode 廃止済、TUI のみ allowed (got ${bot.runtime})`)
+      // Bug 3 fix (re-chain msg 250d01b0 / R15 / F13): non-TUI runtimes
+      // (e.g. `discord` for the human CEO account, `sig` for legacy bots
+      // mid-migration) used to take the throw + failPermanently + alert
+      // path. That corrupted the queue row (forced `failed/WAKE_FAILED`
+      // for a row the daemon simply has no business waking), spammed
+      // alerts on every dispatch, and surfaced as "Idle 連射" in the
+      // sender feedback channel. Silent skip instead — the row stays
+      // `pending` so the actual delivery path (Discord push, etc.)
+      // handles it; the only side effect here is a metric tick.
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })
+      return
     }
     if (!bot.tmux_session) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })

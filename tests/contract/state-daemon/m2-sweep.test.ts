@@ -410,32 +410,72 @@ describe('T17 pg_notify_miss_cron_pickup', () => {
   })
 })
 
-// ── T19 ───────────────────────────────────────────────────────────────────────
-describe('T19 sig_runtime_wake_throws', () => {
-  test('SIG runtime wake → throws + DB row=failed/WAKE_FAILED + alert', async () => {
+// ── T19b ──────────────────────────────────────────────────────────────────────
+// Re-chain (msg 250d01b0) replaces the old T19 (which expected throw +
+// WAKE_FAILED + alert on non-TUI runtime) with a silent-skip contract.
+// The CEO account on Discord is `runtime='discord'` — a human, not a bot —
+// and the previous semantic corrupted the queue row + spammed alerts on
+// every dispatch addressed to that agent. New semantic per R15 / F13:
+// metric tick only, queue stays `pending` for the actual delivery path.
+describe('T19b non_tui_runtime_wake_silent_skip', () => {
+  test('non-TUI runtime → no throw, queue row pending, metric non_tui_skipped, no alert', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
-    const agent = makeAgentId('t19-sig')
-    await seedAgent(pg, { agent_id: agent, runtime: 'SIG' })
+    const agent = makeAgentId('t19b-discord')
+    await seedAgent(pg, { agent_id: agent, runtime: 'discord' })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending', created_at: T0 })
 
     const h = buildHarness(T0)
     await h.daemon.start()
     try {
-      let threw = false
-      try {
+      // Must NOT throw.
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+      })
+
+      // Queue row remains pending — no corruption, no failed_reason.
+      const r = await pg.query(`SELECT status, failed_reason FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ status: string; failed_reason: string | null }>)[0]
+      expect(row.status).toBe('pending')
+      expect(row.failed_reason).toBeNull()
+
+      // Metric ticked exactly once.
+      expect(
+        h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
+      ).toBe(1)
+      // No tmux send — non-TUI never reaches sendKeys.
+      expect(h.tmux.sentKeys.length).toBe(0)
+      // Silent: no alerts emitted.
+      expect(h.alert.alerts.length).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('T19b — repeated non-TUI dispatches all silent-skip without alert flood', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t19b-flood')
+    await seedAgent(pg, { agent_id: agent, runtime: 'sig' })
+    const ids: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const id = await seedQueueRow(pg, {
+        agent_id: agent, status: 'pending', created_at: T0,
+      })
+      ids.push(id)
+    }
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      for (const id of ids) {
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })
-      } catch (e) {
-        threw = true
-        expect((e as Error).message).toMatch(/SIG mode 廃止済/)
       }
-      expect(threw).toBe(true)
-      const r = await pg.query(`SELECT status, failed_reason FROM message_queue WHERE id=$1`, [id])
-      const row = (r.rows as Array<{ status: string; failed_reason: string | null }>)[0]
-      expect(row.status).toBe('failed')
-      expect(row.failed_reason).toBe('WAKE_FAILED')
-      expect(h.alert.contains('SIG mode wake attempt blocked')).toBe(true)
+      // 4 dispatches, 4 metric ticks, 0 alerts.
+      expect(
+        h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
+      ).toBe(4)
+      expect(h.alert.alerts.length).toBe(0)
     } finally {
       await h.daemon.stop()
     }

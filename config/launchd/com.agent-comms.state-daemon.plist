@@ -26,9 +26,17 @@
   <key>Label</key>
   <string>com.agent-comms.state-daemon</string>
 
+  <!--
+    Bug 1 fix (re-chain msg 250d01b0): bun must be referenced by ABSOLUTE
+    path under launchd. The first launch attempt ran with `/usr/local/bin/bun`
+    which doesn't exist on this Apple-Silicon host (bun lives in
+    `/Users/yuji/.bun/bin/bun`); the daemon crash-looped into the
+    ThrottleInterval and never reached `start()`. F14 forbids relative /
+    PATH-dependent argv0.
+  -->
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/bun</string>
+    <string>/Users/yuji/.bun/bin/bun</string>
     <string>/Users/yuji/Developer/agent-comms-mcp/bin/state-daemon.ts</string>
   </array>
 
@@ -50,12 +58,23 @@
   <key>StandardErrorPath</key>
   <string>/Users/yuji/Developer/agent-comms-mcp/logs/state-daemon.err.log</string>
 
+  <!--
+    Bug 2 fix (re-chain msg 250d01b0): launchd does NOT inherit a login
+    shell PATH, so subprocess spawns (`tmux send-keys`, `bash
+    scripts/start-runbot.sh`, etc.) fail to resolve binaries that live
+    under Homebrew. F15 forbids leaving PATH unset / relying on the
+    system default. Pin the prefixes that the daemon actually shells
+    out to: Homebrew (Apple Silicon), Homebrew (Intel), and the system
+    bins.
+  -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>NODE_ENV</key>
     <string>production</string>
     <key>DATABASE_URL</key>
     <string>postgresql://localhost/agent_comms</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 
   <key>ProcessType</key>
