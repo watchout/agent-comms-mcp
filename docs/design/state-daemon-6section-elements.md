@@ -120,7 +120,7 @@ spec 章を section 番号で参照させる:
 - **F2**: `message_queue.dispatch_decision` JSONB 列を再追加しないこと (v0.2 から削除済)
 - **F3**: `message_queue.status='skipped'` enum 値を追加しないこと (v0.2 から削除済)
 - **F4**: ARC が PR branch に直接 commit / push しないこと (memory `feedback_arc_no_direct_commit`)、agent-com-dev が impl
-- **F5** (v0.8 改訂): non-TUI runtime (SIG / 不明 runtime) に対する wake は **silent skip + warn log** で実装すること、error throw 禁止 (TUI 統一前提、§6.3)。理由: production で error throw は alert spam → bot 再起動 loop の risk、silent skip + agents.runtime 監視で対応 [auditor PR #333 cycle 2 Axis 3 PASS、msg `1503bed5`]
+- **F5** (v0.8 cycle 2 改訂): non-TUI runtime (SIG / 不明 runtime) に対する wake は **`metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })` + return** で実装すること。error throw 禁止 + warn log 禁止 + abnormal-activity counter trip 禁止 (R9 ordering: runtime gate 後 = non-TUI 経路では recordDispatch 呼ばない)。理由: PR #333 commit `ddb1688` 実 impl が production 整合解 [文献確認: git show ddb1688:core/state-daemon/index.ts line 437-453]。cycle 1 の「warn log」記述は ARC 起草時の impl 未 verify による誤記述、cycle 2 で訂正。
 - **F6**: 既存 `bin/wake-daemon.ts` を残したまま state-daemon を起動しないこと。phase 5 で wake-daemon を停止、それまでは並行稼働 (phase 3-4) でも **重複 wake は許容、prevention で抑制しない** (idempotent + duplicate suppression で吸収)
 - **F7**: heartbeat の TTL 延長を `claim_expires_at <= now()` の row に適用しないこと (既 expired は self-reclaim 経路で処理)
 - **F8**: bot restart loop 上限 (1h/3 回) を超えて restart を継続しないこと (operator/CEO 介入なしの auto recovery loop は禁止)
@@ -169,7 +169,7 @@ T#:
 | T15 | dual_state_priority_order | §4.3 row 2 + 3 priority |
 | T16 | pg_notify_immediate_dispatch | §6.2 |
 | T17 | pg_notify_miss_cron_pickup | §6.2 |
-| T19b (v0.8 rename) | non_tui_silent_skip | §6.3 + F5 (silent skip semantic、error throw 廃止) |
+| T19b (v0.8 cycle 2) | non_tui_silent_skip | §6.3 + F5 (`metric={result:'non_tui_skipped'}` inc / warn log なし / alert=0 / abnormal-activity 不参加、PR #333 `ddb1688` 実 impl 整合) |
 | T20 | wake_pool_concurrency_limit | §5.2 + §6.4 |
 | **T21** (v0.3 新規) | heartbeat_refresh_extends_claim | §5.1 / R4 |
 | **T22** (v0.3 新規) | dead_bot_tmux_missing_restart | §5.4 / R7 |

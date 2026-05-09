@@ -189,9 +189,9 @@
 
 ---
 
-## T19b: non_tui_silent_skip (v0.8 で T19 sig_runtime_wake_throws から rename + semantic 反転)
+## T19b: non_tui_silent_skip (v0.8 cycle 2、impl 実態整合)
 
-[文献確認: lead-ama `0171600a` / auditor PR #333 cycle 2 Axis 3 PASS]: production で SIG runtime に対する error throw は alert spam を引き起こすため、silent skip + warn log に変更。spec を impl 実態に realign。
+[文献確認: lead-ama `8748f6b4` cycle 2 escalation / PR #333 commit `ddb1688` `core/state-daemon/index.ts` line 437-453]: non-TUI runtime に対しては `metric inc + return` (warn log なし、error throw なし、abnormal-activity counter 不参加)。
 
 **precondition**:
 - agents: `(agent_id='legacy', runtime='SIG')`
@@ -201,12 +201,16 @@
 
 **expected**:
 - error throw なし
-- warn log 1 行 (`wake skipped: non-TUI runtime` 含む)
+- warn log なし
 - DB: R1 変更なし (`last_wake_attempt_at` 未更新、status 未変更)
-- metric: `state_daemon_wake_actions_total{result='ok'}` の inc なし
+- metric: `state_daemon_wake_actions_total{result='non_tui_skipped'}` += 1
 - alert sink: 呼出なし
+- abnormal-activity counter: 不発火 (R9 ordering: runtime gate 後に位置するため non-TUI dispatch では recordDispatch 呼ばれない)
 
-派生 T19c (5 回連続 case): 同 bot に 5 回連続 INSERT で metric=0 / alert=0 (rolling window 不参加、cycle 2 Axis 3 検証済)。
+**派生 T19c (5 回連続 case)**: 同 bot に 5 回連続 INSERT で:
+- `state_daemon_wake_actions_total{result='non_tui_skipped'}` += 5 (5 回 inc)
+- `state_daemon_abnormal_activity_total` += 0 (rolling window 不参加)
+- alert sink 呼出 = 0 (cycle 2 Axis 3 PASS 検証済 [文献確認: auditor msg `1503bed5`])
 - alert 1 回
 
 ---

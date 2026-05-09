@@ -19,17 +19,19 @@
 
 | 旧表現 | v0.8 fix | 採択 |
 |---|---|---|
-| §6.3 wakeBot: `if (bot.runtime !== 'TUI') throw new Error('SIG mode 廃止済')` | `if (bot.runtime !== 'TUI') return (silent skip + warn log)` | **α** (impl 実態整合、SIG 廃止 path で error throw → bot 再起動 loop の risk 回避) |
-| §3 Forbidden F5: 「SIG runtime に wake 試行する path を追加しない」 | 「non-TUI runtime に対する wake は **silent skip** で実装すること、error throw は禁止」 | α |
-| T19 `sig_runtime_wake_throws` (error throw expected) | T19b `non_tui_silent_skip` (silent skip + 0 metric / 0 alert expected) | α |
+| §6.3 wakeBot: `if (bot.runtime !== 'TUI') throw` (v0.7) | `metrics.inc(... 'non_tui_skipped'); return;` (warn log なし、PR #333 `ddb1688` 実 impl 整合) | **α cycle 2** |
+| §3 Forbidden F5: 「SIG wake 試行禁止」 | 「non-TUI wake は **metric inc + return**、error throw + warn log 禁止」 | α cycle 2 |
+| T19 `sig_runtime_wake_throws` | T19b `non_tui_silent_skip` (`metric={result:'non_tui_skipped'}` inc、alert=0、status 変更なし、5 回連続でも abnormal-activity counter 不発火 = R9 ordering: gate 後) | α cycle 2 |
 | §4.3 row table | (変更なし) | — |
 
-**理由**: v0.7 までは SIG runtime 廃止前提で error throw 採用していたが、PR #333 cycle 2 で agent-com-dev が **non-TUI silent skip** 実装で alert spam (5 回 case で metric=0 / alert=0) 検証済 [auditor cycle 2 Axis 3 PASS] = silent skip が production 整合解。spec 側を impl 実態に realign。
+**理由 cycle 2**: PR #333 cycle 2 commit `ddb1688` の `core/state-daemon/index.ts` line 437-453 [文献確認: git show ddb1688] では **`metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })` + return (warn log なし)** が production 整合解。abnormal-activity counter は runtime gate 後に位置 (R9 ordering、cycle 2 fix) するため non-TUI dispatch では trip しない。
+
+[honest 反省、ARC] cycle 1 起草時に PR #333 impl code を **未 verify**、lead-ama escalation の「silent skip + warn log」記述を信頼して spec に転記、誤って「metric=0」と書いた。`memory feedback_check_ssot_before_drafting` 反省再来。cycle 2 で実 impl grep で逆算し正確な記述に realign (metric=non_tui_skipped / 警告なし / abnormal-activity 不参加)。
 
 選択肢比較:
-- (α) spec rephrase + T19→T19b rename: 採択、impl との一致、alert spam 構造的回避
-- (β) PR #333 scope に spec/fixtures/elements 含める: ARC scope (F-5) 違反、却下
-- (γ) error throw 維持: production で alert spam 発生 risk、impl 既 silent skip 実装で次 cycle 修正コスト > 維持コスト、却下
+- (α cycle 2) spec rephrase impl 実態整合 (`metric=non_tui_skipped`、warn log 削除): 採択
+- (β) PR #333 scope に spec/fixtures/elements patch 含める: ARC scope (F-5) 違反、却下
+- (γ) error throw 維持: production で alert spam 発生 risk、却下
 
 ---
 
@@ -386,12 +388,12 @@ setInterval(checkBotLiveness, BOT_LIVENESS_CHECK_INTERVAL_MS); // 補強 #5
 
 ```ts
 // v0.5: agents table SoT 経由に修正、legacy registry 削除
-// v0.8: non-TUI runtime は silent skip + warn log (error throw → bot 再起動 loop 回避)
+// v0.8 cycle 2: non-TUI runtime は silent skip + metric inc (warn log なし)、PR #333 cycle 2 ddb1688 impl 実態と整合
 async function wakeBot(agentId: string): Promise<void> {
   const bot = await agents.findByAgentId(agentId);  // agents table が SoT (§7.1 / v0.4)
   if (bot.runtime !== 'TUI') {
-    log.warn({ agentId, runtime: bot.runtime }, 'wake skipped: non-TUI runtime');
-    return;  // silent skip、no metric inc / no alert
+    metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' });
+    return;  // silent skip、no warn log / no alert / abnormal-activity counter は trip しない (R9 ordering: gate 後)
   }
   await execTmuxSendKeys(bot.tmuxSession, 'check inbox\n');
   await db.update('message_queue', row.id, { last_wake_attempt_at: now() });
@@ -570,7 +572,7 @@ abnormal activity 検出ルール (operator alert を Discord に送出):
 | T15 | 同 row が pending-stale + read-expired 両方該当 | 1 action のみ実行 (read-expired > pending-stale) |
 | T16 | pg_notify INSERT 受信 | 即時 wake |
 | T17 | pg_notify 取りこぼし → cron sweep | 30s 以内に pickup |
-| T19b | non-TUI runtime bot に wake 試行 (v0.8 で T19 sig_runtime_wake_throws から rename + semantic 反転) | silent skip + warn log、metric=0 / alert=0、status 変更なし |
+| T19b | non-TUI runtime bot に wake 試行 (v0.8 で T19 sig_runtime_wake_throws から rename + semantic 反転、cycle 2 で impl 実態整合に再修正) | `metric={result:'non_tui_skipped'}` inc、alert=0、warn log なし、DB 変更なし、abnormal-activity counter 不参加 (R9 gate 後) |
 | T20 | wake pool default capacity 5、6 件目 INSERT | 6 件目は queue、saturation で grow |
 | T21 (v0.3 新規) | read 状態 30s 経過、bot alive、heartbeat tick | claim_expires_at 延長、`last_heartbeat_at` 更新 (補強 #1) |
 | T22 (v0.3 新規) | bot last_seen_at が 3min 前、tmux session なし、TUI runtime | restart 実行、metric inc、operator alert (補強 #5) |
