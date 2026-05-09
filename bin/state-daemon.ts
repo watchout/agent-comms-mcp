@@ -85,13 +85,17 @@ class TmuxShellAdapter implements TmuxClient {
     }
   }
   async sendKeys(session: string, payload: string): Promise<void> {
-    // The daemon's contract format (used by core/state-daemon/index.ts and the
-    // T1/T16 fixtures) is the payload already including its trailing newline,
-    // e.g. 'check inbox\n'. We send the string through tmux send-keys as-is;
-    // appending an extra `Enter` literal would double-press and is therefore
-    // intentionally omitted. tmux interprets the embedded newline as the
-    // Return key under the default key-syntax mode.
-    await execFileAsync('tmux', ['send-keys', '-t', session, payload])
+    // PR #335 hotfix (CTO directive d00d95b6, CEO 0cd1cfd6): tmux send-keys
+    // does NOT interpret an embedded LF inside the payload string as an
+    // Enter keypress. Empirical (CTO 2026-05-09): payload `'TEST\n'` is
+    // typed into the input field as text and no LLM turn ever starts. The
+    // earlier "no Enter literal needed" assumption (PR #330 cycle / Bug 1
+    // fallout) is wrong under tmux's default key syntax. Correct shape
+    // strips the trailing LF and passes `Enter` as a SEPARATE argv so
+    // tmux interprets it as the Return key. F16 (forbidden in §3 of the
+    // re-chain dispatch) bans relying on embedded \n alone.
+    const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
+    await execFileAsync('tmux', ['send-keys', '-t', session, stripped, 'Enter'])
   }
   async restartSession(agentId: string): Promise<void> {
     // Existing launcher: scripts/start-runbot.sh (the only start script

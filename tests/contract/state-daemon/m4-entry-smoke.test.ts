@@ -41,6 +41,14 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
   test('tmux adapter: has-session check + send-keys (payload-as-is) + restart launcher', () => {
     expect(SRC).toMatch(/tmux.*has-session/)
     expect(SRC).toMatch(/send-keys.*-t/)
+    // PR #335 hotfix pin (CTO d00d95b6 / CEO 0cd1cfd6): the daemon must
+    // strip the trailing `\n` from the payload and pass a literal
+    // `'Enter'` as a separate argv to tmux. tmux does NOT interpret an
+    // embedded LF as the Return key under the default key syntax, so the
+    // earlier "payload-as-is" shape silently typed text into the input
+    // field without ever pressing Enter. Pin both halves of the contract.
+    expect(SRC).toMatch(/payload\.endsWith\('\\n'\)/)
+    expect(SRC).toMatch(/send-keys[\s\S]*?'Enter'/)
     // Restart launcher = scripts/start-runbot.sh (the existing launcher in
     // tree; spec §13.2 referenced `scripts/start-bot.sh` as an example name
     // only — see CTO L3 prep finding 2 in the PR description).
