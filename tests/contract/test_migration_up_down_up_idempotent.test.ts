@@ -44,35 +44,6 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
         ON message_queue(claim_expires_at)
         WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'read'`,
     )
-
-    // Issue #323 cycle 7 — restore the state-daemon trigger that the
-    // routing-v3-stage-b down.sql now drops as a prelude (so the down
-    // path could safely remove claim_expires_at without leaving a
-    // dangling trigger reference). m4-entry-smoke and any subsequent
-    // test that asserts the trigger is installed depends on this. The
-    // function and trigger are CREATE OR REPLACE / DROP IF EXISTS +
-    // CREATE so re-running on a DB that already has them is a no-op.
-    await client.query(`
-      CREATE OR REPLACE FUNCTION notify_queue_event() RETURNS trigger AS $func$
-      BEGIN
-        PERFORM pg_notify('queue_event', json_build_object(
-          'op', TG_OP,
-          'id', NEW.id,
-          'agent_id', NEW.agent_id,
-          'status', NEW.status,
-          'claim_expires_at', NEW.claim_expires_at
-        )::text);
-        RETURN NEW;
-      END;
-      $func$ LANGUAGE plpgsql;
-    `)
-    await client.query(`DROP TRIGGER IF EXISTS message_queue_notify ON message_queue`)
-    await client.query(`
-      CREATE TRIGGER message_queue_notify
-        AFTER INSERT OR UPDATE OF status, claim_expires_at ON message_queue
-        FOR EACH ROW EXECUTE FUNCTION notify_queue_event()
-    `)
-
     await client.end()
   })
 
