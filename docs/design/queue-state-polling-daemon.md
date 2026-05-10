@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.8 — supersedes v0.7)
+> **Status**: ARC 起草 (Draft v0.9 — supersedes v0.8)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7) / 2026-05-09 (v0.8)
-> **Trigger**: ..., lead-ama `0171600a` (v0.8、PR #333 auditor Axis 5 SSOT drift 解消、ARC α 採択、T19 → T19b semantic 反転、non-TUI silent skip 化)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7) / 2026-05-09 (v0.8) / 2026-05-10 (v0.9)
+> **Trigger**: ..., CTO `e24ade30` + CEO `15d47c37` (v0.9、status enum 4 active + 1 terminal 再定義、failed/skipped 廃止、新 tool processing/done、wake duplicate suppression 5s→30s)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,65 @@
 
 ---
 
-## 0. v0.7 → v0.8 patch (PR #333 auditor Axis 5 SSOT drift 解消、T19 semantic 反転)
+## 0. v0.8 → v0.9 patch (status enum 4 active + 1 terminal 再定義、CTO + CEO directive)
+
+[文献確認: CTO `e24ade30` (CEO `15d47c37` 採択) + CEO `dafbd8c0` 質問への CTO 回答]:
+
+| 項目 | v0.8 | v0.9 |
+|---|---|---|
+| status enum | `pending / read / replied / failed / skipped` (5) | `pending / received / in_progress / done / replied` (5、再定義) |
+| state-daemon が wake する状態 | pending のみ (read = claim 取得済 = 触らない) | pending / received / done (= bot 認知促す各 state)、in_progress / replied は触らない |
+| failed | error case として保持 | **廃止** (retry loop で透明化、最終 done or replied or PERMANENT 内部状態) |
+| skipped | LOOP_PREVENTED 等 | **廃止** (CC 排除 PR #336 で発生源 0 化) |
+| 新 agent-comms tool | (無) | `mcp__agent-comms__processing` / `mcp__agent-comms__done` |
+| wake duplicate suppression | 5s | **30s** (sweep tick と同期、ARC check inbox 連発対策) |
+
+### v0.9 status state machine
+
+```
+INSERT row → [pending] (= bot 未認知)
+              ↓ state-daemon wake (tmux send-keys)
+              ↓ bot LLM 起動、inbox tool 呼出 → next 取得
+              ↓
+            [received] (= bot が next claim 取得、処理開始前)
+              ↓ wake (= 処理開始 push、stall 防止)
+              ↓ bot が processing tool 呼出
+              ↓
+            [in_progress] (= bot LLM turn 実行中)
+              ↓ state-daemon: nothing (= 信頼)、stall monitoring
+              ↓ bot が done tool 呼出 (reply 不要 case) or send tool 呼出 (reply あり)
+              ↓
+        ┌─ [done] (= 内部完了、reply 未送信)            [replied] (= reply 完了、terminal)
+        │     ↓ wake (= reply 出してね push)
+        │     ↓ bot が send tool 呼出
+        │     ↓
+        └─→ [replied] (terminal)
+```
+
+### state-daemon 動作表 (v0.9)
+
+| status | 意味 | wake 動作 |
+|---|---|---|
+| pending | 未到達 (DB INSERT 直後、bot 未認知) | wake (= inbox check 促す) |
+| received | bot が next 取得済、処理開始前 | wake (= 処理開始 push) |
+| in_progress | bot LLM turn 実行中 | nothing (= 信頼) + stall monitoring |
+| done | bot 内部完了、reply 未送信 | wake (= reply 出してね push) |
+| replied | reply 完了、terminal | nothing |
+
+### 廃止 (failed / skipped)
+
+- failed: retry loop で透明化、最終 done or replied or PERMANENT 内部状態
+- skipped: CC fanout (= PR #336 で廃止) で発生源 0、既存 skipped 行は PR-C-1 7 日 GC で削除
+
+### wake duplicate suppression 5s → 30s
+
+[文献確認: CEO `15d47c37` 「ARC checkinbox 連発」観測]:
+- 旧 5s では sweep tick (30s) 毎に wake 反復、ARC TUI に check inbox 重複入力
+- 新 30s では sweep tick と同期、同一 row への wake は直前 wake から 30s 以内なら skip
+
+---
+
+## 0a. v0.7 → v0.8 patch (PR #333 auditor Axis 5 SSOT drift 解消、T19 semantic 反転)
 
 [文献確認 lead-ama `0171600a` / auditor PR #333 cycle 1 `196cceb2`]:
 
@@ -35,7 +93,7 @@
 
 ---
 
-## 0a. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
+## 0b. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
 
 [文献確認 lead-ama `b76bccff` / agent-com-dev `\d message_queue` 検証済]:
 
@@ -54,7 +112,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0b. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
+## 0c. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
 
 [文献確認 lead-ama `e8abbf0e` / auditor v3 `21beddd8` / CEO `cfb32b4a` α 採択]:
 
@@ -69,7 +127,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0c. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
+## 0d. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
 
 [文献確認 lead-ama `1abdf00d` / auditor v2 `b7398912`]:
 
@@ -81,7 +139,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0d. v0.3 → v0.4 patch (auditor BLOCK 解消)
+## 0e. v0.3 → v0.4 patch (auditor BLOCK 解消)
 
 [文献確認 CTO directive `70050419` / lead-ama `d0161ad6`]:
 
@@ -96,7 +154,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0e. v0.2 → v0.3 主要変更点
+## 0f. v0.2 → v0.3 主要変更点
 
 [文献確認 CTO directive `1d402109` / `907b7e9b`]:
 
@@ -181,21 +239,36 @@ v0.2 起草時 (本日早朝) に挙げた追加 incident:
 
 ## 4. State machine
 
-### 4.1 message_queue 状態遷移
+### 4.1 message_queue 状態遷移 (v0.9 新 enum)
+
+[文献確認: §0 v0.9 patch + auditor cycle 2 BLOCK Axis 1+5 解消、本文 §0 ASCII と一本化]
 
 ```
-                                 ┌─────────────────────────────────┐
-                                 ↓                                 │
-INSERT → [pending] → [read] → [replied] (terminal: success)        │
-              │         │                                          │
-              │         └──→ [failed: IMPLICIT_ABANDON] ────────────┘ (claim_expires_at recent)
-              │                  │
-              │                  └──→ [failed: STALE_DISPATCH] (terminal: age > stuckAfter、v0.7 age-based proxy 統一)
+INSERT → [pending] (= bot 未認知)
               │
-              └──→ [failed: STALE_DISPATCH] (terminal: 5min 以上 pickup されず)
+              ↓ bot が next tool 呼出 (claim 取得)
+            [received] (= bot が next claim 取得、処理開始前)
+              │
+              ↓ bot が processing tool 呼出 (LLM turn 開始)
+            [in_progress] (= bot LLM turn 実行中)
+              │
+              ↓ bot が done tool 呼出 (reply 不要 case) or send tool 呼出 (reply あり)
+        ┌─ [done] (= 内部完了、reply 未送信、wake → reply 出してね push)
+        │     │
+        │     ↓ reply send 完了
+        └─→ [replied] (terminal: 完了)
+
+retry 透明化 path (v0.9 で failed/skipped 廃止):
+  - received age > stuckAfter or claim expired → reset to pending (transparent retry)
+  - pending age > stuckAfter → mark stale → retry loop に再投入
+  - PERMANENT (内部 status、operator 介入要) は別 column or audit log で扱う (impl PR で詳細)
 ```
 
-v0.2 の `[skipped: LOOP_PREVENTED]` は v0.3 で削除 (prevention 全廃)。
+**v0.8 旧 enum 全廃**:
+- `read` → `received` (semantic 同等、enum 名変更のみ)
+- `failed` → 廃止 (retry transparent loop で透明化、最終 done/replied、PERMANENT は内部 audit)
+- `skipped` → 廃止 (CC fanout 廃止 PR #336 で発生源 0、既存行は §12 GC で削除)
+- `failed_reason` enum (`STALE_DISPATCH` 等) → 廃止 (status 自体に semantics 集約)
 
 ### 4.2 state-daemon が判定する dispatch trigger
 
@@ -204,20 +277,29 @@ v0.2 の `[skipped: LOOP_PREVENTED]` は v0.3 で削除 (prevention 全廃)。
 | **pg_notify('queue_event')** | INSERT / UPDATE で即時 | 高 (即時応答) |
 | **cron sweep (30s)** | 漏れ救済 (notify 取りこぼし、stale row、claim refresh、dead bot check) | 低 (fallback + housekeeping) |
 
-### 4.3 状態別 action
+### 4.3 状態別 action (v0.9 cycle 2、新 enum sweep 完了)
 
-state-daemon は 5 transition の action を実行 (v0.2 から prevention semantics を除去):
+[文献確認: §0 v0.9 patch + auditor cycle 2 BLOCK Axis 1+5 解消]
+
+state-daemon は **v0.9 新 enum** (`pending` / `received` / `in_progress` / `done` / `replied`) で動作:
 
 | # | state 条件 | action | rationale |
 |---|---|---|---|
-| 1 | INSERT new pending | wake (tmux send-keys "check inbox") | 通常 path、無条件 wake (prevention 不在) |
-| 2 | pending AND age > PENDING_STALE_AFTER (10s) | re-wake | 取りこぼし救済 (v0.1 継承) |
-| 3 | read AND claim_expires_at < now() | self-reclaim → re-wake | proactive reclaim (v0.1 継承) |
-| 4 | failed AND failed_reason='IMPLICIT_ABANDON' AND claim_expires_at > now() - 60s | reset to pending | recent abandon は recoverable (v0.1 継承) |
-| 5 | status='read' AND age > stuckAfter (default 5min) | status='failed'、failed_reason='STALE_DISPATCH' + alert | infinite reclaim loop 防止 (v0.1 継承)。v0.7 で `attempts` column 言及削除、age-based proxy 単一表現 (production schema 実態整合、CEO α `cfb32b4a` style) |
-| 6 | status='pending' AND age > stuckAfter (default 5min) | status='failed'、failed_reason='STALE_DISPATCH' | (v0.2 継承、v0.5 / v0.7 で row 5 と age-based 統一) |
+| 1 | INSERT new `pending` | wake (tmux send-keys "check inbox") | 通常 path、無条件 wake |
+| 2 | `pending` AND age > PENDING_STALE_AFTER (10s) | re-wake | 取りこぼし救済 (v0.1 継承) |
+| 3 | `received` AND claim_expires_at < now() | self-reclaim → re-wake (= `pending`) | proactive reclaim (v0.1 継承の意味、v0.9 で enum 名変更) |
+| 4 | `received` AND age > stuckAfter (default 5min) | mark stale → reset to `pending` (retry transparent loop) | infinite reclaim 防止、retry は新 enum で透明化 |
+| 5 | `done` AND age > DONE_STALE (10s) | wake (= reply 出してね push) | bot 内部完了で reply 未送信 → push |
+| 6 | `pending` AND age > stuckAfter (default 5min) | mark stale → retry loop に再投入 | (v0.7 継承の意味、age-based proxy 維持) |
+| 7 | `in_progress` | nothing (= 信頼) + stall monitoring | bot LLM turn 中、wake 不要 |
+| 8 | `replied` (terminal) | nothing | 完了 |
 
-各 action は idempotent。`last_wake_attempt_at` で 5s 以内重複 wake 抑制 (heartbeat と区別)。
+各 action は idempotent。**wake duplicate suppression は 30s** (v0.9 cycle 1 で 5s → 30s 延長、ARC checkinbox 連発対策、CEO `15d47c37`)。
+
+**v0.8 旧 enum (`read` / `failed` / `skipped`) は v0.9 で全廃**:
+- `read` → `received` (semantic 同等、bot が next で claim 取得済)
+- `failed` → 内部 retry loop で透明化 (RETRYABLE_REASONS は `pending` reset、PERMANENT は operator 介入)
+- `skipped` → CC fanout 廃止 (PR #336 旧 routing bug fix) で発生源 0、既存行は §12 GC で削除
 
 ## 5. 補強機能 (v0.3 新規、補強 #1/#2/#3/#5)
 
@@ -234,7 +316,7 @@ setInterval(async () => {
     UPDATE message_queue
        SET claim_expires_at = now() + interval '${CLAIM_TTL_SEC} seconds',
            last_heartbeat_at = now()
-     WHERE status = 'read'
+     WHERE status IN ('received', 'in_progress')   -- v0.9 新 enum: claim 取得済 (received) と LLM turn 中 (in_progress) の両方が heartbeat 対象
        AND agent_id IN (SELECT agent_id FROM agents WHERE status = 'online')
        AND claim_expires_at > now()  -- 既 expired は対象外、self-reclaim 経路で処理
   `);
@@ -439,10 +521,29 @@ v0.3 が提案した「`bot_registry` 新 table」は v0.4 で **撤回** (誤�
 
 v0.2 の `dispatch_decision` JSONB 列は v0.3 で削除 (prevention 廃止に伴い不要)。
 
-### 7.2 新規 status 値
+### 7.2 status 値 (v0.9 cycle 2 全面再定義)
 
-`message_queue.failed_reason` enum 拡張: `'STALE_DISPATCH'`
-v0.2 の `'skipped'` status は v0.3 で削除 (prevention 廃止)。
+[文献確認: §0 v0.9 patch + auditor cycle 2 BLOCK Axis 1+5 解消]
+
+新 enum (5 値):
+```sql
+CHECK (status IN ('pending', 'received', 'in_progress', 'done', 'replied'))
+```
+
+| status | 意味 |
+|---|---|
+| pending | 未到達 (DB INSERT 直後、bot 未認知) |
+| received | bot が `next` で claim 取得済、処理開始前 |
+| in_progress | bot LLM turn 実行中 |
+| done | bot 内部完了、reply 未送信 |
+| replied | reply 完了 (terminal) |
+
+**廃止 (v0.8 旧 enum)**:
+- `read` → `received` rename (semantic 同等)
+- `failed` → retry loop で透明化、最終 done or replied or PERMANENT 内部状態
+- `skipped` → CC fanout 廃止 (旧 routing bug fix で対応済) で発生源 0
+
+`failed_reason` enum は廃止 (status 自体に含まれる semantics で表現)、impl 側で internal な PERMANENT status は別 column or audit log で扱う (impl PR で詳細)。
 
 ### 7.3 pg_notify trigger
 
@@ -555,47 +656,118 @@ abnormal activity 検出ルール (operator alert を Discord に送出):
 
 これにより prevention check 不在でも reactive control が成立。
 
-## 11. Test fixtures (contract test、6-section §4 に展開)
+## 11. Test fixtures (contract test、6-section §4 に展開、v0.9 cycle 2 sweep 完了)
 
-[推測]:
+[文献確認: §0 v0.9 patch + auditor cycle 2 BLOCK Axis 4 解消]
+
+### 11.1 v0.9 new state regression gate (新 enum 必須 fixture group、T27 onwards)
+
+新 enum (`pending` / `received` / `in_progress` / `done` / `replied`) の遷移 + duplicate suppression 30s を網羅。
+
+| # | input | expected |
+|---|---|---|
+| T27 | new `pending`、TUI bot alive | dispatch (wake)、`last_wake_attempt_at` 更新、metric `wake_actions_total{result='ok'}`+=1 |
+| T28 | `pending` age=15s、`last_wake_attempt_at`=NULL | re-wake、duplicate 範囲外 |
+| T29 | `pending` age=20s、`last_wake_attempt_at`=10s 前 | **skip wake (30s duplicate suppression)**、metric `wake_actions_total{result='dedup_skipped'}`+=1 |
+| T30 | `pending` age=35s、`last_wake_attempt_at`=31s 前 | re-wake (30s 超過、duplicate 範囲外) |
+| T31 | bot が next tool 呼出 → `pending` → `received` 遷移 | DB: status=`received`、`claim_expires_at` set、tmux 不発火 (claim 取得は bot 主導) |
+| T32 | `received` AND `claim_expires_at < now()` | self-reclaim → status=`pending`、re-wake 1 回、metric `wake_actions_total{result='reclaimed'}`+=1 |
+| T33 | `received` AND age > stuckAfter (5min) | reset to `pending` (transparent retry)、metric `wake_actions_total{result='retry_reset'}`+=1 |
+| T34 | bot が processing tool 呼出 → `received` → `in_progress` 遷移 | DB: status=`in_progress`、tmux 不発火、stall monitor 開始 |
+| T35 | `in_progress` 通常状態、age 範囲内 | nothing (= 信頼)、tmux 不発火、DB 変更なし |
+| T36 | `in_progress` AND age > stallAfter (CEO 採択 default 提案 10min) | operator alert (`stall` 含む)、auto reset しない (= operator 判断、Open decision) |
+| T37 | bot が done tool 呼出 → `in_progress` → `done` 遷移 | DB: status=`done`、`done_at` set |
+| T38 | `done` AND age > DONE_STALE (10s) | wake (= reply 出してね push)、metric `wake_actions_total{result='done_push'}`+=1 |
+| T39 | bot が send tool 呼出 → `done` (or `in_progress`) → `replied` 遷移 | DB: status=`replied` (terminal)、tmux 不発火 |
+| T40 | `replied` (terminal) | nothing (即終端)、DB 変更なし、tmux 不発火 |
+| T41 | `pending` age > stuckAfter (5min) | mark stale → reset to `pending` (retry loop 再投入)、metric `wake_actions_total{result='stuck_reset'}`+=1 |
+
+### 11.2 legacy gate (v0.7/v0.8 fixture、phase 2 まで保持、phase 5 で削除)
+
+[honest]: 旧 enum (`read`/`failed`/`skipped`) 前提の以下 fixture は **v0.9 phase 2 (parallel run) まで保持**、phase 5 (state-daemon 単独運用 + 旧 fanout 廃止確定) 後に削除。impl 整合の transition 期間中は両方が gate。
 
 | # | input | expected |
 |---|---|---|
 | T1 | new pending、TUI bot alive | dispatch (wake)、`last_wake_attempt_at` 更新 |
 | T8 | pending row、age=15s | re-wake、duplicate suppress 範囲外 |
-| T9 | pending row、age=15s、last_wake_attempt 3s 前 | skip wake (duplicate suppression、prevention とは別) |
-| T10 | read row、claim_expires_at 5s 前、age=40s | self-reclaim + re-wake |
-| T11 | failed row、IMPLICIT_ABANDON、claim_expires_at 30s 前 | reset to pending |
-| T12 | read row、age > stuckAfter (`attempts` 列不在の production schema、age-based proxy v0.7 採択) | status='failed'、failed_reason='STALE_DISPATCH' (v0.4 単一固定)、metric inc |
-| T13 | DB connection error | retry with backoff、5 連続失敗で alert (v0.4 一本化) |
+| T9 (legacy 5s) | pending row、age=15s、last_wake_attempt 3s 前 | skip wake (旧 5s suppression、v0.9 で 30s に変更、phase 5 で削除) |
+| T10 (legacy `read`) | read row、claim_expires_at 5s 前、age=40s | self-reclaim + re-wake (v0.9 新 fixture T32 と semantic 同等、enum 名のみ差) |
+| T11 (legacy `failed`) | failed row、IMPLICIT_ABANDON、claim_expires_at 30s 前 | reset to pending (v0.9 transparent retry に semantic 包含、phase 5 で削除) |
+| T12 (legacy `failed`) | read row、age > stuckAfter | status='failed'、failed_reason='STALE_DISPATCH' (**v0.9 で T33 / T41 に置換**、phase 5 で削除) |
+| T13 | DB connection error | retry with backoff、5 連続失敗で alert |
 | T14 | sweep 周期 budget 250ms 消費 | warn log、次周期 skip しない |
-| T15 | 同 row が pending-stale + read-expired 両方該当 | 1 action のみ実行 (read-expired > pending-stale) |
+| T15 (legacy) | 同 row が pending-stale + read-expired 両方該当 | 1 action のみ実行 (v0.9 で T32 + T28 priority 規則に置換) |
 | T16 | pg_notify INSERT 受信 | 即時 wake |
 | T17 | pg_notify 取りこぼし → cron sweep | 30s 以内に pickup |
-| T19b | non-TUI runtime bot に wake 試行 (v0.8 で T19 sig_runtime_wake_throws から rename + semantic 反転、cycle 2 で impl 実態整合に再修正) | `metric={result:'non_tui_skipped'}` inc、alert=0、warn log なし、DB 変更なし、abnormal-activity counter 不参加 (R9 gate 後) |
+| T19b/T19c | non-TUI runtime bot wake (PR #333 cycle 2 整合) | `metric={result:'non_tui_skipped'}`、alert=0、warn log なし — runtime gate **v0.9 でも保持** (= runtime 軸は state 軸と直交、phase 5 後も gate 残存) |
 | T20 | wake pool default capacity 5、6 件目 INSERT | 6 件目は queue、saturation で grow |
-| T21 (v0.3 新規) | read 状態 30s 経過、bot alive、heartbeat tick | claim_expires_at 延長、`last_heartbeat_at` 更新 (補強 #1) |
-| T22 (v0.3 新規) | bot last_seen_at が 3min 前、tmux session なし、TUI runtime | restart 実行、metric inc、operator alert (補強 #5) |
-| T23 (v0.3 新規) | bot restart 1h 内 4 回目 | restart 抑止、CEO escalate alert (補強 #5) |
-| T24 (v0.3 新規) | wake pool queue が high watermark 超過、capacity < MAX | capacity を grow_step 分拡張 (補強 #2) |
-| T25 (v0.3 新規) | wake pool queue 0、capacity > MIN | shrink_step 分縮小 (補強 #2) |
-| T26 (v0.3 新規) | 同 bot が 5min で 5+ pending wake | abnormal activity metric inc + operator alert (reactive control) |
+| T21 (heartbeat) | `received` 30s 経過、bot alive、heartbeat tick | claim_expires_at 延長、`last_heartbeat_at` 更新 (v0.9 では `read` → `received`、補強 #1) |
+| T22 (dead bot restart) | bot last_seen_at 3min 前、tmux session なし、TUI runtime | restart 実行、metric inc、operator alert (補強 #5) |
+| T23 (restart loop) | bot restart 1h 内 4 回目 | restart 抑止、CEO escalate alert (補強 #5) |
+| T24 (pool grow) | wake pool queue が high watermark 超過、capacity < MAX | capacity を grow_step 分拡張 (補強 #2) |
+| T25 (pool shrink) | wake pool queue 0、capacity > MIN | shrink_step 分縮小 (補強 #2) |
+| T26 (abnormal) | 同 bot が 5min で 5+ pending wake | abnormal activity metric inc + operator alert |
 
-v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除。
+v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除済。
 
-## 12. Migration / rollout (canary)
+## 12. Migration / rollout (canary、v0.9 cycle 2 sweep)
 
-[文献確認 CTO `cad7dbd6` 提案 + v0.3 簡素化反映]:
+[文献確認: §0 v0.9 patch + auditor cycle 2 BLOCK Axis 3+5 解消、CTO `cad7dbd6` 提案ベースで新 enum へ全面 supersede]
+
+### 12.1 Phase 表
 
 | Phase | 内容 | gate |
 |---|---|---|
-| 0 | spec freeze (本 doc v0.3)、CEO + CTO + lead-ama review | CEO accept |
-| 1 | DB schema migration: `message_queue.last_wake_attempt_at`, `last_heartbeat_at` 追加、`failed_reason` enum 拡張 (`STALE_DISPATCH`)、pg_notify trigger。bot 情報は既存 `agents` table 利用 (新規 column 追加なし、v0.4 patch) | `route:ceo-approval` |
-| 2 | state-daemon impl (6-section dispatch 経由 agent-com-dev)、unit + contract test (T1, T8-T17, T19-T26) | auditor pre-impl gate (7 項目) |
-| 3 | dev fleet で **wake-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で wake-daemon 同等動作確認 |
-| 4 | wake 抑制 mode 解除、1 bot ずつ rollout (5 bot づつ wave)、補強 #1/#2/#5 を観測 | metric / log 確認 |
-| 5 | wake-daemon 停止、state-daemon 単独運用、launchd 切替 (補強 #3) | abnormal activity / restart loop metric alert 連携 |
-| 6 | SIG runtime 全廃 (`agents.runtime` 既存 column を TUI のみに収束、adf-lead / dev-001 TUI 化完了後) | CEO 別途承認 |
+| 0 | spec freeze (本 doc v0.9)、CEO + CTO + lead-ama review | CEO accept |
+| 1 | **DB schema migration v0.9**: `message_queue.status` CHECK 制約を新 enum (`pending` / `received` / `in_progress` / `done` / `replied`) に変更、`failed_reason` column drop (or null 化)、`done_at` 追加、`last_wake_attempt_at` / `last_heartbeat_at` 追加、pg_notify trigger 更新。**既存行 conversion (12.3 参照)**。bot 情報は既存 `agents` table 利用 (新規 column 追加なし) | `route:ceo-approval` |
+| 2 | **agent-comms tool impl 修正**: `mcp__agent-comms__processing` / `done` 新規追加、`next` の claim 結果 status を `received` に変更 (旧 `read` 代替)、`fail` / `skip` tool を **deprecate** (内部 retry loop で透明化)。`db/migrate.ts:246` / `server.ts:1709, 1842` の旧 enum literal を新 enum に sweep | auditor pre-impl gate (7 項目) |
+| 3 | state-daemon impl (6-section dispatch 経由 agent-com-dev)、unit + contract test (§11.1 T27-T41 + §11.2 legacy 全 pass) | auditor pre-impl gate |
+| 4 | dev fleet で **wake-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で wake-daemon 同等動作確認 |
+| 5 | wake 抑制 mode 解除、1 bot ずつ rollout (5 bot づつ wave)、補強 #1/#2/#5 を観測 | metric / log 確認 |
+| 6 | wake-daemon 停止、state-daemon 単独運用、launchd 切替 (補強 #3)、**legacy fixture (§11.2) 削除 + DB 上の旧 enum literal 完全消滅 verify** | abnormal activity / restart loop metric alert 連携 |
+| 7 | SIG runtime 全廃 (`agents.runtime` 既存 column を TUI のみに収束、adf-lead / dev-001 TUI 化完了後) | CEO 別途承認 |
+
+### 12.2 impl 修正 scope (本 spec merge → 並行 impl PR、route:ceo-approval)
+
+[文献確認: lead-ama auditor literal 指摘 (db/migrate.ts:246 / server.ts:1709, 1842)]
+
+本 spec merge 後、agent-com-dev へ **6-section 指示書経由で impl PR** 別 dispatch (route:ceo-approval、schema migration 含む)。修正対象 (literal):
+
+| ファイル | line | 旧 | 新 |
+|---|---|---|---|
+| `db/migrate.ts` | 246 | `CHECK (status IN ('pending', 'read', 'replied', 'failed', 'skipped'))` | `CHECK (status IN ('pending', 'received', 'in_progress', 'done', 'replied'))` |
+| `server.ts` | 1709 (`fail` tool) | `UPDATE message_queue SET status='failed', failed_reason=$1` | retry transparent loop に変更 (RETRYABLE → reset to `pending`、PERMANENT → 内部 audit log)、tool 自体は deprecate stub |
+| `server.ts` | 1842 (`skip` tool) | `UPDATE ... status='skipped'` | tool 削除 (CC fanout 廃止で発生源 0)、呼び元なし verify 後 |
+| `server.ts` (`next` tool) | claim 部 | `UPDATE ... SET status='read', claim_expires_at=...` | `SET status='received', claim_expires_at=...` |
+| (新規) `server.ts` | — | — | `mcp__agent-comms__processing` tool 追加 (`received` → `in_progress`) |
+| (新規) `server.ts` | — | — | `mcp__agent-comms__done` tool 追加 (`in_progress` → `done`) |
+
+`failed_reason` column の disposition (drop or NULL 維持) は impl PR の Open decision (audit log 連携要否で判断)。
+
+### 12.3 既存 row 変換 plan (Phase 1、破壊的 migration)
+
+[文献確認: auditor cycle 2 BLOCK Axis 3 — `failed` 既存行の変換計画必須]
+
+migration 時点での `message_queue` 既存行を新 enum へ強制変換:
+
+| 旧 status | 旧 row 条件 | 新 status | 理由 |
+|---|---|---|---|
+| `pending` | (条件なし) | `pending` | 同名、変換不要 |
+| `read` | (条件なし) | `received` | semantic 同等 (claim 取得済、未処理開始) |
+| `replied` | (条件なし) | `replied` | terminal、変換不要 |
+| `failed` | `failed_reason='IMPLICIT_ABANDON'` AND `claim_expires_at > now() - 60s` | `pending` | recent abandon は recoverable (旧 row 4 と整合)、retry transparent loop に投入 |
+| `failed` | `failed_reason='STALE_DISPATCH'` (terminal) | `replied` | bot が応答した可能性ありで bot 側 reply 検証必須、検証 NG なら `pending` 再投入 (operator 判断、impl PR で manual classification script 提示) |
+| `failed` | その他 (PERMANENT) | `replied` (= terminal close) + `audit_log` に旧 `failed_reason` 退避 | retry loop で扱えない PERMANENT は terminal 扱い、audit log で保全 |
+| `skipped` | INSERT < 7 日前 | DELETE | 7 日 GC (CC fanout 廃止で発生源 0、保持価値なし) |
+| `skipped` | INSERT >= 7 日前 | DELETE | 同上、即時消去 |
+
+**rollback 策**: Phase 1 migration 直前に `message_queue` を full snapshot (`pg_dump`) → `migration_backup_v0.9_$(date)` に保存。problem 時は snapshot restore + Phase 0 spec 戻し。
+
+**migration 実行時間**: production row 数 (現状 < 50k 想定) で `UPDATE` 単発トランザクション完結を default、row 数増加で batch 化は impl PR の Open decision。
+
+### 12.4 fanout 発生源 0 化検証 (skipped 廃止前提条件)
+
+旧 `skipped` (LOOP_PREVENTED 等) は CC fanout 起源 100%。PR #336 (旧 routing bug fix) merge 後、**新 INSERT で `skipped` 0 件継続 7 日** を Phase 1 開始 gate に追加。0 件未達なら fanout 残存、対応 PR を別途必須。
 
 ## 13. Open decisions (implementer 自由 + CEO 採択待ち)
 
