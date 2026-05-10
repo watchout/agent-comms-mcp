@@ -1,10 +1,10 @@
 # State Machine Driven Dispatch Daemon — Design Spec
 
-> **Status**: ARC 起草 (Draft v0.8 — supersedes v0.7)
+> **Status**: ARC 起草 (Draft v0.9 — supersedes v0.8)
 > **Issue**: [watchout/agent-comms-mcp#323](https://github.com/watchout/agent-comms-mcp/issues/323)
 > **Author**: ARC
-> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7) / 2026-05-09 (v0.8)
-> **Trigger**: ..., lead-ama `0171600a` (v0.8、PR #333 auditor Axis 5 SSOT drift 解消、ARC α 採択、T19 → T19b semantic 反転、non-TUI silent skip 化)
+> **Created**: 2026-05-07 (v0.1) / Revised 2026-05-08 (v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → v0.7) / 2026-05-09 (v0.8) / 2026-05-10 (v0.9)
+> **Trigger**: ..., CTO `e24ade30` + CEO `15d47c37` (v0.9、status enum 4 active + 1 terminal 再定義、failed/skipped 廃止、新 tool processing/done、wake duplicate suppression 5s→30s)
 > **Honesty labels**: 全 claim に [検証済] / [文献確認] / [推測]
 > **Dispatch context** (6-section format):
 > - target_project: `agent-comms-mcp`
@@ -13,7 +13,65 @@
 
 ---
 
-## 0. v0.7 → v0.8 patch (PR #333 auditor Axis 5 SSOT drift 解消、T19 semantic 反転)
+## 0. v0.8 → v0.9 patch (status enum 4 active + 1 terminal 再定義、CTO + CEO directive)
+
+[文献確認: CTO `e24ade30` (CEO `15d47c37` 採択) + CEO `dafbd8c0` 質問への CTO 回答]:
+
+| 項目 | v0.8 | v0.9 |
+|---|---|---|
+| status enum | `pending / read / replied / failed / skipped` (5) | `pending / received / in_progress / done / replied` (5、再定義) |
+| state-daemon が wake する状態 | pending のみ (read = claim 取得済 = 触らない) | pending / received / done (= bot 認知促す各 state)、in_progress / replied は触らない |
+| failed | error case として保持 | **廃止** (retry loop で透明化、最終 done or replied or PERMANENT 内部状態) |
+| skipped | LOOP_PREVENTED 等 | **廃止** (CC 排除 PR #336 で発生源 0 化) |
+| 新 agent-comms tool | (無) | `mcp__agent-comms__processing` / `mcp__agent-comms__done` |
+| wake duplicate suppression | 5s | **30s** (sweep tick と同期、ARC check inbox 連発対策) |
+
+### v0.9 status state machine
+
+```
+INSERT row → [pending] (= bot 未認知)
+              ↓ state-daemon wake (tmux send-keys)
+              ↓ bot LLM 起動、inbox tool 呼出 → next 取得
+              ↓
+            [received] (= bot が next claim 取得、処理開始前)
+              ↓ wake (= 処理開始 push、stall 防止)
+              ↓ bot が processing tool 呼出
+              ↓
+            [in_progress] (= bot LLM turn 実行中)
+              ↓ state-daemon: nothing (= 信頼)、stall monitoring
+              ↓ bot が done tool 呼出 (reply 不要 case) or send tool 呼出 (reply あり)
+              ↓
+        ┌─ [done] (= 内部完了、reply 未送信)            [replied] (= reply 完了、terminal)
+        │     ↓ wake (= reply 出してね push)
+        │     ↓ bot が send tool 呼出
+        │     ↓
+        └─→ [replied] (terminal)
+```
+
+### state-daemon 動作表 (v0.9)
+
+| status | 意味 | wake 動作 |
+|---|---|---|
+| pending | 未到達 (DB INSERT 直後、bot 未認知) | wake (= inbox check 促す) |
+| received | bot が next 取得済、処理開始前 | wake (= 処理開始 push) |
+| in_progress | bot LLM turn 実行中 | nothing (= 信頼) + stall monitoring |
+| done | bot 内部完了、reply 未送信 | wake (= reply 出してね push) |
+| replied | reply 完了、terminal | nothing |
+
+### 廃止 (failed / skipped)
+
+- failed: retry loop で透明化、最終 done or replied or PERMANENT 内部状態
+- skipped: CC fanout (= PR #336 で廃止) で発生源 0、既存 skipped 行は PR-C-1 7 日 GC で削除
+
+### wake duplicate suppression 5s → 30s
+
+[文献確認: CEO `15d47c37` 「ARC checkinbox 連発」観測]:
+- 旧 5s では sweep tick (30s) 毎に wake 反復、ARC TUI に check inbox 重複入力
+- 新 30s では sweep tick と同期、同一 row への wake は直前 wake から 30s 以内なら skip
+
+---
+
+## 0a. v0.7 → v0.8 patch (PR #333 auditor Axis 5 SSOT drift 解消、T19 semantic 反転)
 
 [文献確認 lead-ama `0171600a` / auditor PR #333 cycle 1 `196cceb2`]:
 
@@ -35,7 +93,7 @@
 
 ---
 
-## 0a. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
+## 0b. v0.6 → v0.7 patch (PR #330 auditor Axis 5(b) schema drift 解消)
 
 [文献確認 lead-ama `b76bccff` / agent-com-dev `\d message_queue` 検証済]:
 
@@ -54,7 +112,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0b. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
+## 0c. v0.5 → v0.6 patch (auditor v3 BLOCK A2 残 3 箇所解消)
 
 [文献確認 lead-ama `e8abbf0e` / auditor v3 `21beddd8` / CEO `cfb32b4a` α 採択]:
 
@@ -69,7 +127,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0c. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
+## 0d. v0.4 → v0.5 patch (auditor v2 BLOCK 残 3 件解消)
 
 [文献確認 lead-ama `1abdf00d` / auditor v2 `b7398912`]:
 
@@ -81,7 +139,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0d. v0.3 → v0.4 patch (auditor BLOCK 解消)
+## 0e. v0.3 → v0.4 patch (auditor BLOCK 解消)
 
 [文献確認 CTO directive `70050419` / lead-ama `d0161ad6`]:
 
@@ -96,7 +154,7 @@ T12 fixture (`max_attempts_failed_permanently`) は名前 semantic のみ、`att
 
 ---
 
-## 0e. v0.2 → v0.3 主要変更点
+## 0f. v0.2 → v0.3 主要変更点
 
 [文献確認 CTO directive `1d402109` / `907b7e9b`]:
 
