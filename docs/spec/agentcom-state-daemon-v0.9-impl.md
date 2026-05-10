@@ -14,8 +14,10 @@
 [文献確認: governance-flow.md §0 6-section format 2026-05-07 改訂]
 
 - **`target_project`**: `agent-comms-mcp`
+- **`target_dev_bot`**: `agent-com-dev` (本 PR impl 担当、auditor pre-impl gate D1 per dispatch key として固定、汎用 dev-bot scope 正規化)
 - **`dispatch_origin`**: `arc` (drafting) → `lead-ama` (formal IMPL doc authoring + dispatch)
 - **`dispatch_reason`**: CTO directive `a21fe385` (本日 2026-05-10、CEO `0dc05f05` GO per)。state-daemon v0.9 spec (PR #336 merged commit `72b9c92`) の impl 統合 1 PR 化要請。
+- **`memory_partition`**: `agent-comms-mcp` (agent-memory MCP tool 呼出時 explicit per-call 必須、env default 不可、汎用 dev-bot scope 越境禁止)
 - **`scope_label`**: `route:ceo-approval` (status enum migration + DB schema 変更 + 公開 tool 追加)
 
 agent-com-dev は本指示書の「凍結」section (1-4) を violation したら差戻し、「Open decisions」(5) 以外で判断に迷ったら lead-ama にエスカレーション、self-proceed 禁止。
@@ -259,16 +261,30 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 
 ## 2. Required behavior (凍結)
 
-[文献確認: spec v0.9 §2 設計目標 + governance-flow.md production semantic]
+[文献確認: spec v0.9 §4.3 state machine / §11 fixture / §12 migration phase + governance-flow.md production semantic]
 
-- **Zero-downtime migration**: state-daemon が稼働中、Phase 1 schema migration は zero-downtime 設計 (= 旧 enum と新 enum を一時並存できる migration スクリプト or rolling deploy)
-- **Idempotent tool**: `processing` / `done` 2 回呼出は 2 回目 no-op + warning (= retry safe)
-- **Atomic transition**: status 遷移は単一 UPDATE 文 + WHERE 旧 status (= optimistic concurrency、race 時は warn + retry)
-- **30s suppression**: same `queue_id` への wake 試行は 30s 以内重複抑制、metric `wake_actions_total{result='dedup_skipped'}` inc
-- **9 pattern coverage**: stall detection は 9 pattern 全て network/CPU spike なく一定 sweep 周期 (30s) で評価可能
-- **CC 削除完全性**: queue insert 後の `WHERE status='skipped'` 7 日 0 件 (= Phase 1 gate)
-- **bot 19 体影響**: migration 後、全 bot の `next` 呼出が `'received'` claim を期待、旧 `'read'` claim は migration script で `'received'` rename 済 (data 損失 0)
-- **production semantic 観測**: 全 transition + stall detection を log + metric inc、CI で grep 可能
+### 2.1 production semantic (spec direct anchor 必須)
+
+- **Zero-downtime migration** (spec §12 phase 1-3): state-daemon が稼働中、Phase 1 schema migration は zero-downtime 設計 (= 旧 enum と新 enum を一時並存できる migration スクリプト or rolling deploy)
+- **Idempotent tool** (spec §4.3 transition idempotence): `processing` / `done` 2 回呼出は 2 回目 no-op + warning (= retry safe)
+- **Atomic transition** (spec §4.3): status 遷移は単一 UPDATE 文 + WHERE 旧 status (= optimistic concurrency、race 時は warn + retry)
+- **9 pattern coverage** (spec §4-§7 + §11.1 T27-T41 fixture): stall detection は 9 pattern 全て network/CPU spike なく一定 sweep 周期 (30s) で評価可能、同一 abstraction 3 layer 分類 (Layer 1 queue row predicate / Layer 2 process state / Layer 3 output state)
+- **CC 削除完全性** (spec §1.4 削除 + §12 phase 1 gate): queue insert 後の `WHERE status='skipped'` 7 日 0 件 (= Phase 1 gate)
+- **bot 19 体影響** (spec §12 phase 2 rollout): migration 後、全 bot の `next` 呼出が `'received'` claim を期待、旧 `'read'` claim は migration script で `'received'` rename 済 (data 損失 0)
+- **production semantic 観測** (spec §11 + governance-flow Layer 0): 全 transition + stall detection を log + metric inc、CI で grep 可能
+
+### 2.2 §5.2 確定判断の §2 promote (lead-ama dispatch msg `5e5c5410` per、open decision から required へ移動)
+
+[文献確認: lead-ama dispatch msg `5e5c5410` 6 項目確定 + auditor cycle 1 Q2/A1 指摘「O1-O6 を §5.2 から §2 Required に移動」]
+
+| ID | 確定値 | rationale |
+|---|---|---|
+| **R-O1 (migration 単発)** | 単発トランザクション (row < 50k 想定) | impl 着手前 agent-com-dev が `SELECT count(*) FROM message_queue` で row 数 verify、>10k なら lead-ama に再判断 escalate |
+| **R-O2 (audit_log 新規 table)** | `audit_log` 新規 table を本 PR scope 内で migration 同梱 | scope 拡大 risk 回避、agent-memory MCP 等別 repo 影響回避 |
+| **R-O3 (新 tool MCP schema impl PR 同梱)** | `processing` / `done` MCP schema は本 PR (impl) と同梱 push | 別 PR は cycle 増 + version drift |
+| **R-O4 (env 化必須 `WAKE_DEDUP_SEC`)** | env override `WAKE_DEDUP_SEC` (default 30) を impl 必須、hardcode 不可 | operator emergency tuning 担保、`feedback_no_hardcode` per |
+| **R-O5 (env 化必須 stall threshold)** | env override `STUCK_AFTER_SEC` (default 300=5min) / `STALL_AFTER_SEC` (default 600=10min) を impl 必須、hardcode 不可 | operator tuning + threshold 既決定値の動的調整 |
+| **R-O6 (1 module `stall-detector.ts`)** | 9 stall pattern detection 単一 module `core/state-daemon/stall-detector.ts`、internal split (class / function 構造) は §5.1 自由 | 統合観点を維持、internal は implementer detail |
 
 ## 3. Forbidden behavior (凍結、anti-patterns)
 
@@ -328,28 +344,21 @@ scope exclusion (本 PR で触らない):
 - 全 fixture (T1-T44 + M1-M4 + E1-E4) pass で merge gate (Layer 0 自動 gate per governance)
 - breaking change detection (`scripts/detect-breaking-changes.sh`) で `route:ceo-approval` label 必須
 
-## 5. Open decisions (implementer 自由 + lead-ama 確認待ち)
+## 5. Open decisions (implementer 自由、§2.2 で確定済外の internal detail のみ)
 
-implementer (agent-com-dev) が自由に選択してよい項目:
+[lead-ama cycle 2 縮小: 旧 §5.2 lead-ama 確認待ち 6 項目 (O1-O6) は §2.2 R-O1〜R-O6 で確定済 (env 化必須 / 単発 migration / audit_log 新規 / impl PR 同梱 / 1 module)、本 §5 は internal detail のみ残す]
+
+implementer (agent-com-dev) が自由に選択してよい項目 (lead-ama escalate 不要):
 
 ### 5.1 internal 構造 (自由)
-- daemon 内部 module 分割 (class / function / private helper 命名)
+- daemon 内部 module 分割 (class / function / private helper 命名、§2.2 R-O6 で 1 module 確定後の internal split は自由)
 - `processing` / `done` tool の internal helper 共有 (transition.ts 共通化等)
 - migration script の実装言語 (TypeScript / SQL pure / pg-migrate 等)
-- audit_log table schema (PERMANENT failed 退避先、新規 table or 既存 table 拡張)
+- audit_log table schema 詳細 (column 構成 / index、§2.2 R-O2 で新規 table 確定後の column design 自由)
+- `stall-detector.ts` 内部の関数分割 (1 module 内で 9 pattern を 9 function 化 / 3 layer 化等、§2.2 R-O6 統合観点維持)
+- env name の prefix convention (`AGENTCOM_*` / `STATE_DAEMON_*` 等、§2.2 R-O4/R-O5 既定 env 名は維持)
 
-### 5.2 lead-ama 確認待ち (impl PR 着手前に決定)
-
-| # | 項目 | 提案 default | lead-ama 判断要請 |
-|---|---|---|---|
-| O1 | migration 単発トランザクション or batch? | 単発 (現状 row < 50k) | row 数 verify 後再判断 |
-| O2 | `failed (PERMANENT)` 退避先 | `audit_log` 新規 table | 既存 table 流用要否 |
-| O3 | `processing` / `done` tool の MCP schema 公開タイミング | impl PR 同梱 | 別 PR 分離要否 |
-| O4 | wake_dedup_interval_sec を env 化? | hardcoded 30s | env 化 (`WAKE_DEDUP_SEC`) 要否 |
-| O5 | stall pattern threshold (例: stuckAfter 5min / stallAfter 10min) を config 化? | inline default | env / config table 化要否 |
-| O6 | 9 stall pattern detection を 1 module / 9 module? | 1 module (`stall-detector.ts`) | 分割要否 |
-
-implementer が (1)-(4) に含まれない判断に遭遇 → lead-ama に escalate、self-proceed 禁止。
+implementer が §5.1 列挙以外の判断に遭遇 → lead-ama に escalate、self-proceed 禁止 (engineer-scope-discipline)。
 
 ---
 
