@@ -316,7 +316,7 @@ setInterval(async () => {
     UPDATE message_queue
        SET claim_expires_at = now() + interval '${CLAIM_TTL_SEC} seconds',
            last_heartbeat_at = now()
-     WHERE status = 'read'
+     WHERE status IN ('received', 'in_progress')   -- v0.9 新 enum: claim 取得済 (received) と LLM turn 中 (in_progress) の両方が heartbeat 対象
        AND agent_id IN (SELECT agent_id FROM agents WHERE status = 'online')
        AND claim_expires_at > now()  -- 既 expired は対象外、self-reclaim 経路で処理
   `);
