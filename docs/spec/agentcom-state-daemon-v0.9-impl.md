@@ -51,6 +51,33 @@ ALTER TABLE message_queue
 | `done` | bot 内部完了、reply 未送信 | `in_progress` | `replied` (send tool) |
 | `replied` | reply 完了 (terminal) | `in_progress` / `done` | (terminal) |
 
+### 1.1a enum migration `failed` 既存 row 分岐 contract (auditor A2 解消)
+
+[文献確認: spec v0.9 §12.3 既存 row 変換 plan + auditor A2 BLOCK]
+
+migration script は既存 `failed` row を以下の **3 way 分岐** で transform、結果が新 enum + audit 完備:
+
+```ts
+// pseudo-code (impl 側で SQL or TS migration script に翻訳)
+for (row of message_queue WHERE status='failed') {
+  if (row.failed_reason === 'IMPLICIT_ABANDON' && row.claim_expires_at > now() - interval '60 seconds') {
+    UPDATE row SET status='pending', failed_reason=NULL;  // recoverable, retry loop に投入
+  } else if (row.failed_reason === 'STALE_DISPATCH') {
+    // bot が応答した可能性ありで bot 側 reply 検証必須
+    if (verify_bot_replied(row)) {
+      UPDATE row SET status='replied', failed_reason=NULL;
+    } else {
+      UPDATE row SET status='pending', failed_reason=NULL;  // operator 判断、再投入
+    }
+  } else {
+    // PERMANENT (= retry loop で扱えない) → terminal close + audit log
+    INSERT INTO audit_log (queue_id, original_status, original_reason, archived_at)
+      VALUES (row.id, 'failed', row.failed_reason, now());
+    UPDATE row SET status='replied', failed_reason=NULL;
+  }
+}
+```
+
 ### 1.2 新規 tool 2 個 (MCP server.ts)
 
 ```ts
@@ -80,14 +107,110 @@ invariants:
 - `done` は `in_progress` のみ受領。他 status は `INVALID_STATE` error。
 - 両 tool は idempotent (同 queue_id 2 回呼出は 2 回目 `ALREADY_TRANSITIONED` warning + return ok)。
 
-### 1.3 既存 tool 修正
+### 1.3 既存 tool 修正 (signature / pre / post / invariants 明文化)
 
-| tool | 修正 |
-|---|---|
-| `next` | claim 部 `UPDATE message_queue SET status='received', claim_expires_at=...` (旧 `'read'`) |
-| `fail` | **deprecate**: tool 自体は残すが no-op return + warning。retry transparent loop で内部処理。 |
-| `skip` | **削除**: tool 削除、CC fanout 廃止で発生源 0、呼び元なし verify 必須 |
-| `send` | reply 送信時 `UPDATE ... SET status='replied'` (旧: replied 設定経路維持) |
+#### `next` tool
+```ts
+{
+  name: "next",
+  parameters: {},  // no params (claim from caller's agent_id)
+  // pre: caller agent_id has 1+ pending message
+  // post: returns oldest pending row, status='received', claim_expires_at = now() + CLAIM_TTL_SEC
+  // invariants:
+  //   - 同 row 複数 caller 同時 claim 時は 1 caller のみ成功 (atomic UPDATE WHERE status='pending')
+  //   - 旧 `status='read'` 書込は v0.9 で廃止、`'received'` のみ
+  return: { queue_id: string, message_id: string, content: string, ... } | null
+}
+```
+
+#### `fail` tool (deprecate)
+```ts
+{
+  name: "fail",
+  parameters: { queue_id: string, reason?: string },
+  // pre: queue_id exists、status='received' or 'in_progress'
+  // post: **no-op return + warning log** ('fail tool is deprecated, retry loop handles failure transparently')
+  // invariants:
+  //   - status='failed' 書込は **CHECK 制約違反 → impl error** (新 enum で `failed` 不在)
+  //   - retry transparent loop が RETRYABLE_REASONS なら内部で `pending` reset、PERMANENT なら `replied` + audit_log
+  return: { ok: true, deprecated: true } | error
+}
+```
+
+#### `skip` tool (削除)
+```ts
+// 削除完了。code path 残存 0 verify 必須 (= grep 0 hit)。
+// 呼び元: なし (CC fanout 廃止で発生源 0)
+```
+
+#### `send` tool 修正
+```ts
+{
+  name: "send",
+  parameters: { content: string, mention: string, reply_to: string, message_type?, metadata? },  // cc parameter 削除
+  // pre: reply_to の queue_id が status='received' or 'in_progress' or 'done'
+  // post:
+  //   - target queue row の status='replied' (terminal)
+  //   - new queue row insert (recipient agent 宛) with status='pending'
+  // invariants:
+  //   - `cc` parameter 受領は **schema validation error** (廃止)
+  //   - body 末尾 `[CC: <@id>]` 注入 logic 削除
+  //   - CC recipient 用 queue insert なし (1 mention = 1 row)
+  return: { ok: true, sent_id: string, ... }
+}
+```
+
+#### GC job (新規、cron or daemon side)
+```ts
+function gcRepliedRows(): Promise<{ deleted: number }> {
+  // pre: なし (定時実行、daemon-side)
+  // post: status='replied' AND replied_at < now() - 7 days の row を DELETE
+  // invariants:
+  //   - status='failed' は v0.9 で不在のため対象外 (= 設計上 retry loop で消化済)
+  //   - DELETE は batch (default 1000 rows/tick)、deadlock 回避
+}
+```
+
+#### `stall-detector` module (新規、`core/stall-detector.ts`)
+```ts
+type StallVerdict =
+  | { kind: 'idle'; layer: 1 }
+  | { kind: 'claim_ttl_expired'; layer: 1; queue_id: string }
+  | { kind: 'received_stuck'; layer: 1; queue_id: string; age_sec: number }
+  | { kind: 'dead_bot'; layer: 1; agent_id: string; last_seen_sec_ago: number }
+  | { kind: 'tmux_missing'; layer: 1; agent_id: string }
+  | { kind: 'in_progress_stall'; layer: 2; queue_id: string; age_sec: number }
+  | { kind: 'context_pressure'; layer: 2; agent_id: string }
+  | { kind: 'input_residue'; layer: 2; agent_id: string }
+  | { kind: 'smooshing_hang'; layer: 2; agent_id: string };
+
+function detectStall(
+  rows: MessageQueueRow[],
+  agents: AgentRow[],
+  tmuxState: TmuxState,
+  config: { stuckAfter: number; stallAfter: number; deadAfter: number }
+): StallVerdict[];
+
+// pre: 全引数 immutable snapshot
+// post: 検出 verdict 配列 (重複 detection 0、1 row につき max 1 verdict)
+// invariants:
+//   - 同 sweep 周期内で 2 回呼出 → 同 verdict 配列 (idempotent)
+//   - layer 1 / 2 直交、同 row が 2 layer 同時 detection 可
+```
+
+### 1.3a stall detection 3 layer abstraction (A2 統一)
+
+[文献確認: auditor A2 BLOCK 解消、9 pattern 同一抽象 layer 統一]
+
+| Layer | 抽象 | 共通 detection 軸 | 適用 pattern (#) |
+|---|---|---|---|
+| **L1: queue row predicate** | DB row state + age + claim metadata | `WHERE` 句単発 + age 計算 | 1 (idle: 全 row 不在) / 2 (claim TTL) / 3 (received stuck) |
+| **L2: process state** | bot OS process / agent metadata | `agents.status` + `last_seen_at` + tmux session 存在 | 4 (dead bot) / 5 (tmux missing) |
+| **L3: output state** | bot 出力ストリーム + LLM turn semantics | `in_progress` age + reply 出力 / context 状態観測 | 6 (in_progress stall) / 7 (context pressure) / 8 (input residue) / 9 (smooshing hang) |
+
+各 Layer は同 abstraction 境界内で実装、cross-layer signal は `StallVerdict` 配列を介して合成のみ (混在禁止)。impl module 1 ファイル `core/stall-detector.ts` 内で 3 sub-layer 関数分離 default、internal split は §5.1 implementer 自由。
+
+### 1.4 CC 機構削除 (全 path)
 
 ### 1.4 CC 機構削除 (全 path)
 
@@ -112,23 +235,25 @@ config:
 const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 ```
 
-### 1.6 9 stall pattern detection
+### 1.6 9 stall pattern detection (3 layer 統一、§1.3a abstraction 整合)
 
-[文献確認: spec v0.9 §4-§7]
+[文献確認: spec v0.9 §4-§7 + auditor A2 BLOCK 解消、3 layer 分類]
 
-| Layer | # | pattern | detection | wake 動作 |
+| Layer | # | pattern | detection (kind) | wake / 動作 |
 |---|---|---|---|---|
-| 1 (queue) | 1 | 真 idle (queue 空 + bot online) | `count(pending)=0` + `agents.status='online'` | nothing (信頼) |
-| 1 | 2 | claim TTL expired | `received` AND `claim_expires_at < now()` | self-reclaim → reset to `pending` + re-wake |
-| 1 | 3 | stuck 5min | `received` AND `age > 5min` | reset to `pending` (transparent retry) |
-| 1 | 4 | dead bot | `agents.last_seen_at < now() - 3min` AND `status='online'` | restart 実行 + alert |
-| 1 | 5 | tmux missing | `tmux session 不在` AND `runtime='TUI'` | restart 実行 + alert |
-| 2 (bot internal) | 6 | 判断 prompt 待ち | `in_progress` AND `age > stallAfter (10min default)` | operator alert (auto reset しない) |
-| 2 | 7 | context 圧迫 | bot last reply 内 token 警告 | operator alert |
-| 2 | 8 | input residue | tmux pane に未送信 input 検出 | clear + re-wake |
-| 2 | 9 | Smooshing hang | bot output 全停止 + claim 維持 | operator alert + restart 候補 |
+| **L1 queue row predicate** | 1 | 真 idle (queue 空 + bot online) | `kind='idle'` (`count(pending)=0` + `agents.status='online'`) | nothing (信頼) |
+| L1 | 2 | claim TTL expired | `kind='claim_ttl_expired'` (`received` AND `claim_expires_at < now()`) | self-reclaim → reset to `pending` + re-wake |
+| L1 | 3 | received stuck 5min | `kind='received_stuck'` (`received` AND `age > stuckAfter`) | reset to `pending` (transparent retry) |
+| **L2 process state** | 4 | dead bot | `kind='dead_bot'` (`agents.last_seen_at < now() - deadAfter` AND `status='online'`) | restart 実行 + alert |
+| L2 | 5 | tmux missing | `kind='tmux_missing'` (`tmux session 不在` AND `runtime='TUI'`) | restart 実行 + alert |
+| **L3 output state** | 6 | in_progress stall (判断 prompt 待ち含む) | `kind='in_progress_stall'` (`in_progress` AND `age > stallAfter`) | operator alert (auto reset しない) |
+| L3 | 7 | context pressure | `kind='context_pressure'` (bot last reply に token 警告 pattern) | operator alert |
+| L3 | 8 | input residue | `kind='input_residue'` (tmux pane 未送信 input 検出) | pane clear + re-wake |
+| L3 | 9 | Smooshing hang | `kind='smooshing_hang'` (bot output 無 + claim 維持) | operator alert + restart 候補 |
 
-各 pattern detection function は `core/stall-detector.ts` (新規) に集約、return `StallVerdict` 構造化。
+各 pattern detection function は `core/stall-detector.ts` (新規) に **3 sub-layer 関数分離 default** で集約、return `StallVerdict[]` (§1.3 type 参照)。internal split は §5.1 implementer 自由。
+
+各 detection は **同一抽象軸** (= L1: row predicate / L2: process state / L3: output state) で実装、cross-layer signal 混在禁止 (= verdict 配列で合成のみ)。
 
 ---
 
@@ -150,6 +275,8 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 [文献確認: 過去 incident 整理]
 
 - **再導入禁止 (PR #330 revert per、CTO `1d402109`)**: prevention check / chain depth limit / pair bounce detection / ack pattern detection / TUI rate limit — 全て v0.3 以降廃止、復活させない
+- **B8 type loop / runaway 検出 logic 再導入禁止**: arc↔adf-lead bounce 等の異 agent A↔B loop 検出は **B8 v0.3 spec scope** で別 PR 進行、本 PR では impl しない (= scope 混入禁止)。spec/v0.9 は state machine + 9 stall pattern のみで sufficient (incident 参照: 2026-05-07 17:55 JST `813db0eb`)
+- **`IMPLICIT_ABANDON` reason 再導入禁止**: v0.8 旧 `failed_reason='IMPLICIT_ABANDON'` semantics は v0.9 で **廃止** (transparent retry loop で透明化)、`failed_reason` column 自体 drop 済。書込み試行は CHECK 制約違反 → impl error
 - **CC fanout 復活禁止**: `cc` parameter 受領 / body `[CC: ...]` 注入 / CC recipient queue insert は **block PR**
 - **paired migration files 復活禁止**: `migrations/` ディレクトリ別ファイル形式は廃止 (= inline canonical、`db/migrate.ts` 内 single source)
 - **5s suppression 復活禁止**: `WAKE_DEDUP_INTERVAL_SEC = 5` への戻りは ARC checkinbox 連発再発、block PR
@@ -186,7 +313,15 @@ scope exclusion (本 PR で触らない):
 
 - E1: bot が send → `replied` で terminal、queue から 7 日後 GC 実行で削除確認
 - E2: 30s 以内同 row 連続 INSERT (重複) → wake 1 回のみ、metric `dedup_skipped` += 1
-- E3: 9 stall pattern を仮想 setup → 各 pattern detection が trigger、metric inc 確認
+- **E3a (Layer 1 #1 idle)**: queue 全 row 不在 + bot online → `StallVerdict.kind='idle'` 1 件、metric `stall_detected_total{kind='idle'}` += 1、wake 不発火
+- **E3b (Layer 1 #2 claim TTL expired)**: `received` row、`claim_expires_at = now() - 5s` → `kind='claim_ttl_expired'` 1 件、self-reclaim → `pending` reset、wake 1 回
+- **E3c (Layer 1 #3 received stuck 5min)**: `received` row、`age=6min` → `kind='received_stuck'` 1 件、reset to `pending` (transparent retry)、metric `wake_actions_total{result='retry_reset'}` += 1
+- **E3d (Layer 2 #4 dead bot)**: `agents.last_seen_at = now() - 4min` AND `status='online'` → `kind='dead_bot'` 1 件、restart launcher 呼出、operator alert 1 回
+- **E3e (Layer 2 #5 tmux missing)**: `runtime='TUI'` AND `tmux session 不在` → `kind='tmux_missing'` 1 件、restart 実行、alert 1 回
+- **E3f (Layer 3 #6 in_progress stall)**: `in_progress` row、`age=11min` (default stallAfter=10min 超過) → `kind='in_progress_stall'` 1 件、operator alert (auto reset しない)
+- **E3g (Layer 3 #7 context pressure)**: bot last reply に token 警告 pattern (例: "context limit") → `kind='context_pressure'` 1 件、operator alert
+- **E3h (Layer 3 #8 input residue)**: tmux pane に未送信 input 検出 → `kind='input_residue'` 1 件、pane clear + re-wake
+- **E3i (Layer 3 #9 smooshing hang)**: bot output 無 + claim 維持 + `age > stallAfter` → `kind='smooshing_hang'` 1 件、operator alert + restart 候補
 - E4: bot 19 体に対して migration 実施、`next` 呼出が `'received'` claim 取得確認、data 損失 0
 
 ### 4.3 CI 要件
