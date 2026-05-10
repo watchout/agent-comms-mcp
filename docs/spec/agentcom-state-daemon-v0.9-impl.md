@@ -327,7 +327,7 @@ scope exclusion (本 PR で触らない):
 
 ### 4.2 behavioral smoke (`scripts/test/smoke-v0.9.sh` 等)
 
-各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。merge gate は E1/E2/E3a-E3i (9 件)/E4 = **計 13 件** を個別 pass で count。
+各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。merge gate は E1/E2/E3a-E3i (9 件)/E4 = **計 12 件** (E1 + E2 + E3a-E3i 9 件 + E4) を個別 pass で count。
 
 - **E1**: bot が send → `replied` で terminal、queue から 7 日後 GC 実行で削除確認
   - artifact: `scripts/test/E1-replied-7day-gc.sh`
@@ -355,7 +355,7 @@ scope exclusion (本 PR で触らない):
   - artifact: `scripts/test/E4-migration-19-bots.sh`
 
 ### 4.3 CI 要件
-- 全 fixture (T1-T44 + M1-M4 + E1/E2/E3a-E3i/E4 = 13 件) pass で merge gate (Layer 0 自動 gate per governance)
+- 全 fixture (T1-T44 + M1-M4 + E1/E2/E3a-E3i 9 件/E4 = 12 件) pass で merge gate (Layer 0 自動 gate per governance)
 - breaking change detection (`scripts/detect-breaking-changes.sh`) で `route:ceo-approval` label 必須
 
 ## 5. Open decisions (implementer 自由、§2.2 で確定済外の internal detail のみ)
