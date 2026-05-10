@@ -176,15 +176,15 @@ function gcRepliedRows(): Promise<{ deleted: number }> {
 #### `stall-detector` module (新規、`core/stall-detector.ts`)
 ```ts
 type StallVerdict =
-  | { kind: 'idle'; layer: 1 }
+  | { kind: 'idle'; layer: 1 }                                                      // L1 queue row predicate
   | { kind: 'claim_ttl_expired'; layer: 1; queue_id: string }
   | { kind: 'received_stuck'; layer: 1; queue_id: string; age_sec: number }
-  | { kind: 'dead_bot'; layer: 1; agent_id: string; last_seen_sec_ago: number }
-  | { kind: 'tmux_missing'; layer: 1; agent_id: string }
-  | { kind: 'in_progress_stall'; layer: 2; queue_id: string; age_sec: number }
-  | { kind: 'context_pressure'; layer: 2; agent_id: string }
-  | { kind: 'input_residue'; layer: 2; agent_id: string }
-  | { kind: 'smooshing_hang'; layer: 2; agent_id: string };
+  | { kind: 'dead_bot'; layer: 2; agent_id: string; last_seen_sec_ago: number }     // L2 process state
+  | { kind: 'tmux_missing'; layer: 2; agent_id: string }
+  | { kind: 'in_progress_stall'; layer: 3; queue_id: string; age_sec: number }      // L3 output state
+  | { kind: 'context_pressure'; layer: 3; agent_id: string }
+  | { kind: 'input_residue'; layer: 3; agent_id: string }
+  | { kind: 'smooshing_hang'; layer: 3; agent_id: string };
 
 function detectStall(
   rows: MessageQueueRow[],
@@ -197,7 +197,7 @@ function detectStall(
 // post: 検出 verdict 配列 (重複 detection 0、1 row につき max 1 verdict)
 // invariants:
 //   - 同 sweep 周期内で 2 回呼出 → 同 verdict 配列 (idempotent)
-//   - layer 1 / 2 直交、同 row が 2 layer 同時 detection 可
+//   - layer 1 / 2 / 3 直交、同 row が複数 layer 同時 detection 可
 ```
 
 ### 1.3a stall detection 3 layer abstraction (A2 統一)
@@ -327,21 +327,35 @@ scope exclusion (本 PR で触らない):
 
 ### 4.2 behavioral smoke (`scripts/test/smoke-v0.9.sh` 等)
 
-- E1: bot が send → `replied` で terminal、queue から 7 日後 GC 実行で削除確認
-- E2: 30s 以内同 row 連続 INSERT (重複) → wake 1 回のみ、metric `dedup_skipped` += 1
-- **E3a (Layer 1 #1 idle)**: queue 全 row 不在 + bot online → `StallVerdict.kind='idle'` 1 件、metric `stall_detected_total{kind='idle'}` += 1、wake 不発火
-- **E3b (Layer 1 #2 claim TTL expired)**: `received` row、`claim_expires_at = now() - 5s` → `kind='claim_ttl_expired'` 1 件、self-reclaim → `pending` reset、wake 1 回
-- **E3c (Layer 1 #3 received stuck 5min)**: `received` row、`age=6min` → `kind='received_stuck'` 1 件、reset to `pending` (transparent retry)、metric `wake_actions_total{result='retry_reset'}` += 1
-- **E3d (Layer 2 #4 dead bot)**: `agents.last_seen_at = now() - 4min` AND `status='online'` → `kind='dead_bot'` 1 件、restart launcher 呼出、operator alert 1 回
-- **E3e (Layer 2 #5 tmux missing)**: `runtime='TUI'` AND `tmux session 不在` → `kind='tmux_missing'` 1 件、restart 実行、alert 1 回
-- **E3f (Layer 3 #6 in_progress stall)**: `in_progress` row、`age=11min` (default stallAfter=10min 超過) → `kind='in_progress_stall'` 1 件、operator alert (auto reset しない)
-- **E3g (Layer 3 #7 context pressure)**: bot last reply に token 警告 pattern (例: "context limit") → `kind='context_pressure'` 1 件、operator alert
-- **E3h (Layer 3 #8 input residue)**: tmux pane に未送信 input 検出 → `kind='input_residue'` 1 件、pane clear + re-wake
-- **E3i (Layer 3 #9 smooshing hang)**: bot output 無 + claim 維持 + `age > stallAfter` → `kind='smooshing_hang'` 1 件、operator alert + restart 候補
-- E4: bot 19 体に対して migration 実施、`next` 呼出が `'received'` claim 取得確認、data 損失 0
+各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。merge gate は E1/E2/E3a-E3i (9 件)/E4 = **計 13 件** を個別 pass で count。
+
+- **E1**: bot が send → `replied` で terminal、queue から 7 日後 GC 実行で削除確認
+  - artifact: `scripts/test/E1-replied-7day-gc.sh`
+- **E2**: 30s 以内同 row 連続 INSERT (重複) → wake 1 回のみ、metric `dedup_skipped` += 1
+  - artifact: `scripts/test/E2-wake-dedup-30s.sh`
+- **E3a (L1 #1 idle)**: queue 全 row 不在 + bot online → `StallVerdict.kind='idle'` 1 件、metric `stall_detected_total{kind='idle'}` += 1、wake 不発火
+  - artifact: `scripts/test/E3a-stall-idle.sh`
+- **E3b (L1 #2 claim TTL expired)**: `received` row、`claim_expires_at = now() - 5s` → `kind='claim_ttl_expired'` 1 件、self-reclaim → `pending` reset、wake 1 回
+  - artifact: `scripts/test/E3b-stall-claim-ttl.sh`
+- **E3c (L1 #3 received stuck 5min)**: `received` row、`age=6min` → `kind='received_stuck'` 1 件、reset to `pending` (transparent retry)、metric `wake_actions_total{result='retry_reset'}` += 1
+  - artifact: `scripts/test/E3c-stall-received-stuck.sh`
+- **E3d (L2 #4 dead bot)**: `agents.last_seen_at = now() - 4min` AND `status='online'` → `kind='dead_bot'` 1 件、restart launcher 呼出、operator alert 1 回
+  - artifact: `scripts/test/E3d-stall-dead-bot.sh`
+- **E3e (L2 #5 tmux missing)**: `runtime='TUI'` AND `tmux session 不在` → `kind='tmux_missing'` 1 件、restart 実行、alert 1 回
+  - artifact: `scripts/test/E3e-stall-tmux-missing.sh`
+- **E3f (L3 #6 in_progress stall)**: `in_progress` row、`age=11min` (default stallAfter=10min 超過) → `kind='in_progress_stall'` 1 件、operator alert (auto reset しない)
+  - artifact: `scripts/test/E3f-stall-in-progress.sh`
+- **E3g (L3 #7 context pressure)**: bot last reply に token 警告 pattern (例: "context limit") → `kind='context_pressure'` 1 件、operator alert
+  - artifact: `scripts/test/E3g-stall-context-pressure.sh`
+- **E3h (L3 #8 input residue)**: tmux pane に未送信 input 検出 → `kind='input_residue'` 1 件、pane clear + re-wake
+  - artifact: `scripts/test/E3h-stall-input-residue.sh`
+- **E3i (L3 #9 smooshing hang)**: bot output 無 + claim 維持 + `age > stallAfter` → `kind='smooshing_hang'` 1 件、operator alert + restart 候補
+  - artifact: `scripts/test/E3i-stall-smooshing.sh`
+- **E4**: bot 19 体に対して migration 実施、`next` 呼出が `'received'` claim 取得確認、data 損失 0
+  - artifact: `scripts/test/E4-migration-19-bots.sh`
 
 ### 4.3 CI 要件
-- 全 fixture (T1-T44 + M1-M4 + E1-E4) pass で merge gate (Layer 0 自動 gate per governance)
+- 全 fixture (T1-T44 + M1-M4 + E1/E2/E3a-E3i/E4 = 13 件) pass で merge gate (Layer 0 自動 gate per governance)
 - breaking change detection (`scripts/detect-breaking-changes.sh`) で `route:ceo-approval` label 必須
 
 ## 5. Open decisions (implementer 自由、§2.2 で確定済外の internal detail のみ)
