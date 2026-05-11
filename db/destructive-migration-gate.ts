@@ -20,17 +20,124 @@ const DESTRUCTIVE_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'DROP TABLE', regex: /\bDROP\s+TABLE\b/i },
 ]
 
-function stripSqlComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/--[^\n]*/g, ' ')
+// Char-by-char state machine that returns SQL code with quoted literals,
+// dollar-quoted bodies, and SQL comments redacted to spaces. The state machine
+// preserves positions (replaces redacted bytes with spaces) so multi-statement
+// whole-string regex matching still works on the cleaned output.
+//
+// cycle-3 auditor (msg 6bf799cf) flagged that a regex-only strip would let
+// `SELECT '-- harmless'; DROP TABLE users;` bypass the gate because the
+// line-comment strip would swallow everything from the `--` inside the string
+// through end of line, including the real DROP TABLE.
+//
+// Handled states: single-quote with '' escape, double-quote with "" escape
+// (postgres identifier quoting), dollar-quote $tag$...$tag$ (postgres function
+// bodies, empty tag $$ ok), line comment -- to newline, block comment (non-
+// nested; postgres supports nesting but the in-tree migrations do not).
+function redactSqlLiteralsAndComments(sql: string): string {
+  const out: string[] = []
+  let i = 0
+  const n = sql.length
+
+  const matchDollarTag = (pos: number): { tag: string; len: number } | null => {
+    if (sql[pos] !== '$') return null
+    // tag is letters/digits/underscores between two `$` (empty tag = `$$`)
+    let j = pos + 1
+    while (j < n && /[A-Za-z0-9_]/.test(sql[j]!)) j++
+    if (sql[j] !== '$') return null
+    return { tag: sql.slice(pos + 1, j), len: j - pos + 1 }
+  }
+
+  while (i < n) {
+    const c = sql[i]!
+    const next = sql[i + 1]
+
+    // line comment
+    if (c === '-' && next === '-') {
+      const eol = sql.indexOf('\n', i)
+      const stop = eol === -1 ? n : eol
+      out.push(' '.repeat(stop - i))
+      i = stop
+      continue
+    }
+
+    // block comment
+    if (c === '/' && next === '*') {
+      const close = sql.indexOf('*/', i + 2)
+      const stop = close === -1 ? n : close + 2
+      out.push(' '.repeat(stop - i))
+      i = stop
+      continue
+    }
+
+    // single-quote literal
+    if (c === "'") {
+      out.push(' ')
+      i++
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") {
+            // `''` escape -> consume both
+            out.push('  ')
+            i += 2
+            continue
+          }
+          out.push(' ')
+          i++
+          break
+        }
+        out.push(' ')
+        i++
+      }
+      continue
+    }
+
+    // double-quote identifier
+    if (c === '"') {
+      out.push(' ')
+      i++
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') {
+            out.push('  ')
+            i += 2
+            continue
+          }
+          out.push(' ')
+          i++
+          break
+        }
+        out.push(' ')
+        i++
+      }
+      continue
+    }
+
+    // dollar-quoted body
+    const open = matchDollarTag(i)
+    if (open) {
+      const closeMark = `$${open.tag}$`
+      out.push(' '.repeat(open.len))
+      i += open.len
+      const closeAt = sql.indexOf(closeMark, i)
+      const stop = closeAt === -1 ? n : closeAt + closeMark.length
+      out.push(' '.repeat(stop - i))
+      i = stop
+      continue
+    }
+
+    out.push(c)
+    i++
+  }
+
+  return out.join('')
 }
 
 export function detectDestructivePatterns(sql: string): string[] {
-  const stripped = stripSqlComments(sql)
+  const cleaned = redactSqlLiteralsAndComments(sql)
   const found: string[] = []
   for (const { name, regex } of DESTRUCTIVE_PATTERNS) {
-    if (regex.test(stripped)) found.push(name)
+    if (regex.test(cleaned)) found.push(name)
   }
   return found
 }

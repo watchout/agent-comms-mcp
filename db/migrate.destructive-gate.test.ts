@@ -171,6 +171,74 @@ describe('destructive-migration-gate (spec §4.2)', () => {
   })
 })
 
+describe('destructive-migration-gate (cycle 3 quote/comment awareness)', () => {
+  beforeEach(() => clearEnv())
+  afterEach(() => clearEnv())
+
+  test('T16: RENAME inside a quoted literal → no-throw (Axis 5 false-positive)', () => {
+    // `INSERT INTO logs VALUES ('RENAME requested')` must not trip the gate.
+    expect(
+      assertDestructiveMigrationAllowed(
+        "INSERT INTO logs(msg) VALUES ('RENAME requested')",
+      ),
+    ).toBeUndefined()
+    expect(
+      detectDestructivePatterns(
+        "INSERT INTO logs(msg) VALUES ('RENAME requested')",
+      ),
+    ).toEqual([])
+  })
+
+  test('T17: quoted `--` followed by real DROP TABLE → throw (Axis 6 bypass)', () => {
+    // Regex-only strip would consume from the `--` inside the string through
+    // EOL, hiding the DROP TABLE. The state machine must keep it visible.
+    expectBlocked(
+      "SELECT '-- harmless'; DROP TABLE users;",
+      ['DROP TABLE'],
+    )
+  })
+
+  test('T18: dollar-quoted body then ALTER ... DROP COLUMN → throw', () => {
+    expectBlocked(
+      "DO $$ BEGIN RAISE NOTICE '--'; END $$; ALTER TABLE x DROP COLUMN y;",
+      ['DROP COLUMN'],
+    )
+  })
+
+  test('T19: destructive-looking double-quoted identifier → no-throw', () => {
+    // postgres treats `"DROP TABLE ..."` as a quoted identifier, not a
+    // statement. The gate should not treat its inside as SQL code.
+    expect(
+      assertDestructiveMigrationAllowed(
+        'SELECT "DROP TABLE not_destructive" FROM t',
+      ),
+    ).toBeUndefined()
+  })
+
+  test("T20: doubled-quote escape '' inside string literal -> no-throw", () => {
+    // `'''DROP COLUMN escaped'''` is a single literal whose value contains
+    // `'DROP COLUMN escaped'`. Nothing escapes into SQL code.
+    expect(
+      assertDestructiveMigrationAllowed("SELECT '''DROP COLUMN escaped'''"),
+    ).toBeUndefined()
+  })
+
+  test("tagged dollar-quote $foo$...$foo$ is fully redacted", () => {
+    expect(
+      assertDestructiveMigrationAllowed(
+        "DO $foo$ DROP COLUMN inner $foo$; SELECT 1;",
+      ),
+    ).toBeUndefined()
+  })
+
+  test('multi-statement: real ALTER COLUMN after a quoted decoy → throw', () => {
+    expectBlocked(
+      "INSERT INTO logs VALUES ('ALTER COLUMN imaginary'); ALTER TABLE x ALTER COLUMN y TYPE int;",
+      ['ALTER COLUMN'],
+    )
+  })
+})
+
 describe('destructive-migration-gate / detectDestructivePatterns', () => {
   test('returns empty array for non-destructive SQL', () => {
     expect(detectDestructivePatterns('SELECT 1')).toEqual([])
