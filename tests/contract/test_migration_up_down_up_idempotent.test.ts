@@ -23,10 +23,21 @@ const STAGE_B_DOWN = join(REPO_ROOT, 'db/migrations/2026-04-30-routing-v3-stage-
 const DROP_CMI_UP = join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.up.sql')
 const DROP_CMI_DOWN = join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.down.sql')
 
+// PR #340 (incident #339): the destructive-migration gate in
+// db/migrate.ts rejects DROP COLUMN / TRUNCATE / etc. unless
+// AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 is set. The migrations under
+// test in this suite are intentionally destructive (that is the whole point
+// of the round-trip), so we opt the suite in to the gate. We restore the
+// prior env state on teardown to avoid polluting unrelated tests.
+const DESTRUCTIVE_GATE_ENV = 'AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED'
+
 dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idempotent', () => {
   let client: Client
+  let priorDestructiveGate: string | undefined
 
   beforeAll(async () => {
+    priorDestructiveGate = process.env[DESTRUCTIVE_GATE_ENV]
+    process.env[DESTRUCTIVE_GATE_ENV] = '1'
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
   })
@@ -74,6 +85,11 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     `)
 
     await client.end()
+    if (priorDestructiveGate === undefined) {
+      delete process.env[DESTRUCTIVE_GATE_ENV]
+    } else {
+      process.env[DESTRUCTIVE_GATE_ENV] = priorDestructiveGate
+    }
   })
 
   async function columnExists(table: string, column: string): Promise<boolean> {
