@@ -168,7 +168,7 @@ function loadConfig(): Config {
     agent: {
       display_name: raw.agent?.display_name ?? raw.agent_id ?? process.env.AGENT_ID ?? 'unknown',
       agent_type: raw.agent?.agent_type ?? 'dev',
-      runtime: raw.agent?.runtime ?? 'claude-code',
+      runtime: raw.agent?.runtime ?? 'TUI',
       metadata: raw.agent?.metadata ?? undefined,
     },
     forwarding: {
