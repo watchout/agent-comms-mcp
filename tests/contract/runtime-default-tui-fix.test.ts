@@ -22,9 +22,15 @@ function resolveRuntime(raw: { agent?: { runtime?: unknown } } | null | undefine
 }
 
 describe("Task A — server.ts agent runtime default = 'TUI' (incident 2026-05-11)", () => {
-  test('source anchor: server.ts:171 uses TUI default', () => {
+  test('source anchor: server.ts uses ConfigPort default (X1 refactor) and never falls back to claude-code', () => {
     const src = readFileSync(SERVER_TS, 'utf-8')
-    expect(src).toContain("runtime: raw.agent?.runtime ?? 'TUI'")
+    // X1 (PR #?) replaced the literal `?? 'TUI'` with a ConfigPort call so
+    // production code goes through the port instead of inlining the default.
+    // The anchor now pins the port form and still rejects the pre-PR-#341
+    // `'claude-code'` default.
+    expect(src).toContain(
+      'runtime: raw.agent?.runtime ?? defaultConfigPort.getDefaultRuntime()',
+    )
     expect(src).not.toContain("runtime: raw.agent?.runtime ?? 'claude-code'")
   })
 
