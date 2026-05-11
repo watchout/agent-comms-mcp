@@ -24,6 +24,9 @@ docs/SSOT.md が唯一の仕様書。実装はこの仕様に従うこと。
 4. 実装完了後は必ずテストを実行する
 5. 完了報告はDiscordで行う
 
+## 禁止事項
+- `AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED` は production deploy 時の launchd plist のみで set、dev session で set 禁止 (詳細: `docs/operations/destructive-migration-env-flag.md`)
+
 ## Compact Instructions
 compaction後、以下を必ず保持すること：
 - 現在取り組んでいるタスクの内容と進捗
