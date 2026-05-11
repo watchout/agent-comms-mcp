@@ -1,11 +1,15 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { Database } from 'bun:sqlite'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import {
   DESTRUCTIVE_GATE_ENV,
   DestructiveMigrationBlockedError,
   assertDestructiveMigrationAllowed,
   detectDestructivePatterns,
 } from './destructive-migration-gate'
+import { migrateSqlite } from './migrate-sqlite'
 
 const ENV = DESTRUCTIVE_GATE_ENV
 
@@ -123,35 +127,47 @@ describe('destructive-migration-gate (spec §4.2)', () => {
     )
   })
 
-  test('T14: sqlite path — DROP COLUMN via migrateSqlite gate → blocked', async () => {
-    // §2.4 anchor: sqlite path must use the SAME gate before db.exec.
-    // We simulate by running the gated wrapper that migrate-sqlite.ts uses.
-    const db = new Database(':memory:', { create: true })
-    const gatedExec = (sql: string): void => {
-      assertDestructiveMigrationAllowed(sql)
-      db.exec(sql)
-    }
-    let thrown: unknown
+  test('T14: sqlite path — migrateSqlite() integration: env unset + destructive line → blocked', () => {
+    // §2.4 + §4.2 T14 integration contract: exercise the real
+    // migrateSqlite() entry point (db/migrate-sqlite.ts:7), not a local
+    // wrapper. Pre-seed a temp DB with `agents.current_message_id` so the
+    // existing `ALTER TABLE agents DROP COLUMN current_message_id` upgrade
+    // line fires; the gate must throw before db.exec runs it.
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gate-t14-'))
+    const tmpPath = join(tmpDir, 't14.db')
     try {
-      gatedExec('ALTER TABLE agent_messages DROP COLUMN failed_reason')
-    } catch (e) {
-      thrown = e
+      const seed = new Database(tmpPath, { create: true })
+      seed.exec(
+        'CREATE TABLE agents (agent_id TEXT PRIMARY KEY, current_message_id TEXT)',
+      )
+      seed.close()
+
+      let thrown: unknown
+      try {
+        migrateSqlite(tmpPath)
+      } catch (e) {
+        thrown = e
+      }
+      expect(thrown).toBeInstanceOf(DestructiveMigrationBlockedError)
+      const err = thrown as DestructiveMigrationBlockedError
+      expect(err.patterns).toContain('DROP COLUMN')
+      expect(err.envName).toBe(ENV)
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
     }
-    expect(thrown).toBeInstanceOf(DestructiveMigrationBlockedError)
-    db.close()
   })
 
-  test('T15: sqlite path — CREATE INDEX → no-throw (regression)', () => {
-    const db = new Database(':memory:', { create: true })
-    db.exec('CREATE TABLE foo (id INTEGER)')
-    const gatedExec = (sql: string): void => {
-      assertDestructiveMigrationAllowed(sql)
-      db.exec(sql)
+  test('T15: sqlite path — migrateSqlite() integration: fresh DB has no destructive → no-throw', () => {
+    // §4.2 T15 regression: a fresh sqlite DB has no `current_message_id`
+    // column on `agents`, so the upgrade DROP block is skipped and the
+    // gate must let the full migration through.
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gate-t15-'))
+    const tmpPath = join(tmpDir, 't15.db')
+    try {
+      expect(() => migrateSqlite(tmpPath)).not.toThrow()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
     }
-    expect(() =>
-      gatedExec('CREATE INDEX IF NOT EXISTS idx_x ON foo(id)'),
-    ).not.toThrow()
-    db.close()
   })
 })
 

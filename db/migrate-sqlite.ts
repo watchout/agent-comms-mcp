@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite'
 import {
+  DestructiveMigrationBlockedError,
   assertDestructiveMigrationAllowed,
   destructiveGateLogLine,
 } from './destructive-migration-gate'
@@ -110,7 +111,9 @@ export function migrateSqlite(dbPath?: string): void {
   if (aColNames.has('current_message_id')) {
     try {
       gatedExec(`ALTER TABLE agents DROP COLUMN current_message_id`)
-    } catch {
+    } catch (e) {
+      // The gate's block decision is authoritative — re-throw it.
+      if (e instanceof DestructiveMigrationBlockedError) throw e
       // SQLite < 3.35 — leave the column in place. Stage B reads /
       // writes never touch it, so it is dead but harmless.
     }
