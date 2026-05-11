@@ -10,6 +10,16 @@ import { Client } from 'pg'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { migrateSqlite } from './migrate-sqlite'
+import {
+  assertDestructiveMigrationAllowed,
+  destructiveGateLogLine,
+} from './destructive-migration-gate'
+
+// incident #339: every SQL string handed to pg passes through the gate.
+async function gatedQuery(client: Client, sql: string, params?: unknown[]) {
+  assertDestructiveMigrationAllowed(sql)
+  return params === undefined ? client.query(sql) : client.query(sql, params)
+}
 
 const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
 
@@ -24,10 +34,11 @@ if (existsSync(configPath)) {
 }
 
 async function migrate() {
+  console.log(destructiveGateLogLine())
   const client = new Client({ connectionString: databaseUrl })
   await client.connect()
 
-  await client.query(`
+  await gatedQuery(client, `
     CREATE TABLE IF NOT EXISTS agent_messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       channel_id TEXT,
@@ -520,7 +531,7 @@ async function migrate() {
   //   - DROP INDEX IF EXISTS + CREATE INDEX IF NOT EXISTS is idempotent
   //
   // Rollback: db/rollback-claim-vocabulary.sql (psql -f).
-  await client.query(`
+  await gatedQuery(client, `
     BEGIN;
 
     DO $$
@@ -568,7 +579,7 @@ async function migrate() {
   //
   // Idempotent: CREATE OR REPLACE FUNCTION + DROP/CREATE TRIGGER inside a
   // transaction, safe on re-run.
-  await client.query(`
+  await gatedQuery(client, `
     BEGIN;
 
     CREATE OR REPLACE FUNCTION fn_notify_mq_enqueued() RETURNS TRIGGER AS $$
@@ -596,7 +607,8 @@ async function migrate() {
       const config = JSON.parse(readFileSync(configPath, 'utf-8'))
       for (const [ch, settings] of Object.entries(config.channels ?? {})) {
         const s = settings as { retention_days?: number | null; description?: string }
-        await client.query(
+        await gatedQuery(
+          client,
           `INSERT INTO channel_settings (channel_id, retention_days, description, updated_at)
            VALUES ($1, $2, $3, now())
            ON CONFLICT (channel_id) DO UPDATE SET retention_days = $2, description = $3, updated_at = now()`,
@@ -623,7 +635,7 @@ export async function applyDownMigration(filePath: string): Promise<void> {
   const client = new Client({ connectionString: databaseUrl })
   await client.connect()
   try {
-    await client.query(sql)
+    await gatedQuery(client, sql)
     console.log(`Down migration applied: ${filePath}`)
   } finally {
     await client.end()
@@ -635,7 +647,7 @@ export async function applyUpMigrationFile(filePath: string): Promise<void> {
   const client = new Client({ connectionString: databaseUrl })
   await client.connect()
   try {
-    await client.query(sql)
+    await gatedQuery(client, sql)
     console.log(`Up migration applied: ${filePath}`)
   } finally {
     await client.end()
