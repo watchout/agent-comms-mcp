@@ -90,6 +90,7 @@ import {
 } from './core/route-message-db'
 import { splitMessage } from './core/message-split'
 import { decideSendFallback } from './core/send-fallback-decision'
+import { defaultConfigPort } from './core/ports/config-port'
 import {
   fetchNewMessages as fetchNewMessagesCore,
   reclaimSelfOrphanedClaims as reclaimSelfOrphanedClaimsCore,
@@ -168,7 +169,7 @@ function loadConfig(): Config {
     agent: {
       display_name: raw.agent?.display_name ?? raw.agent_id ?? process.env.AGENT_ID ?? 'unknown',
       agent_type: raw.agent?.agent_type ?? 'dev',
-      runtime: raw.agent?.runtime ?? 'TUI',
+      runtime: raw.agent?.runtime ?? defaultConfigPort.getDefaultRuntime(),
       metadata: raw.agent?.metadata ?? undefined,
     },
     forwarding: {

@@ -47,6 +47,7 @@ import {
   type TmuxClient,
 } from './types'
 import { WakePool } from './wake-pool'
+import { defaultConfigPort } from '../ports/config-port'
 
 interface QueueRow {
   id: number
@@ -352,7 +353,7 @@ export class StateDaemon {
       // by agent_id, so a missing tmux_session value is not a blocker; it is
       // exactly the case we want restarted. Non-TUI runtimes are still alert-
       // only (cycle 1 auditor Axis 1: tmux_session 欠落 path も restart 試行へ).
-      if (bot.runtime !== 'TUI') {
+      if (bot.runtime !== defaultConfigPort.getDefaultRuntime()) {
         await this.alert.alert(
           `bot ${bot.agent_id} dead (runtime=${bot.runtime}, manual intervention)`,
         )
@@ -434,7 +435,7 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
       return
     }
-    if (bot.runtime !== 'TUI') {
+    if (bot.runtime !== defaultConfigPort.getDefaultRuntime()) {
       // Bug 3 fix (re-chain msg 250d01b0 / R15 / F13): non-TUI runtimes
       // (e.g. `discord` for the human CEO account, `sig` for legacy bots
       // mid-migration) used to take the throw + failPermanently + alert

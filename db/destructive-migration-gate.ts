@@ -10,7 +10,11 @@
  * fail-closed: env flag unset = block, explicit `=1` = allow.
  */
 
-export const DESTRUCTIVE_GATE_ENV = 'AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED'
+import { defaultConfigPort, DESTRUCTIVE_GATE_ENV as PORT_DESTRUCTIVE_GATE_ENV } from '../core/ports/config-port'
+
+// Re-exported for callers (tests, error.envName) that need the env name
+// string directly. The source of truth lives in the ConfigPort module.
+export const DESTRUCTIVE_GATE_ENV = PORT_DESTRUCTIVE_GATE_ENV
 
 const DESTRUCTIVE_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'DROP COLUMN', regex: /\bDROP\s+COLUMN\b/i },
@@ -155,7 +159,7 @@ export class DestructiveMigrationBlockedError extends Error {
 export function assertDestructiveMigrationAllowed(sql: string): void {
   const patterns = detectDestructivePatterns(sql)
   if (patterns.length === 0) return
-  if (process.env[DESTRUCTIVE_GATE_ENV] === '1') return
+  if (defaultConfigPort.getDestructiveMigrationFlagState().allowed) return
   throw new DestructiveMigrationBlockedError(
     patterns,
     `Destructive migration blocked: [${patterns.map(p => `'${p}'`).join(', ')}]. ` +
@@ -165,7 +169,7 @@ export function assertDestructiveMigrationAllowed(sql: string): void {
 }
 
 export function destructiveGateLogLine(): string {
-  return process.env[DESTRUCTIVE_GATE_ENV] === '1'
+  return defaultConfigPort.getDestructiveMigrationFlagState().allowed
     ? '[migrate] destructive migrations: ALLOWED (env)'
     : '[migrate] destructive migrations: BLOCKED (default, dev-bot safe)'
 }
