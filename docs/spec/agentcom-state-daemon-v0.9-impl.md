@@ -430,7 +430,7 @@ scope exclusion (本 PR で触らない):
   - artifact: `scripts/test/E4-migration-19-bots.sh`
 
 ### 4.3 CI 要件
-- 全 fixture (T1-T44 + M1-M4 + E1/E2/E3a-E3i 9 件/E4 = 12 件) pass で merge gate (Layer 0 自動 gate per governance)
+- 全 fixture (T1-T44 + M1-M7 + E1/E2/E3a-E3i 9 件/E4 = 15 件、M5-M7 は sub-PR 1 destructive migration safety per §1.1b cycle 2 patch) pass で merge gate (Layer 0 自動 gate per governance)
 - breaking change detection (`scripts/detect-breaking-changes.sh`) で `route:ceo-approval` label 必須
 
 ## 5. Open decisions (implementer 自由、§2.2 で確定済外の internal detail のみ)
