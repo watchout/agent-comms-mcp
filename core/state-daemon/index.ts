@@ -50,7 +50,7 @@ import { WakePool } from './wake-pool'
 import { defaultConfigPort } from '../ports/config-port'
 import {
   createDefaultStallDetector,
-  DEFAULT_STALL_THRESHOLDS,
+  loadStallThresholdsFromEnv,
   type StallDetector,
   type BotContext,
   type StallVerdict,
@@ -503,7 +503,13 @@ export class StateDaemon {
       row: row as unknown as BotContext['row'],
       agent: (rows[0] ?? null) as unknown as BotContext['agent'],
       tmuxPaneTail: null,
-      thresholds: DEFAULT_STALL_THRESHOLDS,
+      // cycle 2 Fix 3: thresholds read from env at each gate evaluation
+      // (no module-level cache) so that an operator-level override via
+      // STATE_DAEMON_STUCK_AFTER_SEC / STATE_DAEMON_STALL_AFTER_SEC is
+      // picked up without daemon restart. The function returns the
+      // FALLBACK_STALL_THRESHOLDS literal when the env var is unset or
+      // malformed, preserving the previous hardcoded behaviour.
+      thresholds: loadStallThresholdsFromEnv(),
     }
     return this.stallDetector.detect(ctx)
   }

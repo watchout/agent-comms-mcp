@@ -14,6 +14,8 @@ import { describe, test, expect } from 'bun:test'
 import {
   createDefaultStallDetector,
   DEFAULT_STALL_THRESHOLDS,
+  FALLBACK_STALL_THRESHOLDS,
+  loadStallThresholdsFromEnv,
   STUB_DEPENDENCIES,
   type BotContext,
   type DetectorAgentRow,
@@ -127,14 +129,28 @@ describe('stall-detector — pattern coverage (spec §1.6 table)', () => {
     expect(STUB_DEPENDENCIES.context_pressure).toContain('infra')
   })
 
-  test('pattern 8: input_residue → L3 verdict on non-empty tmux pane tail', async () => {
+  test('pattern 8 stub (cycle 2 reclass): default daemon path passes tmuxPaneTail=null → inert', async () => {
+    // cycle 2 Fix 1: input_residue is interface-shipped but the daemon
+    // currently never supplies a tmuxPaneTail (no capture-pane caller in
+    // state-daemon, see STUB_DEPENDENCIES.input_residue). So in
+    // production-shaped calls the verdict must never fire.
+    const v = await detector.detect(ctx())
+    expect(v.find(x => x.kind === 'input_residue')).toBeUndefined()
+    expect(STUB_DEPENDENCIES.input_residue).toContain('tmux capture-pane')
+  })
+
+  test('pattern 8 shape preserved: detection logic still works when a tail is supplied directly (eventual wire-up anchor)', async () => {
+    // The detector function's shape is unchanged so that the future PR
+    // routing tmux capture-pane into the daemon flips this from inert to
+    // functional with no signature edit. Verified by passing a non-empty
+    // tail directly here; the verdict is L3 input_residue.
     const v = await detector.detect(
       ctx({ tmuxPaneTail: 'check inbox\nstill typing here' }),
     )
     expect(v.find(x => x.kind === 'input_residue')?.layer).toBe('L3')
   })
 
-  test('pattern 8: empty tail / prompt-only tail → no verdict', async () => {
+  test('pattern 8 shape preserved: empty tail / prompt-only tail → no verdict', async () => {
     expect(
       (await detector.detect(ctx({ tmuxPaneTail: '' }))).find(x => x.kind === 'input_residue'),
     ).toBeUndefined()
@@ -203,6 +219,43 @@ describe('stall-detector — three-layer abstraction', () => {
     const result = await mock.detect(ctx() as unknown as BotContext)
     expect(result).toEqual([])
     expect(calls).toEqual(['detect'])
+  })
+})
+
+describe('stall-detector — env-driven thresholds (cycle 2 Fix 3)', () => {
+  test('unset env → falls back to FALLBACK_STALL_THRESHOLDS literals', () => {
+    expect(loadStallThresholdsFromEnv({})).toEqual(FALLBACK_STALL_THRESHOLDS)
+  })
+
+  test('valid env vars override the fallbacks', () => {
+    const t = loadStallThresholdsFromEnv({
+      STATE_DAEMON_STUCK_AFTER_SEC: '90',
+      STATE_DAEMON_STALL_AFTER_SEC: '45',
+      STATE_DAEMON_CLAIM_TTL_EXPIRED_AFTER_SEC: '15',
+    })
+    expect(t.receivedStuckAfterSec).toBe(90)
+    expect(t.deadBotAfterSec).toBe(45)
+    expect(t.claimTtlExpiredAfterSec).toBe(15)
+  })
+
+  test('malformed env value falls back per-field (not all-or-nothing)', () => {
+    const t = loadStallThresholdsFromEnv({
+      STATE_DAEMON_STUCK_AFTER_SEC: 'not-a-number',
+      STATE_DAEMON_STALL_AFTER_SEC: '60',
+    })
+    expect(t.receivedStuckAfterSec).toBe(FALLBACK_STALL_THRESHOLDS.receivedStuckAfterSec)
+    expect(t.deadBotAfterSec).toBe(60)
+  })
+
+  test('negative env value is rejected (treated as malformed)', () => {
+    const t = loadStallThresholdsFromEnv({
+      STATE_DAEMON_STUCK_AFTER_SEC: '-5',
+    })
+    expect(t.receivedStuckAfterSec).toBe(FALLBACK_STALL_THRESHOLDS.receivedStuckAfterSec)
+  })
+
+  test('DEFAULT_STALL_THRESHOLDS still points at the fallback for back-compat', () => {
+    expect(DEFAULT_STALL_THRESHOLDS).toBe(FALLBACK_STALL_THRESHOLDS)
   })
 })
 

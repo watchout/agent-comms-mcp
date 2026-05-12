@@ -104,11 +104,56 @@ export interface StallThresholds {
   readonly deadBotAfterSec: number
 }
 
-export const DEFAULT_STALL_THRESHOLDS: StallThresholds = Object.freeze({
+/**
+ * Hard-coded fallback values used when the matching env var is unset.
+ * Production code reads through `loadStallThresholdsFromEnv()`; the literal
+ * fallbacks below sit in one named export so a reader can grep for the
+ * source of truth without chasing env wiring.
+ */
+export const FALLBACK_STALL_THRESHOLDS: StallThresholds = Object.freeze({
   claimTtlExpiredAfterSec: 0,
   receivedStuckAfterSec: 300,
   deadBotAfterSec: 120,
 })
+
+/**
+ * Env-driven thresholds (cycle 2 Fix 3, spec §1.3a). Reads
+ * `STATE_DAEMON_STUCK_AFTER_SEC` and `STATE_DAEMON_STALL_AFTER_SEC` from
+ * the process env; falls back to {@link FALLBACK_STALL_THRESHOLDS} when
+ * the var is unset or malformed. The X1 ConfigPort module (PR #343)
+ * narrowed its "no `process.env` raw reads" rule to the
+ * runtime / production-bot / destructive-flag axes (spec §3.1 commit
+ * `8efcb2a`/`23599c0`), so reading state-daemon tuning vars here is
+ * within X1's scope.
+ */
+export function loadStallThresholdsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): StallThresholds {
+  const parse = (key: string, fallback: number): number => {
+    const raw = env[key]
+    if (raw === undefined) return fallback
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n < 0) return fallback
+    return n
+  }
+  return {
+    claimTtlExpiredAfterSec: parse(
+      'STATE_DAEMON_CLAIM_TTL_EXPIRED_AFTER_SEC',
+      FALLBACK_STALL_THRESHOLDS.claimTtlExpiredAfterSec,
+    ),
+    receivedStuckAfterSec: parse(
+      'STATE_DAEMON_STUCK_AFTER_SEC',
+      FALLBACK_STALL_THRESHOLDS.receivedStuckAfterSec,
+    ),
+    deadBotAfterSec: parse(
+      'STATE_DAEMON_STALL_AFTER_SEC',
+      FALLBACK_STALL_THRESHOLDS.deadBotAfterSec,
+    ),
+  }
+}
+
+/** Backwards-compatible alias; kept so older imports keep working. */
+export const DEFAULT_STALL_THRESHOLDS = FALLBACK_STALL_THRESHOLDS
 
 export interface StallDetector {
   /**
@@ -145,7 +190,13 @@ export const STUB_DEPENDENCIES: Readonly<Record<StallKind, string | null>> = Obj
   tmux_missing: null,
   in_progress_stall: "depends on sub-PR 1 (status='in_progress' enum migration)",
   context_pressure: 'depends on follow-up bot-reply token-monitoring infra (no existing code path)',
-  input_residue: null,
+  // cycle 2 Fix 1 (auditor verdict `7860f70a`): input_residue is interface-
+  // shipped but inert. The detector function inspects ctx.tmuxPaneTail, but
+  // the daemon currently calls `evaluateStallGate` with tmuxPaneTail=null
+  // (no capture-pane caller in state-daemon — the only existing caller is
+  // server.ts:3371). Re-classified as stub until that caller routes through
+  // the daemon. Five patterns are functional, four are stubs.
+  input_residue: 'depends on follow-up tmux capture-pane wiring from state-daemon (currently lives in server.ts:3371)',
   smooshing_hang: 'depends on follow-up bot-output stream monitoring infra (no existing code path)',
 })
 
@@ -227,10 +278,20 @@ async function l2_tmux_missing(ctx: BotContext): Promise<StallVerdict | null> {
 // ── L3: output state ───────────────────────────────────────────────────────
 
 async function l3_input_residue(ctx: BotContext): Promise<StallVerdict | null> {
-  // §1.6 row 8: tmux pane has unsent input. The caller decides whether to
-  // capture the pane; the detector only inspects what it was given. A
-  // non-empty trailing line that is not the canonical "claude " prompt is
-  // treated as residue.
+  // STUB-equivalent (cycle 2 Fix 1, auditor verdict `7860f70a`): the
+  // detection logic below is correct in shape, but the daemon currently
+  // always passes `tmuxPaneTail: null` because no caller inside
+  // state-daemon takes a tmux capture (the only existing capture site is
+  // server.ts:3371). The function therefore short-circuits to `null` on
+  // every production call and stays interface-only until a future PR
+  // routes the capture through the daemon. Treated as a stub for honest
+  // accounting; see STUB_DEPENDENCIES.input_residue.
+  //
+  // The original detection comment, kept for the eventual wire-up:
+  //   §1.6 row 8: tmux pane has unsent input. The caller decides whether
+  //   to capture the pane; the detector only inspects what it was given.
+  //   A non-empty trailing line that is not the canonical "claude " prompt
+  //   is treated as residue.
   if (ctx.tmuxPaneTail === null) return null
   const trimmed = ctx.tmuxPaneTail.trimEnd()
   if (trimmed.length === 0) return null
