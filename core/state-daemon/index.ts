@@ -122,7 +122,7 @@ export class StateDaemon {
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
-    // cycle 2 Fix (auditor verdict `d1067c73`): the GC env overrides have
+    // cycle 2 Fix (auditor verdict `ab541187`): the GC env overrides have
     // to land in `this.config` to actually take effect at runtime.
     // Merge order, lowest → highest precedence:
     //   DEFAULT_CONFIG (compile-time) → env overrides (operator) → deps.config (caller / test).

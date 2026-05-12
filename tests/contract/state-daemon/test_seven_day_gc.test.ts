@@ -268,7 +268,7 @@ describe('loadGcOverridesFromEnv', () => {
   })
 
   test('end-to-end: env var → constructor → daemon.config reflects override (cycle 2)', () => {
-    // Auditor cycle 1 BLOCK (msg `d1067c73`): the helper was defined but
+    // Auditor cycle 1 BLOCK (msg `ab541187`): the helper was defined but
     // the constructor did not call it, leaving env overrides dead-wired.
     // This test pins the production assembly path: setenv → new
     // StateDaemon(...) → config carries the override.
