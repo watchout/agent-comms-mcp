@@ -238,7 +238,8 @@ state-daemon sweep loop は **bot 単位** で suppression evaluate (msg 件数�
 for each bot with pending msg:
   SELECT MAX(last_wake_attempt_at) AS bot_last_wake
     FROM message_queue
-    WHERE agent_id = bot AND status = 'pending';
+    WHERE agent_id = bot AND status = 'pending'
+    GROUP BY agent_id;
 
   IF bot_last_wake > now() - interval '30 seconds' THEN
     skip bot 全体 (= bot 内全 pending msg を本 sweep cycle で wake しない)

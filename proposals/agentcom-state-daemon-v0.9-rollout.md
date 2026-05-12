@@ -24,7 +24,7 @@ destructive change (= status enum migration) は **fleet 慣熟後最後に push
 | **sub-PR 3** | §1.4 CC 機構完全削除 (queue 非投入化、`cc` parameter 廃止) | `route:ceo-approval` | 🟡 behavior change (= caller 互換性ある breaking change、CEO `a7bd49d8` 確認済) | sub-PR 4 + sub-PR 5 後推奨 (= 安定運用確認後) | **4** |
 | **sub-PR 4** | §1.5 per-bot wake duplicate suppression (cycle 5 patch、CEO `fc0b043e` 設計 literal) | `route:fast-merge` | 🟢 additive (= state-daemon 内 logic refine、外部 contract 不変) | なし、最優先 (= wake_storm 解消の core) | **1** |
 | **sub-PR 5** | §1.6 (新規 番号、旧 §1.6) 7 day GC (replied 7 日経過 delete、failed 除外) | `route:fast-merge` | 🟢 additive (= GC daemon の新規実装、production 影響限定) | sub-PR 4 後推奨 | **3** |
-| **sub-PR 6** | §1.7 新 tool 2 個 (`mcp__agent-comms__processing` / `done`) | `route:fast-merge` | 🟢 additive (= 新 tool 追加、既 tool 不変) | sub-PR 1 (status enum) 前提 (= `in_progress` / `replied` 新 enum required) | sub-PR 1 と paired (= sub-PR 1 と同時 or 直前) | **5** |
+| **sub-PR 6** | §1.7 新 tool 2 個 (`mcp__agent-comms__processing` / `done`) | `route:fast-merge` | 🟢 additive (= 新 tool 追加、既 tool 不変) | sub-PR 1 (status enum) 前提 (= `in_progress` / `replied` 新 enum required)、sub-PR 1 完了後に着手 | sub-PR 1 完了後 (= 最終 PR group の 2 番目) | **6.5** |
 
 ---
 
@@ -63,8 +63,8 @@ CEO directive 「sub-PR 1 destructive を最後に push」+ wake_storm 解消優
 
 **sub-PR 6** (`processing` / `done` tool)。理由:
 - additive (= 新 tool 追加)、ただし new status enum (`in_progress` / `replied`) **前提**
-- sub-PR 1 (enum migration) と paired、ただし new tool 自体は additive
-- 実装: sub-PR 1 と paired commit、または sub-PR 1 直後の即 sub-PR 6
+- sub-PR 1 (enum migration) **完了後** に着手 (= sub-PR 1 destructive 最終 push 制約と整合)
+- 実装: sub-PR 1 merge 完了 + fleet PID drift verify 後、別 PR として sub-PR 6 起票
 
 ### Phase 6: destructive enum migration
 
@@ -88,15 +88,15 @@ sub-PR 5 (7 day GC, additive)
     ↓
 sub-PR 3 (CC 削除, behavior change, route:ceo-approval)
     ↓
-sub-PR 6 (新 tool processing/done) ─┐
-                                     ├─ paired or sub-PR 1 → 6 sequence
-sub-PR 1 (status enum migration, 🔴 destructive, route:ceo-approval) ─┘
+sub-PR 1 (status enum migration, 🔴 destructive, route:ceo-approval)
+    ↓ (merge + fleet PID drift verify)
+sub-PR 6 (新 tool processing/done、sub-PR 1 完了後)
 ```
 
 **並行可能性**:
 - sub-PR 4 / 2 / 5 は accept criteria 独立、bandwidth 許せば parallel impl 可
 - sub-PR 3 / 1 は behavior change / destructive のため sequential
-- sub-PR 6 は sub-PR 1 と paired (= 同時または直接 sequence)
+- sub-PR 6 は sub-PR 1 完了後に着手 (= sub-PR 1 destructive 最終 push 制約と整合、新 enum 前提を満たす)
 
 ---
 
@@ -144,7 +144,7 @@ sub-PR 1 (status enum migration, 🔴 destructive, route:ceo-approval) ─┘
 - [ ] 2 回呼出 idempotent (= 2 回目 no-op + warning)
 - [ ] 単一 UPDATE + WHERE 旧 status (= atomic transition)
 - [ ] fixture: tool happy path + retry idempotence
-- [ ] new status enum (`in_progress` / `replied`) 前提 (= sub-PR 1 paired)
+- [ ] new status enum (`in_progress` / `replied`) 前提 (= sub-PR 1 完了後着手)
 
 ### sub-PR 1 (status enum migration)
 
