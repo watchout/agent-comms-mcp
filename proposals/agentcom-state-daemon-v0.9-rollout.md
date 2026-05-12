@@ -105,7 +105,7 @@ sub-PR 6 (新 tool processing/done、sub-PR 1 完了後)
 ### sub-PR 4 (per-bot suppression)
 
 - [ ] `WAKE_DEDUP_INTERVAL_SEC = 30` config landed
-- [ ] state-daemon sweep loop が per-bot evaluate (= `SELECT MAX(last_wake_attempt_at) ... GROUP BY agent_id`)
+- [ ] state-daemon sweep loop が per-bot evaluate (= `SELECT MAX(last_wake_attempt_at) AS bot_last_wake FROM message_queue WHERE agent_id = bot AND status = 'pending' GROUP BY agent_id;`)
 - [ ] 1 bot に N pending あっても 30s 内 1 wake のみ test fixture PASS
 - [ ] bot 全 pending msg `last_wake_attempt_at` 同時更新 test PASS
 - [ ] regression: 既 tests green
