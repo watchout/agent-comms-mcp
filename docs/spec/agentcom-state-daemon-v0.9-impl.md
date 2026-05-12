@@ -53,6 +53,44 @@ ALTER TABLE message_queue
 | `done` | bot 内部完了、reply 未送信 | `in_progress` | `replied` (send tool) |
 | `replied` | reply 完了 (terminal) | `in_progress` / `done` | (terminal) |
 
+### 1.1b 旧 status → 新 status migration mapping (sub-PR 1 dispatch gap fill)
+
+[文献確認: lead-ama dispatch `7c600cc6` sub-PR 1 spec verify per、agent-com-dev escalation `33ac66ae` 「現 schema: `pending|read|replied|failed` のみ」literal]
+
+destructive migration 実行前提:
+- **AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 env flag** (PR #340 deploy 済) 必須、unset 時 fail-closed。production deploy は launchd plist 経由のみ set (= S2 PR #342 per、dev session で set 禁止)
+- 全 production bot が **fleet PID drift check** PASS (= 全 bot 新 code 起動済)
+- sub-PR 2-6 fleet 慣熟完了 (rollout plan per、sub-PR 1 = 最終 push)
+
+旧 → 新 status value migration mapping (full enumeration):
+
+| 旧 status | 新 status | 変換 logic |
+|---|---|---|
+| `pending` | `pending` | **no change** (= value 同一、CHECK 制約のみ拡張) |
+| `read` | `received` | **rename** (= UPDATE 文で `SET status='received' WHERE status='read'`) |
+| `replied` | `replied` | **no change** (= terminal、value 同一) |
+| `failed` | (§1.1a per) | **3-way 分岐** (= IMPLICIT_ABANDON → pending、STALE_DISPATCH → bot verify、PERMANENT → replied + audit) |
+| `skipped` (= v0.8 残存可能) | (drop) | **drop** (CC 削除 PR で skipped 発生源 0 化、migration 時点で残 row 0 件期待、残あれば audit_log + replied 化) |
+
+migration 順序 (zero-downtime per spec §12 Phase 1-3):
+1. **Phase 1 (schema 拡張)**: CHECK 制約を新 5 値 (`pending|received|in_progress|done|replied`) に **DROP + ADD**、`failed_reason` column DROP、`done_at` column ADD。**旧書込 (`read`/`failed`) は CHECK 違反で reject** = 旧 bot は新 code に rolling deploy 前提
+2. **Phase 2 (data migration)**: 既存 row UPDATE: `read → received` rename、`failed` 3-way 分岐 (§1.1a)、`skipped` drop。**state-daemon は本 phase で stop**、migration script 完了後 restart (= migration window 数十秒想定)
+3. **Phase 3 (verify + cleanup)**: 旧値 0 件 verify (`SELECT count(*) WHERE status NOT IN ('pending','received','in_progress','done','replied')`)、production bot 起動 commit hash 確認
+
+production deploy procedure (= operator action):
+```bash
+# 1. AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED env を全 production bot launchd plist に set
+# 2. state-daemon stop + 全 production bot pause
+# 3. migration script 実行 (= Phase 1 + 2)
+# 4. snapshot diff verify + rollback ready
+# 5. state-daemon + 全 production bot restart (= 新 code load)
+# 6. Phase 3 verify、failure 時 rollback (旧 enum 戻し migration script、ARC 別 draft)
+```
+
+rollback contract:
+- Phase 1 + 2 のみ実行で stop 可能 (= Phase 3 verify 失敗時、旧 row 復元 migration script で rollback)
+- rollback migration script は本 sub-PR 1 で同時 ship 必須 (= dev impl の acceptance criteria)
+
 ### 1.1a enum migration `failed` 既存 row 分岐 contract (auditor A2 解消)
 
 [文献確認: spec v0.9 §12.3 既存 row 変換 plan + auditor A2 BLOCK]
