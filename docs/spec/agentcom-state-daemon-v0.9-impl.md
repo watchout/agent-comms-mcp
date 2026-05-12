@@ -226,16 +226,45 @@ skipped status 発生源 0 化検証:
 - migration 直前 `SELECT count(*) FROM message_queue WHERE status='skipped'` で snapshot
 - migration 後 `INSERT WHERE status='skipped'` 7 日継続 0 件確認 (Phase 1 開始 gate)
 
-### 1.5 wake duplicate suppression: 5s → 30s
+### 1.5 wake duplicate suppression: per-bot 化 + 5s → 30s (cycle 5 patch、CEO `fc0b043e` 設計 refine)
 
-state-daemon の `last_wake_attempt_at` チェック:
-- 旧: `last_wake_attempt_at > now() - interval '5 seconds'` → skip
-- 新: `last_wake_attempt_at > now() - interval '30 seconds'` → skip
+[文献確認: CEO `fc0b043e` 「1 メッセージごとに何秒でなくて、1 以上の pending があったら 1 回弾く。30 秒後にリトライでないといけないのでは？」、lead-ama dispatch `25cc5aa7`+`ab227d14`]
 
-config:
+**設計 (= per-bot suppression、旧 per-msg ではない)**:
+
+state-daemon sweep loop は **bot 単位** で suppression evaluate (msg 件数依存削除):
+
+```
+for each bot with pending msg:
+  SELECT MAX(last_wake_attempt_at) AS bot_last_wake
+    FROM message_queue
+    WHERE agent_id = bot AND status = 'pending';
+
+  IF bot_last_wake > now() - interval '30 seconds' THEN
+    skip bot 全体 (= bot 内全 pending msg を本 sweep cycle で wake しない)
+  ELSE
+    wake bot 1 回
+    UPDATE message_queue
+      SET last_wake_attempt_at = now()
+      WHERE agent_id = bot AND status = 'pending';
+  END IF;
+```
+
+**Key invariants**:
+- **per-bot 単位 evaluation**: 1 bot に N pending msg あっても本 cycle で wake は 1 回のみ (= msg 件数依存排除)
+- **bot 内全 pending msg `last_wake_attempt_at` 同時更新**: 次 sweep で bot 全体が 30s skip 対象になる
+- **30 秒 retry 周期**: 旧 5s から 30s 化、CEO 設計 「30 秒後にリトライ」 literal 実装
+- **bot online status と独立**: pending 存在 & online bot のみ candidate、suppression は wake 時刻だけで判定
+
+**config**:
 ```ts
 const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
+// per-bot suppression、per-msg ではない (= cycle 5 refine、msg 件数依存削除)
 ```
+
+**rationale (旧 per-msg → 新 per-bot の意義)**:
+- 旧 per-msg: 1 bot に 5 pending あれば 5 wake (= ARC check inbox 連発再発の根因)
+- 新 per-bot: 1 bot に 5 pending あっても 1 wake/30s (= CEO 設計、wake_storm 構造解消)
 
 ### 1.6 9 stall pattern detection (3 layer 統一、§1.3a abstraction 整合)
 
@@ -296,6 +325,7 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 - **CC fanout 復活禁止**: `cc` parameter 受領 / body `[CC: ...]` 注入 / CC recipient queue insert は **block PR**
 - **paired migration files 復活禁止**: `migrations/` ディレクトリ別ファイル形式は廃止 (= inline canonical、`db/migrate.ts` 内 single source)
 - **5s suppression 復活禁止**: `WAKE_DEDUP_INTERVAL_SEC = 5` への戻りは ARC checkinbox 連発再発、block PR
+- **per-msg suppression 復活禁止 (cycle 5 patch)**: §1.5 per-bot 設計を per-msg (= 各 row 毎の `last_wake_attempt_at` 個別判定) に戻すことは CEO `fc0b043e` 設計違反、wake_storm 再発、block PR
 - **同期 wake 禁止**: state-daemon は async pool で wake、main loop block する同期 wake は禁止
 - **`skip` tool 残存禁止**: 削除と仕様。tool deprecation だけでなく code path 削除完全 verify
 - **fail tool で status='failed' 残存禁止**: status='failed' は新 enum で存在しない、書込試行は CHECK 制約違反 → impl error
