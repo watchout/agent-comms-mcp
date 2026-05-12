@@ -402,7 +402,7 @@ scope exclusion (本 PR で触らない):
 
 ### 4.2 behavioral smoke (`scripts/test/smoke-v0.9.sh` 等)
 
-各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。merge gate は E1/E2/E3a-E3i (9 件)/E4 = **計 12 件** (E1 + E2 + E3a-E3i 9 件 + E4) を個別 pass で count。
+各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。本 §4.2 は behavioral smoke subset = E1/E2/E3a-E3i (9 件)/E4 = **E-fixture 12 件**、migration fixture M1-M7 は §4.1 per (sub-PR 1 cycle 2 patch で M5-M7 追加)、**merge gate 総数は §4.3 per 計 15 件 (T1-T44 + M1-M7 + E-fixture 12)** が canonical。
 
 - **E1**: bot が send → `replied` で terminal、queue から 7 日後 GC 実行で削除確認
   - artifact: `scripts/test/E1-replied-7day-gc.sh`
