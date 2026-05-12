@@ -48,6 +48,13 @@ import {
 } from './types'
 import { WakePool } from './wake-pool'
 import { defaultConfigPort } from '../ports/config-port'
+import {
+  createDefaultStallDetector,
+  loadStallThresholdsFromEnv,
+  type StallDetector,
+  type BotContext,
+  type StallVerdict,
+} from './stall-detector'
 
 interface QueueRow {
   id: number
@@ -83,6 +90,11 @@ export class StateDaemon {
   private readonly alert: AlertSink
   private readonly config: StateDaemonConfig
   private readonly wakePool: WakePool
+  // v0.9 sub-PR 2: wake-time stall gate (§1.3a 3-layer abstraction). Sits
+  // BEFORE the per-bot suppression query inside runWakeIfNotSuppressed; if
+  // it returns a non-empty verdict array, wake is skipped and a metric is
+  // emitted tagged with the verdict kind.
+  private readonly stallDetector: StallDetector = createDefaultStallDetector()
 
   private status: 'stopped' | 'running' | 'stopping' = 'stopped'
   private dbErrorStreak = 0
@@ -407,6 +419,28 @@ export class StateDaemon {
     dedupResultLabel: string,
   ): Promise<boolean> {
     const now = this.clock.now()
+    // v0.9 sub-PR 2 §1.3a stall gate: evaluated before the per-bot
+    // suppression check. If any of the three layers reports a stall the
+    // wake is skipped; the existing sweep / heartbeat paths own the
+    // recovery action separately. The gate is fail-open: any unexpected
+    // error in detection logs and falls through to the suppression check.
+    try {
+      const verdicts = await this.evaluateStallGate(row, now)
+      if (verdicts.length > 0) {
+        for (const v of verdicts) {
+          this.metrics.inc('state_daemon_stall_skipped_total', {
+            layer: v.layer,
+            kind: v.kind,
+          })
+        }
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'stall_skipped' })
+        return false
+      }
+    } catch (e) {
+      this.metrics.inc('state_daemon_stall_detector_error_total', {})
+      this.recordDbError(e)
+      // fall through; the suppression check below is unchanged.
+    }
     // v0.9 sub-PR 4 §1.5 per-bot suppression: the deduplication window is
     // owned by the bot, not the individual message. If the bot has any
     // pending message that was woken within the last `wakeDuplicateSuppressSec`,
@@ -447,6 +481,37 @@ export class StateDaemon {
     } finally {
       this.inflightWakes.delete(runPromise)
     }
+  }
+
+  /**
+   * Build a BotContext and run it through the stall detector. Kept private
+   * because it is only used from `runWakeIfNotSuppressed`; the detector
+   * itself is the testable seam. tmuxPaneTail is left null for now — the
+   * L3 input_residue check stays inert until the daemon grows its own
+   * capture-pane caller (the existing capture is in server.ts:3371).
+   */
+  private async evaluateStallGate(
+    row: QueueRow,
+    now: Date,
+  ): Promise<readonly StallVerdict[]> {
+    const { rows } = await this.dbQuery<AgentRow>(
+      `SELECT agent_id, runtime, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
+      [row.agent_id],
+    )
+    const ctx: BotContext = {
+      now,
+      row: row as unknown as BotContext['row'],
+      agent: (rows[0] ?? null) as unknown as BotContext['agent'],
+      tmuxPaneTail: null,
+      // cycle 2 Fix 3: thresholds read from env at each gate evaluation
+      // (no module-level cache) so that an operator-level override via
+      // STATE_DAEMON_STUCK_AFTER_SEC / STATE_DAEMON_STALL_AFTER_SEC is
+      // picked up without daemon restart. The function returns the
+      // FALLBACK_STALL_THRESHOLDS literal when the env var is unset or
+      // malformed, preserving the previous hardcoded behaviour.
+      thresholds: loadStallThresholdsFromEnv(),
+    }
+    return this.stallDetector.detect(ctx)
   }
 
   private async executeWake(row: QueueRow, now: Date): Promise<void> {

@@ -206,7 +206,7 @@ function detectStall(
 
 | Layer | 抽象 | 共通 detection 軸 | 適用 pattern (#) |
 |---|---|---|---|
-| **L1: queue row predicate** | DB row state + age + claim metadata | `WHERE` 句単発 + age 計算 | 1 (idle: 全 row 不在) / 2 (claim TTL) / 3 (received stuck) |
+| **L1: queue row predicate** | DB row state + age + claim metadata | `WHERE` 句単発 + age 計算 | 1 (idle: non-pending row のみ存在、cycle 2 narrow) / 2 (claim TTL) / 3 (received stuck) |
 | **L2: process state** | bot OS process / agent metadata | `agents.status` + `last_seen_at` + tmux session 存在 | 4 (dead bot) / 5 (tmux missing) |
 | **L3: output state** | bot 出力ストリーム + LLM turn semantics | `in_progress` age + reply 出力 / context 状態観測 | 6 (in_progress stall) / 7 (context pressure) / 8 (input residue) / 9 (smooshing hang) |
 
@@ -273,14 +273,14 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 
 | Layer | # | pattern | detection (kind) | wake / 動作 |
 |---|---|---|---|---|
-| **L1 queue row predicate** | 1 | 真 idle (queue 空 + bot online) | `kind='idle'` (`count(pending)=0` + `agents.status='online'`) | nothing (信頼) |
+| **L1 queue row predicate** | 1 | 真 idle (bot 該当 row に pending 不在 + bot online) | `kind='idle'` (`count(pending)=0` for agent_id + `agents.status='online'`、cycle 2 narrow restate: gate run 条件下 non-pending row のみ存在時に発火) | nothing (信頼) |
 | L1 | 2 | claim TTL expired | `kind='claim_ttl_expired'` (`received` AND `claim_expires_at < now()`) | self-reclaim → reset to `pending` + re-wake |
 | L1 | 3 | received stuck 5min | `kind='received_stuck'` (`received` AND `age > stuckAfter`) | reset to `pending` (transparent retry) |
 | **L2 process state** | 4 | dead bot | `kind='dead_bot'` (`agents.last_seen_at < now() - deadAfter` AND `status='online'`) | restart 実行 + alert |
 | L2 | 5 | tmux missing | `kind='tmux_missing'` (`tmux session 不在` AND `runtime='TUI'`) | restart 実行 + alert |
 | **L3 output state** | 6 | in_progress stall (判断 prompt 待ち含む) | `kind='in_progress_stall'` (`in_progress` AND `age > stallAfter`) | operator alert (auto reset しない) |
 | L3 | 7 | context pressure | `kind='context_pressure'` (bot last reply に token 警告 pattern) | operator alert |
-| L3 | 8 | input residue | `kind='input_residue'` (tmux pane 未送信 input 検出) | pane clear + re-wake |
+| L3 | 8 | input residue (**stub**、cycle 4 narrow per PR #345 Fix 4) | `kind='input_residue'` interface 定義のみ、検出 logic は **stub** (Task 3a pane scrape infra 待ち、本 PR は interface ship のみ) | (deferred) `pane clear + re-wake` は Task 3a で functional 化 |
 | L3 | 9 | Smooshing hang | `kind='smooshing_hang'` (bot output 無 + claim 維持) | operator alert + restart 候補 |
 
 各 pattern detection function は `core/stall-detector.ts` (新規) に **3 sub-layer 関数分離 default** で集約、return `StallVerdict[]` (§1.3 type 参照)。internal split は §5.1 implementer 自由。
@@ -364,7 +364,9 @@ scope exclusion (本 PR で触らない):
   - artifact: `scripts/test/E1-replied-7day-gc.sh`
 - **E2**: 30s 以内同 row 連続 INSERT (重複) → wake 1 回のみ、metric `dedup_skipped` += 1
   - artifact: `scripts/test/E2-wake-dedup-30s.sh`
-- **E3a (L1 #1 idle)**: queue 全 row 不在 + bot online → `StallVerdict.kind='idle'` 1 件、metric `stall_detected_total{kind='idle'}` += 1、wake 不発火
+- **E3a (L1 #1 idle、cycle 2 narrow restate per PR #345 Fix 2 / CTO option B)**: 該当 bot に **non-pending row のみ** (= `status != 'pending'` の row 存在、`status='replied'/'failed'/'in_progress'` 等) + bot online → `StallVerdict.kind='idle'` 1 件、metric `stall_detected_total{kind='idle'}` += 1、wake 不発火
+  - rationale: gate run 条件 (sweep loop) は queue row 存在時のみ走るため、spec literal「queue 全 row 不在」は impl で観測不能。実 impl `status !== 'pending'` predicate を spec 側で正当化、honest restate
+  - 旧 spec literal「queue 全 row 不在」 は impl で永久に発火しない dead pattern、cycle 2 で削除
   - artifact: `scripts/test/E3a-stall-idle.sh`
 - **E3b (L1 #2 claim TTL expired)**: `received` row、`claim_expires_at = now() - 5s` → `kind='claim_ttl_expired'` 1 件、self-reclaim → `pending` reset、wake 1 回
   - artifact: `scripts/test/E3b-stall-claim-ttl.sh`
@@ -378,8 +380,9 @@ scope exclusion (本 PR で触らない):
   - artifact: `scripts/test/E3f-stall-in-progress.sh`
 - **E3g (L3 #7 context pressure)**: bot last reply に token 警告 pattern (例: "context limit") → `kind='context_pressure'` 1 件、operator alert
   - artifact: `scripts/test/E3g-stall-context-pressure.sh`
-- **E3h (L3 #8 input residue)**: tmux pane に未送信 input 検出 → `kind='input_residue'` 1 件、pane clear + re-wake
-  - artifact: `scripts/test/E3h-stall-input-residue.sh`
+- **E3h (L3 #8 input residue、cycle 4 narrow restate per PR #345 Fix 4)**: **stub** (Task 3a pane scrape infra 待ち、本 PR は interface 定義のみ ship)、functional 化は別 PR で Task 3a 完了後
+  - rationale: pane scrape infra (tmux pane content read API) は本 sub-PR 2 scope 外、本 PR では `kind='input_residue'` interface のみ提供、検出 logic は inert stub
+  - artifact: `scripts/test/E3h-stall-input-residue.sh` (Task 3a 完了後 functional 化、本 PR では stub 検証のみ)
 - **E3i (L3 #9 smooshing hang)**: bot output 無 + claim 維持 + `age > stallAfter` → `kind='smooshing_hang'` 1 件、operator alert + restart 候補
   - artifact: `scripts/test/E3i-stall-smooshing.sh`
 - **E4**: bot 19 体に対して migration 実施、`next` 呼出が `'received'` claim 取得確認、data 損失 0
