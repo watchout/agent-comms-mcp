@@ -266,4 +266,63 @@ describe('loadGcOverridesFromEnv', () => {
     expect(out.gcIntervalMs).toBeUndefined()
     expect(out.gcBatchLimit).toBeUndefined()
   })
+
+  test('end-to-end: env var → constructor → daemon.config reflects override (cycle 2)', () => {
+    // Auditor cycle 1 BLOCK (msg `d1067c73`): the helper was defined but
+    // the constructor did not call it, leaving env overrides dead-wired.
+    // This test pins the production assembly path: setenv → new
+    // StateDaemon(...) → config carries the override.
+    const prior = {
+      STATE_DAEMON_GC_AGE_DAYS: process.env.STATE_DAEMON_GC_AGE_DAYS,
+      STATE_DAEMON_GC_BATCH_LIMIT: process.env.STATE_DAEMON_GC_BATCH_LIMIT,
+    }
+    process.env.STATE_DAEMON_GC_AGE_DAYS = '2'
+    process.env.STATE_DAEMON_GC_BATCH_LIMIT = '250'
+    try {
+      const daemon = new StateDaemon({
+        db: new PgDBClient(pg),
+        pgListen: new FakePgListen(),
+        tmux: new FakeTmux(),
+        clock: new FakeClock(new Date()),
+        metrics: new FakeMetrics(),
+        alert: new FakeAlertSink(),
+        config: {}, // intentionally empty — let env be the source
+      })
+      // Reach into the daemon's config via the same accessor the
+      // production code uses for the GC scheduler. There is no public
+      // getter, so the test reads the snapshot through a type-checked
+      // cast that mirrors what the daemon itself does at construction.
+      const cfg = (daemon as unknown as { config: typeof DEFAULT_CONFIG }).config
+      expect(cfg.gcRepliedAfterSec).toBe(2 * 86_400)
+      expect(cfg.gcBatchLimit).toBe(250)
+      // The interval var was not set; the default must survive.
+      expect(cfg.gcIntervalMs).toBe(DEFAULT_CONFIG.gcIntervalMs)
+    } finally {
+      if (prior.STATE_DAEMON_GC_AGE_DAYS === undefined) delete process.env.STATE_DAEMON_GC_AGE_DAYS
+      else process.env.STATE_DAEMON_GC_AGE_DAYS = prior.STATE_DAEMON_GC_AGE_DAYS
+      if (prior.STATE_DAEMON_GC_BATCH_LIMIT === undefined) delete process.env.STATE_DAEMON_GC_BATCH_LIMIT
+      else process.env.STATE_DAEMON_GC_BATCH_LIMIT = prior.STATE_DAEMON_GC_BATCH_LIMIT
+    }
+  })
+
+  test('end-to-end: explicit deps.config wins over env override (highest precedence)', () => {
+    const prior = process.env.STATE_DAEMON_GC_AGE_DAYS
+    process.env.STATE_DAEMON_GC_AGE_DAYS = '2'
+    try {
+      const daemon = new StateDaemon({
+        db: new PgDBClient(pg),
+        pgListen: new FakePgListen(),
+        tmux: new FakeTmux(),
+        clock: new FakeClock(new Date()),
+        metrics: new FakeMetrics(),
+        alert: new FakeAlertSink(),
+        config: { gcRepliedAfterSec: 999 }, // caller / test wins
+      })
+      const cfg = (daemon as unknown as { config: typeof DEFAULT_CONFIG }).config
+      expect(cfg.gcRepliedAfterSec).toBe(999)
+    } finally {
+      if (prior === undefined) delete process.env.STATE_DAEMON_GC_AGE_DAYS
+      else process.env.STATE_DAEMON_GC_AGE_DAYS = prior
+    }
+  })
 })

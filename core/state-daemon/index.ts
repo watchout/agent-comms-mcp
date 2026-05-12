@@ -31,6 +31,7 @@ import {
   AlreadyStartedError,
   BotRestartLimitError,
   DEFAULT_CONFIG,
+  loadGcOverridesFromEnv,
   DBConnectionError,
   TmuxSendKeysError,
   type AlertSink,
@@ -121,7 +122,17 @@ export class StateDaemon {
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
-    this.config = { ...DEFAULT_CONFIG, ...(deps.config ?? {}) }
+    // cycle 2 Fix (auditor verdict `d1067c73`): the GC env overrides have
+    // to land in `this.config` to actually take effect at runtime.
+    // Merge order, lowest → highest precedence:
+    //   DEFAULT_CONFIG (compile-time) → env overrides (operator) → deps.config (caller / test).
+    // Test fakes that pass an explicit `config` keep their values because
+    // `deps.config` sits last in the spread.
+    this.config = {
+      ...DEFAULT_CONFIG,
+      ...loadGcOverridesFromEnv(),
+      ...(deps.config ?? {}),
+    }
     this.wakePool = new WakePool({
       config: this.config,
       metrics: this.metrics,
