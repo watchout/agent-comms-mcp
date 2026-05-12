@@ -280,7 +280,7 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 | L2 | 5 | tmux missing | `kind='tmux_missing'` (`tmux session 不在` AND `runtime='TUI'`) | restart 実行 + alert |
 | **L3 output state** | 6 | in_progress stall (判断 prompt 待ち含む) | `kind='in_progress_stall'` (`in_progress` AND `age > stallAfter`) | operator alert (auto reset しない) |
 | L3 | 7 | context pressure | `kind='context_pressure'` (bot last reply に token 警告 pattern) | operator alert |
-| L3 | 8 | input residue | `kind='input_residue'` (tmux pane 未送信 input 検出) | pane clear + re-wake |
+| L3 | 8 | input residue (**stub**、cycle 4 narrow per PR #345 Fix 4) | `kind='input_residue'` interface 定義のみ、検出 logic は **stub** (Task 3a pane scrape infra 待ち、本 PR は interface ship のみ) | (deferred) `pane clear + re-wake` は Task 3a で functional 化 |
 | L3 | 9 | Smooshing hang | `kind='smooshing_hang'` (bot output 無 + claim 維持) | operator alert + restart 候補 |
 
 各 pattern detection function は `core/stall-detector.ts` (新規) に **3 sub-layer 関数分離 default** で集約、return `StallVerdict[]` (§1.3 type 参照)。internal split は §5.1 implementer 自由。
@@ -380,8 +380,9 @@ scope exclusion (本 PR で触らない):
   - artifact: `scripts/test/E3f-stall-in-progress.sh`
 - **E3g (L3 #7 context pressure)**: bot last reply に token 警告 pattern (例: "context limit") → `kind='context_pressure'` 1 件、operator alert
   - artifact: `scripts/test/E3g-stall-context-pressure.sh`
-- **E3h (L3 #8 input residue)**: tmux pane に未送信 input 検出 → `kind='input_residue'` 1 件、pane clear + re-wake
-  - artifact: `scripts/test/E3h-stall-input-residue.sh`
+- **E3h (L3 #8 input residue、cycle 4 narrow restate per PR #345 Fix 4)**: **stub** (Task 3a pane scrape infra 待ち、本 PR は interface 定義のみ ship)、functional 化は別 PR で Task 3a 完了後
+  - rationale: pane scrape infra (tmux pane content read API) は本 sub-PR 2 scope 外、本 PR では `kind='input_residue'` interface のみ提供、検出 logic は inert stub
+  - artifact: `scripts/test/E3h-stall-input-residue.sh` (Task 3a 完了後 functional 化、本 PR では stub 検証のみ)
 - **E3i (L3 #9 smooshing hang)**: bot output 無 + claim 維持 + `age > stallAfter` → `kind='smooshing_hang'` 1 件、operator alert + restart 候補
   - artifact: `scripts/test/E3i-stall-smooshing.sh`
 - **E4**: bot 19 体に対して migration 実施、`next` 呼出が `'received'` claim 取得確認、data 損失 0
