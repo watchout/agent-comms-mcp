@@ -342,7 +342,12 @@ describe('T26 abnormal_activity_alert (R9 daemon detection path)', () => {
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })
-        h.clock.advance(1_000)
+        // PR #338 sub-PR 4 §1.5: per-bot wake suppression dedups within the
+        // suppression window. T26 measures the abnormal-activity counter,
+        // which is recorded inside `executeWake`. To keep each iteration
+        // executing wake (and thus feeding the counter), advance the clock
+        // past the suppression window between events.
+        h.clock.advance(60_000)
       }
       // 5th event trips the latched alert + metric.
       expect(h.metrics.countInc('state_daemon_abnormal_activity_total', { agent_id: agent, kind: 'dispatch' })).toBe(1)

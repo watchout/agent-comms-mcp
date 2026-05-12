@@ -407,8 +407,33 @@ export class StateDaemon {
     dedupResultLabel: string,
   ): Promise<boolean> {
     const now = this.clock.now()
-    if (row.last_wake_attempt_at) {
-      const sinceLast = (now.getTime() - new Date(row.last_wake_attempt_at).getTime()) / 1000
+    // v0.9 sub-PR 4 §1.5 per-bot suppression: the deduplication window is
+    // owned by the bot, not the individual message. If the bot has any
+    // pending message that was woken within the last `wakeDuplicateSuppressSec`,
+    // skip — regardless of how many other pending rows are queued for that bot.
+    //
+    // The SQL below is the spec SSOT (PR #338 cycle 7,
+    // docs/spec/agentcom-state-daemon-v0.9-impl.md §1.5 +
+    // proposals/agentcom-state-daemon-v0.9-rollout.md §sub-PR 4):
+    //
+    //   SELECT MAX(last_wake_attempt_at) AS bot_last_wake
+    //     FROM message_queue
+    //     WHERE agent_id = bot AND status = 'pending'
+    //     GROUP BY agent_id;
+    //
+    // GROUP BY is part of the SSOT literal even though the predicate already
+    // restricts to one agent — the spec freezes this form to keep the three
+    // location SSOT (commit summary / spec body / acceptance) in sync.
+    const { rows: lastWakeRows } = await this.dbQuery<{ bot_last_wake: Date | null }>(
+      `SELECT MAX(last_wake_attempt_at) AS bot_last_wake
+         FROM message_queue
+         WHERE agent_id = $1 AND status = 'pending'
+         GROUP BY agent_id`,
+      [row.agent_id],
+    )
+    const botLastWake = lastWakeRows[0]?.bot_last_wake ?? null
+    if (botLastWake) {
+      const sinceLast = (now.getTime() - new Date(botLastWake).getTime()) / 1000
       if (sinceLast < this.config.wakeDuplicateSuppressSec) {
         this.metrics.inc('state_daemon_wake_actions_total', { result: dedupResultLabel })
         return false
@@ -466,9 +491,17 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'tmux_error' })
       throw new TmuxSendKeysError((err as Error).message ?? String(err))
     }
+    // v0.9 sub-PR 4 §1.5: update every pending row for the bot in one
+    // transaction so the per-bot MAX(last_wake_attempt_at) read in
+    // `runWakeIfNotSuppressed` reflects the wake regardless of which row
+    // triggered it. This is the per-bot equivalent of the previous per-msg
+    // UPDATE; the previous form left other pending rows for the same bot
+    // with NULL / stale timestamps, which made the suppression window
+    // depend on which row the dispatcher pulled first.
     await this.dbQuery(
-      `UPDATE message_queue SET last_wake_attempt_at=$1 WHERE id=$2`,
-      [now, row.id],
+      `UPDATE message_queue SET last_wake_attempt_at=$1
+         WHERE agent_id=$2 AND status='pending'`,
+      [now, row.agent_id],
     )
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'ok' })
   }
