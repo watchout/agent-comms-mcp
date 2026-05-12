@@ -41,6 +41,11 @@ export interface StateDaemonConfig {
   // §8 alert thresholds
   dbErrorAlertThreshold: number      // default 5 (consecutive)
 
+  // PR #338 sub-PR 5 — 7-day GC (spec §1.6 GC job)
+  gcRepliedAfterSec: number          // default 604_800 (= 7 * 24h)
+  gcIntervalMs: number               // default 3_600_000 (= 1 hour)
+  gcBatchLimit: number               // default 1000 (spec invariant: batch delete to avoid deadlock)
+
   /**
    * Test-only scope guard. When set, every queue / agents query the daemon
    * issues is filtered to `agent_id LIKE prefix||'%'`. Production MUST leave
@@ -75,6 +80,39 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   abnormalActivityThreshold: 5,
   dbErrorAlertThreshold: 5,
   agentIdPrefix: null,
+  gcRepliedAfterSec: 604_800,
+  gcIntervalMs: 3_600_000,
+  gcBatchLimit: 1000,
+}
+
+/**
+ * Env-driven override loader for the 7-day GC knobs (PR #338 sub-PR 5,
+ * spec §1.6 GC job + env-driven thresholds precedent from sub-PR 2
+ * cycle 2 `loadStallThresholdsFromEnv`). Reads `STATE_DAEMON_GC_AGE_DAYS`
+ * (converted to seconds), `STATE_DAEMON_GC_INTERVAL_MS`, and
+ * `STATE_DAEMON_GC_BATCH_LIMIT`. Each field falls back per-field when its
+ * env var is unset, malformed, or non-positive — the existing defaults in
+ * `DEFAULT_CONFIG` are the fallback values, so callers can write
+ * `{ ...DEFAULT_CONFIG, ...loadGcOverridesFromEnv() }`.
+ */
+export function loadGcOverridesFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): Partial<StateDaemonConfig> {
+  const out: Partial<StateDaemonConfig> = {}
+  const parsePositive = (key: string): number | null => {
+    const raw = env[key]
+    if (raw === undefined) return null
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n <= 0) return null
+    return n
+  }
+  const ageDays = parsePositive('STATE_DAEMON_GC_AGE_DAYS')
+  if (ageDays !== null) out.gcRepliedAfterSec = Math.round(ageDays * 86_400)
+  const intervalMs = parsePositive('STATE_DAEMON_GC_INTERVAL_MS')
+  if (intervalMs !== null) out.gcIntervalMs = Math.round(intervalMs)
+  const batchLimit = parsePositive('STATE_DAEMON_GC_BATCH_LIMIT')
+  if (batchLimit !== null) out.gcBatchLimit = Math.round(batchLimit)
+  return out
 }
 
 /** pg_notify('queue_event', ...) JSON payload (§7.3).

@@ -174,6 +174,14 @@ export class StateDaemon {
         this.config.botLivenessCheckIntervalMs,
       ),
     )
+    // PR #338 sub-PR 5 — 7-day GC of replied rows. Runs on its own
+    // schedule (default 1h) so the main sweep cadence is unaffected.
+    this.intervalHandles.push(
+      setInterval(
+        () => void this.gcRepliedRows().catch((e) => this.recordDbError(e)),
+        this.config.gcIntervalMs,
+      ),
+    )
   }
 
   async stop(): Promise<void> {
@@ -316,6 +324,53 @@ export class StateDaemon {
       result.budgetWarn = true
     }
     return result
+  }
+
+  // ── 7-day GC (§1.6 GC job, PR #338 sub-PR 5) ───────────────────────────────
+
+  /**
+   * Delete `replied` rows whose `replied_at` is older than the configured
+   * GC age. Spec §1.6 invariant: `failed` rows are NOT garbage-collected
+   * (retention policy). Default cutoff is 7 days; env overrides via
+   * `STATE_DAEMON_GC_AGE_DAYS` / `STATE_DAEMON_GC_INTERVAL_MS` /
+   * `STATE_DAEMON_GC_BATCH_LIMIT` are wired through `loadGcOverridesFromEnv`
+   * at config construction time.
+   *
+   * Deletes are batched (default 1000 rows/tick) to avoid long-held
+   * locks. Returns the number of rows actually deleted.
+   */
+  async gcRepliedRows(): Promise<{ deleted: number }> {
+    const cutoffSec = this.config.gcRepliedAfterSec
+    const batchLimit = this.config.gcBatchLimit
+    const params: unknown[] = [String(cutoffSec), batchLimit]
+    // agentIdPrefix is a test-only scope guard (types.ts:51); on the
+    // shared dev DB it keeps the GC from touching rows that belong to
+    // other test runs.
+    let prefixClause = ''
+    if (this.config.agentIdPrefix) {
+      prefixClause = ` AND agent_id LIKE $3`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    const r = await this.dbQuery<{ id: number }>(
+      `DELETE FROM message_queue
+         WHERE id IN (
+           SELECT id FROM message_queue
+            WHERE status = 'replied'
+              AND replied_at IS NOT NULL
+              AND replied_at < now() - ($1 || ' seconds')::interval
+              ${prefixClause}
+            ORDER BY replied_at ASC
+            LIMIT $2
+         )
+         RETURNING id`,
+      params,
+    )
+    const deleted = r.rowCount
+    if (deleted > 0) {
+      this.metrics.inc('state_daemon_gc_deleted_total', {}, deleted)
+    }
+    this.metrics.inc('state_daemon_gc_runs_total')
+    return { deleted }
   }
 
   // ── Heartbeat (§5.1 / R4 / 補強 #1) ────────────────────────────────────────
