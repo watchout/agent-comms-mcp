@@ -55,7 +55,7 @@ ALTER TABLE message_queue
 
 ### 1.1b 旧 status → 新 status migration mapping (sub-PR 1 dispatch gap fill)
 
-[文献確認: lead-ama dispatch `7c600cc6` sub-PR 1 spec verify per、agent-com-dev escalation `33ac66ae` 「現 schema: `pending|read|replied|failed` のみ」literal]
+[文献確認: lead-ama dispatch `7c600cc6` sub-PR 1 spec verify per、agent-com-dev escalation `33ac66ae` 「現 schema: `pending|read|replied|failed` のみ」literal、ARC branch `spec/pr338-sub-pr1-enum-migration-gap-fill` (commit `3a8619d` 初版)]
 
 destructive migration 実行前提:
 - **AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 env flag** (PR #340 deploy 済) 必須、unset 時 fail-closed。production deploy は launchd plist 経由のみ set (= S2 PR #342 per、dev session で set 禁止)
@@ -370,6 +370,8 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 - **fail tool で status='failed' 残存禁止**: status='failed' は新 enum で存在しない、書込試行は CHECK 制約違反 → impl error
 - **silent fallback 禁止** (`feedback_no_silent_fallback`): 通信障害時は alert + log のみ、通常通信代替禁止
 - **scope 拡大禁止**: 本 PR は v0.9 spec 範囲限定、新規 feature 追加は **別 PR**
+- **rollback 不在禁止 (sub-PR 1 §1.1b per、cycle 2 patch)**: destructive migration impl PR は rollback migration script を同時 ship 必須、rollback script 不在の destructive PR は **block PR**、CEO L4 GO 前提条件
+- **dev DB verify 不在禁止 (sub-PR 1 §1.1b per、cycle 2 patch)**: destructive migration の production deploy 前に **dev DB で migration script + rollback script を実行 verify** 必須、dev verify skip は CEO 「端折らない」 directive (`b26651f0`) 違反、block PR
 
 scope exclusion (本 PR で触らない):
 - agent-memory MCP の DB schema (= 別 repo/scope)
@@ -393,6 +395,10 @@ scope exclusion (本 PR で触らない):
   - M2 `failed (IMPLICIT_ABANDON recent) → pending`: 旧 `failed` AND `failed_reason='IMPLICIT_ABANDON'` AND `claim_expires_at > now() - 60s` → `pending`、retry loop に投入
   - M3 `failed (other) → replied + audit log`: 上記以外の `failed` row → `replied` + 旧 `failed_reason` を `audit_log` table に退避
   - M4 `skipped → DELETE`: 全 `skipped` row 削除、count=0 確認
+- **destructive migration safety fixture** (sub-PR 1 §1.1b per、cycle 2 patch、3 件):
+  - **M5 `snapshot-before/after`**: migration 実行前 + 後 で `message_queue` table の全 row count + status 分布を snapshot、diff verify (= 全 row が新 enum 5 値に migration 済、count 不一致 0)
+  - **M6 `Phase1/2/3 verify`**: Phase 1 (CHECK 制約拡張) 完了後 旧書込 CHECK 違反 / Phase 2 (data migration) 完了後 旧値 0 件 / Phase 3 (verify) `SELECT count(*) WHERE status NOT IN (new enum)` = 0 確認、各 phase で fixture 個別 pass
+  - **M7 `rollback dry-run`**: rollback migration script を dev DB で実行 → 旧 enum 5 値復元 + 元 row count 一致 verify、production 適用前 mandatory
 
 ### 4.2 behavioral smoke (`scripts/test/smoke-v0.9.sh` 等)
 
