@@ -13,20 +13,22 @@
  * the verdict kind, and lets the existing sweep / heartbeat paths handle
  * the recovery action separately.
  *
- * Coverage (spec §1.6 table):
+ * Coverage (spec §1.6 table, cycle 2 reclass: input_residue moved to STUB):
  *   L1: 1 idle, 2 claim_ttl_expired, 3 received_stuck — functional
  *   L2: 4 dead_bot, 5 tmux_missing — functional
- *   L3: 8 input_residue — functional
- *   L3: 6 in_progress_stall, 7 context_pressure, 9 smooshing_hang — STUB,
- *       interface-only (CTO directive `0cc8ba72`, option β: ship the full
- *       9-pattern interface, leave the three L3 stalls as inert stubs until
- *       the infra they depend on lands).
+ *   L3: 6 in_progress_stall, 7 context_pressure, 8 input_residue, 9
+ *       smooshing_hang — STUB, interface-only (CTO directive `0cc8ba72`,
+ *       option β: ship the full 9-pattern interface, leave the four L3
+ *       stalls as inert stubs until the dependencies land — see
+ *       STUB_DEPENDENCIES for the per-pattern reason).
  *
  * Stub dependencies (do not implement before these ship):
  *   - in_progress_stall: needs `status='in_progress'` in the queue enum
  *     (sub-PR 1 destructive migration, last in the rollout).
  *   - context_pressure: needs bot-reply token-pressure monitoring; not in
  *     any current state-daemon code path.
+ *   - input_residue: needs tmux capture-pane wiring from state-daemon
+ *     (current capture site is server.ts:3371; cycle 2 reclass).
  *   - smooshing_hang: needs bot-output stream monitoring; same.
  */
 
