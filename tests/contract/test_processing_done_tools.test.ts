@@ -242,7 +242,7 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     // handler-equivalent helper produces RACE when invoked against the new
     // observed status path is irrelevant here — what we are pinning is that
     // a stale-fromStatus UPDATE returns zero rows, which is the exact branch
-    // server.ts:3360-3365 keys off to emit the RACE response.
+    // server.ts:3333-3343 keys off to emit the RACE response.
     expect(await statusOf(id)).toBe('in_progress')
   })
 
