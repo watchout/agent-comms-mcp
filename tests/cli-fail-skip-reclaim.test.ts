@@ -137,32 +137,36 @@ describe('T3 — §4.1 implicit abandon → status=failed, failed_reason=IMPLICI
 // T4 — MCP tools: fail / skip / reclaim
 // ─────────────────────────────────────────────────────────────────────────────
 describe('T4 — server.ts MCP tools: fail / skip / reclaim', () => {
-  test('tool list registers fail / skip / reclaim', () => {
+  test('tool list registers fail (deprecated) and reclaim; skip is removed (sub-PR 3)', () => {
     expect(SERVER_SRC).toMatch(/name: 'fail'/)
-    expect(SERVER_SRC).toMatch(/name: 'skip'/)
     expect(SERVER_SRC).toMatch(/name: 'reclaim'/)
+    // sub-PR 3 (v0.9 spec §1.3): skip tool fully removed; CC fanout was its
+    // sole caller and CC is removed in v0.9. Registration must be absent.
+    expect(SERVER_SRC).not.toMatch(/name: 'skip'/)
   })
 
-  test('CallToolRequestSchema handler branches for each new tool', () => {
-    // The branch gate accepts both fail and skip in one if (union predicate).
-    expect(SERVER_SRC).toMatch(/if \(name === 'fail' \|\| name === 'skip'\)/)
+  test('CallToolRequestSchema branches: fail (deprecated) + reclaim; combined fail||skip handler removed', () => {
+    expect(SERVER_SRC).toMatch(/if \(name === 'fail'\)/)
     expect(SERVER_SRC).toMatch(/if \(name === 'reclaim'\)/)
+    // sub-PR 3: the legacy `name === 'fail' || name === 'skip'` combined
+    // branch is removed in favor of a fail-only no-op deprecation shim.
+    expect(SERVER_SRC).not.toMatch(/if \(name === 'fail' \|\| name === 'skip'\)/)
   })
 
-  test('fail/skip handler uses the EXISTS-derive open-claim status update (Issue #278 cycle 1)', () => {
-    expect(SERVER_SRC).toMatch(/SET status = \$1, failed_reason = \$2/)
-    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
-    const failIdx = SERVER_SRC.indexOf("if (name === 'fail' || name === 'skip')")
+  test('fail tool is a no-op deprecation shim (sub-PR 3): returns deprecated:true without DB write', () => {
+    const failIdx = SERVER_SRC.indexOf("if (name === 'fail')")
+    expect(failIdx).toBeGreaterThan(-1)
     const reclaimIdx = SERVER_SRC.indexOf("if (name === 'reclaim')", failIdx)
-    expect(failIdx).toBeGreaterThan(sendIdx)
     const handler = SERVER_SRC.slice(failIdx, reclaimIdx === -1 ? SERVER_SRC.length : reclaimIdx)
-    // Multi in-flight: closing one claim must not unconditionally
-    // idle the agent; CASE WHEN EXISTS keeps busy while other reads
-    // remain.
-    expect(handler).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
-    )
-    expect(handler).not.toMatch(/current_message_id = NULL/)
+    // No DB write — must not contain UPDATE message_queue / UPDATE agents.
+    expect(handler).not.toMatch(/UPDATE message_queue/)
+    expect(handler).not.toMatch(/UPDATE agents/)
+    // No status enum literal write — the v0.9 CHECK constraint would trip on
+    // any failed/skipped/read attempt and crash the fleet (2026-05-13 PR #347
+    // incident anchor).
+    expect(handler).not.toMatch(/SET status = \$1, failed_reason = \$2/)
+    // Returns the deprecation marker.
+    expect(handler).toMatch(/deprecated:\s*true/)
   })
 
   test('reclaim handler uses 15-minute cutoff + returns reclaimed_queue_ids', () => {
