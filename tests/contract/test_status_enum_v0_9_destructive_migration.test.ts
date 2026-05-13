@@ -15,6 +15,7 @@ import { join, dirname } from 'node:path'
 // M5 snapshot before/after                    (full row count + status histogram)
 // M6 Phase 1/2/3 verify                       (constraint swap + done_at + failed_reason drop)
 // M7 rollback dry-run                         (down.sql restores v0.8 vocab)
+// M8 failed STALE_DISPATCH 3-way verify       (3-way branch b — auditor cycle 2 Finding 1)
 
 const DATABASE_URL = process.env.DATABASE_URL
 const dbDescribe = DATABASE_URL ? describe : describe.skip
@@ -102,6 +103,14 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     `)
     await client.query(`DELETE FROM message_queue_status_migration_audit WHERE 1=1`).catch(() => {})
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT])
+    // M8 inserts into agent_messages: one inbound (some upstream sender) +
+    // one outbound (our fixture bot's reply). Outbound has a reply_to FK
+    // pointing at inbound, so we drop everything on the fixture channel
+    // in one statement to avoid the FK ordering snag.
+    await client.query(
+      `DELETE FROM agent_messages WHERE channel_id = $1`,
+      ['__pr338_subpr1_m8_channel__'],
+    ).catch(() => {})
   })
 
   async function insertRow(opts: {
@@ -332,5 +341,82 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
       [idFailedPerm],
     )
     expect(r.rows[0]?.failed_reason).toBe('LOOP_DETECTED')
+  })
+
+  // M8 — STALE_DISPATCH 3-way verification (auditor cycle 2 Finding 1).
+  //
+  // spec §1.1a [v0.9-impl.md:105] STALE_DISPATCH branch:
+  //   if verify_bot_replied(row) → replied (no audit)
+  //   else                       → pending (no audit)
+  //
+  // verify_bot_replied SQL translation in up.sql:
+  //   queue.replied_with IS NOT NULL
+  //   OR EXISTS (outbound agent_messages with reply_to::text = queue.message_id
+  //              AND author_id = queue.agent_id)
+  //
+  // M8a covers the (b1) replied path via an outbound agent_messages witness.
+  // M8b covers the (b2) pending path with no witness.
+  test('M8a STALE_DISPATCH + outbound agent_messages witness → replied', async () => {
+    // agent_messages.reply_to has a self-FK to agent_messages.id, so the
+    // outbound witness needs a real inbound row to reference. Pattern:
+    //   inbound row (some upstream message) <—reply_to— outbound row (bot reply)
+    // and the queue's message_id mirrors the inbound row's id (this is the
+    // queue ↔ agent_messages link the production send-path uses).
+    const inbound = await client.query<{ id: string }>(
+      `INSERT INTO agent_messages
+         (channel_id, author_id, author_bot, content, direction, role)
+       VALUES ($1, $2, false, $3, 'inbound', 'user')
+       RETURNING id::text AS id`,
+      ['__pr338_subpr1_m8_channel__', 'fixture-sender', 'M8a inbound original'],
+    )
+    const messageId = inbound.rows[0]!.id
+
+    const idReplied = await insertRow({
+      status: 'failed',
+      failed_reason: 'STALE_DISPATCH',
+      message_id: messageId,
+    })
+
+    // Outbound witness: the bot already replied to the inbound message.
+    await client.query(
+      `INSERT INTO agent_messages
+         (channel_id, author_id, author_bot, content, direction, role, reply_to)
+       VALUES ($1, $2, true, $3, 'outbound', 'agent', $4::uuid)`,
+      [
+        '__pr338_subpr1_m8_channel__',
+        FIXTURE_AGENT,
+        'M8a witness reply',
+        messageId,
+      ],
+    )
+
+    await applyUpMigrationFile(UP)
+
+    expect(await statusOf(idReplied)).toBe('replied')
+    // STALE_DISPATCH (b1) does NOT write to message_queue_status_migration_audit.
+    const auditCount = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM message_queue_status_migration_audit WHERE queue_id = $1`,
+      [idReplied],
+    )
+    expect(Number.parseInt(auditCount.rows[0]!.count, 10)).toBe(0)
+  })
+
+  test('M8b STALE_DISPATCH + no witness → pending', async () => {
+    const idPending = await insertRow({
+      status: 'failed',
+      failed_reason: 'STALE_DISPATCH',
+      // Default random message_id (not a UUID) — even if cast were attempted,
+      // no agent_messages row has reply_to pointing here, so EXISTS is false.
+    })
+
+    await applyUpMigrationFile(UP)
+
+    expect(await statusOf(idPending)).toBe('pending')
+    // STALE_DISPATCH (b2) does NOT write to message_queue_status_migration_audit either.
+    const auditCount = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM message_queue_status_migration_audit WHERE queue_id = $1`,
+      [idPending],
+    )
+    expect(Number.parseInt(auditCount.rows[0]!.count, 10)).toBe(0)
   })
 })
