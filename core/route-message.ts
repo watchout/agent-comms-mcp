@@ -422,9 +422,16 @@ export async function applyDiscordIdRetry(
   msg: { authorAgentId: string | null; mentions: string[] },
   channel: { channelId: string },
   resolveDiscordId: (agentId: string) => Promise<string | null>,
+  agents?: AgentInfo[],
 ): Promise<RouteResult> {
+  // When the caller provides the agent list, only retry agents whose
+  // cached discordId was null at routeMessage time (true A4 path). Without
+  // the list, retry every NOT_MENTIONED drop — slower but still correct.
+  const a4Candidates = agents
+    ? new Set(agents.filter((a) => a.discordId == null).map((a) => a.agentId))
+    : null
   const retryCandidates = Object.entries(result.dropTargets)
-    .filter(([, reason]) => reason === 'NOT_MENTIONED')
+    .filter(([id, reason]) => reason === 'NOT_MENTIONED' && (a4Candidates ? a4Candidates.has(id) : true))
 
   if (retryCandidates.length === 0) return result
 
