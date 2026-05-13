@@ -53,6 +53,44 @@ ALTER TABLE message_queue
 | `done` | bot 内部完了、reply 未送信 | `in_progress` | `replied` (send tool) |
 | `replied` | reply 完了 (terminal) | `in_progress` / `done` | (terminal) |
 
+### 1.1b 旧 status → 新 status migration mapping (sub-PR 1 dispatch gap fill)
+
+[文献確認: lead-ama dispatch `7c600cc6` sub-PR 1 spec verify per、agent-com-dev escalation `33ac66ae` 「現 schema: `pending|read|replied|failed` のみ」literal、ARC branch `spec/pr338-sub-pr1-enum-migration-gap-fill` (commit `3a8619d` 初版)]
+
+destructive migration 実行前提:
+- **AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 env flag** (PR #340 deploy 済) 必須、unset 時 fail-closed。production deploy は launchd plist 経由のみ set (= S2 PR #342 per、dev session で set 禁止)
+- 全 production bot が **fleet PID drift check** PASS (= 全 bot 新 code 起動済)
+- sub-PR 2-6 fleet 慣熟完了 (rollout plan per、sub-PR 1 = 最終 push)
+
+旧 → 新 status value migration mapping (full enumeration):
+
+| 旧 status | 新 status | 変換 logic |
+|---|---|---|
+| `pending` | `pending` | **no change** (= value 同一、CHECK 制約のみ拡張) |
+| `read` | `received` | **rename** (= UPDATE 文で `SET status='received' WHERE status='read'`) |
+| `replied` | `replied` | **no change** (= terminal、value 同一) |
+| `failed` | (§1.1a per) | **3-way 分岐** (= IMPLICIT_ABANDON → pending、STALE_DISPATCH → bot verify、PERMANENT → replied + audit) |
+| `skipped` (= v0.8 残存可能) | (drop) | **drop** (CC 削除 PR で skipped 発生源 0 化、migration 時点で残 row 0 件期待、残あれば audit_log + replied 化) |
+
+migration 順序 (zero-downtime per spec §12 Phase 1-3):
+1. **Phase 1 (schema 拡張)**: CHECK 制約を新 5 値 (`pending|received|in_progress|done|replied`) に **DROP + ADD**、`failed_reason` column DROP、`done_at` column ADD。**旧書込 (`read`/`failed`) は CHECK 違反で reject** = 旧 bot は新 code に rolling deploy 前提
+2. **Phase 2 (data migration)**: 既存 row UPDATE: `read → received` rename、`failed` 3-way 分岐 (§1.1a)、`skipped` drop。**state-daemon は本 phase で stop**、migration script 完了後 restart (= migration window 数十秒想定)
+3. **Phase 3 (verify + cleanup)**: 旧値 0 件 verify (`SELECT count(*) WHERE status NOT IN ('pending','received','in_progress','done','replied')`)、production bot 起動 commit hash 確認
+
+production deploy procedure (= operator action):
+```bash
+# 1. AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED env を全 production bot launchd plist に set
+# 2. state-daemon stop + 全 production bot pause
+# 3. migration script 実行 (= Phase 1 + 2)
+# 4. snapshot diff verify + rollback ready
+# 5. state-daemon + 全 production bot restart (= 新 code load)
+# 6. Phase 3 verify、failure 時 rollback (旧 enum 戻し migration script、ARC 別 draft)
+```
+
+rollback contract:
+- Phase 1 + 2 のみ実行で stop 可能 (= Phase 3 verify 失敗時、旧 row 復元 migration script で rollback)
+- rollback migration script は本 sub-PR 1 で同時 ship 必須 (= dev impl の acceptance criteria)
+
 ### 1.1a enum migration `failed` 既存 row 分岐 contract (auditor A2 解消)
 
 [文献確認: spec v0.9 §12.3 既存 row 変換 plan + auditor A2 BLOCK]
@@ -332,6 +370,8 @@ const WAKE_DEDUP_INTERVAL_SEC = 30;  // 旧 5
 - **fail tool で status='failed' 残存禁止**: status='failed' は新 enum で存在しない、書込試行は CHECK 制約違反 → impl error
 - **silent fallback 禁止** (`feedback_no_silent_fallback`): 通信障害時は alert + log のみ、通常通信代替禁止
 - **scope 拡大禁止**: 本 PR は v0.9 spec 範囲限定、新規 feature 追加は **別 PR**
+- **rollback 不在禁止 (sub-PR 1 §1.1b per、cycle 2 patch)**: destructive migration impl PR は rollback migration script を同時 ship 必須、rollback script 不在の destructive PR は **block PR**、CEO L4 GO 前提条件
+- **dev DB verify 不在禁止 (sub-PR 1 §1.1b per、cycle 2 patch)**: destructive migration の production deploy 前に **dev DB で migration script + rollback script を実行 verify** 必須、dev verify skip は CEO 「端折らない」 directive (`b26651f0`) 違反、block PR
 
 scope exclusion (本 PR で触らない):
 - agent-memory MCP の DB schema (= 別 repo/scope)
@@ -355,10 +395,14 @@ scope exclusion (本 PR で触らない):
   - M2 `failed (IMPLICIT_ABANDON recent) → pending`: 旧 `failed` AND `failed_reason='IMPLICIT_ABANDON'` AND `claim_expires_at > now() - 60s` → `pending`、retry loop に投入
   - M3 `failed (other) → replied + audit log`: 上記以外の `failed` row → `replied` + 旧 `failed_reason` を `audit_log` table に退避
   - M4 `skipped → DELETE`: 全 `skipped` row 削除、count=0 確認
+- **destructive migration safety fixture** (sub-PR 1 §1.1b per、cycle 2 patch、3 件):
+  - **M5 `snapshot-before/after`**: migration 実行前 + 後 で `message_queue` table の全 row count + status 分布を snapshot、diff verify (= 全 row が新 enum 5 値に migration 済、count 不一致 0)
+  - **M6 `Phase1/2/3 verify`**: Phase 1 (CHECK 制約拡張) 完了後 旧書込 CHECK 違反 / Phase 2 (data migration) 完了後 旧値 0 件 / Phase 3 (verify) `SELECT count(*) WHERE status NOT IN (new enum)` = 0 確認、各 phase で fixture 個別 pass
+  - **M7 `rollback dry-run`**: rollback migration script を dev DB で実行 → 旧 enum 5 値復元 + 元 row count 一致 verify、production 適用前 mandatory
 
 ### 4.2 behavioral smoke (`scripts/test/smoke-v0.9.sh` 等)
 
-各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。merge gate は E1/E2/E3a-E3i (9 件)/E4 = **計 12 件** (E1 + E2 + E3a-E3i 9 件 + E4) を個別 pass で count。
+各 fixture は **個別 executable artifact** (= shell script 1 ファイル) として impl、`scripts/test/` 配下に配置。本 §4.2 は behavioral smoke subset = E1/E2/E3a-E3i (9 件)/E4 = **E-fixture 12 件**、migration fixture M1-M7 は §4.1 per (sub-PR 1 cycle 2 patch で M5-M7 追加)、**merge gate 総数は §4.3 per 計 15 件 (T1-T44 + M1-M7 + E-fixture 12)** が canonical。
 
 - **E1**: bot が send → `replied` で terminal、queue から 7 日後 GC 実行で削除確認
   - artifact: `scripts/test/E1-replied-7day-gc.sh`
@@ -389,7 +433,7 @@ scope exclusion (本 PR で触らない):
   - artifact: `scripts/test/E4-migration-19-bots.sh`
 
 ### 4.3 CI 要件
-- 全 fixture (T1-T44 + M1-M4 + E1/E2/E3a-E3i 9 件/E4 = 12 件) pass で merge gate (Layer 0 自動 gate per governance)
+- 全 fixture (T1-T44 + M1-M7 + E1/E2/E3a-E3i 9 件/E4 = 15 件、M5-M7 は sub-PR 1 destructive migration safety per §1.1b cycle 2 patch) pass で merge gate (Layer 0 自動 gate per governance)
 - breaking change detection (`scripts/detect-breaking-changes.sh`) で `route:ceo-approval` label 必須
 
 ## 5. Open decisions (implementer 自由、§2.2 で確定済外の internal detail のみ)
