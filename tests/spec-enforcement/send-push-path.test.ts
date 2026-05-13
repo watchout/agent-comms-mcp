@@ -111,7 +111,7 @@ describe('T4 — MCP next tool exists in server.ts (spec §4.1)', () => {
     expect(body).not.toMatch(/UPDATE agents SET current_message_id/)
     expect(body).toMatch(/claimed_by\s*=\s*\$1/)
     expect(body).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
   })
 })

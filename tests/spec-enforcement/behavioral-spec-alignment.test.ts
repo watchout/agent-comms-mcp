@@ -111,7 +111,7 @@ describe('Behavioral FAIL B1 — next derives agents.status from open-claim EXIS
   // the same EXISTS-derive shape.
   test('server.ts next uses CASE WHEN EXISTS open-claim derivation', () => {
     expect(SERVER_SRC).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
   })
   test('cli nextMessage uses CASE WHEN EXISTS open-claim derivation', () => {
@@ -127,7 +127,7 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
     const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
     expect(handler).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
     // Negative pins.
     expect(handler).not.toMatch(/UPDATE agents SET current_message_id = NULL/)

@@ -561,7 +561,7 @@ async function coreDbAdapter(): Promise<DbAdapter | null> {
  * `mcp.connect(...).catch(err => process.exit(1))` boundary instead
  * of silently skipping startup self-reclaim + sweepers (cycle 8 had
  * `coreDbAdapter()` returning null on connection failure, leaving
- * own claims permanently in `status='read'`). Callers must use this
+ * own claims permanently in `status='received'`). Callers must use this
  * helper for any startup-time DB acquisition that the bot cannot
  * boot without.
  */
@@ -1011,7 +1011,7 @@ async function registerAgent(): Promise<void> {
   // Discord adapter: registerAgent() returns before discord.connect()
   // resolves and before `discordClients.set(AGENT_ID, discord)` runs,
   // so the first consumer tick (1s later) would find an empty map and
-  // flip every claimed row to `status='failed'` with
+  // flip every claimed row to a failure terminal status with
   // `last_error='no_discord_client_for_agent'` (outbound-consumer.ts
   // §3.6 fallback-removed branch). The consumer is instead started
   // inside postConnect() (below) after the client is registered.
@@ -1550,13 +1550,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'send',
-      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Phase 5: \`mention\` (1 primary recipient, required) + \`cc\` (queue 非投入、body 末尾に [CC: <@id>] 注入).${agentListStr}`,
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. v0.9: \`mention\` (1 primary recipient, required); \`cc\` parameter is removed — 1 mention = 1 queue row.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'Required: 1 primary recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
-          cc: { type: 'array', items: { type: 'string' }, description: 'Reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入). Unknown agents are stripped + warning.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
@@ -1569,7 +1568,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // reply_to is intentionally absent: notify does not mark any
       // message_queue row 'replied' and does not touch agents.current_message_id.
       name: 'notify',
-      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. Phase 5: \`mention\` (required) + \`cc\` (queue 非投入).${agentListStr}`,
+      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. v0.9: \`mention\` (required); \`cc\` parameter is removed.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1577,7 +1576,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'Required: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
-          cc: { type: 'array', items: { type: 'string' }, description: 'Reference recipients (queue 投入なし、body 末尾に [CC: <@id>] 注入).' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
@@ -1708,31 +1706,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     // ───────────────── v2.1.0 (spec §4.1, §11 failed_reason) ─────────────────
     {
       name: 'fail',
-      description: 'Mark the in-flight message_queue row as failed (status=\'failed\') with an explicit reason string, and release the agent to idle. Use when the LLM could not reply (LLM_FAILED, SEND_FAILED_AFTER_N_RETRIES, LOOP_DETECTED, OBSOLETE, etc.). Matches `agent-com fail --message-id X --reason Y`.',
+      description: 'DEPRECATED in v0.9 — no-op. Retry transparent loop now handles failure: RETRYABLE_REASONS reset the row to pending, PERMANENT failures terminate with status=replied + audit_log. Returns {ok:true, deprecated:true} for back-compat.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          message_id: { type: 'string', description: 'message_queue.message_id (agent_messages UUID). Required.' },
-          reason: { type: 'string', description: 'Free-form failure reason. Use §11 標準値 (IMPLICIT_ABANDON / LLM_FAILED / SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED) when possible.' },
+          message_id: { type: 'string', description: 'Accepted for back-compat but ignored.' },
+          reason: { type: 'string', description: 'Accepted for back-compat but ignored.' },
         },
-        required: ['message_id', 'reason'],
-      },
-    },
-    {
-      name: 'skip',
-      description: 'Operator-initiated sibling of fail — marks a message_queue row `skipped` instead of `failed`. Use for manual overrides where no machine error occurred. Matches `agent-com skip --message-id X --reason Y`.',
-      inputSchema: {
-        type: 'object' as const,
-        properties: {
-          message_id: { type: 'string', description: 'message_queue.message_id (agent_messages UUID). Required.' },
-          reason: { type: 'string', description: 'Free-form skip reason (e.g. OBSOLETE).' },
-        },
-        required: ['message_id', 'reason'],
       },
     },
     {
       name: 'reclaim',
-      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'read\' row whose read_at is older than 15 minutes back to pending and flips the agent to idle. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
+      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'received\' row whose read_at is older than 15 minutes back to pending and flips the agent to idle. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1786,13 +1771,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Issue #278 (A) segment 3c — legacy priorId IMPLICIT_ABANDON pattern
       // removed. The previous shape locked the agents row with FOR UPDATE,
       // read agents.current_message_id, and synchronously flipped any
-      // 'read' row referenced by it to 'failed'/'IMPLICIT_ABANDON'. That
+      // received row referenced by it to a terminal IMPLICIT_ABANDON. That
       // path served two roles: (a) implicit-skip an orphaned claim before
       // popping a fresh row, and (b) serialise concurrent next calls per
       // agent on the agents row lock. Both are now obsolete:
       //   (a) replaced by the periodic claim-TTL sweeper
       //       (core/claim-ttl.ts, segment 3b) — sweepExpiredClaims fires
-      //       every 5 min and flips the same set of rows out of 'read'
+      //       every 5 min and flips the same set of rows out of 'received'
       //       structurally. The TTL window (default 30s) bounds how long
       //       an orphan can linger, which is strictly tighter than the
       //       indefinite linger possible under the legacy pattern (it
@@ -1810,7 +1795,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // v1.0.2 §6.5: try the PollingDriver buffer first. The buffer
       // contains a read-only snapshot of pending rows from the last poll
       // tick. If a row is available, we still need to claim it
-      // transactionally (UPDATE status='read') — the buffer just tells us
+      // transactionally (UPDATE status='received') — the buffer just tells us
       // WHICH row to claim without a full SELECT ... FOR UPDATE SKIP LOCKED
       // scan. If the buffer is empty or stale, fall back to the direct query.
       const buffered = pollingDriver.shift()
@@ -1857,7 +1842,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Issue #278 (A) — per-row claim. Stamp claimed_by / claimed_at /
-      // claim_expires_at alongside the status='read' transition so the
+      // claim_expires_at alongside the status='received' transition so the
       // TTL sweeper (core/claim-ttl.ts, segment 3b) can flip orphaned
       // claims to IMPLICIT_ABANDON. With segment 3c the legacy priorId
       // implicit-skip path is gone — orphan recovery is now exclusively
@@ -1866,7 +1851,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
       await client.query(
         `UPDATE message_queue
-            SET status = 'read',
+            SET status = 'received',
                 read_at = now(),
                 claimed_by = $1,
                 claimed_at = now(),
@@ -1877,14 +1862,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // spec §4.1 step 4 — mark agent busy while processing this message.
       // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
       // semantics, busy/idle is derived from the actual open-claim set,
-      // not blindly stamped. Here we just transitioned a row to 'read'
+      // not blindly stamped. Here we just transitioned a row to 'received'
       // so the EXISTS predicate is guaranteed true; we still go through
       // the CASE WHEN derivation so every agents.status writer in this
       // PR uses the same one-line idempotent shape.
       await client.query(
         `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
            status_updated_at = now()
          WHERE agent_id = $1`,
         [agentId],
@@ -1982,12 +1967,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // surfaced as INVALID_MENTION with a migration hint instead of silent
     // auto-conversion. See ADR-041 amendment 2026-05-05.
     if (args.mentions !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary', cc: ['observers'] } instead" }], isError: true }
+      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary' } instead" }], isError: true }
+    }
+    // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. CC fanout was the
+    // sole caller of the (now-removed) skip tool, and v0.9 enforces
+    // 1 mention = 1 queue row. Reject any caller still passing cc[] with a
+    // schema validation error rather than silent strip.
+    if ((args as any).cc !== undefined) {
+      return { content: [{ type: 'text', text: "Error [INVALID_PARAMETER]: cc parameter is removed in v0.9 — 1 mention = 1 queue row. Send a separate message for additional recipients." }], isError: true }
     }
     // Phase 5 wiring runs AFTER the per-row claim acquisition so the channel
     // is resolved; see resolvePhase5(...) call site below.
     // mentions[] is the resolved enqueue list produced by resolvePhase5(); it
-    // starts empty and is populated from { mention, cc } via the routing port.
+    // starts empty and is populated from { mention } via the routing port.
     let mentions: string[] = []
     // Issue #266: snapshot the raw mention(s) for outbound trace. After the
     // mentions[] removal this is just [args.mention] (or [] when missing —
@@ -2011,7 +2003,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // flow in a single BEGIN/COMMIT and hold a FOR UPDATE lock on the row
     // owning the in-flight claim. With per-row claim semantics the locked
     // row is the message_queue row keyed by (message_id = reply_to,
-    // claimed_by = agentId, status = 'read') — locking message_queue rather
+    // claimed_by = agentId, status = 'received') — locking message_queue rather
     // than agents lets independent claims proceed in parallel (Issue #278
     // §A multi in-flight) while still serialising any concurrent send
     // attempts targeting the same claim, so a parallel caller blocks on
@@ -2428,8 +2420,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // the true state.
     await txClient.query(
       `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
          status_updated_at = now()
        WHERE agent_id = $1`,
       [agentId],
@@ -2562,10 +2554,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'notify') {
     let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
     // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
-    // argument is removed. Callers MUST use `mention` + `cc[]`. See ADR-041
+    // argument is removed. Callers MUST use `mention` (1 primary). See ADR-041
     // amendment 2026-05-05.
     if (args.mentions !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary', cc: ['observers'] } instead" }], isError: true }
+      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary' } instead" }], isError: true }
+    }
+    // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. Reject upfront.
+    if ((args as any).cc !== undefined) {
+      return { content: [{ type: 'text', text: "Error [INVALID_PARAMETER]: cc parameter is removed in v0.9 — 1 mention = 1 queue row." }], isError: true }
     }
     // mentions[] is the resolved enqueue list; populated by resolvePhase5().
     let mentions: string[] = []
@@ -3146,68 +3142,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // v2.1.0 — fail / skip / reclaim (spec §4.1, §11 failed_reason)
+  // v0.9 — fail (deprecated no-op) / skip (removed) — sub-PR 3 spec §1.3
   // ─────────────────────────────────────────────────────────────────────
-  // Shared with `agent-com fail` / `agent-com skip` / `agent-com reclaim`.
-  // Kept inline here (rather than in core/) because the MCP tool handler and
-  // the CLI live on opposite sides of the Node/Bun split and the SQL is tiny.
-  if (name === 'fail' || name === 'skip') {
-    const client = await tryGetDb()
-    if (!client) {
-      return { content: [{ type: 'text', text: 'Error: DATABASE_URL not configured — fail/skip require PG access.' }], isError: true }
-    }
-    const messageId = typeof args?.message_id === 'string' ? args.message_id : undefined
-    const reason = typeof args?.reason === 'string' ? args.reason : undefined
-    if (!messageId || !reason) {
-      return { content: [{ type: 'text', text: `Error: ${name} requires both message_id and reason.` }], isError: true }
-    }
-    const targetStatus = name === 'fail' ? 'failed' : 'skipped'
-    try {
-      await client.query('BEGIN')
-      try {
-        const upd = await client.query(
-          `UPDATE message_queue
-              SET status = $1, failed_reason = $2
-            WHERE agent_id = $3 AND message_id = $4 AND status IN ('pending','read')
-            RETURNING id`,
-          [targetStatus, reason, AGENT_ID, messageId],
-        )
-        if (upd.rows.length === 0) {
-          await client.query('ROLLBACK')
-          return {
-            content: [{
-              type: 'text',
-              text: `Error: no in-flight or pending message_queue row for agent_id=${AGENT_ID}, message_id=${messageId} (already replied/failed/skipped?).`,
-            }],
-            isError: true,
-          }
-        }
-        const queueId = upd.rows[0].id as number
-        // Issue #278 cycle 1 (auditor BLOCK 1): EXISTS-derive busy/idle
-        // from the remaining open claims rather than unconditionally
-        // flipping to idle — multi in-flight means fail/skip closes
-        // only ONE claim while others may still be active.
-        await client.query(
-          `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
-             status_updated_at = now()
-           WHERE agent_id = $1`,
-          [AGENT_ID],
-        )
-        await client.query('COMMIT')
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ ok: true, queue_id: queueId, message_id: messageId, status: targetStatus, failed_reason: reason }),
-          }],
-        }
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
-        throw err
-      }
-    } catch (err) {
-      return { content: [{ type: 'text', text: `Error: ${name} failed: ${String(err).slice(0, 500)}` }], isError: true }
+  // `fail` is a no-op deprecation shim: retry transparent loop now handles
+  // failure (RETRYABLE_REASONS reset to pending; PERMANENT terminate with
+  // status=replied + audit_log). The legacy failed status literal is removed,
+  // so a write attempt would trip the CHECK constraint and crash the fleet
+  // (= 2026-05-13 PR #347 incident pattern). `skip` was removed entirely —
+  // CC fanout was its only caller, and CC is removed in v0.9.
+  if (name === 'fail') {
+    console.warn('[fail] tool is deprecated in v0.9: retry transparent loop handles failure; no-op return')
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ ok: true, deprecated: true, note: 'fail is a no-op in v0.9; retry loop handles failure transparently' }),
+      }],
     }
   }
 
@@ -3224,20 +3173,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `UPDATE message_queue
               SET status = 'pending', read_at = NULL
             WHERE agent_id = $1
-              AND status = 'read'
+              AND status = 'received'
               AND read_at < now() - INTERVAL '15 minutes'
             RETURNING id`,
           [targetAgent],
         )
         // Issue #278 cycle 1 (auditor BLOCK 1): reclaim must respect
-        // the multi in-flight contract. After rolling expired 'read'
+        // the multi in-flight contract. After rolling expired 'received'
         // rows back to 'pending', the agent may still hold OTHER
         // active claims that are not orphaned; EXISTS-derive keeps
         // those visible.
         await client.query(
           `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
              status_updated_at = now()
            WHERE agent_id = $1`,
           [targetAgent],
@@ -4030,7 +3979,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     // local try/catch that swallows the error; its rejection
     // propagates to the top-level startup catch and exits the process
     // with code 1. Allowing the bot to continue boot when reclaim
-    // fails leaves own queue rows in `status='read'` forever
+    // fails leaves own queue rows in `status='received'` forever
     // (claim-ttl sweeper excludes self via `selfAgentId`), so a silent
     // skip would defeat the entire PR. launchd/systemd restart on
     // exit covers transient DB hiccups; persistent failures surface
