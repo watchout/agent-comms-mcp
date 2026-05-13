@@ -1740,6 +1740,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
     },
+    // ───────────────── PR #338 sub-PR 6 (spec §1.2): state transition tools ─────────────────
+    // Both tools require the v0.9 status enum (sub-PR 1) to be applied. On a
+    // pre-migration DB the receiving side returns INVALID_STATE because the
+    // CHECK constraint forbids 'in_progress' / 'done'.
+    {
+      name: 'processing',
+      description: 'Mark a claimed message as in_progress (LLM turn started). Pre: status=\'received\'. Post: status=\'in_progress\'. Idempotent — a second call on an already-in_progress row returns ALREADY_TRANSITIONED + ok:true. Spec §1.2.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          queue_id: { type: 'string', description: 'message_queue.id (numeric, stringified). Required.' },
+        },
+        required: ['queue_id'],
+      },
+    },
+    {
+      name: 'done',
+      description: 'Mark an in-progress message as done (internal complete, no reply sent). Pre: status=\'in_progress\'. Post: status=\'done\', done_at=now(). Idempotent — a second call on an already-done row returns ALREADY_TRANSITIONED + ok:true. Spec §1.2.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          queue_id: { type: 'string', description: 'message_queue.id (numeric, stringified). Required.' },
+        },
+        required: ['queue_id'],
+      },
+    },
   ],
   }
 })
@@ -3234,6 +3260,101 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error: reclaim failed: ${String(err).slice(0, 500)}` }], isError: true }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PR #338 sub-PR 6 — processing / done state-transition tools (spec §1.2)
+  // ─────────────────────────────────────────────────────────────────────
+  // Both tools assume the v0.9 status enum is live (sub-PR 1 merged +
+  // up.sql applied on the operator side). On a pre-migration DB the
+  // CHECK constraint rejects 'in_progress' / 'done' and the UPDATE
+  // surfaces as a SQL error to the caller — we do not silently swallow
+  // that because the schema mismatch IS the bug to surface.
+  //
+  // Idempotence: a second call on a row already at the target status
+  // returns ok:true with `already_transitioned:true` and no UPDATE.
+  // INVALID_STATE: any other source status is an error (isError:true)
+  // with the observed status in the body so the caller can adapt.
+  if (name === 'processing' || name === 'done') {
+    const client = await tryGetDb()
+    if (!client) {
+      return { content: [{ type: 'text', text: `Error [DB_UNAVAILABLE]: database required for ${name}` }], isError: true }
+    }
+    const queueIdRaw = typeof args?.queue_id === 'string' ? args.queue_id : undefined
+    if (!queueIdRaw) {
+      return { content: [{ type: 'text', text: `Error: ${name} requires queue_id (string).` }], isError: true }
+    }
+    const queueId = Number.parseInt(queueIdRaw, 10)
+    if (!Number.isFinite(queueId) || queueId <= 0) {
+      return { content: [{ type: 'text', text: `Error: ${name} queue_id must be a positive integer, got '${queueIdRaw}'.` }], isError: true }
+    }
+    const fromStatus = name === 'processing' ? 'received' : 'in_progress'
+    const toStatus = name === 'processing' ? 'in_progress' : 'done'
+    try {
+      await client.query('BEGIN')
+      try {
+        // Inspect first so idempotence and INVALID_STATE can be reported
+        // distinctly from "row not found". One row, one UPDATE.
+        const cur = await client.query<{ status: string }>(
+          `SELECT status FROM message_queue WHERE id = $1`,
+          [queueId],
+        )
+        if (cur.rows.length === 0) {
+          await client.query('ROLLBACK')
+          return {
+            content: [{ type: 'text', text: `Error [NOT_FOUND]: no message_queue row with id=${queueId}.` }],
+            isError: true,
+          }
+        }
+        const status = cur.rows[0]!.status
+        if (status === toStatus) {
+          await client.query('ROLLBACK')
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ ok: true, queue_id: queueId, status: toStatus, already_transitioned: true }),
+            }],
+          }
+        }
+        if (status !== fromStatus) {
+          await client.query('ROLLBACK')
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [INVALID_STATE]: ${name} requires status='${fromStatus}', got '${status}' (queue_id=${queueId}).`,
+            }],
+            isError: true,
+          }
+        }
+        const setClauses = name === 'done'
+          ? `status = 'done', done_at = now()`
+          : `status = 'in_progress'`
+        const upd = await client.query(
+          `UPDATE message_queue SET ${setClauses} WHERE id = $1 AND status = $2 RETURNING id`,
+          [queueId, fromStatus],
+        )
+        if (upd.rows.length === 0) {
+          // Lost a race; another caller already advanced the row.
+          await client.query('ROLLBACK')
+          return {
+            content: [{ type: 'text', text: `Error [RACE]: ${name} lost the status='${fromStatus}' transition for queue_id=${queueId}.` }],
+            isError: true,
+          }
+        }
+        await client.query('COMMIT')
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ ok: true, queue_id: queueId, status: toStatus }),
+          }],
+        }
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${name} failed: ${String(err).slice(0, 500)}` }], isError: true }
     }
   }
 
