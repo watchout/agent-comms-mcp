@@ -38,12 +38,14 @@ import type { DiscordAdapter } from './discord'
 import {
   routeInbound,
   parseMentions,
+  applyDiscordIdRetry,
 } from '../core/route-message'
 import {
   isHumanAgent,
   resolveAgentFromDiscordId,
   resolveInboundChannel,
   loadAgentInfo,
+  getAgentDiscordId,
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
@@ -610,22 +612,32 @@ export async function handleInboundMessage(params: {
   // literal token `routeInbound(` still appears in `routeInboundImpl`
   // and in this comment so source-grep regression tests (saveMessage
   // before routeInbound) keep matching.
-  const result = routeInboundImpl(
-    {
-      authorAgentId: senderAgentId,
-      authorIsBot,
-      content,
-      mentions: resolvedMentions,
-      messageType: 'chat',
-    },
-    {
-      channelId: resolved.channelId,
-      threadId: resolved.threadId,
-      members: resolved.members,
-      type: resolved.type,
-    },
-    memberAgents,
-  )
+  const routeMsg = {
+    authorAgentId: senderAgentId,
+    authorIsBot,
+    content,
+    mentions: resolvedMentions,
+    messageType: 'chat',
+  }
+  const routeChannel = {
+    channelId: resolved.channelId,
+    threadId: resolved.threadId,
+    members: resolved.members,
+    type: resolved.type,
+  }
+  const initialResult = routeInboundImpl(routeMsg, routeChannel, memberAgents)
+
+  // Issue #351 A4 2nd-attempt: any recipient dropped with NOT_MENTIONED
+  // whose cached `discordId` was null gets one fresh DB lookup. If the
+  // agents row now has a discord_id and msg.mentions contains it, the
+  // recipient is promoted from drop to push. Without this, brand-new
+  // bots that mention themselves before the agents-cache refresh fired
+  // were dropped silently.
+  const result = coreDb
+    ? await applyDiscordIdRetry(initialResult, routeMsg, routeChannel,
+        (id) => getAgentDiscordId(coreDb, id),
+        memberAgents)
+    : initialResult
 
   writeStderr(
     `agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`,

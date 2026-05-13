@@ -10,7 +10,7 @@
  * extraction. PR-A is a pure refactor.
  */
 
-import { parseMentions } from './route-message.js'
+import { parseMentions, emitSendReject } from './route-message.js'
 import type { AgentInfo } from './route-message.js'
 
 /**
@@ -208,6 +208,17 @@ export async function resolveSendDestination(
   const originalSenderIsHuman = await isHumanAgent(db, original.author_id)
 
   if (!mentionedInOriginal && !isOwnMessage && !isEmergencyMsg && !originalSenderIsHuman) {
+    // Issue #351 Phase A: structured warn-log + counter on every reject.
+    // Without this the rejection was silent for the caller and invisible
+    // to operators; CTO bug report msg `3b65e0cf` traced the cascade to
+    // exactly this path firing without a trail.
+    emitSendReject('not_mentioned_in_original', {
+      callerAgentId: agentId,
+      originalAuthor: original.author_id ?? null,
+      originalId: replyTo,
+      hasParsedMentions: contentMentions.length > 0,
+      hasMetadataMentions: metaMentions.length > 0,
+    })
     return { error: '元メッセージであなたはメンションされていません。応答権限がありません', code: 'NOT_MENTIONED_IN_ORIGINAL' }
   }
 

@@ -50,15 +50,189 @@ export interface RouteResult {
 /** Call-site discriminator for `routeMessage`. */
 export type RouteSourceType = 'inbound' | 'send-tool' | 'cli'
 
-/** Parse @agent_id mentions from message content */
-export function parseMentions(content: string): string[] {
+/** Parse @agent_id mentions from message content.
+ *
+ * Issue #351 Phase A: defensive against malformed input. Empty / non-string
+ * / pure-`<@>` / numeric-only IDs (Discord snowflakes) return an empty array
+ * without throwing. Numeric-only IDs are excluded because the `@` regex
+ * would otherwise alias raw Discord IDs as native agent_ids (false-positive
+ * documented in buildSendMentions above).
+ */
+export function parseMentions(content: unknown): string[] {
+  if (typeof content !== 'string' || content.length === 0) return []
   const mentions: string[] = []
   const regex = /@([a-zA-Z0-9_-]+)/g
   let match
-  while ((match = regex.exec(content)) !== null) {
-    mentions.push(match[1])
+  try {
+    while ((match = regex.exec(content)) !== null) {
+      const captured = match[1]
+      if (!captured) continue
+      if (/^\d+$/.test(captured)) continue
+      mentions.push(captured)
+    }
+  } catch {
+    return []
   }
   return [...new Set(mentions)]
+}
+
+// ─── Issue #351 Phase A: drop / reject observability ──────────────────────
+//
+// routeMessage / resolveSendDestination historically dropped recipients
+// silently (return value showed `dropTargets[agentId] = REASON` but nothing
+// was logged and no metric was incremented). When mention plumbing broke
+// (CTO bug report msg `3b65e0cf`, 2026-05-13), the silent drops made the
+// failure mode invisible. Phase A converts every drop / reject path to a
+// structured warn-log + counter without changing routing semantics.
+
+/** Drop taxonomy emitted by routeMessage / send-tool guards. */
+export type RouteDropReason =
+  | 'channel_non_member'
+  | 'observer_mode'
+  | 'mention_not_in_array'
+  | 'discord_id_unresolved'
+  | 'sender_not_a_member'
+
+/** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
+ *
+ * Phase A scope intentionally limited to the one reject path
+ * `resolveSendDestination` actually owns. Claim-related rejects
+ * (`claim_expired` / `claim_missing`) live in the send fallback layer
+ * (`core/send-fallback-decision.ts`) and will get their own taxonomy
+ * entries in a follow-up PR — they are not wired here so we don't
+ * define a label without a producer.
+ */
+export type SendRejectReason =
+  | 'not_mentioned_in_original'
+
+interface RouteDropEvent {
+  ts: string
+  level: 'warn'
+  event: 'route_drop'
+  reason: RouteDropReason
+  recipient_agent_id: string
+  sender_agent_id: string | null
+  channel_id: string
+  message_id?: string | null
+}
+
+/**
+ * Emitted by `applyDiscordIdRetry` when an A4 drop is overturned by a
+ * fresh DB lookup. Distinct from `route_drop` because the recipient is
+ * NOT lost — the message reaches them. Operators tail-filtering for
+ * `route_drop` warnings should not see recoveries.
+ */
+interface RouteRecoveredEvent {
+  ts: string
+  level: 'info'
+  event: 'route_recovered'
+  reason: 'discord_id_resolved_on_retry'
+  recipient_agent_id: string
+  sender_agent_id: string | null
+  channel_id: string
+  message_id?: string | null
+}
+
+interface SendRejectEvent {
+  ts: string
+  level: 'warn'
+  event: 'send_reject'
+  reason: SendRejectReason
+  caller_agent_id: string
+  original_author: string | null
+  original_id: string
+  has_parsed_mentions: boolean
+  has_metadata_mentions: boolean
+}
+
+/** Structured-log sink. Default writes JSON line to stderr. */
+export type ObservabilityLogger = (event: RouteDropEvent | RouteRecoveredEvent | SendRejectEvent) => void
+
+let activeLogger: ObservabilityLogger = (event) => {
+  try {
+    process.stderr.write(JSON.stringify(event) + '\n')
+  } catch {
+    /* ignore — logging must never throw */
+  }
+}
+
+/** Replace the active logger (tests inject a capturing sink). */
+export function setObservabilityLogger(fn: ObservabilityLogger | null): void {
+  activeLogger = fn ?? ((event) => {
+    try { process.stderr.write(JSON.stringify(event) + '\n') } catch { /* */ }
+  })
+}
+
+/** Counter store — `<metric>|<labelKey>=<labelVal>,...` → count. */
+const counters = new Map<string, number>()
+
+function counterKey(metric: string, labels: Record<string, string>): string {
+  const entries = Object.entries(labels).sort(([a], [b]) => a.localeCompare(b))
+  const labelStr = entries.map(([k, v]) => `${k}=${v}`).join(',')
+  return labelStr ? `${metric}|${labelStr}` : metric
+}
+
+export function incRouteMessageDrop(reason: RouteDropReason): void {
+  const key = counterKey('route_message_drops_total', { reason })
+  counters.set(key, (counters.get(key) ?? 0) + 1)
+}
+
+export function incSendReject(reason: SendRejectReason): void {
+  const key = counterKey('send_reject_total', { reason })
+  counters.set(key, (counters.get(key) ?? 0) + 1)
+}
+
+/** Read a snapshot of all counters (test-friendly). */
+export function getObservabilityCounters(): Record<string, number> {
+  return Object.fromEntries(counters)
+}
+
+/** Test helper — reset counters between cases. */
+export function resetObservabilityCounters(): void {
+  counters.clear()
+}
+
+function emitRouteDrop(
+  reason: RouteDropReason,
+  recipientAgentId: string,
+  ctx: { senderAgentId: string | null; channelId: string; messageId?: string | null },
+): void {
+  activeLogger({
+    ts: new Date().toISOString(),
+    level: 'warn',
+    event: 'route_drop',
+    reason,
+    recipient_agent_id: recipientAgentId,
+    sender_agent_id: ctx.senderAgentId,
+    channel_id: ctx.channelId,
+    message_id: ctx.messageId ?? null,
+  })
+  incRouteMessageDrop(reason)
+}
+
+/** Emitted by resolveSendDestination on NOT_MENTIONED_IN_ORIGINAL reject. */
+export function emitSendReject(
+  reason: SendRejectReason,
+  ctx: {
+    callerAgentId: string
+    originalAuthor: string | null
+    originalId: string
+    hasParsedMentions: boolean
+    hasMetadataMentions: boolean
+  },
+): void {
+  activeLogger({
+    ts: new Date().toISOString(),
+    level: 'warn',
+    event: 'send_reject',
+    reason,
+    caller_agent_id: ctx.callerAgentId,
+    original_author: ctx.originalAuthor,
+    original_id: ctx.originalId,
+    has_parsed_mentions: ctx.hasParsedMentions,
+    has_metadata_mentions: ctx.hasMetadataMentions,
+  })
+  incSendReject(reason)
 }
 
 /**
@@ -136,12 +310,15 @@ export function routeMessage(
   const isEmergency = isEmergencyMessage(msg.content, msg.messageType)
   const isDm = channel.type === 'dm' || channel.channelId.startsWith('dm:')
 
+  const logCtx = { senderAgentId: msg.authorAgentId, channelId: channel.channelId, messageId: null }
+
   // §C2 sender-side guard: only applies to send-tool / cli. Inbound senders
   // are untrusted external parties (humans or other bots) and cannot be
   // blocked by this check — the receiver still accepts and records the
   // message, it just never gets pushed to any subscriber.
   if (sourceType !== 'inbound' && msg.authorAgentId) {
     if (!channel.members.includes(msg.authorAgentId)) {
+      emitRouteDrop('sender_not_a_member', msg.authorAgentId, logCtx)
       return {
         pushTargets: [],
         dropTargets: {},
@@ -152,6 +329,14 @@ export function routeMessage(
     }
   }
 
+  // Issue #351 A4 detection helper: did the message reference any raw
+  // Discord snowflakes? If yes and a recipient's discordId is null in the
+  // agents row, the recipient is silently lost to a discord_id_unresolved
+  // drop (vs the regular mention_not_in_array drop where the bot's
+  // discord_id exists but simply isn't listed).
+  const rawDiscordIdsInMentions = msg.mentions.filter((m) => /^\d{6,}$/.test(m))
+  const contentHasDiscordSnowflake = /<@!?\d{6,}>/.test(msg.content)
+
   for (const agent of agents) {
     // Self-send prevention
     if (agent.agentId === msg.authorAgentId) continue
@@ -159,6 +344,7 @@ export function routeMessage(
     // Must be a channel member
     if (!channel.members.includes(agent.agentId)) {
       dropTargets[agent.agentId] = 'NOT_A_MEMBER'
+      emitRouteDrop('channel_non_member', agent.agentId, logCtx)
       continue
     }
 
@@ -177,6 +363,7 @@ export function routeMessage(
     // Observer mode → drop
     if (agent.observerMode) {
       dropTargets[agent.agentId] = 'OBSERVER_MODE'
+      emitRouteDrop('observer_mode', agent.agentId, logCtx)
       continue
     }
 
@@ -217,11 +404,96 @@ export function routeMessage(
       continue
     }
 
-    // Not mentioned → drop
+    // Not mentioned → drop.
+    //
+    // Issue #351 A3/A4 split: if the original message carried raw Discord
+    // snowflakes (or msg.mentions contains them) and this agent's
+    // discord_id is null on the agents row, the failure mode is the
+    // "metadata.discord_id unresolved" path (A4) — distinct from the
+    // ordinary "your agent_id just wasn't listed" path (A3). The receiver
+    // caller uses the `discord_id_unresolved` signal to trigger a 2nd-
+    // attempt DB lookup before giving up.
     dropTargets[agent.agentId] = 'NOT_MENTIONED'
+    if (agent.discordId == null && (rawDiscordIdsInMentions.length > 0 || contentHasDiscordSnowflake)) {
+      emitRouteDrop('discord_id_unresolved', agent.agentId, logCtx)
+    } else {
+      emitRouteDrop('mention_not_in_array', agent.agentId, logCtx)
+    }
   }
 
   return { pushTargets, dropTargets, senderIsHuman, noMentions }
+}
+
+/**
+ * Issue #351 A4 2nd-attempt — re-evaluate `discord_id_unresolved` drops
+ * after a fresh agent → discord_id DB lookup.
+ *
+ * routeMessage stays signature-pure (sync, no I/O). This wrapper takes the
+ * routeMessage result + agent list and, for each recipient dropped with
+ * `discord_id_unresolved`, calls `resolveDiscordId(agentId)` to refresh
+ * the bot's discord_id. On a successful re-resolve, if msg.mentions
+ * contains the resolved id, the agent is moved from dropTargets to
+ * pushTargets. Every retry (success and failure) is logged.
+ *
+ * Caller is responsible for injecting a DB-backed resolver (typically
+ * `(id) => getAgentDiscordId(db, id)`). When `db` is unavailable the
+ * caller should pass a resolver returning null, which makes this wrapper
+ * a no-op (the original drop stands).
+ */
+export async function applyDiscordIdRetry(
+  result: RouteResult,
+  msg: { authorAgentId: string | null; mentions: string[] },
+  channel: { channelId: string },
+  resolveDiscordId: (agentId: string) => Promise<string | null>,
+  agents?: AgentInfo[],
+): Promise<RouteResult> {
+  // When the caller provides the agent list, only retry agents whose
+  // cached discordId was null at routeMessage time (true A4 path). Without
+  // the list, retry every NOT_MENTIONED drop — slower but still correct.
+  const a4Candidates = agents
+    ? new Set(agents.filter((a) => a.discordId == null).map((a) => a.agentId))
+    : null
+  const retryCandidates = Object.entries(result.dropTargets)
+    .filter(([id, reason]) => reason === 'NOT_MENTIONED' && (a4Candidates ? a4Candidates.has(id) : true))
+
+  if (retryCandidates.length === 0) return result
+
+  const logCtx = { senderAgentId: msg.authorAgentId, channelId: channel.channelId, messageId: null }
+  const newPush = [...result.pushTargets]
+  const newDrop = { ...result.dropTargets }
+
+  for (const [agentId] of retryCandidates) {
+    let resolved: string | null = null
+    try {
+      resolved = await resolveDiscordId(agentId)
+    } catch {
+      resolved = null
+    }
+    if (resolved && msg.mentions.includes(resolved)) {
+      newPush.push(agentId)
+      delete newDrop[agentId]
+      // Promote: the recipient is reachable after all. Emit `route_recovered`
+      // (info level, distinct event name) so warn-tailed alerting doesn't
+      // pick this up — it would falsely look like a silent drop.
+      activeLogger({
+        ts: new Date().toISOString(),
+        level: 'info',
+        event: 'route_recovered',
+        reason: 'discord_id_resolved_on_retry',
+        recipient_agent_id: agentId,
+        sender_agent_id: logCtx.senderAgentId,
+        channel_id: logCtx.channelId,
+        message_id: null,
+      })
+      const recoveryKey = counterKey('route_message_discord_id_retry_total', { result: 'recovered' })
+      counters.set(recoveryKey, (counters.get(recoveryKey) ?? 0) + 1)
+    } else {
+      const failKey = counterKey('route_message_discord_id_retry_total', { result: 'unresolved' })
+      counters.set(failKey, (counters.get(failKey) ?? 0) + 1)
+    }
+  }
+
+  return { ...result, pushTargets: newPush, dropTargets: newDrop }
 }
 
 /**
