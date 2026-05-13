@@ -62,18 +62,31 @@ DO $$
 DECLARE
   recent_implicit_abandon_window CONSTANT INTERVAL := '60 seconds';
 BEGIN
-  -- 3a. `failed` row 3-way branch (§1.1a).
+  -- 3a. `failed` row 3-way branch (spec §1.1a literal):
   --
-  --   IMPLICIT_ABANDON + still within claim_expires_at window  -> pending
-  --     (retry loop can recover; no audit needed because the row stays alive)
-  --   STALE_DISPATCH                                            -> pending
-  --     (operator follow-up via dev-DB inspection; row alive, no terminal close)
-  --   any other reason (PERMANENT / NULL / unknown)             -> replied + audit
+  --   (a) IMPLICIT_ABANDON + still within claim_expires_at window
+  --         -> pending, no audit       (retry loop recovers; row stays alive)
+  --
+  --   (b) STALE_DISPATCH                          -> verify_bot_replied(row):
+  --        - if the bot already replied to this row -> replied, no audit
+  --          (verify_bot_replied = `replied_with IS NOT NULL` on the queue
+  --          row OR an outbound agent_messages row from the same bot whose
+  --          `reply_to` references this row's `message_id`; the universal
+  --          agent_messages log is the SSOT for outbound bot replies, the
+  --          queue's `replied_with` is the queue-side mirror set by the
+  --          existing `send` path at server.ts:2392)
+  --        - else                                  -> pending, no audit
+  --          (operator follow-up; row alive, no terminal close)
+  --
+  --   (c) any other reason (PERMANENT / NULL / unknown)
+  --         -> replied + audit         (terminal close; audit holds the
+  --          pre-migration status + reason so rollback can restore)
   --
   -- Audit row is written *before* the UPDATE so a constraint failure on
-  -- the UPDATE side will roll the audit back together inside the DO block
-  -- transaction.
+  -- the UPDATE side rolls the audit back together inside the DO block
+  -- transaction (the whole step 3 runs in the outer BEGIN at line 25).
 
+  -- (c) PERMANENT audit. Includes everything not in (a) or (b).
   INSERT INTO message_queue_status_migration_audit (queue_id, original_status, original_reason, archived_at)
     SELECT id, 'failed', failed_reason, now()
       FROM message_queue
@@ -85,6 +98,7 @@ BEGIN
        )
        AND failed_reason IS DISTINCT FROM 'STALE_DISPATCH';
 
+  -- (a) IMPLICIT_ABANDON recent -> pending.
   UPDATE message_queue
      SET status = 'pending',
          failed_reason = NULL
@@ -93,12 +107,33 @@ BEGIN
      AND claim_expires_at IS NOT NULL
      AND claim_expires_at > now() - recent_implicit_abandon_window;
 
+  -- (b1) STALE_DISPATCH AND verify_bot_replied -> replied (spec §1.1a literal).
+  UPDATE message_queue mq
+     SET status = 'replied',
+         failed_reason = NULL
+   WHERE mq.status = 'failed'
+     AND mq.failed_reason = 'STALE_DISPATCH'
+     AND (
+       mq.replied_with IS NOT NULL
+       OR (
+         mq.message_id IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM agent_messages am
+            WHERE am.reply_to::text = mq.message_id
+              AND am.author_id = mq.agent_id
+              AND am.direction = 'outbound'
+         )
+       )
+     );
+
+  -- (b2) STALE_DISPATCH AND NOT verify_bot_replied -> pending (spec §1.1a literal).
   UPDATE message_queue
      SET status = 'pending',
          failed_reason = NULL
    WHERE status = 'failed'
      AND failed_reason = 'STALE_DISPATCH';
 
+  -- (c) PERMANENT (anything `failed` still left after a/b) -> replied.
   UPDATE message_queue
      SET status = 'replied',
          failed_reason = NULL

@@ -100,10 +100,15 @@ reset_to_v08() {
 }
 
 cleanup() {
-  psql_x "DELETE FROM message_queue WHERE agent_id LIKE '${FIXTURE_PREFIX}%'" || true
+  # Order matters: the audit subquery joins back to message_queue by
+  # queue_id, so we must delete the audit rows FIRST (while their target
+  # queue rows still exist) and only then delete the queue rows.
+  # Deleting queue rows first leaves orphan audit residue in the shared
+  # dev DB (auditor cycle 2 Finding 2).
   psql_x "DELETE FROM message_queue_status_migration_audit
             WHERE queue_id IN (SELECT id FROM message_queue
                                 WHERE agent_id LIKE '${FIXTURE_PREFIX}%')" 2>/dev/null || true
+  psql_x "DELETE FROM message_queue WHERE agent_id LIKE '${FIXTURE_PREFIX}%'" || true
 }
 
 seed_fleet() {
