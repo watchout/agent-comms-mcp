@@ -93,17 +93,40 @@ export type RouteDropReason =
   | 'discord_id_unresolved'
   | 'sender_not_a_member'
 
-/** Reject taxonomy emitted by send / reply guards (route-message-db.ts). */
+/** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
+ *
+ * Phase A scope intentionally limited to the one reject path
+ * `resolveSendDestination` actually owns. Claim-related rejects
+ * (`claim_expired` / `claim_missing`) live in the send fallback layer
+ * (`core/send-fallback-decision.ts`) and will get their own taxonomy
+ * entries in a follow-up PR — they are not wired here so we don't
+ * define a label without a producer.
+ */
 export type SendRejectReason =
   | 'not_mentioned_in_original'
-  | 'claim_expired'
-  | 'claim_missing'
 
 interface RouteDropEvent {
   ts: string
   level: 'warn'
   event: 'route_drop'
   reason: RouteDropReason
+  recipient_agent_id: string
+  sender_agent_id: string | null
+  channel_id: string
+  message_id?: string | null
+}
+
+/**
+ * Emitted by `applyDiscordIdRetry` when an A4 drop is overturned by a
+ * fresh DB lookup. Distinct from `route_drop` because the recipient is
+ * NOT lost — the message reaches them. Operators tail-filtering for
+ * `route_drop` warnings should not see recoveries.
+ */
+interface RouteRecoveredEvent {
+  ts: string
+  level: 'info'
+  event: 'route_recovered'
+  reason: 'discord_id_resolved_on_retry'
   recipient_agent_id: string
   sender_agent_id: string | null
   channel_id: string
@@ -123,7 +146,7 @@ interface SendRejectEvent {
 }
 
 /** Structured-log sink. Default writes JSON line to stderr. */
-export type ObservabilityLogger = (event: RouteDropEvent | SendRejectEvent) => void
+export type ObservabilityLogger = (event: RouteDropEvent | RouteRecoveredEvent | SendRejectEvent) => void
 
 let activeLogger: ObservabilityLogger = (event) => {
   try {
@@ -449,19 +472,19 @@ export async function applyDiscordIdRetry(
     if (resolved && msg.mentions.includes(resolved)) {
       newPush.push(agentId)
       delete newDrop[agentId]
+      // Promote: the recipient is reachable after all. Emit `route_recovered`
+      // (info level, distinct event name) so warn-tailed alerting doesn't
+      // pick this up — it would falsely look like a silent drop.
       activeLogger({
         ts: new Date().toISOString(),
-        level: 'warn',
-        event: 'route_drop',
-        reason: 'discord_id_unresolved',
+        level: 'info',
+        event: 'route_recovered',
+        reason: 'discord_id_resolved_on_retry',
         recipient_agent_id: agentId,
         sender_agent_id: logCtx.senderAgentId,
         channel_id: logCtx.channelId,
         message_id: null,
       })
-      // Counter stays incremented from the initial routeMessage drop; the
-      // 2nd-attempt recovery itself is captured via a separate counter so
-      // operators can quantify how often the fallback fires.
       const recoveryKey = counterKey('route_message_discord_id_retry_total', { result: 'recovered' })
       counters.set(recoveryKey, (counters.get(recoveryKey) ?? 0) + 1)
     } else {

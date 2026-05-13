@@ -94,13 +94,29 @@ describe('T2: applyDiscordIdRetry A4 — 2nd-attempt DB lookup', () => {
     const retried = await applyDiscordIdRetry(base, msg, channel, async (id) => {
       if (id === 'agent-b') return '1486351481871794207'
       return null
-    })
+    }, agents)
 
     expect(retried.pushTargets).toContain('agent-b')
     expect(retried.dropTargets['agent-b']).toBeUndefined()
 
     const counters = getObservabilityCounters()
     expect(counters['route_message_discord_id_retry_total|result=recovered']).toBe(1)
+
+    // The recovery path must emit `route_recovered` (info), NOT a second
+    // `route_drop` (warn). Tail-filtering on `event:route_drop` should
+    // never surface a recipient who was actually delivered to.
+    const recovered = events.filter((e) => e.event === 'route_recovered')
+    expect(recovered.length).toBe(1)
+    expect(recovered[0].recipient_agent_id).toBe('agent-b')
+    expect(recovered[0].level).toBe('info')
+    expect(recovered[0].reason).toBe('discord_id_resolved_on_retry')
+
+    const postRetryDropsForB = events.filter(
+      (e) => e.event === 'route_drop' && e.recipient_agent_id === 'agent-b' && e.reason === 'discord_id_unresolved',
+    )
+    // routeMessage's initial drop log is still emitted (1×); we just must
+    // not emit a SECOND warn on top of the recovery.
+    expect(postRetryDropsForB.length).toBe(1)
   })
 
   test('unresolved path: 2nd-attempt also returns null → drop stands', async () => {
