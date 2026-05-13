@@ -80,17 +80,17 @@ export async function sweepExpiredClaims(
     // both pg and SQLite accept the predicate (`<> ALL($2)` is a
     // PG-only array form). The placeholder offset starts at $2 since
     // $1 holds the failure reason.
-    const placeholders = opts.selfAgentIds.map((_, i) => `$${i + 2}`).join(', ')
+    const placeholders = opts.selfAgentIds.map((_, i) => `$${i + 1}`).join(', ')
     const result: any = await db.query(
       `UPDATE message_queue
-       SET status = 'failed', failed_reason = $1
-       WHERE status = 'read'
+       SET status = 'pending'
+       WHERE status = 'received'
          AND claimed_by IS NOT NULL
          AND claimed_by NOT IN (${placeholders})
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()
        RETURNING id`,
-      [reason, ...opts.selfAgentIds],
+      [...opts.selfAgentIds],
     )
     const rc = result?.rowCount
     if (typeof rc === 'number') return rc
@@ -99,24 +99,24 @@ export async function sweepExpiredClaims(
   if (opts.selfAgentId) {
     const result = await db.query(
       `UPDATE message_queue
-       SET status = 'failed', failed_reason = $1
-       WHERE status = 'read'
+       SET status = 'pending'
+       WHERE status = 'received'
          AND claimed_by IS NOT NULL
-         AND claimed_by <> $2
+         AND claimed_by <> $1
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()`,
-      [reason, opts.selfAgentId],
+      [opts.selfAgentId],
     )
     return result.rowCount ?? 0
   }
   const result = await db.query(
     `UPDATE message_queue
-     SET status = 'failed', failed_reason = $1
-     WHERE status = 'read'
+     SET status = 'pending'
+     WHERE status = 'received'
        AND claimed_by IS NOT NULL
        AND claim_expires_at IS NOT NULL
        AND claim_expires_at < now()`,
-    [reason],
+    [],
   )
   return result.rowCount ?? 0
 }

@@ -122,13 +122,13 @@ describe('T9 pending_stale_duplicate_suppress', () => {
 
 // ── T10 ───────────────────────────────────────────────────────────────────────
 describe('T10 read_expired_reclaim', () => {
-  test('read row with claim_expires_at in past → status=pending + sendKeys + reclaimed metric', async () => {
+  test('received row with claim_expires_at in past → status=pending + sendKeys + reclaimed metric', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t10')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
-      status: 'read',
+      status: 'received',
       created_at: new Date(T0.getTime() - 40_000),
       claim_expires_at: new Date(T0.getTime() - 5_000),
       claimed_by: agent,
@@ -155,64 +155,18 @@ describe('T10 read_expired_reclaim', () => {
 })
 
 // ── T11 ───────────────────────────────────────────────────────────────────────
-describe('T11 abandon_recent_reset', () => {
-  test('failed/IMPLICIT_ABANDON within abandon window resets to pending', async () => {
-    const T0 = new Date('2026-05-08T00:00:00.000Z')
-    const agent = makeAgentId('t11')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
-    const id = await seedQueueRow(pg, {
-      agent_id: agent,
-      status: 'failed',
-      failed_reason: 'IMPLICIT_ABANDON',
-      claim_expires_at: new Date(T0.getTime() - 30_000),
-      created_at: new Date(T0.getTime() - 60_000),
-    })
-
-    const h = buildHarness(T0)
-    await h.daemon.start()
-    try {
-      const result = await h.daemon.sweepStale()
-      expect(result.abandonReset).toBe(1)
-      const r = await pg.query(`SELECT status, failed_reason FROM message_queue WHERE id=$1`, [id])
-      const row = (r.rows as Array<{ status: string; failed_reason: string | null }>)[0]
-      expect(row.status).toBe('pending')
-      expect(row.failed_reason).toBeNull()
-    } finally {
-      await h.daemon.stop()
-    }
-  })
+// v0.9: 'failed' status + 'failed_reason' column removed (sub-PR 1 #347).
+// abandonReset path is no-op'd; abandonment tracking redesign deferred to
+// Issue #349.
+describe.skip('T11 abandon_recent_reset (deferred to Issue #349)', () => {
+  test('failed/IMPLICIT_ABANDON within abandon window resets to pending', async () => {})
 })
 
 // ── T12 ───────────────────────────────────────────────────────────────────────
-describe('T12 max_attempts_failed_permanently', () => {
-  test('read row aged 6min → status=failed, failed_reason=STALE_DISPATCH, alert', async () => {
-    const T0 = new Date('2026-05-08T00:00:00.000Z')
-    const agent = makeAgentId('t12')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
-    const id = await seedQueueRow(pg, {
-      agent_id: agent,
-      status: 'read',
-      created_at: new Date(T0.getTime() - 6 * 60_000),
-      claim_expires_at: new Date(T0.getTime() + 60_000), // claim still live so reclaim path skips
-      claimed_by: agent,
-    })
-
-    const h = buildHarness(T0)
-    await h.daemon.start()
-    try {
-      const result = await h.daemon.sweepStale()
-      expect(result.permanentlyFailed).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'permanently_failed' })).toBe(1)
-      expect(h.alert.alerts.length).toBeGreaterThanOrEqual(1)
-      expect(h.alert.contains('STALE_DISPATCH')).toBe(true)
-      const r = await pg.query(`SELECT status, failed_reason FROM message_queue WHERE id=$1`, [id])
-      const row = (r.rows as Array<{ status: string; failed_reason: string | null }>)[0]
-      expect(row.status).toBe('failed')
-      expect(row.failed_reason).toBe('STALE_DISPATCH')
-    } finally {
-      await h.daemon.stop()
-    }
-  })
+// v0.9: status='failed' + failed_reason='STALE_DISPATCH' permanent-failure
+// path collapsed to no-op (sub-PR 7). Redesign deferred to Issue #349.
+describe.skip('T12 max_attempts_failed_permanently (deferred to Issue #349)', () => {
+  test('read row aged 6min → status=failed, failed_reason=STALE_DISPATCH, alert', async () => {})
 })
 
 // ── T13 ───────────────────────────────────────────────────────────────────────
@@ -330,11 +284,11 @@ describe('T14 sweep_budget_warn', () => {
 
 // ── T15 ───────────────────────────────────────────────────────────────────────
 describe('T15 dual_state_priority_order', () => {
-  test('row that matches both pending-stale and read-expired runs read-expired only', async () => {
+  test('row that matches both pending-stale and received-expired runs received-expired only', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t15')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
-    // row is read AND claim_expires_at past → read-expired branch (priority).
+    // row is received AND claim_expires_at past → received-expired branch (priority).
     // It is also "old enough" but pending-stale only fetches status='pending',
     // so the priority guard within sweepStale's pending loop is what stops the
     // double-action — covered by `expired.some(...)` skip. We still emit one
@@ -342,7 +296,7 @@ describe('T15 dual_state_priority_order', () => {
     // does not act on this row.
     const id = await seedQueueRow(pg, {
       agent_id: agent,
-      status: 'read',
+      status: 'received',
       created_at: new Date(T0.getTime() - 15_000),
       claim_expires_at: new Date(T0.getTime() - 5_000),
       claimed_by: agent,
@@ -437,11 +391,10 @@ describe('T19b non_tui_runtime_wake_silent_skip', () => {
         op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
       })
 
-      // Queue row remains pending — no corruption, no failed_reason.
-      const r = await pg.query(`SELECT status, failed_reason FROM message_queue WHERE id=$1`, [id])
-      const row = (r.rows as Array<{ status: string; failed_reason: string | null }>)[0]
+      // Queue row remains pending — no corruption.
+      const r = await pg.query(`SELECT status FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ status: string }>)[0]
       expect(row.status).toBe('pending')
-      expect(row.failed_reason).toBeNull()
 
       // Metric ticked exactly once.
       expect(

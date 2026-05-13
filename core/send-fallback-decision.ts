@@ -66,7 +66,7 @@ export async function decideSendFallback(
   //    row lock for the remainder of the handler).
   const claimRow = await txClient.query<{ id: number | string }>(
     `SELECT id FROM message_queue
-        WHERE message_id = $1 AND claimed_by = $2 AND status = 'read'
+        WHERE message_id = $1 AND claimed_by = $2 AND status = 'received'
         FOR UPDATE`,
     [reply_to, agentId],
   )

@@ -67,7 +67,7 @@ describe('T21 heartbeat_refresh_extends_claim', () => {
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'online' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
-      status: 'read',
+      status: 'received',
       claim_expires_at: new Date(T0.getTime() + 30_000),
       claimed_by: agent,
     })
@@ -100,7 +100,7 @@ describe('T21 heartbeat_refresh_extends_claim', () => {
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'online' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
-      status: 'read',
+      status: 'received',
       claim_expires_at: new Date(T0.getTime() - 1000), // already past
       claimed_by: agent,
     })
@@ -125,7 +125,7 @@ describe('T21 heartbeat_refresh_extends_claim', () => {
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'offline' })
     await seedQueueRow(pg, {
       agent_id: agent,
-      status: 'read',
+      status: 'received',
       claim_expires_at: new Date(T0.getTime() + 30_000),
       claimed_by: agent,
     })

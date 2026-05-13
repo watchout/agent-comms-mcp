@@ -81,11 +81,11 @@ export async function drainPendingWithAutoSkip(
 
     const m = matchesAutoSkipPattern({ content, messageType, authorAgentId, recipientAgentId: agentId })
     if (m.matched) {
+      // v0.9: 'skipped' / failed_reason removed from schema. Auto-skip
+      // collapsed to terminal close as 'replied' (= msg removed from active set).
       await client.query(
-        `UPDATE message_queue
-            SET status = 'skipped', failed_reason = $1
-          WHERE id = $2 AND status = 'pending'`,
-        [`AUTO_SKIP_PATTERN:${m.reason ?? 'unknown'}`, row.id],
+        `UPDATE message_queue SET status = 'replied' WHERE id = $1 AND status = 'pending'`,
+        [row.id],
       )
       skipped++
     }

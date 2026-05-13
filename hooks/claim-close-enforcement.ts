@@ -156,7 +156,7 @@ async function inspectQueue(client: Client, agentId: string): Promise<QueueState
   // the rows here against the hashed key directly.
   const claims = await client.query<{ id: number | string; message_id: string | null }>(
     `SELECT id, message_id FROM message_queue
-       WHERE claimed_by = $1 AND status = 'read'
+       WHERE claimed_by = $1 AND status = 'received'
        ORDER BY id ASC`,
     [agentId],
   )

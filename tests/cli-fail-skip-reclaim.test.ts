@@ -94,7 +94,12 @@ describe('T2 — cli/index.ts fail / skip / reclaim handlers + dispatch', () => 
 // ─────────────────────────────────────────────────────────────────────────────
 // T3 — §4.1 implicit-skip renamed to implicit-fail (CLI + server)
 // ─────────────────────────────────────────────────────────────────────────────
-describe('T3 — §4.1 implicit abandon → status=failed, failed_reason=IMPLICIT_ABANDON', () => {
+// v0.9 (sub-PR 1 #347 + sub-PR 7): 'failed' status + 'failed_reason'
+// column removed. The IMPLICIT_ABANDON write that this block pins on
+// core/claim-ttl.ts is gone. Abandonment-tracking redesign is
+// deferred to Issue #349; T3 will be rewritten against the new
+// taxonomy when that lands.
+describe.skip('T3 — §4.1 implicit abandon (deferred to Issue #349)', () => {
   test('IMPLICIT_ABANDON is emitted by the claim-TTL sweeper only (Issue #278 segment 3d)', () => {
     // The legacy in-line implicit-abandon UPDATE was hosted in
     // cli/index.ts nextMessage and server.ts next handler. Both are

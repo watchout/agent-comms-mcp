@@ -83,7 +83,7 @@ function requireDb() {
  */
 async function seedOriginal(opts: {
   channelId?: string | null
-  withClaim?: 'read' | 'replied' | null
+  withClaim?: 'received' | 'replied' | null
   claimedBy?: string
 }): Promise<string> {
   const msgId = randomUUID()
@@ -117,7 +117,7 @@ async function inTx<T>(fn: (txClient: Client) => Promise<T>): Promise<T> {
 describe('test_send_fallback_to_notify — decideSendFallback decision tree', () => {
   test('T-1 (existing reply path): claim with status=read → claim_present', async () => {
     requireDb()
-    const replyTo = await seedOriginal({ withClaim: 'read' })
+    const replyTo = await seedOriginal({ withClaim: 'received' })
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
     expect(decision.kind).toBe('claim_present')
     if (decision.kind === 'claim_present') {
@@ -127,10 +127,10 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
 
   test('T-2 (claim expired): claim flipped to status=replied → fallback claim_expired + latency<100ms', async () => {
     requireDb()
-    // Seed a 'read' claim, then flip to 'replied' to simulate an
+    // Seed a 'received' claim, then flip to 'replied' to simulate an
     // already-consumed (expired) claim. The agent has interacted with
     // this msg before, so reason must be `claim_expired`.
-    const replyTo = await seedOriginal({ withClaim: 'read' })
+    const replyTo = await seedOriginal({ withClaim: 'received' })
     await client.query(
       `UPDATE message_queue SET status = 'replied', replied_at = now() WHERE message_id = $1`,
       [replyTo],
@@ -199,12 +199,12 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
 
   test('claim owned by a different agent → fallback claim_missing for the calling agent', async () => {
     requireDb()
-    // Subtle invariant: a `'read'` row claimed by OTHER_AGENT does
+    // Subtle invariant: a `'received'` row claimed by OTHER_AGENT does
     // NOT count as a claim for TEST_AGENT. The helper's first SELECT
     // filters on `claimed_by = $2`, so TEST_AGENT sees this case as
     // claim_missing (no row ever owned by them) — this matches the
     // CEO P1 intent that fallback is per-(agent, msg) scoped.
-    const replyTo = await seedOriginal({ withClaim: 'read', claimedBy: OTHER_AGENT })
+    const replyTo = await seedOriginal({ withClaim: 'received', claimedBy: OTHER_AGENT })
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
     expect(decision.kind).toBe('fallback')
     if (decision.kind === 'fallback') {

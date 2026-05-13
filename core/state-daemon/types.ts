@@ -126,7 +126,7 @@ export interface QueueEvent {
   op: 'INSERT' | 'UPDATE'
   id: number
   agent_id: string
-  status: 'pending' | 'read' | 'replied' | 'failed'
+  status: 'pending' | 'received' | 'replied' | 'skipped'
   claim_expires_at: string | null
 }
 

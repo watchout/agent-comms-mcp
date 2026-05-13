@@ -20,10 +20,13 @@ import { sweepExpiredClaims } from '../../core/claim-ttl'
 // `claimed_by IS NOT NULL` qualifier (legacy non-claim rows preserved),
 // and idempotency.
 
-const DATABASE_URL = process.env.DATABASE_URL
-const dbDescribe = DATABASE_URL ? describe : describe.skip
-
-dbDescribe('test_claim_ttl_implicit_abandon — sweepExpiredClaims flips orphaned read → failed/IMPLICIT_ABANDON', () => {
+// v0.9 (sub-PR 1 #347 + sub-PR 7): 'failed' status + 'failed_reason'
+// column removed. sweepExpiredClaims now resets foreign expired claims
+// back to 'pending' (retry path) instead of marking them 'failed'.
+// The IMPLICIT_ABANDON taxonomy + permanent-failure marking belongs to
+// Issue #349 (abandonment-tracking redesign). All cases below assert
+// the removed semantics and are skipped until #349 lands.
+describe.skip('test_claim_ttl_implicit_abandon — deferred to Issue #349', () => {
   let client: Client
   const TEST_AGENT = `test-claim-ttl-${randomUUID().slice(0, 8)}`
 

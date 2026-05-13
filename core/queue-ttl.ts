@@ -39,19 +39,12 @@ export interface QueueTtlOptions {
  * test assertions.
  */
 export async function sweepExpiredPending(
-  db: QueueTtlDb,
-  opts: QueueTtlOptions = {},
+  _db: QueueTtlDb,
+  _opts: QueueTtlOptions = {},
 ): Promise<number> {
-  const ttlHours = opts.ttlHours ?? 24
-  const reason = opts.reason ?? 'ttl_24h'
-  const result = await db.query(
-    `UPDATE message_queue
-     SET status = 'skipped', failed_reason = $2
-     WHERE status = 'pending'
-       AND created_at < now() - make_interval(hours => $1)`,
-    [ttlHours, reason],
-  )
-  return result.rowCount ?? 0
+  // v0.9: 'skipped' / failed_reason removed from schema (sub-PR 1 + 3).
+  // TTL sweeper no-op until Issue #349 redesign (= audit log table).
+  return 0
 }
 
 /**
