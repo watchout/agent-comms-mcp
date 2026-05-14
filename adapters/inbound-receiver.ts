@@ -52,7 +52,6 @@ import { persistInboundDelivery } from '../core/inbound-delivery'
 import { applyMentionsAutoFill } from '../core/agent-cache'
 import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
 import { notifySenderAndObserve } from '../core/sender-feedback-emit'
-import type { MessageBus } from '../core/message-bus'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -111,13 +110,10 @@ export interface InboundReceiverDeps {
   buildQuoteBlock: (messageId: string) => Promise<{ quote: string; authorId: string } | null>
   updateActiveThread: (agentId: string, threadId: string | null) => Promise<void>
   hashCode: (str: string) => number
-  /**
-   * Primary delivery signal (spec §13.5.1). Fired after a successful
-   * message_queue commit so a waiting bot runner (scripts/run-bot.sh)
-   * wakes immediately instead of paying the full polling interval.
-   * Non-fatal: a missing bus or a kill failure defers to polling.
-   */
-  bus?: MessageBus
+  // ADR-050 (2026-05-05): legacy in-process signaling removed. wake-daemon
+  // (tmux send-keys, see bin/wake-daemon.ts) is the de jure primary delivery
+  // mechanism — it polls message_queue and injects prompts to the
+  // recipient bot's LLM session. The receiver no longer signals.
   /**
    * Spec v5 §2.1 claude/channel push. When set, the listener fires
    * `notifications/claude/channel` against the local MCP server
@@ -732,23 +728,10 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // spec §13.5.1 primary — MessageBus signal. Fire SIGUSR1 to every
-  // committed receiver so each bot's polling driver wakes
-  // independently. A missing PID file (bot offline) or kill failure
-  // is a no-op inside UnixSignalBus, so the polling fallback still
-  // covers recovery. We skip rollback / dedup-only entries to avoid
-  // announcing deliveries that are not actually queued.
-  if (d.bus && committedReceivers.length > 0) {
-    for (const targetAgentId of committedReceivers) {
-      try {
-        await d.bus.signal(`bot_${targetAgentId}`)
-      } catch (err) {
-        writeStderr(
-          `agent-comms: bus.signal failed for ${targetAgentId} (non-fatal, falling back to polling): ${err}\n`,
-        )
-      }
-    }
-  }
+  // ADR-050 (2026-05-05): wake-daemon (bin/wake-daemon.ts) is the
+  // de jure primary delivery mechanism. It polls message_queue and
+  // injects prompts to the recipient bot's LLM session via tmux
+  // send-keys, so the inbound receiver no longer signals recipients.
 
   // spec §8.2 + §2(e) per cycle 2 Finding 3 — sender feedback fans out
   // to every committed receiver, not just the daemon's own agent_id.

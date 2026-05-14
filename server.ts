@@ -106,7 +106,6 @@ import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
-import { createMessageBus, type MessageBus } from './core/message-bus'
 import { truncateForDiscord } from './core/truncate'
 
 // --- Load Config ---
@@ -1493,10 +1492,10 @@ const mcp = createMcpServer()
 // processedIds / mcp) are defined above; both the stdio and daemon
 // transport branches below rely on these being wired before any
 // startListener() / handleInboundMessage() call.
-// spec §13.5.1 primary — MessageBus (UnixSignalBus). Inbound commits wake
-// the receiver's bot runner via SIGUSR1 instead of paying the full polling
-// interval. Missing PID files fall through to polling fallback.
-const messageBus: MessageBus = createMessageBus()
+// ADR-050 (2026-05-05): wake-daemon (bin/wake-daemon.ts) is the de jure
+// primary delivery mechanism per spec §13.5.1 — it polls message_queue
+// and injects prompts to recipient bots' LLM sessions via tmux send-keys.
+// The inbound receiver no longer needs an in-process signal bus handle.
 
 setInboundReceiverDeps({
   agentId: AGENT_ID,
@@ -1511,7 +1510,6 @@ setInboundReceiverDeps({
   buildQuoteBlock,
   updateActiveThread,
   hashCode,
-  bus: messageBus,
   // Spec v5 §1.2 / §2.1 — claude/channel push. Thin wrapper so the
   // receiver doesn't need a direct handle on the MCP Server instance
   // (keeps the server.ts ↔ inbound-receiver dependency DAG cycle-free).
