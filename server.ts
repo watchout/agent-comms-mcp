@@ -4047,6 +4047,12 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
         if (processedIds.has(msg.id)) return
         processedIds.set(msg.id, Date.now())
 
+        // CEO directive 2026-05-14: DB is the SSOT, Discord is downstream display.
+        // Bot-authored Discord events = echo of own agent-comms outbound; ignoring
+        // them prevents duplicate message_queue rows (source=agent-comms + source=discord)
+        // that defeat uq_mq_agent_message (different message_ids) and cause check-inbox loops.
+        if (msg.author.isBot) return
+
         const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
         const content = msg.content || (atts ? '(attachment)' : '')
 
