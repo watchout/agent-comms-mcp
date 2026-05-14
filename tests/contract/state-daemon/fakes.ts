@@ -86,6 +86,7 @@ export class FakeTmux implements TmuxClient {
   /** Sessions reported as existing. Defaults to "all exist". */
   existingSessions: Set<string> | null = null
   sendKeysShouldThrow = false
+  sendDelayMs = 0
 
   async sessionExists(session: string): Promise<boolean> {
     if (this.existingSessions === null) return true
@@ -94,6 +95,9 @@ export class FakeTmux implements TmuxClient {
   async sendKeys(session: string, payload: string): Promise<void> {
     if (this.sendKeysShouldThrow) {
       throw new Error('fake tmux send-keys failure')
+    }
+    if (this.sendDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs))
     }
     this.sentKeys.push({ session, payload })
   }
@@ -105,6 +109,7 @@ export class FakeTmux implements TmuxClient {
     this.restarts = []
     this.existingSessions = null
     this.sendKeysShouldThrow = false
+    this.sendDelayMs = 0
   }
 }
 

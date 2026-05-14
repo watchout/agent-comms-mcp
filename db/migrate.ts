@@ -127,7 +127,11 @@ async function migrate() {
       -- NULL on first boot = legitimate "row absent / cursor unset"
       -- signal per cycle 11 contract; first inbox/next call populates.
       inbox_cursor_at TIMESTAMPTZ,
-      inbox_cursor_id UUID
+      inbox_cursor_id UUID,
+      -- State-daemon wake suppression SSOT. This is bot runtime state,
+      -- not message row state; message_queue.last_wake_attempt_at remains
+      -- row-level audit/diagnostic data only.
+      last_wake_attempt_at TIMESTAMPTZ
     );
 
     -- v0.1.0: Add org_id, active_thread, observer_mode, channel_port to agents
@@ -147,6 +151,7 @@ async function migrate() {
       -- paired migration.
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_at TIMESTAMPTZ;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS inbox_cursor_id UUID;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_wake_attempt_at TIMESTAMPTZ;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
 
@@ -302,6 +307,17 @@ async function migrate() {
       ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
+
+    UPDATE agents a
+       SET last_wake_attempt_at = q.bot_last_wake
+      FROM (
+        SELECT agent_id, MAX(last_wake_attempt_at) AS bot_last_wake
+          FROM message_queue
+         WHERE last_wake_attempt_at IS NOT NULL
+         GROUP BY agent_id
+      ) q
+     WHERE a.agent_id = q.agent_id
+       AND (a.last_wake_attempt_at IS NULL OR a.last_wake_attempt_at < q.bot_last_wake);
 
     CREATE OR REPLACE FUNCTION notify_queue_event() RETURNS trigger AS $func$
     BEGIN

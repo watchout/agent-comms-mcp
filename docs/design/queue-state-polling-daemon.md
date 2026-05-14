@@ -477,8 +477,10 @@ async function wakeBot(agentId: string): Promise<void> {
     metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' });
     return;  // silent skip、no warn log / no alert / abnormal-activity counter は trip しない (R9 ordering: gate 後)
   }
+  const reserved = await db.reserveAgentWake(agentId, now(), WAKE_DEDUP_INTERVAL_SEC);
+  if (!reserved) return;
   await execTmuxSendKeys(bot.tmuxSession, 'check inbox\n');
-  await db.update('message_queue', row.id, { last_wake_attempt_at: now() });
+  await db.update('message_queue', row.id, { last_wake_attempt_at: now() }); // audit stamp
 }
 ```
 
@@ -503,7 +505,8 @@ async function wakeBot(agentId: string): Promise<void> {
 
 | table | column | type | rationale |
 |---|---|---|---|
-| `message_queue` | `last_wake_attempt_at` | TIMESTAMPTZ | 重複 wake 抑制 (v0.1 継承) |
+| `agents` | `last_wake_attempt_at` | TIMESTAMPTZ | bot 単位 wake 抑制の SSOT |
+| `message_queue` | `last_wake_attempt_at` | TIMESTAMPTZ | row-level wake audit / diagnostic |
 | `message_queue` | `last_heartbeat_at` | TIMESTAMPTZ | 補強 #1 claim refresh 観測用 |
 
 [検証済 CTO `70050419`、v0.4 patch]: bot 情報は **既存 `agents` table (DB primary、21 列)** を SoT として再利用:
@@ -666,10 +669,10 @@ abnormal activity 検出ルール (operator alert を Discord に送出):
 
 | # | input | expected |
 |---|---|---|
-| T27 | new `pending`、TUI bot alive | dispatch (wake)、`last_wake_attempt_at` 更新、metric `wake_actions_total{result='ok'}`+=1 |
-| T28 | `pending` age=15s、`last_wake_attempt_at`=NULL | re-wake、duplicate 範囲外 |
-| T29 | `pending` age=20s、`last_wake_attempt_at`=10s 前 | **skip wake (30s duplicate suppression)**、metric `wake_actions_total{result='dedup_skipped'}`+=1 |
-| T30 | `pending` age=35s、`last_wake_attempt_at`=31s 前 | re-wake (30s 超過、duplicate 範囲外) |
+| T27 | new `pending`、TUI bot alive | dispatch (wake)、`agents.last_wake_attempt_at` + row audit stamp 更新、metric `wake_actions_total{result='ok'}`+=1 |
+| T28 | `pending` age=15s、`agents.last_wake_attempt_at`=NULL | re-wake、duplicate 範囲外 |
+| T29 | `pending` age=20s、`agents.last_wake_attempt_at`=10s 前 | **skip wake (30s duplicate suppression)**、metric `wake_actions_total{result='dedup_skipped'}`+=1 |
+| T30 | `pending` age=35s、`agents.last_wake_attempt_at`=31s 前 | re-wake (30s 超過、duplicate 範囲外) |
 | T31 | bot が next tool 呼出 → `pending` → `received` 遷移 | DB: status=`received`、`claim_expires_at` set、tmux 不発火 (claim 取得は bot 主導) |
 | T32 | `received` AND `claim_expires_at < now()` | self-reclaim → status=`pending`、re-wake 1 回、metric `wake_actions_total{result='reclaimed'}`+=1 |
 | T33 | `received` AND age > stuckAfter (5min) | reset to `pending` (transparent retry)、metric `wake_actions_total{result='retry_reset'}`+=1 |
@@ -719,7 +722,7 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除済。
 | Phase | 内容 | gate |
 |---|---|---|
 | 0 | spec freeze (本 doc v0.9)、CEO + CTO + lead-ama review | CEO accept |
-| 1 | **DB schema migration v0.9**: `message_queue.status` CHECK 制約を新 enum (`pending` / `received` / `in_progress` / `done` / `replied`) に変更、`failed_reason` column drop (or null 化)、`done_at` 追加、`last_wake_attempt_at` / `last_heartbeat_at` 追加、pg_notify trigger 更新。**既存行 conversion (12.3 参照)**。bot 情報は既存 `agents` table 利用 (新規 column 追加なし) | `route:ceo-approval` |
+| 1 | **DB schema migration v0.9**: `message_queue.status` CHECK 制約を新 enum (`pending` / `received` / `in_progress` / `done` / `replied`) に変更、`failed_reason` column drop (or null 化)、`done_at` 追加、`agents.last_wake_attempt_at` / `message_queue.last_wake_attempt_at` / `last_heartbeat_at` 追加、pg_notify trigger 更新。**既存行 conversion (12.3 参照)**。bot 情報は既存 `agents` table 利用 | `route:ceo-approval` |
 | 2 | **agent-comms tool impl 修正**: `mcp__agent-comms__processing` / `done` 新規追加、`next` の claim 結果 status を `received` に変更 (旧 `read` 代替)、`fail` / `skip` tool を **deprecate** (内部 retry loop で透明化)。`db/migrate.ts:246` / `server.ts:1709, 1842` の旧 enum literal を新 enum に sweep | auditor pre-impl gate (7 項目) |
 | 3 | state-daemon impl (6-section dispatch 経由 agent-com-dev)、unit + contract test (§11.1 T27-T41 + §11.2 legacy 全 pass) | auditor pre-impl gate |
 | 4 | dev fleet で **legacy wake-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で legacy wake-daemon 同等動作確認 |

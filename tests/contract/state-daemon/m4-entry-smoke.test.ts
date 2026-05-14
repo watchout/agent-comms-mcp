@@ -148,6 +148,12 @@ describe('m4 — wiring smoke (no real LISTEN, no real tmux)', () => {
             AND column_name IN ('last_wake_attempt_at','last_heartbeat_at')`,
       )
       expect(cols.rowCount).toBe(2)
+      const agentCols = await c.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name='agents'
+            AND column_name = 'last_wake_attempt_at'`,
+      )
+      expect(agentCols.rowCount).toBe(1)
     } finally {
       await c.end()
     }
