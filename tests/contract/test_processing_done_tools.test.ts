@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { existsSync, readFileSync } from 'node:fs'
 import { Client } from 'pg'
 import { applyDownMigration, applyUpMigrationFile } from '../../db/migrate'
+import { assertDestructiveMigrationTestDatabase } from '../../db/destructive-migration-gate'
 import { join, dirname } from 'node:path'
 
 // PR #338 sub-PR 6 — contract tests for the `processing` + `done` MCP tools
@@ -56,7 +57,7 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
 // see the legacy schema again. Per-test cleanup drops fixture rows tagged
 // with a sentinel agent_id.
 // ─────────────────────────────────────────────────────────────────────────────
-const DATABASE_URL = process.env.DATABASE_URL
+const DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const UP = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.up.sql')
 const DOWN = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.down.sql')
 // T2 needs the v0.9 paired SQL files (shipped by sub-PR 1, PR #347). When
@@ -75,17 +76,18 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
   beforeAll(async () => {
     priorGate = process.env[DESTRUCTIVE_GATE_ENV]
     process.env[DESTRUCTIVE_GATE_ENV] = '1'
+    assertDestructiveMigrationTestDatabase(DATABASE_URL)
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
     // Migrate to v0.9 so 'received' / 'in_progress' / 'done' are accepted.
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
   })
 
   afterAll(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT]).catch(() => {})
     // Restore v0.8 so downstream suites in the run see the legacy schema.
     try {
-      await applyDownMigration(DOWN)
+      await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
     } catch {}
     await client.end()
     if (priorGate === undefined) {

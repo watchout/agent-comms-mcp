@@ -12,26 +12,30 @@ import { join, dirname } from 'node:path'
 import { migrateSqlite } from './migrate-sqlite'
 import {
   assertDestructiveMigrationAllowed,
+  assertNoProductionDestructiveMigration,
   destructiveGateLogLine,
 } from './destructive-migration-gate'
 
 // incident #339: every SQL string handed to pg passes through the gate.
-async function gatedQuery(client: Client, sql: string, params?: unknown[]) {
+async function gatedQuery(client: Client, sql: string, params?: unknown[], targetUrl = databaseUrl) {
   assertDestructiveMigrationAllowed(sql)
+  assertNoProductionDestructiveMigration(sql, targetUrl)
   return params === undefined ? client.query(sql) : client.query(sql, params)
 }
 
 const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
 
-// Load database_url from config.json if available, fallback to env
-let databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+// Load database_url from env first. config.json is a fallback only; tests and
+// operators must be able to override the local config with DATABASE_URL.
+let databaseUrl = process.env.DATABASE_URL
 const configPath = join(dirname(new URL(import.meta.url).pathname), '..', 'config.json')
 if (existsSync(configPath)) {
   try {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'))
-    databaseUrl = config.database_url ?? databaseUrl
+    databaseUrl = databaseUrl ?? config.database_url
   } catch {}
 }
+databaseUrl = databaseUrl ?? 'postgresql://localhost/agent_comms'
 
 async function migrate() {
   console.log(destructiveGateLogLine())
@@ -667,24 +671,32 @@ async function migrate() {
 // statement-list via the same `pg.Client` that `migrate()` uses. The
 // canonical idempotent up still runs from `migrate()`, so the down path
 // is informational + operator-driven (CTO directive, msg `167415dc`).
-export async function applyDownMigration(filePath: string): Promise<void> {
+export async function applyDownMigration(
+  filePath: string,
+  opts: { databaseUrl?: string } = {},
+): Promise<void> {
+  const targetUrl = opts.databaseUrl ?? databaseUrl
   const sql = readFileSync(filePath, 'utf-8')
-  const client = new Client({ connectionString: databaseUrl })
+  const client = new Client({ connectionString: targetUrl })
   await client.connect()
   try {
-    await gatedQuery(client, sql)
+    await gatedQuery(client, sql, undefined, targetUrl)
     console.log(`Down migration applied: ${filePath}`)
   } finally {
     await client.end()
   }
 }
 
-export async function applyUpMigrationFile(filePath: string): Promise<void> {
+export async function applyUpMigrationFile(
+  filePath: string,
+  opts: { databaseUrl?: string } = {},
+): Promise<void> {
+  const targetUrl = opts.databaseUrl ?? databaseUrl
   const sql = readFileSync(filePath, 'utf-8')
-  const client = new Client({ connectionString: databaseUrl })
+  const client = new Client({ connectionString: targetUrl })
   await client.connect()
   try {
-    await gatedQuery(client, sql)
+    await gatedQuery(client, sql, undefined, targetUrl)
     console.log(`Up migration applied: ${filePath}`)
   } finally {
     await client.end()
