@@ -18,6 +18,7 @@ export const DESTRUCTIVE_GATE_ENV = PORT_DESTRUCTIVE_GATE_ENV
 
 const DESTRUCTIVE_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'DROP COLUMN', regex: /\bDROP\s+COLUMN\b/i },
+  { name: 'DROP CONSTRAINT', regex: /\bDROP\s+CONSTRAINT\b/i },
   { name: 'ALTER COLUMN', regex: /\bALTER\s+COLUMN\b/i },
   { name: 'RENAME', regex: /\bRENAME\b/i },
   { name: 'TRUNCATE', regex: /\bTRUNCATE\b/i },
@@ -156,6 +157,66 @@ export class DestructiveMigrationBlockedError extends Error {
   }
 }
 
+export const PRODUCTION_DESTRUCTIVE_GATE_ENV =
+  'AGENT_COMMS_PRODUCTION_DESTRUCTIVE_MIGRATIONS_ALLOWED'
+export const TEST_DATABASE_URL_ENV = 'AGENT_COM_TEST_DATABASE_URL'
+
+export class ProductionDatabaseDestructiveMigrationBlockedError extends Error {
+  readonly name = 'ProductionDatabaseDestructiveMigrationBlockedError'
+  readonly databaseName: string | null
+  readonly envName: string = PRODUCTION_DESTRUCTIVE_GATE_ENV
+  constructor(databaseName: string | null, message: string) {
+    super(message)
+    this.databaseName = databaseName
+  }
+}
+
+function databaseNameFromUrl(databaseUrl: string): string | null {
+  try {
+    const parsed = new URL(databaseUrl)
+    const path = decodeURIComponent(parsed.pathname ?? '').replace(/^\/+/, '')
+    if (!path) return null
+    return path.split('/').filter(Boolean).at(-1) ?? null
+  } catch {
+    return null
+  }
+}
+
+function productionDatabaseNames(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  const raw = env.AGENT_COM_PRODUCTION_DATABASE_NAMES ?? 'agent_comms'
+  return new Set(raw.split(',').map((s) => s.trim()).filter(Boolean))
+}
+
+export function isProductionDatabaseUrl(
+  databaseUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const dbName = databaseNameFromUrl(databaseUrl)
+  return dbName !== null && productionDatabaseNames(env).has(dbName)
+}
+
+export function assertDestructiveMigrationTestDatabase(
+  databaseUrl: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!databaseUrl) {
+    throw new ProductionDatabaseDestructiveMigrationBlockedError(
+      null,
+      `${TEST_DATABASE_URL_ENV} or DATABASE_URL is required for destructive migration tests.`,
+    )
+  }
+  const dbName = databaseNameFromUrl(databaseUrl)
+  if (env[TEST_DATABASE_URL_ENV] && databaseUrl === env[TEST_DATABASE_URL_ENV]) {
+    if (!isProductionDatabaseUrl(databaseUrl, env)) return
+  }
+  if (dbName?.endsWith('_test')) return
+  throw new ProductionDatabaseDestructiveMigrationBlockedError(
+    dbName,
+    `Destructive migration tests require ${TEST_DATABASE_URL_ENV} or a *_test database. ` +
+      `Refusing target database ${dbName ?? '<unknown>'}.`,
+  )
+}
+
 export function assertDestructiveMigrationAllowed(sql: string): void {
   const patterns = detectDestructivePatterns(sql)
   if (patterns.length === 0) return
@@ -165,6 +226,23 @@ export function assertDestructiveMigrationAllowed(sql: string): void {
     `Destructive migration blocked: [${patterns.map(p => `'${p}'`).join(', ')}]. ` +
       `Set ${DESTRUCTIVE_GATE_ENV}=1 to proceed (production deploy only). ` +
       `incident #339 anchor.`,
+  )
+}
+
+export function assertNoProductionDestructiveMigration(
+  sql: string,
+  databaseUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const patterns = detectDestructivePatterns(sql)
+  if (patterns.length === 0) return
+  if (!isProductionDatabaseUrl(databaseUrl, env)) return
+  if (env[PRODUCTION_DESTRUCTIVE_GATE_ENV] === '1') return
+  throw new ProductionDatabaseDestructiveMigrationBlockedError(
+    databaseNameFromUrl(databaseUrl),
+    `Destructive migration targets production database '${databaseNameFromUrl(databaseUrl) ?? '<unknown>'}'. ` +
+      `Set ${PRODUCTION_DESTRUCTIVE_GATE_ENV}=1 only for an operator-approved production migration. ` +
+      `Tests must use ${TEST_DATABASE_URL_ENV} or a *_test database.`,
   )
 }
 

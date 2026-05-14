@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { Client } from 'pg'
 import { applyDownMigration, applyUpMigrationFile } from '../../db/migrate'
+import { assertDestructiveMigrationTestDatabase } from '../../db/destructive-migration-gate'
 import { join, dirname } from 'node:path'
 
 // PR #338 sub-PR 1 — M1-M7 contract tests for the destructive status enum
@@ -17,7 +18,7 @@ import { join, dirname } from 'node:path'
 // M7 rollback dry-run                         (down.sql restores v0.8 vocab)
 // M8 failed STALE_DISPATCH 3-way verify       (3-way branch b — auditor cycle 2 Finding 1)
 
-const DATABASE_URL = process.env.DATABASE_URL
+const DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const dbDescribe = DATABASE_URL ? describe : describe.skip
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
@@ -33,6 +34,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
   beforeAll(async () => {
     priorDestructiveGate = process.env[DESTRUCTIVE_GATE_ENV]
     process.env[DESTRUCTIVE_GATE_ENV] = '1'
+    assertDestructiveMigrationTestDatabase(DATABASE_URL)
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
   })
@@ -42,7 +44,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     // shared test DB in the new (post-up) vocabulary. Other test files
     // assume the legacy CHECK constraint and the failed_reason column.
     try {
-      await applyDownMigration(DOWN)
+      await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
     } catch {}
     // Re-add failed_reason if it is still missing — applyDownMigration's
     // SQL ADDs it, but if the down failed mid-way we want callers to find
@@ -82,7 +84,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     // Ensure we are in the legacy (pre-up) vocabulary at start of each
     // test. Some tests apply up.sql; this resets between them.
     try {
-      await applyDownMigration(DOWN)
+      await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
     } catch {}
     await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
     await client.query(`ALTER TABLE message_queue DROP COLUMN IF EXISTS done_at`)
@@ -180,7 +182,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     ])
     expect(await countByStatus('read')).toBe(3)
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     expect(await countByStatus('received')).toBe(3)
     for (const id of ids) {
@@ -195,7 +197,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
       claim_expires_offset_sec: -30, // within 60s window per spec
     })
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     expect(await statusOf(id)).toBe('pending')
     // failed_reason column has been dropped, so we cannot grep it; the
@@ -220,7 +222,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
       claim_expires_offset_sec: -120, // outside 60s window → PERMANENT-like
     })
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     expect(await statusOf(idPermanent)).toBe('replied')
     expect(await statusOf(idAbandonStale)).toBe('replied')
@@ -240,7 +242,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     const idA = await insertRow({ status: 'skipped', failed_reason: 'OBSOLETE' })
     const idB = await insertRow({ status: 'skipped', failed_reason: null })
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     expect(await countByStatus('skipped')).toBe(0)
     expect(await statusOf(idA)).toBe('replied')
@@ -271,7 +273,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     )
     expect(Number.parseInt(before.rows[0]!.count, 10)).toBe(ids.length)
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     const after = await client.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM message_queue WHERE agent_id = $1`,
@@ -296,7 +298,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     expect(await checkConstraintAllows('failed')).toBe(true)
     expect(await checkConstraintAllows('received')).toBe(false)
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     // post-state
     expect(await columnExists('message_queue', 'failed_reason')).toBe(false)
@@ -313,13 +315,13 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     const idFailedPerm = await insertRow({ status: 'failed', failed_reason: 'LOOP_DETECTED' })
     const idSkipped = await insertRow({ status: 'skipped', failed_reason: 'OBSOLETE' })
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
     // post-up state: idRead='received', idFailedPerm='replied', idSkipped='replied'
     expect(await statusOf(idRead)).toBe('received')
     expect(await statusOf(idFailedPerm)).toBe('replied')
     expect(await statusOf(idSkipped)).toBe('replied')
 
-    await applyDownMigration(DOWN)
+    await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
 
     // down restores schema...
     expect(await columnExists('message_queue', 'failed_reason')).toBe(true)
@@ -390,7 +392,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
       ],
     )
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     expect(await statusOf(idReplied)).toBe('replied')
     // STALE_DISPATCH (b1) does NOT write to message_queue_status_migration_audit.
@@ -409,7 +411,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
       // no agent_messages row has reply_to pointing here, so EXISTS is false.
     })
 
-    await applyUpMigrationFile(UP)
+    await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
 
     expect(await statusOf(idPending)).toBe('pending')
     // STALE_DISPATCH (b2) does NOT write to message_queue_status_migration_audit either.

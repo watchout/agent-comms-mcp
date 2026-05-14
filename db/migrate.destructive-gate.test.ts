@@ -6,7 +6,12 @@ import { tmpdir } from 'node:os'
 import {
   DESTRUCTIVE_GATE_ENV,
   DestructiveMigrationBlockedError,
+  ProductionDatabaseDestructiveMigrationBlockedError,
+  PRODUCTION_DESTRUCTIVE_GATE_ENV,
+  TEST_DATABASE_URL_ENV,
   assertDestructiveMigrationAllowed,
+  assertDestructiveMigrationTestDatabase,
+  assertNoProductionDestructiveMigration,
   detectDestructivePatterns,
 } from './destructive-migration-gate'
 import { migrateSqlite } from './migrate-sqlite'
@@ -49,6 +54,13 @@ describe('destructive-migration-gate (spec §4.2)', () => {
 
   test('T2: ALTER COLUMN unset → blocked', () => {
     expectBlocked('ALTER TABLE x ALTER COLUMN y TYPE int;', ['ALTER COLUMN'])
+  })
+
+  test('T2b: DROP CONSTRAINT unset → blocked', () => {
+    expectBlocked(
+      'ALTER TABLE message_queue DROP CONSTRAINT message_queue_status_check;',
+      ['DROP CONSTRAINT'],
+    )
   })
 
   test('T3: RENAME unset → blocked', () => {
@@ -249,5 +261,54 @@ describe('destructive-migration-gate / detectDestructivePatterns', () => {
       'TRUNCATE x; ALTER TABLE y DROP COLUMN z',
     )
     expect(found.sort()).toEqual(['DROP COLUMN', 'TRUNCATE'].sort())
+  })
+})
+
+describe('destructive-migration-gate / production DB guard', () => {
+  afterEach(() => {
+    delete process.env[PRODUCTION_DESTRUCTIVE_GATE_ENV]
+    delete process.env[TEST_DATABASE_URL_ENV]
+  })
+
+  test('blocks destructive SQL against production agent_comms even when the base gate is enabled', () => {
+    let thrown: unknown
+    try {
+      assertNoProductionDestructiveMigration(
+        'ALTER TABLE message_queue DROP COLUMN failed_reason;',
+        'postgresql:///agent_comms?host=/tmp',
+        { [DESTRUCTIVE_GATE_ENV]: '1' } as NodeJS.ProcessEnv,
+      )
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(ProductionDatabaseDestructiveMigrationBlockedError)
+    expect((thrown as Error).message).toContain(PRODUCTION_DESTRUCTIVE_GATE_ENV)
+  })
+
+  test('allows destructive SQL against an explicit test database', () => {
+    expect(
+      assertNoProductionDestructiveMigration(
+        'ALTER TABLE message_queue DROP COLUMN failed_reason;',
+        'postgresql:///agent_comms_test?host=/tmp',
+      ),
+    ).toBeUndefined()
+  })
+
+  test('destructive migration tests require AGENT_COM_TEST_DATABASE_URL or *_test', () => {
+    expect(
+      assertDestructiveMigrationTestDatabase(
+        'postgresql:///agent_comms_test?host=/tmp',
+      ),
+    ).toBeUndefined()
+
+    let thrown: unknown
+    try {
+      assertDestructiveMigrationTestDatabase(
+        'postgresql:///agent_comms?host=/tmp',
+      )
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(ProductionDatabaseDestructiveMigrationBlockedError)
   })
 })
