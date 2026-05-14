@@ -96,7 +96,7 @@ function dbRead(sql: string, params: unknown[] = []): any[] {
 }
 
 describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
-  test('message_queue has failed_reason + 5-state CHECK', () => {
+  test('message_queue has failed_reason + v0.9-compatible CHECK', () => {
     const rows = dbRead(`PRAGMA table_info(message_queue)`)
     expect(rows.map((r: any) => r.name)).toContain('failed_reason')
   })
@@ -109,7 +109,7 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
 })
 
 describe('F2 — agent-com next (SQLite)', () => {
-  test('pops a pending row, marks read, stamps the per-row claim, sets busy', () => {
+  test('pops a pending row, marks received, stamps the per-row claim, sets busy', () => {
     const { messageId, queueId } = seedPendingMessage('next test')
     const r = runCli(['next'])
     expect(r.status).toBe(0)
@@ -122,7 +122,7 @@ describe('F2 — agent-com next (SQLite)', () => {
     // The in-flight pointer now lives on the message_queue row itself
     // via the per-row claim columns.
     const q = dbRead(`SELECT status, claimed_by, claim_expires_at FROM message_queue WHERE id = ?`, [queueId])
-    expect(q[0].status).toBe('read')
+    expect(q[0].status).toBe('received')
     expect(q[0].claimed_by).toBe('probe-f')
     expect(q[0].claim_expires_at).not.toBeNull()
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
@@ -140,18 +140,18 @@ describe('F2 — agent-com next (SQLite)', () => {
   test('multi in-flight: two consecutive `next` calls produce two distinct active claims (no implicit-fail)', () => {
     // Issue #278 (A) §A — the legacy single-slot guard is gone, so
     // two `next` calls in succession both succeed and leave both
-    // claims active (status='read'). Orphan recovery is structural
+    // claims active (status='received'). Orphan recovery is structural
     // via the claim-TTL sweeper, not via in-line implicit-fail.
     const first = seedPendingMessage('m1')
     const second = seedPendingMessage('m2')
-    runCli(['next']) // pops m1, status read
-    runCli(['next']) // pops m2 — m1 STAYS read (segment 3c)
+    runCli(['next']) // pops m1, status received
+    runCli(['next']) // pops m2 — m1 STAYS received (segment 3c)
     const q = dbRead(`SELECT id, status, failed_reason, claimed_by FROM message_queue ORDER BY id`)
     const m1 = q.find((r: any) => r.id === first.queueId)
     const m2 = q.find((r: any) => r.id === second.queueId)
-    expect(m1.status).toBe('read')
+    expect(m1.status).toBe('received')
     expect(m1.claimed_by).toBe('probe-f')
-    expect(m2.status).toBe('read')
+    expect(m2.status).toBe('received')
     expect(m2.claimed_by).toBe('probe-f')
   })
 })
@@ -272,7 +272,7 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     expect(q[0].failed_reason).toBe('OBSOLETE')
   })
 
-  test('reclaim rolls read→pending for rows > 15 min stale + clears agent pointer', () => {
+  test('reclaim rolls received→pending for received rows > 15 min stale + clears agent pointer', () => {
     // Seed a message, next-pop it, then artificially age read_at by 20min
     // using SQLite directly to simulate a crashed bot.
     const { queueId } = seedPendingMessage('f4-reclaim')

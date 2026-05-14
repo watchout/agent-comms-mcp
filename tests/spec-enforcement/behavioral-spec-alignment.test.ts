@@ -50,7 +50,7 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // value — silent reject is forbidden.
     expect(handler).toMatch(/fallback: notify \(reason: \$\{fallbackReason\}\)/)
   })
-  // Pre-existing latent fail: pins `status = 'read'` in
+  // Pre-existing latent fail: previously pinned the legacy claim status in
   // send-fallback-decision helper, but v0.9 (sub-PR 1 #347 + sub-PR 3 #350)
   // renamed it to 'received'. Vocab follow lives in this PR's source
   // changes; the test itself needs the pin updated, which is its own
@@ -72,7 +72,7 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // Invariant: the helper holds the FOR UPDATE clause.
     const helperSrc = readFileSync(join(REPO_ROOT, 'core', 'send-fallback-decision.ts'), 'utf-8')
     expect(helperSrc).toMatch(/FOR UPDATE/)
-    expect(helperSrc).toMatch(/WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'read'/)
+    expect(helperSrc).toMatch(/WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'received'/)
   })
   test('handler COMMITs only on the happy path and ROLLBACKs via finally on early return', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
@@ -122,7 +122,7 @@ describe('Behavioral FAIL B1 — next derives agents.status from open-claim EXIS
   })
   test('cli nextMessage uses CASE WHEN EXISTS open-claim derivation', () => {
     expect(CLI_SRC).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
   })
 })
@@ -141,7 +141,7 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
   })
   test('cli sendMessage uses CASE WHEN EXISTS open-claim derivation', () => {
     expect(CLI_SRC).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
     expect(CLI_SRC).not.toMatch(/UPDATE agents SET current_message_id = NULL, status = 'idle'/)
   })

@@ -207,8 +207,8 @@ describe('per-bot wake suppression (PR #338 sub-PR 4 §1.5)', () => {
     }
   })
 
-  test('test 2: pending 0 (no row) → suppression irrelevant, wake fires when a row arrives', async () => {
-    const agent = makeAgentId('per-bot-2')
+  test('test 1d: active claim がある bot には追加 wake しない', async () => {
+    const agent = makeAgentId('per-bot-1d')
     await seedAgent(pg, {
       agent_id: agent,
       runtime: 'TUI',
@@ -216,7 +216,48 @@ describe('per-bot wake suppression (PR #338 sub-PR 4 §1.5)', () => {
       status: 'online',
     })
 
+    const t0 = new Date('2026-05-12T00:00:55.000Z')
+    const clock = new FakeClock(t0)
+    const tmux = new FakeTmux()
+    const metrics = new FakeMetrics()
+    const daemon = mkDaemon(clock, tmux, metrics)
+    await daemon.start()
+    try {
+      await pg.query(
+        `INSERT INTO message_queue (agent_id, status, payload, created_at, claimed_by, claimed_at, claim_expires_at)
+         VALUES ($1, 'received', '{}', $2, $1, $2, $3)`,
+        [agent, t0, new Date(t0.getTime() + 60_000)],
+      )
+      const [id] = await insertPending(agent, t0, 1)
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(tmux.sentKeys.length).toBe(0)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+  })
+
+  test('test 2: pending 0 (no row) → suppression irrelevant, wake fires when a row arrives', async () => {
+    const agent = makeAgentId('per-bot-2')
     const t0 = new Date('2026-05-12T00:01:00.000Z')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      tmux_session: `${agent}-session`,
+      status: 'online',
+      last_seen_at: t0,
+    })
+    await pg.query(
+      `UPDATE agents SET last_wake_attempt_at=NULL WHERE agent_id=$1`,
+      [agent],
+    )
     const clock = new FakeClock(t0)
     const tmux = new FakeTmux()
     const metrics = new FakeMetrics()
@@ -241,14 +282,19 @@ describe('per-bot wake suppression (PR #338 sub-PR 4 §1.5)', () => {
 
   test('test 3: window 経過後の wake 復帰', async () => {
     const agent = makeAgentId('per-bot-3')
+    const t0 = new Date('2026-05-12T00:02:00.000Z')
     await seedAgent(pg, {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
       status: 'online',
+      last_seen_at: t0,
     })
+    await pg.query(
+      `UPDATE agents SET last_wake_attempt_at=NULL WHERE agent_id=$1`,
+      [agent],
+    )
 
-    const t0 = new Date('2026-05-12T00:02:00.000Z')
     const clock = new FakeClock(t0)
     const tmux = new FakeTmux()
     const metrics = new FakeMetrics()
@@ -264,6 +310,12 @@ describe('per-bot wake suppression (PR #338 sub-PR 4 §1.5)', () => {
         claim_expires_at: null,
       })
       expect(tmux.sentKeys.length).toBe(1)
+
+      // Simulate the bot having drained the first item. The next-only receive
+      // contract suppresses additional wake while active claims exist, so this
+      // fixture verifies pure suppression-window recovery after the prior work
+      // is already closed.
+      await pg.query(`UPDATE message_queue SET status='replied' WHERE id=$1`, [id1])
 
       // Advance the clock past the suppression window, insert another pending
       // row, and verify wake fires a second time.

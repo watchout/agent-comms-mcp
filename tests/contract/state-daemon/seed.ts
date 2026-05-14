@@ -53,6 +53,10 @@ export async function openClient(): Promise<Client> {
   const url = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const c = new Client({ connectionString: url })
   await c.connect()
+  // State-daemon contract files share the same fixture prefix on the same
+  // Postgres database. Bun may run files in parallel, so serialize the suite
+  // at the DB connection level before any file can clean another file's rows.
+  await c.query(`SELECT pg_advisory_lock(hashtext('agent-comms-state-daemon-contract-tests'))`)
   await ensureStateDaemonMigration(c)
   return c
 }

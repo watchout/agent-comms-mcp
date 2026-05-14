@@ -304,12 +304,11 @@ function buildAuthMetadata(agentId: string, channel: string, content: string): R
  * Internal flow (spec §4.1 step list, mapped to this implementation):
  *   1. If agents.current_message_id is set → implicit-skip the prior row
  *      (UPDATE message_queue SET status='skipped' WHERE id=current
- *       AND status='read'). The spec wording leaves status='read' on
- *       implicit skip, but we use 'skipped' so operators can distinguish
- *       bypassed messages from in-progress ones. The CHECK constraint
- *       added in db/migrate.ts allows both values.
+ *       AND status='received'). Legacy implicit-skip handling is retained
+ *       only for old callers; the normal receive vocabulary is
+ *       pending -> received -> replied/done.
  *   2. SELECT the oldest pending row (priority DESC, created_at ASC).
- *   3. UPDATE status='read', read_at=NOW(), agents.current_message_id=row.id.
+ *   3. UPDATE status='received', read_at=NOW(), agents.current_message_id=row.id.
  *   4. Hydrate channel/content from message_queue.payload (the receiver
  *      already enriched it on INSERT) — no second query into agent_messages
  *      is required for the canonical fields.
@@ -349,7 +348,7 @@ async function nextMessage() {
       if (pop.rows.length === 0) {
         await db.query('COMMIT')
       } else {
-        // Step 2: mark the popped row 'read' + stamp the per-row claim
+        // Step 2: mark the popped row 'received' + stamp the per-row claim
         // (claimed_by / claimed_at / claim_expires_at) inside the same
         // txn. The TTL window (default 30s, env AGENT_COMMS_CLAIM_TTL_SEC)
         // bounds how long an orphaned claim can linger before the
@@ -364,7 +363,7 @@ async function nextMessage() {
         const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
         await db.query(
           `UPDATE message_queue
-              SET status = 'read',
+              SET status = 'received',
                   read_at = now(),
                   claimed_by = $1,
                   claimed_at = now(),
@@ -377,8 +376,8 @@ async function nextMessage() {
         // multi in-flight stays visible on agents.status.
         await db.query(
           `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
              status_updated_at = now()
            WHERE agent_id = $1`,
           [agentId],
@@ -582,7 +581,7 @@ async function sendMessage(args: string[]) {
       // legacy SELECT current_message_id FROM agents path. The CLI does
       // not take a --reply-to flag, so we resolve "the in-flight message"
       // as the most recent active claim owned by this agent: the row
-      // with claimed_by=$agentId AND status='read' ORDER BY claimed_at
+      // with claimed_by=$agentId AND status='received' ORDER BY claimed_at
       // DESC LIMIT 1. FOR UPDATE on that row serialises any concurrent
       // `agent-com send` for the same claim — the second caller wakes
       // to status='replied' on the locked row, the predicate misses,
@@ -591,7 +590,7 @@ async function sendMessage(args: string[]) {
       // lock is per-row, not on the agents row.
       const claimRow = await db.query(
         `SELECT id, message_id, payload FROM message_queue
-            WHERE claimed_by = $1 AND status = 'read'
+            WHERE claimed_by = $1 AND status = 'received'
             ORDER BY claimed_at DESC NULLS LAST
             LIMIT 1
             FOR UPDATE`,
@@ -765,13 +764,13 @@ async function sendMessage(args: string[]) {
       )
       // spec §4.2 step 10-11 — flip the agent based on remaining open
       // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
-      // the send only closed ONE claim; if other claims are still 'read'
+      // the send only closed ONE claim; if other claims are still 'received'
       // the agent must remain busy. EXISTS-derive keeps observability
       // (sender-feedback / heartbeat / bot_status) tracking the truth.
       await db.query(
         `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
            status_updated_at = now()
          WHERE agent_id = $1`,
         [agentId],
@@ -1077,7 +1076,7 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
       const upd = await db.query(
         `UPDATE message_queue
             SET status = $1, failed_reason = $2
-          WHERE agent_id = $3 AND message_id = $4 AND status IN ('pending','read')
+          WHERE agent_id = $3 AND message_id = $4 AND status IN ('pending','received')
           RETURNING id`,
         [targetStatus, reason, agentId, messageId],
       )
@@ -1092,11 +1091,11 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
 
       // Issue #278 cycle 1 (auditor BLOCK 1): EXISTS-derive busy/idle
       // from the remaining open claims. fail/skip closes one claim
-      // only; if others are still 'read' the agent stays busy.
+      // only; if others are still 'received' the agent stays busy.
       await db.query(
         `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
            status_updated_at = now()
          WHERE agent_id = $1`,
         [agentId],
@@ -1121,7 +1120,7 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
 
 /**
  * `agent-com reclaim` (spec §4.1, v2.1.0) — manual orphan reclaim. When a bot
- * crashed mid-read (status='read' but never transitioned to replied/failed/skipped)
+ * crashed after receiving a row (status='received' but never transitioned to replied/failed/skipped)
  * and the normal 15-minute daemon heartbeat reclaim has not run yet, an operator
  * can force the release here.
  *
@@ -1146,26 +1145,26 @@ async function reclaimMessages(args: string[]) {
   try {
     await db.query('BEGIN')
     try {
-      // Roll 'read' rows older than 15 minutes back to 'pending'. read_at is
+      // Roll 'received' rows older than 15 minutes back to 'pending'. read_at is
       // cleared so a follow-up next() doesn't think the row is still in-flight.
       const rollback = await db.query(
         `UPDATE message_queue
             SET status = 'pending', read_at = NULL
           WHERE agent_id = $1
-            AND status = 'read'
+            AND status = 'received'
             AND read_at < now() - INTERVAL '15 minutes'
           RETURNING id`,
         [agentId],
       )
 
       // Issue #278 cycle 1 (auditor BLOCK 1): reclaim respects multi
-      // in-flight — after rolling expired 'read' rows back to 'pending',
+      // in-flight — after rolling expired 'received' rows back to 'pending',
       // the agent may still hold OTHER active claims that are not
       // orphaned. EXISTS-derive keeps the right state visible.
       await db.query(
         `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
            status_updated_at = now()
          WHERE agent_id = $1`,
         [agentId],
@@ -1235,7 +1234,7 @@ async function status(args: string[]) {
       // claim from message_queue.
       const claim = await db.query(
         `SELECT id::text AS id FROM message_queue
-            WHERE claimed_by = $1 AND status = 'read'
+            WHERE claimed_by = $1 AND status = 'received'
             ORDER BY claimed_at DESC NULLS LAST
             LIMIT 1`,
         [agentId],

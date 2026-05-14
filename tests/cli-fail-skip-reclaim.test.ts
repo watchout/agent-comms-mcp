@@ -41,8 +41,8 @@ describe('T1 — message_queue failed_reason + failed status (PG + SQLite)', () 
     expect(MIGRATE_PG).toMatch(/CHECK \(status IN \('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'\)\)/)
     expect(MIGRATE_PG).toMatch(/failed_reason TEXT\s+--\s+v2\.1\.0/)
   })
-  test('SQLite CREATE TABLE message_queue carries v2.1.0 CHECK + failed_reason', () => {
-    expect(MIGRATE_SQLITE).toMatch(/CHECK \(status IN \('pending', 'read', 'replied', 'skipped', 'failed'\)\)/)
+  test('SQLite CREATE TABLE message_queue carries the v0.9 8-value CHECK + failed_reason', () => {
+    expect(MIGRATE_SQLITE).toMatch(/CHECK \(status IN \('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'\)\)/)
     expect(MIGRATE_SQLITE).toContain('failed_reason TEXT')
   })
   test('SQLite migration idempotently adds failed_reason to pre-v2.1.0 DBs', () => {

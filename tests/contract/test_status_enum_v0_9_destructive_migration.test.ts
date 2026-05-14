@@ -26,6 +26,7 @@ const UP = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructiv
 const DOWN = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.down.sql')
 
 const DESTRUCTIVE_GATE_ENV = 'AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED'
+const STATE_DAEMON_CONTRACT_LOCK = 'agent-comms-state-daemon-contract-tests'
 
 dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () => {
   let client: Client
@@ -37,6 +38,10 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     assertDestructiveMigrationTestDatabase(DATABASE_URL)
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    // This file temporarily swaps message_queue_status_check back to the
+    // legacy 5-value vocabulary. Serialize with state-daemon contract tests,
+    // which write v0.9 statuses such as `received` against the same CI DB.
+    await client.query(`SELECT pg_advisory_lock(hashtext($1))`, [STATE_DAEMON_CONTRACT_LOCK])
   })
 
   afterAll(async () => {
@@ -66,6 +71,9 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
           CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
       END $$;
     `)
+    try {
+      await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [STATE_DAEMON_CONTRACT_LOCK])
+    } catch {}
     await client.end()
     if (priorDestructiveGate === undefined) {
       delete process.env[DESTRUCTIVE_GATE_ENV]

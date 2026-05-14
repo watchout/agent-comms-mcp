@@ -4,17 +4,17 @@
 // `AGENT_COMMS_CLAIM_TTL_SEC`) to each `message_queue` row when `next`
 // hands it to a bot. If the bot crashes mid-turn — or the LLM exits
 // without calling `send` / `skip` / `fail` — the claim is orphaned and
-// the row stays in `status='read'` forever, blocking re-delivery.
+// the row stays in `status='received'` forever, blocking re-delivery.
 //
 // This sweeper is the structured replacement for the legacy priorId
 // IMPLICIT_ABANDON pattern in the `next` handler (still in place, will
 // be removed in segment 3c once the sweeper is verified live). Every
 // 5 min (env `AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS`) it flips any
-// `status='read'` row whose `claim_expires_at` is in the past to
-// `status='failed', failed_reason='IMPLICIT_ABANDON'`. The partial
+// `status='received'` row whose `claim_expires_at` is in the past back to
+// `status='pending'`. The partial
 // index `idx_mq_expired_claims` (db/migrate.ts, segment 1) already
 // covers `(claim_expires_at) WHERE claimed_by IS NOT NULL AND
-// claim_expires_at IS NOT NULL AND status = 'read'`, so the sweep is
+// claim_expires_at IS NOT NULL AND status = 'received'`, so the sweep is
 // O(expired) regardless of total queue size.
 //
 // Lives in-process inside `server.ts` for the same reasons as
@@ -32,21 +32,20 @@ export interface ClaimTtlOptions {
   reason?: string
   /**
    * PR-0 (Issue #287) cycle 7 axis 1 BLOCK fix: when set, the sweeper
-   * excludes this agent's own claims from the IMPLICIT_ABANDON predicate.
-   * Self-owned expired claims are reclaimed (read → pending) by
+   * excludes this agent's own claims from the fleet-level reclaim predicate.
+   * Self-owned expired claims are reclaimed (received → pending) by
    * `core/inbox-cursor.ts:startSelfReclaimSweeper` instead, which is the
    * authoritative path for own-orphan recovery after Issue #287.
    * Without this exclusion the claim-ttl sweep races the self-reclaim
    * path on startup (claim-ttl `setTimeout(fire, 0)` fires before
-   * self-reclaim) and own claims land in `failed/IMPLICIT_ABANDON`
-   * instead of `pending`, defeating the restart-recovery contract.
+   * self-reclaim), defeating the restart-recovery contract.
    */
   selfAgentId?: string
   /**
    * PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — multi-bot fleet support.
    * In factory mode (`createBotServer(botId)` / `EXPECTED_BOTS`) one
    * process hosts many bots; the single-process claim-TTL sweeper
-   * must exclude *all* of them from the IMPLICIT_ABANDON predicate,
+   * must exclude *all* of them from the fleet-level reclaim predicate,
    * not just the primary `AGENT_ID`. When provided, this list takes
    * precedence over `selfAgentId` (which remains for legacy
    * single-agent callers).
@@ -55,10 +54,10 @@ export interface ClaimTtlOptions {
 }
 
 /**
- * One-shot sweep — flips every `status='read'` row whose
- * `claim_expires_at` is in the past to `status='failed'` with
- * `failed_reason` (default 'IMPLICIT_ABANDON'). Idempotent: rows that
- * have already been flipped no longer match the predicate.
+ * One-shot sweep — flips every `status='received'` row whose
+ * `claim_expires_at` is in the past back to `status='pending'`.
+ * Idempotent: rows that have already been flipped no longer match the
+ * predicate.
  *
  * When `opts.selfAgentId` is set, rows owned by that agent are
  * excluded (handled by self-reclaim, see Issue #287 cycle 7).
@@ -70,16 +69,14 @@ export async function sweepExpiredClaims(
   db: ClaimTtlDb,
   opts: ClaimTtlOptions = {},
 ): Promise<number> {
-  const reason = opts.reason ?? 'IMPLICIT_ABANDON'
   // PR-0 cycle 16 — prefer the multi-bot list when provided. The
   // `selfAgentIds` array is funneled into a single SQL `<> ALL($2)`
   // predicate so all hosted bots are excluded in one pass without
   // serialising per-bot sweeps.
   if (opts.selfAgentIds && opts.selfAgentIds.length > 0) {
     // PR-0 cycle 16 — generate `NOT IN ($2, $3, ...)` dynamically so
-    // both pg and SQLite accept the predicate (`<> ALL($2)` is a
-    // PG-only array form). The placeholder offset starts at $2 since
-    // $1 holds the failure reason.
+    // both pg and SQLite accept the predicate (`<> ALL($1)` is a
+    // PG-only array form).
     const placeholders = opts.selfAgentIds.map((_, i) => `$${i + 1}`).join(', ')
     const result: any = await db.query(
       `UPDATE message_queue
@@ -133,15 +130,15 @@ export function startClaimTtlSweeper(
   const intervalMs = opts.intervalMs ?? 5 * 60_000  // 5 minutes
   const fire = async () => {
     try {
-      const failed = await sweepExpiredClaims(db, opts)
-      if (failed > 0) {
-        process.stderr.write(`agent-comms: claim ttl sweep — ${failed} expired claims flipped to IMPLICIT_ABANDON\n`)
+      const reclaimed = await sweepExpiredClaims(db, opts)
+      if (reclaimed > 0) {
+        process.stderr.write(`agent-comms: claim ttl sweep — ${reclaimed} expired claims returned to pending\n`)
       }
     } catch (err) {
       // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — fail-closed instead
       // of log-and-continue. A continuously-failing claim-TTL sweep
       // lets other agents' truly-abandoned claims pile up in
-      // `status='read'`, which is the very stuck-read regression
+      // `status='received'`, which is the very stuck-received regression
       // this PR is supposed to prevent. Tests inject `onError` to
       // inspect; production exits with code 1 so the supervisor
       // restarts into a clean state.

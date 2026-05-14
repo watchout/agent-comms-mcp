@@ -56,7 +56,7 @@ self-originated post（reply_to なし、watchdog / startup / 定期報告用）
 
 ### next
 
-未処理メッセージを 1 件 pop。Issue #257 — `reply_chain[]` は default で light shape (preview のみ)、`{full: true}` で legacy 復旧（MCP 専用 arg、非対称）。
+未処理メッセージを 1 件 pop し、`message_queue.status` を `pending -> received` に遷移させる唯一の受信 tool。Issue #257 — `reply_chain[]` は default で light shape (preview のみ)、`{full: true}` で legacy 復旧（MCP 専用 arg、非対称）。
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|-----|------|------|
@@ -94,12 +94,21 @@ self-originated post（reply_to なし、watchdog / startup / 定期報告用）
 
 ### inbox
 
-メッセージ再確認・チャンネルフィルタ用。Issue #257 — default で row body 80-char preview + truncation suffix、`{full: true}` で legacy verbatim（MCP 専用 arg）。
+履歴/診断用。新規 queue 受信には使わない。`pending` が残っている場合は本文を返さず `NEXT_REQUIRED` を返し、`next` で claim させる。Issue #257 — default で row body 80-char preview + truncation suffix、`{full: true}` で legacy verbatim（MCP 専用 arg）。
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|-----|------|------|
 | limit | number | - | 取得件数（default: 20） |
 | full | boolean | - | `true` で row body 全文 (default: `false` = 80-char preview + `… [truncated, call expand_msg with id={id}]` suffix) |
+
+**Pending guard:**
+```json
+{
+  "error": "NEXT_REQUIRED",
+  "pending": 1,
+  "message": "Pending queue items are hidden from inbox. Call next to claim one message."
+}
+```
 
 **Response shape (default light):**
 ```json
@@ -231,7 +240,7 @@ Discord API から直接履歴取得（DB 補完用）。
 
 | # | 入力 | 出力 | 説明 |
 |---|------|------|------|
-| E10 | `inbox({ limit: 10 })` | `{ count, messages: [{ ..., preview }] }` | default light、80-char preview + truncation suffix |
+| E10 | `inbox({ limit: 10 })` | `{ count, messages: [{ ..., preview }] }` or `NEXT_REQUIRED` | pending がない場合のみ履歴を返す |
 | E11 | `inbox({ full: true })` | `{ count, messages: [{ ..., content }] }` | legacy verbatim |
 | E12 | `next({})` | reply_chain[] に preview のみ | default light |
 | E13 | `next({ full: true })` | reply_chain[] に content + preview | legacy 復旧 |
@@ -334,20 +343,28 @@ Feature: メッセージ履歴取得（history）
 ### inbox / next / expand_msg
 
 ```gherkin
-Feature: 未読メッセージ確認 (inbox / next) — Issue #257 light/full
+Feature: 受信は next のみ、inbox は履歴/診断 — Issue #257 light/full
 
   Scenario: inbox default light
-    Given "cto" 宛に1件の row body 200-char メッセージがある
+    Given "cto" 宛に pending queue がない
+    And "cto" 宛に1件の row body 200-char メッセージがある
     When "cto" が inbox(limit=10) を実行
     Then 1件のメッセージが返される
     And `messages[0].preview` が 80-char + " … [truncated, call expand_msg with id=<id>]" suffix である
     And `messages[0].content` は undefined である
 
   Scenario: inbox full opt-in (legacy)
-    Given "cto" 宛に1件のメッセージがある
+    Given "cto" 宛に pending queue がない
+    And "cto" 宛に1件のメッセージがある
     When "cto" が inbox(full=true) を実行
     Then `messages[0].content` に full body が含まれる
     And preview field は undefined である
+
+  Scenario: pending がある場合 inbox は本文を返さない
+    Given "cto" 宛に pending queue が1件ある
+    When "cto" が inbox(limit=10) を実行
+    Then `NEXT_REQUIRED` が返る
+    And pending row body は返されない
 
   Scenario: next reply_chain default light
     Given seed message "m3" の reply_to chain が m1 ← m2 ← m3

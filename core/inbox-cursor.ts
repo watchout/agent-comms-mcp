@@ -128,7 +128,7 @@ export interface ReclaimDb {
 }
 
 /**
- * Issue #287 — startup self-reclaim. Rolls THIS agent's `status='read'`
+ * Issue #287 — startup self-reclaim. Rolls THIS agent's `status='received'`
  * rows back to `pending` so the new session re-receives them via the
  * normal `next` path. Idempotent.
  *
@@ -141,15 +141,16 @@ export interface ReclaimDb {
  *
  * Conflict with `core/claim-ttl.ts` `sweepExpiredClaims` is resolved
  * by predicate ordering: self-reclaim runs first (startup + 60s
- * periodic) and flips own expired/null-TTL rows from `read` → `pending`,
- * after which the claim-ttl sweeper's predicate (`status='read' AND
+ * periodic) and flips own expired/null-TTL rows from `received` → `pending`,
+ * after which the claim-ttl sweeper's predicate (`status='received' AND
  * claim_expires_at < now()`) no longer matches them. Other agents'
- * truly-abandoned claims still flow through claim-ttl → `failed`.
+ * truly-abandoned claims still flow through claim-ttl → `pending` for
+ * redelivery.
  */
 /**
  * PR-0 cycle 8 axis 3 BLOCK fix — fail-closed on DB errors. The cycle
  * 7 implementation swallowed any error and returned 0, leaving
- * orphaned own claims permanently in `status='read'` (claim-ttl
+ * orphaned own claims permanently in `status='received'` (claim-ttl
  * sweeper excludes self via `selfAgentId`, so nothing else recovers
  * them). Per CTO directive 2026-05-01 + governance-flow.md fail-closed
  * principle, the function now throws; the server startup caller
@@ -190,7 +191,7 @@ export async function reclaimSelfOrphanedClaims(
 /**
  * PR-0 cycle 7 axis 2/3 BLOCK fix — derive `agents.status` from the
  * agent's open-claim set. Idempotent: callers should invoke after any
- * status='read' transition (claim or reclaim).
+ * status='received' transition (claim or reclaim).
  *
  * PR-0 cycle 14 axis 1/2/3/5/6 BLOCK fix — try/catch removed.
  * `reclaimSelfOrphanedClaims` and the periodic sweepers must surface
