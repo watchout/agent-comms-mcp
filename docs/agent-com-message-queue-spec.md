@@ -519,10 +519,10 @@ heartbeat:
 ```
 
 - daemon (inbound / outbound) と bot runner (LLM 処理) は独立プロセス
-- daemon が message_queue INSERT → wake-daemon (`bin/wake-daemon.ts`) が polling 検出 → tmux send-keys で対象 bot の LLM session に prompt 注入 → bot が `next` を能動呼出
+- daemon が message_queue INSERT → state-daemon (`bin/state-daemon.ts`) が polling 検出 → tmux send-keys で対象 bot の LLM session に prompt 注入 → bot が `next` を能動呼出
 - LLM は bot runner から呼ばれる (MCP session 常駐不要、§13.5.1 primary 経路)
-- wake-daemon (ADR-050、2026-05-05) は de jure primary。bot 側 LLM (Claude Code / Codex / Gemini) が tmux session で prompt を受領、`next` tool を呼ぶ
-- wake-daemon 不達 / bot 不通時は polling fallback (bot LLM が定期的に `next` を呼ぶ judgement) で最終的にメッセージ取得
+- state-daemon (ADR-050、2026-05-05) は de jure primary。bot 側 LLM (Claude Code / Codex / Gemini) が tmux session で prompt を受領、`next` tool を呼ぶ
+- state-daemon 不達 / bot 不通時は polling fallback (bot LLM が定期的に `next` を呼ぶ judgement) で最終的にメッセージ取得
 
 #### end-to-end flow
 
@@ -640,7 +640,7 @@ bot runner は chat UI に依存しない:
 ```
 Chat UI → adapter → daemon (inbound) → message_queue
                                               ↓
-                                        wake-daemon (polling → tmux send-keys)
+                                        state-daemon (polling → tmux send-keys)
                                               ↓
                                         bot LLM session (next → LLM → send)
                                               ↓
@@ -717,7 +717,7 @@ receiverClient.on("messageCreate", async (msg) => {
   // 4. push対象のmessage_queue INSERT
   for (const agentId of result.pushTargets) {
     await db.insertQueue(agentId, unified.id, payload); // Reply Chain Context (§18.1) は next 取得時に付与
-    // wake-daemon (ADR-050、§13.5.1 primary) が message_queue INSERT を polling 検出し
+    // state-daemon (ADR-050、§13.5.1 primary) が message_queue INSERT を polling 検出し
     // tmux send-keys で対象 bot を wake する。inbound handler 自身は signal しない。
     // 送信者へのフィードバック（§8）
     await notifySenderOfDeliveryStatus(unified.author_id, agentId, unified.id);
@@ -1203,11 +1203,11 @@ chmod 600 .env
 
 ## 13. PostgreSQL / SQLite 対応
 
-### 13.1 wake-daemon (primary delivery mechanism)
+### 13.1 state-daemon (primary delivery mechanism)
 
-ADR-050 (2026-05-05、CTO ratify + CEO acceptance) により、メッセージ配信の primary は **wake-daemon** (`bin/wake-daemon.ts`) に統一される。DB vendor 固有の signal 機構 (pg_notify / LISTEN、SQLite polling、in-process SIGUSR1 等) は使わない。
+ADR-050 (2026-05-05、CTO ratify + CEO acceptance) により、メッセージ配信の primary は **state-daemon** (`bin/state-daemon.ts`) に統一される。DB vendor 固有の signal 機構 (pg_notify / LISTEN、SQLite polling、in-process SIGUSR1 等) は使わない。
 
-- wake-daemon は外部プロセスとして常駐し、`message_queue` を polling
+- state-daemon は外部プロセスとして常駐し、`message_queue` を polling
 - 新規 row 検出時、対象 bot の tmux session に `tmux send-keys` で prompt を注入
 - bot 側 (Claude Code / Codex / Gemini など LLM agent) は prompt を受領して `next` tool を能動呼出
 - LLM agent 環境向け、PG / SQLite いずれの backend でも同一動作 (DB 機能に非依存)
@@ -1221,7 +1221,7 @@ ADR-050 (2026-05-05、CTO ratify + CEO acceptance) により、メッセージ�
   └──────────────────┘
        ▲ polling (poll interval: §13.5)
        │
-[wake-daemon]
+[state-daemon]
        │
        ▼ tmux send-keys "<wake prompt>"
   ┌──────────────────────────────┐
@@ -1301,24 +1301,24 @@ bot数         推奨間隔                     負荷
   環境変数で調整するだけ。コード変更不要
 
 ~100 bot以上:
-  wake-daemon (§13.1) の polling 間隔 + bot 側 polling fallback の interval を環境に合わせて調整
-  PostgreSQL 環境では Phase D で wake-daemon を pg_notify driven 化する選択肢あり (将来 ADR、本 spec scope 外)
-  SQLite 環境では wake-daemon + bot LLM 側 polling fallback で十分
+  state-daemon (§13.1) の polling 間隔 + bot 側 polling fallback の interval を環境に合わせて調整
+  PostgreSQL 環境では Phase D で state-daemon を pg_notify driven 化する選択肢あり (将来 ADR、本 spec scope 外)
+  SQLite 環境では state-daemon + bot LLM 側 polling fallback で十分
 ```
 
 OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分。
 
 ### 13.5.1 メッセージ配信メカニズム
 
-メッセージ配信は 3 層構造。**primary (wake-daemon) → secondary (MCP notification) → fallback (polling)** の順に作用する。ADR-050 (2026-05-05) により、primary は wake-daemon (tmux send-keys) に整合化された。
+メッセージ配信は 3 層構造。**primary (state-daemon) → secondary (MCP notification) → fallback (polling)** の順に作用する。ADR-050 (2026-05-05) により、primary は state-daemon (tmux send-keys) に整合化された。
 
-**Primary: wake-daemon tmux send-keys (§13.1)**
+**Primary: state-daemon tmux send-keys (§13.1)**
 
-- 外部プロセス `bin/wake-daemon.ts` が `message_queue` を polling し、新規 row 検出時に対象 bot の tmux session に `tmux send-keys` で prompt を注入
+- 外部プロセス `bin/state-daemon.ts` が `message_queue` を polling し、新規 row 検出時に対象 bot の tmux session に `tmux send-keys` で prompt を注入
 - bot 側 LLM agent (Claude Code / Codex / Gemini) は prompt を受領して `next` tool を能動呼出
 - DB 機能に非依存、PG / SQLite 共通、LLM-agnostic
-- wake-daemon 不通 / tmux session 不在時は non-fatal (次層にフォールバック)
-- wake-daemon の HA / supervisor は ADR-051 で別途扱う
+- state-daemon 不通 / tmux session 不在時は non-fatal (次層にフォールバック)
+- state-daemon の HA / supervisor は ADR-051 で別途扱う
 
 **Secondary: MCP notification (MCP client 対応時の加速)**
 
@@ -1326,16 +1326,16 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 - method: `notifications/message/pending` / params: `{ waiting: number }`
 - PollingDriver の setInterval (`AGENT_COM_POLL_INTERVAL_MS`, default 3s) で pending 検出時に毎回送信
 - MCP client がコンテキスト注入をサポートする場合、LLM が `next` tool を呼ぶトリガーとして機能 (Claude Code / Codex / Gemini / Cursor 全対応の MCP protocol 標準機能)
-- 現時点では Claude Code 未対応 (§13.5 既知制約)。対応クライアントで wake-daemon を補助する位置づけ
+- 現時点では Claude Code 未対応 (§13.5 既知制約)。対応クライアントで state-daemon を補助する位置づけ
 - pending 0 のときは送信しない。送信失敗時 (transport 断、client 未対応等) も polling は継続 (non-fatal)
 
 **Fallback: Polling (bot LLM judgement)**
 
-- bot 側 LLM agent が wake-daemon prompt を受領しなくても、定期的に `next` tool を能動呼出 (LLM 内部 judgement、prompt の指示等)
-- wake-daemon / notification が全て失敗しても最終的にメッセージ取得
+- bot 側 LLM agent が state-daemon prompt を受領しなくても、定期的に `next` tool を能動呼出 (LLM 内部 judgement、prompt の指示等)
+- state-daemon / notification が全て失敗しても最終的にメッセージ取得
 - `AGENT_COM_POLL_INTERVAL_MS` は polling driver 側の pre-fetch 間隔 (§13.5 参照)
 
-§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分は secondary として実装済み (message 本体は依然 `next` pull 一択、spec §4.1)。**primary は wake-daemon** で LLM agent (Claude Code / Codex / Gemini) 環境向けの配信を実現する。
+§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分は secondary として実装済み (message 本体は依然 `next` pull 一択、spec §4.1)。**primary は state-daemon** で LLM agent (Claude Code / Codex / Gemini) 環境向けの配信を実現する。
 
 ### 13.6 Presence Client
 
@@ -1358,7 +1358,7 @@ client.login(process.env.DISCORD_TOKEN);
 | # | 条件 | 検証方法 |
 |---|------|----------|
 | 1 | npx agent-comms-mcp で全機能起動 (run-bot subcommand 含む) | CI: fresh env → init → run-bot → message 送受信 |
-| 2 | SQLite default (PostgreSQL 基本機能動作) | CI: SQLite で全テスト pass。PG 固有の wake mechanism (pg_notify driven wake-daemon) は Phase D |
+| 2 | SQLite default (PostgreSQL 基本機能動作) | CI: SQLite で全テスト pass。PG 固有の wake mechanism (pg_notify driven state-daemon) は Phase D |
 | 3 | 1 daemon で inbound + outbound + heartbeat 完結 | test: daemon → Discord 送受信 → run-bot.sh が LLM で返信 |
 | 4 | routing 100% deterministic (LLM 判断ゼロ) | test: LLM 未接続で全 routing 動作 |
 | 5 | 外部ファイル依存ゼロ | grep: access.json/plugin 参照なし |
@@ -1608,10 +1608,10 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 ❌ IS_RECEIVER_MODE — Phase C I5 で廃止
 ❌ Push polling (agent_messages 直接読取 + MCP notification push) — message_queue ベースの next pull モデルに統一
 ❌ notifications/claude/channel (Claude Code 固有 push) — LLM-agnostic 化
-❌ PgMessageBus (pg_notify / LISTEN 依存) — wake-daemon (§13.1) に統一 (ADR-050)
-❌ SqliteMessageBus (テーブル変更 polling 依存) — wake-daemon (§13.1) に統一 (ADR-050)
-❌ in-process signal bus 抽象 (PID file + SIGUSR1) — wake-daemon (§13.1) に統一 (ADR-050、2026-05-05)
-❌ restart-bot.sh の LLM 初期指示 (tmux send-keys 起動 prompt) — wake-daemon (§13.5.1 primary) で代替、初期指示送信は不要
+❌ PgMessageBus (pg_notify / LISTEN 依存) — state-daemon (§13.1) に統一 (ADR-050)
+❌ SqliteMessageBus (テーブル変更 polling 依存) — state-daemon (§13.1) に統一 (ADR-050)
+❌ in-process signal bus 抽象 (PID file + SIGUSR1) — state-daemon (§13.1) に統一 (ADR-050、2026-05-05)
+❌ restart-bot.sh の LLM 初期指示 (tmux send-keys 起動 prompt) — state-daemon (§13.5.1 primary) で代替、初期指示送信は不要
 ```
 
 ---
@@ -1620,7 +1620,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
-| 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「wake-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し wake-daemon (`bin/wake-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を wake-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |
+| 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「state-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し state-daemon (`bin/state-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を state-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |
 | 2026-04-19 | v2.1.0: §5.3-5.4 run-bot.sh 安定動作要件追加 (end-to-end flow / signal coalescing / graceful shutdown / orphan reclaim / retry+dead-letter / truncate / loop 防止 / consumer 排他 / heartbeat / LLM prompt / subcommand 化 / migration 計画)。§4.1 暗黙 skip 廃止 → fail CLI 明示遷移。§3.2 message_queue に failed_reason + status CHECK 拡張。§4.2 send step 9 を fail/skip 3 分岐に。§8.1 状態遷移表に fail/skip/reclaim 追加。§11 エラーコードに failed_reason 標準値追加。§13.5 polling driver 記述整理。§14 Phase C 完了条件に v2.1.0 テストケース追加。外部 AI 3 round review 反映。 |
 | 2026-04-19 | §13.1 / §13.5.1 / §5.3 / §20 更新。in-process signal bus 抽象を統一実装に整理 (後に ADR-050 で削除、本行は当時の暫定状態の歴史記録)。§13.5.1 を「メッセージ配信メカニズム」に改題、primary=signal / secondary=MCP notification / fallback=polling の 3 層構造化。§5.3 に `run-bot.sh` event-driven bot runner 記述追加、§20 に PgMessageBus / SqliteMessageBus / restart-bot.sh LLM 初期指示 廃止追加。docs-only (実装は後続 PR)。 |
 | 2026-04-19 | §13.5.1 Pending Message Notification (MCP 標準) 追加。PollingDriver が pending 検出時に `notifications/message/pending` を送信し、LLM client の `next` トリガーとして機能。件数シグナルのみ (本体は依然 `next` pull)、失敗は non-fatal で polling 継続。 |

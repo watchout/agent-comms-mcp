@@ -207,7 +207,7 @@ v0.2 起草時 (本日早朝) に挙げた追加 incident:
 
 1. **取りこぼし耐性**: bot busy 中の wake 取りこぼしから回復 (v0.1 継承)
 2. **冪等**: 重複 wake / 重複 reset で副作用なし (v0.1 継承)
-3. **single daemon 統合**: wake-daemon 完全置換、process / connection sprawl 回避 (v0.2 継承)
+3. **single daemon 統合**: state-daemon 完全置換、process / connection sprawl 回避 (v0.2 継承)
 4. **「出てから制御」**: abnormal activity を metric + alert で検出、operator が manual で kill / skip (v0.3 新規)
 5. **safety net**: heartbeat-claim refresh / dead bot auto-restart / subprocess pool 動的拡張 / launchd 自動再起動 (v0.3 新規)
 6. **observable**: action 結果を log + metric で追跡 (v0.1 継承)
@@ -219,7 +219,7 @@ v0.2 起草時 (本日早朝) に挙げた追加 incident:
 - `message_queue.status='pending'` を hook 起点とした **state machine driven dispatch** (= 単純 wake)
 - pg_notify (即時 trigger) + cron 30s (sweep / fallback) の hybrid
 - TUI bot の wake = tmux send-keys (`agents.runtime` 既存 column で abstract、新規追加なし)
-- 既存 wake-daemon の機能を完全包含、置換
+- 既存 state-daemon の機能を完全包含、置換
 - claim refresh (heartbeat 30s 毎 UPDATE)、補強 #1
 - subprocess pool 動的拡張、補強 #2
 - launchd plist supervisor、補強 #3
@@ -440,7 +440,7 @@ setInterval(checkBotLiveness, BOT_LIVENESS_CHECK_INTERVAL_MS);  // default 30_00
 
 ### 6.1 配置
 
-新規 daemon `bin/state-daemon.ts` が **wake-daemon を完全置換**。
+新規 daemon `bin/state-daemon.ts` が **state-daemon を完全置換**。
 v0.1 の「co-locate / 別 process」議論は閉じ、**1 central daemon 統合**。
 
 ### 6.2 trigger 実装
@@ -492,7 +492,7 @@ async function wakeBot(agentId: string): Promise<void> {
 
 | 既存 | v0.3 で吸収 |
 |---|---|
-| `bin/wake-daemon.ts` | **削除**、state-daemon に吸収 |
+| `bin/state-daemon.ts` | **削除**、state-daemon に吸収 |
 | `core/inbox-cursor.ts` (self-reclaim) | 受動側残存、state-daemon は能動側で重複呼び出し許容 (idempotent) |
 | `core/claim-ttl.ts` (TTL sweeper) | state-daemon の cron sweep + 補強 #1 heartbeat に統合 |
 | `adapters/inbound-receiver.ts` (bus.signal) | 既存 INSERT 後 pg_notify をトリガとして再利用、変更なし |
@@ -722,9 +722,9 @@ v0.2 の T2-T7 (prevention) / T18 (dryRun) は v0.3 で削除済。
 | 1 | **DB schema migration v0.9**: `message_queue.status` CHECK 制約を新 enum (`pending` / `received` / `in_progress` / `done` / `replied`) に変更、`failed_reason` column drop (or null 化)、`done_at` 追加、`last_wake_attempt_at` / `last_heartbeat_at` 追加、pg_notify trigger 更新。**既存行 conversion (12.3 参照)**。bot 情報は既存 `agents` table 利用 (新規 column 追加なし) | `route:ceo-approval` |
 | 2 | **agent-comms tool impl 修正**: `mcp__agent-comms__processing` / `done` 新規追加、`next` の claim 結果 status を `received` に変更 (旧 `read` 代替)、`fail` / `skip` tool を **deprecate** (内部 retry loop で透明化)。`db/migrate.ts:246` / `server.ts:1709, 1842` の旧 enum literal を新 enum に sweep | auditor pre-impl gate (7 項目) |
 | 3 | state-daemon impl (6-section dispatch 経由 agent-com-dev)、unit + contract test (§11.1 T27-T41 + §11.2 legacy 全 pass) | auditor pre-impl gate |
-| 4 | dev fleet で **wake-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で wake-daemon 同等動作確認 |
+| 4 | dev fleet で **state-daemon と並行稼働 1 時間** (state-daemon は wake 抑制 mode、log のみ) | log 比較で state-daemon 同等動作確認 |
 | 5 | wake 抑制 mode 解除、1 bot ずつ rollout (5 bot づつ wave)、補強 #1/#2/#5 を観測 | metric / log 確認 |
-| 6 | wake-daemon 停止、state-daemon 単独運用、launchd 切替 (補強 #3)、**legacy fixture (§11.2) 削除 + DB 上の旧 enum literal 完全消滅 verify** | abnormal activity / restart loop metric alert 連携 |
+| 6 | state-daemon 停止、state-daemon 単独運用、launchd 切替 (補強 #3)、**legacy fixture (§11.2) 削除 + DB 上の旧 enum literal 完全消滅 verify** | abnormal activity / restart loop metric alert 連携 |
 | 7 | SIG runtime 全廃 (`agents.runtime` 既存 column を TUI のみに収束、adf-lead / dev-001 TUI 化完了後) | CEO 別途承認 |
 
 ### 12.2 impl 修正 scope (本 spec merge → 並行 impl PR、route:ceo-approval)
@@ -807,7 +807,7 @@ v0.3 の O6 (bot_registry txt vs DB) は v0.4 で削除 (CTO `70050419` 検証�
 - Issue #323
 - 本日 議論 chain: CEO `2c8c0428` / CEO `7670b33f` / CEO `481b8fa0` / CEO `e4bfe41c` (v0.3 簡素化 greenlight) / CTO `446d5c4d` / CTO `f0916e13` / CTO `cad7dbd6` / CTO `720cf233` / CTO `1d402109` (v0.3 directive) / CTO `907b7e9b`
 - spec `docs/agent-com-message-queue-spec.md` §13.5.1 (delivery layer)
-- 関連 component: `bin/wake-daemon.ts` (廃止予定), `core/inbox-cursor.ts`, `core/claim-ttl.ts`, `adapters/inbound-receiver.ts`
+- 関連 component: `bin/state-daemon.ts` (廃止予定), `core/inbox-cursor.ts`, `core/claim-ttl.ts`, `adapters/inbound-receiver.ts`
 - 関連 incident: webb-dev 27008、本日 B8 arc↔adf-lead bounce、本日 ARC reply_chain misread (msg `c9c6655c`)
 - 関連 PR: #318, #325, #326
 - 関連 doc: `docs/B8-loop-detection-spec-amendment-v0.md`
