@@ -25,7 +25,27 @@ const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres
 
 const configPath = join(dirname(new URL(import.meta.url).pathname), '..', 'config.json')
 
-function resolveDatabaseUrl(): string {
+// Production migrate() precedence: config.json > DATABASE_URL (preserved from
+// pre-PR-370 behavior). Flipping this affects every fleet bootstrap whose env
+// + config disagree; PR #370 auditor cycle 1 flagged the flip as axis 3/4/6
+// FAIL. Destructive helper paths below use a separate env-first resolver so
+// the AGENT_COM_TEST_DATABASE_URL fixture can isolate tests without touching
+// migrate() semantics.
+function resolveProductionDatabaseUrl(): string {
+  let databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+      databaseUrl = config.database_url ?? databaseUrl
+    } catch {}
+  }
+  return databaseUrl
+}
+
+// Call-time env-first resolver for destructive test paths (applyUpMigrationFile
+// / applyDownMigration). Used so tests can point at AGENT_COM_TEST_DATABASE_URL
+// (or DATABASE_URL set per-invocation) without being overridden by config.json.
+function resolveDestructiveMigrationDatabaseUrl(): string {
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL
 
   let databaseUrl = 'postgresql://localhost/agent_comms'
@@ -40,7 +60,7 @@ function resolveDatabaseUrl(): string {
 
 async function migrate() {
   console.log(destructiveGateLogLine())
-  const client = new Client({ connectionString: resolveDatabaseUrl() })
+  const client = new Client({ connectionString: resolveProductionDatabaseUrl() })
   await client.connect()
 
   await gatedQuery(client, `
@@ -658,7 +678,7 @@ async function migrate() {
 // is informational + operator-driven (CTO directive, msg `167415dc`).
 export async function applyDownMigration(filePath: string): Promise<void> {
   const sql = readFileSync(filePath, 'utf-8')
-  const client = new Client({ connectionString: resolveDatabaseUrl() })
+  const client = new Client({ connectionString: resolveDestructiveMigrationDatabaseUrl() })
   await client.connect()
   try {
     await gatedQuery(client, sql)
@@ -670,7 +690,7 @@ export async function applyDownMigration(filePath: string): Promise<void> {
 
 export async function applyUpMigrationFile(filePath: string): Promise<void> {
   const sql = readFileSync(filePath, 'utf-8')
-  const client = new Client({ connectionString: resolveDatabaseUrl() })
+  const client = new Client({ connectionString: resolveDestructiveMigrationDatabaseUrl() })
   await client.connect()
   try {
     await gatedQuery(client, sql)
