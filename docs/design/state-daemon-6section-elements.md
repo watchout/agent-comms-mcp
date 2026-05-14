@@ -121,7 +121,7 @@ spec 章を section 番号で参照させる:
 - **F3**: `message_queue.status='skipped'` enum 値を追加しないこと (v0.2 から削除済)
 - **F4**: ARC が PR branch に直接 commit / push しないこと (memory `feedback_arc_no_direct_commit`)、agent-com-dev が impl
 - **F5** (v0.8 cycle 2 改訂): non-TUI runtime (SIG / 不明 runtime) に対する wake は **`metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })` + return** で実装すること。error throw 禁止 + warn log 禁止 + abnormal-activity counter trip 禁止 (R9 ordering: runtime gate 後 = non-TUI 経路では recordDispatch 呼ばない)。理由: PR #333 commit `ddb1688` 実 impl が production 整合解 [文献確認: git show ddb1688:core/state-daemon/index.ts line 437-453]。cycle 1 の「warn log」記述は ARC 起草時の impl 未 verify による誤記述、cycle 2 で訂正。
-- **F6**: 既存 `bin/wake-daemon.ts` を残したまま state-daemon を起動しないこと。phase 5 で wake-daemon を停止、それまでは並行稼働 (phase 3-4) でも **重複 wake は許容、prevention で抑制しない** (idempotent + duplicate suppression で吸収)
+- **F6**: legacy `bin/wake-daemon.ts` を残したまま state-daemon を起動しないこと。phase 5 で legacy wake-daemon を停止、それまでは並行稼働 (phase 3-4) でも **重複 wake は許容、prevention で抑制しない** (idempotent + duplicate suppression で吸収)
 - **F7**: heartbeat の TTL 延長を `claim_expires_at <= now()` の row に適用しないこと (既 expired は self-reclaim 経路で処理)
 - **F8**: bot restart loop 上限 (1h/3 回) を超えて restart を継続しないこと (operator/CEO 介入なしの auto recovery loop は禁止)
 - **F9**: spec §13.2 CEO 採択待ち項目 (O2/O3/O5/O6/O7/O8) を CEO 確定前に default 値で hard-code しないこと、config 経由で上書き可能に

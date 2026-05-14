@@ -1,5 +1,11 @@
 # ADR-050: UnixSignalBus 削除 + spec §13.5.1 honesty audit
 
+## Terminology
+
+- **legacy_name**: `wake-daemon` (deprecated, history 文脈で残存) — 旧 daemon、`bin/wake-daemon.ts`、ADR 起草時の de facto primary 観察対象 (ps PID 6804 等)。本 ADR / migration note / changelog の history 文脈ではこの名称で参照する。
+- **current_name**: `state-daemon` (production primary、SSOT) — 現行 daemon、`bin/state-daemon.ts`、launchd label `com.agent-comms.state-daemon`。本 SSOT は本名で参照、forward-looking / 新規記述 / production 運用 context はこちら。
+- **migration relation**: legacy `wake-daemon` → current `state-daemon` (rename only、機能等価、ADR-050 ratify 後 launchd 改名)。`bin/wake-daemon.ts` は production 稼働残存のため別 PR scope (ARC `a0e0d4d7` rename リスク per)。
+
 > **Status**: Accepted — ratify chain complete
 > **Author**: ARC (iyasaka-arc)
 > **Date**: 2026-05-05 (proposed) / 2026-05-14 (accepted)
@@ -10,7 +16,7 @@
 > **CEO directive (early approval)**: msg `97dd47e6` (「C」全 ADR 並走承認、[文献確認: 2026-05-04 agent-comms channel]), msg `c40b8dc9` (「進めて」初期承認、[文献確認: 同 channel])
 > **Predecessors**: なし
 > **Successors**: ADR-052 (DB-observable queue reaper、本 ADR ratify を前提とする — 2026-05-14 時点 ratify 完了、後続着手可)
-> **Cross-cutting**: ADR-051 (wake-daemon HA / supervisor、本 ADR で wake-daemon を de jure primary 化した後に着手)
+> **Cross-cutting**: ADR-051 (state-daemon HA / supervisor、本 ADR で state-daemon を de jure primary 化した後に着手)
 
 ## Context
 
@@ -78,7 +84,7 @@ spec ownership 第一優先 [文献確認: msg `1d03f8bd` 2026-05-04 agent-comms
 
 ## Decision
 
-我々は **UnixSignalBus 関連 code を完全削除し、spec §13.5.1 を実態 (wake-daemon
+我々は **UnixSignalBus 関連 code を完全削除し、spec §13.5.1 を実態 (state-daemon
 primary) に整合させる** ことを採用する。
 
 ### Code 削除 scope [文献確認: 上記 Fixture A/B + 過去 ADR-041 routing port 構造]
@@ -104,7 +110,7 @@ fallback:   Polling (30s timeout)
 へ atomic 適用]:
 
 ```
-primary:    wake-daemon tmux send-keys (bin/wake-daemon.ts)
+primary:    state-daemon tmux send-keys (bin/state-daemon.ts)
             - polling DB で pending 検出
             - tmux send-keys で対象 bot に prompt 注入
             - bot 側は LLM agent (Claude Code / Codex / Gemini)、
@@ -113,7 +119,7 @@ secondary:  MCP notification (notifications/message/pending)
             - MCP client がコンテキスト注入対応時の加速
             - 現時点 Claude Code 未対応 (§13.5 既知制約維持)
 fallback:   Polling (next 能動呼出 by bot LLM judgement)
-            - bot は wake-daemon prompt を受領しなくても
+            - bot は state-daemon prompt を受領しなくても
               定期的に next を呼ぶ (LLM 内部 judgement)
             - signal/notification が全て失敗しても最終的に message 取得
 ```
@@ -239,13 +245,19 @@ expected:
   - log に PID file 不在 warning なし
 ```
 
-### §6c: spec §13.5.1 の primary が wake-daemon
+### §6c: spec §13.5.1 の primary が state-daemon
 
 ```bash
-$ grep -A 3 'primary:' docs/agent-com-message-queue-spec.md | head -5
-expected: "primary: wake-daemon tmux send-keys" 等の表記
+$ grep -A 3 'Primary:' docs/agent-com-message-queue-spec.md | head -5
+expected: "Primary: state-daemon tmux send-keys" 等の表記
        (UnixSignalBus 表記が残っていない)
 ```
+
+#### Migration history
+
+- 2026-05-14 (本 ADR ratify 後): rename launchd label `com.agent-comms.wake-daemon` → `com.agent-comms.state-daemon` (production primary 改称、機能等価)
+- 本 §6c は **current primary = `state-daemon`** を assertion 値として確定。legacy 名 `wake-daemon` は本 ADR の Migration history / Changelog / Fixture history context でのみ参照される (Terminology rule per、ADR top §Terminology 節参照)。
+- spec §13.5.1 L1315 + ADR-050 §6c + `tests/contract/test_adr050_spec_section_13_5_1.test.ts` の triangulation で current SSOT は 3 者 `state-daemon` 一致。
 
 ### §6d: wake-daemon stderr legacy-token absence (regression-detection invariant)
 

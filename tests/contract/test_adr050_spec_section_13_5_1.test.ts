@@ -1,8 +1,13 @@
 /**
- * ADR-050 fixture (6c) — spec §13.5.1 normative statement is wake-daemon.
+ * ADR-050 fixture (6c) — spec §13.5.1 normative statement is state-daemon
+ * (current SSOT primary after the 2026-05-14 rename `wake-daemon` →
+ * `state-daemon`). This assertion targets the rename-後 current SSOT name,
+ * not the legacy historical name. Legacy `wake-daemon` references survive
+ * only in ADR-050 Terminology / Migration history / Changelog / Fixture
+ * history context (see ADR-050 top §Terminology).
  *
  * Reads docs/agent-com-message-queue-spec.md and asserts:
- *   - §13.5.1 declares "Primary: wake-daemon" (with tmux send-keys reference)
+ *   - §13.5.1 declares "Primary: state-daemon" (with tmux send-keys reference)
  *   - the normative section (everything before "## 改訂履歴") contains 0
  *     occurrences of the legacy API tokens (UnixSignalBus / waitForSignal /
  *     bus.signal). The Changelog history section retains the original
@@ -29,8 +34,8 @@ function normativeSection(spec: string): string {
   return spec.slice(0, idx)
 }
 
-describe('ADR-050 §6c — spec §13.5.1 primary is wake-daemon', () => {
-  test('§13.5.1 declares Primary: wake-daemon (tmux send-keys)', () => {
+describe('ADR-050 §6c — spec §13.5.1 primary is state-daemon (current SSOT after rename)', () => {
+  test('§13.5.1 declares Primary: state-daemon (tmux send-keys)', () => {
     const spec = loadSpec()
     // Find the section header
     const header = spec.indexOf('### 13.5.1 メッセージ配信メカニズム')
@@ -40,7 +45,7 @@ describe('ADR-050 §6c — spec §13.5.1 primary is wake-daemon', () => {
     const nextSection = tail.search(/\n##+ /m)
     const section = nextSection > 0 ? tail.slice(0, nextSection) : tail
 
-    expect(section).toMatch(/Primary:\s*wake-daemon/)
+    expect(section).toMatch(/Primary:\s*state-daemon/)
     expect(section).toMatch(/tmux send-keys/)
     expect(section).not.toMatch(/UnixSignalBus/)
     expect(section).not.toMatch(/waitForSignal/)
