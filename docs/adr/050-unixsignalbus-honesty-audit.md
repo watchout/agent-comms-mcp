@@ -245,13 +245,19 @@ expected:
   - log に PID file 不在 warning なし
 ```
 
-### §6c: spec §13.5.1 の primary が wake-daemon
+### §6c: spec §13.5.1 の primary が state-daemon
 
 ```bash
-$ grep -A 3 'primary:' docs/agent-com-message-queue-spec.md | head -5
-expected: "primary: wake-daemon tmux send-keys" 等の表記
+$ grep -A 3 'Primary:' docs/agent-com-message-queue-spec.md | head -5
+expected: "Primary: state-daemon tmux send-keys" 等の表記
        (UnixSignalBus 表記が残っていない)
 ```
+
+#### Migration history
+
+- 2026-05-14 (本 ADR ratify 後): rename launchd label `com.agent-comms.wake-daemon` → `com.agent-comms.state-daemon` (production primary 改称、機能等価)
+- 本 §6c は **current primary = `state-daemon`** を assertion 値として確定。legacy 名 `wake-daemon` は本 ADR の Migration history / Changelog / Fixture history context でのみ参照される (Terminology rule per、ADR top §Terminology 節参照)。
+- spec §13.5.1 L1315 + ADR-050 §6c + `tests/contract/test_adr050_spec_section_13_5_1.test.ts` の triangulation で current SSOT は 3 者 `state-daemon` 一致。
 
 ### §6d: wake-daemon stderr legacy-token absence (regression-detection invariant)
 
