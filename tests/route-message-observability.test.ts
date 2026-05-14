@@ -3,7 +3,7 @@
  * Issue #351 Phase A — mention drop observability.
  *
  * T1: routeMessage A1 (channel_non_member) → warn log + counter +1
- * T2: applyDiscordIdRetry A4 path — both recover and unresolve outcomes
+ * T2: core routing ignores adapter external IDs
  * T3: resolveSendDestination B1 (caller not in mentions) → reject + log
  * T4: parseMentions malformed input → empty array, no throw
  * T5: happy-path regression — valid mention still enqueues, no drop log
@@ -14,7 +14,6 @@ import { describe, test, expect, beforeEach } from 'bun:test'
 import {
   routeMessage,
   parseMentions,
-  applyDiscordIdRetry,
   setObservabilityLogger,
   resetObservabilityCounters,
   getObservabilityCounters,
@@ -68,8 +67,8 @@ describe('T1: routeMessage A1 — channel_non_member drop emits log + counter', 
   })
 })
 
-describe('T2: applyDiscordIdRetry A4 — 2nd-attempt DB lookup', () => {
-  test('recovery path: stale discordId null → fresh DB returns id matching mention → moved to pushTargets', async () => {
+describe('T2: core routing ignores adapter external IDs', () => {
+  test('raw Discord IDs in msg.mentions never route to a bot in core', async () => {
     const { events } = captureLogger()
 
     const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel' }
@@ -87,40 +86,14 @@ describe('T2: applyDiscordIdRetry A4 — 2nd-attempt DB lookup', () => {
 
     const base = routeMessage(msg, channel, agents, 'inbound')
     expect(base.dropTargets['agent-b']).toBe('NOT_MENTIONED')
+    expect(base.pushTargets).not.toContain('agent-b')
 
-    const dropEvents = events.filter((e) => e.reason === 'discord_id_unresolved' && e.recipient_agent_id === 'agent-b')
-    expect(dropEvents.length).toBeGreaterThan(0)
-
-    const retried = await applyDiscordIdRetry(base, msg, channel, async (id) => {
-      if (id === 'agent-b') return '1486351481871794207'
-      return null
-    }, agents)
-
-    expect(retried.pushTargets).toContain('agent-b')
-    expect(retried.dropTargets['agent-b']).toBeUndefined()
-
-    const counters = getObservabilityCounters()
-    expect(counters['route_message_discord_id_retry_total|result=recovered']).toBe(1)
-
-    // The recovery path must emit `route_recovered` (info), NOT a second
-    // `route_drop` (warn). Tail-filtering on `event:route_drop` should
-    // never surface a recipient who was actually delivered to.
-    const recovered = events.filter((e) => e.event === 'route_recovered')
-    expect(recovered.length).toBe(1)
-    expect(recovered[0].recipient_agent_id).toBe('agent-b')
-    expect(recovered[0].level).toBe('info')
-    expect(recovered[0].reason).toBe('discord_id_resolved_on_retry')
-
-    const postRetryDropsForB = events.filter(
-      (e) => e.event === 'route_drop' && e.recipient_agent_id === 'agent-b' && e.reason === 'discord_id_unresolved',
-    )
-    // routeMessage's initial drop log is still emitted (1×); we just must
-    // not emit a SECOND warn on top of the recovery.
-    expect(postRetryDropsForB.length).toBe(1)
+    const dropEvents = events.filter((e) => e.reason === 'mention_not_in_array' && e.recipient_agent_id === 'agent-b')
+    expect(dropEvents.length).toBe(1)
   })
 
-  test('unresolved path: 2nd-attempt also returns null → drop stands', async () => {
-    captureLogger()
+  test('explicit agent_id mention still routes without discord metadata', () => {
+    const { events } = captureLogger()
     const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel' }
     const agents: AgentInfo[] = [
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
@@ -129,18 +102,17 @@ describe('T2: applyDiscordIdRetry A4 — 2nd-attempt DB lookup', () => {
     const msg = {
       authorAgentId: 'ceo',
       authorIsBot: false,
-      content: '<@9999999999> hi',
-      mentions: ['9999999999'],
+      content: '@agent-b hi',
+      mentions: ['agent-b'],
       messageType: 'chat',
     }
-    const base = routeMessage(msg, channel, agents, 'inbound')
-    const retried = await applyDiscordIdRetry(base, msg, channel, async () => null)
 
-    expect(retried.pushTargets).not.toContain('agent-b')
-    expect(retried.dropTargets['agent-b']).toBe('NOT_MENTIONED')
+    const result = routeMessage(msg, channel, agents, 'inbound')
+    expect(result.pushTargets).toContain('agent-b')
+    expect(result.dropTargets['agent-b']).toBeUndefined()
 
-    const counters = getObservabilityCounters()
-    expect(counters['route_message_discord_id_retry_total|result=unresolved']).toBeGreaterThanOrEqual(1)
+    const dropEventsForB = events.filter((e) => e.event === 'route_drop' && e.recipient_agent_id === 'agent-b')
+    expect(dropEventsForB.length).toBe(0)
   })
 })
 

@@ -82,6 +82,7 @@ import {
   getMessageById,
   isHumanAgent,
   resolveAgentFromDiscordId,
+  resolveAgentFromDiscordIdInMembers,
   resolveInboundChannel,
   loadAgentInfo,
   resolveSendDestination,
@@ -1159,16 +1160,29 @@ async function resolveDestination(to: string, senderId: string): Promise<Resolve
 // resolveInboundChannel moved to core/route-message{,-db}.ts.
 // extractDiscordMentions stays here because it composes those helpers
 // and is a server-side concern; it now goes through coreDbAdapter().
-async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[]): Promise<string[]> {
+async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[], externalChannelId?: string): Promise<string[]> {
   const db = await coreDbAdapter()
   const agentIds: string[] = []
+  const inboundChannel = externalChannelId ? await resolveInboundChannel(db, externalChannelId) : null
+  const memberSet = inboundChannel ? new Set(inboundChannel.members) : null
+  const resolveMemberMention = async (discordId: string): Promise<string | null> => {
+    if (!memberSet) return null
+    const resolved = await resolveAgentFromDiscordIdInMembers(db, discordId, [...memberSet])
+    if ('agentId' in resolved) return resolved.agentId
+    if (resolved.error === 'ambiguous') {
+      process.stderr.write(
+        `agent-comms: inbound adapter mention ambiguous — discord_id=${discordId} candidates=${resolved.candidates.join(',')}\n`,
+      )
+    }
+    return null
+  }
 
   // 1. Parse <@discord_id> from content text
   const contentMentions = content.match(/<@!?(\d+)>/g)
   if (contentMentions) {
     for (const mention of contentMentions) {
       const discordId = mention.replace(/<@!?(\d+)>/, '$1')
-      const agentId = await resolveAgentFromDiscordId(db, discordId)
+      const agentId = await resolveMemberMention(discordId)
       if (agentId) agentIds.push(agentId)
     }
   }
@@ -1189,13 +1203,14 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
     )
     for (const discordId of rawDiscordUserIds) {
       if (!contentIdSet.has(discordId)) continue
-      const agentId = await resolveAgentFromDiscordId(db, discordId)
+      const agentId = await resolveMemberMention(discordId)
       if (agentId) agentIds.push(agentId)
     }
   }
 
   // 3. Parse @agent_id style mentions (agent-comms native format)
   const nativeMentions = parseMentions(content)
+    .filter((agentId) => !memberSet || memberSet.has(agentId) || ['all', 'dev', 'org'].includes(agentId))
   return [...new Set([...agentIds, ...nativeMentions])]
 }
 
@@ -2269,8 +2284,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await pgNotify(dbClient, 'agent_inbox', JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId }))
 
       // §5.1: Use pure routeInbound() for delivery filter (unified across all push paths)
-      // Issue #103 Option A union: merge mentions arg + <@discord_id> tokens in content
-      // so push routing is LLM-independent (works even when only one source is provided).
+      // Core routing SSOT: use already-resolved agent_id mentions only.
+      // Chat adapter tokens such as <@discord_id> are display/input syntax
+      // and must not extend the DB recipient list here.
+      // This keeps push routing LLM-independent and usable without chat UI metadata.
       const sendMentions = await buildSendMentions(
         mentions,
         partContent,
@@ -4054,7 +4071,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
         const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
         const content = msg.content || (atts ? '(attachment)' : '')
 
-        extractDiscordMentions(content, msg.mentionUserIds).then(resolvedMentions => {
+        extractDiscordMentions(content, msg.mentionUserIds, msg.channel).then(resolvedMentions => {
           return handleInboundMessage({
             receiverAgentId: AGENT_ID,
             externalChannelId: msg.channel,

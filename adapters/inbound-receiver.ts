@@ -38,14 +38,12 @@ import type { DiscordAdapter } from './discord'
 import {
   routeInbound,
   parseMentions,
-  applyDiscordIdRetry,
 } from '../core/route-message'
 import {
   isHumanAgent,
   resolveAgentFromDiscordId,
   resolveInboundChannel,
   loadAgentInfo,
-  getAgentDiscordId,
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
@@ -621,19 +619,10 @@ export async function handleInboundMessage(params: {
     members: resolved.members,
     type: resolved.type,
   }
-  const initialResult = routeInboundImpl(routeMsg, routeChannel, memberAgents)
-
-  // Issue #351 A4 2nd-attempt: any recipient dropped with NOT_MENTIONED
-  // whose cached `discordId` was null gets one fresh DB lookup. If the
-  // agents row now has a discord_id and msg.mentions contains it, the
-  // recipient is promoted from drop to push. Without this, brand-new
-  // bots that mention themselves before the agents-cache refresh fired
-  // were dropped silently.
-  const result = coreDb
-    ? await applyDiscordIdRetry(initialResult, routeMsg, routeChannel,
-        (id) => getAgentDiscordId(coreDb, id),
-        memberAgents)
-    : initialResult
+  // Chat adapter IDs must already be translated into agent_id mentions
+  // before core routing. Do not re-resolve external IDs here: the DB
+  // channel member list is the only sendable-recipient scope.
+  const result = routeInboundImpl(routeMsg, routeChannel, memberAgents)
 
   writeStderr(
     `agent-comms: routeInbound — receiver=${receiverAgentId} sender=${authorExternalId} senderAgent=${senderAgentId} mentions=[${resolvedMentions.join(',')}] push=[${result.pushTargets.join(',')}] drop=${JSON.stringify(result.dropTargets)}\n`,

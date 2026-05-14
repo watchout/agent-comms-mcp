@@ -368,15 +368,12 @@ describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () =
     expect(CORE_PURE_SOURCE).toContain('discordId?: string | null')
   })
 
-  test.skip('routeInbound matches mentions against agent.discordId as a fallback (pre-PR-B path)', () => {
-    // PR-B (step 2/2) renamed routeInbound → routeMessage; routeInbound
-    // is now a thin wrapper that delegates. The discordId-fallback
-    // logic lives in routeMessage. This test pin still points at the
-    // old routeInbound body and finds the slim wrapper. Skipped until
-    // rewritten to target routeMessage.
-    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeInbound(')
-    const body = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 3500)
-    expect(body).toContain('agent.discordId != null && msg.mentions.includes(agent.discordId)')
+  test('routeMessage treats agent_id as the only core individual mention key', () => {
+    const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
+    expect(fnIdx).toBeGreaterThan(-1)
+    const body = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 6000)
+    expect(body).toContain('msg.mentions.includes(agent.agentId)')
+    expect(body).not.toContain('msg.mentions.includes(agent.discordId)')
   })
 
   test('loadAgentInfo populates discordId from metadata', () => {
