@@ -2,6 +2,12 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { Client } from 'pg'
 import { applyDownMigration, applyUpMigrationFile } from '../../db/migrate'
 import { join, dirname } from 'node:path'
+import {
+  getDestructiveMigrationTestDatabaseUrl,
+  installDestructiveMigrationTestDatabaseUrl,
+  restoreDatabaseUrl,
+  restoreForwardCompatibleMessageQueueStatusConstraint,
+} from '../helpers/destructive-test-db-guard'
 
 // PR #338 sub-PR 1 — M1-M7 contract tests for the destructive status enum
 // migration (spec §4.1 + §4.3 canonical, dispatched per lead-ama
@@ -17,7 +23,7 @@ import { join, dirname } from 'node:path'
 // M7 rollback dry-run                         (down.sql restores v0.8 vocab)
 // M8 failed STALE_DISPATCH 3-way verify       (3-way branch b — auditor cycle 2 Finding 1)
 
-const DATABASE_URL = process.env.DATABASE_URL
+const DATABASE_URL = getDestructiveMigrationTestDatabaseUrl()
 const dbDescribe = DATABASE_URL ? describe : describe.skip
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
@@ -29,8 +35,10 @@ const DESTRUCTIVE_GATE_ENV = 'AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED'
 dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () => {
   let client: Client
   let priorDestructiveGate: string | undefined
+  let priorDatabaseUrl: string | undefined
 
   beforeAll(async () => {
+    priorDatabaseUrl = installDestructiveMigrationTestDatabaseUrl(DATABASE_URL!)
     priorDestructiveGate = process.env[DESTRUCTIVE_GATE_ENV]
     process.env[DESTRUCTIVE_GATE_ENV] = '1'
     client = new Client({ connectionString: DATABASE_URL })
@@ -39,32 +47,13 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
 
   afterAll(async () => {
     // Best-effort restore so a partial failure does not leave the
-    // shared test DB in the new (post-up) vocabulary. Other test files
-    // assume the legacy CHECK constraint and the failed_reason column.
+    // dedicated test DB in a legacy-only vocabulary.
     try {
       await applyDownMigration(DOWN)
     } catch {}
-    // Re-add failed_reason if it is still missing — applyDownMigration's
-    // SQL ADDs it, but if the down failed mid-way we want callers to find
-    // the legacy schema again.
-    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
-    await client.query(`ALTER TABLE message_queue DROP COLUMN IF EXISTS done_at`)
-    await client.query(`
-      DO $$
-      BEGIN
-        IF EXISTS (
-          SELECT 1 FROM pg_constraint
-           WHERE conname = 'message_queue_status_check'
-             AND conrelid = 'message_queue'::regclass
-        ) THEN
-          ALTER TABLE message_queue DROP CONSTRAINT message_queue_status_check;
-        END IF;
-        ALTER TABLE message_queue
-          ADD CONSTRAINT message_queue_status_check
-          CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
-      END $$;
-    `)
+    await restoreForwardCompatibleMessageQueueStatusConstraint(client)
     await client.end()
+    restoreDatabaseUrl(priorDatabaseUrl)
     if (priorDestructiveGate === undefined) {
       delete process.env[DESTRUCTIVE_GATE_ENV]
     } else {

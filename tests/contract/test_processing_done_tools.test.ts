@@ -3,6 +3,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { Client } from 'pg'
 import { applyDownMigration, applyUpMigrationFile } from '../../db/migrate'
 import { join, dirname } from 'node:path'
+import {
+  getDestructiveMigrationTestDatabaseUrl,
+  installDestructiveMigrationTestDatabaseUrl,
+  restoreDatabaseUrl,
+  restoreForwardCompatibleMessageQueueStatusConstraint,
+} from '../helpers/destructive-test-db-guard'
 
 // PR #338 sub-PR 6 — contract tests for the `processing` + `done` MCP tools
 // per spec §1.2. Two layers:
@@ -52,11 +58,11 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
 // T2 — DB-level transition + invariants against the v0.9 schema.
 //
 // The migration files live under db/migrations/2026-05-13-status-enum-v0.9-*.sql.
-// We apply up.sql in beforeAll and tear back down in afterAll so other suites
-// see the legacy schema again. Per-test cleanup drops fixture rows tagged
-// with a sentinel agent_id.
+// We apply up.sql in beforeAll against a dedicated test DB. Teardown restores
+// the forward-compatible union vocabulary so subsequent suites do not inherit
+// a legacy-only constraint.
 // ─────────────────────────────────────────────────────────────────────────────
-const DATABASE_URL = process.env.DATABASE_URL
+const DATABASE_URL = getDestructiveMigrationTestDatabaseUrl()
 const UP = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.up.sql')
 const DOWN = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.down.sql')
 // T2 needs the v0.9 paired SQL files (shipped by sub-PR 1, PR #347). When
@@ -71,8 +77,10 @@ const FIXTURE_AGENT = '__pr338_subpr6_fixture__'
 dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
   let client: Client
   let priorGate: string | undefined
+  let priorDatabaseUrl: string | undefined
 
   beforeAll(async () => {
+    priorDatabaseUrl = installDestructiveMigrationTestDatabaseUrl(DATABASE_URL!)
     priorGate = process.env[DESTRUCTIVE_GATE_ENV]
     process.env[DESTRUCTIVE_GATE_ENV] = '1'
     client = new Client({ connectionString: DATABASE_URL })
@@ -83,11 +91,12 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
 
   afterAll(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT]).catch(() => {})
-    // Restore v0.8 so downstream suites in the run see the legacy schema.
     try {
       await applyDownMigration(DOWN)
     } catch {}
+    await restoreForwardCompatibleMessageQueueStatusConstraint(client)
     await client.end()
+    restoreDatabaseUrl(priorDatabaseUrl)
     if (priorGate === undefined) {
       delete process.env[DESTRUCTIVE_GATE_ENV]
     } else {

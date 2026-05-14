@@ -2,6 +2,11 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { Client } from 'pg'
 import { applyDownMigration, applyUpMigrationFile } from '../../db/migrate'
 import { join, dirname } from 'node:path'
+import {
+  getDestructiveMigrationTestDatabaseUrl,
+  installDestructiveMigrationTestDatabaseUrl,
+  restoreDatabaseUrl,
+} from '../helpers/destructive-test-db-guard'
 
 // Issue #278 (§G-2 case 16) — paired migration files must support a
 // down → up roundtrip without losing data.
@@ -14,7 +19,7 @@ import { join, dirname } from 'node:path'
 // where it started (column present after the round trip, index back in
 // place, unrelated rows untouched).
 
-const DATABASE_URL = process.env.DATABASE_URL
+const DATABASE_URL = getDestructiveMigrationTestDatabaseUrl()
 const dbDescribe = DATABASE_URL ? describe : describe.skip
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
@@ -34,8 +39,10 @@ const DESTRUCTIVE_GATE_ENV = 'AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED'
 dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idempotent', () => {
   let client: Client
   let priorDestructiveGate: string | undefined
+  let priorDatabaseUrl: string | undefined
 
   beforeAll(async () => {
+    priorDatabaseUrl = installDestructiveMigrationTestDatabaseUrl(DATABASE_URL!)
     priorDestructiveGate = process.env[DESTRUCTIVE_GATE_ENV]
     process.env[DESTRUCTIVE_GATE_ENV] = '1'
     client = new Client({ connectionString: DATABASE_URL })
@@ -85,6 +92,7 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     `)
 
     await client.end()
+    restoreDatabaseUrl(priorDatabaseUrl)
     if (priorDestructiveGate === undefined) {
       delete process.env[DESTRUCTIVE_GATE_ENV]
     } else {

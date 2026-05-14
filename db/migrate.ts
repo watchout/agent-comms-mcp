@@ -23,19 +23,24 @@ async function gatedQuery(client: Client, sql: string, params?: unknown[]) {
 
 const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
 
-// Load database_url from config.json if available, fallback to env
-let databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const configPath = join(dirname(new URL(import.meta.url).pathname), '..', 'config.json')
-if (existsSync(configPath)) {
-  try {
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'))
-    databaseUrl = config.database_url ?? databaseUrl
-  } catch {}
+
+function resolveDatabaseUrl(): string {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL
+
+  let databaseUrl = 'postgresql://localhost/agent_comms'
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+      databaseUrl = config.database_url ?? databaseUrl
+    } catch {}
+  }
+  return databaseUrl
 }
 
 async function migrate() {
   console.log(destructiveGateLogLine())
-  const client = new Client({ connectionString: databaseUrl })
+  const client = new Client({ connectionString: resolveDatabaseUrl() })
   await client.connect()
 
   await gatedQuery(client, `
@@ -653,7 +658,7 @@ async function migrate() {
 // is informational + operator-driven (CTO directive, msg `167415dc`).
 export async function applyDownMigration(filePath: string): Promise<void> {
   const sql = readFileSync(filePath, 'utf-8')
-  const client = new Client({ connectionString: databaseUrl })
+  const client = new Client({ connectionString: resolveDatabaseUrl() })
   await client.connect()
   try {
     await gatedQuery(client, sql)
@@ -665,7 +670,7 @@ export async function applyDownMigration(filePath: string): Promise<void> {
 
 export async function applyUpMigrationFile(filePath: string): Promise<void> {
   const sql = readFileSync(filePath, 'utf-8')
-  const client = new Client({ connectionString: databaseUrl })
+  const client = new Client({ connectionString: resolveDatabaseUrl() })
   await client.connect()
   try {
     await gatedQuery(client, sql)
