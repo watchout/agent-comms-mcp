@@ -213,7 +213,7 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
 // Pre-existing latent fail (mentions array remnant grep — Issue #351
 // Phase A/B 系列、本 PR v0.9 vocab-follow scope と直交). Deferred
 // to Issue #338 sub-PR 9 (latent fail investigation).
-describe.skip('(e) repo-wide CI grep — no `mentions: [` MCP-shape remnant (TODO Issue #338 sub-PR 9 — latent fail)', () => {
+describe('(e) repo-wide CI grep — no `mentions: [` MCP-shape remnant', () => {
   test('find + grep yields zero hits across repo (excluding tests/fixtures + internal-API allowlist)', () => {
     let stdout = ''
     try {
@@ -245,6 +245,10 @@ describe.skip('(e) repo-wide CI grep — no `mentions: [` MCP-shape remnant (TOD
       // enqueue list and returns a Discord-snowflake list. The `mentions`
       // arg is server-internal, not the MCP tool argument.
       './tests/spec-enforcement/send-mention-union.test.ts',
+      // routeMessage() observability test — `mentions: [...]` here is the
+      // parsed inbound mentions list passed to the internal routing API,
+      // identical in shape to routeInbound() callers above.
+      './tests/route-message-observability.test.ts',
       // Outbound mention snowflake test — historical comment refers to
       // the MCP shape; the code itself uses internal API.
       './tests/contract/test_outbound_mention_snowflake.test.ts',

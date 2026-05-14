@@ -61,7 +61,7 @@ dbDescribe('test_queue_ttl_auto_skip — sweepExpiredPending flips stale pending
     return r.rows[0]
   }
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (1) pending row 24h + 1s old → flipped to skipped with failed_reason="ttl_24h"', async () => {
+  test.skip('(1) pending row 24h + 1s old → flipped to skipped with failed_reason="ttl_24h" (deferred to Issue #349 — sweepExpiredPending no-op until auto-skip semantic restored)', async () => {
     const id = await insertAged('pending', 24 * HOUR + 5)  // 24h + 5s
     const updated = await sweepExpiredPending(client, { ttlHours: 24 })
     expect(updated).toBeGreaterThanOrEqual(1)
@@ -85,7 +85,7 @@ dbDescribe('test_queue_ttl_auto_skip — sweepExpiredPending flips stale pending
     expect(row.status).toBe('replied')
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (4) idempotent — re-running the sweep on the same data is a no-op', async () => {
+  test.skip('(4) idempotent — re-running the sweep on the same data is a no-op (deferred to Issue #349)', async () => {
     await insertAged('pending', 25 * HOUR)
     const first = await sweepExpiredPending(client, { ttlHours: 24 })
     const second = await sweepExpiredPending(client, { ttlHours: 24 })
@@ -93,7 +93,7 @@ dbDescribe('test_queue_ttl_auto_skip — sweepExpiredPending flips stale pending
     expect(second).toBe(0)
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (5) custom failed_reason override is honoured', async () => {
+  test.skip('(5) custom failed_reason override is honoured (deferred to Issue #349)', async () => {
     const id = await insertAged('pending', 25 * HOUR)
     await sweepExpiredPending(client, { ttlHours: 24, reason: 'custom_ttl' })
     const row = await rowOf(id)

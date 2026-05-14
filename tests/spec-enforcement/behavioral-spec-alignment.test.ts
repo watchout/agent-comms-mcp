@@ -50,13 +50,7 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // value — silent reject is forbidden.
     expect(handler).toMatch(/fallback: notify \(reason: \$\{fallbackReason\}\)/)
   })
-  // Pre-existing latent fail: pins `status = 'read'` in
-  // send-fallback-decision helper, but v0.9 (sub-PR 1 #347 + sub-PR 3 #350)
-  // renamed it to 'received'. Vocab follow lives in this PR's source
-  // changes; the test itself needs the pin updated, which is its own
-  // concern (1 PR 1 concern). Deferred to Issue #338 sub-PR 9 (latent
-  // fail investigation).
-  test.skip('claim guard delegates to decideSendFallback helper with FOR UPDATE atomicity (TODO Issue #338 sub-PR 9 — latent fail)', () => {
+  test('claim guard delegates to decideSendFallback helper with FOR UPDATE atomicity', () => {
     // Per-row claim replaces the agents single-slot lock. CEO P1
     // refactored the SELECT ... FOR UPDATE into core/send-fallback-decision
     // so the decision tree (claim_present / fallback / invalid_reply_to)
@@ -72,7 +66,7 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // Invariant: the helper holds the FOR UPDATE clause.
     const helperSrc = readFileSync(join(REPO_ROOT, 'core', 'send-fallback-decision.ts'), 'utf-8')
     expect(helperSrc).toMatch(/FOR UPDATE/)
-    expect(helperSrc).toMatch(/WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'read'/)
+    expect(helperSrc).toMatch(/WHERE message_id = \$1 AND claimed_by = \$2 AND status = 'received'/)
   })
   test('handler COMMITs only on the happy path and ROLLBACKs via finally on early return', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")

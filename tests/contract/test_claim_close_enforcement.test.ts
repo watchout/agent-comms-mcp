@@ -78,7 +78,7 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (case 6b) open claim → exit 2 + open_claim re-prompt JSON', async () => {
+  test.skip('(case 6b) open claim → exit 2 + open_claim re-prompt JSON (deferred — hook queries status="received" but seedClaim uses "read" for parallel-safety vs destructive migration test race; needs test isolation redesign)', async () => {
     await seedClaim()
     const r = runHook(`s-${randomUUID().slice(0, 8)}`)
     expect(r.status).toBe(2)
@@ -102,7 +102,7 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (case 17) retry limit (3) reached → 4th attempt passes + bypass.log + audit_log row', async () => {
+  test.skip('(case 17) retry limit (3) reached → 4th attempt passes + bypass.log + audit_log row (deferred — race vs destructive migration test, see case 6b)', async () => {
     const claim = await seedClaim()
     const session = `s-${randomUUID().slice(0, 8)}`
 
@@ -136,7 +136,7 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     rmSync(tmp, { recursive: true, force: true })
   }, 30_000)
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (cycle 2) simultaneous multi-claim set — adding a new claim mid-session changes claim_key + resets retry counter', async () => {
+  test.skip('(cycle 2) simultaneous multi-claim set — adding a new claim mid-session changes claim_key + resets retry counter (deferred — race vs destructive migration test, see case 6b)', async () => {
     // Issue #278 cycle 2 (auditor BLOCK 2 verbatim): the dedup key is
     // a SHA-256 hash over the SET of open claim ids, not the latest
     // single claim. Holding {A} and then expanding to {A,B} must
@@ -219,7 +219,7 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (cycle 1 BLOCK 2) escalation key is (agent_id, session_id, claim_id-set) — new claim resets retry budget', async () => {
+  test.skip('(cycle 1 BLOCK 2) escalation key is (agent_id, session_id, claim_id-set) — new claim resets retry budget (deferred — race vs destructive migration test, see case 6b)', async () => {
     // Issue #278 cycle 1 (auditor BLOCK 2): a fresh claim within the
     // same Claude session must be eligible for its own retry counter
     // and its own escalation. The legacy session_id-only key would
@@ -284,7 +284,7 @@ dbDescribe('test_claim_close_enforcement — Stop hook v8 + G-3 escalation', () 
     rmSync(tmp, { recursive: true, force: true })
   }, 30_000)
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema — escalation dedupe — repeated post-limit calls only fire one audit_log row + one bypass line', async () => {
+  test.skip('— escalation dedupe — repeated post-limit calls only fire one audit_log row + one bypass line (deferred — race vs destructive migration test, see case 6b)', async () => {
     await seedClaim()
     const session = `s-${randomUUID().slice(0, 8)}`
     for (let i = 1; i <= 3; i++) runHook(session)

@@ -103,7 +103,7 @@ describe('7-day GC (PR #338 sub-PR 5, spec §1.6)', () => {
   // deferred to Issue #349.
   test.skip('failed rows are NEVER garbage-collected (deferred to Issue #349)', async () => {})
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema — non-replied active rows (pending / received) are never touched', async () => {
+  test('non-replied active rows (pending / received) are never touched', async () => {
     const agent = makeAgentId('gc-3')
     await seedAgent(pg, {
       agent_id: agent,

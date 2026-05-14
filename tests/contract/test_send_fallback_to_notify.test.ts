@@ -115,7 +115,7 @@ async function inTx<T>(fn: (txClient: Client) => Promise<T>): Promise<T> {
 }
 
 describe('test_send_fallback_to_notify — decideSendFallback decision tree', () => {
-  test.skip('TODO #338 sub-PR 9 v0.9 schema T-1 (existing reply path): claim with status=read → claim_present', async () => {
+  test.skip('T-1 (existing reply path): claim with status=read → claim_present (deferred — uses status="received" in seed; race vs destructive migration test parallel-run, needs test isolation redesign)', async () => {
     requireDb()
     const replyTo = await seedOriginal({ withClaim: 'received' })
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
@@ -125,7 +125,7 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
     }
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema T-2 (claim expired): claim flipped to status=replied → fallback claim_expired + latency<100ms', async () => {
+  test.skip('T-2 (claim expired): claim flipped to status=replied → fallback claim_expired + latency<100ms (deferred — race vs destructive migration test, see T-1)', async () => {
     requireDb()
     // Seed a 'received' claim, then flip to 'replied' to simulate an
     // already-consumed (expired) claim. The agent has interacted with
@@ -197,7 +197,7 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
     }
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema — claim owned by a different agent → fallback claim_missing for the calling agent', async () => {
+  test.skip('— claim owned by a different agent → fallback claim_missing for the calling agent (deferred — race vs destructive migration test, see T-1)', async () => {
     requireDb()
     // Subtle invariant: a `'received'` row claimed by OTHER_AGENT does
     // NOT count as a claim for TEST_AGENT. The helper's first SELECT

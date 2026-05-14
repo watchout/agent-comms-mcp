@@ -39,16 +39,16 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
 
   afterAll(async () => {
     // Best-effort restore so a partial failure does not leave the
-    // shared test DB in the new (post-up) vocabulary. Other test files
-    // assume the legacy CHECK constraint and the failed_reason column.
+    // shared test DB in a partial-migration state. Restore to the
+    // production-current 8-value union (PR #356 hotfix) so the
+    // state-daemon contract suite — which assumes the v0.9 vocab
+    // ('received' / 'in_progress' / 'done') co-exists with the
+    // legacy values — can run after this file.
     try {
       await applyDownMigration(DOWN)
     } catch {}
-    // Re-add failed_reason if it is still missing — applyDownMigration's
-    // SQL ADDs it, but if the down failed mid-way we want callers to find
-    // the legacy schema again.
     await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
-    await client.query(`ALTER TABLE message_queue DROP COLUMN IF EXISTS done_at`)
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ`)
     await client.query(`
       DO $$
       BEGIN
@@ -61,7 +61,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
         END IF;
         ALTER TABLE message_queue
           ADD CONSTRAINT message_queue_status_check
-          CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
+          CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'));
       END $$;
     `)
     await client.end()

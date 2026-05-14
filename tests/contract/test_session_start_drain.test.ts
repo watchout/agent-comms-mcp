@@ -87,7 +87,7 @@ dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
     expect(r.stderr).toContain('drained=0')
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema (case 10) pending=10 with limit=5, mix → drained=5, only matched skipped, unmatched stay pending', async () => {
+  test.skip('(case 10) pending=10 with limit=5, mix → drained=5, only matched skipped, unmatched stay pending (deferred to Issue #349 — drain auto-skip collapsed to "replied" in v0.9)', async () => {
     // 10 pending rows, half are auto-skip-pattern noise. Only the
     // newest 5 are drained (ORDER BY created_at DESC LIMIT 5). Within
     // the drained slice, auto-skip-matching rows flip to skipped;
