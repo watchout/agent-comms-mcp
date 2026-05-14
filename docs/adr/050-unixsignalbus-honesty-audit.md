@@ -9,7 +9,7 @@
 > - CEO acceptance: msg `71b5f2c3` (initial), msg `7db33a96` 「通常フローですすめて」(governance flow re-confirmation, 2026-05-14)
 > **CEO directive (early approval)**: msg `97dd47e6` (「C」全 ADR 並走承認、[文献確認: 2026-05-04 agent-comms channel]), msg `c40b8dc9` (「進めて」初期承認、[文献確認: 同 channel])
 > **Predecessors**: なし
-> **Successors**: ADR-052 (DB-observable queue reaper、本 ADR ratify が前提)
+> **Successors**: ADR-052 (DB-observable queue reaper、本 ADR ratify を前提とする — 2026-05-14 時点 ratify 完了、後続着手可)
 > **Cross-cutting**: ADR-051 (wake-daemon HA / supervisor、本 ADR で wake-daemon を de jure primary 化した後に着手)
 
 ## Context
@@ -74,7 +74,7 @@ spec ownership 第一優先 [文献確認: msg `1d03f8bd` 2026-05-04 agent-comms
 | 機能 (bot wake) | wake-daemon が代替して functionally 解消、症状観察上 bug なし | 低 | [検証済: 本日複数 channel で正常 message 配送観察] |
 | governance honesty | spec text と実装が乖離 = false claim | 高 | [検証済: Fixture A/B/C の DB 外形証跡] |
 | 信頼性 | wake-daemon 単一障害点、UnixSignalBus は dead code | 中 | [検証済: ADR-051 で別 ADR scope] |
-| 後続 ADR の前提 | ADR-052 (reaper) が wake-daemon を primary 前提とする impl を含む | 高 | [文献確認: ADR-052 v0.1 §「Decision」、本 ADR ratify が前提と明記] |
+| 後続 ADR の前提 | ADR-052 (reaper) が wake-daemon を primary 前提とする impl を含む | 高 | [文献確認: ADR-052 v0.1 §「Decision」、本 ADR ratify を前提と明記。本 ADR ratify は 2026-05-14 完了済] |
 
 ## Decision
 
@@ -100,8 +100,8 @@ secondary:  MCP notification
 fallback:   Polling (30s timeout)
 ```
 
-改訂後 [推測: 本 ADR が ratify されたら spec に反映する案、impl PR 内で atomic に
-適用]:
+改訂後 [文献確認: 本 ADR ratify 済 (2026-05-14)、impl PR #317 内で spec §13.5.1
+へ atomic 適用]:
 
 ```
 primary:    wake-daemon tmux send-keys (bin/wake-daemon.ts)
@@ -124,12 +124,12 @@ fallback:   Polling (next 能動呼出 by bot LLM judgement)
   (UnixSignalBus 不在のため signal timeout の概念が消失)
 - `waitForSignal()` API 削除 (UnixSignalBus と一体)、代替なし
 
-### 実装順序拘束 (本 ADR ratify 後)
+### 実装順序拘束 (本 ADR ratify 後 — 2026-05-14 完了、以下 1-4 は PR #317 内で実施済)
 
-1. spec §13.5.1 改訂を本 ADR 内で記述 (impl PR 内で適用)
-2. UnixSignalBus 削除 PR を起票 (`core/message-bus.ts` + import 整合 + bot run script)
-3. 同 PR 内で spec §13.5.1 改訂を doc 変更として含める (実装 + spec 同期 atomic merge)
-4. CI で「PID file 不在」が前提として正常動作するか full suite 検証
+1. spec §13.5.1 改訂を本 ADR 内で記述 (impl PR #317 内で適用済)
+2. UnixSignalBus 削除 PR を起票 (`core/message-bus.ts` + import 整合 + bot run script) — PR #317
+3. 同 PR 内で spec §13.5.1 改訂を doc 変更として含める (実装 + spec 同期 atomic merge) — PR #317 で実施
+4. CI で「PID file 不在」が前提として正常動作するか full suite 検証 — `978a3d1` 以降 942/184/0 連続 green
 5. merge 後、ADR-052 impl PR 着手可能となる
 
 ## Considered alternatives
@@ -184,13 +184,13 @@ Option B 採択理由:
 4. **LLM agent 整合**: tmux send-keys 経由 prompt 注入が wake mechanism として
    現運用で機能 [検証済: 本日複数 channel で wake-daemon 経由 message 配送観察]、
    UnixSignalBus は LLM agent 環境向きでない [推測]
-5. **後続 ADR (-052 / -051) 整合**: 本 ADR ratify が ADR-052 の前提 [文献確認:
-   ADR-052 v0.1 §1 Predecessors 明記]、ADR-051 は wake-daemon 責務確定後着手、
-   一貫した path
+5. **後続 ADR (-052 / -051) 整合**: 本 ADR ratify は ADR-052 の前提 [文献確認:
+   ADR-052 v0.1 §1 Predecessors 明記]、本 ADR ratify は 2026-05-14 完了済、
+   ADR-051 は wake-daemon 責務確定後着手、一貫した path
 
 ## Consequences
 
-### Positive [推測: 本 ADR ratify + impl 後の予測影響]
+### Positive [文献確認: 本 ADR ratify + impl PR #317 merge 後の実観測影響、起草時点では推測]
 
 - spec と実装が一致、CEO directive「監査通過 governance gap」が本 ADR scope
   内で解消 [文献確認: CEO directive msg `1d03f8bd`]
@@ -216,9 +216,11 @@ Option B 採択理由:
 
 ## Contract tests (merge gate)
 
-本 ADR ratify 後、impl PR で以下 contract test を merge gate とする。本 ADR
-v0.1 起草時点では fixture 自体は未実行 [推測: 全 §6a-§6e は impl PR で executable
-化、本 ADR 段階では「実行する内容と期待値の宣言」のみ]:
+本 ADR ratify 後 (2026-05-14 完了)、impl PR #317 内で以下 contract test を merge
+gate として executable 化済。本 ADR v0.1 起草時点 (2026-05-05) では fixture 自体
+は未実行で「実行する内容と期待値の宣言」のみだったが、impl PR #317 で全
+§6a-§6e が executable 化され、cycle-4 で §6d の責任分割明文化、cycle-3 で
+full bun test 942 pass / 184 skip / 0 fail を 3 連続 verify 済:
 
 ### §6a: UnixSignalBus 関連 import / 使用が code base に存在しない
 
@@ -312,12 +314,12 @@ expected: 全 suite pass、UnixSignalBus 関連 test は削除 or skip → green
 
 | 項目 | 内容 |
 |------|------|
-| 関連 ADR | ADR-041 (Phase 5 routing + 2026-05-05 amendment), ADR-052 (DB-observable reaper、本 ADR ratify が前提), ADR-051 (HA / supervisor、本 ADR ratify 後着手), ADR-053 (heartbeat、取下げ) |
+| 関連 ADR | ADR-041 (Phase 5 routing + 2026-05-05 amendment), ADR-052 (DB-observable reaper、本 ADR ratify を前提 — 2026-05-14 完了), ADR-051 (HA / supervisor、本 ADR ratify 後着手 — 2026-05-14 以降可), ADR-053 (heartbeat、取下げ) |
 | 関連 spec | `agent-comms-mcp/docs/agent-com-message-queue-spec.md` §13.5.1 (line 1306-1332) |
 | 観察 evidence | msg `c1258e88` / `978ade62` / `7a0c227d` (agent-com-dev A2 調査), 実機 ps wake-daemon PID 6804 (7d12h 稼働), grep 結果 (PID file 書込み code path 不在) |
 | CEO directive | msg `1d03f8bd` (監査通過 governance gap), msg `97dd47e6` (「C」全 ADR 並走), msg `c40b8dc9` (「進めて」初期) |
-| 関連 PR | impl PR (TBD、本 ADR ratify 後起票) |
-| 関連 Issue | (TBD impl PR 起票時に追記) |
+| 関連 PR | impl PR #317 (本 PR、ADR と同一 atomic merge) |
+| 関連 Issue | — (impl は PR #317 に集約、別 issue 立てず) |
 
 ## Meta
 
@@ -325,11 +327,14 @@ expected: 全 suite pass、UnixSignalBus 関連 test は削除 or skip → green
 |------|------|
 | 作成日 | 2026-05-05 |
 | 作成者 | ARC (iyasaka-arc) |
-| 最終更新日 | 2026-05-05 |
-| レビュアー | CTO (ratify 待機), CEO (acceptance) |
+| 最終更新日 | 2026-05-14 |
+| レビュアー | Ratified by CTO (msg `68d17ecd`) and CEO via msg `7db33a96` (CEO「通常フローですすめて」directive、本 ADR を governance flow 正常承認として acceptance 兼) |
 
 ## Changelog
 
 | 日付 | 変更内容 | 変更者 |
 |------|---------|-------|
 | 2026-05-05 | v0.1 初版起草 (ADR-052 順序拘束対応で P0 起草、observed evidence 3 件取り込み、wake-daemon de jure primary 化、evidence labels [検証済]/[文献確認]/[推測] 全 substantive assertion に付与) | ARC |
+| 2026-05-14 | Status を `Proposed pending ...` から `Accepted — ratify chain complete` に更新 (cycle-2 PR #317 axis 6 fix)。impl PR #317 で本 ADR と atomic merge。 | agent-com-dev |
+| 2026-05-14 | §6d を「regression-detection invariant gate (stderr legacy-token absence)」と明文化、`test_0_wake_daemon.test.ts` との責任分割 table 追加 (cycle-4 PR #317 axis 4 fix)。 | agent-com-dev |
+| 2026-05-14 | `Related: 関連 PR` / `Meta: 最終更新日 / レビュアー` の stale governance metadata を ratify 済 state と整合 (cycle-5 PR #317 axis 5/6 fix)。 | agent-com-dev |
