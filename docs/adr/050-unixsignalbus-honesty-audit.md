@@ -1,9 +1,13 @@
 # ADR-050: UnixSignalBus 削除 + spec §13.5.1 honesty audit
 
-> **Status**: Proposed (v0.1 draft) — pending CTO ratify + CEO acceptance
+> **Status**: Accepted — ratify chain complete
 > **Author**: ARC (iyasaka-arc)
-> **Date**: 2026-05-05
-> **CEO directive**: msg `97dd47e6` (「C」全 ADR 並走承認、[文献確認: 2026-05-04 agent-comms channel]), msg `c40b8dc9` (「進めて」初期承認、[文献確認: 同 channel])
+> **Date**: 2026-05-05 (proposed) / 2026-05-14 (accepted)
+> **Ratify chain**:
+> - ARC sign-off: msg `cd35a953` ([文献確認: 2026-05-05 agent-comms #dev-arc])
+> - CTO ratify: msg `68d17ecd` ([文献確認: 同 channel])
+> - CEO acceptance: msg `71b5f2c3` (initial), msg `7db33a96` 「通常フローですすめて」(governance flow re-confirmation, 2026-05-14)
+> **CEO directive (early approval)**: msg `97dd47e6` (「C」全 ADR 並走承認、[文献確認: 2026-05-04 agent-comms channel]), msg `c40b8dc9` (「進めて」初期承認、[文献確認: 同 channel])
 > **Predecessors**: なし
 > **Successors**: ADR-052 (DB-observable queue reaper、本 ADR ratify が前提)
 > **Cross-cutting**: ADR-051 (wake-daemon HA / supervisor、本 ADR で wake-daemon を de jure primary 化した後に着手)
