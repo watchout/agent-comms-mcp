@@ -124,11 +124,16 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     let dStderr = ''
     daemon.stderr!.on('data', (d: Buffer) => { dStderr += d.toString() })
 
-    // Wait for the daemon to announce "sqlite polling mode".
+    // Wait for the daemon to announce "sqlite polling mode". Under full-
+    // suite parallel load the bun cold-start for the daemon child can
+    // legitimately take 10–20s (CPU contention across ~120 sibling test
+    // files all spawning bun subprocesses); the 30s budget reflects
+    // observed worst-case cold-start latency without relaxing the spec
+    // §4.1 5s wake budget that fires after this readiness gate.
     const ready = await waitFor(
       () => dStderr,
       (s) => /sqlite polling mode/.test(s),
-      8000,
+      30000,
     )
     expect(ready).not.toBeNull()
 
@@ -171,5 +176,5 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     // (f) tmux cleanup
     tmuxKill(SESSION)
     expect(tmuxHas(SESSION)).toBe(false)
-  }, 30_000)
+  }, 60_000)
 })
