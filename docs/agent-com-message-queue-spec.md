@@ -542,7 +542,7 @@ heartbeat:
 4. LLM 呼出 (交換可能)
    → echo "$content" | $LLM_CMD
    → 環境変数 LLM_CMD で指定 (default: claude --print)
-   → claude --print / codex --quiet / gemini --prompt / 任意 CLI
+   → claude --print / codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral / gemini --prompt / 任意 CLI
 
 5. 返信送信
    → agent-com send --reply-to $message_id --mentions $from --content "$response"
