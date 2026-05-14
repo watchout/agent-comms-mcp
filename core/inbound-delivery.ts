@@ -204,12 +204,15 @@ export async function persistInboundDeliveryOnClient(
     // Issue #277 (B) — when skipReason is set, INSERT directly into the
     // 'skipped' terminal state with failed_reason populated so `next` will
     // never claim the row. Audit / history stay intact.
+    // v0.9: 'skipped' / failed_reason removed from schema. Skip-on-INSERT
+    // collapsed to terminal close as 'replied' (= row exists for audit,
+    // never claimed by `next`).
     const mqIns = skipReason
       ? await client.query(
-          `INSERT INTO message_queue (agent_id, message_id, payload, status, failed_reason)
-           VALUES ($1::text, $2::text, $3::text, 'skipped', $4::text)
+          `INSERT INTO message_queue (agent_id, message_id, payload, status)
+           VALUES ($1::text, $2::text, $3::text, 'replied')
            ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-          [receiverAgentId, messageId, mqPayloadJson, skipReason],
+          [receiverAgentId, messageId, mqPayloadJson],
         )
       : await client.query(
           `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1::text, $2::text, $3::text)

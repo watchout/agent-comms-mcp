@@ -87,7 +87,7 @@ function pgWrap(adapter: SqliteAdapter) {
 }
 
 describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
-  // case 1: startup self-reclaim flips this agent's status='read' rows back to pending.
+  // case 1: startup self-reclaim flips this agent's status='received' rows back to pending.
   test('case 1 — reclaimSelfOrphanedClaims rolls own read claims back to pending', async () => {
     await db.execute(
       `INSERT INTO agents (agent_id) VALUES ($1)`,
@@ -96,12 +96,12 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     // Two stuck read rows owned by self.
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claimed_at, read_at)
-       VALUES ($1, $2, 'read', $2, datetime('now'), datetime('now'))`,
+       VALUES ($1, $2, 'received', $2, datetime('now'), datetime('now'))`,
       ['mq1', 'test-bot'],
     )
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claimed_at, read_at)
-       VALUES ($1, $2, 'read', $2, datetime('now'), datetime('now'))`,
+       VALUES ($1, $2, 'received', $2, datetime('now'), datetime('now'))`,
       ['mq2', 'test-bot'],
     )
 
@@ -118,14 +118,14 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
   test('case 2 — reclaimSelfOrphanedClaims leaves other agents alone', async () => {
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
-       VALUES ('mq-other', 'other-bot', 'read', 'other-bot', datetime('now'))`,
+       VALUES ('mq-other', 'other-bot', 'received', 'other-bot', datetime('now'))`,
     )
     const reclaimed = await reclaimSelfOrphanedClaims(pgWrap(db), 'test-bot')
     expect(reclaimed).toBe(0)
     const r = await db.query<{ status: string }>(
       `SELECT status FROM message_queue WHERE id = 'mq-other'`,
     )
-    expect(r[0].status).toBe('read')
+    expect(r[0].status).toBe('received')
   })
 
   // case 3: periodic sweeper only reclaims TTL-expired rows.
@@ -133,13 +133,13 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     // Active claim (TTL 1h in the future)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
-       VALUES ('active', 'test-bot', 'read', 'test-bot',
+       VALUES ('active', 'test-bot', 'received', 'test-bot',
                datetime('now', '+1 hour'), datetime('now'))`,
     )
     // Expired claim (TTL 1h in the past)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
-       VALUES ('expired', 'test-bot', 'read', 'test-bot',
+       VALUES ('expired', 'test-bot', 'received', 'test-bot',
                datetime('now', '-1 hour'), datetime('now'))`,
     )
 
@@ -152,7 +152,7 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
       `SELECT id, status FROM message_queue ORDER BY id`,
     )
     const byId = Object.fromEntries(after.map((r) => [r.id, r.status]))
-    expect(byId.active).toBe('read')      // untouched
+    expect(byId.active).toBe('received')      // untouched
     expect(byId.expired).toBe('pending')  // reclaimed
   })
 
@@ -187,7 +187,7 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
   test('case 6 — reclaim is idempotent (second invocation reclaims 0)', async () => {
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
-       VALUES ('once', 'test-bot', 'read', 'test-bot', datetime('now'))`,
+       VALUES ('once', 'test-bot', 'received', 'test-bot', datetime('now'))`,
     )
     expect(await reclaimSelfOrphanedClaims(pgWrap(db), 'test-bot')).toBe(1)
     expect(await reclaimSelfOrphanedClaims(pgWrap(db), 'test-bot')).toBe(0)
@@ -351,25 +351,25 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     await db.execute(`INSERT INTO agents (agent_id) VALUES ('me')`)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
-       VALUES ('expired-self', 'me', 'read', 'me', datetime('now', '-1 hour'), datetime('now'))`,
+       VALUES ('expired-self', 'me', 'received', 'me', datetime('now', '-1 hour'), datetime('now'))`,
     )
     const swept = await sweepExpiredClaims(pgWrap(db), { selfAgentId: 'me' })
     expect(swept).toBe(0)
     const after = await db.query<{ status: string }>(
       `SELECT status FROM message_queue WHERE id = 'expired-self'`,
     )
-    expect(after[0].status).toBe('read') // not flipped to 'failed' — protected for self-reclaim
+    expect(after[0].status).toBe('received') // not flipped to 'failed' — protected for self-reclaim
   })
 
   // PR-0 cycle 7 axis 2/3 BLOCK fix — reclaim path derives agents.status
   // from the live claim set. Two scenarios:
-  //   (a) all reclaimed → no remaining 'read' claim → status='idle'
-  //   (b) one row left in 'read' (other agent / fresh claim) → status='busy'
+  //   (a) all reclaimed → no remaining 'received' claim → status='idle'
+  //   (b) one row left in 'received' (other agent / fresh claim) → status='busy'
   test('case 11 — reclaim updates agents.status to idle when no claims remain', async () => {
     await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('me', 'busy')`)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
-       VALUES ('orph', 'me', 'read', 'me', datetime('now'))`,
+       VALUES ('orph', 'me', 'received', 'me', datetime('now'))`,
     )
     await reclaimSelfOrphanedClaims(pgWrap(db), 'me')
     const after = await db.query<{ status: string; status_detail: string | null }>(
@@ -383,13 +383,13 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('me', 'busy')`)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
-       VALUES ('orph', 'me', 'read', 'me', datetime('now'))`,
+       VALUES ('orph', 'me', 'received', 'me', datetime('now'))`,
     )
     // A second claim outside the reclaim predicate (claim_expires_at in
     // the future = active TTL, not eligible for startup reclaim).
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
-       VALUES ('active', 'me', 'read', 'me', datetime('now', '+1 hour'), datetime('now'))`,
+       VALUES ('active', 'me', 'received', 'me', datetime('now', '+1 hour'), datetime('now'))`,
     )
     await reclaimSelfOrphanedClaims(pgWrap(db), 'me')
     const after = await db.query<{ status: string }>(
@@ -845,7 +845,7 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
   // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — claim-TTL sweeper
   // fail-closed contract, mirror of case 29 for the other-agent
   // claim recovery path. A continuously-failing claim-TTL sweep
-  // would leave truly-abandoned claims piling up in `status='read'`;
+  // would leave truly-abandoned claims piling up in `status='received'`;
   // production exits, tests inject `onError`.
   test('case 30 — startClaimTtlSweeper invokes onError on query failure (fail-closed)', async () => {
     const failingDb = {
@@ -944,24 +944,27 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     // Behavioral SQL pin: claim-TTL sweep with selfAgentIds skips
     // every member's own expired claim. Insert one expired claim
     // per bot, run sweep with [bot-a, bot-b] in selfAgentIds, and
-    // assert neither row was flipped to 'failed'.
+    // assert neither hosted row is touched. The foreign claim is
+    // reset to 'pending' for retry (v0.9: 'failed' status removed
+    // by sub-PR 1 #347, abandonment-tracking redesign deferred to
+    // Issue #349).
     const { sweepExpiredClaims } = await import('../core/claim-ttl')
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, claim_expires_at, read_at)
-       VALUES ('a-expired', 'bot-a', 'read', 'bot-a', datetime('now', '-1 hour'), datetime('now')),
-              ('b-expired', 'bot-b', 'read', 'bot-b', datetime('now', '-1 hour'), datetime('now')),
-              ('foreign-expired', 'other-bot', 'read', 'other-bot', datetime('now', '-1 hour'), datetime('now'))`,
+       VALUES ('a-expired', 'bot-a', 'received', 'bot-a', datetime('now', '-1 hour'), datetime('now')),
+              ('b-expired', 'bot-b', 'received', 'bot-b', datetime('now', '-1 hour'), datetime('now')),
+              ('foreign-expired', 'other-bot', 'received', 'other-bot', datetime('now', '-1 hour'), datetime('now'))`,
     )
     const swept = await sweepExpiredClaims(pgWrap(db), { selfAgentIds: ['bot-a', 'bot-b'] })
-    // Only the foreign claim is flipped to failed; the two hosted
-    // bots' claims stay in 'read' for self-reclaim to handle.
+    // Only the foreign claim is reset; the two hosted bots' claims
+    // stay in 'received' for self-reclaim to handle.
     expect(swept).toBe(1)
     const after = await db.query<{ id: string; status: string }>(
       `SELECT id, status FROM message_queue WHERE id IN ('a-expired', 'b-expired', 'foreign-expired') ORDER BY id`,
     )
     const byId = Object.fromEntries(after.map((r) => [r.id, r.status]))
-    expect(byId['a-expired']).toBe('read')      // protected
-    expect(byId['b-expired']).toBe('read')      // protected
-    expect(byId['foreign-expired']).toBe('failed')  // foreign abandon
+    expect(byId['a-expired']).toBe('received')       // protected
+    expect(byId['b-expired']).toBe('received')       // protected
+    expect(byId['foreign-expired']).toBe('pending')  // foreign claim reset for retry (v0.9)
   })
 })

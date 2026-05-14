@@ -65,7 +65,6 @@ interface QueueRow {
   created_at: Date
   last_wake_attempt_at: Date | null
   last_heartbeat_at: Date | null
-  failed_reason: string | null
   attempts?: number | null
 }
 
@@ -223,7 +222,7 @@ export class StateDaemon {
     if (this.status !== 'running') return
     const { rows } = await this.dbQuery<QueueRow>(
       `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at, failed_reason
+              last_wake_attempt_at, last_heartbeat_at
          FROM message_queue WHERE id = $1`,
       [event.id],
     )
@@ -301,7 +300,7 @@ export class StateDaemon {
     for (const row of abandon) {
       result.scanned++
       await this.dbQuery(
-        `UPDATE message_queue SET status='pending', failed_reason=NULL WHERE id=$1`,
+        `UPDATE message_queue SET status='pending' WHERE id=$1`,
         [row.id],
       )
       result.abandonReset++
@@ -391,7 +390,7 @@ export class StateDaemon {
     let sql = `UPDATE message_queue mq
           SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
               last_heartbeat_at = $1::timestamptz
-        WHERE mq.status = 'read'
+        WHERE mq.status = 'received'
           AND mq.claim_expires_at > $1::timestamptz
           AND EXISTS (
             SELECT 1 FROM agents a
@@ -653,9 +652,11 @@ export class StateDaemon {
   }
 
   private async failPermanently(row: QueueRow, reason: string, detail: string): Promise<void> {
+    // v0.9: 'failed' / failed_reason removed from schema. Permanent failure
+    // collapsed to alert-only + replied terminal close (= row removed from active set).
     await this.dbQuery(
-      `UPDATE message_queue SET status='failed', failed_reason=$1 WHERE id=$2`,
-      [reason, row.id],
+      `UPDATE message_queue SET status='replied' WHERE id=$1`,
+      [row.id],
     )
     await this.alert.alert(`row ${row.id} permanently failed: ${reason} (${detail}) — max_attempts or stale`)
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'permanently_failed' })
@@ -677,7 +678,7 @@ export class StateDaemon {
     const prefix = this.config.agentIdPrefix ? ` AND agent_id LIKE $3` : ''
     const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit]
     let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at, failed_reason
+              last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
         WHERE status='pending'
           AND created_at < $1::timestamptz - ($2)::interval`
@@ -692,9 +693,9 @@ export class StateDaemon {
 
   private async fetchReadExpired(): Promise<QueueRow[]> {
     let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at, failed_reason
+              last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
-        WHERE status='read' AND claim_expires_at < $1::timestamptz`
+        WHERE status='received' AND claim_expires_at < $1::timestamptz`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     if (this.config.agentIdPrefix) {
       sql += ` AND agent_id LIKE $3`
@@ -706,29 +707,19 @@ export class StateDaemon {
   }
 
   private async fetchAbandonRecent(): Promise<QueueRow[]> {
-    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at, failed_reason
-         FROM message_queue
-        WHERE status='failed'
-          AND failed_reason='IMPLICIT_ABANDON'
-          AND claim_expires_at > $1::timestamptz - ($2)::interval`
-    const params: unknown[] = [this.clock.now(), this.config.abandonRecent, this.config.batchLimit]
-    if (this.config.agentIdPrefix) {
-      sql += ` AND agent_id LIKE $4`
-      params.push(this.config.agentIdPrefix + '%')
-    }
-    sql += ` LIMIT $3`
-    const { rows } = await this.dbQuery<QueueRow>(sql, params)
-    return rows
+    // v0.9: 'failed' status removed from schema. IMPLICIT_ABANDON detection
+    // is now via claim-ttl sweeper (rolling back to 'pending'). This fetch
+    // is a no-op in v0.9 — Issue #349 will redesign abandonment tracking.
+    return []
   }
 
   private async fetchStuck(): Promise<QueueRow[]> {
     // §4.3 row 5 (read stale, max_attempts proxy via age) + row 6 (pending
     // stuck) — both terminate as STALE_DISPATCH (v0.5 単一固定).
     let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at, failed_reason
+              last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
-        WHERE status IN ('pending', 'read')
+        WHERE status IN ('pending', 'received')
           AND created_at < $1::timestamptz - ($2)::interval`
     const params: unknown[] = [this.clock.now(), this.config.stuckAfter, this.config.batchLimit]
     if (this.config.agentIdPrefix) {

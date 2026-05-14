@@ -217,7 +217,7 @@ async function l1_idle(ctx: BotContext): Promise<StallVerdict | null> {
 }
 
 async function l1_claim_ttl_expired(ctx: BotContext): Promise<StallVerdict | null> {
-  if (ctx.row.status !== 'read') return null
+  if (ctx.row.status !== 'received') return null
   if (!ctx.row.claim_expires_at) return null
   const expiresAt = new Date(ctx.row.claim_expires_at).getTime()
   if (expiresAt < ctx.now.getTime()) {
@@ -231,7 +231,7 @@ async function l1_claim_ttl_expired(ctx: BotContext): Promise<StallVerdict | nul
 }
 
 async function l1_received_stuck(ctx: BotContext): Promise<StallVerdict | null> {
-  if (ctx.row.status !== 'read') return null
+  if (ctx.row.status !== 'received') return null
   const ageSec = (ctx.now.getTime() - new Date(ctx.row.created_at).getTime()) / 1000
   if (ageSec > ctx.thresholds.receivedStuckAfterSec) {
     return {

@@ -94,10 +94,11 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
 
 export interface SeedQueueRow {
   agent_id: string
-  status?: 'pending' | 'read' | 'replied' | 'failed' | 'skipped'
+  // v0.9: 'read'→'received', 'failed' removed (sub-PR 1 #347 + sub-PR 3 #350).
+  // Issue #349 will redesign abandonment tracking.
+  status?: 'pending' | 'received' | 'replied' | 'skipped'
   message_id?: string | null
   payload?: string
-  failed_reason?: string | null
   claim_expires_at?: Date | null
   claimed_by?: string | null
   claimed_at?: Date | null
@@ -109,16 +110,15 @@ export interface SeedQueueRow {
 export async function seedQueueRow(c: Client, r: SeedQueueRow): Promise<number> {
   const res = await c.query(
     `INSERT INTO message_queue
-       (agent_id, status, message_id, payload, failed_reason, claim_expires_at,
+       (agent_id, status, message_id, payload, claim_expires_at,
         claimed_by, claimed_at, created_at, last_wake_attempt_at, last_heartbeat_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, NOW()), $10, $11)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9, $10)
      RETURNING id`,
     [
       r.agent_id,
       r.status ?? 'pending',
       r.message_id ?? null,
       r.payload ?? '{}',
-      r.failed_reason ?? null,
       r.claim_expires_at ?? null,
       r.claimed_by ?? null,
       r.claimed_at ?? null,

@@ -170,7 +170,7 @@ export async function reclaimSelfOrphanedClaims(
            read_at = NULL
      WHERE agent_id = $1
        AND claimed_by = $1
-       AND status = 'read'
+       AND status = 'received'
        AND (claim_expires_at IS NULL OR claim_expires_at < now())
      RETURNING id`,
     [agentId],
@@ -202,8 +202,8 @@ export async function reclaimSelfOrphanedClaims(
 async function syncAgentStatusFromClaims(db: ReclaimDb, agentId: string): Promise<void> {
   await db.query(
     `UPDATE agents SET
-       status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-       status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
+       status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+       status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
        status_updated_at = now()
      WHERE agent_id = $1`,
     [agentId],
@@ -233,7 +233,7 @@ export function startSelfReclaimSweeper(
                read_at = NULL
          WHERE agent_id = $1
            AND claimed_by = $1
-           AND status = 'read'
+           AND status = 'received'
            AND claim_expires_at IS NOT NULL
            AND claim_expires_at < now()
          RETURNING id`,

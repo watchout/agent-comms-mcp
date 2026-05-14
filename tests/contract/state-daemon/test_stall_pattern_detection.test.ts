@@ -64,7 +64,7 @@ describe('stall-detector — pattern coverage (spec §1.6 table)', () => {
 
   test('pattern 1: idle / non-pending row → L1 idle verdict', async () => {
     const v = await detector.detect(
-      ctx({ row: pendingRow({ status: 'failed' }) }),
+      ctx({ row: pendingRow({ status: 'replied' }) }),
     )
     expect(v.map(x => x.kind)).toContain('idle')
     expect(v[0].layer).toBe('L1')
@@ -74,7 +74,7 @@ describe('stall-detector — pattern coverage (spec §1.6 table)', () => {
     const v = await detector.detect(
       ctx({
         row: pendingRow({
-          status: 'read',
+          status: 'received',
           claim_expires_at: new Date(NOW.getTime() - 60_000),
         }),
       }),
@@ -87,7 +87,7 @@ describe('stall-detector — pattern coverage (spec §1.6 table)', () => {
     const v = await detector.detect(
       ctx({
         row: pendingRow({
-          status: 'read',
+          status: 'received',
           claim_expires_at: new Date(NOW.getTime() + 60_000),
           created_at: stuckCreated,
         }),
@@ -180,7 +180,7 @@ describe('stall-detector — three-layer abstraction', () => {
 
   test('l1 / l2 / l3 entry points each return only their layer', async () => {
     const c = ctx({
-      row: pendingRow({ status: 'failed' }), // → l1 idle
+      row: pendingRow({ status: 'replied' }), // → l1 idle
       agent: agent({ tmux_session: null }), // → l2 tmux_missing
       tmuxPaneTail: 'half-typed input', // → l3 input_residue
     })
