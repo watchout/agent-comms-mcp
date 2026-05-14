@@ -1,5 +1,11 @@
 # ADR-050: UnixSignalBus 削除 + spec §13.5.1 honesty audit
 
+## Terminology
+
+- **legacy_name**: `wake-daemon` (deprecated, history 文脈で残存) — 旧 daemon、`bin/wake-daemon.ts`、ADR 起草時の de facto primary 観察対象 (ps PID 6804 等)。本 ADR / migration note / changelog の history 文脈ではこの名称で参照する。
+- **current_name**: `state-daemon` (production primary、SSOT) — 現行 daemon、`bin/state-daemon.ts`、launchd label `com.agent-comms.state-daemon`。本 SSOT は本名で参照、forward-looking / 新規記述 / production 運用 context はこちら。
+- **migration relation**: legacy `wake-daemon` → current `state-daemon` (rename only、機能等価、ADR-050 ratify 後 launchd 改名)。`bin/wake-daemon.ts` は production 稼働残存のため別 PR scope (ARC `a0e0d4d7` rename リスク per)。
+
 > **Status**: Accepted — ratify chain complete
 > **Author**: ARC (iyasaka-arc)
 > **Date**: 2026-05-05 (proposed) / 2026-05-14 (accepted)
