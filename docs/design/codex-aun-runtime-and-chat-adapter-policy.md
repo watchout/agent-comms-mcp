@@ -40,6 +40,110 @@ Responsibilities:
 
 Runtime adapters must not own Discord or Telegram delivery.
 
+## MCP Naming Policy
+
+The MCP-facing integration should use names that distinguish three concepts:
+
+1. runtime identity
+2. MCP server/tool surface
+3. chat UI delivery
+
+Use `codex-aun` as the Codex runtime adapter name.
+
+Recommended names:
+
+| Layer | Name | Meaning |
+|---|---|---|
+| Runtime adapter | `codex-aun` | Codex-facing AUN runtime adapter |
+| MCP server registration | `aun` or `agent-comms` | The shared MCP service exposed to runtimes |
+| Codex MCP profile | `codex-aun` | Codex's local profile/agent identity using the shared MCP service |
+| Claude runtime adapter | `claude-aun` | Claude Code-facing AUN runtime adapter |
+| Chat dispatcher | `aun-chat-dispatcher` | DB -> UI delivery process |
+| Discord chat adapter | `aun-discord` | Discord implementation of the chat adapter |
+
+The preferred public phrasing is:
+
+```text
+Claude uses claude-aun.
+Codex uses codex-aun.
+Both talk to the same AUN MCP service.
+Chat UI delivery is handled by AUN chat adapters.
+```
+
+Avoid naming the Codex path `agent-comms-codex-discord`, `codex-discord`, or similar. Those names imply Discord is the transport. It is not. Discord is only one chat UI adapter after the DB.
+
+### MCP Tool Surface
+
+The MCP tools should be runtime-neutral where possible:
+
+```text
+aun.notify
+aun.send
+aun.inbox
+aun.processing
+aun.done
+aun.status
+```
+
+Runtime-specific behavior belongs behind the adapter, not in tool names. For example, prefer:
+
+```text
+codex-aun calls aun.inbox
+claude-aun calls aun.inbox
+```
+
+over:
+
+```text
+codex_inbox
+claude_inbox
+```
+
+Runtime-specific wrappers may exist for setup and process control, but they should call the same shared lifecycle commands.
+
+### Adapter Directory Naming
+
+When code is split out of the current shared files, use this target shape:
+
+```text
+runtime/
+  types.ts
+  claude-aun/
+    adapter.ts
+    mcp-profile.ts
+    runner.ts
+  codex-aun/
+    adapter.ts
+    mcp-profile.ts
+    runner.ts
+    inbox.ts
+
+chat/
+  types.ts
+  dispatcher.ts
+  aun-discord/
+    adapter.ts
+    outbound-consumer.ts
+  aun-telegram/
+    adapter.ts
+  aun-web/
+    adapter.ts
+```
+
+`runtime/*` owns LLM behavior. `chat/*` owns UI delivery. Neither layer should import implementation details from the other.
+
+### Agent Identity
+
+For real operation, use `codex-aun` as the agent id, not `codex-test`.
+
+`codex-test` may remain a diagnostic fixture, but production and review flows should use:
+
+```text
+AGENT_ID=codex-aun
+```
+
+This keeps DB logs, channel membership, outbound allowlists, and future MCP profiles aligned.
+
 ### Chat UI Adapter
 
 Chat UI adapters are responsible for DB -> UI display delivery.
