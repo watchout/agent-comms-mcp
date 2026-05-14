@@ -117,16 +117,32 @@ export function loadGcOverridesFromEnv(
 
 /** pg_notify('queue_event', ...) JSON payload (§7.3).
  *
- * `'skipped'` is intentionally absent — the v0.3 simplification removed it
- * as an enum value (CEO `e4bfe41c` per spec §0c, F3 forbidden line).
- * Listing it here would invite silent re-introduction of the prevention
- * path that v0.3 deleted. Auditor cycle 1 Axis 5(a) BLOCK.
+ * Status union tracks the v0.9 schema (`message_queue_status_check`):
+ * `'pending' | 'received' | 'in_progress' | 'done' | 'replied'`.
+ *
+ * The historical `'read'` / `'failed'` / `'skipped'` values have been
+ * removed by the destructive migration in sub-PR 1 #347 (status enum
+ * v0.9) and the core-vocab follow-on in sub-PR 7 #353:
+ *   - `'read'`     → renamed to `'received'` (sub-PR 3 #350 / sub-PR 7
+ *                    #353); receiver-side "claim handed out" state.
+ *   - `'failed'`   → collapsed; permanent-failure marking is no-op'd
+ *                    in sub-PR 7. Per-row abandonment taxonomy will be
+ *                    redesigned in Issue #349.
+ *   - `'skipped'`  → dropped at v0.3 (CEO `e4bfe41c` per spec §0c, F3
+ *                    forbidden line; auditor cycle 1 Axis 5(a) BLOCK
+ *                    on adding it back). The queue-cleanup script
+ *                    (sub-PR 8 #354) now collapses cleanup writes to
+ *                    `'replied'` to stay within the v0.9 enum.
+ *
+ * Re-listing any of the three under the QueueEvent union would invite
+ * a silent re-introduction of the dropped state machines, so they are
+ * intentionally absent here.
  */
 export interface QueueEvent {
   op: 'INSERT' | 'UPDATE'
   id: number
   agent_id: string
-  status: 'pending' | 'read' | 'replied' | 'failed'
+  status: 'pending' | 'received' | 'in_progress' | 'done' | 'replied'
   claim_expires_at: string | null
 }
 
