@@ -142,7 +142,7 @@ ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING;
 CREATE TABLE outbound_queue (
   id BIGSERIAL PRIMARY KEY,
   message_id TEXT NOT NULL,            -- agent_messages.id
-  agent_id TEXT NOT NULL,              -- 送信者（どのtokenで投稿するか）
+  agent_id TEXT NOT NULL,              -- 論理送信者 agent_id（誰の発言として表示・監査するか）
   channel_external_id TEXT NOT NULL,   -- Discord channel/thread ID
   content TEXT NOT NULL,
   mentions_display TEXT DEFAULT '[]',  -- Discord表示用メンション（変換済み）
@@ -181,6 +181,12 @@ CREATE INDEX idx_outbound_queue_agent_pending_next_retry
 | `claimed_at` | PR #164 (S2-A) | consumer が claim した瞬間の wall-clock。orphan 再回収の閾値判定 (`OUTBOUND_ORPHAN_TIMEOUT_SEC`) |
 | `next_retry_at` | PR #164 (S2-A) | transient failure 後の再試行最早時刻。`min(30s, 2^(attempt-1)) + jitter` の exponential backoff |
 | `discord_message_id` | PR #168 (Phase C Step 1 PR-A) | 送信成功時 Discord snowflake を永続化する **観測性カラム**。dedup layer ではない — `status='sent'` と同じ UPDATE で atomic に書くため、通常 pending filter は discord_message_id 非 null の行を拾わない構造的保証があり、consumer 内の short-circuit 分岐は mark-sent 完了後に行が何らかの理由で再度 pending に戻る極稀なエッジケースに対する**限定的保険**として動作するに留まる。実効 dedup は §6.4 の 2 層 (platform nonce + 40062 idempotent 収束)|
+
+**用語整理**:
+
+- `message_queue.agent_id` は **受信者 agent_id**。DB → LLM の inbox 配送先を表す。
+- `agent_messages.author_id` は **発言者 agent_id**。会話ログ上の発言主体を表す。
+- `outbound_queue.agent_id` は **論理送信者 agent_id**。DB → UI の表示・監査上「誰の発言か」を表す。既存互換の `self` claim scope では dispatcher claim key としても使われるが、これは互換動作であり、新規の chat dispatcher 設計では `AGENT_COM_OUTBOUND_CLAIM_SCOPE=global` を使って論理送信者と配送担当を分離する。
 
 ### 3.4 agents（既存テーブル改修）
 
@@ -759,7 +765,7 @@ Cycle 3 honesty: `discord_message_id` は観測性カラムであり dedup layer
 
 ##### その他の処理ステップ
 
-1. **Atomic claim (§3.3)**: 1 tick (1 秒) につき 1 行、`agent_id = AGENT_ID` 条件で `status='pending' → 'claimed'`、`attempts += 1`、`claimed_at = now()` を `FOR UPDATE SKIP LOCKED` で取得。別 consumer の二重取得は構造的に不可 (PR #172 FEAT-005 CP-3 で vocabulary `'processing'` → `'claimed'` に rename)
+1. **Atomic claim (§3.3)**: 1 tick (1 秒) につき 1 行、`status='pending' → 'claimed'`、`attempts += 1`、`claimed_at = now()` を `FOR UPDATE SKIP LOCKED` で取得。既定は `AGENT_COM_OUTBOUND_CLAIM_SCOPE=self` で `agent_id = AGENT_ID` 条件を維持する。`global` は共通 chat dispatcher mode で、`outbound_queue.agent_id` を論理送信者として扱い、配送担当 process の Discord client で全 pending sender の UI 投稿を claim する。`global` は全channel/全recipient配信ではなく、各 row の `channel_external_id` だけへ配送する。別 consumer の二重取得は構造的に不可 (PR #172 FEAT-005 CP-3 で vocabulary `'processing'` → `'claimed'` に rename)
 2. **Row-level short-circuit (限定保険)**: claim した行の `discord_message_id` が既に非 null なら `sendAdapterMessage` を呼ばず直接 `status='sent'` へ flip。通常 path では `status='sent'` と同時 UPDATE で永続化するため pending filter がこの行を拾わず到達不能だが、mark-sent 完了後に行が何らかの理由 (手動 UPDATE / ツール直叩き等) で再度 pending に戻された場合の safeguard として残す
 3. **Success path**: 送信成功時は `status='sent'` + `sent_at=now()` + `discord_message_id=<返却された snowflake>` を 1 つの UPDATE で atomic に永続化。この atomicity が上記 Layer 1/2 dedup の前提
 4. **Transient failure → exponential backoff (§3.4)**: network/timeout/5xx/429 等は `status='pending'` に戻し、`next_retry_at = now() + min(30s, 2^(attempt-1) s) + jitter`

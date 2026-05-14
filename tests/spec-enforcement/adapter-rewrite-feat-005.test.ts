@@ -55,7 +55,7 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     // claimed_at stamp on a still-pending row).
     const src = readIfExists('adapters/outbound-consumer.ts')
     expect(src).not.toBeNull()
-    const fn = sliceFn(src!, 'consumeOneOutboundRow')
+    const fn = sliceFn(src!, 'buildOutboundClaimQuery')
     const m = fn.match(/UPDATE\s+outbound_queue[\s\S]{0,2000}?RETURNING/)
     expect(m).not.toBeNull()
     const sql = m![0]
@@ -65,8 +65,8 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     // second worker entering the same UPDATE cannot match.
     expect(sql).toMatch(/status\s*=\s*'pending'/)
     expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/)
-    // agent_id filter survives the rewrite.
-    expect(sql).toMatch(/agent_id\s*=\s*\$\d/)
+    // Default self claim scope preserves the historical agent_id filter.
+    expect(fn).toContain("const claimFilter = scope === 'self' ? 'AND agent_id = $1' : ''")
     // Backoff window honored.
     expect(sql).toMatch(/next_retry_at\s+IS\s+NULL\s+OR\s+next_retry_at\s*<=\s*now\(\)/i)
   })

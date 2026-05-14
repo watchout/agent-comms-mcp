@@ -117,9 +117,9 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     expect(SERVER_SRC).toMatch(/UPDATE\s+outbound_queue[\s\S]*?SET[\s\S]*?attempts\s*=\s*attempts\s*\+\s*1/)
     expect(SERVER_SRC).toMatch(/SELECT id FROM outbound_queue[\s\S]*?WHERE status\s*=\s*'pending'/)
     expect(SERVER_SRC).toMatch(/FOR UPDATE SKIP LOCKED/)
-    // RETURNING shape shifted: agent_id is now implicit (AGENT_ID filter on the
-    // claim), so it no longer has to round-trip through the query result.
-    expect(SERVER_SRC).toMatch(/RETURNING\s+id,\s*message_id,\s*channel_external_id/)
+    // RETURNING includes agent_id because global dispatcher mode needs the
+    // row's logical sender even when the dispatcher process is different.
+    expect(SERVER_SRC).toMatch(/RETURNING\s+id,\s*message_id,\s*agent_id,\s*channel_external_id/)
   })
   test('consumer transitions claimed rows to sent or failed', () => {
     expect(SERVER_SRC).toMatch(/UPDATE outbound_queue SET status\s*=\s*'sent',\s*sent_at\s*=\s*now\(\)/)
@@ -286,7 +286,7 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
   })
 
   test('consumeOneOutboundRow selects discord_message_id in RETURNING', () => {
-    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
+    const fnIdx = SERVER_SRC.indexOf('function buildOutboundClaimQuery')
     expect(fnIdx).toBeGreaterThan(-1)
     const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 4000)
     expect(fnBody).toMatch(/RETURNING[^;]*discord_message_id/)

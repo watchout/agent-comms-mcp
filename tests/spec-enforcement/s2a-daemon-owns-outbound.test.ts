@@ -65,23 +65,23 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(fn).toMatch(/OUTBOUND_QUEUE_CONSUMER\s*===\s*'0'/)
   })
 
-  test('2. consumeOneOutboundRow claim SQL atomically flips to claimed + filters agent_id', () => {
+  test('2. outbound claim SQL atomically flips to claimed + defaults to agent_id filter', () => {
     // Scope assertions to consumeOneOutboundRow so a future unrelated
     // UPDATE outbound_queue elsewhere cannot accidentally satisfy
     // this test (S3 auditor fix).
     // CP-3 (2026-04-14): vocabulary 'processing' → 'claimed'. Same
     // atomic-flip invariant, renamed to match the claim SQL verb.
-    const fn = sliceFn(SERVER_SRC, 'consumeOneOutboundRow')
+    const fn = sliceFn(SERVER_SRC, 'buildOutboundClaimQuery')
     const m = fn.match(/UPDATE\s+outbound_queue[\s\S]{0,2000}?RETURNING/)
     expect(m).not.toBeNull()
     const sql = m![0]
     expect(sql).toMatch(/SET[\s\S]*status\s*=\s*'claimed'/)
-    expect(sql).toMatch(/WHERE[\s\S]*agent_id\s*=\s*\$\d/)
+    expect(fn).toContain("const claimFilter = scope === 'self' ? 'AND agent_id = $1' : ''")
     expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/)
   })
 
   test('3. claim SQL honors next_retry_at backoff window', () => {
-    const fn = sliceFn(SERVER_SRC, 'consumeOneOutboundRow')
+    const fn = sliceFn(SERVER_SRC, 'buildOutboundClaimQuery')
     const m = fn.match(/UPDATE\s+outbound_queue[\s\S]{0,2000}?RETURNING/)
     expect(m).not.toBeNull()
     expect(m![0]).toMatch(/next_retry_at\s+IS\s+NULL\s+OR\s+next_retry_at\s*<=\s*now\(\)/i)

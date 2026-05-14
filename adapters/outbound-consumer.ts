@@ -13,10 +13,11 @@
  *
  *   1. Atomic claim (§3.3): UPDATE flips `status='pending' → 'claimed'`
  *      + sets `claimed_at=now()` in one statement with
- *      FOR UPDATE SKIP LOCKED + agent_id filter. The pending→claimed
- *      transition (renamed from 'processing' in CP-3) is the single
- *      barrier that prevents two workers from observing the same row
- *      as pending.
+ *      FOR UPDATE SKIP LOCKED. Default claim scope is `self`, preserving
+ *      the historical agent_id filter. `global` scope is an explicit
+ *      chat-dispatcher mode: it claims any pending row for Discord UI
+ *      delivery while treating outbound_queue.agent_id as the logical
+ *      sender, not as the dispatcher identity.
  *
  *   2. 1 bot = 1 Discord client (§3.6): outbound send resolves the
  *      client strictly via `discordClients.get(AGENT_ID)`. No
@@ -56,10 +57,27 @@ type DbGetter = () => Promise<DbLike | null>
 let getDb: DbGetter | null = null
 let AGENT_ID = ''
 
+export type OutboundClaimScope = 'self' | 'global'
+
+const OUTBOUND_CLAIM_SCOPE_ENV = 'AGENT_COM_OUTBOUND_CLAIM_SCOPE'
+
 /** Install the `pg` client getter + this process's agent id. */
 export function setDbGetter(fn: DbGetter, agentId: string): void {
   getDb = fn
   AGENT_ID = agentId
+}
+
+export function parseOutboundClaimScope(raw: string | undefined = process.env[OUTBOUND_CLAIM_SCOPE_ENV]): OutboundClaimScope {
+  if (raw === undefined || raw === '' || raw === 'self') return 'self'
+  if (raw === 'global') return 'global'
+  process.stderr.write(
+    `agent-comms: WARN invalid ${OUTBOUND_CLAIM_SCOPE_ENV}="${raw}", defaulting to self\n`,
+  )
+  return 'self'
+}
+
+function outboundClaimScope(): OutboundClaimScope {
+  return parseOutboundClaimScope()
 }
 
 // ---- Constants ------------------------------------------------------------
@@ -208,6 +226,38 @@ export const pollingDriver = new PollingDriver()
 
 // ---- Outbound consumer ----------------------------------------------------
 
+export interface OutboundClaimQuery {
+  sql: string
+  params: any[]
+}
+
+export function buildOutboundClaimQuery(agentId: string, scope: OutboundClaimScope): OutboundClaimQuery {
+  const claimFilter = scope === 'self' ? 'AND agent_id = $1' : ''
+  return {
+    sql: `UPDATE outbound_queue
+          SET status = 'claimed', attempts = attempts + 1, claimed_at = now()
+        WHERE id = (
+          SELECT id FROM outbound_queue
+           WHERE status = 'pending'
+             ${claimFilter}
+             AND (next_retry_at IS NULL OR next_retry_at <= now())
+           ORDER BY created_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, message_id, agent_id, channel_external_id, content,
+                  mentions_display, attachments, reply_to_discord_id,
+                  attempts, max_attempts, discord_message_id`,
+    params: scope === 'self' ? [agentId] : [],
+  }
+}
+
+function outboundClaimScopeDescription(scope: OutboundClaimScope): string {
+  return scope === 'global'
+    ? 'global dispatcher (claims all senders; posts via dispatcher Discord client)'
+    : `self (agent=${AGENT_ID})`
+}
+
 let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
 let outboundOrphanInterval: ReturnType<typeof setInterval> | null = null
 let outboundConsumerInFlight = false
@@ -225,28 +275,14 @@ export async function consumeOneOutboundRow(): Promise<void> {
     const client = getDb ? await getDb() : null
     if (!client) return
 
-    // §3.3 Atomic claim: flip status 'pending' → 'claimed' + set claimed_at
-    // + filter by agent_id so each bot only consumes rows tagged to itself.
-    // FOR UPDATE SKIP LOCKED + single-statement UPDATE removes the race
-    // that allowed multiple consumers to observe the same 'pending' row
-    // between select and send (2026-04-12 duplicate-post incident).
-    const claimed = await client.query(
-      `UPDATE outbound_queue
-          SET status = 'claimed', attempts = attempts + 1, claimed_at = now()
-        WHERE id = (
-          SELECT id FROM outbound_queue
-           WHERE status = 'pending'
-             AND agent_id = $1
-             AND (next_retry_at IS NULL OR next_retry_at <= now())
-           ORDER BY created_at ASC
-           LIMIT 1
-           FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id, message_id, channel_external_id, content,
-                  mentions_display, attachments, reply_to_discord_id,
-                  attempts, max_attempts, discord_message_id`,
-      [AGENT_ID],
-    ).catch(err => {
+    // §3.3 Atomic claim. Default `self` scope keeps the historical
+    // `agent_id = AGENT_ID` filter. Explicit `global` scope is for a
+    // chat dispatcher process: outbound_queue.agent_id is then the
+    // logical sender shown in DB/UI, while AGENT_ID is only the dispatcher
+    // process whose Discord client posts the row.
+    const claimScope = outboundClaimScope()
+    const claimQuery = buildOutboundClaimQuery(AGENT_ID, claimScope)
+    const claimed = await client.query(claimQuery.sql, claimQuery.params).catch(err => {
       process.stderr.write(`agent-comms: outbound consumer claim failed: ${err}\n`)
       return null
     })
@@ -270,18 +306,23 @@ export async function consumeOneOutboundRow(): Promise<void> {
       return
     }
 
-    // §3.6 Fallback removed: the row must be delivered by the bot whose
-    // token is loaded (discordClients.get(AGENT_ID)). No shared-client
-    // fallback — if the client is missing we fail the row explicitly so
-    // another consumer doesn't silently re-post under the wrong identity.
+    // §3.6 Fallback removed: the row must be delivered by this process's
+    // configured Discord client (discordClients.get(AGENT_ID)). In `self`
+    // scope the row sender and dispatcher are the same agent. In `global`
+    // scope, AGENT_ID is the chat dispatcher and row.agent_id remains the
+    // logical sender only; this mode is explicit because it intentionally
+    // trades per-agent Discord identity for DB-backed common UI delivery.
     const clientForAgent = discordClients.get(AGENT_ID)
     if (!clientForAgent) {
+      const missingClientError = claimScope === 'global'
+        ? 'no_discord_client_for_dispatcher'
+        : 'no_discord_client_for_agent'
       await client.query(
         `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
-        ['no_discord_client_for_agent', row.id],
+        [missingClientError, row.id],
       ).catch(() => {})
       process.stderr.write(
-        `agent-comms: outbound row id=${row.id} failed: no Discord client for agent ${AGENT_ID}\n`,
+        `agent-comms: outbound row id=${row.id} failed: no Discord client for ${claimScope === 'global' ? 'dispatcher' : 'agent'} ${AGENT_ID} (sender=${row.agent_id})\n`,
       )
       return
     }
@@ -447,6 +488,10 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
   const client = getDb ? await getDb() : null
   if (!client) return
   const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '600', 10) || 600)
+  const claimScope = outboundClaimScope()
+  const claimFilter = claimScope === 'self' ? 'AND agent_id = $1' : ''
+  const params = claimScope === 'self' ? [AGENT_ID, timeoutSec] : [timeoutSec]
+  const timeoutParam = claimScope === 'self' ? '$2' : '$1'
   try {
     // Stage A: rows under the attempts cap return to 'pending'.
     // Inline SQL mirrors computeOutboundRetryDelayMs():
@@ -463,15 +508,15 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
                               )
                             + ((random() * 500)::int || ' milliseconds')::interval
         WHERE status = 'claimed'
-          AND agent_id = $1
-          AND claimed_at < now() - ($2::int || ' seconds')::interval
+          ${claimFilter}
+          AND claimed_at < now() - (${timeoutParam}::int || ' seconds')::interval
           AND attempts < max_attempts
         RETURNING id, attempts`,
-      [AGENT_ID, timeoutSec],
+      params,
     )
     if (reclaimed.rowCount && reclaimed.rowCount > 0) {
       process.stderr.write(
-        `agent-comms: outbound orphan reclaim — ${reclaimed.rowCount} row(s) returned to pending (agent=${AGENT_ID}, timeout=${timeoutSec}s)\n`,
+        `agent-comms: outbound orphan reclaim — ${reclaimed.rowCount} row(s) returned to pending (scope=${outboundClaimScopeDescription(claimScope)}, timeout=${timeoutSec}s)\n`,
       )
     }
 
@@ -484,15 +529,15 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
               last_error = 'exhausted_via_orphan_reclaim',
               claimed_at = NULL
         WHERE status = 'claimed'
-          AND agent_id = $1
-          AND claimed_at < now() - ($2::int || ' seconds')::interval
+          ${claimFilter}
+          AND claimed_at < now() - (${timeoutParam}::int || ' seconds')::interval
           AND attempts >= max_attempts
         RETURNING id, attempts, max_attempts`,
-      [AGENT_ID, timeoutSec],
+      params,
     )
     if (exhausted.rowCount && exhausted.rowCount > 0) {
       process.stderr.write(
-        `agent-comms: outbound orphan reclaim — ${exhausted.rowCount} row(s) exhausted via orphan reclaim, marked failed (agent=${AGENT_ID})\n`,
+        `agent-comms: outbound orphan reclaim — ${exhausted.rowCount} row(s) exhausted via orphan reclaim, marked failed (scope=${outboundClaimScopeDescription(claimScope)})\n`,
       )
     }
   } catch (err) {
@@ -517,7 +562,7 @@ export function startOutboundConsumer(): void {
     })
   }, OUTBOUND_ORPHAN_TICK_MS)
   process.stderr.write(
-    `agent-comms: outbound queue consumer started (tick=${OUTBOUND_POLL_INTERVAL_MS}ms, orphan_tick=${OUTBOUND_ORPHAN_TICK_MS}ms)\n`,
+    `agent-comms: outbound queue consumer started (tick=${OUTBOUND_POLL_INTERVAL_MS}ms, orphan_tick=${OUTBOUND_ORPHAN_TICK_MS}ms, claim_scope=${outboundClaimScope()})\n`,
   )
 }
 
