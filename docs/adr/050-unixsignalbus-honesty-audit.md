@@ -245,17 +245,40 @@ expected: "primary: wake-daemon tmux send-keys" 等の表記
        (UnixSignalBus 表記が残っていない)
 ```
 
-### §6d: wake-daemon 経由 message delivery が動作する (regression)
+### §6d: wake-daemon stderr legacy-token absence (regression-detection invariant)
+
+> **Cycle-4 clarification (2026-05-14)**: §6d is a *regression-detection
+> invariant gate*, not a wake-delivery liveness gate. End-to-end "real
+> message → wake-daemon → tmux Enter arrival" liveness is owned by
+> `tests/contract/test_0_wake_daemon.test.ts` (spec v3 contract
+> `test_0`), which pre-existed this ADR and remains the single source
+> of truth for that physical-delivery invariant. §6d's job is to catch
+> a hot-path-only re-import of the deleted bus that would slip past
+> §6a's static `grep`.
 
 ```
-fixture (real send + wake-daemon active):
-  1. wake-daemon を起動 [検証済: 既稼働 PID 6804、impl PR では fresh start でも実証]
-  2. mcp__agent-comms__send で test-probe bot に message 送信
-  3. test-probe の tmux session で next 呼出が観測される (15s 以内)
+fixture (real wake-daemon spawn, real SQLite, real INSERT — no tmux required):
+  1. spawn `bin/wake-daemon.ts` (SQLite mode) and wait for "sqlite polling mode" log
+  2. INSERT one agent_messages + message_queue row
+  3. wait for the daemon stderr to confirm row pickup
+     (either "wake .* for <agent>/<msg>" or "no tmux session for agent <agent>")
 expected:
-  - test-probe が message を pop し reply する
-  - UnixSignalBus 経路を通らずに wake が成立 (本 ADR の主目的)
+  - daemon picks up the row via the de jure wake path
+  - daemon stderr contains 0 occurrences of /UnixSignalBus/
+  - daemon stderr contains 0 occurrences of /SIGUSR1.*bot_/
+  - clean SIGTERM
 ```
+
+`test_0_wake_daemon.test.ts` (sibling, pre-existing) owns the orthogonal
+liveness invariant: real tmux session + Enter arrival ≤5 s after INSERT
++ SIGTERM ≤30 s. Together with §6a (static grep over runtime sources)
+the three gates partition the post-removal invariant surface:
+
+| invariant | gate |
+|---|---|
+| legacy tokens absent in runtime *source* | §6a (static grep) |
+| legacy tokens absent in runtime *stderr* on a hot-path | §6d (this section) |
+| wake-daemon physically delivers a wake ≤5 s after INSERT | `test_0_wake_daemon.test.ts` |
 
 ### §6e: full test suite green
 
