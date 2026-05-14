@@ -34,29 +34,30 @@ const CORE_DB_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message-db.ts
 
 describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   test('extractDiscordMentions function exists with rawDiscordUserIds param', () => {
-    expect(SERVER_SOURCE).toContain('async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[])')
+    expect(SERVER_SOURCE).toContain('async function extractDiscordMentions(content: string, rawDiscordUserIds?: string[], externalChannelId?: string)')
   })
 
   test('parses Discord <@id> mentions', () => {
     expect(SERVER_SOURCE).toContain('/<@!?(\\d+)>/g')
   })
 
-  test('resolves Discord IDs to agent_ids via resolveAgentFromDiscordId', () => {
+  test('resolves Discord IDs to agent_ids only through channel members', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1000)
-    // PR-A: resolveAgentFromDiscordId now takes (db, discordId) — extracted to core/
-    expect(fnBody).toContain('resolveAgentFromDiscordId(db, discordId)')
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 1800)
+    expect(fnBody).toContain('resolveInboundChannel(db, externalChannelId)')
+    expect(fnBody).toContain('resolveAgentFromDiscordIdInMembers(db, discordId, [...memberSet])')
+    expect(fnBody).not.toContain('resolveAgentFromDiscordId(db, discordId)')
   })
 
   test('also parses @agent_id native mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
     expect(fnBody).toContain('parseMentions(content)')
   })
 
   test('deduplicates mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
     expect(fnBody).toContain('new Set(')
   })
 
@@ -67,7 +68,7 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   // to those that actually appear as <@...> in the content text.
   test('filters rawDiscordUserIds to IDs present in content (excludes reply auto-mention)', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2000)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
     expect(fnBody).toContain('contentIdSet')
     expect(fnBody).toMatch(/if\s*\(!contentIdSet\.has\(discordId\)\)\s*continue/)
   })
@@ -327,7 +328,7 @@ describe('§2.2 Pattern A — Human warning', () => {
 describe('Inbound Mentions Filter — callsite updates (Phase C I5: unified)', () => {
   test('Discord adapter connects and uses handleInboundMessage', () => {
     expect(SERVER_SOURCE).toContain('Discord adapter connected (inbound + outbound)')
-    expect(SERVER_SOURCE).toContain('extractDiscordMentions(content, msg.mentionUserIds)')
+    expect(SERVER_SOURCE).toContain('extractDiscordMentions(content, msg.mentionUserIds, msg.channel)')
   })
 
   test('per-bot client does NOT bind onMessage (outbound-only)', () => {

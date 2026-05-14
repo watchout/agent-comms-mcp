@@ -25,10 +25,8 @@ export interface AgentInfo {
   agentId: string
   agentType: string
   observerMode: boolean
-  // ADR-040 D7: the Discord user ID this agent owns, if any. routeInbound
-  // matches mentions against both `agentId` and `discordId` so a human
-  // writing `<@1487367645933211699>` (raw Discord) still reaches the bot
-  // whose agent_id is `agent-com-dev`. Populated by `loadAgentInfo`.
+  // Adapter metadata loaded for observability and compatibility. Core
+  // routing does not match mentions against external IDs.
   discordId?: string | null
 }
 
@@ -90,7 +88,6 @@ export type RouteDropReason =
   | 'channel_non_member'
   | 'observer_mode'
   | 'mention_not_in_array'
-  | 'discord_id_unresolved'
   | 'sender_not_a_member'
 
 /** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
@@ -116,23 +113,6 @@ interface RouteDropEvent {
   message_id?: string | null
 }
 
-/**
- * Emitted by `applyDiscordIdRetry` when an A4 drop is overturned by a
- * fresh DB lookup. Distinct from `route_drop` because the recipient is
- * NOT lost — the message reaches them. Operators tail-filtering for
- * `route_drop` warnings should not see recoveries.
- */
-interface RouteRecoveredEvent {
-  ts: string
-  level: 'info'
-  event: 'route_recovered'
-  reason: 'discord_id_resolved_on_retry'
-  recipient_agent_id: string
-  sender_agent_id: string | null
-  channel_id: string
-  message_id?: string | null
-}
-
 interface SendRejectEvent {
   ts: string
   level: 'warn'
@@ -146,7 +126,7 @@ interface SendRejectEvent {
 }
 
 /** Structured-log sink. Default writes JSON line to stderr. */
-export type ObservabilityLogger = (event: RouteDropEvent | RouteRecoveredEvent | SendRejectEvent) => void
+export type ObservabilityLogger = (event: RouteDropEvent | SendRejectEvent) => void
 
 let activeLogger: ObservabilityLogger = (event) => {
   try {
@@ -238,37 +218,20 @@ export function emitSendReject(
 /**
  * Build the final `sendMentions` list for the send-tool push routing.
  *
- * Option A union (Issue #103, fix for silent push failures):
- *   - `mentions` arg (agent IDs) are included directly
- *   - `<@discord_id>` patterns in content are resolved to agent IDs via
- *     the `resolveDiscordIdToAgent` callback and added to the union
- *   - `@agent_id` native patterns in content are also included
- *   - All three sources are deduplicated
- *
- * The resolver callback is injected so this function stays pure and
- * testable without a real DB connection.
+ * Core routing contract:
+ *   - `mentions` contains already-resolved agent IDs selected from the
+ *     DB-owned channel member list.
+ *   - Chat-adapter tokens such as Discord `<@snowflake>` are display/input
+ *     syntax only. They must be translated by the adapter before this helper
+ *     is called and must never extend the core recipient list.
  */
 export async function buildSendMentions(
   mentions: unknown,
-  content: string,
-  resolveDiscordIdToAgent: (discordId: string) => Promise<string | null>,
+  _content: string,
+  _resolveDiscordIdToAgent?: (discordId: string) => Promise<string | null>,
 ): Promise<string[]> {
-  // 1. Agent IDs from the explicit mentions argument
   const argAgentIds: string[] = Array.isArray(mentions) ? (mentions as string[]) : []
-
-  // 2. Agent IDs resolved from <@discord_id> patterns in content
-  const discordIds = (content.match(/<@!?(\d+)>/g) ?? [])
-    .map(m => m.replace(/<@!?(\d+)>/, '$1'))
-  const resolvedFromContent = (
-    await Promise.all(discordIds.map(did => resolveDiscordIdToAgent(did).catch(() => null)))
-  ).filter((s): s is string => s !== null)
-
-  // Union, dedup
-  // Note: parseMentions(content) is intentionally excluded here — its regex
-  // matches numeric discord IDs (e.g. <@1485…> → "1485…") as if they were
-  // native @agent_id handles, causing false duplicates in the output.
-  // Callers that need @agent_id-native extraction should handle it separately.
-  return [...new Set([...argAgentIds, ...resolvedFromContent])]
+  return [...new Set(argAgentIds)]
 }
 
 /** Detect emergency messages (broadcast bypass: type=emergency or content starts with !stop) */
@@ -329,14 +292,6 @@ export function routeMessage(
     }
   }
 
-  // Issue #351 A4 detection helper: did the message reference any raw
-  // Discord snowflakes? If yes and a recipient's discordId is null in the
-  // agents row, the recipient is silently lost to a discord_id_unresolved
-  // drop (vs the regular mention_not_in_array drop where the bot's
-  // discord_id exists but simply isn't listed).
-  const rawDiscordIdsInMentions = msg.mentions.filter((m) => /^\d{6,}$/.test(m))
-  const contentHasDiscordSnowflake = /<@!?\d{6,}>/.test(msg.content)
-
   for (const agent of agents) {
     // Self-send prevention
     if (agent.agentId === msg.authorAgentId) continue
@@ -389,111 +344,18 @@ export function routeMessage(
       continue
     }
 
-    // Individual mention
-    // ADR-040 D7: match mentions against BOTH the agent_id and the Discord
-    // user ID. extractDiscordMentions normally resolves `<@discord_id>` →
-    // `agent_id` before we get here, but if the resolver ever returns null
-    // (e.g. because metadata.discord_id was briefly wiped by the D8 bug
-    // and not yet self-registered), the raw Discord user ID is still in
-    // `msg.mentions` and the bot should still count as mentioned.
-    if (
-      msg.mentions.includes(agent.agentId) ||
-      (agent.discordId != null && msg.mentions.includes(agent.discordId))
-    ) {
+    // Individual mention. Mentions are core agent IDs only; adapter-level
+    // external IDs must have been translated before entering routeMessage().
+    if (msg.mentions.includes(agent.agentId)) {
       pushTargets.push(agent.agentId)
       continue
     }
 
-    // Not mentioned → drop.
-    //
-    // Issue #351 A3/A4 split: if the original message carried raw Discord
-    // snowflakes (or msg.mentions contains them) and this agent's
-    // discord_id is null on the agents row, the failure mode is the
-    // "metadata.discord_id unresolved" path (A4) — distinct from the
-    // ordinary "your agent_id just wasn't listed" path (A3). The receiver
-    // caller uses the `discord_id_unresolved` signal to trigger a 2nd-
-    // attempt DB lookup before giving up.
     dropTargets[agent.agentId] = 'NOT_MENTIONED'
-    if (agent.discordId == null && (rawDiscordIdsInMentions.length > 0 || contentHasDiscordSnowflake)) {
-      emitRouteDrop('discord_id_unresolved', agent.agentId, logCtx)
-    } else {
-      emitRouteDrop('mention_not_in_array', agent.agentId, logCtx)
-    }
+    emitRouteDrop('mention_not_in_array', agent.agentId, logCtx)
   }
 
   return { pushTargets, dropTargets, senderIsHuman, noMentions }
-}
-
-/**
- * Issue #351 A4 2nd-attempt — re-evaluate `discord_id_unresolved` drops
- * after a fresh agent → discord_id DB lookup.
- *
- * routeMessage stays signature-pure (sync, no I/O). This wrapper takes the
- * routeMessage result + agent list and, for each recipient dropped with
- * `discord_id_unresolved`, calls `resolveDiscordId(agentId)` to refresh
- * the bot's discord_id. On a successful re-resolve, if msg.mentions
- * contains the resolved id, the agent is moved from dropTargets to
- * pushTargets. Every retry (success and failure) is logged.
- *
- * Caller is responsible for injecting a DB-backed resolver (typically
- * `(id) => getAgentDiscordId(db, id)`). When `db` is unavailable the
- * caller should pass a resolver returning null, which makes this wrapper
- * a no-op (the original drop stands).
- */
-export async function applyDiscordIdRetry(
-  result: RouteResult,
-  msg: { authorAgentId: string | null; mentions: string[] },
-  channel: { channelId: string },
-  resolveDiscordId: (agentId: string) => Promise<string | null>,
-  agents?: AgentInfo[],
-): Promise<RouteResult> {
-  // When the caller provides the agent list, only retry agents whose
-  // cached discordId was null at routeMessage time (true A4 path). Without
-  // the list, retry every NOT_MENTIONED drop — slower but still correct.
-  const a4Candidates = agents
-    ? new Set(agents.filter((a) => a.discordId == null).map((a) => a.agentId))
-    : null
-  const retryCandidates = Object.entries(result.dropTargets)
-    .filter(([id, reason]) => reason === 'NOT_MENTIONED' && (a4Candidates ? a4Candidates.has(id) : true))
-
-  if (retryCandidates.length === 0) return result
-
-  const logCtx = { senderAgentId: msg.authorAgentId, channelId: channel.channelId, messageId: null }
-  const newPush = [...result.pushTargets]
-  const newDrop = { ...result.dropTargets }
-
-  for (const [agentId] of retryCandidates) {
-    let resolved: string | null = null
-    try {
-      resolved = await resolveDiscordId(agentId)
-    } catch {
-      resolved = null
-    }
-    if (resolved && msg.mentions.includes(resolved)) {
-      newPush.push(agentId)
-      delete newDrop[agentId]
-      // Promote: the recipient is reachable after all. Emit `route_recovered`
-      // (info level, distinct event name) so warn-tailed alerting doesn't
-      // pick this up — it would falsely look like a silent drop.
-      activeLogger({
-        ts: new Date().toISOString(),
-        level: 'info',
-        event: 'route_recovered',
-        reason: 'discord_id_resolved_on_retry',
-        recipient_agent_id: agentId,
-        sender_agent_id: logCtx.senderAgentId,
-        channel_id: logCtx.channelId,
-        message_id: null,
-      })
-      const recoveryKey = counterKey('route_message_discord_id_retry_total', { result: 'recovered' })
-      counters.set(recoveryKey, (counters.get(recoveryKey) ?? 0) + 1)
-    } else {
-      const failKey = counterKey('route_message_discord_id_retry_total', { result: 'unresolved' })
-      counters.set(failKey, (counters.get(failKey) ?? 0) + 1)
-    }
-  }
-
-  return { ...result, pushTargets: newPush, dropTargets: newDrop }
 }
 
 /**

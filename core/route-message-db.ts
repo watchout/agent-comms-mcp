@@ -85,6 +85,30 @@ export async function resolveAgentFromDiscordId(db: DbAdapter | null, discordId:
 }
 
 /**
+ * Resolve an adapter external user ID only inside the DB-owned channel member set.
+ *
+ * Core routing is keyed by `agent_id`. Chat adapters may translate platform
+ * IDs into agent IDs, but only against the channel membership selected from
+ * the DB. A duplicate external ID must fail closed instead of letting a
+ * global lookup pick an arbitrary agent.
+ */
+export async function resolveAgentFromDiscordIdInMembers(
+  db: DbAdapter | null,
+  discordId: string,
+  members: readonly string[],
+): Promise<{ agentId: string } | { error: 'not_found' | 'ambiguous'; candidates: string[] }> {
+  if (!db || members.length === 0) return { error: 'not_found', candidates: [] }
+  const r = await db.query<{ agent_id: string }>(
+    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 AND agent_id = ANY($2::text[]) ORDER BY agent_id",
+    [discordId, members],
+  )
+  const candidates = r.rows.map((row) => row.agent_id)
+  if (candidates.length === 1) return { agentId: candidates[0] }
+  if (candidates.length > 1) return { error: 'ambiguous', candidates }
+  return { error: 'not_found', candidates: [] }
+}
+
+/**
  * ADR-040 D7: fetch `agents.metadata.discord_id` for a given agent_id.
  * Used by `resolveSendDestination` to compare a bot's own Discord user ID
  * against `<@discord_user_id>` mentions in the original message. Without
@@ -144,9 +168,8 @@ export async function resolveInboundChannel(
 
 /**
  * Load agent info for pure routeInbound.
- * ADR-040 D7: also read `metadata->>'discord_id'` so routeInbound can match
- * raw Discord user IDs in `msg.mentions` when extractDiscordMentions failed
- * to resolve them ahead of time.
+ * Adapter metadata is included for diagnostics and existing type shape, but
+ * routeInbound/routeMessage only matches individual mentions by agent_id.
  */
 export async function loadAgentInfo(db: DbAdapter | null, agentId: string): Promise<AgentInfo | null> {
   if (!db) return { agentId, agentType: 'dev', observerMode: false, discordId: null }  // fallback

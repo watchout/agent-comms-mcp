@@ -19,11 +19,10 @@
  *
  *   4 distinct cases of this class caused missed push notifications on 2026-04-09.
  *
- * Fix (Option A union, `core/route-message.ts#buildSendMentions`):
- *   Union three sources and dedup:
- *     1. Agent IDs from the `mentions` arg
- *     2. Agent IDs resolved from `<@discord_id>` patterns in content
- *     3. Agent IDs from `@agent_id` native patterns in content
+ * Current contract (`core/route-message.ts#buildSendMentions`):
+ *   Core routing uses already-resolved agent IDs only. Chat adapter tokens
+ *   such as Discord `<@snowflake>` are display/input syntax and must not
+ *   extend the DB recipient list.
  *
  * Each test below cites the regression class it guards and MUST remain green.
  *
@@ -42,29 +41,18 @@ const mockResolve = async (did: string): Promise<string | null> =>
 // ─────────────────────────────────────────────────────────────────────────────
 // T1: mentions arg provided, same agent also in content as <@discord_id>
 // ─────────────────────────────────────────────────────────────────────────────
-// REGRESSION CLASS: caller supplies mentions:["cto"] + "<@CTO_DID>" in content.
-// Old code took the mentions array and never looked at content → correct result
-// by accident, but the symmetric T2 case (empty arg) silently dropped the agent.
-// Union ensures both sources are always merged and deduped.
-describe('T1 — mentions arg + matching content discord ID → dedup to 1', () => {
-  test('sendMentions contains cto exactly once', async () => {
+describe('T1 — mentions arg + matching content discord ID → explicit agent_id only', () => {
+  test('sendMentions contains cto exactly once and does not depend on content token', async () => {
     const result = await buildSendMentions(['cto'], '<@1485599598259994635> hello', mockResolve)
     expect(result).toContain('cto')
     expect(result.length).toBe(1)
   })
 })
 
-// ─────────────────────────────────────────────────────────────────────────────
-// T2: empty mentions arg, agent only in content as <@discord_id>
-// ─────────────────────────────────────────────────────────────────────────────
-// REGRESSION CLASS: caller supplies mentions:[] but uses "<@CTO_DID>" in content
-// (the Discord-native dual-mention pattern).  Old code hit parseMentions(content)
-// which matches @word patterns only — "<@\d+>" was never parsed → pushTargets=[].
-describe('T2 — empty mentions arg, discord ID in content → resolved from content', () => {
-  test('sendMentions resolves cto from content token', async () => {
+describe('T2 — empty mentions arg, discord ID in content → no core recipient', () => {
+  test('sendMentions does not resolve Discord content tokens globally', async () => {
     const result = await buildSendMentions([], '<@1485599598259994635> hello', mockResolve)
-    expect(result).toContain('cto')
-    expect(result.length).toBe(1)
+    expect(result).toEqual([])
   })
 })
 
@@ -86,7 +74,7 @@ describe('T3 — mentions arg only, no content discord token → arg preserved',
 // ─────────────────────────────────────────────────────────────────────────────
 // REGRESSION CLASS: multi-agent message where both agents appear in the mentions
 // arg AND as discord tokens in content.  Must be exactly 2 (no duplicates).
-describe('T4 — two agents in arg + both <@discord_id> in content → 2 unique agents', () => {
+describe('T4 — two agents in arg + both <@discord_id> in content → explicit two agents', () => {
   test('sendMentions contains exactly cto and ceo', async () => {
     const result = await buildSendMentions(
       ['cto', 'ceo'],
