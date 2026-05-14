@@ -56,17 +56,17 @@ $ grep -n 'readFileSync.*pid\|kill\(' core/message-bus.ts
 `readFileSync` は ENOENT を投げ、try/catch で swallow される結果 `bus.signal('bot_X')`
 は **常に no-op** [検証済: Fixture A の PID file 不在 + B の swallow 構造から論理的に確定]。
 
-#### Fixture C: state-daemon が事実上の primary [検証済: ps 出力 + tmux 観察]
+#### Fixture C: wake-daemon が事実上の primary [検証済: ps 出力 + tmux 観察]
 
 ```bash
-$ ps -ef | grep state-daemon
-arrowsworks  6804  ... bin/state-daemon.ts
+$ ps -ef | grep wake-daemon
+arrowsworks  6804  ... bin/wake-daemon.ts
 ```
 
 PID 6804、7 日 12 時間連続稼働、tmux send-keys で全 19 bot に prompt 注入する
 mechanism として de facto primary を担う [検証済: lead-ama / agent-com-dev 共通観察]。
 ただし spec §13.5.1 では primary とも fallback とも明示されていない位置 [文献確認:
-spec §13.5.1 の 3 層列挙に state-daemon が現れない]。
+spec §13.5.1 の 3 層列挙に wake-daemon が現れない]。
 
 ### CEO directive (msg `1d03f8bd`「監査通過 governance gap」)
 
@@ -77,10 +77,10 @@ spec ownership 第一優先 [文献確認: msg `1d03f8bd` 2026-05-04 agent-comms
 
 | 軸 | 現状 | 影響 | evidence |
 |---|---|---|---|
-| 機能 (bot wake) | state-daemon が代替して functionally 解消、症状観察上 bug なし | 低 | [検証済: 本日複数 channel で正常 message 配送観察] |
+| 機能 (bot wake) | wake-daemon が代替して functionally 解消、症状観察上 bug なし | 低 | [検証済: 本日複数 channel で正常 message 配送観察] |
 | governance honesty | spec text と実装が乖離 = false claim | 高 | [検証済: Fixture A/B/C の DB 外形証跡] |
-| 信頼性 | state-daemon 単一障害点、UnixSignalBus は dead code | 中 | [検証済: ADR-051 で別 ADR scope] |
-| 後続 ADR の前提 | ADR-052 (reaper) が state-daemon を primary 前提とする impl を含む | 高 | [文献確認: ADR-052 v0.1 §「Decision」、本 ADR ratify を前提と明記。本 ADR ratify は 2026-05-14 完了済] |
+| 信頼性 | wake-daemon 単一障害点、UnixSignalBus は dead code | 中 | [検証済: ADR-051 で別 ADR scope] |
+| 後続 ADR の前提 | ADR-052 (reaper) が wake-daemon を primary 前提とする impl を含む | 高 | [文献確認: ADR-052 v0.1 §「Decision」、本 ADR ratify を前提と明記。本 ADR ratify は 2026-05-14 完了済] |
 
 ## Decision
 
@@ -143,15 +143,15 @@ fallback:   Polling (next 能動呼出 by bot LLM judgement)
 ### Option A: spec 通り PID file 復活 + UnixSignalBus 機能化
 
 `server.ts` boot で `writeFileSync(pidFilePathFor(AGENT_ID), String(process.pid))` +
-EXIT trap で `unlinkSync`、UnixSignalBus を本来の primary として復活、state-daemon
+EXIT trap で `unlinkSync`、UnixSignalBus を本来の primary として復活、wake-daemon
 は redundant supplementary に。
 
 **メリット**: code 変更小 (server.ts に PID write 追加のみ)、spec text 不変。
 
 **デメリット**:
-- state-daemon との role 重複、runtime 競合可能性 [推測: 両 mechanism が同一 bot
+- wake-daemon との role 重複、runtime 競合可能性 [推測: 両 mechanism が同一 bot
   に同時 wake → SIGUSR1 連射 / tmux 連射の race、prototype 検証必要]
-- state-daemon 7d12h 稼働実績 [検証済: ps PID 6804] を後付け降格する整合 cost 大
+- wake-daemon 7d12h 稼働実績 [検証済: ps PID 6804] を後付け降格する整合 cost 大
 - LLM agent (Claude Code / Codex / Gemini) は SIGUSR1 を受けても prompt 注入されない
   [推測: tmux send-keys 経由が prompt 注入の standard、SIGUSR1 単独では LLM session
   に prompt が届かない、empirical 確認は別途必要]
@@ -163,9 +163,9 @@ EXIT trap で `unlinkSync`、UnixSignalBus を本来の primary として復活�
 
 本 ADR の決定。
 
-### Option C: 両立 (PID file 復活 + spec で state-daemon を別 supplementary 明記)
+### Option C: 両立 (PID file 復活 + spec で wake-daemon を別 supplementary 明記)
 
-PID file 機構復活させつつ、spec で「primary = state-daemon、tertiary = UnixSignalBus」
+PID file 機構復活させつつ、spec で「primary = wake-daemon、tertiary = UnixSignalBus」
 等の併記。
 
 **メリット**: 冗長性最大、UnixSignalBus も live。
@@ -173,8 +173,8 @@ PID file 機構復活させつつ、spec で「primary = state-daemon、tertiary
 **デメリット**:
 - complexity 増 (3 機構の優先順位 + race 制御) [推測: maintenance 増の見込み]
 - maintenance 増、UnixSignalBus は LLM agent 環境では実効性低い (Option A 同根拠)
-- ADR-051 (HA / supervisor) で state-daemon SPOF を解消する path と矛盾 [文献確認:
-  ADR-051 起票要請 msg `e7bd...` (forward in this ARC session)、state-daemon を
+- ADR-051 (HA / supervisor) で wake-daemon SPOF を解消する path と矛盾 [文献確認:
+  ADR-051 起票要請 msg `e7bd...` (forward in this ARC session)、wake-daemon を
   primary として受け取り supervisor で守る前提]
 
 ## Selection rationale
@@ -183,16 +183,16 @@ Option B 採択理由:
 
 1. **Honesty 原則**: CEO directive (msg `1d03f8bd`) [文献確認] 解消が第一目的、
    spec と実装の乖離をゼロにする最 direct path
-2. **state-daemon de jure 化**: PID 6804 7d12h 連続稼働 [検証済: ps 出力] の de
+2. **wake-daemon de jure 化**: PID 6804 7d12h 連続稼働 [検証済: ps 出力] の de
    facto primary を spec で明文化、impl 既存資産に sync (新規 work 最小)
-3. **runtime 競合回避**: A の PID file 復活は state-daemon と race を生む [推測:
+3. **runtime 競合回避**: A の PID file 復活は wake-daemon と race を生む [推測:
    prototype 検証必要、ただし B は race 自体を発生させない安全側]
 4. **LLM agent 整合**: tmux send-keys 経由 prompt 注入が wake mechanism として
-   現運用で機能 [検証済: 本日複数 channel で state-daemon 経由 message 配送観察]、
+   現運用で機能 [検証済: 本日複数 channel で wake-daemon 経由 message 配送観察]、
    UnixSignalBus は LLM agent 環境向きでない [推測]
 5. **後続 ADR (-052 / -051) 整合**: 本 ADR ratify は ADR-052 の前提 [文献確認:
    ADR-052 v0.1 §1 Predecessors 明記]、本 ADR ratify は 2026-05-14 完了済、
-   ADR-051 は state-daemon 責務確定後着手、一貫した path
+   ADR-051 は wake-daemon 責務確定後着手、一貫した path
 
 ## Consequences
 
@@ -200,13 +200,13 @@ Option B 採択理由:
 
 - spec と実装が一致、CEO directive「監査通過 governance gap」が本 ADR scope
   内で解消 [文献確認: CEO directive msg `1d03f8bd`]
-- state-daemon が de jure primary、ADR-052 / ADR-051 の前提が spec で明文化
+- wake-daemon が de jure primary、ADR-052 / ADR-051 の前提が spec で明文化
 - UnixSignalBus dead code 削除、保守対象縮小
 - LLM agent 環境 (Claude Code / Codex / Gemini) との整合明示
 
 ### Negative (許容するトレードオフ) [推測]
 
-- state-daemon が唯一の push mechanism となり SPOF が顕在化、ただし ADR-051
+- wake-daemon が唯一の push mechanism となり SPOF が顕在化、ただし ADR-051
   (HA / supervisor) で別途解決 path 設定済 [文献確認: ADR-051 起票要請 msg]
 - `waitForSignal()` API 削除により外部 OSS 利用者 (将来想定) の互換性が破壊
   される。本 ADR は OSS 公開前 (ADF Phase C redef §1) [文献確認: project memory
@@ -245,19 +245,19 @@ expected:
   - log に PID file 不在 warning なし
 ```
 
-### §6c: spec §13.5.1 の primary が state-daemon
+### §6c: spec §13.5.1 の primary が wake-daemon
 
 ```bash
 $ grep -A 3 'primary:' docs/agent-com-message-queue-spec.md | head -5
-expected: "primary: state-daemon tmux send-keys" 等の表記
+expected: "primary: wake-daemon tmux send-keys" 等の表記
        (UnixSignalBus 表記が残っていない)
 ```
 
-### §6d: state-daemon stderr legacy-token absence (regression-detection invariant)
+### §6d: wake-daemon stderr legacy-token absence (regression-detection invariant)
 
 > **Cycle-4 clarification (2026-05-14)**: §6d is a *regression-detection
 > invariant gate*, not a wake-delivery liveness gate. End-to-end "real
-> message → state-daemon → tmux Enter arrival" liveness is owned by
+> message → wake-daemon → tmux Enter arrival" liveness is owned by
 > `tests/contract/test_0_wake_daemon.test.ts` (spec v3 contract
 > `test_0`), which pre-existed this ADR and remains the single source
 > of truth for that physical-delivery invariant. §6d's job is to catch
@@ -265,8 +265,8 @@ expected: "primary: state-daemon tmux send-keys" 等の表記
 > §6a's static `grep`.
 
 ```
-fixture (real state-daemon spawn, real SQLite, real INSERT — no tmux required):
-  1. spawn `bin/state-daemon.ts` (SQLite mode) and wait for "sqlite polling mode" log
+fixture (real wake-daemon spawn, real SQLite, real INSERT — no tmux required):
+  1. spawn `bin/wake-daemon.ts` (SQLite mode) and wait for "sqlite polling mode" log
   2. INSERT one agent_messages + message_queue row
   3. wait for the daemon stderr to confirm row pickup
      (either "wake .* for <agent>/<msg>" or "no tmux session for agent <agent>")
@@ -286,7 +286,7 @@ the three gates partition the post-removal invariant surface:
 |---|---|
 | legacy tokens absent in runtime *source* | §6a (static grep) |
 | legacy tokens absent in runtime *stderr* on a hot-path | §6d (this section) |
-| state-daemon physically delivers a wake ≤5 s after INSERT | `test_0_wake_daemon.test.ts` |
+| wake-daemon physically delivers a wake ≤5 s after INSERT | `test_0_wake_daemon.test.ts` |
 
 ### §6e: full test suite green
 
@@ -310,7 +310,7 @@ expected: 全 suite pass、UnixSignalBus 関連 test は削除 or skip → green
   LLM agent 環境不整合、prototype で実証は不要、Fixture A/B から論理的に decline
   可能]
 - **UnixSignalBus を「fallback」「tertiary」として spec に残す** — Option C の道、
-  Single source of truth 違反 [文献確認: 実態は state-daemon 単一 primary、
+  Single source of truth 違反 [文献確認: 実態は wake-daemon 単一 primary、
   Fixture A/B から確定]
 - **spec § 13.5.1 改訂を impl PR と分離する** — atomic merge 必須 [文献確認:
   PR #309 / #310 cascade で spec/impl 乖離が brick window を生んだ事例 = ADR-052
@@ -322,7 +322,7 @@ expected: 全 suite pass、UnixSignalBus 関連 test は削除 or skip → green
 |------|------|
 | 関連 ADR | ADR-041 (Phase 5 routing + 2026-05-05 amendment), ADR-052 (DB-observable reaper、本 ADR ratify を前提 — 2026-05-14 完了), ADR-051 (HA / supervisor、本 ADR ratify 後着手 — 2026-05-14 以降可), ADR-053 (heartbeat、取下げ) |
 | 関連 spec | `agent-comms-mcp/docs/agent-com-message-queue-spec.md` §13.5.1 (line 1306-1332) |
-| 観察 evidence | msg `c1258e88` / `978ade62` / `7a0c227d` (agent-com-dev A2 調査), 実機 ps state-daemon PID 6804 (7d12h 稼働), grep 結果 (PID file 書込み code path 不在) |
+| 観察 evidence | msg `c1258e88` / `978ade62` / `7a0c227d` (agent-com-dev A2 調査), 実機 ps wake-daemon PID 6804 (7d12h 稼働), grep 結果 (PID file 書込み code path 不在) |
 | CEO directive | msg `1d03f8bd` (監査通過 governance gap), msg `97dd47e6` (「C」全 ADR 並走), msg `c40b8dc9` (「進めて」初期) |
 | 関連 PR | impl PR #317 (本 PR、ADR と同一 atomic merge) |
 | 関連 Issue | — (impl は PR #317 に集約、別 issue 立てず) |
@@ -340,7 +340,7 @@ expected: 全 suite pass、UnixSignalBus 関連 test は削除 or skip → green
 
 | 日付 | 変更内容 | 変更者 |
 |------|---------|-------|
-| 2026-05-05 | v0.1 初版起草 (ADR-052 順序拘束対応で P0 起草、observed evidence 3 件取り込み、state-daemon de jure primary 化、evidence labels [検証済]/[文献確認]/[推測] 全 substantive assertion に付与) | ARC |
+| 2026-05-05 | v0.1 初版起草 (ADR-052 順序拘束対応で P0 起草、observed evidence 3 件取り込み、wake-daemon de jure primary 化、evidence labels [検証済]/[文献確認]/[推測] 全 substantive assertion に付与) | ARC |
 | 2026-05-14 | Status を `Proposed pending ...` から `Accepted — ratify chain complete` に更新 (cycle-2 PR #317 axis 6 fix)。impl PR #317 で本 ADR と atomic merge。 | agent-com-dev |
 | 2026-05-14 | §6d を「regression-detection invariant gate (stderr legacy-token absence)」と明文化、`test_0_wake_daemon.test.ts` との責任分割 table 追加 (cycle-4 PR #317 axis 4 fix)。 | agent-com-dev |
 | 2026-05-14 | `Related: 関連 PR` / `Meta: 最終更新日 / レビュアー` の stale governance metadata を ratify 済 state と整合 (cycle-5 PR #317 axis 5/6 fix)。 | agent-com-dev |
