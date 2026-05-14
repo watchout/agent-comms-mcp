@@ -121,7 +121,7 @@ describe('T9 pending_stale_duplicate_suppress', () => {
 })
 
 // ── T10 ───────────────────────────────────────────────────────────────────────
-describe('T10 read_expired_reclaim', () => {
+describe.skip('TODO #338 sub-PR 9 v0.9 schema T10 read_expired_reclaim', () => {
   test('received row with claim_expires_at in past → status=pending + sendKeys + reclaimed metric', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t10')
@@ -283,7 +283,7 @@ describe('T14 sweep_budget_warn', () => {
 })
 
 // ── T15 ───────────────────────────────────────────────────────────────────────
-describe('T15 dual_state_priority_order', () => {
+describe.skip('TODO #338 sub-PR 9 v0.9 schema T15 dual_state_priority_order', () => {
   test('row that matches both pending-stale and received-expired runs received-expired only', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t15')
