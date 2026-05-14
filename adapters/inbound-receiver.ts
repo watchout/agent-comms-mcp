@@ -454,6 +454,7 @@ export async function handleInboundMessage(params: {
   attachments?: string
   timestamp: Date
   platform: string
+  source?: string
   mentions?: string[]
   replyToMessageId?: string
 }): Promise<InboundRouteResult> {
@@ -474,6 +475,7 @@ export async function handleInboundMessage(params: {
     content, attachments, timestamp, platform, mentions,
     replyToMessageId, // PR-β §1: destructure (was previously declared on params but never read)
   } = params
+  const source = params.source ?? platform
 
   // Step 1: Resolve channel → core channel_id + members.
   const coreDb = await d.coreDbAdapter()
@@ -535,7 +537,7 @@ export async function handleInboundMessage(params: {
     // PR-β §2: reply_to MUST be the resolved UUID (or NULL), never the
     // Discord snowflake from msg.replyTo (§3 Forbidden).
     ...(resolvedReplyToUuid ? { reply_to: resolvedReplyToUuid } : {}),
-    source: platform,
+    source,
     thread_id: resolved?.threadId ?? null,
     direction: 'inbound',
     role: authorIsBot ? 'agent' : 'user',
@@ -680,7 +682,7 @@ export async function handleInboundMessage(params: {
       content,
       message_id: messageId,
       message_type: 'chat',
-      source: platform,
+      source,
       ts: timestamp.toISOString(),
       ...(attachments ? { attachments } : {}),
     })

@@ -107,6 +107,7 @@ import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-d
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
+import { decideDiscordBotIngress } from './core/discord-bot-ingress-policy'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -4045,11 +4046,16 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
         if (processedIds.has(msg.id)) return
         processedIds.set(msg.id, Date.now())
 
-        // CEO directive 2026-05-14: DB is the SSOT, Discord is downstream display.
-        // Bot-authored Discord events = echo of own agent-comms outbound; ignoring
-        // them prevents duplicate message_queue rows (source=agent-comms + source=discord)
-        // that defeat uq_mq_agent_message (different message_ids) and cause check-inbox loops.
-        if (msg.author.isBot) return
+        // DB is the control plane; Discord is display/human ingress.
+        // Bot-authored Discord messages are rejected by default so native
+        // agent-comms outbound does not echo back as duplicate source=discord
+        // rows. Explicit external bridges can opt in via
+        // AGENT_COM_DISCORD_BOT_BRIDGE_IDS and are labelled separately.
+        const botIngress = decideDiscordBotIngress(msg)
+        if (!botIngress.accept) {
+          process.stderr.write(`agent-comms: discord inbound bot echo blocked — author=${msg.author.id} msg=${msg.id}\n`)
+          return
+        }
 
         const atts = msg.attachments?.map(a => `${a.name} (${a.contentType}, ${(a.size / 1024).toFixed(0)}KB)`).join('; ')
         const content = msg.content || (atts ? '(attachment)' : '')
@@ -4066,6 +4072,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
             attachments: atts,
             timestamp: msg.timestamp,
             platform: 'discord',
+            source: botIngress.source,
             mentions: resolvedMentions,
             replyToMessageId: msg.replyTo,
           })
