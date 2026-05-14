@@ -463,6 +463,213 @@ async function nextMessage() {
 // removed. The queue (message_queue table) is the sole message source.
 
 /**
+ * `agent-com inbox` — manual codex-aun inbox reader.
+ *
+ * This is the first DB -> Codex receiving primitive. It claims pending
+ * message_queue rows for the selected agent and emits a compact JSON
+ * envelope that a Codex session, shell wrapper, or human operator can read.
+ *
+ * Status lifecycle:
+ *   pending -> received -> in_progress -> done
+ *
+ * Flags:
+ *   --agent-id <id>       optional, falls back to AGENT_ID
+ *   --limit <n>           optional, default 1, max 10
+ */
+async function inboxMessage(args: string[]) {
+  const agentId = resolveAgentId(args, 'inbox')
+  const { flags } = parseArgs(args)
+  const limit = Math.max(1, Math.min(10, parseInt(flags.limit ?? '1', 10) || 1))
+  const db = await getDb()
+  try {
+    let rows: Array<{ id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date }> = []
+    await db.query('BEGIN')
+    try {
+      const claim = await db.query(
+        `SELECT id, message_id, payload, priority, created_at
+           FROM message_queue
+          WHERE status = 'pending' AND agent_id = $1
+          ORDER BY priority DESC, created_at ASC
+          LIMIT $2
+          FOR UPDATE SKIP LOCKED`,
+        [agentId, limit],
+      )
+      rows = claim.rows
+
+      const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+      const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
+      for (const row of rows) {
+        await db.query(
+          `UPDATE message_queue
+              SET status = 'received',
+                  read_at = now(),
+                  claimed_by = $1,
+                  claimed_at = now(),
+                  claim_expires_at = $2
+            WHERE id = $3 AND status = 'pending'`,
+          [agentId, claimExpiresAt, row.id],
+        )
+      }
+
+      await db.query(
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE status END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE status_detail END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
+        [agentId],
+      )
+      await db.query('COMMIT')
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {})
+      throw err
+    }
+
+    const waitingRow = await db.query(
+      `SELECT count(*)::int AS n FROM message_queue
+       WHERE agent_id = $1 AND status = 'pending'`,
+      [agentId],
+    )
+    const waiting: number = waitingRow.rows[0]?.n ?? 0
+
+    const messages = rows.map((row) => {
+      let payload: Record<string, any> = {}
+      try {
+        payload = JSON.parse(row.payload)
+      } catch (err) {
+        payload = { parse_error: String(err), raw_payload: row.payload }
+      }
+      return {
+        queue_id: row.id,
+        message_id: row.message_id ?? payload.message_id ?? null,
+        status: 'received',
+        channel_id: payload.channel_id ?? null,
+        thread_id: payload.thread_id ?? null,
+        from: payload.author_id ?? null,
+        from_name: payload.author_name ?? null,
+        content: payload.content ?? '',
+        message_type: payload.message_type ?? 'chat',
+        source: payload.source ?? null,
+        created_at: row.created_at,
+      }
+    })
+
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      agent_id: agentId,
+      waiting,
+      claimed: messages.length,
+      messages,
+    }) + '\n')
+  } finally {
+    await db.end()
+  }
+}
+
+async function transitionQueueMessage(
+  command: 'processing' | 'done',
+  args: string[],
+) {
+  const agentId = resolveAgentId(args, command)
+  const { flags } = parseArgs(args)
+  const queueId = flags['queue-id']
+  if (!queueId) {
+    console.error(`Error: --queue-id is required`)
+    process.exit(2)
+  }
+
+  const fromStatus = command === 'processing' ? 'received' : 'in_progress'
+  const toStatus = command === 'processing' ? 'in_progress' : 'done'
+  const idempotentStatus = toStatus
+  const setClause = command === 'done'
+    ? `status = 'done', done_at = now()`
+    : `status = 'in_progress'`
+
+  const db = await getDb()
+  try {
+    const current = await db.query(
+      `SELECT id, status, agent_id FROM message_queue WHERE id = $1`,
+      [queueId],
+    )
+    if (current.rows.length === 0) {
+      process.stdout.write(JSON.stringify({ ok: false, code: 'NOT_FOUND', queue_id: queueId }) + '\n')
+      process.exit(1)
+    }
+    const observed = current.rows[0].status
+    const rowAgentId = current.rows[0].agent_id
+    if (rowAgentId !== agentId) {
+      process.stdout.write(JSON.stringify({
+        ok: false,
+        code: 'AGENT_MISMATCH',
+        queue_id: queueId,
+        expected_agent_id: agentId,
+        observed_agent_id: rowAgentId,
+      }) + '\n')
+      process.exit(1)
+    }
+    if (observed === idempotentStatus) {
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        queue_id: queueId,
+        status: observed,
+        already_transitioned: true,
+      }) + '\n')
+      return
+    }
+    if (observed !== fromStatus) {
+      process.stdout.write(JSON.stringify({
+        ok: false,
+        code: 'INVALID_STATE',
+        queue_id: queueId,
+        expected: fromStatus,
+        observed,
+      }) + '\n')
+      process.exit(1)
+    }
+
+    await db.query('BEGIN')
+    try {
+      const updated = await db.query(
+        `UPDATE message_queue SET ${setClause}
+          WHERE id = $1 AND agent_id = $2 AND status = $3
+          RETURNING id`,
+        [queueId, agentId, fromStatus],
+      )
+      if (updated.rows.length === 0) {
+        await db.query('ROLLBACK')
+        process.stdout.write(JSON.stringify({
+          ok: false,
+          code: 'STALE_TRANSITION',
+          queue_id: queueId,
+          expected: fromStatus,
+        }) + '\n')
+        process.exit(1)
+      }
+      await db.query(
+        `UPDATE agents SET
+           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received','in_progress')) THEN 'busy' ELSE 'idle' END,
+           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received','in_progress')) THEN 'メッセージ処理中' ELSE NULL END,
+           status_updated_at = now()
+         WHERE agent_id = $1`,
+        [agentId],
+      )
+      await db.query('COMMIT')
+    } catch (err) {
+      await db.query('ROLLBACK').catch(() => {})
+      throw err
+    }
+
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      queue_id: queueId,
+      status: toStatus,
+    }) + '\n')
+  } finally {
+    await db.end()
+  }
+}
+
+/**
  * `agent-com send` — reply to the message captured by the most recent `next`
  * (Issue #128 Phase 2 / message-queue-spec §4.2).
  *
@@ -1394,6 +1601,12 @@ if (command === 'channel') {
   await heartbeat([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'daemon') {
   await daemon([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'inbox') {
+  await inboxMessage([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'processing') {
+  await transitionQueueMessage('processing', [subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'done') {
+  await transitionQueueMessage('done', [subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'next') {
   await nextMessage()
 } else if (command === 'send') {
@@ -1426,6 +1639,9 @@ Commands:
   status
 
 Message I/O (requires AGENT_ID env var):
+  inbox [--agent-id <id>] [--limit 1]                  — claim pending messages as received (codex-aun manual inbox)
+  processing --queue-id <id> [--agent-id <id>]         — mark received message in_progress
+  done --queue-id <id> [--agent-id <id>]               — mark in_progress message done
   next                                                — fetch one unread message (oldest first)
   send --content "..." --mentions cto,ceo [--message-type chat]
   notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
