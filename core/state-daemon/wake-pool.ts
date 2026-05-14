@@ -13,8 +13,8 @@
  */
 import type { Metrics, AlertSink, StateDaemonConfig } from './types'
 
-export interface WakeJob {
-  exec(): Promise<void>
+export interface WakeJob<T = void> {
+  exec(): Promise<T>
 }
 
 export interface WakePoolDeps {
@@ -55,7 +55,7 @@ export class WakePool {
    * Run a job. Resolves when the job's exec completes; if pool is full, awaits
    * a free slot. Grows capacity if queued depth > high watermark.
    */
-  async run(job: WakeJob): Promise<void> {
+  async run<T = void>(job: WakeJob<T>): Promise<T> {
     if (this.active >= this.capacity) {
       // queue and possibly grow before we wait
       await new Promise<void>((resolve) => {
@@ -67,7 +67,7 @@ export class WakePool {
     }
     this.active++
     try {
-      await job.exec()
+      return await job.exec()
     } finally {
       this.active--
       this.maybeShrink()

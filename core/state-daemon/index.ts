@@ -504,45 +504,14 @@ export class StateDaemon {
     } catch (e) {
       this.metrics.inc('state_daemon_stall_detector_error_total', {})
       this.recordDbError(e)
-      // fall through; the suppression check below is unchanged.
+      // fail open into the wake reservation path.
     }
-    // v0.9 sub-PR 4 §1.5 per-bot suppression: the deduplication window is
-    // owned by the bot, not the individual message. If the bot has any
-    // pending message that was woken within the last `wakeDuplicateSuppressSec`,
-    // skip — regardless of how many other pending rows are queued for that bot.
-    //
-    // The SQL below is the spec SSOT (PR #338 cycle 7,
-    // docs/spec/agentcom-state-daemon-v0.9-impl.md §1.5 +
-    // proposals/agentcom-state-daemon-v0.9-rollout.md §sub-PR 4):
-    //
-    //   SELECT MAX(last_wake_attempt_at) AS bot_last_wake
-    //     FROM message_queue
-    //     WHERE agent_id = bot AND status = 'pending'
-    //     GROUP BY agent_id;
-    //
-    // GROUP BY is part of the SSOT literal even though the predicate already
-    // restricts to one agent — the spec freezes this form to keep the three
-    // location SSOT (commit summary / spec body / acceptance) in sync.
-    const { rows: lastWakeRows } = await this.dbQuery<{ bot_last_wake: Date | null }>(
-      `SELECT MAX(last_wake_attempt_at) AS bot_last_wake
-         FROM message_queue
-         WHERE agent_id = $1 AND status = 'pending'
-         GROUP BY agent_id`,
-      [row.agent_id],
-    )
-    const botLastWake = lastWakeRows[0]?.bot_last_wake ?? null
-    if (botLastWake) {
-      const sinceLast = (now.getTime() - new Date(botLastWake).getTime()) / 1000
-      if (sinceLast < this.config.wakeDuplicateSuppressSec) {
-        this.metrics.inc('state_daemon_wake_actions_total', { result: dedupResultLabel })
-        return false
-      }
-    }
-    const runPromise = this.wakePool.run({ exec: () => this.executeWake(row, now) })
+    const runPromise = this.wakePool.run({
+      exec: () => this.executeWake(row, now, dedupResultLabel),
+    })
     this.inflightWakes.add(runPromise)
     try {
-      await runPromise
-      return true
+      return await runPromise
     } finally {
       this.inflightWakes.delete(runPromise)
     }
@@ -579,7 +548,11 @@ export class StateDaemon {
     return this.stallDetector.detect(ctx)
   }
 
-  private async executeWake(row: QueueRow, now: Date): Promise<void> {
+  private async executeWake(
+    row: QueueRow,
+    now: Date,
+    dedupResultLabel: string,
+  ): Promise<boolean> {
     const { rows } = await this.dbQuery<AgentRow>(
       `SELECT agent_id, runtime, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
       [row.agent_id],
@@ -588,7 +561,7 @@ export class StateDaemon {
     if (!bot) {
       await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
-      return
+      return false
     }
     if (bot.runtime !== defaultConfigPort.getDefaultRuntime()) {
       // Bug 3 fix (re-chain msg 250d01b0 / R15 / F13): non-TUI runtimes
@@ -606,34 +579,54 @@ export class StateDaemon {
       // trip the operator alert. F13 covers BOTH the throw path AND
       // the alert side-channel.
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })
-      return
+      return false
     }
-    // R9 abnormal-activity recording sits AFTER the runtime gate so
-    // only real wake attempts (TUI bots) feed the rolling window.
-    this.recordDispatchForAbnormalCheck(row.agent_id)
     if (!bot.tmux_session) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })
-      return
+      return false
     }
+
+    // Wake suppression is bot runtime state, not message row state. Reserve
+    // the bot's window with one conditional UPDATE so concurrent queue events
+    // cannot all observe the same stale timestamp and fan out duplicate wakes.
+    const reserved = await this.dbQuery(
+      `UPDATE agents
+          SET last_wake_attempt_at=$1
+        WHERE agent_id=$2
+          AND (
+            last_wake_attempt_at IS NULL
+            OR last_wake_attempt_at <= $1::timestamptz - ($3 || ' seconds')::interval
+          )`,
+      [now, row.agent_id, this.config.wakeDuplicateSuppressSec],
+    )
+    if (reserved.rowCount === 0) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: dedupResultLabel })
+      return false
+    }
+
+    // R9 abnormal-activity recording sits AFTER the runtime gate and the
+    // per-bot reservation so only actual wake sends feed the rolling window.
+    this.recordDispatchForAbnormalCheck(row.agent_id)
     try {
       await this.tmux.sendKeys(bot.tmux_session, 'check inbox\n')
     } catch (err) {
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, now],
+      )
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'tmux_error' })
       throw new TmuxSendKeysError((err as Error).message ?? String(err))
     }
-    // v0.9 sub-PR 4 §1.5: update every pending row for the bot in one
-    // transaction so the per-bot MAX(last_wake_attempt_at) read in
-    // `runWakeIfNotSuppressed` reflects the wake regardless of which row
-    // triggered it. This is the per-bot equivalent of the previous per-msg
-    // UPDATE; the previous form left other pending rows for the same bot
-    // with NULL / stale timestamps, which made the suppression window
-    // depend on which row the dispatcher pulled first.
+    // Keep the row-level timestamp as audit/diagnostic compatibility. The
+    // suppression SSOT above is agents.last_wake_attempt_at.
     await this.dbQuery(
       `UPDATE message_queue SET last_wake_attempt_at=$1
          WHERE agent_id=$2 AND status='pending'`,
       [now, row.agent_id],
     )
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'ok' })
+    return true
   }
 
   // ── State transition helpers (§4.3) ────────────────────────────────────────

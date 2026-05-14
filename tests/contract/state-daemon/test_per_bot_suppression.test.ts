@@ -6,12 +6,12 @@
  * window, regardless of how many other pending rows the bot has. The window
  * is owned by the bot, not by any individual message.
  *
- * SSOT SQL (spec § sub-PR 4 acceptance + spec body §1.5, commit `36dfa2e`):
+ * SSOT SQL:
  *
- *   SELECT MAX(last_wake_attempt_at) AS bot_last_wake
- *     FROM message_queue
- *     WHERE agent_id = bot AND status = 'pending'
- *     GROUP BY agent_id;
+ *   UPDATE agents
+ *      SET last_wake_attempt_at = now
+ *    WHERE agent_id = bot
+ *      AND last_wake_attempt_at outside suppression window;
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
@@ -117,6 +117,91 @@ describe('per-bot wake suppression (PR #338 sub-PR 4 §1.5)', () => {
       for (const row of stamps.rows) {
         expect(row.last_wake_attempt_at).not.toBeNull()
       }
+      const agentWake = await pg.query<{ last_wake_attempt_at: Date | null }>(
+        `SELECT last_wake_attempt_at FROM agents WHERE agent_id=$1`,
+        [agent],
+      )
+      expect(agentWake.rows[0].last_wake_attempt_at).not.toBeNull()
+    } finally {
+      await daemon.stop()
+    }
+  })
+
+  test('test 1b: single pending が received に移っても agent-level suppression が効く', async () => {
+    const agent = makeAgentId('per-bot-1b')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      tmux_session: `${agent}-session`,
+      status: 'online',
+    })
+
+    const t0 = new Date('2026-05-12T00:00:30.000Z')
+    const clock = new FakeClock(t0)
+    const tmux = new FakeTmux()
+    const metrics = new FakeMetrics()
+    const daemon = mkDaemon(clock, tmux, metrics)
+    await daemon.start()
+    try {
+      const [id1] = await insertPending(agent, t0, 1)
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: id1,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      expect(tmux.sentKeys.length).toBe(1)
+
+      await pg.query(`UPDATE message_queue SET status='received' WHERE id=$1`, [id1])
+      clock.advance(1000)
+
+      const [id2] = await insertPending(agent, clock.now(), 1)
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: id2,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(tmux.sentKeys.length).toBe(1)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'ok' })).toBe(1)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+  })
+
+  test('test 1c: concurrent INSERT events でも agent-level reservation が wake を 1 回に抑える', async () => {
+    const agent = makeAgentId('per-bot-1c')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      tmux_session: `${agent}-session`,
+      status: 'online',
+    })
+
+    const t0 = new Date('2026-05-12T00:00:45.000Z')
+    const clock = new FakeClock(t0)
+    const tmux = new FakeTmux()
+    tmux.sendDelayMs = 20
+    const metrics = new FakeMetrics()
+    const daemon = mkDaemon(clock, tmux, metrics)
+    await daemon.start()
+    try {
+      const ids = await insertPending(agent, t0, 2)
+      await Promise.all(ids.map((id) => daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })))
+
+      expect(tmux.sentKeys.length).toBe(1)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'ok' })).toBe(1)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(1)
     } finally {
       await daemon.stop()
     }

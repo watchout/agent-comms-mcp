@@ -179,6 +179,7 @@ export function migrateSqlite(dbPath?: string): void {
       -- so SQLite-backed deployments survive session restarts identically.
       inbox_cursor_at TEXT,
       inbox_cursor_id TEXT,
+      last_wake_attempt_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
@@ -190,6 +191,9 @@ export function migrateSqlite(dbPath?: string): void {
   }
   if (!agentsColNames.has('inbox_cursor_id')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN inbox_cursor_id TEXT`)
+  }
+  if (!agentsColNames.has('last_wake_attempt_at')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN last_wake_attempt_at TEXT`)
   }
 
   gatedExec(`

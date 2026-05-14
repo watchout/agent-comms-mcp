@@ -89,6 +89,10 @@ describe('T8 pending_stale_rewake', () => {
       const ts = (r.rows as Array<{ last_wake_attempt_at: Date | null }>)[0].last_wake_attempt_at
       expect(ts).not.toBeNull()
       expect(Math.abs(new Date(ts!).getTime() - (T0.getTime() + 15_000))).toBeLessThan(1500)
+      const agentWake = await pg.query(`SELECT last_wake_attempt_at FROM agents WHERE agent_id=$1`, [agent])
+      const agentTs = (agentWake.rows as Array<{ last_wake_attempt_at: Date | null }>)[0].last_wake_attempt_at
+      expect(agentTs).not.toBeNull()
+      expect(Math.abs(new Date(agentTs!).getTime() - (T0.getTime() + 15_000))).toBeLessThan(1500)
     } finally {
       await h.daemon.stop()
     }
@@ -107,6 +111,10 @@ describe('T9 pending_stale_duplicate_suppress', () => {
       created_at: T0,
       last_wake_attempt_at: new Date(T0.getTime() + 12_000),
     })
+    await pg.query(`UPDATE agents SET last_wake_attempt_at=$1 WHERE agent_id=$2`, [
+      new Date(T0.getTime() + 12_000),
+      agent,
+    ])
 
     const h = buildHarness(new Date(T0.getTime() + 15_000))
     await h.daemon.start()

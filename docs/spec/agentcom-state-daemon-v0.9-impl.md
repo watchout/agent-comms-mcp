@@ -270,16 +270,19 @@ skipped status 発生源 0 化検証:
 
 **設計 (= per-bot suppression、旧 per-msg ではない)**:
 
-state-daemon sweep loop は **bot 単位** で suppression evaluate (msg 件数依存削除):
+state-daemon sweep loop は **bot 単位** で suppression evaluate (msg 件数依存削除)。判定は read-then-write ではなく、`agents` row の条件付き UPDATE で wake window を原子的に予約する:
 
 ```
 for each bot with pending msg:
-  SELECT MAX(last_wake_attempt_at) AS bot_last_wake
-    FROM message_queue
-    WHERE agent_id = bot AND status = 'pending'
-    GROUP BY agent_id;
+  UPDATE agents
+    SET last_wake_attempt_at = now()
+    WHERE agent_id = bot
+      AND (
+        last_wake_attempt_at IS NULL
+        OR last_wake_attempt_at <= now() - interval '30 seconds'
+      );
 
-  IF bot_last_wake > now() - interval '30 seconds' THEN
+  IF updated row count = 0 THEN
     skip bot 全体 (= bot 内全 pending msg を本 sweep cycle で wake しない)
   ELSE
     wake bot 1 回
@@ -291,7 +294,9 @@ for each bot with pending msg:
 
 **Key invariants**:
 - **per-bot 単位 evaluation**: 1 bot に N pending msg あっても本 cycle で wake は 1 回のみ (= msg 件数依存排除)
-- **bot 内全 pending msg `last_wake_attempt_at` 同時更新**: 次 sweep で bot 全体が 30s skip 対象になる
+- **bot runtime SSOT**: `agents.last_wake_attempt_at` が suppression の正本。単発 pending が `received` へ遷移しても wake 履歴は残る
+- **atomic reservation**: 同時 INSERT/NOTIFY が並行しても `agents` の条件付き UPDATE が 1 件だけ成功し、同一 window 内の重複 wake を防ぐ
+- **bot 内全 pending msg `last_wake_attempt_at` 同時更新**: row-level audit/diagnostic として保持するが、suppression 判定の正本ではない
 - **30 秒 retry 周期**: 旧 5s から 30s 化、CEO 設計 「30 秒後にリトライ」 literal 実装
 - **bot online status と独立**: pending 存在 & online bot のみ candidate、suppression は wake 時刻だけで判定
 

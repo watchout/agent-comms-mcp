@@ -17,7 +17,10 @@ export function makeAgentId(suffix: string): string {
 }
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
-const MIGRATION_FILE = 'db/migrations/2026-05-08-state-daemon-323.up.sql'
+const MIGRATION_FILES = [
+  'db/migrations/2026-05-08-state-daemon-323.up.sql',
+  'db/migrations/2026-05-14-agent-wake-suppression-ssot.up.sql',
+]
 let migrationApplied = false
 
 /**
@@ -31,8 +34,10 @@ let migrationApplied = false
 async function ensureStateDaemonMigration(client: Client): Promise<void> {
   if (migrationApplied) return
   try {
-    const sql = readFileSync(join(REPO_ROOT, MIGRATION_FILE), 'utf-8')
-    await client.query(sql)
+    for (const file of MIGRATION_FILES) {
+      const sql = readFileSync(join(REPO_ROOT, file), 'utf-8')
+      await client.query(sql)
+    }
     migrationApplied = true
   } catch (err) {
     // The migration file may not be present on a branch that has rebased
