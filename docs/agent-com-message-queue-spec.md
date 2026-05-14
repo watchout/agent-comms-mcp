@@ -108,7 +108,10 @@ CREATE TABLE message_queue (
   read_at TIMESTAMPTZ,
   replied_at TIMESTAMPTZ,
   replied_with TEXT,                   -- 返信メッセージのID
-  failed_reason TEXT                   -- v2.1.0: fail CLI で設定 (LOOP_DETECTED, LLM_FAILED 等)
+  failed_reason TEXT,                  -- v2.1.0: fail CLI で設定 (LOOP_DETECTED, LLM_FAILED 等)
+  intent TEXT NOT NULL DEFAULT 'request',
+  expect_response BOOLEAN NOT NULL DEFAULT true,
+  context JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX idx_mq_agent_pending
@@ -125,12 +128,22 @@ CREATE UNIQUE INDEX uq_mq_agent_message
   WHERE message_id IS NOT NULL;
 ```
 
+#### 3.2.1 message_queue disposition envelope
+
+`message_queue` は delivery queue であり、用途固有の PR review / audit / implementation 等を core enum として持たない。受信側 automation が「対応する/しない」を本文解釈だけに依存せず判定できるよう、以下の薄い envelope のみを保持する。
+
+- `intent`: 汎用 intent。既定は `request`。慣用値は `request` / `inform` / `ack` だが、core は domain-specific task kind として解釈しない。
+- `expect_response`: 受信側の応答・対応を期待するか。既定は `true`、`intent='inform'` 指定時の tool/CLI default は `false`。
+- `context`: opaque JSON。GitHub PR 番号、外部 ticket、UI route などを格納できるが、core routing は解釈しない。
+
+原則として「宛先に届いた row は対応対象」であり、対応不要の共有は `intent='inform'` / `expect_response=false` で明示する。
+
 **DML rule (上記 DDL invariant `uq_mq_agent_message` と対応)**:
 `message_queue` への INSERT は **必ず** 以下の形式で行うこと。ON CONFLICT の target を明示し (部分 UNIQUE の述語も同一)、並行 enqueue が UNIQUE 違反で throw しない・どの制約が発火したかも明示される:
 
 ```sql
-INSERT INTO message_queue (agent_id, message_id, payload)
-VALUES ($1, $2, $3)
+INSERT INTO message_queue (agent_id, message_id, payload, intent, expect_response, context)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING;
 ```
 
@@ -730,7 +743,7 @@ receiverClient.on("messageCreate", async (msg) => {
 **Atomic commit boundary (7b + 7d):**
 
 - Step **7b** — `UPDATE agent_messages SET metadata = metadata || jsonb_build_object('to', $receiverAgentId) WHERE id = $messageId`
-- Step **7d** — `INSERT INTO message_queue (agent_id, message_id, payload) VALUES (...) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`
+- Step **7d** — `INSERT INTO message_queue (agent_id, message_id, payload[, intent, expect_response, context]) VALUES (...) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`
 
 Both queries run on a **transaction-private** `pg.Client` inside one `BEGIN`/`COMMIT`. Implementation: `core/inbound-delivery.ts` `persistInboundDelivery(databaseUrl, params)`. Invariants:
 

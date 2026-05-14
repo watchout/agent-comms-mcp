@@ -40,6 +40,9 @@ describe('fanoutToRecipients — happy path', () => {
     expect(res.deduped).toEqual([])
     expect(res.failed).toEqual([])
     expect(calls.length).toBe(3)
+    expect(calls[0].sql).toContain('agent_id, message_id, payload')
+    expect(calls[0].sql).not.toContain('intent, expect_response, context')
+    expect(calls[0].params.length).toBe(3)
     // Payload shape sanity
     const payload = JSON.parse(calls[0].params[2])
     expect(payload.channel_id).toBe('ch-1')
@@ -65,12 +68,21 @@ describe('fanoutToRecipients — happy path', () => {
       recipients: ['probe-a'],
       messageType: 'approval',
       source: 'cli-notify',
+      intent: 'inform',
+      expectResponse: false,
+      context: { repo: 'watchout/agent-comms-mcp', pr: 370 },
     })
     const payload = JSON.parse(calls[0].params[2])
     expect(payload.thread_id).toBe('thr-1')
     expect(payload.author_name).toBe('CTO')
     expect(payload.message_type).toBe('approval')
     expect(payload.source).toBe('cli-notify')
+    expect(calls[0].params[3]).toBe('inform')
+    expect(calls[0].params[4]).toBe(false)
+    expect(JSON.parse(calls[0].params[5])).toEqual({
+      repo: 'watchout/agent-comms-mcp',
+      pr: 370,
+    })
   })
 })
 

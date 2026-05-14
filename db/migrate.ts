@@ -269,7 +269,10 @@ async function migrate() {
       read_at TIMESTAMPTZ,
       replied_at TIMESTAMPTZ,
       replied_with TEXT,                     -- reply message id
-      failed_reason TEXT                     -- v2.1.0: fail CLI で設定 (IMPLICIT_ABANDON / LLM_FAILED / SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED / OBSOLETE)
+      failed_reason TEXT,                    -- v2.1.0: fail CLI で設定 (IMPLICIT_ABANDON / LLM_FAILED / SEND_FAILED_AFTER_N_RETRIES / LOOP_DETECTED / OBSOLETE)
+      intent TEXT NOT NULL DEFAULT 'request',
+      expect_response BOOLEAN NOT NULL DEFAULT true,
+      context JSONB NOT NULL DEFAULT '{}'::jsonb
     );
     CREATE INDEX IF NOT EXISTS idx_mq_agent_pending
       ON message_queue(agent_id, status, priority DESC, created_at ASC)
@@ -284,6 +287,9 @@ async function migrate() {
       ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
       ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
       ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS intent TEXT NOT NULL DEFAULT 'request';
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS expect_response BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS context JSONB NOT NULL DEFAULT '{}'::jsonb;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
     CREATE INDEX IF NOT EXISTS idx_mq_expired_claims

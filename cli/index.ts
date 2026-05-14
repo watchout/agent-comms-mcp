@@ -28,6 +28,11 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
+import {
+  hasExplicitMessageDisposition,
+  normalizeMessageDisposition,
+  readMessageQueueDisposition,
+} from '../core/message-intent'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -102,6 +107,26 @@ function parseArgs(argv: string[]): { positional: string[]; flags: Record<string
     }
   }
   return { positional, flags }
+}
+
+function parseOptionalBooleanFlag(value: string | undefined, flagName: string): boolean | undefined {
+  if (value === undefined) return undefined
+  if (value === 'true' || value === '1' || value === 'yes') return true
+  if (value === 'false' || value === '0' || value === 'no') return false
+  console.error(`Error: --${flagName} must be true or false`)
+  process.exit(2)
+}
+
+function parseOptionalJsonObjectFlag(value: string | undefined, flagName: string): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined
+  try {
+    const parsed = JSON.parse(value)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {}
+  console.error(`Error: --${flagName} must be a JSON object`)
+  process.exit(2)
 }
 
 async function auditLog(db: Client, eventType: string, agentId: string | null, target: string | null, detail: Record<string, unknown>) {
@@ -331,7 +356,13 @@ async function nextMessage() {
     // concurrent `agent-com next` calls now both succeed in parallel,
     // each grabbing a distinct message_queue row via FOR UPDATE SKIP
     // LOCKED — the §A multi in-flight contract.
-    let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date } | null = null
+    let row: {
+      id: string | number
+      message_id: string | null
+      payload: string
+      priority: number
+      created_at: Date
+    } | null = null
     await db.query('BEGIN')
     try {
       // Step 1: pop the oldest pending row with an exclusive lock so a
@@ -437,6 +468,8 @@ async function nextMessage() {
       }
     }
 
+    const queueDisposition = await readMessageQueueDisposition(db, row.id)
+
     // Spec §4.1 output shape — channel_id / content / etc come from the
     // payload the receiver enriched on INSERT.
     process.stdout.write(JSON.stringify({
@@ -451,6 +484,9 @@ async function nextMessage() {
       content: payload.content,
       message_type: payload.message_type ?? 'chat',
       source: payload.source ?? null,
+      intent: queueDisposition.intent,
+      expect_response: queueDisposition.expectResponse,
+      context: queueDisposition.context,
       created_at: row.created_at,
       reply_chain: replyChain,
     }) + '\n')
@@ -496,6 +532,16 @@ async function sendMessage(args: string[]) {
   const content = flags.content
   const mentionsRaw = flags.mentions
   const messageType = flags['message-type'] ?? 'chat'
+  const disposition = normalizeMessageDisposition({
+    intent: flags.intent,
+    expect_response: parseOptionalBooleanFlag(flags['expect-response'], 'expect-response'),
+    context: parseOptionalJsonObjectFlag(flags['context-json'], 'context-json'),
+  })
+  const dispositionSpecified = hasExplicitMessageDisposition({
+    intent: flags.intent,
+    expect_response: flags['expect-response'],
+    context: flags['context-json'],
+  })
 
   if (!content) {
     console.error('Error: --content is required')
@@ -680,6 +726,13 @@ async function sendMessage(args: string[]) {
             recipients: mentions,
             messageType,
             source: 'cli-send',
+            ...(dispositionSpecified
+              ? {
+                  intent: disposition.intent,
+                  expectResponse: disposition.expectResponse,
+                  context: disposition.context,
+                }
+              : {}),
           },
         )
         if (fanoutRes.failed.length > 0) {
@@ -832,6 +885,16 @@ async function notifyMessage(args: string[]) {
   const content = flags.content
   const mentionsRaw = flags.mentions
   const messageType = flags['message-type'] ?? 'chat'
+  const disposition = normalizeMessageDisposition({
+    intent: flags.intent,
+    expect_response: parseOptionalBooleanFlag(flags['expect-response'], 'expect-response'),
+    context: parseOptionalJsonObjectFlag(flags['context-json'], 'context-json'),
+  })
+  const dispositionSpecified = hasExplicitMessageDisposition({
+    intent: flags.intent,
+    expect_response: flags['expect-response'],
+    context: flags['context-json'],
+  })
 
   if (!channelArg) {
     console.error('Error: --channel is required')
@@ -950,6 +1013,13 @@ async function notifyMessage(args: string[]) {
           recipients: mentions,
           messageType,
           source: 'cli-notify',
+          ...(dispositionSpecified
+            ? {
+                intent: disposition.intent,
+                expectResponse: disposition.expectResponse,
+                context: disposition.context,
+              }
+            : {}),
         },
       )
       if (fanoutRes.failed.length > 0) {
@@ -1427,8 +1497,8 @@ Commands:
 
 Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
-  send --content "..." --mentions cto,ceo [--message-type chat]
-  notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
+  send --content "..." --mentions cto,ceo [--message-type chat] [--intent request|inform|ack] [--expect-response true|false] [--context-json '{}']
+  notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat] [--intent request|inform|ack] [--expect-response true|false] [--context-json '{}']
   fail --message-id <uuid> --reason <text>            — mark in-flight message failed (v2.1.0, §4.1)
   skip --message-id <uuid> --reason <text>            — operator-initiated skip (v2.1.0, §4.1)
   reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)

@@ -104,6 +104,11 @@ import { fetchReplyChain, parseReplyChainDepth, REPLY_CHAIN_PREVIEW_CHARS } from
 import { resolvePhase5 } from './core/routing/server-integration'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
+import {
+  hasExplicitMessageDisposition,
+  normalizeMessageDisposition,
+  readMessageQueueDisposition,
+} from './core/message-intent'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
@@ -1557,6 +1562,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
+          intent: { type: 'string', description: 'Generic receiver intent. Default: request. Common values: request, inform, ack.' },
+          expect_response: { type: 'boolean', description: 'Whether the recipient is expected to respond or act. Default: true, false when intent=inform.' },
+          context: { type: 'object', description: 'Opaque structured context for scripts; core does not interpret it.' },
         },
         required: ['content', 'reply_to', 'mention'],
       },
@@ -1576,6 +1584,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           mention: { type: 'string', description: 'Required: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
+          intent: { type: 'string', description: 'Generic receiver intent. Default: request. Common values: request, inform, ack.' },
+          expect_response: { type: 'boolean', description: 'Whether the recipient is expected to respond or act. Default: true, false when intent=inform.' },
+          context: { type: 'object', description: 'Opaque structured context for scripts; core does not interpret it.' },
         },
         required: ['channel', 'content', 'mention'],
       },
@@ -1797,7 +1808,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // WHICH row to claim without a full SELECT ... FOR UPDATE SKIP LOCKED
       // scan. If the buffer is empty or stale, fall back to the direct query.
       const buffered = pollingDriver.shift()
-      let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date | string } | null = null
+      let row: {
+        id: string | number
+        message_id: string | null
+        payload: string
+        priority: number
+        created_at: Date | string
+      } | null = null
 
       if (buffered) {
         // Verify the buffered row is still pending (it may have been
@@ -1932,6 +1949,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      const queueDisposition = await readMessageQueueDisposition(client, row.id)
       const result = {
         waiting,
         queue_id: row.id,
@@ -1943,6 +1961,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: payload.content,
         message_type: payload.message_type ?? 'chat',
         source: payload.source ?? null,
+        intent: queueDisposition.intent,
+        expect_response: queueDisposition.expectResponse,
+        context: queueDisposition.context,
         created_at: row.created_at,
         reply_chain: replyChain,
       }
@@ -1958,7 +1979,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ============================================================
 
   if (name === 'send') {
-    let { content, reply_to, message_type, metadata } = args as any
+    let { content, reply_to, message_type, metadata, intent, expect_response, context } = args as any
+    const disposition = normalizeMessageDisposition({ intent, expect_response, context, metadata })
+    const dispositionSpecified = hasExplicitMessageDisposition({ intent, expect_response, context, metadata })
     // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
     // argument is removed. Callers MUST use `mention` (1 primary, required) +
     // `cc[]` (reference, queue 非投入). A caller still passing `mentions` is
@@ -2314,8 +2337,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               content: partContent,
               source: 'agent-comms',
               windowSeconds: dedupWindowSec,
-              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-              insertParams: [recipient, id, mqPayload],
+              insertSql: dispositionSpecified
+                ? `INSERT INTO message_queue (agent_id, message_id, payload, intent, expect_response, context) VALUES ($1, $2, $3, $4, $5, $6::jsonb) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`
+                : `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+              insertParams: dispositionSpecified
+                ? [
+                    recipient,
+                    id,
+                    mqPayload,
+                    disposition.intent,
+                    disposition.expectResponse,
+                    JSON.stringify(disposition.context),
+                  ]
+                : [recipient, id, mqPayload],
             })
             if (result.dedupSkipped) {
               process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
@@ -2550,7 +2584,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // conceptually with send; we replicate the minimum necessary to satisfy
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
-    let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
+    let { channel, thread_id: threadArg, content, message_type, metadata, intent, expect_response, context } = args as any
+    const disposition = normalizeMessageDisposition({ intent, expect_response, context, metadata })
+    const dispositionSpecified = hasExplicitMessageDisposition({ intent, expect_response, context, metadata })
     // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
     // argument is removed. Callers MUST use `mention` (1 primary). See ADR-041
     // amendment 2026-05-05.
@@ -2789,8 +2825,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: partContent,
             source: 'agent-comms',
             windowSeconds: dedupWindowSec,
-            insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-            insertParams: [recipient, id, mqPayload],
+            insertSql: dispositionSpecified
+              ? `INSERT INTO message_queue (agent_id, message_id, payload, intent, expect_response, context) VALUES ($1, $2, $3, $4, $5, $6::jsonb) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`
+              : `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+            insertParams: dispositionSpecified
+              ? [
+                  recipient,
+                  id,
+                  mqPayload,
+                  disposition.intent,
+                  disposition.expectResponse,
+                  JSON.stringify(disposition.context),
+                ]
+              : [recipient, id, mqPayload],
           })
           if (result.dedupSkipped) {
             process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)

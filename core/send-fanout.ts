@@ -34,6 +34,9 @@ export interface FanoutParams {
   recipients: string[]
   messageType?: string
   source?: string
+  intent?: string
+  expectResponse?: boolean
+  context?: Record<string, unknown>
   /** Optional pre-rendered timestamp; defaults to `new Date().toISOString()`. */
   ts?: string
 }
@@ -79,13 +82,31 @@ export async function fanoutToRecipients(
       // targets the partial UNIQUE index `uq_mq_agent_message`. PG requires
       // the WHERE predicate match the index. SQLite (bun:sqlite) also
       // accepts this exact shape (verified), so no per-backend branching.
-      const r = await db.query<{ id: number | string }>(
-        `INSERT INTO message_queue (agent_id, message_id, payload)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
-         RETURNING id`,
-        [recipient, params.messageId, mqPayload],
-      )
+      const hasDisposition = params.intent !== undefined
+        || params.expectResponse !== undefined
+        || params.context !== undefined
+      const r = hasDisposition
+        ? await db.query<{ id: number | string }>(
+            `INSERT INTO message_queue (agent_id, message_id, payload, intent, expect_response, context)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
+             RETURNING id`,
+            [
+              recipient,
+              params.messageId,
+              mqPayload,
+              params.intent ?? 'request',
+              params.expectResponse ?? true,
+              JSON.stringify(params.context ?? {}),
+            ],
+          )
+        : await db.query<{ id: number | string }>(
+            `INSERT INTO message_queue (agent_id, message_id, payload)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
+             RETURNING id`,
+            [recipient, params.messageId, mqPayload],
+          )
       if (r.rows.length > 0) {
         inserted.push(recipient)
       } else {

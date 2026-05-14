@@ -98,6 +98,12 @@ describe('T1 — db/migrate.ts ships the message_queue table + per-row claim col
     expect(dropMigration).toMatch(/ALTER TABLE agents DROP COLUMN IF EXISTS current_message_id/)
     expect(MIGRATE_SRC).toMatch(/ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_message_id/)
   })
+  test('message_queue carries a generic disposition envelope, not domain task enums', () => {
+    expect(MIGRATE_SRC).toMatch(/intent TEXT NOT NULL DEFAULT 'request'/)
+    expect(MIGRATE_SRC).toMatch(/expect_response BOOLEAN NOT NULL DEFAULT true/)
+    expect(MIGRATE_SRC).toMatch(/context JSONB NOT NULL DEFAULT '\{\}'::jsonb/)
+    expect(MIGRATE_SRC).not.toMatch(/task_kind/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,8 +135,8 @@ describe('T2 — server.ts send-tool writes message_queue rows for each pushTarg
       }
     }
     const body = SERVER_SRC.slice(start, i + 1)
-    expect(body).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload\)/)
-    expect(body).toMatch(/\[recipient,\s*id,\s*mqPayload\]/)
+    expect(body).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload,\s*intent,\s*expect_response,\s*context\)/)
+    expect(body).toMatch(/recipient[\s\S]*?id[\s\S]*?mqPayload[\s\S]*?disposition\.intent[\s\S]*?disposition\.expectResponse[\s\S]*?JSON\.stringify\(disposition\.context\)/)
   })
 })
 
@@ -170,7 +176,7 @@ describe('T3 — handleInboundMessage writes a message_queue row for the receive
     // (b) helper body holds the INSERT + ON CONFLICT DO NOTHING pin.
     //     SERVER_SRC is concatenated with core/inbound-delivery.ts above,
     //     so the same regex still matches at the new home.
-    expect(SERVER_SRC).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload\)/)
+    expect(SERVER_SRC).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload,\s*intent,\s*expect_response,\s*context\)/)
     expect(SERVER_SRC).toMatch(/ON\s+CONFLICT[\s\S]{0,200}?DO\s+NOTHING/i)
   })
 })
