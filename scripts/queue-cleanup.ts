@@ -200,7 +200,10 @@ function logBreakdown(
     `Per-bot pending breakdown (created_at < NOW() - ${maxAge}, claimed_by IS NULL):\n`,
   )
   for (const r of b.perBot) {
-    const verb = mode === 'dry-run' ? 'would skip' : 'will skip'
+    // v0.9 (sub-PR 8 #338): operator log vocab follows the on-row
+    // status. 'skipped' was dropped from the enum in sub-PR 1 #347;
+    // the cleanup write now collapses to 'replied'.
+    const verb = mode === 'dry-run' ? 'would mark replied' : 'will mark replied'
     process.stderr.write(`  ${r.agent_id}: ${r.count} → ${verb}\n`)
   }
   process.stderr.write(`Sample 5 rows (oldest):\n`)

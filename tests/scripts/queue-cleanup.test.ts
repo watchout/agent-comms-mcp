@@ -167,19 +167,32 @@ describe('PR-Q1 queue-cleanup script', () => {
     expect(second).toBe(0)
   })
 
-  test('case 6: reason taxonomy starts with BULK_CLEANUP prefix (now stderr-only)', async () => {
+  test('case 6: reason taxonomy starts with BULK_CLEANUP prefix (stderr-only + literal emit pinned)', async () => {
     if (!available) return
     const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c6`, ageHours: 24 })
 
-    await runQueueCleanup('execute', DATABASE_URL)
+    // v0.9 (sub-PR 1 #347 + sub-PR 8 #338, cycle 2 axis 3): pin the
+    // actual stderr emit, not just the _internal export, so the
+    // taxonomy is verified end-to-end (script → stderr).
+    const captured: string[] = []
+    const orig = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: any) => {
+      captured.push(typeof chunk === 'string' ? chunk : chunk.toString())
+      return true
+    }) as typeof process.stderr.write
+    try {
+      await runQueueCleanup('execute', DATABASE_URL)
+    } finally {
+      process.stderr.write = orig
+    }
 
     const post = await statusOf(id)
     expect(post.status).toBe('replied')
-    // v0.9 (sub-PR 1 #347): failed_reason column dropped. Reason taxonomy
-    // now lives in stderr log only; verify the taxonomy strings through
-    // the _internal export rather than a DB column.
     expect(_internal.REASON).toMatch(/^BULK_CLEANUP:/)
     expect(_internal.REASON).toBe(_internal.DEFAULT_REASON)
+    const stderrText = captured.join('')
+    expect(stderrText).toContain(_internal.DEFAULT_REASON)
+    expect(stderrText).toMatch(/taxonomy=BULK_CLEANUP:/)
   })
 
   test('parseMode: default is dry-run, --execute switches', () => {
@@ -200,15 +213,30 @@ describe('PR-Q1 queue-cleanup script', () => {
       ageHours: 31 * 24,
     })
 
-    await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+    // cycle 2 axis 3: pin the actual stderr emit for the 30d taxonomy.
+    const captured: string[] = []
+    const orig = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: any) => {
+      captured.push(typeof chunk === 'string' ? chunk : chunk.toString())
+      return true
+    }) as typeof process.stderr.write
+    try {
+      await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+    } finally {
+      process.stderr.write = orig
+    }
 
     const recent = await statusOf(recentId)
     const stale = await statusOf(staleId)
     expect(recent.status).toBe('pending')
     expect(stale.status).toBe('replied')
-    // v0.9 (sub-PR 1 #347): failed_reason column dropped. Verify the
-    // 30d-run reason taxonomy through _internal.reasonFor() instead.
     expect(_internal.reasonFor('30d')).toMatch(/^STALE_BULK_DRAIN_2026-05-04:/)
+    const stderrText = captured.join('')
+    expect(stderrText).toMatch(/STALE_BULK_DRAIN_2026-05-04: max-age=30d/)
+    // cycle 2 axis 4: log vocab must follow on-row status ('replied'),
+    // not the dropped 'skipped' status.
+    expect(stderrText).toMatch(/will mark replied/)
+    expect(stderrText).not.toMatch(/will skip|would skip/)
   })
 
   test('case 8: --max-age 30d execute → idempotent rerun (no-op)', async () => {
