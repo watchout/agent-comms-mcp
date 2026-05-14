@@ -255,7 +255,15 @@ async function migrate() {
       message_id TEXT,                       -- agent_messages.id (NULL for system messages)
       payload TEXT NOT NULL,                 -- enriched JSON payload
       status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed')),
+        -- Issue #338 / CEO 2026-05-14 hotfix: 8-value union covers both
+        -- the v0.8 legacy values ('read' / 'failed' / 'skipped') still
+        -- written by un-restarted fleet bots AND the v0.9 vocab
+        -- ('received' / 'in_progress' / 'done' / 'replied') from
+        -- sub-PR 1 #347, sub-PR 7 #353, sub-PR 7a #355. Additive only —
+        -- the destructive narrowing (removing 'read' / 'failed' /
+        -- 'skipped') belongs to a future, gated migration once every
+        -- bot has rolled to v0.9 vocab.
+        CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed')),
       priority INTEGER NOT NULL DEFAULT 0,   -- higher = more urgent
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       read_at TIMESTAMPTZ,
@@ -427,6 +435,14 @@ async function migrate() {
     -- constraint swap is DO-guarded so re-runs are safe.
     ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT;
 
+    -- Issue #338 / CEO 2026-05-14 hotfix: align the idempotent ALTER
+    -- block with the CREATE TABLE definition above. Drop any existing
+    -- constraint whose definition does not already match the 8-value
+    -- union, then re-add the canonical 8-value union. Additive: the
+    -- legacy values ('read' / 'failed' / 'skipped') remain valid so
+    -- un-restarted fleet bots keep functioning while the v0.9 vocab
+    -- ('received' / 'in_progress' / 'done' / 'replied') is also
+    -- accepted.
     DO $$
     BEGIN
       IF EXISTS (
@@ -434,7 +450,7 @@ async function migrate() {
           FROM pg_constraint
          WHERE conname = 'message_queue_status_check'
            AND conrelid = 'message_queue'::regclass
-           AND pg_get_constraintdef(oid) NOT LIKE '%failed%'
+           AND pg_get_constraintdef(oid) NOT LIKE '%received%'
       ) THEN
         ALTER TABLE message_queue DROP CONSTRAINT message_queue_status_check;
       END IF;
@@ -446,9 +462,14 @@ async function migrate() {
       ) THEN
         ALTER TABLE message_queue
           ADD CONSTRAINT message_queue_status_check
-          CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
+          CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'));
       END IF;
     END $$;
+
+    -- Issue #338 / CEO 2026-05-14 hotfix: state-transition tools (sub-PR
+    -- 6 #348) require a done_at TIMESTAMPTZ for the v0.9 'done' state.
+    -- Idempotent ADD so re-running migrate is safe.
+    ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ;
 
     -- Issue #129 Phase 3: outbound_queue (Discord send queue, message-queue-spec 3.3)
     -- Receiver-side consumer dequeues pending rows on a 1-second tick and posts

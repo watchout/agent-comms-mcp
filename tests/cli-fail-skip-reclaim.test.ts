@@ -29,14 +29,16 @@ describe('T1 — message_queue failed_reason + failed status (PG + SQLite)', () 
   test('PG migrate.ts adds failed_reason TEXT column (idempotent)', () => {
     expect(MIGRATE_PG).toContain('ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT')
   })
-  test('PG migrate.ts extends status CHECK to include failed', () => {
-    // The DO block swaps the constraint; assert both the drop and the new value.
+  test('PG migrate.ts swaps status CHECK to the v0.9 8-value union', () => {
+    // Issue #338 / CEO 2026-05-14 hotfix: the DO block swaps the
+    // constraint to the additive 8-value union (legacy v0.8 + new v0.9
+    // states). Pin both the drop and the new union literal.
     expect(MIGRATE_PG).toMatch(/DROP CONSTRAINT message_queue_status_check/)
-    expect(MIGRATE_PG).toMatch(/CHECK \(status IN \('pending', 'read', 'replied', 'skipped', 'failed'\)\)/)
+    expect(MIGRATE_PG).toMatch(/CHECK \(status IN \('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'\)\)/)
   })
-  test('PG CREATE TABLE message_queue carries failed + failed_reason', () => {
-    // New DBs should get the v2.1.0 shape from the initial CREATE.
-    expect(MIGRATE_PG).toMatch(/CHECK \(status IN \('pending', 'read', 'replied', 'skipped', 'failed'\)\)/)
+  test('PG CREATE TABLE message_queue carries the v0.9 8-value CHECK + failed_reason', () => {
+    // New DBs should get the v0.9 hotfix shape from the initial CREATE.
+    expect(MIGRATE_PG).toMatch(/CHECK \(status IN \('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'\)\)/)
     expect(MIGRATE_PG).toMatch(/failed_reason TEXT\s+--\s+v2\.1\.0/)
   })
   test('SQLite CREATE TABLE message_queue carries v2.1.0 CHECK + failed_reason', () => {

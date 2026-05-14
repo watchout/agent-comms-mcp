@@ -63,11 +63,14 @@ describe('T1 — db/migrate.ts ships the message_queue table + per-row claim col
   test('message_queue.id is BIGSERIAL PRIMARY KEY', () => {
     expect(MIGRATE_SRC).toMatch(/id\s+BIGSERIAL\s+PRIMARY KEY/)
   })
-  test('message_queue.status CHECK constraint covers all five states (v2.1.0 adds failed)', () => {
-    // v2.1.0 (PR #220): `failed` was added alongside the existing
-    // pending/read/replied/skipped so that explicit abandon (fail CLI) can
-    // persist a reason distinct from operator-issued skip.
-    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'read'\s*,\s*'replied'\s*,\s*'skipped'\s*,\s*'failed'\s*\)\s*\)/)
+  test('message_queue.status CHECK constraint covers the v0.9 8-value union (legacy + new states)', () => {
+    // Issue #338 / CEO 2026-05-14 hotfix: bootstrap CHECK must accept
+    // both the legacy v0.8 vocab ('read' / 'failed' / 'skipped') still
+    // written by un-restarted fleet bots AND the v0.9 vocab
+    // ('received' / 'in_progress' / 'done' / 'replied') from sub-PR 1
+    // #347, sub-PR 7 #353, sub-PR 7a #355. Additive only — destructive
+    // narrowing is a future, gated migration.
+    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'read'\s*,\s*'received'\s*,\s*'in_progress'\s*,\s*'done'\s*,\s*'replied'\s*,\s*'skipped'\s*,\s*'failed'\s*\)\s*\)/)
   })
   test('idx_mq_agent_pending partial index is created', () => {
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_agent_pending/)
