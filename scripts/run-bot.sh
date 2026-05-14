@@ -30,7 +30,7 @@
 #
 # Usage:
 #   LLM_CMD="claude --print" ./scripts/run-bot.sh <agent-id>
-#   LLM_CMD="codex --quiet"  ./scripts/run-bot.sh <agent-id>
+#   LLM_CMD="codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral" ./scripts/run-bot.sh <agent-id>
 #   LLM_CMD="echo test"      ./scripts/run-bot.sh <agent-id>   # smoke-test
 set -euo pipefail
 

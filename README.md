@@ -71,18 +71,34 @@ Add to your `.mcp.json`:
 
 ### 4. Add to Codex CLI
 
-Add to `~/.codex/config.toml`:
+Use the Codex CLI MCP registry command:
+
+```bash
+codex mcp add agent-comms \
+  --env AGENT_ID=codex-bot \
+  --env DATABASE_URL=postgresql://localhost/agent_comms \
+  --env WEBHOOK_PORT=8795 \
+  -- bun run --cwd /path/to/agent-comms-mcp server.ts
+```
+
+Or add the equivalent entry to `~/.codex/config.toml`:
 
 ```toml
-[mcp.agent-comms]
+[mcp_servers.agent-comms]
 command = "bun"
-args = ["run", "server.ts"]
-cwd = "/path/to/agent-comms-mcp"
-
-[mcp.agent-comms.env]
-AGENT_ID = "codex-bot"
-DATABASE_URL = "postgresql://localhost/agent_comms"
+args = ["run", "--cwd", "/path/to/agent-comms-mcp", "server.ts"]
+env = { AGENT_ID = "codex-bot", DATABASE_URL = "postgresql://localhost/agent_comms", WEBHOOK_PORT = "8795" }
+startup_timeout_sec = 30
+tool_timeout_sec = 120
 ```
+
+Check the registration with `codex mcp list` and `codex mcp get agent-comms`.
+
+Codex must use the agent-comms native MCP tools for bot-to-bot traffic:
+`next` to receive, `send` to reply, and `notify` for self-originated posts.
+Do not rely on Discord bot-authored echoes for Codex delivery; Discord is a
+downstream display sink, while the DB-backed `agent_messages` /
+`message_queue` path is the control plane.
 
 ## How It Works
 
