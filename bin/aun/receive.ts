@@ -15,19 +15,21 @@ export interface ReceiveOptions {
   dryRun?: boolean
 }
 
-export interface ReceivePlan {
+export interface CommandPlan {
   repoRoot: string
   argv: string[]
   env: Record<string, string>
   databaseUrlCandidates: string[]
 }
 
+export type ReceivePlan = CommandPlan
+
 export interface ReceiveResult {
   ok: boolean
   code: number
   stdout: string
   stderr: string
-  plan: ReceivePlan
+  plan: CommandPlan
 }
 
 const DEFAULT_DB_URLS = [
@@ -39,7 +41,7 @@ export function repoRoot(): string {
   return resolve(import.meta.dir, '..', '..')
 }
 
-function cleanEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+export function cleanEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(env)) {
     if (v !== undefined) out[k] = v
@@ -47,7 +49,7 @@ function cleanEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return out
 }
 
-function resolveAgentId(opts: ReceiveOptions, env: NodeJS.ProcessEnv = process.env): string {
+export function resolveAgentId(opts: ReceiveOptions, env: NodeJS.ProcessEnv = process.env): string {
   const raw = opts.agentId ?? env.AGENT_ID
   const agentId = raw?.trim()
   if (!agentId) {
@@ -66,7 +68,7 @@ function assertExpectedAgentId(env: Record<string, string>, agentId: string): vo
   }
 }
 
-function databaseCandidates(env: NodeJS.ProcessEnv): string[] {
+export function databaseCandidates(env: NodeJS.ProcessEnv): string[] {
   const explicit = env.DATABASE_URL?.trim()
   if (!explicit) return DEFAULT_DB_URLS
   if (explicit.includes('host=/tmp')) {
@@ -75,7 +77,10 @@ function databaseCandidates(env: NodeJS.ProcessEnv): string[] {
   return [explicit]
 }
 
-export function buildReceivePlan(opts: ReceiveOptions = {}): ReceivePlan {
+export function buildCommandPlan(
+  opts: ReceiveOptions,
+  argv: string[],
+): CommandPlan {
   const envIn = opts.env ?? process.env
   const agentId = resolveAgentId(opts, envIn)
   const env = cleanEnv(envIn)
@@ -88,13 +93,17 @@ export function buildReceivePlan(opts: ReceiveOptions = {}): ReceivePlan {
 
   return {
     repoRoot: opts.cwd ?? repoRoot(),
-    argv: ['bun', 'cli/index.ts', 'next'],
+    argv,
     env,
     databaseUrlCandidates: candidates,
   }
 }
 
-function shouldTryNextSocket(stderr: string): boolean {
+export function buildReceivePlan(opts: ReceiveOptions = {}): ReceivePlan {
+  return buildCommandPlan(opts, ['bun', 'cli/index.ts', 'next'])
+}
+
+export function shouldTryNextSocket(stderr: string): boolean {
   return (
     stderr.includes('/tmp/.s.PGSQL.5432') ||
     stderr.includes('host=/tmp') ||
@@ -123,6 +132,11 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
     }
   }
 
+  const result = runCommandPlan(plan)
+  return { ...result, plan }
+}
+
+export function runCommandPlan(plan: CommandPlan): Omit<ReceiveResult, 'plan'> {
   let last = { status: 1, stdout: '', stderr: '' }
   for (let i = 0; i < plan.databaseUrlCandidates.length; i++) {
     const env = { ...plan.env, DATABASE_URL: plan.databaseUrlCandidates[i] }
@@ -137,7 +151,7 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
       stderr: r.stderr ?? '',
     }
     if (last.status === 0) {
-      return { ok: true, code: 0, stdout: last.stdout, stderr: last.stderr, plan }
+      return { ok: true, code: 0, stdout: last.stdout, stderr: last.stderr }
     }
     if (i + 1 >= plan.databaseUrlCandidates.length || !shouldTryNextSocket(last.stderr)) {
       break
@@ -149,6 +163,5 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
     code: last.status,
     stdout: last.stdout,
     stderr: last.stderr,
-    plan,
   }
 }
