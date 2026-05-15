@@ -81,4 +81,44 @@ describe('test_aun_receive_wrapper — stable next wrapper', () => {
     expect(body.expected_agent_id).toBe('agent-com-dev')
     expect(body.argv).toEqual(['bun', 'cli/index.ts', 'next'])
   })
+
+  test('existing expected identity is preserved and mismatched --agent-id fails closed', () => {
+    const r = spawnSync('bun', ['run', AUN_CLI, 'receive', '--agent-id', 'wrong-agent', '--dry-run'], {
+      cwd: '/',
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        AGENT_ID: 'codex-audit',
+        AGENT_COM_EXPECTED_AGENT_ID: 'codex-audit',
+        DATABASE_URL: 'postgresql:///agent_comms?host=/tmp',
+      },
+      timeout: 15_000,
+    })
+
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('AGENT_ID_MISMATCH')
+    expect(r.stderr).toContain('expected codex-audit')
+    expect(r.stderr).toContain('resolved agent_id=wrong-agent')
+    expect(r.stdout).toBe('')
+  })
+
+  test('env AGENT_ID mismatch with existing expected identity fails closed', () => {
+    const r = spawnSync('bun', ['run', AUN_CLI, 'receive', '--dry-run'], {
+      cwd: '/',
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        AGENT_ID: 'wrong-agent',
+        AGENT_COM_EXPECTED_AGENT_ID: 'codex-audit',
+        DATABASE_URL: 'postgresql:///agent_comms?host=/tmp',
+      },
+      timeout: 15_000,
+    })
+
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('AGENT_ID_MISMATCH')
+    expect(r.stderr).toContain('expected codex-audit')
+    expect(r.stderr).toContain('resolved agent_id=wrong-agent')
+    expect(r.stdout).toBe('')
+  })
 })

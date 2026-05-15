@@ -128,10 +128,16 @@ export function run(argv: string[] = process.argv): number {
     }
     case 'receive':
     case 'next': {
-      const res = receive({
-        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
-        dryRun: !!flags['dry-run'],
-      })
+      let res
+      try {
+        res = receive({
+          agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+          dryRun: !!flags['dry-run'],
+        })
+      } catch (err) {
+        process.stderr.write(`Error [AGENT_ID_MISMATCH]: ${(err as Error).message}\n`)
+        return 2
+      }
       if (res.stdout) process.stdout.write(res.stdout)
       if (res.stderr) process.stderr.write(res.stderr)
       return res.code

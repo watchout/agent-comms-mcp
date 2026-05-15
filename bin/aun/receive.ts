@@ -47,13 +47,23 @@ function cleanEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return out
 }
 
-function resolveAgentId(opts: ReceiveOptions): string {
-  const raw = opts.agentId ?? opts.env?.AGENT_ID
+function resolveAgentId(opts: ReceiveOptions, env: NodeJS.ProcessEnv = process.env): string {
+  const raw = opts.agentId ?? env.AGENT_ID
   const agentId = raw?.trim()
   if (!agentId) {
     throw new Error('agent id required: pass --agent-id <id> or set AGENT_ID')
   }
   return agentId
+}
+
+function assertExpectedAgentId(env: Record<string, string>, agentId: string): void {
+  const expected = env.AGENT_COM_EXPECTED_AGENT_ID?.trim()
+  if (expected && expected !== agentId) {
+    throw new Error(
+      `AGENT_ID_MISMATCH: resolved agent_id=${agentId}, expected ${expected}. ` +
+      `Set AGENT_ID=${expected} or remove AGENT_COM_EXPECTED_AGENT_ID for this process.`,
+    )
+  }
 }
 
 function databaseCandidates(env: NodeJS.ProcessEnv): string[] {
@@ -67,10 +77,11 @@ function databaseCandidates(env: NodeJS.ProcessEnv): string[] {
 
 export function buildReceivePlan(opts: ReceiveOptions = {}): ReceivePlan {
   const envIn = opts.env ?? process.env
-  const agentId = resolveAgentId(opts)
+  const agentId = resolveAgentId(opts, envIn)
   const env = cleanEnv(envIn)
   env.AGENT_ID = agentId
-  env.AGENT_COM_EXPECTED_AGENT_ID = agentId
+  assertExpectedAgentId(env, agentId)
+  env.AGENT_COM_EXPECTED_AGENT_ID = env.AGENT_COM_EXPECTED_AGENT_ID || agentId
 
   const candidates = databaseCandidates(env)
   env.DATABASE_URL = candidates[0]
