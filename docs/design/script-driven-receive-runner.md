@@ -26,6 +26,7 @@ and invoke a configured runner for that agent/runtime.
 4. Chat UIs are projections, not the receive path.
 5. Runtime differences live behind adapters.
 6. Natural-language wake injection is a fallback, not the primary mechanism.
+7. Transport limits must not change durable message identity.
 
 ## State Ownership
 
@@ -54,6 +55,22 @@ Behavior:
 - emit structured logs with `agent_id`, `queue_id`, `message_id`, and result
 
 This runner is safe to invoke repeatedly. If no work exists, it exits cleanly.
+
+### Batch Receive Runner
+
+Input: `agent_id`
+
+Behavior:
+
+- repeatedly call the deterministic claim path until no immediately claimable
+  `pending` row remains, or until a configured batch limit is reached
+- return a structured batch result containing every claimed `queue_id`
+- preserve per-row ownership and claim TTLs
+- never depend on an LLM deciding how many times to call `next`
+
+The single-row `next` primitive remains useful for compatibility and simple
+manual operation. Automated runtimes should prefer the batch runner so a burst
+of messages is drained by script policy instead of natural-language retry loops.
 
 ### Process Runner
 
@@ -89,6 +106,33 @@ Behavior:
 - write operational logs and metrics
 
 It should not inject `check inbox` as the primary receive mechanism.
+
+## Durable Message vs Chat Projection
+
+AUN must store one canonical logical message in the database. Discord, Slack,
+Telegram, terminal UIs, and future proprietary UIs may impose transport-specific
+message length limits, but those limits are projection concerns only.
+
+The canonical receive path must not split one logical message into multiple
+`message_queue` work items just because a chat adapter needs multiple outbound
+posts. Splitting is allowed only in the outbound projection layer, where each
+chunk points back to the same canonical `message_id`.
+
+Required model:
+
+- `agent_messages` stores the complete logical message body and metadata.
+- `message_queue` stores delivery/claim state for that logical message.
+- chat/outbound adapters may create transport chunks, but chunks are not
+  independent work items for the receiving LLM.
+- receive/process runners pass the reassembled canonical body to the runtime.
+
+If a transport adapter receives an externally chunked message, it must either
+reassemble the chunks before creating the canonical message or mark the chunks
+with a stable grouping key so the receive runner can present one logical
+message to the runtime.
+
+This keeps DB semantics independent from Discord-specific limits and prevents
+LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.
 
 ## Runtime Adapter Boundary
 
