@@ -83,12 +83,14 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   }
   await c.query(
     `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, last_seen_at, channel_port, metadata)
-     VALUES ($1, $2, 'test', $3, $4, $5, 0, $6::jsonb)
+       (agent_id, display_name, agent_type, runtime, status, last_seen_at,
+        last_wake_attempt_at, channel_port, metadata)
+     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb)
      ON CONFLICT (agent_id) DO UPDATE SET
        runtime = EXCLUDED.runtime,
        status = EXCLUDED.status,
        last_seen_at = EXCLUDED.last_seen_at,
+       last_wake_attempt_at = NULL,
        metadata = EXCLUDED.metadata`,
     [
       a.agent_id,
@@ -103,9 +105,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
 
 export interface SeedQueueRow {
   agent_id: string
-  // v0.9: 'read'→'received', 'failed' removed (sub-PR 1 #347 + sub-PR 3 #350).
-  // Issue #349 will redesign abandonment tracking.
-  status?: 'pending' | 'received' | 'replied' | 'skipped'
+  status?: 'pending' | 'received' | 'replied' | 'skipped' | 'failed'
   message_id?: string | null
   payload?: string
   claim_expires_at?: Date | null

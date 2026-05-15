@@ -89,9 +89,8 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     expect(SERVER_SRC).not.toMatch(/d3_fallback_replied/)
   })
   test('outbound_queue INSERT sits AFTER the message_queue "replied" UPDATE', () => {
-    const repliedIdx = SERVER_SRC.indexOf(
-      `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
-    )
+    const repliedMatch = /UPDATE message_queue\s+SET\s+status\s*=\s*'replied'[\s\S]*?replied_at\s*=\s*now\(\)[\s\S]*?replied_with\s*=\s*\$1[\s\S]*?claim_expires_at\s*=\s*NULL[\s\S]*?WHERE id = \$2/.exec(SERVER_SRC)
+    const repliedIdx = repliedMatch?.index ?? -1
     const outboundIdx = SERVER_SRC.indexOf(
       `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)`,
     )

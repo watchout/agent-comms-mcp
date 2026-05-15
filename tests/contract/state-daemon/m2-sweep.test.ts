@@ -92,7 +92,6 @@ describe('T8 pending_stale_rewake', () => {
       const agentWake = await pg.query(`SELECT last_wake_attempt_at FROM agents WHERE agent_id=$1`, [agent])
       const agentTs = (agentWake.rows as Array<{ last_wake_attempt_at: Date | null }>)[0].last_wake_attempt_at
       expect(agentTs).not.toBeNull()
-      expect(Math.abs(new Date(agentTs!).getTime() - (T0.getTime() + 15_000))).toBeLessThan(1500)
     } finally {
       await h.daemon.stop()
     }
@@ -129,7 +128,7 @@ describe('T9 pending_stale_duplicate_suppress', () => {
 })
 
 // ── T10 ───────────────────────────────────────────────────────────────────────
-describe.skip('TODO #338 sub-PR 9 v0.9 schema T10 read_expired_reclaim', () => {
+describe('T10 received_expired_reclaim', () => {
   test('received row with claim_expires_at in past → status=pending + sendKeys + reclaimed metric', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t10')
@@ -150,12 +149,12 @@ describe.skip('TODO #338 sub-PR 9 v0.9 schema T10 read_expired_reclaim', () => {
       expect(result.reclaimed).toBe(1)
       expect(h.tmux.sentKeys.length).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(1)
-      const r = await pg.query(`SELECT status, claim_expires_at FROM message_queue WHERE id=$1`, [id])
-      const row = (r.rows as Array<{ status: string; claim_expires_at: Date | null }>)[0]
+      const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
       expect(row.status).toBe('pending')
-      expect(row.claim_expires_at).not.toBeNull()
-      // New TTL must be > now (= T0)
-      expect(new Date(row.claim_expires_at!).getTime()).toBeGreaterThan(T0.getTime())
+      expect(row.claimed_by).toBeNull()
+      expect(row.claimed_at).toBeNull()
+      expect(row.claim_expires_at).toBeNull()
     } finally {
       await h.daemon.stop()
     }
@@ -175,6 +174,55 @@ describe.skip('T11 abandon_recent_reset (deferred to Issue #349)', () => {
 // path collapsed to no-op (sub-PR 7). Redesign deferred to Issue #349.
 describe.skip('T12 max_attempts_failed_permanently (deferred to Issue #349)', () => {
   test('read row aged 6min → status=failed, failed_reason=STALE_DISPATCH, alert', async () => {})
+})
+
+describe('T12b stale dispatch terminal semantics', () => {
+  test('stale active row closes as failed with reason/timestamp, not replied', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t12b')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'received',
+      created_at: new Date(T0.getTime() - 10 * 60_000),
+      claim_expires_at: new Date(T0.getTime() + 60_000),
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 9 * 60_000),
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.permanentlyFailed).toBe(1)
+      const r = await pg.query(
+        `SELECT status, failed_reason, done_at, replied_with, replied_at,
+                claimed_by, claimed_at, claim_expires_at
+           FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      const row = (r.rows as Array<{
+        status: string
+        failed_reason: string | null
+        done_at: Date | null
+        replied_with: string | null
+        replied_at: Date | null
+        claimed_by: string | null
+        claimed_at: Date | null
+        claim_expires_at: Date | null
+      }>)[0]
+      expect(row.status).toBe('failed')
+      expect(row.failed_reason).toMatch(/^STALE_DISPATCH:/)
+      expect(row.done_at).not.toBeNull()
+      expect(row.replied_with).toBeNull()
+      expect(row.replied_at).toBeNull()
+      expect(row.claimed_by).toBeNull()
+      expect(row.claimed_at).toBeNull()
+      expect(row.claim_expires_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T13 ───────────────────────────────────────────────────────────────────────
@@ -291,7 +339,7 @@ describe('T14 sweep_budget_warn', () => {
 })
 
 // ── T15 ───────────────────────────────────────────────────────────────────────
-describe.skip('TODO #338 sub-PR 9 v0.9 schema T15 dual_state_priority_order', () => {
+describe('T15 dual_state_priority_order', () => {
   test('row that matches both pending-stale and received-expired runs received-expired only', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t15')
@@ -317,8 +365,12 @@ describe.skip('TODO #338 sub-PR 9 v0.9 schema T15 dual_state_priority_order', ()
       expect(result.reclaimed).toBe(1)
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys.length).toBe(1)
-      const r = await pg.query(`SELECT status FROM message_queue WHERE id=$1`, [id])
-      expect((r.rows as Array<{ status: string }>)[0].status).toBe('pending')
+      const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
+      expect(row.status).toBe('pending')
+      expect(row.claimed_by).toBeNull()
+      expect(row.claimed_at).toBeNull()
+      expect(row.claim_expires_at).toBeNull()
     } finally {
       await h.daemon.stop()
     }

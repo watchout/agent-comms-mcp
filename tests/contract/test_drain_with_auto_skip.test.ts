@@ -64,7 +64,7 @@ dbDescribe('drainPendingWithAutoSkip — shared helper for F-1 / Stop-hook v8', 
     expect(result).toEqual({ drained: 0, skipped: 0 })
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema — matched rows flip to skipped with AUTO_SKIP_PATTERN reason; unmatched stay pending', async () => {
+  test('matched rows flip to skipped with AUTO_SKIP_PATTERN reason; unmatched stay pending', async () => {
     const noiseId = await seed('⚠️ メンションがないため warning')
     const chatId = await seed('please review')
     const result = await drainPendingWithAutoSkip(client, TEST_AGENT, 5)
@@ -84,7 +84,7 @@ dbDescribe('drainPendingWithAutoSkip — shared helper for F-1 / Stop-hook v8', 
     expect(chatRow.rows[0].failed_reason).toBe(null)
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema — self-echo (sender=recipient) is matched and skipped with reason=self_echo', async () => {
+  test('self-echo (sender=recipient) is matched and skipped with reason=self_echo', async () => {
     const id = await seed('echo', 'chat', TEST_AGENT)
     const result = await drainPendingWithAutoSkip(client, TEST_AGENT, 5)
     expect(result.skipped).toBe(1)

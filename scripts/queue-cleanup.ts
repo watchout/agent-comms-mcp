@@ -47,7 +47,7 @@ function defaultConfigPath(): string {
   )
 }
 
-function resolveDatabaseUrl(
+export function resolveDatabaseUrl(
   env: NodeJS.ProcessEnv = process.env,
   configPath: string = defaultConfigPath(),
 ): string {
@@ -133,11 +133,8 @@ function ageIntervalSql(maxAge: string): string {
  * ops); longer runs get the STALE_BULK_DRAIN_2026-05-04 prefix per §2.5
  * of the dispatch.
  *
- * v0.9 (sub-PR 1 #347 / sub-PR 8 #338): the `failed_reason` column has
- * been dropped from `message_queue`, so the taxonomy is no longer
- * persisted to DB — it lives only in stderr logs for ops visibility.
- * Per-row reason taxonomy redesign belongs to Issue #349
- * (abandonment-tracking redesign).
+ * The taxonomy is persisted in `failed_reason` so bulk no-reply cleanup is
+ * distinguishable from a real reply (`status='replied'`).
  */
 function reasonFor(maxAge: string): string {
   if (maxAge === DEFAULT_MAX_AGE) return DEFAULT_REASON
@@ -200,10 +197,7 @@ function logBreakdown(
     `Per-bot pending breakdown (created_at < NOW() - ${maxAge}, claimed_by IS NULL):\n`,
   )
   for (const r of b.perBot) {
-    // v0.9 (sub-PR 8 #338): operator log vocab follows the on-row
-    // status. 'skipped' was dropped from the enum in sub-PR 1 #347;
-    // the cleanup write now collapses to 'replied'.
-    const verb = mode === 'dry-run' ? 'would mark replied' : 'will mark replied'
+    const verb = mode === 'dry-run' ? 'would mark skipped' : 'will mark skipped'
     process.stderr.write(`  ${r.agent_id}: ${r.count} → ${verb}\n`)
   }
   process.stderr.write(`Sample 5 rows (oldest):\n`)
@@ -231,15 +225,19 @@ async function runDryRun(client: Client, opts: RunOptions = {}): Promise<number>
 
   // §2.2: BEGIN/UPDATE/ROLLBACK to prove the UPDATE form is valid against
   // live schema without committing any mutation.
-  // v0.9 (sub-PR 1 #347): failed_reason column dropped from message_queue;
-  // reason taxonomy is logged to stderr above, not persisted on the row.
   await client.query('BEGIN')
   const upd = await client.query(
     `UPDATE message_queue
-        SET status = 'replied'
+        SET status = 'skipped',
+            failed_reason = $1,
+            done_at = now(),
+            claimed_by = NULL,
+            claimed_at = NULL,
+            claim_expires_at = NULL
       WHERE status = 'pending'
         AND created_at < NOW() - ${ageInterval}
         AND claimed_by IS NULL`,
+    [reason],
   )
   await client.query('ROLLBACK')
 
@@ -264,17 +262,20 @@ async function runExecute(client: Client, opts: RunOptions = {}): Promise<number
   await client.query('BEGIN')
   const upd = await client.query(
     `UPDATE message_queue
-        SET status = 'replied'
+        SET status = 'skipped',
+            failed_reason = $1,
+            done_at = now(),
+            claimed_by = NULL,
+            claimed_at = NULL,
+            claim_expires_at = NULL
       WHERE status = 'pending'
         AND created_at < NOW() - ${ageInterval}
         AND claimed_by IS NULL`,
+    [reason],
   )
   await client.query('COMMIT')
   const ms = Date.now() - t0
 
-  // v0.9 (sub-PR 1 #347): failed_reason column dropped. Verify count
-  // can no longer filter on reason taxonomy — we report the rowCount
-  // of the UPDATE plus the reason in stderr for ops correlation.
   process.stderr.write(`Updated ${upd.rowCount ?? 0} rows in ${ms} ms (taxonomy=${reason}).\n`)
   process.stderr.write(`Finished: ${new Date().toISOString()}\n`)
   return upd.rowCount ?? 0
