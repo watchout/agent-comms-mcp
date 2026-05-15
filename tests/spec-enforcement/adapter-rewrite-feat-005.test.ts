@@ -65,8 +65,9 @@ describe('adapter rewrite (FEAT-005 完遂) — structural contracts', () => {
     // second worker entering the same UPDATE cannot match.
     expect(sql).toMatch(/status\s*=\s*'pending'/)
     expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/)
-    // agent_id filter survives the rewrite.
-    expect(sql).toMatch(/agent_id\s*=\s*\$\d/)
+    // #410: adapter-owner consumer key drives delivery, while legacy rows
+    // without consumer_agent_id continue to fall back to agent_id.
+    expect(sql).toMatch(/COALESCE\(consumer_agent_id,\s*agent_id\)\s*=\s*\$\d/)
     // Backoff window honored.
     expect(sql).toMatch(/next_retry_at\s+IS\s+NULL\s+OR\s+next_retry_at\s*<=\s*now\(\)/i)
   })
