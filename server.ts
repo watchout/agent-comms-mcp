@@ -189,6 +189,14 @@ function loadConfig(): Config {
 
 const config = loadConfig()
 const AGENT_ID = config.agent_id
+const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
+if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
+  process.stderr.write(
+    `agent-comms: ERROR [AGENT_ID_MISMATCH] resolved agent_id=${AGENT_ID}, expected ${EXPECTED_AGENT_ID}. ` +
+      `Set AGENT_ID=${EXPECTED_AGENT_ID} or remove AGENT_COM_EXPECTED_AGENT_ID for this process.\n`,
+  )
+  process.exit(2)
+}
 const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
 // Issue #248: port 8789 was the CTO bot's port; defaulting every plugin-form
 // install to 8789 caused all bots to fight for the same socket and trigger

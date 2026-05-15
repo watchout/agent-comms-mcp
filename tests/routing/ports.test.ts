@@ -210,7 +210,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
   // length / order / forbidden additions are all gated by a single
   // assertion (cycle 1 `toContain` only verified inclusion, missed
   // contamination + reorder regressions).
-  test('§4.4 channel 1487368919613444156 — exact 8-bot allowlist', () => {
+  test('§4.4 channel 1487368919613444156 — exact 9-bot allowlist', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -224,6 +224,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
       'agent-com-dev',
       'lead-ama',
       'cto',
+      'codex-cto',
       'ceo',
       'auditor',
       'arc',
