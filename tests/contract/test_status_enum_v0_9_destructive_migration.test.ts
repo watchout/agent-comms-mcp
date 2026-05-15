@@ -54,9 +54,10 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
       await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
     } catch {}
     // Re-assert the forward-compatible v0.9 union in case the paired
-    // migration failed mid-way. This mirrors the production-safe union
-    // used during rollout and keeps shared CI fixtures writable by both
-    // legacy and new-status tests.
+    // migration failed mid-way. Keep failed_reason present because older
+    // contract fixtures still write/read it while the shared CI DB is
+    // transitioning toward the v0.9 vocabulary.
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
     await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ`)
     await client.query(`
       DO $$
