@@ -3,7 +3,8 @@
   "channels": {
     "1487368919613444156": {
       "primary": "agent-com-dev",
-      "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "codex-cto", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
+      "adapterOwner": "agent-com-dev",
+      "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "codex-cto", "codex-aun", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
     }
   }
 }

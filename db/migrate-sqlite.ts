@@ -128,6 +128,7 @@ export function migrateSqlite(dbPath?: string): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       message_id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
+      consumer_agent_id TEXT,
       channel_external_id TEXT NOT NULL,
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',
@@ -157,6 +158,9 @@ export function migrateSqlite(dbPath?: string): void {
   }
   if (!oqColNames.has('discord_message_id')) {
     gatedExec(`ALTER TABLE outbound_queue ADD COLUMN discord_message_id TEXT`)
+  }
+  if (!oqColNames.has('consumer_agent_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN consumer_agent_id TEXT`)
   }
 
   gatedExec(`

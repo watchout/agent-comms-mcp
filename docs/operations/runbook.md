@@ -15,6 +15,7 @@
   "channels": {
     "<channel_id>": {
       "primary": "<agent_id>",            // mention 不在時の inbound default 宛先
+      "adapterOwner": "<agent_id>",       // chat projection を claim/send する adapter owner
       "outboundAllowlist": ["<agent_id>"] // sender + recipients の ACL
     }
   }
@@ -22,6 +23,7 @@
 ```
 
 - **`primary`**: `routeInbound` で `mention` が無く、`channel.primary` がある場合に primary を 1 名 enqueue。両方無い channel は skip + warning log。
+- **`adapterOwner`**: #410 以降、`outbound_queue.agent_id` は canonical author として保持し、Discord 等の chat projection は `consumer_agent_id` が示す adapter owner process が claim する。`adapterOwner` 不在時は互換 fallback として `primary` を使う。
 - **`outboundAllowlist`**: `send` / `notify` で sender or recipients が含まれていなければ `OUTBOUND_ACL_VIOLATION` reject。**allowlist 不在 channel (entry 自体無し) は legacy compat、全 sender 許可**。
 
 ### 編集手順
@@ -70,11 +72,38 @@ mcp__agent-comms__bot_status
 | parse error (invalid JSON) | 同上 (fail-closed semantics — 起動継続、警告 log) |
 | schema invalid (channels が object でない等) | 同上 |
 | `primary` の agent_id が agents table に不在 | inbound 時 enqueue 失敗 + alert log |
+| `adapterOwner` の bot process / Discord token が無い | outbound 診断で `consumer_agent_not_registered` または `consumer_agent_not_available` |
 | `cc[]` allowlist 外 agent | `OUTBOUND_ACL_VIOLATION` reject (cc[] strip は v2 で廃止) |
 | `mention` + `mentions` 両方指定 | mention 優先 + warning log |
 
 ---
 
-## 2. その他運用 (既存項目)
+## 2. Phase 1 delivery smoke diagnostics (#410)
+
+Bot-to-bot receive と chat projection のどちらも、script-driven JSON 診断で確認する。
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/diagnose-phase1-delivery.ts --queue-id 71984
+
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/diagnose-phase1-delivery.ts --outbound-message-id b807397b-243f-44ef-9a17-1d88ce793b3c
+```
+
+同じ処理は CLI からも実行できる。
+
+```bash
+bun cli/index.ts diagnose-delivery --message-id <agent_messages_or_message_queue_id>
+```
+
+診断 JSON の要点:
+
+- `inbound.next_returnable=false`: `next` が返さない理由を `reason` に出す。terminal row は `terminal_status_not_returned_by_next`。
+- `inbound.terminal_writer_class`: `replied` / `skipped` / `failed` / `stale` / `cleanup` / `auto-skip` の推定。
+- `outbound.author_id`: canonical author (`codex-aun` 等)。
+- `outbound.consumer_agent_id`: projection owner (`agent-com-dev` 等)。
+- `outbound.reason`: pending なのに projection されない機械可読理由。
+
+## 3. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)

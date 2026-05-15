@@ -21,7 +21,7 @@ const isKnown = (id: string) => KNOWN_AGENTS.has(id)
 
 const TMP_CONFIG = `/tmp/phase5-routing-${process.pid}-${Date.now()}.json`
 
-function setRoutingConfig(channels: Record<string, { primary?: string | null; outboundAllowlist?: string[] }>) {
+function setRoutingConfig(channels: Record<string, { primary?: string | null; adapterOwner?: string | null; outboundAllowlist?: string[] }>) {
   writeFileSync(TMP_CONFIG, JSON.stringify({ version: 1, channels }), 'utf8')
   process.env.AGENT_COM_BOT_ROUTING_PATH = TMP_CONFIG
   resetChannelPolicyCache()
@@ -51,9 +51,10 @@ describe('channel-policy (§1.8)', () => {
   })
 
   test('present channel returns configured primary + allowlist', () => {
-    setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice', 'bob'] } })
+    setRoutingConfig({ 'ch1': { primary: 'alice', adapterOwner: 'bob', outboundAllowlist: ['alice', 'bob'] } })
     const p = getChannelPolicy('ch1')
     expect(p.primary).toBe('alice')
+    expect(p.adapterOwner).toBe('bob')
     expect(p.outboundAllowlist).toEqual(['alice', 'bob'])
   })
 
@@ -210,7 +211,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
   // length / order / forbidden additions are all gated by a single
   // assertion (cycle 1 `toContain` only verified inclusion, missed
   // contamination + reorder regressions).
-  test('§4.4 channel 1487368919613444156 — exact 9-bot allowlist', () => {
+  test('§4.4 channel 1487368919613444156 — exact 10-bot allowlist + adapter owner', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -220,11 +221,13 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
       ),
     )
     const allowed = cfg.channels['1487368919613444156']?.outboundAllowlist
+    expect(cfg.channels['1487368919613444156']?.adapterOwner).toBe('agent-com-dev')
     expect(allowed).toEqual([
       'agent-com-dev',
       'lead-ama',
       'cto',
       'codex-cto',
+      'codex-aun',
       'ceo',
       'auditor',
       'arc',

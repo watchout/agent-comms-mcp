@@ -226,7 +226,9 @@ export async function consumeOneOutboundRow(): Promise<void> {
     if (!client) return
 
     // §3.3 Atomic claim: flip status 'pending' → 'claimed' + set claimed_at
-    // + filter by agent_id so each bot only consumes rows tagged to itself.
+    // + filter by adapter owner so Codex-only authors can still project via
+    // the channel's chat adapter process (#410). Older rows without
+    // consumer_agent_id fall back to the legacy agent_id ownership.
     // FOR UPDATE SKIP LOCKED + single-statement UPDATE removes the race
     // that allowed multiple consumers to observe the same 'pending' row
     // between select and send (2026-04-12 duplicate-post incident).
@@ -236,7 +238,7 @@ export async function consumeOneOutboundRow(): Promise<void> {
         WHERE id = (
           SELECT id FROM outbound_queue
            WHERE status = 'pending'
-             AND agent_id = $1
+             AND COALESCE(consumer_agent_id, agent_id) = $1
              AND (next_retry_at IS NULL OR next_retry_at <= now())
            ORDER BY created_at ASC
            LIMIT 1
@@ -463,7 +465,7 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
                               )
                             + ((random() * 500)::int || ' milliseconds')::interval
         WHERE status = 'claimed'
-          AND agent_id = $1
+          AND COALESCE(consumer_agent_id, agent_id) = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND attempts < max_attempts
         RETURNING id, attempts`,
@@ -484,7 +486,7 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
               last_error = 'exhausted_via_orphan_reclaim',
               claimed_at = NULL
         WHERE status = 'claimed'
-          AND agent_id = $1
+          AND COALESCE(consumer_agent_id, agent_id) = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND attempts >= max_attempts
         RETURNING id, attempts, max_attempts`,

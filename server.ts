@@ -108,6 +108,7 @@ import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-d
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
+import { resolveOutboundProjectionRoute } from './core/outbound-projection'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -2464,21 +2465,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // outbound INSERT failure rolls back the entire send (including the
     // 'replied' UPDATE), so the caller can retry via `next` → `send`.
     {
-      let externalId: string | null = null
-      if (dest.threadId) {
-        const tr = await txClient.query(
-          `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
-          [dest.threadId],
-        ).catch(() => ({ rows: [] as any[] }))
-        if (tr.rows.length > 0) externalId = tr.rows[0].external_id
-      }
-      if (!externalId) {
-        const cr = await txClient.query(
-          `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-          [dest.channelId],
-        ).catch(() => ({ rows: [] as any[] }))
-        if (cr.rows.length > 0) externalId = cr.rows[0].external_id
-      }
+      const projection = await resolveOutboundProjectionRoute(txClient, {
+        channelId: dest.channelId,
+        threadId: dest.threadId,
+      })
+      const externalId = projection.channelExternalId
       if (externalId) {
         // Issue #248 follow-up — render `mentions` (agent_id list) as Discord
         // snowflake mentions prepended to the first part. Without this, Discord
@@ -2493,14 +2484,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             : rawPartContent
           try {
             await txClient.query(
-              `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
-               VALUES ($1, $2, $3, $4)`,
+              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
+               VALUES ($1, $2, $3, $4, $5)`,
               // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars to
               // match spec §5.3 エラーハンドリング. truncateForPlatform's 2000-char
               // limit is the raw Discord hard cap; truncateForDiscord bakes in
               // 100 chars of headroom for mentions / reply markers / Discord
               // server-side reformat.
-              [partMessageId, agentId, externalId, truncateForDiscord(partContent)],
+              [partMessageId, agentId, projection.consumerAgentId, externalId, truncateForDiscord(partContent)],
             )
           } catch (err) {
             // ARC codex audit (PR#135): do NOT silently swallow. The
@@ -2853,21 +2844,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // spec §4.3 step 7 — outbound_queue INSERT per part.
-    let externalId: string | null = null
-    if (dest.threadId) {
-      const tr = await client.query(
-        `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
-        [dest.threadId],
-      ).catch(() => ({ rows: [] as any[] }))
-      if (tr.rows.length > 0) externalId = tr.rows[0].external_id
-    }
-    if (!externalId) {
-      const cr = await client.query(
-        `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-        [dest.channelId],
-      ).catch(() => ({ rows: [] as any[] }))
-      if (cr.rows.length > 0) externalId = cr.rows[0].external_id
-    }
+    const projection = await resolveOutboundProjectionRoute(client, {
+      channelId: dest.channelId,
+      threadId: dest.threadId,
+    })
+    const externalId = projection.channelExternalId
     if (externalId) {
       // Issue #248 follow-up — same Discord snowflake prefix as the send tool.
       // notify path uses `client` (no explicit transaction wrapper).
@@ -2880,11 +2861,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : rawPartContent
         try {
           await client.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
-             VALUES ($1, $2, $3, $4)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5)`,
             // v2.1.0: clamp at DISCORD_MAX (1900) before enqueue — see send-tool
             // call site above for rationale.
-            [partMessageId, agentId, externalId, truncateForDiscord(partContent)],
+            [partMessageId, agentId, projection.consumerAgentId, externalId, truncateForDiscord(partContent)],
           )
         } catch (err) {
           process.stderr.write(`agent-comms: notify outbound_queue INSERT failed: ${err}\n`)

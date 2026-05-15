@@ -28,6 +28,8 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
+import { resolveOutboundProjectionRoute } from '../core/outbound-projection'
+import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -844,21 +846,8 @@ async function sendMessage(args: string[]) {
       // queued. The receiver pipeline still picks up the agent_messages row
       // via pg_notify, so other bots see the message; only the human-facing
       // Discord display is skipped. We surface this in the response.
-      let discordExternalId: string | null = null
-      if (threadId) {
-        const tr = await db.query(
-          `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
-          [threadId],
-        )
-        if (tr.rows.length > 0) discordExternalId = tr.rows[0].external_id
-      }
-      if (!discordExternalId) {
-        const cr = await db.query(
-          `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-          [channelId],
-        )
-        if (cr.rows.length > 0) discordExternalId = cr.rows[0].external_id
-      }
+      const projection = await resolveOutboundProjectionRoute(db as any, { channelId, threadId })
+      const discordExternalId = projection.channelExternalId
 
       let outboundQueued = false
       let outboundSkipReason: string | null = null
@@ -868,9 +857,9 @@ async function sendMessage(args: string[]) {
           // enqueue so an over-long LLM reply is truncated once, deterministically,
           // instead of being split across retries inside the Discord adapter.
           await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
-             VALUES ($1, $2, $3, $4)`,
-            [id, agentId, discordExternalId, truncateForDiscord(content)],
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(content)],
           )
           outboundQueued = true
         } catch (err) {
@@ -1099,21 +1088,11 @@ async function notifyMessage(args: string[]) {
       }
     }
 
-    let discordExternalId: string | null = null
-    if (resolvedThreadId) {
-      const tr = await db.query(
-        `SELECT external_id FROM thread_adapters WHERE thread_id = $1 AND platform = 'discord'`,
-        [resolvedThreadId],
-      )
-      if (tr.rows.length > 0) discordExternalId = tr.rows[0].external_id
-    }
-    if (!discordExternalId) {
-      const cr = await db.query(
-        `SELECT external_id FROM channel_adapters WHERE channel_id = $1 AND platform = 'discord'`,
-        [resolvedChannelId],
-      )
-      if (cr.rows.length > 0) discordExternalId = cr.rows[0].external_id
-    }
+    const projection = await resolveOutboundProjectionRoute(db as any, {
+      channelId: resolvedChannelId,
+      threadId: resolvedThreadId,
+    })
+    const discordExternalId = projection.channelExternalId
 
     let outboundQueued = false
     let outboundSkipReason: string | null = null
@@ -1121,9 +1100,9 @@ async function notifyMessage(args: string[]) {
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
-           VALUES ($1, $2, $3, $4)`,
-          [id, agentId, discordExternalId, truncateForDiscord(content)],
+          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(content)],
         )
         outboundQueued = true
       } catch (err) {
@@ -1327,6 +1306,67 @@ async function reclaimMessages(args: string[]) {
       await db.query('ROLLBACK').catch(() => {})
       throw err
     }
+  } finally {
+    await db.end()
+  }
+}
+
+async function diagnoseDelivery(args: string[]) {
+  const { flags } = parseArgs(args)
+  const queueId = flags['queue-id']
+  const messageId = flags['message-id']
+  const outboundMessageId = flags['outbound-message-id'] ?? messageId
+  const db = await getDb()
+  try {
+    const report: Record<string, unknown> = { ok: true, inbound: null, outbound: null }
+
+    if (queueId || messageId) {
+      const inbound = await db.query(
+        `SELECT id, agent_id, message_id, status, claimed_by, claim_expires_at,
+                replied_with, failed_reason, done_at
+           FROM message_queue
+          WHERE ($1::text IS NOT NULL AND id::text = $1)
+             OR ($2::text IS NOT NULL AND message_id = $2)
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [queueId ?? null, messageId ?? null],
+      )
+      report.inbound = diagnoseInboundQueueRow(inbound.rows[0] ?? null)
+    }
+
+    if (outboundMessageId) {
+      const outbound = await db.query(
+        `SELECT id, message_id, agent_id, consumer_agent_id, channel_external_id,
+                status, attempts, max_attempts, last_error, sent_at, discord_message_id
+           FROM outbound_queue
+          WHERE message_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [outboundMessageId],
+      )
+      const row = outbound.rows[0] ?? null
+      const consumerAgentId = row ? (row.consumer_agent_id ?? row.agent_id) : null
+      const consumer = consumerAgentId
+        ? await db.query(
+          `SELECT agent_id, status, metadata
+             FROM agents WHERE agent_id = $1`,
+          [consumerAgentId],
+        ).catch(() => ({ rows: [] as any[] }))
+        : { rows: [] as any[] }
+      const consumerRow = consumer.rows[0]
+      if (consumerRow) {
+        let metadata: Record<string, unknown> = {}
+        if (consumerRow.metadata && typeof consumerRow.metadata === 'object') {
+          metadata = consumerRow.metadata
+        } else if (typeof consumerRow.metadata === 'string') {
+          try { metadata = JSON.parse(consumerRow.metadata) } catch {}
+        }
+        consumerRow.has_discord_id = typeof metadata.discord_id === 'string' && metadata.discord_id.length > 0
+      }
+      report.outbound = diagnoseOutboundQueueRow(row, consumerRow ?? null)
+    }
+
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
   } finally {
     await db.end()
   }
@@ -1559,6 +1599,8 @@ if (command === 'channel') {
 } else if (command === 'reclaim') {
   // spec §4.1 (v2.1.0): manual orphan reclaim for crashed bots.
   await reclaimMessages([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'diagnose-delivery') {
+  await diagnoseDelivery([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -1579,6 +1621,8 @@ Message I/O (requires AGENT_ID env var):
   fail --message-id <uuid> --reason <text>            — mark in-flight message failed (v2.1.0, §4.1)
   skip --message-id <uuid> --reason <text>            — operator-initiated skip (v2.1.0, §4.1)
   reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)
+  diagnose-delivery [--queue-id <id>] [--message-id <uuid>] [--outbound-message-id <uuid>]
+                                                       — JSON explanation for next/projection gaps
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
