@@ -10,6 +10,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
+DROP INDEX IF EXISTS idx_mq_expired_claims;
 CREATE INDEX IF NOT EXISTS idx_mq_expired_claims
   ON message_queue(claim_expires_at)
-  WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'read';
+  WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'received';

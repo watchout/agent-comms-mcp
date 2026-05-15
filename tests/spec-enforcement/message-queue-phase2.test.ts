@@ -84,6 +84,10 @@ describe('T1 — db/migrate.ts ships the message_queue table + per-row claim col
     expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claimed_by TEXT/)
     expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ/)
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_expired_claims/)
+    expect(MIGRATE_SRC).toMatch(/DROP INDEX IF EXISTS idx_mq_expired_claims/)
+    expect(MIGRATE_SRC).toMatch(/idx_mq_expired_claims[\s\S]*status = 'received'/)
+    expect(MIGRATE_SRC).toMatch(/DROP INDEX IF EXISTS idx_mq_read_expired/)
+    expect(MIGRATE_SRC).toMatch(/idx_mq_read_expired[\s\S]*status = 'received'/)
     // Issue #278 (A) segment 3d hotfix (2026-04-30 incident) — the
     // DROP COLUMN current_message_id is hosted ONLY in the paired G-2
     // migration file, not in the auto-applied bootstrap, to prevent

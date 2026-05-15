@@ -967,4 +967,58 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(byId['b-expired']).toBe('received')       // protected
     expect(byId['foreign-expired']).toBe('pending')  // foreign claim reset for retry (v0.9)
   })
+
+  test('case 33 — shared claim-TTL sweep clears claim metadata and resyncs agents.status', async () => {
+    const { sweepExpiredClaims } = await import('../core/claim-ttl')
+    await db.execute(
+      `INSERT INTO agents (agent_id, status, status_detail)
+       VALUES ('expired-only', 'busy', 'メッセージ処理中'),
+              ('still-busy', 'busy', 'メッセージ処理中')`,
+    )
+    await db.execute(
+      `INSERT INTO message_queue (id, agent_id, status, claimed_by, claimed_at, claim_expires_at, read_at)
+       VALUES ('expired-only-row', 'expired-only', 'received', 'expired-only', datetime('now', '-2 hour'), datetime('now', '-1 hour'), datetime('now', '-2 hour')),
+              ('still-busy-expired', 'still-busy', 'received', 'still-busy', datetime('now', '-2 hour'), datetime('now', '-1 hour'), datetime('now', '-2 hour')),
+              ('still-busy-active', 'still-busy', 'received', 'still-busy', datetime('now'), datetime('now', '+1 hour'), datetime('now'))`,
+    )
+
+    const swept = await sweepExpiredClaims(pgWrap(db))
+    expect(swept).toBe(2)
+
+    const rows = await db.query<{
+      id: string
+      status: string
+      claimed_by: string | null
+      claimed_at: string | null
+      claim_expires_at: string | null
+      read_at: string | null
+    }>(
+      `SELECT id, status, claimed_by, claimed_at, claim_expires_at, read_at
+         FROM message_queue
+        WHERE id IN ('expired-only-row', 'still-busy-expired', 'still-busy-active')
+        ORDER BY id`,
+    )
+    const byId = Object.fromEntries(rows.map((row) => [row.id, row]))
+    expect(byId['expired-only-row'].status).toBe('pending')
+    expect(byId['expired-only-row'].claimed_by).toBe(null)
+    expect(byId['expired-only-row'].claimed_at).toBe(null)
+    expect(byId['expired-only-row'].claim_expires_at).toBe(null)
+    expect(byId['expired-only-row'].read_at).toBe(null)
+    expect(byId['still-busy-expired'].status).toBe('pending')
+    expect(byId['still-busy-expired'].claimed_by).toBe(null)
+    expect(byId['still-busy-active'].status).toBe('received')
+    expect(byId['still-busy-active'].claimed_by).toBe('still-busy')
+
+    const agents = await db.query<{ agent_id: string; status: string; status_detail: string | null }>(
+      `SELECT agent_id, status, status_detail
+         FROM agents
+        WHERE agent_id IN ('expired-only', 'still-busy')
+        ORDER BY agent_id`,
+    )
+    const agentById = Object.fromEntries(agents.map((agent) => [agent.agent_id, agent]))
+    expect(agentById['expired-only'].status).toBe('idle')
+    expect(agentById['expired-only'].status_detail).toBe(null)
+    expect(agentById['still-busy'].status).toBe('busy')
+    expect(agentById['still-busy'].status_detail).toBe('メッセージ処理中')
+  })
 })

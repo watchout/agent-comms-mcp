@@ -42,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_mq_pending_stale
   ON message_queue(status, created_at)
   WHERE status = 'pending';
 
+DROP INDEX IF EXISTS idx_mq_read_expired;
 CREATE INDEX IF NOT EXISTS idx_mq_read_expired
   ON message_queue(status, claim_expires_at)
-  WHERE status = 'read';
+  WHERE status = 'received';

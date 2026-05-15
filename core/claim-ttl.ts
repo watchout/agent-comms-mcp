@@ -78,44 +78,103 @@ export async function sweepExpiredClaims(
     // both pg and SQLite accept the predicate (`<> ALL($1)` is a
     // PG-only array form).
     const placeholders = opts.selfAgentIds.map((_, i) => `$${i + 1}`).join(', ')
+    const agents = await selectExpiredClaimAgents(
+      db,
+      `AND claimed_by NOT IN (${placeholders})`,
+      [...opts.selfAgentIds],
+    )
     const result: any = await db.query(
       `UPDATE message_queue
-       SET status = 'pending'
+       SET status = 'pending',
+           claimed_by = NULL,
+           claimed_at = NULL,
+           claim_expires_at = NULL,
+           read_at = NULL
        WHERE status = 'received'
          AND claimed_by IS NOT NULL
          AND claimed_by NOT IN (${placeholders})
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()
-       RETURNING id`,
+      RETURNING id`,
       [...opts.selfAgentIds],
     )
+    await syncAgentStatusForAgents(db, agents)
     const rc = result?.rowCount
     if (typeof rc === 'number') return rc
     return Array.isArray(result?.rows) ? result.rows.length : 0
   }
   if (opts.selfAgentId) {
+    const agents = await selectExpiredClaimAgents(db, 'AND claimed_by <> $1', [opts.selfAgentId])
     const result = await db.query(
       `UPDATE message_queue
-       SET status = 'pending'
+       SET status = 'pending',
+           claimed_by = NULL,
+           claimed_at = NULL,
+           claim_expires_at = NULL,
+           read_at = NULL
        WHERE status = 'received'
          AND claimed_by IS NOT NULL
          AND claimed_by <> $1
          AND claim_expires_at IS NOT NULL
-         AND claim_expires_at < now()`,
+         AND claim_expires_at < now()
+       RETURNING id`,
       [opts.selfAgentId],
     )
-    return result.rowCount ?? 0
+    await syncAgentStatusForAgents(db, agents)
+    const rc = result?.rowCount
+    if (typeof rc === 'number') return rc
+    return Array.isArray(result?.rows) ? result.rows.length : 0
   }
+  const agents = await selectExpiredClaimAgents(db)
   const result = await db.query(
     `UPDATE message_queue
-     SET status = 'pending'
+     SET status = 'pending',
+         claimed_by = NULL,
+         claimed_at = NULL,
+         claim_expires_at = NULL,
+         read_at = NULL
      WHERE status = 'received'
        AND claimed_by IS NOT NULL
        AND claim_expires_at IS NOT NULL
-       AND claim_expires_at < now()`,
+       AND claim_expires_at < now()
+     RETURNING id`,
     [],
   )
-  return result.rowCount ?? 0
+  await syncAgentStatusForAgents(db, agents)
+  const rc = result?.rowCount
+  if (typeof rc === 'number') return rc
+  return Array.isArray(result?.rows) ? result.rows.length : 0
+}
+
+async function selectExpiredClaimAgents(
+  db: ClaimTtlDb,
+  extraPredicate = '',
+  params: unknown[] = [],
+): Promise<string[]> {
+  const result = await db.query<{ agent_id: string }>(
+    `SELECT DISTINCT claimed_by AS agent_id
+       FROM message_queue
+      WHERE status = 'received'
+        AND claimed_by IS NOT NULL
+        AND claim_expires_at IS NOT NULL
+        AND claim_expires_at < now()
+        ${extraPredicate}`,
+    params,
+  )
+  return Array.from(new Set((result.rows ?? []).map((row) => row.agent_id).filter(Boolean))).sort()
+}
+
+async function syncAgentStatusForAgents(db: ClaimTtlDb, agentIds: string[]): Promise<void> {
+  for (const agentId of agentIds) {
+    await db.query(
+      `UPDATE agents SET
+         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
+         status_updated_at = now()
+       WHERE agent_id = $1`,
+      [agentId],
+    )
+  }
 }
 
 /**

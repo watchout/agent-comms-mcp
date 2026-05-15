@@ -295,9 +295,10 @@ async function migrate() {
       ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
+    DROP INDEX IF EXISTS idx_mq_expired_claims;
     CREATE INDEX IF NOT EXISTS idx_mq_expired_claims
       ON message_queue(claim_expires_at)
-      WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'read';
+      WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'received';
 
     -- Issue #323 — state-daemon schema (CTO directive 56bd384a per CEO
     -- a4a3be6a). Mirrors db/migrations/2026-05-08-state-daemon-323.up.sql
@@ -345,9 +346,10 @@ async function migrate() {
       ON message_queue(status, created_at)
       WHERE status = 'pending';
 
+    DROP INDEX IF EXISTS idx_mq_read_expired;
     CREATE INDEX IF NOT EXISTS idx_mq_read_expired
       ON message_queue(status, claim_expires_at)
-      WHERE status = 'read';
+      WHERE status = 'received';
 
     -- Issue #278 (A) Inbound idempotency was already in place as
     -- uq_mq_agent_message ((agent_id, message_id) WHERE message_id IS NOT NULL,
