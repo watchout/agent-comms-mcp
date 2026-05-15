@@ -15,6 +15,8 @@ export interface ReplyOptions extends ReceiveOptions {
   content?: string
   mentions?: string
   messageType?: string
+  queueId?: string
+  messageId?: string
 }
 
 export interface NotifyOptions extends ReplyOptions {
@@ -43,6 +45,8 @@ export function buildReplyPlan(opts: ReplyOptions = {}): CommandPlan {
   const mentions = requireText(opts.mentions, '--mentions')
   const argv = ['bun', 'cli/index.ts', 'send', '--content', content, '--mentions', mentions]
   if (opts.messageType?.trim()) argv.push('--message-type', opts.messageType.trim())
+  if (opts.queueId?.trim()) argv.push('--queue-id', opts.queueId.trim())
+  if (opts.messageId?.trim()) argv.push('--message-id', opts.messageId.trim())
   return buildCommandPlan(opts, argv)
 }
 

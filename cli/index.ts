@@ -494,6 +494,8 @@ async function nextMessage() {
  *   --content "<text>"        required
  *   --mentions a,b,c          required (comma-separated agent IDs)
  *   --message-type chat|...   default: chat
+ *   --queue-id <id>           optional durable close target
+ *   --message-id <uuid>       optional cross-check for --queue-id
  *
  * MVP scope (Phase 2): this is a thin INSERT + pg_notify path. The full
  * server.ts send handler (rate limit / dup check / message split / channel-
@@ -507,6 +509,8 @@ async function sendMessage(args: string[]) {
   const content = flags.content
   const mentionsRaw = flags.mentions
   const messageType = flags['message-type'] ?? 'chat'
+  const queueIdRaw = flags['queue-id']
+  const messageIdRaw = flags['message-id']
 
   if (!content) {
     console.error('Error: --content is required')
@@ -564,6 +568,17 @@ async function sendMessage(args: string[]) {
     }
   }
 
+  function writeFailureJson(
+    code: string,
+    detail: string,
+    extra: Record<string, unknown> = {},
+    exitCode = 1,
+  ): never {
+    process.stdout.write(JSON.stringify({ ok: false, code, detail, ...extra }) + '\n')
+    process.stderr.write(`Error [${code}]: ${detail}\n`)
+    throw new CliSendExit(exitCode)
+  }
+
   const db = await getDb()
   let exitCode = 0
   let committed = false
@@ -588,6 +603,87 @@ async function sendMessage(args: string[]) {
         queue_id: number         // message_queue.id
       }
       let target: Target | null = null
+      const explicitClose = !!queueIdRaw || !!messageIdRaw
+
+      if (explicitClose) {
+        let qres
+        if (queueIdRaw) {
+          const queueId = Number(queueIdRaw)
+          if (!Number.isInteger(queueId) || queueId < 1) {
+            writeFailureJson('QUEUE_NOT_FOUND', `invalid queue_id: ${queueIdRaw}`, { queue_id: queueIdRaw })
+          }
+          qres = await db.query(
+            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+               FROM message_queue
+              WHERE id = $1
+              FOR UPDATE`,
+            [queueId],
+          )
+        } else {
+          qres = await db.query(
+            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+               FROM message_queue
+              WHERE agent_id = $1 AND message_id = $2
+              ORDER BY created_at DESC
+              LIMIT 1
+              FOR UPDATE`,
+            [agentId, messageIdRaw],
+          )
+        }
+
+        if (qres.rows.length === 0) {
+          writeFailureJson('QUEUE_NOT_FOUND', 'no message_queue row matches the explicit reply target', {
+            queue_id: queueIdRaw ?? null,
+            message_id: messageIdRaw ?? null,
+          })
+        }
+
+        const qrow = qres.rows[0]
+        if (messageIdRaw && qrow.message_id !== messageIdRaw) {
+          writeFailureJson('QUEUE_MESSAGE_MISMATCH', 'queue_id and message_id identify different messages', {
+            queue_id: qrow.id,
+            expected_message_id: qrow.message_id,
+            supplied_message_id: messageIdRaw,
+          })
+        }
+        if (qrow.agent_id !== agentId) {
+          writeFailureJson('NOT_MENTIONED', `queue row is addressed to ${qrow.agent_id}, not ${agentId}`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+          })
+        }
+        if (['replied', 'skipped', 'failed'].includes(qrow.status)) {
+          writeFailureJson('ALREADY_CLOSED', `queue row is already terminal (${qrow.status})`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            replied_with: qrow.replied_with ?? null,
+          })
+        }
+        if (qrow.status === 'received' && qrow.claimed_by && qrow.claimed_by !== agentId) {
+          writeFailureJson('NOT_CLAIM_OWNER', `queue row is actively claimed by ${qrow.claimed_by}`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            claimed_by: qrow.claimed_by,
+          })
+        }
+
+        let payload: Record<string, any> = {}
+        try { payload = JSON.parse(qrow.payload) } catch {}
+        const replyTo = qrow.message_id ?? payload.message_id
+        const channelId = payload.channel_id
+        if (!replyTo || !channelId) {
+          writeFailureJson('QUEUE_NOT_FOUND', 'queue row is missing message_id or channel_id metadata', {
+            queue_id: qrow.id,
+            message_id: qrow.message_id ?? null,
+          })
+        }
+        target = {
+          reply_to: replyTo,
+          channel_id: channelId,
+          thread_id: payload.thread_id ?? null,
+          queue_id: qrow.id,
+        }
+      }
 
       // Issue #278 (A) segment 3d — per-row claim lookup. Replaces the
       // legacy SELECT current_message_id FROM agents path. The CLI does
@@ -600,23 +696,25 @@ async function sendMessage(args: string[]) {
       // and it exits with INVALID_REPLY_TO instead of double-replying.
       // Independent claims (multi in-flight) are unaffected because the
       // lock is per-row, not on the agents row.
-      const claimRow = await db.query(
-        `SELECT id, message_id, payload FROM message_queue
-            WHERE claimed_by = $1 AND status = 'received'
-            ORDER BY claimed_at DESC NULLS LAST
-            LIMIT 1
-            FOR UPDATE`,
-        [agentId],
-      )
-      if (claimRow.rows.length > 0) {
-        const qrow = claimRow.rows[0]
-        let payload: Record<string, any> = {}
-        try { payload = JSON.parse(qrow.payload) } catch {}
-        target = {
-          reply_to: qrow.message_id ?? payload.message_id,
-          channel_id: payload.channel_id,
-          thread_id: payload.thread_id ?? null,
-          queue_id: qrow.id,
+      if (!explicitClose) {
+        const claimRow = await db.query(
+          `SELECT id, message_id, payload FROM message_queue
+              WHERE claimed_by = $1 AND status = 'received'
+              ORDER BY claimed_at DESC NULLS LAST
+              LIMIT 1
+              FOR UPDATE`,
+          [agentId],
+        )
+        if (claimRow.rows.length > 0) {
+          const qrow = claimRow.rows[0]
+          let payload: Record<string, any> = {}
+          try { payload = JSON.parse(qrow.payload) } catch {}
+          target = {
+            reply_to: qrow.message_id ?? payload.message_id,
+            channel_id: payload.channel_id,
+            thread_id: payload.thread_id ?? null,
+            queue_id: qrow.id,
+          }
         }
       }
 
@@ -626,6 +724,13 @@ async function sendMessage(args: string[]) {
         // agent has no active claim — either `next` was never called,
         // the claim TTL expired and the sweeper flipped it to
         // IMPLICIT_ABANDON, or a concurrent `send` already replied.
+        process.stdout.write(JSON.stringify({
+          ok: false,
+          code: 'RECLAIM_REQUIRED',
+          reason: 'CLAIM_EXPIRED',
+          legacy_code: 'INVALID_REPLY_TO',
+          detail: `no active received claim for ${agentId}; retry with explicit --queue-id/--message-id durable close`,
+        }) + '\n')
         console.error(`Error [INVALID_REPLY_TO]: no in-flight claim for ${agentId} — run 'agent-com next' first or the claim may have expired`)
         throw new CliSendExit(1)
       }
@@ -636,13 +741,29 @@ async function sendMessage(args: string[]) {
       // Membership check — bot can only reply in channels it belongs to.
       const ch = await db.query('SELECT members FROM channels WHERE id = $1', [channelId])
       if (ch.rows.length === 0) {
-        console.error(`Error: channel ${channelId} not found`)
-        throw new CliSendExit(1)
+        if (explicitClose) {
+          writeFailureJson('NOT_CHANNEL_MEMBER', `channel ${channelId} not found`, {
+            queue_id: target.queue_id,
+            message_id: replyTo,
+            channel_id: channelId,
+          })
+        } else {
+          console.error(`Error: channel ${channelId} not found`)
+          throw new CliSendExit(1)
+        }
       }
       const members: string[] = ch.rows[0].members ?? []
       if (!members.includes(agentId)) {
-        console.error(`Error: ${agentId} is not a member of channel ${channelId}`)
-        throw new CliSendExit(1)
+        if (explicitClose) {
+          writeFailureJson('NOT_CHANNEL_MEMBER', `${agentId} is not a member of channel ${channelId}`, {
+            queue_id: target.queue_id,
+            message_id: replyTo,
+            channel_id: channelId,
+          })
+        } else {
+          console.error(`Error: ${agentId} is not a member of channel ${channelId}`)
+          throw new CliSendExit(1)
+        }
       }
 
       const id = randomUUID()
@@ -799,6 +920,8 @@ async function sendMessage(args: string[]) {
         mentions,
         auth_signed: authMeta !== undefined,
         outbound_queued: outboundQueued,
+        close_mode: explicitClose ? 'explicit' : 'active_claim',
+        queue_id: target.queue_id,
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
     } finally {
