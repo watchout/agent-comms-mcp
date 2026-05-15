@@ -20,8 +20,19 @@ and invoke a configured runner for that agent/runtime.
 This document is a proposed migration target for the receive path. Until the
 implementation PR lands, the existing `queue-state-polling-daemon.md` and
 `state-daemon-6section-elements.md` contracts remain the active production
-contract. This document supersedes only the natural-language receive handoff
-after the runner implementation provides equivalent tests and rollout steps.
+contract. `next-only-receive-flow.md` also remains the active contract for the
+claim surface: receive still means `pending -> next -> received`, and `inbox`
+stays history/diagnostics only. This document supersedes only the
+natural-language receive handoff after the runner implementation provides
+equivalent tests and rollout steps.
+
+Where `next-only-receive-flow.md` describes `done` as a direct no-reply close,
+that statement is treated as the current CLI compatibility surface, not a new
+state-model authority. The v0.9 state-daemon model remains authoritative for
+completion semantics until a separate migration changes it: `done` is
+non-terminal internal completion, and `done -> replied` is valid. The
+implementation PR must either preserve this bridge or update both documents in
+one atomic change.
 
 ## Core Principles
 
@@ -176,6 +187,8 @@ channel members and agent routing.
 ## Acceptance Criteria
 
 - A pending row can be claimed without any LLM tool-choice decision.
+- `pending -> next -> received` from `next-only-receive-flow.md` remains the
+  receive claim contract.
 - `inbox` cannot advance queue state and cannot be required for receive.
 - A busy agent can accumulate pending rows without repeated UI prompt injection.
 - A crashed runner leaves enough DB state for deterministic reclaim.
