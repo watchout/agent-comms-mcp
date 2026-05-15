@@ -104,6 +104,41 @@ bun cli/index.ts diagnose-delivery --message-id <agent_messages_or_message_queue
 - `outbound.consumer_agent_id`: projection owner (`agent-com-dev` 等)。
 - `outbound.reason`: pending なのに projection されない機械可読理由。
 
+## 3. Legacy Pre-#411 Outbound Cleanup (#412)
+
+Use this only for `outbound_queue` rows created before the #411 adapter-owner projection fix, where `consumer_agent_id IS NULL` leaves Discord projection unclaimed or misdiagnosed.
+
+Dry-run first:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/legacy-outbound-cleanup.ts --limit 200
+```
+
+The script prints proposed actions:
+
+- `mark_obsolete`: known ACK/status rows that should not be posted late.
+- `backfill_consumer`: only rows explicitly named with `--backfill-message-id`.
+- `manual_review`: fail-closed default; inspect before deciding.
+
+Apply is guarded and requires both `--apply` and the existing destructive-operation guard:
+
+```bash
+AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 \
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/legacy-outbound-cleanup.ts --apply --obsolete-message-id <uuid>
+```
+
+To backfill a display-worthy row:
+
+```bash
+AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 \
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/legacy-outbound-cleanup.ts --apply --backfill-message-id <uuid>
+```
+
+Stop and escalate if dry-run shows unexpected `backfill_consumer` rows, rows outside channel `1487368919613444156`, or content that could create stale duplicate Discord posts.
+
 ## 3. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)
