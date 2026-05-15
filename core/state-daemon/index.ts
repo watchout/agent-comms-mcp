@@ -49,6 +49,7 @@ import {
 } from './types'
 import { WakePool } from './wake-pool'
 import { defaultConfigPort } from '../ports/config-port'
+import { staleDispatchReason } from '../message-queue-terminal'
 import {
   createDefaultStallDetector,
   loadStallThresholdsFromEnv,
@@ -300,7 +301,12 @@ export class StateDaemon {
     for (const row of abandon) {
       result.scanned++
       await this.dbQuery(
-        `UPDATE message_queue SET status='pending' WHERE id=$1`,
+        `UPDATE message_queue
+            SET status='pending',
+                claimed_by=NULL,
+                claimed_at=NULL,
+                claim_expires_at=NULL
+          WHERE id=$1`,
         [row.id],
       )
       result.abandonReset++
@@ -645,12 +651,14 @@ export class StateDaemon {
   // ── State transition helpers (§4.3) ────────────────────────────────────────
 
   private async reclaimRow(row: QueueRow): Promise<void> {
-    const newExpiry = new Date(this.clock.now().getTime() + this.config.claimTtlSec * 1000)
     await this.dbQuery(
       `UPDATE message_queue
-          SET status='pending', claim_expires_at=$1, claimed_by=NULL, claimed_at=NULL
-        WHERE id=$2`,
-      [newExpiry, row.id],
+          SET status='pending',
+              claim_expires_at=NULL,
+              claimed_by=NULL,
+              claimed_at=NULL
+        WHERE id=$1`,
+      [row.id],
     )
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
     // After reclaim, re-wake (T10 expects sendKeys 1).
@@ -658,11 +666,16 @@ export class StateDaemon {
   }
 
   private async failPermanently(row: QueueRow, reason: string, detail: string): Promise<void> {
-    // v0.9: 'failed' / failed_reason removed from schema. Permanent failure
-    // collapsed to alert-only + replied terminal close (= row removed from active set).
     await this.dbQuery(
-      `UPDATE message_queue SET status='replied' WHERE id=$1`,
-      [row.id],
+      `UPDATE message_queue
+          SET status='failed',
+              failed_reason=$2,
+              done_at=$3,
+              claimed_by=NULL,
+              claimed_at=NULL,
+              claim_expires_at=NULL
+        WHERE id=$1`,
+      [row.id, staleDispatchReason(detail), this.clock.now()],
     )
     await this.alert.alert(`row ${row.id} permanently failed: ${reason} (${detail}) — max_attempts or stale`)
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'permanently_failed' })

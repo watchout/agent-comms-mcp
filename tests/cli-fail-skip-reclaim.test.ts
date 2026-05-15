@@ -23,9 +23,9 @@ const MIGRATE_PG = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
 const MIGRATE_SQLITE = readFileSync(join(REPO_ROOT, 'db', 'migrate-sqlite.ts'), 'utf-8')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T1 — DB migration: failed_reason + extended CHECK
+// T1 — DB migration: failed_reason/done_at + extended CHECK
 // ─────────────────────────────────────────────────────────────────────────────
-describe('T1 — message_queue failed_reason + failed status (PG + SQLite)', () => {
+describe('T1 — message_queue failed_reason/done_at + failed status (PG + SQLite)', () => {
   test('PG migrate.ts adds failed_reason TEXT column (idempotent)', () => {
     expect(MIGRATE_PG).toContain('ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT')
   })
@@ -44,12 +44,14 @@ describe('T1 — message_queue failed_reason + failed status (PG + SQLite)', () 
   test('SQLite CREATE TABLE message_queue carries the v0.9 8-value CHECK + failed_reason', () => {
     expect(MIGRATE_SQLITE).toMatch(/CHECK \(status IN \('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'\)\)/)
     expect(MIGRATE_SQLITE).toContain('failed_reason TEXT')
+    expect(MIGRATE_SQLITE).toContain('done_at TEXT')
   })
-  test('SQLite migration idempotently adds failed_reason to pre-v2.1.0 DBs', () => {
+  test('SQLite migration idempotently adds failed_reason/done_at to older DBs', () => {
     // SQLite lacks ALTER TABLE ADD COLUMN IF NOT EXISTS; the migration checks
     // PRAGMA table_info first. Pin that shape so a refactor doesn't drop it.
     expect(MIGRATE_SQLITE).toContain(`PRAGMA table_info(message_queue)`)
     expect(MIGRATE_SQLITE).toMatch(/ALTER TABLE message_queue ADD COLUMN failed_reason TEXT/)
+    expect(MIGRATE_SQLITE).toMatch(/ALTER TABLE message_queue ADD COLUMN done_at TEXT/)
   })
 })
 
@@ -73,14 +75,15 @@ describe('T2 — cli/index.ts fail / skip / reclaim handlers + dispatch', () => 
     expect(CLI_SRC).toMatch(/command === 'reclaim'[\s\S]{0,200}?reclaimMessages\(/)
   })
 
-  test('fail/skip share a transactional helper that sets status + failed_reason + idles the agent', () => {
+  test('fail/skip share a transactional helper that sets status + close evidence + idles the agent', () => {
     // Anchor on the shared helper so a future refactor that splits them
     // doesn't silently drop the transactional invariants (status update →
     // agent idle → COMMIT). Issue #278 segment 3d: the legacy
     // current_message_id WHERE filter is gone, the agent idle flip is
     // unconditional once the message_queue UPDATE matched a row.
     expect(CLI_SRC).toMatch(/async function failOrSkipMessage/)
-    expect(CLI_SRC).toMatch(/SET status = \$1, failed_reason = \$2/)
+    expect(CLI_SRC).toMatch(/SET status = \$1,\s*failed_reason = \$2,\s*done_at = now\(\)/)
+    expect(CLI_SRC).toMatch(/claimed_by = NULL,\s*claimed_at = NULL,\s*claim_expires_at = NULL/)
     expect(CLI_SRC).not.toMatch(/current_message_id = NULL/)
   })
 
@@ -179,6 +182,12 @@ describe('T4 — server.ts MCP tools: fail / skip / reclaim', () => {
   test('reclaim handler uses 15-minute cutoff + returns reclaimed_queue_ids', () => {
     expect(SERVER_SRC).toMatch(/INTERVAL '15 minutes'/)
     expect(SERVER_SRC).toMatch(/reclaimed_queue_ids/)
+  })
+
+  test('reclaim handler clears claim ownership when resetting rows to pending', () => {
+    const reclaimIdx = SERVER_SRC.indexOf("if (name === 'reclaim')")
+    const handler = SERVER_SRC.slice(reclaimIdx, SERVER_SRC.indexOf('\n  if (name ===', reclaimIdx + 1) === -1 ? SERVER_SRC.length : SERVER_SRC.indexOf('\n  if (name ===', reclaimIdx + 1))
+    expect(handler).toMatch(/SET status = 'pending',\s*read_at = NULL,\s*claimed_by = NULL,\s*claimed_at = NULL,\s*claim_expires_at = NULL/)
   })
 })
 

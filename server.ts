@@ -2430,7 +2430,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // bookkeeping is skipped.
     if (claimedMqId !== null) {
       await txClient.query(
-        `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1 WHERE id = $2`,
+        `UPDATE message_queue
+            SET status = 'replied',
+                replied_at = now(),
+                replied_with = $1,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                claim_expires_at = NULL
+          WHERE id = $2`,
         [id, claimedMqId],
       )
     }
@@ -3216,7 +3223,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         const rollback = await client.query(
           `UPDATE message_queue
-              SET status = 'pending', read_at = NULL
+              SET status = 'pending',
+                  read_at = NULL,
+                  claimed_by = NULL,
+                  claimed_at = NULL,
+                  claim_expires_at = NULL
             WHERE agent_id = $1
               AND status = 'received'
               AND read_at < now() - INTERVAL '15 minutes'

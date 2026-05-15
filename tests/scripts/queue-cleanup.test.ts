@@ -4,18 +4,11 @@
  *
  * Behavioral pins (5-section §4 merge gate):
  *   1. dry-run does not mutate any row
- *   2. execute changes target rows to status='replied' (v0.9 collapse —
- *      'skipped' / 'failed' enum values were dropped in sub-PR 1 #347)
+ *   2. execute changes target rows to status='skipped' with a reason
  *   3. rows newer than 12h are not touched
  *   4. rows with claimed_by != NULL are not touched
  *   5. re-running execute is idempotent (0 additional rows)
- *   6. reason taxonomy still emitted via _internal exports (stderr log only)
- *
- * v0.9 (sub-PR 1 #347 / sub-PR 8 #338): the `failed_reason` column has
- * been dropped from `message_queue`; reason taxonomy is no longer
- * persisted on the row. Cases 6/7/9 verify the taxonomy strings via
- * `_internal.DEFAULT_REASON` / `_internal.reasonFor()` instead of a DB
- * column. Per-row reason persistence redesign belongs to Issue #349.
+ *   6. reason taxonomy is emitted to stderr and persisted in failed_reason.
  *
  * Skipped automatically when no DATABASE_URL is reachable so CI without
  * Postgres does not red-line.
@@ -72,9 +65,9 @@ async function seedRow(r: SeedRow): Promise<number> {
   return Number(res.rows[0].id)
 }
 
-async function statusOf(id: number): Promise<{ status: string }> {
+async function statusOf(id: number): Promise<{ status: string; failed_reason: string | null; done_at: Date | null }> {
   const r = await client!.query(
-    `SELECT status FROM message_queue WHERE id = $1`,
+    `SELECT status, failed_reason, done_at FROM message_queue WHERE id = $1`,
     [id],
   )
   return r.rows[0]
@@ -112,14 +105,16 @@ describe('PR-Q1 queue-cleanup script', () => {
     expect(matched).toBeGreaterThanOrEqual(1)
   })
 
-  test('case 2: execute flips target rows to replied (v0.9 collapse from skipped)', async () => {
+  test('case 2: execute flips target rows to skipped with reason/timestamp', async () => {
     if (!available) return
     const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c2`, ageHours: 24 })
 
     const matched = await runQueueCleanup('execute', DATABASE_URL)
 
     const post = await statusOf(id)
-    expect(post.status).toBe('replied')
+    expect(post.status).toBe('skipped')
+    expect(post.failed_reason).toBe(_internal.DEFAULT_REASON)
+    expect(post.done_at).not.toBeNull()
     expect(matched).toBeGreaterThanOrEqual(1)
   })
 
@@ -133,7 +128,7 @@ describe('PR-Q1 queue-cleanup script', () => {
     const young = await statusOf(youngId)
     const old = await statusOf(oldId)
     expect(young.status).toBe('pending')
-    expect(old.status).toBe('replied')
+    expect(old.status).toBe('skipped')
   })
 
   test('case 4: claimed_by != NULL rows are not touched', async () => {
@@ -153,7 +148,7 @@ describe('PR-Q1 queue-cleanup script', () => {
     const claimed = await statusOf(claimedId)
     const unclaimed = await statusOf(unclaimedId)
     expect(claimed.status).toBe('pending')
-    expect(unclaimed.status).toBe('replied')
+    expect(unclaimed.status).toBe('skipped')
   })
 
   test('case 5: re-running execute is idempotent (0 additional rows)', async () => {
@@ -187,7 +182,8 @@ describe('PR-Q1 queue-cleanup script', () => {
     }
 
     const post = await statusOf(id)
-    expect(post.status).toBe('replied')
+    expect(post.status).toBe('skipped')
+    expect(post.failed_reason).toBe(_internal.DEFAULT_REASON)
     expect(_internal.REASON).toMatch(/^BULK_CLEANUP:/)
     expect(_internal.REASON).toBe(_internal.DEFAULT_REASON)
     const stderrText = captured.join('')
@@ -229,14 +225,12 @@ describe('PR-Q1 queue-cleanup script', () => {
     const recent = await statusOf(recentId)
     const stale = await statusOf(staleId)
     expect(recent.status).toBe('pending')
-    expect(stale.status).toBe('replied')
+    expect(stale.status).toBe('skipped')
+    expect(stale.failed_reason).toBe(_internal.reasonFor('30d'))
     expect(_internal.reasonFor('30d')).toMatch(/^STALE_BULK_DRAIN_2026-05-04:/)
     const stderrText = captured.join('')
     expect(stderrText).toMatch(/STALE_BULK_DRAIN_2026-05-04: max-age=30d/)
-    // cycle 2 axis 4: log vocab must follow on-row status ('replied'),
-    // not the dropped 'skipped' status.
-    expect(stderrText).toMatch(/will mark replied/)
-    expect(stderrText).not.toMatch(/will skip|would skip/)
+    expect(stderrText).toMatch(/will mark skipped/)
   })
 
   test('case 8: --max-age 30d execute → idempotent rerun (no-op)', async () => {
@@ -259,9 +253,8 @@ describe('PR-Q1 queue-cleanup script', () => {
     await runQueueCleanup('execute', DATABASE_URL)
 
     const post = await statusOf(id)
-    expect(post.status).toBe('replied')
-    // v0.9 (sub-PR 1 #347): failed_reason column dropped. Default
-    // taxonomy is still exported via _internal for ops correlation.
+    expect(post.status).toBe('skipped')
+    expect(post.failed_reason).toBe(_internal.DEFAULT_REASON)
     expect(_internal.DEFAULT_REASON).toMatch(/^BULK_CLEANUP:/)
   })
 })

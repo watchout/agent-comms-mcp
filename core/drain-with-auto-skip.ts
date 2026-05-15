@@ -29,6 +29,7 @@
 
 import type { Client } from 'pg'
 import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
+import { autoSkipReason } from './message-queue-terminal'
 
 export interface DrainSummary {
   /** Number of rows the helper iterated over (≤ limit). */
@@ -81,11 +82,16 @@ export async function drainPendingWithAutoSkip(
 
     const m = matchesAutoSkipPattern({ content, messageType, authorAgentId, recipientAgentId: agentId })
     if (m.matched) {
-      // v0.9: 'skipped' / failed_reason removed from schema. Auto-skip
-      // collapsed to terminal close as 'replied' (= msg removed from active set).
       await client.query(
-        `UPDATE message_queue SET status = 'replied' WHERE id = $1 AND status = 'pending'`,
-        [row.id],
+        `UPDATE message_queue
+            SET status = 'skipped',
+                failed_reason = $2,
+                done_at = now(),
+                claimed_by = NULL,
+                claimed_at = NULL,
+                claim_expires_at = NULL
+          WHERE id = $1 AND status = 'pending'`,
+        [row.id, autoSkipReason(m.reason)],
       )
       skipped++
     }

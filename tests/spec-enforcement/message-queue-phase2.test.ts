@@ -136,6 +136,10 @@ describe('T2 — server.ts send-tool writes message_queue rows for each pushTarg
     expect(body).toMatch(/INSERT INTO message_queue\s*\(agent_id,\s*message_id,\s*payload\)/)
     expect(body).toMatch(/\[recipient,\s*id,\s*mqPayload\]/)
   })
+
+  test('server send finalization clears claim ownership on terminal replied rows', () => {
+    expect(SERVER_SRC).toMatch(/UPDATE message_queue\s+SET\s+status\s*=\s*'replied'[\s\S]*?replied_at\s*=\s*now\(\)[\s\S]*?replied_with\s*=\s*\$1[\s\S]*?claimed_by\s*=\s*NULL[\s\S]*?claimed_at\s*=\s*NULL[\s\S]*?claim_expires_at\s*=\s*NULL/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,7 +282,7 @@ describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 
   })
   test('on success, queue mode UPDATEs message_queue to replied + idles the agent', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/UPDATE message_queue SET status\s*=\s*'replied',\s*replied_at\s*=\s*now\(\),\s*replied_with/)
+    expect(body).toMatch(/UPDATE message_queue\s+SET\s+status\s*=\s*'replied',\s*replied_at\s*=\s*now\(\),\s*replied_with/)
     // Issue #278 segment 3d — agents.current_message_id is gone, so the
     // idle-flip UPDATE no longer touches that column. Negative pin
     // catches a refactor that brings the column write back.
@@ -286,6 +290,10 @@ describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 
       /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
+  })
+  test('on success, queue mode clears claim ownership on terminal replied rows', () => {
+    const body = sendMessageBody()
+    expect(body).toMatch(/UPDATE message_queue\s+SET\s+status\s*=\s*'replied'[\s\S]*?claimed_by\s*=\s*NULL[\s\S]*?claimed_at\s*=\s*NULL[\s\S]*?claim_expires_at\s*=\s*NULL/)
   })
   test('sendMessage wraps the body in BEGIN/COMMIT with FOR UPDATE on the claim row', () => {
     const body = sendMessageBody()

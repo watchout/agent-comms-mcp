@@ -891,7 +891,13 @@ async function sendMessage(args: string[]) {
       // the only path now.
       // ─────────────────────────────────────────────────────────────────
       await db.query(
-        `UPDATE message_queue SET status = 'replied', replied_at = now(), replied_with = $1
+        `UPDATE message_queue
+            SET status = 'replied',
+                replied_at = now(),
+                replied_with = $1,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                claim_expires_at = NULL
          WHERE id = $2`,
         [id, target.queue_id],
       )
@@ -1210,7 +1216,12 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
       // this pair is unique when message_id IS NOT NULL, so we need no tie-break.
       const upd = await db.query(
         `UPDATE message_queue
-            SET status = $1, failed_reason = $2
+            SET status = $1,
+                failed_reason = $2,
+                done_at = now(),
+                claimed_by = NULL,
+                claimed_at = NULL,
+                claim_expires_at = NULL
           WHERE agent_id = $3 AND message_id = $4 AND status IN ('pending','received')
           RETURNING id`,
         [targetStatus, reason, agentId, messageId],
@@ -1280,7 +1291,11 @@ async function reclaimMessages(args: string[]) {
       // cleared so a follow-up next() doesn't think the row is still in-flight.
       const rollback = await db.query(
         `UPDATE message_queue
-            SET status = 'pending', read_at = NULL
+            SET status = 'pending',
+                read_at = NULL,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                claim_expires_at = NULL
           WHERE agent_id = $1
             AND status = 'received'
             AND read_at < now() - INTERVAL '15 minutes'

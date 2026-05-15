@@ -96,9 +96,10 @@ function dbRead(sql: string, params: unknown[] = []): any[] {
 }
 
 describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
-  test('message_queue has failed_reason + v0.9-compatible CHECK', () => {
+  test('message_queue has failed_reason/done_at + v0.9-compatible CHECK', () => {
     const rows = dbRead(`PRAGMA table_info(message_queue)`)
     expect(rows.map((r: any) => r.name)).toContain('failed_reason')
+    expect(rows.map((r: any) => r.name)).toContain('done_at')
   })
   test('channel_adapters / thread_adapters tables exist (added in Phase 2 F)', () => {
     const tables = dbRead(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
@@ -255,9 +256,10 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     runCli(['next'])
     const r = runCli(['fail', '--message-id', messageId, '--reason', 'SQLITE_FAIL_TEST'])
     expect(r.status).toBe(0)
-    const q = dbRead(`SELECT status, failed_reason FROM message_queue WHERE id = ?`, [queueId])
+    const q = dbRead(`SELECT status, failed_reason, done_at FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('failed')
     expect(q[0].failed_reason).toBe('SQLITE_FAIL_TEST')
+    expect(q[0].done_at).not.toBeNull()
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     expect(a[0].status).toBe('idle')
   })
@@ -267,9 +269,10 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     runCli(['next'])
     const r = runCli(['skip', '--message-id', messageId, '--reason', 'OBSOLETE'])
     expect(r.status).toBe(0)
-    const q = dbRead(`SELECT status, failed_reason FROM message_queue WHERE id = ?`, [queueId])
+    const q = dbRead(`SELECT status, failed_reason, done_at FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('skipped')
     expect(q[0].failed_reason).toBe('OBSOLETE')
+    expect(q[0].done_at).not.toBeNull()
   })
 
   test('reclaim rolls received→pending for received rows > 15 min stale + clears agent pointer', () => {

@@ -65,6 +65,7 @@ export function migrateSqlite(dbPath?: string): void {
       replied_at TEXT,
       replied_with TEXT,
       failed_reason TEXT,
+      done_at TEXT,
       -- Issue #278 (A) — per-row claim columns. Mirrors the PG schema so
       -- the CLI's claim lookup (cli/index.ts sendMessage, segment 3d)
       -- works in SQLite mode too. claim_expires_at uses TEXT for SQLite
@@ -90,6 +91,9 @@ export function migrateSqlite(dbPath?: string): void {
   const mqColNames = new Set(mqCols.map((c) => c.name))
   if (!mqColNames.has('failed_reason')) {
     gatedExec(`ALTER TABLE message_queue ADD COLUMN failed_reason TEXT`)
+  }
+  if (!mqColNames.has('done_at')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN done_at TEXT`)
   }
   // Issue #278 (A) segment 3d — backfill the per-row claim columns on
   // pre-Stage-B SQLite DBs. SQLite lacks ALTER TABLE ADD COLUMN IF NOT
