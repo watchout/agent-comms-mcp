@@ -10,12 +10,18 @@ by an LLM choosing a tool from a natural-language prompt.
 ```text
 pending -> receive runner -> next -> received
 received -> process runner -> processing -> in_progress
-in_progress -> completion runner -> send/done -> replied/done
+in_progress -> completion runner -> done -> send -> replied
 ```
 
 `state-daemon` remains the DB-state observer and scheduler. It must not be a
 Claude/Codex UI operator. Its primary job is to detect state that needs action
 and invoke a configured runner for that agent/runtime.
+
+This document is a proposed migration target for the receive path. Until the
+implementation PR lands, the existing `queue-state-polling-daemon.md` and
+`state-daemon-6section-elements.md` contracts remain the active production
+contract. This document supersedes only the natural-language receive handoff
+after the runner implementation provides equivalent tests and rollout steps.
 
 ## Core Principles
 
@@ -35,11 +41,16 @@ and invoke a configured runner for that agent/runtime.
 | `pending` | Work exists for a target agent but is not claimed. | receive runner |
 | `received` | `next` claimed the row for the target agent. | process runner |
 | `in_progress` | Runtime is actively processing the claimed work. | completion runner / runtime adapter |
+| `done` | Runtime finished internal work and a reply/no-reply decision still needs to be finalized. | completion runner / runtime adapter |
 | `replied` | Terminal: response was sent with `send`. | none |
-| `done` | Terminal: work completed without a reply. | none |
 
 `read` is legacy vocabulary for `received`. New runner code must use
 `received` after the next-only receive contract lands.
+
+`done` keeps the existing v0.9 meaning from the state-daemon spec: internal
+processing is complete, but the queue is not terminal yet. A normal reply path
+may still transition `done -> replied`. A no-reply completion must be explicit
+and auditable in the runtime result; it must not silently strand rows in `done`.
 
 ## Runner Responsibilities
 
@@ -88,16 +99,23 @@ Input: runtime result and claim identity
 
 Behavior:
 
-- if the result contains a reply, call `send` and close as `replied`
-- if the result is explicitly no-reply, call `done` and close as `done`
-- if the runtime fails, leave an auditable failure state or use the existing
-  fail/skip path according to the failure policy
+- call `done` when runtime processing has completed and a final response
+  decision is ready to be applied
+- if the result contains a reply, call `send` after `done` and close as
+  `replied`
+- if the result is explicitly no-reply, close through the approved no-reply
+  policy defined by the implementation PR; the row must not remain active
+  indefinitely
+- if the runtime fails, leave the row in a reclaimable active state and emit an
+  auditable error/alert according to the v0.9 failure policy
 
-`done -> replied` is not a valid normal transition. `done` is terminal.
+`failed` and `skipped` are legacy vocabulary in the v0.9 receive path. New
+runner code must not introduce new `failed` or `skipped` transitions as the
+primary failure model.
 
 ## State-Daemon Role
 
-`state-daemon` should be redefined as a runner scheduler:
+`state-daemon` should migrate toward a runner scheduler:
 
 - observe `message_queue` and `agents`
 - suppress duplicate runner starts while an agent has active work
@@ -105,7 +123,10 @@ Behavior:
 - detect stuck rows and enqueue recovery actions
 - write operational logs and metrics
 
-It should not inject `check inbox` as the primary receive mechanism.
+During migration, existing tmux wake / natural-language prompt injection remains
+the compatibility fallback for TUI agents. The implementation PR must define the
+cutover gate before making runner invocation primary. After cutover, `check
+inbox` injection must not be the primary receive mechanism.
 
 ## Durable Message vs Chat Projection
 
@@ -142,9 +163,15 @@ LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.
 | Claude Code | hook or script invocation first; TUI text injection only as fallback |
 | OpenClaw / other orchestrators | adapter invokes AUN runner API and maps task results back to AUN states |
 
-The runner configuration should be addressable by `agent_id` and stored in one
-DB-backed or config-backed registry. The same registry should later feed the UI
-that manages channel members and agent routing.
+Runner configuration must be addressable by `agent_id` and use the existing
+`agents` table as the authoritative registry. Runtime-specific values may live
+in `agents.metadata` or in an operational config file keyed by `agent_id`, but
+that file is only a launcher overlay and must not become an independent bot
+registry. New `bot_registry` tables or daemon reads from `bot-registry.txt` are
+out of scope and remain forbidden by the state-daemon SSOT.
+
+The same `agents`/channel registry should later feed the UI that manages
+channel members and agent routing.
 
 ## Acceptance Criteria
 
@@ -154,3 +181,7 @@ that manages channel members and agent routing.
 - A crashed runner leaves enough DB state for deterministic reclaim.
 - Codex and Claude use the same state machine, differing only at the runtime
   adapter boundary.
+- Existing v0.9 `done -> replied` semantics remain valid unless a separate
+  migration explicitly changes the state model.
+- Runner configuration uses `agents` as SSOT and does not introduce a parallel
+  bot registry.
