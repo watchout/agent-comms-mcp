@@ -15,6 +15,10 @@ export interface ReceiveOptions {
   dryRun?: boolean
 }
 
+export interface DrainOptions extends ReceiveOptions {
+  limit?: number
+}
+
 export interface ReceivePlan {
   repoRoot: string
   argv: string[]
@@ -24,6 +28,22 @@ export interface ReceivePlan {
 
 export type CommandPlan = ReceivePlan
 
+export interface ClaimedMessage {
+  waiting: number
+  mode?: string
+  queue_id?: string | number
+  message_id?: string | null
+  channel_id?: string
+  thread_id?: string | null
+  from?: string
+  from_name?: string | null
+  content?: string
+  message_type?: string
+  source?: string | null
+  created_at?: string
+  reply_chain?: unknown[]
+}
+
 export interface ReceiveResult {
   ok: boolean
   code: number
@@ -32,10 +52,16 @@ export interface ReceiveResult {
   plan: ReceivePlan
 }
 
+export interface DrainResult extends ReceiveResult {
+  claimed: ClaimedMessage[]
+}
+
 const DEFAULT_DB_URLS = [
   'postgresql:///agent_comms?host=/tmp',
   'postgresql:///agent_comms?host=/private/tmp',
 ]
+
+const DEFAULT_DRAIN_LIMIT = 20
 
 export function repoRoot(): string {
   return resolve(import.meta.dir, '..', '..')
@@ -149,6 +175,96 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
 
   const result = runCommandPlan(plan)
   return { ...result, plan }
+}
+
+export function parseDrainLimit(limit: number | undefined): number {
+  if (limit === undefined) return DEFAULT_DRAIN_LIMIT
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error('--limit must be a positive integer')
+  }
+  return limit
+}
+
+function parseClaim(stdout: string): ClaimedMessage {
+  try {
+    return JSON.parse(stdout) as ClaimedMessage
+  } catch (err) {
+    throw new Error(`failed to parse agent-com next JSON: ${(err as Error).message}`)
+  }
+}
+
+export function drain(opts: DrainOptions = {}): DrainResult {
+  const limit = parseDrainLimit(opts.limit)
+  const plan = buildReceivePlan(opts)
+  if (opts.dryRun) {
+    return {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        dry_run: true,
+        cwd: plan.repoRoot,
+        argv: plan.argv,
+        agent_id: plan.env.AGENT_ID,
+        expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+        database_url_candidates: plan.databaseUrlCandidates,
+        limit,
+      }) + '\n',
+      stderr: '',
+      plan,
+      claimed: [],
+    }
+  }
+
+  const claimed: ClaimedMessage[] = []
+  let waiting = 0
+  for (let i = 0; i < limit; i++) {
+    const result = runCommandPlan(plan)
+    if (!result.ok) {
+      return {
+        ...result,
+        stdout: JSON.stringify({ ok: false, claimed, waiting }) + '\n',
+        plan,
+        claimed,
+      }
+    }
+
+    let body: ClaimedMessage
+    try {
+      body = parseClaim(result.stdout)
+    } catch (err) {
+      return {
+        ok: false,
+        code: 1,
+        stdout: JSON.stringify({ ok: false, claimed, waiting }) + '\n',
+        stderr: `Error [DRAIN_PARSE_FAILED]: ${(err as Error).message}\n`,
+        plan,
+        claimed,
+      }
+    }
+
+    waiting = body.waiting ?? 0
+    if (body.queue_id === undefined) break
+    claimed.push(body)
+    if (waiting <= 0) break
+  }
+
+  const capped = claimed.length >= limit && waiting > 0
+  return {
+    ok: true,
+    code: 0,
+    stdout: JSON.stringify({
+      ok: true,
+      claimed,
+      claimed_count: claimed.length,
+      waiting,
+      limit,
+      capped,
+    }) + '\n',
+    stderr: '',
+    plan,
+    claimed,
+  }
 }
 
 export function runCommandPlan(plan: CommandPlan): Omit<ReceiveResult, 'plan'> {
