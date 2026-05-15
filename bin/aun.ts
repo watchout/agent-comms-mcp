@@ -8,6 +8,8 @@
  *   - aun start [-- <extra args passed to claude>]
  *   - aun receive --agent-id <id> [--dry-run]
  *   - aun next --agent-id <id> [--dry-run]
+ *   - aun reply --agent-id <id> --content <text> --mentions <ids>
+ *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
  *   - aun uninstall [--backup <path>] [--surgical]
  *   - aun status
  *   - aun --help / -h
@@ -17,6 +19,7 @@ import { uninstall } from './aun/uninstall'
 import { status } from './aun/status'
 import { start } from './aun/start'
 import { receive } from './aun/receive'
+import { notify, reply } from './aun/reply'
 
 function printHelp(): void {
   const lines = [
@@ -28,6 +31,8 @@ function printHelp(): void {
     '  aun start [-- <args...>]',
     '  aun receive --agent-id <id> [--dry-run]',
     '  aun next --agent-id <id> [--dry-run]',
+    '  aun reply --agent-id <id> --content <text> --mentions <ids> [--dry-run]',
+    '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
     '  aun --help | -h',
@@ -138,6 +143,34 @@ export function run(argv: string[] = process.argv): number {
         process.stderr.write(`Error [AGENT_ID_MISMATCH]: ${(err as Error).message}\n`)
         return 2
       }
+      if (res.stdout) process.stdout.write(res.stdout)
+      if (res.stderr) process.stderr.write(res.stderr)
+      return res.code
+    }
+    case 'reply': {
+      const res = reply({
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        content: typeof flags.content === 'string' ? (flags.content as string) : undefined,
+        mentions: typeof flags.mentions === 'string' ? (flags.mentions as string) : undefined,
+        messageType: typeof flags['message-type'] === 'string' ? (flags['message-type'] as string) : undefined,
+        dryRun: !!flags['dry-run'],
+      })
+      if (res.stdout) process.stdout.write(res.stdout)
+      if (res.stderr) process.stderr.write(res.stderr)
+      return res.code
+    }
+    case 'notify': {
+      const res = notify({
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        channel: typeof flags.channel === 'string' ? (flags.channel as string) : undefined,
+        threadId: typeof flags['thread-id'] === 'string' ? (flags['thread-id'] as string) : undefined,
+        content: typeof flags.content === 'string' ? (flags.content as string) : undefined,
+        mentions: typeof flags.mentions === 'string' ? (flags.mentions as string) : undefined,
+        messageType: typeof flags['message-type'] === 'string' ? (flags['message-type'] as string) : undefined,
+        replyTo: typeof flags['reply-to'] === 'string' ? (flags['reply-to'] as string) : undefined,
+        queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+        dryRun: !!flags['dry-run'],
+      })
       if (res.stdout) process.stdout.write(res.stdout)
       if (res.stderr) process.stderr.write(res.stderr)
       return res.code
