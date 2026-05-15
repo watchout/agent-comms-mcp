@@ -8,6 +8,7 @@
  *   - aun start [-- <extra args passed to claude>]
  *   - aun receive --agent-id <id> [--dry-run]
  *   - aun next --agent-id <id> [--dry-run]
+ *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <ids>
  *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -18,7 +19,7 @@ import { init } from './aun/init'
 import { uninstall } from './aun/uninstall'
 import { status } from './aun/status'
 import { start } from './aun/start'
-import { receive } from './aun/receive'
+import { drain, receive } from './aun/receive'
 import { notify, reply } from './aun/reply'
 
 function printHelp(): void {
@@ -31,6 +32,7 @@ function printHelp(): void {
     '  aun start [-- <args...>]',
     '  aun receive --agent-id <id> [--dry-run]',
     '  aun next --agent-id <id> [--dry-run]',
+    '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <ids> [--dry-run]',
     '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -141,6 +143,28 @@ export function run(argv: string[] = process.argv): number {
         })
       } catch (err) {
         process.stderr.write(`Error [AGENT_ID_MISMATCH]: ${(err as Error).message}\n`)
+        return 2
+      }
+      if (res.stdout) process.stdout.write(res.stdout)
+      if (res.stderr) process.stderr.write(res.stderr)
+      return res.code
+    }
+    case 'drain': {
+      let res
+      try {
+        const limitFlag = flags.limit
+        let limit: number | undefined
+        if (limitFlag !== undefined) {
+          if (typeof limitFlag !== 'string') throw new Error('--limit requires a value')
+          limit = Number(limitFlag)
+        }
+        res = drain({
+          agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+          dryRun: !!flags['dry-run'],
+          limit,
+        })
+      } catch (err) {
+        process.stderr.write(`Error [DRAIN_FAILED]: ${(err as Error).message}\n`)
         return 2
       }
       if (res.stdout) process.stdout.write(res.stdout)
