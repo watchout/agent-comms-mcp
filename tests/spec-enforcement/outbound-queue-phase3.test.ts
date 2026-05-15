@@ -69,6 +69,7 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     const ddl = MIGRATE_SRC.slice(start, end)
     expect(ddl).toMatch(/message_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/agent_id\s+TEXT\s+NOT NULL/)
+    expect(ddl).toMatch(/consumer_agent_id\s+TEXT/)
     expect(ddl).toMatch(/channel_external_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/content\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/mentions_display\s+TEXT/)
@@ -182,13 +183,16 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
   test('send-tool INSERTs into outbound_queue with the right column tuple', () => {
     // Anchor on the send-tool send loop. We can't extract the loop body
     // perfectly without parsing TS, so check that the send handler contains
-    // a `(message_id, agent_id, channel_external_id, content)` INSERT.
-    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*channel_external_id,\s*content\)/)
+    // a `(message_id, agent_id, consumer_agent_id, channel_external_id, content)` INSERT.
+    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*channel_external_id,\s*content\)/)
   })
   test('send-tool resolves channel_external_id via thread_adapters then channel_adapters', () => {
-    // Both lookups must be present so threads land in the right place.
-    expect(SERVER_SRC).toMatch(/SELECT external_id FROM thread_adapters WHERE thread_id\s*=\s*\$1\s+AND platform\s*=\s*'discord'/)
-    expect(SERVER_SRC).toMatch(/SELECT external_id FROM channel_adapters WHERE channel_id\s*=\s*\$1\s+AND platform\s*=\s*'discord'/)
+    // Both lookups live in the #410 projection helper so threads land in the
+    // right place while also resolving the adapter owner.
+    const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
+    expect(SERVER_SRC).toMatch(/resolveOutboundProjectionRoute/)
+    expect(projection).toMatch(/SELECT external_id,\s*metadata FROM thread_adapters WHERE thread_id\s*=\s*\$1 AND platform\s*=\s*\$2/)
+    expect(projection).toMatch(/SELECT external_id,\s*metadata FROM channel_adapters WHERE channel_id\s*=\s*\$1 AND platform\s*=\s*\$2/)
   })
   test('send-tool no longer calls sendAdapterMessage directly inside the part loop', () => {
     // The legacy call site was: getDiscordClient(agentId).sendAdapterMessage(...).
@@ -239,12 +243,14 @@ function sendMessageBody(): string {
 describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('sendMessage INSERTs into outbound_queue', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*channel_external_id,\s*content\)/)
+    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*channel_external_id,\s*content\)/)
   })
   test('sendMessage resolves channel_external_id via thread_adapters then channel_adapters', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/SELECT external_id FROM thread_adapters/)
-    expect(body).toMatch(/SELECT external_id FROM channel_adapters/)
+    const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
+    expect(body).toMatch(/resolveOutboundProjectionRoute/)
+    expect(projection).toMatch(/SELECT external_id,\s*metadata FROM thread_adapters/)
+    expect(projection).toMatch(/SELECT external_id,\s*metadata FROM channel_adapters/)
   })
   test('legacy deliverToDiscord helper is removed', () => {
     expect(CLI_SRC).not.toMatch(/async function deliverToDiscord\s*\(/)

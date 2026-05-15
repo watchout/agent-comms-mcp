@@ -65,7 +65,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(fn).toMatch(/OUTBOUND_QUEUE_CONSUMER\s*===\s*'0'/)
   })
 
-  test('2. consumeOneOutboundRow claim SQL atomically flips to claimed + filters agent_id', () => {
+  test('2. consumeOneOutboundRow claim SQL atomically flips to claimed + filters adapter owner', () => {
     // Scope assertions to consumeOneOutboundRow so a future unrelated
     // UPDATE outbound_queue elsewhere cannot accidentally satisfy
     // this test (S3 auditor fix).
@@ -76,7 +76,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(m).not.toBeNull()
     const sql = m![0]
     expect(sql).toMatch(/SET[\s\S]*status\s*=\s*'claimed'/)
-    expect(sql).toMatch(/WHERE[\s\S]*agent_id\s*=\s*\$\d/)
+    expect(sql).toMatch(/WHERE[\s\S]*COALESCE\(consumer_agent_id,\s*agent_id\)\s*=\s*\$\d/)
     expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/)
   })
 

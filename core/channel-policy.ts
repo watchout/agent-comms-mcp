@@ -14,6 +14,8 @@ export type AgentId = string
 export interface ChannelPolicyEntry {
   /** §1.3 / §2.3 — inbound default recipient when no `mention` is present. */
   primary: AgentId | null
+  /** #410 — chat adapter process that owns projection for this channel. */
+  adapterOwner: AgentId | null
   /** §1.3 / §2.4 — outbound ACL allowlist. `null` = entry absent (legacy: all senders permitted). */
   outboundAllowlist: AgentId[] | null
 }
@@ -22,6 +24,7 @@ interface RoutingConfig {
   version: number
   channels: Record<string, {
     primary?: AgentId | null
+    adapterOwner?: AgentId | null
     outboundAllowlist?: AgentId[]
   }>
 }
@@ -80,9 +83,10 @@ function loadConfig(): RoutingConfig {
 export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
   const config = loadConfig()
   const entry = config.channels[channel_id]
-  if (!entry) return { primary: null, outboundAllowlist: null }
+  if (!entry) return { primary: null, adapterOwner: null, outboundAllowlist: null }
   return {
     primary: entry.primary ?? null,
+    adapterOwner: entry.adapterOwner ?? null,
     outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
   }
 }

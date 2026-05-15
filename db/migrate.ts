@@ -501,7 +501,8 @@ async function migrate() {
     CREATE TABLE IF NOT EXISTS outbound_queue (
       id BIGSERIAL PRIMARY KEY,
       message_id TEXT NOT NULL,            -- agent_messages.id of the row to deliver
-      agent_id TEXT NOT NULL,              -- sender agent_id (selects bot token / client)
+      agent_id TEXT NOT NULL,              -- canonical author agent_id
+      consumer_agent_id TEXT,              -- adapter owner that claims/posts this row (#410)
       channel_external_id TEXT NOT NULL,   -- Discord channel or thread snowflake
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',  -- pre-rendered Discord mentions (JSON)
@@ -527,6 +528,7 @@ async function migrate() {
     -- See: docs/plans/outbound-forwarder-unification.md §3.
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS consumer_agent_id TEXT;
 
     -- Phase C Step 1 PR-A (cycle 3/4 honesty note): observability column for
     -- the returned Discord snowflake. Effective outbound dedup is provided
@@ -561,6 +563,9 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_outbound_queue_agent_pending_next_retry
       ON outbound_queue(agent_id, status, next_retry_at)
       WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_outbound_queue_consumer_pending_next_retry
+      ON outbound_queue(consumer_agent_id, status, next_retry_at)
+      WHERE status = 'pending' AND consumer_agent_id IS NOT NULL;
   `)
 
   // FEAT-005 CP-3 forward migration: rename outbound_queue claim state
