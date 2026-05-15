@@ -46,16 +46,18 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
 
   afterAll(async () => {
     // Best-effort restore so a partial failure does not leave the
-    // shared test DB in the new (post-up) vocabulary. Other test files
-    // assume the legacy CHECK constraint and the failed_reason column.
+    // shared test DB in the legacy down-migration vocabulary. Other
+    // concurrent test files, especially state-daemon contracts, write
+    // v0.9 statuses such as `received`; releasing the advisory lock
+    // while the DB is still v0.8 causes constraint failures.
     try {
-      await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
+      await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
     } catch {}
-    // Re-add failed_reason if it is still missing — applyDownMigration's
-    // SQL ADDs it, but if the down failed mid-way we want callers to find
-    // the legacy schema again.
-    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
-    await client.query(`ALTER TABLE message_queue DROP COLUMN IF EXISTS done_at`)
+    // Re-assert the forward-compatible v0.9 union in case the paired
+    // migration failed mid-way. This mirrors the production-safe union
+    // used during rollout and keeps shared CI fixtures writable by both
+    // legacy and new-status tests.
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ`)
     await client.query(`
       DO $$
       BEGIN
@@ -68,7 +70,7 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
         END IF;
         ALTER TABLE message_queue
           ADD CONSTRAINT message_queue_status_check
-          CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
+          CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'));
       END $$;
     `)
     try {
