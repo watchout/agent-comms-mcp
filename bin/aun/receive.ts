@@ -22,6 +22,8 @@ export interface ReceivePlan {
   databaseUrlCandidates: string[]
 }
 
+export type CommandPlan = ReceivePlan
+
 export interface ReceiveResult {
   ok: boolean
   code: number
@@ -75,6 +77,28 @@ function databaseCandidates(env: NodeJS.ProcessEnv): string[] {
   return [explicit]
 }
 
+export function buildCommandPlan(
+  opts: ReceiveOptions,
+  argv: string[],
+): CommandPlan {
+  const envIn = opts.env ?? process.env
+  const agentId = resolveAgentId(opts, envIn)
+  const env = cleanEnv(envIn)
+  env.AGENT_ID = agentId
+  assertExpectedAgentId(env, agentId)
+  env.AGENT_COM_EXPECTED_AGENT_ID = env.AGENT_COM_EXPECTED_AGENT_ID || agentId
+
+  const candidates = databaseCandidates(env)
+  env.DATABASE_URL = candidates[0]
+
+  return {
+    repoRoot: opts.cwd ?? repoRoot(),
+    argv,
+    env,
+    databaseUrlCandidates: candidates,
+  }
+}
+
 export function buildReceivePlan(opts: ReceiveOptions = {}): ReceivePlan {
   const envIn = opts.env ?? process.env
   const agentId = resolveAgentId(opts, envIn)
@@ -123,6 +147,11 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
     }
   }
 
+  const result = runCommandPlan(plan)
+  return { ...result, plan }
+}
+
+export function runCommandPlan(plan: CommandPlan): Omit<ReceiveResult, 'plan'> {
   let last = { status: 1, stdout: '', stderr: '' }
   for (let i = 0; i < plan.databaseUrlCandidates.length; i++) {
     const env = { ...plan.env, DATABASE_URL: plan.databaseUrlCandidates[i] }
@@ -137,7 +166,7 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
       stderr: r.stderr ?? '',
     }
     if (last.status === 0) {
-      return { ok: true, code: 0, stdout: last.stdout, stderr: last.stderr, plan }
+      return { ok: true, code: 0, stdout: last.stdout, stderr: last.stderr }
     }
     if (i + 1 >= plan.databaseUrlCandidates.length || !shouldTryNextSocket(last.stderr)) {
       break
@@ -149,6 +178,5 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
     code: last.status,
     stdout: last.stdout,
     stderr: last.stderr,
-    plan,
   }
 }
