@@ -84,6 +84,10 @@ describe('T1 — db/migrate.ts ships the message_queue table + per-row claim col
     expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claimed_by TEXT/)
     expect(MIGRATE_SRC).toMatch(/ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ/)
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_mq_expired_claims/)
+    expect(MIGRATE_SRC).toMatch(/DROP INDEX IF EXISTS idx_mq_expired_claims/)
+    expect(MIGRATE_SRC).toMatch(/idx_mq_expired_claims[\s\S]*status = 'received'/)
+    expect(MIGRATE_SRC).toMatch(/DROP INDEX IF EXISTS idx_mq_read_expired/)
+    expect(MIGRATE_SRC).toMatch(/idx_mq_read_expired[\s\S]*status = 'received'/)
     // Issue #278 (A) segment 3d hotfix (2026-04-30 incident) — the
     // DROP COLUMN current_message_id is hosted ONLY in the paired G-2
     // migration file, not in the auto-applied bootstrap, to prevent
@@ -191,7 +195,7 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
   test('Issue #278 segment 3c — legacy priorId / IMPLICIT_ABANDON read in `next` is gone', () => {
     const body = nextMessageBody()
     // The pre-Stage-B path read agents.current_message_id and synchronously
-    // flipped any orphaned 'read' row to 'failed'/'IMPLICIT_ABANDON'. Both
+    // flipped any orphaned legacy claim row to failed/IMPLICIT_ABANDON. Both
     // are removed; orphan recovery is structural via the claim-TTL sweeper
     // (core/claim-ttl.ts).
     expect(body).not.toMatch(/SELECT current_message_id FROM agents/)
@@ -204,15 +208,15 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // lead-ama's prescribed snippet) and FOR UPDATE SKIP LOCKED appended.
     expect(body).toMatch(/FROM message_queue\s*\n?\s*WHERE status = 'pending' AND agent_id = \$1\s*\n?\s*ORDER BY priority DESC, created_at ASC/)
   })
-  test('marks read + stamps the per-row claim + flips status to busy', () => {
+  test('marks received + stamps the per-row claim + flips status to busy', () => {
     const body = nextMessageBody()
     // Issue #278 segment 3d — the in-flight pointer lives on the
     // message_queue row (claimed_by + claimed_at + claim_expires_at),
     // not on agents.current_message_id. The agents UPDATE only flips
     // status='busy' now.
-    expect(body).toMatch(/UPDATE message_queue\s*\n?\s*SET status\s*=\s*'read'[\s\S]*?claimed_by\s*=\s*\$1[\s\S]*?claimed_at\s*=\s*now\(\)[\s\S]*?claim_expires_at\s*=\s*\$2/)
+    expect(body).toMatch(/UPDATE message_queue\s*\n?\s*SET status\s*=\s*'received'[\s\S]*?claimed_by\s*=\s*\$1[\s\S]*?claimed_at\s*=\s*now\(\)[\s\S]*?claim_expires_at\s*=\s*\$2/)
     expect(body).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
     // Negative pin: the legacy single-slot stamp must not coexist.
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1/)
@@ -258,9 +262,9 @@ describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 
   test('reads the most-recent active claim from message_queue, not agents.current_message_id', () => {
     const body = sendMessageBody()
     // Issue #278 segment 3d — the lookup is now keyed by claimed_by +
-    // status='read' on message_queue, ordered by claimed_at DESC. The
+    // status='received' on message_queue, ordered by claimed_at DESC. The
     // legacy SELECT current_message_id from agents is gone.
-    expect(body).toMatch(/SELECT id, message_id, payload FROM message_queue\s*\n?\s*WHERE claimed_by = \$1 AND status = 'read'/)
+    expect(body).toMatch(/SELECT id, message_id, payload FROM message_queue\s*\n?\s*WHERE claimed_by = \$1 AND status = 'received'/)
     expect(body).not.toMatch(/SELECT current_message_id FROM agents WHERE agent_id/)
   })
   test('INVALID_REPLY_TO error when no active claim resolves the target', () => {
@@ -279,7 +283,7 @@ describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 
     // idle-flip UPDATE no longer touches that column. Negative pin
     // catches a refactor that brings the column write back.
     expect(body).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'read'\) THEN 'busy' ELSE 'idle' END/,
+      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
   })

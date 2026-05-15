@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { existsSync, readFileSync } from 'node:fs'
 import { Client } from 'pg'
-import { applyDownMigration, applyUpMigrationFile } from '../../db/migrate'
+import { applyUpMigrationFile } from '../../db/migrate'
 import { assertDestructiveMigrationTestDatabase } from '../../db/destructive-migration-gate'
 import { join, dirname } from 'node:path'
 
@@ -53,9 +53,9 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
 // T2 — DB-level transition + invariants against the v0.9 schema.
 //
 // The migration files live under db/migrations/2026-05-13-status-enum-v0.9-*.sql.
-// We apply up.sql in beforeAll and tear back down in afterAll so other suites
-// see the legacy schema again. Per-test cleanup drops fixture rows tagged
-// with a sentinel agent_id.
+// We apply up.sql in beforeAll and leave the shared CI DB in a
+// forward-compatible schema afterwards. Per-test cleanup drops fixture rows
+// tagged with a sentinel agent_id.
 // ─────────────────────────────────────────────────────────────────────────────
 const DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const UP = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.up.sql')
@@ -81,14 +81,35 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     await client.connect()
     // Migrate to v0.9 so 'received' / 'in_progress' / 'done' are accepted.
     await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
+    // Keep transitional legacy fixtures writable while this suite is running.
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
   })
 
   afterAll(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT]).catch(() => {})
-    // Restore v0.8 so downstream suites in the run see the legacy schema.
+    // Restore the forward-compatible status vocabulary before releasing the
+    // shared DB back to the rest of the test run. Down-migrating here races
+    // state-daemon fixtures that write v0.9 statuses such as `received`.
     try {
-      await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
+      await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
     } catch {}
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ`)
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+           WHERE conname = 'message_queue_status_check'
+             AND conrelid = 'message_queue'::regclass
+        ) THEN
+          ALTER TABLE message_queue DROP CONSTRAINT message_queue_status_check;
+        END IF;
+        ALTER TABLE message_queue
+          ADD CONSTRAINT message_queue_status_check
+          CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'));
+      END $$;
+    `)
     await client.end()
     if (priorGate === undefined) {
       delete process.env[DESTRUCTIVE_GATE_ENV]

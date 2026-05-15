@@ -285,7 +285,7 @@ agent-com next --agent-id cto [--priority ceo_first] [--channel agent-mem]
 ```
 1. 直前のcurrentMessageがあれば agent-com fail --reason IMPLICIT_ABANDON で明示 failed 遷移（status='failed'、v2.1.0 で暗黙 skip 廃止）
 2. message_queueからpending最古の1件取得（priority/channel考慮）
-3. status='read', read_at=NOW() に更新
+3. status='received', read_at=NOW() に更新
 4. agents.status='busy', status_detail='メッセージ処理中' に更新
 5. currentMessageIdをプロセス内メモリに保持
 6. ペイロードをJSON出力
@@ -564,7 +564,7 @@ heartbeat:
 - `agent-com fail --message-id X --reason Y` → status='failed', failed_reason 設定, current_message_id=NULL, status='idle'
 - `agent-com skip --message-id X --reason Y` → status='skipped' (手動運用のみ)
 - `agent-com register --agent-id X --token $TOKEN --channels ch1,ch2` → agents INSERT + channels.members 追加
-- `agent-com reclaim --agent-id X` → 手動 orphan reclaim (read→pending + current_message_id=NULL)
+- `agent-com reclaim --agent-id X` → 手動 orphan reclaim (received→pending + current_message_id=NULL)
 
 #### DB schema 追加 (v2.1.0)
 
@@ -593,11 +593,11 @@ SIGTERM/SIGINT で SHUTDOWN flag → drain loop の次 iteration で break。現
 
 #### orphan reclaim
 
-**self-reclaim (Issue #287 / PR-0 #291)**: 各 bot の server.ts 起動時、**(a) `await reclaimSelfOrphanedClaims(...)` で同期 startup reclaim を完了させてから** (b) 60s 間隔の periodic sweeper、(c) claim-ttl sweeper の順で起動する (`AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS` で上書き可、kill switch `AGENT_COMMS_TTL_SWEEP_DISABLED=1`)。(a)/(b) とも自分の `claimed_by = $self AND status='read'` 行のみ対象、(a) は `claim_expires_at IS NULL OR claim_expires_at < now()` (TTL 内の active claim は yank 禁止 — 二重起動 / 遅延起動が legitimate worker から msg を奪うのを防ぐ)、(b) は `claim_expires_at IS NOT NULL AND claim_expires_at < now()` (TTL 経過必須)。`status='read' → 'pending'` 遷移直後に `agents.status` を `CASE WHEN EXISTS(...) THEN 'busy' ELSE 'idle' END` で派生 update する (sender-feedback の busy/idle 分岐を狂わせない、Issue #287 cycle 7 axis 2/3 BLOCK fix)。cursor も DB persist (§4.8.1) で復元されるため再配信が正しく届く。`agents.current_message_id` は Issue #278 (A) segment 3d で削除済 (per-row claim model に移行)。
+**self-reclaim (Issue #287 / PR-0 #291)**: 各 bot の server.ts 起動時、**(a) `await reclaimSelfOrphanedClaims(...)` で同期 startup reclaim を完了させてから** (b) 60s 間隔の periodic sweeper、(c) claim-ttl sweeper の順で起動する (`AGENT_COMMS_SELF_RECLAIM_INTERVAL_MS` で上書き可、kill switch `AGENT_COMMS_TTL_SWEEP_DISABLED=1`)。(a)/(b) とも自分の `claimed_by = $self AND status='received'` 行のみ対象、(a) は `claim_expires_at IS NULL OR claim_expires_at < now()` (TTL 内の active claim は yank 禁止 — 二重起動 / 遅延起動が legitimate worker から msg を奪うのを防ぐ)、(b) は `claim_expires_at IS NOT NULL AND claim_expires_at < now()` (TTL 経過必須)。`status='received' → 'pending'` 遷移直後に `agents.status` を `CASE WHEN EXISTS(...) THEN 'busy' ELSE 'idle' END` で派生 update する (sender-feedback の busy/idle 分岐を狂わせない、Issue #287 cycle 7 axis 2/3 BLOCK fix)。cursor も DB persist (§4.8.1) で復元されるため再配信が正しく届く。`agents.current_message_id` は Issue #278 (A) segment 3d で削除済 (per-row claim model に移行)。
 
-`core/claim-ttl.ts` の `sweepExpiredClaims` (5min 間隔、`status='read' AND claim_expires_at < now()` を `failed/IMPLICIT_ABANDON`) は **`selfAgentId` predicate で own 行を構造的に除外** する (Issue #287 cycle 7 axis 1)。startup 順序入替 + own 行除外の二重 guard により、sweeper の `setTimeout(fire, 0)` が self-reclaim より早く発火しても own claim が `failed/IMPLICIT_ABANDON` に流れることはない。other agents の真の abandon は claim-ttl 経由で `failed` に確定する。
+`core/claim-ttl.ts` の `sweepExpiredClaims` (5min 間隔、`status='received' AND claim_expires_at < now()` を pending に戻す) は **`selfAgentId` predicate で own 行を構造的に除外** する (Issue #287 cycle 7 axis 1)。startup 順序入替 + own 行除外の二重 guard により、sweeper の `setTimeout(fire, 0)` が self-reclaim より早く発火しても own claim が処理中 worker から奪われることはない。
 
-**sweeper も fail-closed** (PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix): periodic self-reclaim sweeper + claim-TTL sweeper 双方の `fire()` ループで例外を non-fatal log だけして継続する pattern を廃止。production path は `process.exit(1)` で run-bot.sh / launchd / systemd 経由 restart に委譲、test path は `onError` callback inject で観測。silent skip による "stuck read" / "stale busy-idle" 回帰を構造排除。
+**sweeper も fail-closed** (PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix): periodic self-reclaim sweeper + claim-TTL sweeper 双方の `fire()` ループで例外を non-fatal log だけして継続する pattern を廃止。production path は `process.exit(1)` で run-bot.sh / launchd / systemd 経由 restart に委譲、test path は `onError` callback inject で観測。silent skip による "stuck received" / "stale busy-idle" 回帰を構造排除。
 
 #### heartbeat (run-bot.sh 責務)
 

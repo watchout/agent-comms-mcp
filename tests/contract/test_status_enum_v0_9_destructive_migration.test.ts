@@ -26,6 +26,7 @@ const UP = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructiv
 const DOWN = join(REPO_ROOT, 'db/migrations/2026-05-13-status-enum-v0.9-destructive.down.sql')
 
 const DESTRUCTIVE_GATE_ENV = 'AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED'
+const STATE_DAEMON_CONTRACT_LOCK = 'agent-comms-state-daemon-contract-tests'
 
 dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () => {
   let client: Client
@@ -37,20 +38,27 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
     assertDestructiveMigrationTestDatabase(DATABASE_URL)
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    // This file temporarily swaps message_queue_status_check back to the
+    // legacy 5-value vocabulary. Serialize with state-daemon contract tests,
+    // which write v0.9 statuses such as `received` against the same CI DB.
+    await client.query(`SELECT pg_advisory_lock(hashtext($1))`, [STATE_DAEMON_CONTRACT_LOCK])
   })
 
   afterAll(async () => {
     // Best-effort restore so a partial failure does not leave the
-    // shared test DB in the new (post-up) vocabulary. Other test files
-    // assume the legacy CHECK constraint and the failed_reason column.
+    // shared test DB in the legacy down-migration vocabulary. Other
+    // concurrent test files, especially state-daemon contracts, write
+    // v0.9 statuses such as `received`; releasing the advisory lock
+    // while the DB is still v0.8 causes constraint failures.
     try {
-      await applyDownMigration(DOWN, { databaseUrl: DATABASE_URL })
+      await applyUpMigrationFile(UP, { databaseUrl: DATABASE_URL })
     } catch {}
-    // Re-add failed_reason if it is still missing — applyDownMigration's
-    // SQL ADDs it, but if the down failed mid-way we want callers to find
-    // the legacy schema again.
+    // Re-assert the forward-compatible v0.9 union in case the paired
+    // migration failed mid-way. Keep failed_reason present because older
+    // contract fixtures still write/read it while the shared CI DB is
+    // transitioning toward the v0.9 vocabulary.
     await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS failed_reason TEXT`)
-    await client.query(`ALTER TABLE message_queue DROP COLUMN IF EXISTS done_at`)
+    await client.query(`ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ`)
     await client.query(`
       DO $$
       BEGIN
@@ -63,9 +71,12 @@ dbDescribe('PR #338 sub-PR 1 — status enum destructive migration (M1-M7)', () 
         END IF;
         ALTER TABLE message_queue
           ADD CONSTRAINT message_queue_status_check
-          CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'));
+          CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'));
       END $$;
     `)
+    try {
+      await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [STATE_DAEMON_CONTRACT_LOCK])
+    } catch {}
     await client.end()
     if (priorDestructiveGate === undefined) {
       delete process.env[DESTRUCTIVE_GATE_ENV]

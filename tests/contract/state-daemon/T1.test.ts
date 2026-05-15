@@ -4,7 +4,7 @@
  *   precondition: agents alpha (TUI, online); message_queue empty.
  *   trigger:      INSERT row → pg_notify (simulated via __testHandleEvent).
  *   expected:
- *     - tmux.sendKeys('alpha-session', 'check inbox\n') 1 回
+ *     - tmux.sendKeys('alpha-session', 'Call the agent-comms next tool now. Do not call inbox.\n') 1 回
  *     - DB: row.last_wake_attempt_at = T0
  *     - metric: state_daemon_wake_actions_total{result='ok'} += 1
  */
@@ -85,7 +85,7 @@ describe('T1 new_pending_dispatched', () => {
       // tmux.sendKeys called once with the right target + payload.
       expect(tmux.sentKeys.length).toBe(1)
       expect(tmux.sentKeys[0].session).toBe(`${agent}-session`)
-      expect(tmux.sentKeys[0].payload).toBe('check inbox\n')
+      expect(tmux.sentKeys[0].payload).toBe('Call the agent-comms next tool now. Do not call inbox.\n')
 
       // DB: last_wake_attempt_at = t0 (within ~1s tolerance for tz parsing)
       const got = await pg.query(

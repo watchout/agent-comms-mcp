@@ -79,6 +79,14 @@ describe('test_7_mcp_tool_compat — MCP tool registration source pin', () => {
     expect(src).toMatch(/if\s*\(\s*name\s*===\s*['"]expand_msg['"]\s*\)/)
   })
 
+  test('inbox is history-only and refuses to preview pending queue rows', () => {
+    const src = readRepo('server.ts')
+    const inboxHandler = src.split("if (name === 'inbox' || name === 'check_inbox')")[1]?.split("if (name === 'expand_msg')")[0] ?? ''
+    expect(inboxHandler).toContain('NEXT_REQUIRED')
+    expect(inboxHandler).toContain("status = 'pending'")
+    expect(inboxHandler).toContain('Call next to claim one message')
+  })
+
   test('server.ts expand_msg handler emits all 4 error classes + structured happy result', () => {
     const src = readRepo('server.ts')
     const handlerStart = src.indexOf("if (name === 'expand_msg')")

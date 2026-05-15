@@ -5,7 +5,7 @@
  *   - Subscribes to `pg_notify('queue_event')` for immediate dispatch (§6.2).
  *   - Runs a 30s cron sweep over message_queue rows for §4.3 row 2-6.
  *   - Refreshes claim TTLs every 30s for live `agents.status='online'` bots
- *     holding `read` rows (§5.1 / R4 / 補強 #1).
+ *     holding `received` rows (§5.1 / R4 / 補強 #1).
  *   - Polls `agents.last_seen_at` every 30s; restarts TUI bots with missing
  *     tmux sessions (§5.4 / R7 / 補強 #5), with a 1h/N rate limit (F8).
  *   - Manages a dynamic-capacity wake pool (§5.2 / 補強 #2).
@@ -279,8 +279,8 @@ export class StateDaemon {
       scanned: 0, rewoken: 0, reclaimed: 0, abandonReset: 0, permanentlyFailed: 0, durationMs: 0, budgetWarn: false,
     }
 
-    // priority order per T15: row 3 (read-expired) > row 2 (pending-stale)
-    const expired = await this.fetchReadExpired()
+    // priority order per T15: row 3 (received-expired) > row 2 (pending-stale)
+    const expired = await this.fetchReceivedExpired()
     for (const row of expired) {
       result.scanned++
       await this.reclaimRow(row)
@@ -289,7 +289,7 @@ export class StateDaemon {
 
     const stale = await this.fetchPendingStale()
     for (const row of stale) {
-      // Skip if same row was already handled as read-expired this tick
+      // Skip if same row was already handled as received-expired this tick
       if (expired.some((e) => e.id === row.id)) continue
       result.scanned++
       const acted = await this.runWakeIfNotSuppressed(row, 'dedup_skipped')
@@ -306,9 +306,9 @@ export class StateDaemon {
       result.abandonReset++
     }
 
-    // §4.3 row 5+6: stuck pending OR stuck read both → STALE_DISPATCH (v0.5
+    // §4.3 row 5+6: stuck pending OR stuck received both → STALE_DISPATCH (v0.5
     // 単一固定 per α). The schema has no `attempts` column, so the "attempts
-    // >= max" clause from row 5 is interpreted age-based (read row that has
+    // >= max" clause from row 5 is interpreted age-based (received row that has
     // been parked beyond stuckAfter is functionally indistinguishable from a
     // max-attempts loop and tripping the same terminal handles both).
     const stuck = await this.fetchStuck()
@@ -586,6 +586,19 @@ export class StateDaemon {
       return false
     }
 
+    const activeClaims = await this.dbQuery(
+      `SELECT 1 FROM message_queue
+        WHERE agent_id=$1
+          AND claimed_by=$1
+          AND status IN ('received', 'in_progress')
+        LIMIT 1`,
+      [row.agent_id],
+    )
+    if (activeClaims.rows.length > 0) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })
+      return false
+    }
+
     // Wake suppression is bot runtime state, not message row state. Reserve
     // the bot's window with one conditional UPDATE so concurrent queue events
     // cannot all observe the same stale timestamp and fan out duplicate wakes.
@@ -608,7 +621,7 @@ export class StateDaemon {
     // per-bot reservation so only actual wake sends feed the rolling window.
     this.recordDispatchForAbnormalCheck(row.agent_id)
     try {
-      await this.tmux.sendKeys(bot.tmux_session, 'check inbox\n')
+      await this.tmux.sendKeys(bot.tmux_session, 'Call the agent-comms next tool now. Do not call inbox.\n')
     } catch (err) {
       await this.dbQuery(
         `UPDATE agents SET last_wake_attempt_at=NULL
@@ -684,7 +697,7 @@ export class StateDaemon {
     return rows
   }
 
-  private async fetchReadExpired(): Promise<QueueRow[]> {
+  private async fetchReceivedExpired(): Promise<QueueRow[]> {
     let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
@@ -707,7 +720,7 @@ export class StateDaemon {
   }
 
   private async fetchStuck(): Promise<QueueRow[]> {
-    // §4.3 row 5 (read stale, max_attempts proxy via age) + row 6 (pending
+    // §4.3 row 5 (received stale, max_attempts proxy via age) + row 6 (pending
     // stuck) — both terminate as STALE_DISPATCH (v0.5 単一固定).
     let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at

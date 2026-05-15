@@ -1640,7 +1640,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'inbox',
-      description: 'Messages are automatically pushed to your session. Use this only to re-check history or filter by channel. Each row body is a 80-char preview by default; pass {full: true} to opt in to the legacy verbatim row body.',
+      description: 'History/diagnostic view only. Do not use this to receive new work. Pending queue items must be claimed with next; inbox never claims or marks messages received.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1865,7 +1865,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Issue #278 (A) — per-row claim. Stamp claimed_by / claimed_at /
       // claim_expires_at alongside the status='received' transition so the
       // TTL sweeper (core/claim-ttl.ts, segment 3b) can flip orphaned
-      // claims to IMPLICIT_ABANDON. With segment 3c the legacy priorId
+      // claims back to pending. With segment 3c the legacy priorId
       // implicit-skip path is gone — orphan recovery is now exclusively
       // structural via the sweeper. TTL default 30s, env-overridable
       // per Issue #278 §5 Open decisions.
@@ -2965,6 +2965,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   if (name === 'inbox' || name === 'check_inbox') {
     const { limit, full } = (args ?? {}) as any
+    const client = await tryGetDb()
+    if (!client) {
+      return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for inbox' }], isError: true }
+    }
+    const pendingRow = await client.query(
+      `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+      [agentId],
+    )
+    const pending = pendingRow.rows[0]?.n ?? 0
+    if (pending > 0) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: 'NEXT_REQUIRED',
+            pending,
+            message: 'Pending queue items are hidden from inbox. Call next to claim one message.',
+          }),
+        }],
+        isError: true,
+      }
+    }
     // Issue #257 — light by default (80-char preview + truncation suffix).
     // MCP opt-in via `{full: true}` (CLI uses env var, intentionally asymmetric).
     const rows = await fetchNewMessages(agentId, Math.min(limit ?? 20, 100))
@@ -3981,9 +4003,9 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
   // Issue #287 cycle 7 axis 1 BLOCK fix — startup order: self-reclaim FIRST,
   // claim-ttl SECOND. The previous order (claim-ttl first, with
   // `setTimeout(fire, 0)` immediate sweep in core/claim-ttl.ts) raced
-  // ahead of self-reclaim and converted own expired claims to
-  // `failed/IMPLICIT_ABANDON` before the self-reclaim path could roll
-  // them back to `pending`, defeating the restart-recovery contract.
+  // ahead of self-reclaim and could roll own expired claims back to
+  // `pending` before the owner had a chance to finish startup reclaim,
+  // defeating the restart-recovery contract.
   //
   // Order:
   //   (1) `await reclaimSelfOrphanedClaims(...)` — synchronous, must
@@ -3992,10 +4014,10 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
   //       for claims that expire mid-session.
   //   (3) `startClaimTtlSweeper(... selfAgentId: AGENT_ID)` — the
   //       `selfAgentId` predicate excludes own rows from the
-  //       IMPLICIT_ABANDON sweep. Belt-and-braces: even if the
+  //       fleet-level reclaim sweep. Belt-and-braces: even if the
   //       sweeper's `setTimeout(fire, 0)` races ahead of
-  //       `startSelfReclaimSweeper`, own rows are not flipped to
-  //       `failed`.
+  //       `startSelfReclaimSweeper`, own rows are not reclaimed by the
+  //       shared sweeper.
   if (process.env.AGENT_COMMS_TTL_SWEEP_DISABLED !== '1') {
     // PR-0 cycle 8 axis 3 BLOCK fix — fail-closed startup. The
     // `await reclaimSelfOrphanedClaims(...)` is no longer wrapped in a
@@ -4019,8 +4041,8 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     // process hosts up to 18 bots; each one must own-reclaim
     // independently and the shared claim-TTL sweep must exclude
     // every hosted bot's claims (otherwise the other bots' expired
-    // claims land in `failed/IMPLICIT_ABANDON` rather than
-    // `pending`). Build the list once (`AGENT_ID` deduped against
+    // claims are reclaimed by the shared sweep rather than the owning
+    // bot's self-reclaim). Build the list once (`AGENT_ID` deduped against
     // `EXPECTED_BOTS`), loop per-bot for self-reclaim + periodic
     // sweeper install, then install one shared claim-TTL sweeper
     // with the full `selfAgentIds` exclusion list.
@@ -4034,7 +4056,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     }
     const intervalMs = parseInt(process.env.AGENT_COMMS_CLAIM_SWEEP_INTERVAL_MS ?? '300000', 10)
     startClaimTtlSweeper(reclaimDb, { intervalMs, selfAgentIds: hostedAgentIds })
-    process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, reason=IMPLICIT_ABANDON, selfAgentIds=[${hostedAgentIds.join(',')}])\n`)
+    process.stderr.write(`agent-comms: claim ttl sweeper started (interval=${intervalMs}ms, selfAgentIds=[${hostedAgentIds.join(',')}])\n`)
   }
 
   // Connect Per-Bot Discord Clients for all expected bots at startup
