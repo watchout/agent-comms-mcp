@@ -228,7 +228,7 @@ async function agentRegister(args: string[]) {
  */
 function resolveAgentId(args: string[], command: string): string {
   const idx = args.indexOf('--agent-id')
-  if (idx !== -1 && args[idx + 1]) return args[idx + 1]
+  if (idx !== -1 && args[idx + 1]) return assertExpectedAgentId(args[idx + 1], command)
   return requireAgentId(command)
 }
 
@@ -240,6 +240,18 @@ function requireAgentId(command: string): string {
   const id = process.env.AGENT_ID
   if (!id) {
     console.error(`Error: AGENT_ID env var or --agent-id flag is required for 'agent-com ${command}'`)
+    process.exit(2)
+  }
+  return assertExpectedAgentId(id, command)
+}
+
+function assertExpectedAgentId(id: string, command: string): string {
+  const expected = process.env.AGENT_COM_EXPECTED_AGENT_ID
+  if (expected && id !== expected) {
+    console.error(
+      `Error [AGENT_ID_MISMATCH]: agent-com ${command} resolved agent_id=${id}, expected ${expected}. ` +
+        `Set AGENT_ID=${expected} or remove AGENT_COM_EXPECTED_AGENT_ID for this process.`,
+    )
     process.exit(2)
   }
   return id
