@@ -6,6 +6,8 @@
  *   - aun                    → init if missing, else start
  *   - aun init [--dry-run] [--force]
  *   - aun start [-- <extra args passed to claude>]
+ *   - aun receive --agent-id <id> [--dry-run]
+ *   - aun next --agent-id <id> [--dry-run]
  *   - aun uninstall [--backup <path>] [--surgical]
  *   - aun status
  *   - aun --help / -h
@@ -14,6 +16,7 @@ import { init } from './aun/init'
 import { uninstall } from './aun/uninstall'
 import { status } from './aun/status'
 import { start } from './aun/start'
+import { receive } from './aun/receive'
 
 function printHelp(): void {
   const lines = [
@@ -23,6 +26,8 @@ function printHelp(): void {
     '  aun                       run init if missing, else start',
     '  aun init [--dry-run] [--force]',
     '  aun start [-- <args...>]',
+    '  aun receive --agent-id <id> [--dry-run]',
+    '  aun next --agent-id <id> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
     '  aun --help | -h',
@@ -120,6 +125,22 @@ export function run(argv: string[] = process.argv): number {
         return -1
       }
       return res.ok ? 0 : 1
+    }
+    case 'receive':
+    case 'next': {
+      let res
+      try {
+        res = receive({
+          agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+          dryRun: !!flags['dry-run'],
+        })
+      } catch (err) {
+        process.stderr.write(`Error [AGENT_ID_MISMATCH]: ${(err as Error).message}\n`)
+        return 2
+      }
+      if (res.stdout) process.stdout.write(res.stdout)
+      if (res.stderr) process.stderr.write(res.stderr)
+      return res.code
     }
     case 'uninstall': {
       const res = uninstall({
