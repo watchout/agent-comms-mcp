@@ -56,6 +56,7 @@ import {
   type BotContext,
   type StallVerdict,
 } from './stall-detector'
+import { planQueueAction, type PlannedQueueAction } from './action-planner'
 
 interface QueueRow {
   id: number
@@ -288,6 +289,13 @@ export class StateDaemon {
     const expired = await this.fetchReceivedExpired()
     for (const row of expired) {
       result.scanned++
+      this.recordQueueAction(planQueueAction({
+        row,
+        agent: null,
+        now: this.clock.now(),
+        defaultRuntime: defaultConfigPort.getDefaultRuntime(),
+        hasActiveClaim: false,
+      }), row)
       await this.reclaimRow(row)
       result.reclaimed++
     }
@@ -547,11 +555,26 @@ export class StateDaemon {
     )
     const bot = rows[0]
     if (!bot) {
+      this.recordQueueAction(planQueueAction({
+        row,
+        agent: null,
+        now,
+        defaultRuntime: defaultConfigPort.getDefaultRuntime(),
+        hasActiveClaim: false,
+      }), row)
       await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
       return false
     }
-    if (bot.runtime !== defaultConfigPort.getDefaultRuntime()) {
+    const defaultRuntime = defaultConfigPort.getDefaultRuntime()
+    if (bot.runtime !== defaultRuntime) {
+      this.recordQueueAction(planQueueAction({
+        row,
+        agent: bot,
+        now,
+        defaultRuntime,
+        hasActiveClaim: false,
+      }), row)
       // Bug 3 fix (re-chain msg 250d01b0 / R15 / F13): non-TUI runtimes
       // (e.g. `discord` for the human CEO account, `sig` for legacy bots
       // mid-migration) used to take the throw + terminal failure + alert
@@ -570,6 +593,13 @@ export class StateDaemon {
       return false
     }
     if (!bot.tmux_session) {
+      this.recordQueueAction(planQueueAction({
+        row,
+        agent: bot,
+        now,
+        defaultRuntime,
+        hasActiveClaim: false,
+      }), row)
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })
       return false
     }
@@ -583,9 +613,23 @@ export class StateDaemon {
       [row.agent_id],
     )
     if (activeClaims.rows.length > 0) {
+      this.recordQueueAction(planQueueAction({
+        row,
+        agent: bot,
+        now,
+        defaultRuntime,
+        hasActiveClaim: true,
+      }), row)
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })
       return false
     }
+    this.recordQueueAction(planQueueAction({
+      row,
+      agent: bot,
+      now,
+      defaultRuntime,
+      hasActiveClaim: false,
+    }), row)
 
     // Wake suppression is bot runtime state, not message row state. Reserve
     // the bot's window with one conditional UPDATE so concurrent queue events
@@ -645,6 +689,14 @@ export class StateDaemon {
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
     // After reclaim, re-wake (T10 expects sendKeys 1).
     await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null }, 'dedup_skipped')
+  }
+
+  private recordQueueAction(action: PlannedQueueAction, row: QueueRow): void {
+    this.metrics.inc('state_daemon_state_actions_total', {
+      action: action.kind,
+      status: row.status,
+      terminal: action.terminal ? 'true' : 'false',
+    })
   }
 
   // ── Sweep fetch helpers ────────────────────────────────────────────────────
