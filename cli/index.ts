@@ -846,7 +846,7 @@ async function sendMessage(args: string[]) {
       // queued. The receiver pipeline still picks up the agent_messages row
       // via pg_notify, so other bots see the message; only the human-facing
       // Discord display is skipped. We surface this in the response.
-      const projection = await resolveOutboundProjectionRoute(db as any, { channelId, threadId })
+      const projection = await resolveOutboundProjectionRoute(db as any, { channelId, threadId, senderAgentId: agentId })
       const discordExternalId = projection.channelExternalId
 
       let outboundQueued = false
@@ -1091,6 +1091,7 @@ async function notifyMessage(args: string[]) {
     const projection = await resolveOutboundProjectionRoute(db as any, {
       channelId: resolvedChannelId,
       threadId: resolvedThreadId,
+      senderAgentId: agentId,
     })
     const discordExternalId = projection.channelExternalId
 

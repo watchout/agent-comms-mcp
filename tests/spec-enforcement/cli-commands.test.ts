@@ -235,7 +235,7 @@ describe('T8 — thread_id flows from next → send → outbound', () => {
   test('sendMessage resolves channel_external_id via thread_adapters when threadId is set', () => {
     const body = sendMessageBody()
     const projectionSrc = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
-    expect(body).toMatch(/resolveOutboundProjectionRoute\(db as any,\s*\{\s*channelId,\s*threadId\s*\}/)
+    expect(body).toMatch(/resolveOutboundProjectionRoute\(db as any,\s*\{\s*channelId,\s*threadId,\s*senderAgentId:\s*agentId\s*\}/)
     expect(projectionSrc).toMatch(/if\s*\(\s*input\.threadId\s*\)\s*\{[\s\S]{0,500}thread_adapters/)
   })
 })

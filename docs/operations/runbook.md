@@ -139,6 +139,16 @@ DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
 
 Stop and escalate if dry-run shows unexpected `backfill_consumer` rows, rows outside channel `1487368919613444156`, or content that could create stale duplicate Discord posts.
 
-## 3. その他運用 (既存項目)
+## 4. Codex CTO Identity Normalization (#417)
+
+The detailed mutation plan, rollback, and E2E smoke checklist live in:
+
+```bash
+docs/operations/codex-cto-identity-normalization.md
+```
+
+Do not mutate production identity rows, `/Users/yuji/Developer/tech-lead/.mcp.json`, `scripts/bot-registry.txt`, or restart `discord-cto` until the #417 plan is reviewed and approved for an execution window.
+
+## 5. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)

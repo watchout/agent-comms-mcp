@@ -2468,6 +2468,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const projection = await resolveOutboundProjectionRoute(txClient, {
         channelId: dest.channelId,
         threadId: dest.threadId,
+        senderAgentId: agentId,
       })
       const externalId = projection.channelExternalId
       if (externalId) {
@@ -2847,6 +2848,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const projection = await resolveOutboundProjectionRoute(client, {
       channelId: dest.channelId,
       threadId: dest.threadId,
+      senderAgentId: agentId,
     })
     const externalId = projection.channelExternalId
     if (externalId) {

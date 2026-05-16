@@ -4,6 +4,9 @@
     "1487368919613444156": {
       "primary": "agent-com-dev",
       "adapterOwner": "agent-com-dev",
+      "nativeRoleOutboundOwners": {
+        "codex-cto": "codex-cto"
+      },
       "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "codex-cto", "codex-aun", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
     }
   }
