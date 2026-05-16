@@ -49,7 +49,6 @@ import {
 } from './types'
 import { WakePool } from './wake-pool'
 import { defaultConfigPort } from '../ports/config-port'
-import { staleDispatchReason } from '../message-queue-terminal'
 import {
   createDefaultStallDetector,
   loadStallThresholdsFromEnv,
@@ -312,28 +311,6 @@ export class StateDaemon {
       result.abandonReset++
     }
 
-    // §4.3 row 5+6: stuck pending OR stuck received both → STALE_DISPATCH (v0.5
-    // 単一固定 per α). The schema has no `attempts` column, so the "attempts
-    // >= max" clause from row 5 is interpreted age-based (received row that has
-    // been parked beyond stuckAfter is functionally indistinguishable from a
-    // max-attempts loop and tripping the same terminal handles both).
-    const stuck = await this.fetchStuck()
-    const seenStuckIds = new Set<number>()
-    for (const row of stuck) {
-      if (seenStuckIds.has(row.id)) continue
-      seenStuckIds.add(row.id)
-      // Skip rows we already terminally handled this tick via reclaim/abandon
-      // paths — they're already in `pending` again, the stuck branch should
-      // not bounce them straight to failed.
-      if (
-        expired.some((e) => e.id === row.id) ||
-        abandon.some((a) => a.id === row.id)
-      ) continue
-      result.scanned++
-      await this.failPermanently(row, 'STALE_DISPATCH', `stale beyond ${this.config.stuckAfter}`)
-      result.permanentlyFailed++
-    }
-
     result.durationMs = this.clock.now().getTime() - t0
     this.metrics.observe('state_daemon_sweep_duration_ms', result.durationMs)
     if (result.durationMs > this.config.budgetWarnMs) {
@@ -572,7 +549,7 @@ export class StateDaemon {
     if (bot.runtime !== defaultConfigPort.getDefaultRuntime()) {
       // Bug 3 fix (re-chain msg 250d01b0 / R15 / F13): non-TUI runtimes
       // (e.g. `discord` for the human CEO account, `sig` for legacy bots
-      // mid-migration) used to take the throw + failPermanently + alert
+      // mid-migration) used to take the throw + terminal failure + alert
       // path. That corrupted the queue row (forced `failed/WAKE_FAILED`
       // for a row the daemon simply has no business waking), spammed
       // alerts on every dispatch, and surfaced as "Idle 連射" in the
@@ -665,22 +642,6 @@ export class StateDaemon {
     await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null }, 'dedup_skipped')
   }
 
-  private async failPermanently(row: QueueRow, reason: string, detail: string): Promise<void> {
-    await this.dbQuery(
-      `UPDATE message_queue
-          SET status='failed',
-              failed_reason=$2,
-              done_at=$3,
-              claimed_by=NULL,
-              claimed_at=NULL,
-              claim_expires_at=NULL
-        WHERE id=$1`,
-      [row.id, staleDispatchReason(detail), this.clock.now()],
-    )
-    await this.alert.alert(`row ${row.id} permanently failed: ${reason} (${detail}) — max_attempts or stale`)
-    this.metrics.inc('state_daemon_wake_actions_total', { result: 'permanently_failed' })
-  }
-
   // ── Sweep fetch helpers ────────────────────────────────────────────────────
 
   /**
@@ -730,24 +691,6 @@ export class StateDaemon {
     // is now via claim-ttl sweeper (rolling back to 'pending'). This fetch
     // is a no-op in v0.9 — Issue #349 will redesign abandonment tracking.
     return []
-  }
-
-  private async fetchStuck(): Promise<QueueRow[]> {
-    // §4.3 row 5 (received stale, max_attempts proxy via age) + row 6 (pending
-    // stuck) — both terminate as STALE_DISPATCH (v0.5 単一固定).
-    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at
-         FROM message_queue
-        WHERE status IN ('pending', 'received')
-          AND created_at < $1::timestamptz - ($2)::interval`
-    const params: unknown[] = [this.clock.now(), this.config.stuckAfter, this.config.batchLimit]
-    if (this.config.agentIdPrefix) {
-      sql += ` AND agent_id LIKE $4`
-      params.push(this.config.agentIdPrefix + '%')
-    }
-    sql += ` LIMIT $3`
-    const { rows } = await this.dbQuery<QueueRow>(sql, params)
-    return rows
   }
 
   // ── Restart rate limiter (§5.4 / F8) ───────────────────────────────────────

@@ -176,8 +176,8 @@ describe.skip('T12 max_attempts_failed_permanently (deferred to Issue #349)', ()
   test('read row aged 6min → status=failed, failed_reason=STALE_DISPATCH, alert', async () => {})
 })
 
-describe('T12b stale dispatch terminal semantics', () => {
-  test('stale active row closes as failed with reason/timestamp, not replied', async () => {
+describe('T12b stale dispatch observation semantics', () => {
+  test('stale owned active row is left open for durable completion', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t12b')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
@@ -194,7 +194,7 @@ describe('T12b stale dispatch terminal semantics', () => {
     await h.daemon.start()
     try {
       const result = await h.daemon.sweepStale()
-      expect(result.permanentlyFailed).toBe(1)
+      expect(result.permanentlyFailed).toBe(0)
       const r = await pg.query(
         `SELECT status, failed_reason, done_at, replied_with, replied_at,
                 claimed_by, claimed_at, claim_expires_at
@@ -211,14 +211,15 @@ describe('T12b stale dispatch terminal semantics', () => {
         claimed_at: Date | null
         claim_expires_at: Date | null
       }>)[0]
-      expect(row.status).toBe('failed')
-      expect(row.failed_reason).toMatch(/^STALE_DISPATCH:/)
-      expect(row.done_at).not.toBeNull()
+      expect(row.status).toBe('received')
+      expect(row.failed_reason).toBeNull()
+      expect(row.done_at).toBeNull()
       expect(row.replied_with).toBeNull()
       expect(row.replied_at).toBeNull()
-      expect(row.claimed_by).toBeNull()
-      expect(row.claimed_at).toBeNull()
-      expect(row.claim_expires_at).toBeNull()
+      expect(row.claimed_by).toBe(agent)
+      expect(row.claimed_at).not.toBeNull()
+      expect(row.claim_expires_at).not.toBeNull()
+      expect(h.alert.alerts).toEqual([])
     } finally {
       await h.daemon.stop()
     }
