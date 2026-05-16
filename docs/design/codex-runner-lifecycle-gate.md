@@ -34,6 +34,25 @@ config, or bot registry. Formal state-daemon restart remains gated on #421.
 Draft PRs for #422 or #426 must remain draft until #421/#427 dependencies are
 settled and L1/L2 review is requested.
 
+## Non-Goals And Product Boundary
+
+#426 is a communication-completeness gate only. It answers whether a request,
+question, answer, result, or close in AUN communication is still open and who is
+responsible for the next communication event.
+
+Shirube remains the owner for broader work and project management, including:
+
+- project plans and milestones
+- task decomposition and assignment outside a specific AUN communication thread
+- backlog state, priority, estimation, and capacity planning
+- cross-project reporting and product delivery dashboards
+- long-lived workflow orchestration beyond message/request completeness
+
+AUN should expose enough structured lifecycle state for communication to be
+recoverable and auditable. It should not become the system of record for broad
+project execution. If a request maps to a project task, AUN may store a link or
+reference, but task ownership and project truth stay in Shirube.
+
 ## #422 Codex Auto-Receive Runner
 
 ### Runtime Shape
