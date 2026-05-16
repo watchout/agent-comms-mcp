@@ -400,6 +400,30 @@ describe('T16 pg_notify_immediate_dispatch', () => {
       await h.daemon.stop()
     }
   })
+
+  test('pg_notify wake tmux failure is reported without escaping the listener callback', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t16-tmux-fail')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending', created_at: T0 })
+
+    const h = buildHarness(T0)
+    h.tmux.sendKeysShouldThrow = true
+    await h.daemon.start()
+    try {
+      h.pgListen.emit(JSON.stringify({
+        op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+      }))
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tmux_error' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_pg_notify_errors_total')).toBe(1)
+      expect(h.alert.contains(`pg_notify handler failed for row ${id}`)).toBe(true)
+      expect(h.daemon.__status).toBe('running')
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T17 ───────────────────────────────────────────────────────────────────────
