@@ -97,13 +97,23 @@ function parseArgs(argv: string[]): { positional: string[]; flags: Record<string
   for (let i = 0; i < argv.length; i++) {
     if (argv[i].startsWith('--')) {
       const key = argv[i].slice(2)
-      flags[key] = argv[i + 1] ?? ''
-      i++
+      const next = argv[i + 1]
+      if (next !== undefined && !next.startsWith('--')) {
+        flags[key] = next
+        i++
+      } else {
+        flags[key] = 'true'
+      }
     } else {
       positional.push(argv[i])
     }
   }
   return { positional, flags }
+}
+
+function flagEnabled(value: string | undefined): boolean {
+  if (value === undefined) return false
+  return !['', '0', 'false', 'no', 'off'].includes(value.toLowerCase())
 }
 
 async function auditLog(db: Client, eventType: string, agentId: string | null, target: string | null, detail: Record<string, unknown>) {
@@ -498,6 +508,8 @@ async function nextMessage() {
  *   --message-type chat|...   default: chat
  *   --queue-id <id>           optional durable close target
  *   --message-id <uuid>       optional cross-check for --queue-id
+ *   --no-close                ACK/progress reply: do not terminal-close work
+ *   --close                   explicit final close intent (default-compatible)
  *
  * MVP scope (Phase 2): this is a thin INSERT + pg_notify path. The full
  * server.ts send handler (rate limit / dup check / message split / channel-
@@ -513,9 +525,15 @@ async function sendMessage(args: string[]) {
   const messageType = flags['message-type'] ?? 'chat'
   const queueIdRaw = flags['queue-id']
   const messageIdRaw = flags['message-id']
+  const noClose = flagEnabled(flags['no-close'])
+  const closeRequested = flagEnabled(flags.close)
 
   if (!content) {
     console.error('Error: --content is required')
+    process.exit(2)
+  }
+  if (noClose && closeRequested) {
+    console.error('Error: --no-close and --close are mutually exclusive')
     process.exit(2)
   }
   if (!mentionsRaw) {
@@ -874,35 +892,39 @@ async function sendMessage(args: string[]) {
         outboundSkipReason = 'no discord adapter mapping for this channel'
       }
 
-      // ─────────────────────────────────────────────────────────────────
-      // Finalize in-flight state (§4.2 step 9-11).
-      // Issue #130 Phase 4: signal-mode unlink path removed. Queue mode is
-      // the only path now.
-      // ─────────────────────────────────────────────────────────────────
-      await db.query(
-        `UPDATE message_queue
-            SET status = 'replied',
-                replied_at = now(),
-                replied_with = $1,
-                claimed_by = NULL,
-                claimed_at = NULL,
-                claim_expires_at = NULL
-         WHERE id = $2`,
-        [id, target.queue_id],
-      )
-      // spec §4.2 step 10-11 — flip the agent based on remaining open
-      // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
-      // the send only closed ONE claim; if other claims are still 'received'
-      // the agent must remain busy. EXISTS-derive keeps observability
-      // (sender-feedback / heartbeat / bot_status) tracking the truth.
-      await db.query(
-        `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-           status_updated_at = now()
-         WHERE agent_id = $1`,
-        [agentId],
-      )
+      const workClosed = !noClose
+      if (workClosed) {
+        // ─────────────────────────────────────────────────────────────────
+        // Finalize in-flight state (§4.2 step 9-11).
+        // Issue #130 Phase 4: signal-mode unlink path removed. Queue mode is
+        // the only path now. #420 keeps this default path for backward
+        // compatibility; ACK/progress callers opt out with --no-close.
+        // ─────────────────────────────────────────────────────────────────
+        await db.query(
+          `UPDATE message_queue
+              SET status = 'replied',
+                  replied_at = now(),
+                  replied_with = $1,
+                  claimed_by = NULL,
+                  claimed_at = NULL,
+                  claim_expires_at = NULL
+           WHERE id = $2`,
+          [id, target.queue_id],
+        )
+        // spec §4.2 step 10-11 — flip the agent based on remaining open
+        // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
+        // the send only closed ONE claim; if other claims are still 'received'
+        // the agent must remain busy. EXISTS-derive keeps observability
+        // (sender-feedback / heartbeat / bot_status) tracking the truth.
+        await db.query(
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
+          [agentId],
+        )
+      }
       await db.query('COMMIT')
       committed = true
 
@@ -915,7 +937,8 @@ async function sendMessage(args: string[]) {
         mentions,
         auth_signed: authMeta !== undefined,
         outbound_queued: outboundQueued,
-        close_mode: explicitClose ? 'explicit' : 'active_claim',
+        work_closed: workClosed,
+        close_mode: workClosed ? (explicitClose || closeRequested ? 'explicit' : 'active_claim') : 'none',
         queue_id: target.queue_id,
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
@@ -1616,7 +1639,7 @@ Commands:
 
 Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
-  send --content "..." --mentions cto,ceo [--message-type chat]
+  send --content "..." --mentions cto,ceo [--message-type chat] [--no-close|--close]
   notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
   fail --message-id <uuid> --reason <text>            — mark in-flight message failed (v2.1.0, §4.1)
   skip --message-id <uuid> --reason <text>            — operator-initiated skip (v2.1.0, §4.1)

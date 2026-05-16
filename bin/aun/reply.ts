@@ -17,6 +17,8 @@ export interface ReplyOptions extends ReceiveOptions {
   messageType?: string
   queueId?: string
   messageId?: string
+  noClose?: boolean
+  close?: boolean
 }
 
 export interface NotifyOptions extends ReplyOptions {
@@ -47,6 +49,8 @@ export function buildReplyPlan(opts: ReplyOptions = {}): CommandPlan {
   if (opts.messageType?.trim()) argv.push('--message-type', opts.messageType.trim())
   if (opts.queueId?.trim()) argv.push('--queue-id', opts.queueId.trim())
   if (opts.messageId?.trim()) argv.push('--message-id', opts.messageId.trim())
+  if (opts.noClose) argv.push('--no-close')
+  if (opts.close) argv.push('--close')
   return buildCommandPlan(opts, argv)
 }
 
