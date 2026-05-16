@@ -160,6 +160,11 @@ export class StateDaemon {
         void this.handleQueueEvent(ev).then(() => {
           const lag = this.clock.now().getTime() - lagStart
           this.metrics.observe('state_daemon_pg_notify_lag_ms', lag)
+        }).catch((err) => {
+          this.metrics.inc('state_daemon_pg_notify_errors_total')
+          void this.alert.alert(
+            `pg_notify handler failed for row ${ev.id}: ${(err as Error).message ?? String(err)}`,
+          )
         })
       } catch (err) {
         this.metrics.inc('state_daemon_invalid_payload_total')
