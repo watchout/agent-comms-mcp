@@ -239,6 +239,11 @@ describe('per-bot wake suppression (PR #338 sub-PR 4 §1.5)', () => {
 
       expect(tmux.sentKeys.length).toBe(0)
       expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })).toBe(1)
+      expect(metrics.countInc('state_daemon_state_actions_total', {
+        action: 'observe_busy',
+        status: 'pending',
+        terminal: 'false',
+      })).toBe(1)
     } finally {
       await daemon.stop()
     }

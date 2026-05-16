@@ -105,7 +105,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
 
 export interface SeedQueueRow {
   agent_id: string
-  status?: 'pending' | 'received' | 'replied' | 'skipped' | 'failed'
+  status?: 'pending' | 'received' | 'in_progress' | 'replied' | 'skipped' | 'failed'
   message_id?: string | null
   payload?: string
   claim_expires_at?: Date | null

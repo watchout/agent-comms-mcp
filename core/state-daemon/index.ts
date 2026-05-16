@@ -289,15 +289,16 @@ export class StateDaemon {
     const expired = await this.fetchReceivedExpired()
     for (const row of expired) {
       result.scanned++
-      this.recordQueueAction(planQueueAction({
-        row,
-        agent: null,
-        now: this.clock.now(),
-        defaultRuntime: defaultConfigPort.getDefaultRuntime(),
-        hasActiveClaim: false,
-      }), row)
+      this.recordQueueAction(this.planAction(row, null, false, this.clock.now()), row)
       await this.reclaimRow(row)
       result.reclaimed++
+    }
+
+    const observed = await this.fetchObservableWork()
+    for (const row of observed) {
+      if (expired.some((e) => e.id === row.id)) continue
+      result.scanned++
+      this.recordQueueAction(this.planAction(row, null, true, this.clock.now()), row)
     }
 
     const stale = await this.fetchPendingStale()
@@ -554,82 +555,31 @@ export class StateDaemon {
       [row.agent_id],
     )
     const bot = rows[0]
-    if (!bot) {
-      this.recordQueueAction(planQueueAction({
-        row,
-        agent: null,
-        now,
-        defaultRuntime: defaultConfigPort.getDefaultRuntime(),
-        hasActiveClaim: false,
-      }), row)
-      await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
-      return false
-    }
     const defaultRuntime = defaultConfigPort.getDefaultRuntime()
-    if (bot.runtime !== defaultRuntime) {
-      this.recordQueueAction(planQueueAction({
-        row,
-        agent: bot,
-        now,
-        defaultRuntime,
-        hasActiveClaim: false,
-      }), row)
-      // Bug 3 fix (re-chain msg 250d01b0 / R15 / F13): non-TUI runtimes
-      // (e.g. `discord` for the human CEO account, `sig` for legacy bots
-      // mid-migration) used to take the throw + terminal failure + alert
-      // path. That corrupted the queue row (forced `failed/WAKE_FAILED`
-      // for a row the daemon simply has no business waking), spammed
-      // alerts on every dispatch, and surfaced as "Idle 連射" in the
-      // sender feedback channel. Silent skip instead — the row stays
-      // `pending` so the actual delivery path (Discord push, etc.)
-      // handles it; the only side effect here is a metric tick.
-      // Cycle 2 fix (auditor Axis 1+3): the abnormal-activity counter
-      // is also gated behind this branch — recording it here means a
-      // burst of non-TUI dispatches (e.g. human CEO chatter) cannot
-      // trip the operator alert. F13 covers BOTH the throw path AND
-      // the alert side-channel.
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })
-      return false
-    }
-    if (!bot.tmux_session) {
-      this.recordQueueAction(planQueueAction({
-        row,
-        agent: bot,
-        now,
-        defaultRuntime,
-        hasActiveClaim: false,
-      }), row)
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })
-      return false
+    let hasActiveClaim = false
+    if (bot && bot.runtime === defaultRuntime && bot.tmux_session) {
+      const activeClaims = await this.dbQuery(
+        `SELECT 1 FROM message_queue
+          WHERE agent_id=$1
+            AND claimed_by=$1
+            AND status IN ('received', 'in_progress')
+          LIMIT 1`,
+        [row.agent_id],
+      )
+      hasActiveClaim = activeClaims.rows.length > 0
     }
 
-    const activeClaims = await this.dbQuery(
-      `SELECT 1 FROM message_queue
-        WHERE agent_id=$1
-          AND claimed_by=$1
-          AND status IN ('received', 'in_progress')
-        LIMIT 1`,
-      [row.agent_id],
-    )
-    if (activeClaims.rows.length > 0) {
-      this.recordQueueAction(planQueueAction({
-        row,
-        agent: bot,
-        now,
-        defaultRuntime,
-        hasActiveClaim: true,
-      }), row)
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })
-      return false
-    }
-    this.recordQueueAction(planQueueAction({
+    const action = planQueueAction({
       row,
-      agent: bot,
+      agent: bot ?? null,
       now,
       defaultRuntime,
-      hasActiveClaim: false,
-    }), row)
+      hasActiveClaim,
+    })
+    this.recordQueueAction(action, row)
+    if (action.kind !== 'wake_pending') {
+      return this.runObservedQueueAction(action, row)
+    }
 
     // Wake suppression is bot runtime state, not message row state. Reserve
     // the bot's window with one conditional UPDATE so concurrent queue events
@@ -653,7 +603,7 @@ export class StateDaemon {
     // per-bot reservation so only actual wake sends feed the rolling window.
     this.recordDispatchForAbnormalCheck(row.agent_id)
     try {
-      await this.tmux.sendKeys(bot.tmux_session, 'Call the agent-comms next tool now. Do not call inbox.\n')
+      await this.tmux.sendKeys(bot!.tmux_session!, 'Call the agent-comms next tool now. Do not call inbox.\n')
     } catch (err) {
       await this.dbQuery(
         `UPDATE agents SET last_wake_attempt_at=NULL
@@ -699,6 +649,42 @@ export class StateDaemon {
     })
   }
 
+  private async runObservedQueueAction(action: PlannedQueueAction, row: QueueRow): Promise<boolean> {
+    switch (action.kind) {
+      case 'agent_missing':
+        await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
+        return false
+      case 'runtime_skip':
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' })
+        return false
+      case 'tmux_missing':
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })
+        return false
+      case 'observe_busy':
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })
+        return false
+      default:
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
+        return false
+    }
+  }
+
+  private planAction(
+    row: QueueRow,
+    agent: AgentRow | null,
+    hasActiveClaim: boolean,
+    now: Date,
+  ): PlannedQueueAction {
+    return planQueueAction({
+      row,
+      agent,
+      now,
+      defaultRuntime: defaultConfigPort.getDefaultRuntime(),
+      hasActiveClaim,
+    })
+  }
+
   // ── Sweep fetch helpers ────────────────────────────────────────────────────
 
   /**
@@ -739,6 +725,26 @@ export class StateDaemon {
       params.push(this.config.agentIdPrefix + '%')
     }
     sql += ` ORDER BY claim_expires_at LIMIT $2`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
+    return rows
+  }
+
+  private async fetchObservableWork(): Promise<QueueRow[]> {
+    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
+              last_wake_attempt_at, last_heartbeat_at
+         FROM message_queue
+        WHERE status IN ('received', 'in_progress')
+          AND (
+            status <> 'received'
+            OR claim_expires_at IS NULL
+            OR claim_expires_at >= $1::timestamptz
+          )`
+    const params: unknown[] = [this.clock.now(), this.config.batchLimit]
+    if (this.config.agentIdPrefix) {
+      sql += ` AND agent_id LIKE $3`
+      params.push(this.config.agentIdPrefix + '%')
+    }
+    sql += ` ORDER BY created_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }

@@ -224,6 +224,82 @@ describe('T12b stale dispatch observation semantics', () => {
       await h.daemon.stop()
     }
   })
+
+  test('live received row is observed without wake, reclaim, or terminal close', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t12b-live')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'received',
+      created_at: new Date(T0.getTime() - 60_000),
+      claim_expires_at: new Date(T0.getTime() + 60_000),
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 30_000),
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.reclaimed).toBe(0)
+      expect(result.rewoken).toBe(0)
+      expect(h.tmux.sentKeys.length).toBe(0)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', {
+        action: 'observe_received',
+        status: 'received',
+        terminal: 'false',
+      })).toBe(1)
+      const row = (await pg.query(`SELECT status, claimed_by, replied_with, failed_reason FROM message_queue WHERE id=$1`, [id]))
+        .rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null }
+      expect(row).toEqual({
+        status: 'received',
+        claimed_by: agent,
+        replied_with: null,
+        failed_reason: null,
+      })
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('in_progress row is observed without wake or terminal close', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t12b-in-progress')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      created_at: new Date(T0.getTime() - 60_000),
+      claim_expires_at: new Date(T0.getTime() + 60_000),
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 30_000),
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.reclaimed).toBe(0)
+      expect(result.rewoken).toBe(0)
+      expect(h.tmux.sentKeys.length).toBe(0)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', {
+        action: 'observe_in_progress',
+        status: 'in_progress',
+        terminal: 'false',
+      })).toBe(1)
+      const row = (await pg.query(`SELECT status, claimed_by, replied_with, failed_reason FROM message_queue WHERE id=$1`, [id]))
+        .rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null }
+      expect(row).toEqual({
+        status: 'in_progress',
+        claimed_by: agent,
+        replied_with: null,
+        failed_reason: null,
+      })
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T13 ───────────────────────────────────────────────────────────────────────
