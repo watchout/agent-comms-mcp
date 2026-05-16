@@ -9,7 +9,7 @@
  *   - aun receive --agent-id <id> [--dry-run]
  *   - aun next --agent-id <id> [--dry-run]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
- *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>]
+ *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
  *   - aun uninstall [--backup <path>] [--surgical]
  *   - aun status
@@ -33,7 +33,7 @@ function printHelp(): void {
     '  aun receive --agent-id <id> [--dry-run]',
     '  aun next --agent-id <id> [--dry-run]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
-    '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--dry-run]',
+    '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
@@ -179,6 +179,8 @@ export function run(argv: string[] = process.argv): number {
         messageType: typeof flags['message-type'] === 'string' ? (flags['message-type'] as string) : undefined,
         queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
         messageId: typeof flags['message-id'] === 'string' ? (flags['message-id'] as string) : undefined,
+        noClose: !!flags['no-close'],
+        close: !!flags.close,
         dryRun: !!flags['dry-run'],
       })
       if (res.stdout) process.stdout.write(res.stdout)
