@@ -149,6 +149,24 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
       .toEqual({ status: 'replied', replied_with: body.message_id })
   })
 
+  test('aged caller-owned claim closes by explicit queue id', () => {
+    const { queueId } = seedPending({ content: 'aged self claim' })
+    expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
+    dbExec(`UPDATE message_queue
+      SET created_at='2000-01-01T00:00:00.000Z',
+          claimed_at='2000-01-01T00:00:00.000Z',
+          claim_expires_at='2999-01-01T00:00:00.000Z'
+      WHERE id=${queueId}`)
+
+    const reply = explicitReply(queueId)
+
+    expect(reply.status).toBe(0)
+    const body = JSON.parse(reply.stdout)
+    expect(body.close_mode).toBe('explicit')
+    expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'replied', replied_with: body.message_id })
+  })
+
   test('another active owner fails with NOT_CLAIM_OWNER', () => {
     const { queueId } = seedPending({ content: 'owned elsewhere' })
     dbExec(`UPDATE message_queue
