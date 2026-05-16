@@ -9,6 +9,7 @@
  *   - aun receive --agent-id <id> [--dry-run]
  *   - aun next --agent-id <id> [--dry-run]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
+ *   - aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
  *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -21,6 +22,7 @@ import { status } from './aun/status'
 import { start } from './aun/start'
 import { drain, receive } from './aun/receive'
 import { notify, reply } from './aun/reply'
+import { codexRunnerTick } from './aun/codex-runner'
 
 function printHelp(): void {
   const lines = [
@@ -33,6 +35,7 @@ function printHelp(): void {
     '  aun receive --agent-id <id> [--dry-run]',
     '  aun next --agent-id <id> [--dry-run]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
+    '  aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
     '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -167,6 +170,27 @@ export function run(argv: string[] = process.argv): number {
         process.stderr.write(`Error [DRAIN_FAILED]: ${(err as Error).message}\n`)
         return 2
       }
+      if (res.stdout) process.stdout.write(res.stdout)
+      if (res.stderr) process.stderr.write(res.stderr)
+      return res.code
+    }
+    case 'codex-runner': {
+      const limitFlag = flags.limit
+      let limit: number | undefined
+      if (limitFlag !== undefined) {
+        if (typeof limitFlag !== 'string') {
+          process.stderr.write('Error [CODEX_RUNNER_INVALID_LIMIT]: --limit requires a value\n')
+          return 2
+        }
+        limit = Number(limitFlag)
+      }
+      const res = codexRunnerTick({
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        limit,
+        ackMentions: typeof flags['ack-mentions'] === 'string' ? (flags['ack-mentions'] as string) : undefined,
+        ackContent: typeof flags['ack-content'] === 'string' ? (flags['ack-content'] as string) : undefined,
+        dryRun: !!flags['dry-run'],
+      })
       if (res.stdout) process.stdout.write(res.stdout)
       if (res.stderr) process.stderr.write(res.stderr)
       return res.code
