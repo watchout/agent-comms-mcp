@@ -28,10 +28,10 @@ ThrottleInterval: 10
 ProcessType: Background
 ```
 
-`<APPROVED_REPO>` must be a clean checkout/worktree at
-`0b6efae21c49e85619394194a466f7120f79d964` or a later CTO-approved `main`
-commit. Do not use the dirty/behind developer checkout at
-`/Users/yuji/Developer/agent-comms-mcp` for restart.
+`<APPROVED_REPO>` must be a clean checkout/worktree at the CTO-approved
+post-fix `main` commit. That commit must be the #432-or-later merge commit
+containing the `scripts/restart-bot.sh` adapter fix. Do not use the dirty/behind
+developer checkout at `/Users/yuji/Developer/agent-comms-mcp` for restart.
 
 ### DB URL
 
@@ -60,22 +60,25 @@ approved restart window.
 
 ### Approved Checkout
 
-The daemon must run from a clean checkout at the approved merge commit. For the
-#431 / #421 verification window, that commit is:
+The daemon must run from a clean checkout at the CTO-approved post-fix merge
+commit. The approved commit must include the #432 `scripts/restart-bot.sh`
+adapter fix; #431 commit `0b6efae21c49e85619394194a466f7120f79d964` is not
+sufficient for restart because it still references the missing
+`scripts/start-runbot.sh` path.
 
 ```text
-0b6efae21c49e85619394194a466f7120f79d964
+CTO_APPROVED_STATE_DAEMON_COMMIT=<#432-or-later merge commit containing the restart-bot.sh adapter fix>
 ```
 
 Preflight command:
 
 ```bash
-APPROVED_COMMIT=0b6efae21c49e85619394194a466f7120f79d964
-APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${APPROVED_COMMIT}
+CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-#432-or-later-merge-commit>'
+APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}
 
 git fetch origin main
-test "$(git rev-parse origin/main)" = "$APPROVED_COMMIT"
-git worktree add --detach "$APPROVED_REPO" "$APPROVED_COMMIT"
+test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
+git worktree add --detach "$APPROVED_REPO" "$CTO_APPROVED_STATE_DAEMON_COMMIT"
 git -C "$APPROVED_REPO" status --short
 bun --cwd "$APPROVED_REPO" install --frozen-lockfile
 ```
@@ -117,10 +120,12 @@ rg 'scripts/(restart-bot|start-runbot)\\.sh' \
 Run these before asking CTO for restart approval:
 
 ```bash
-APPROVED_COMMIT=0b6efae21c49e85619394194a466f7120f79d964
-APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${APPROVED_COMMIT}
+CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-#432-or-later-merge-commit>'
+APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}
 DATABASE_URL='postgresql:///agent_comms?host=/tmp'
 
+git fetch origin main
+test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
 git -C "$APPROVED_REPO" diff --check
 bun --cwd "$APPROVED_REPO" test \
   tests/contract/state-daemon/test_state_action_matrix.test.ts \
@@ -128,7 +133,7 @@ bun --cwd "$APPROVED_REPO" test \
   tests/contract/state-daemon/test_per_bot_suppression.test.ts \
   tests/contract/state-daemon/m4-entry-smoke.test.ts
 bun --cwd "$APPROVED_REPO" build --target bun bin/state-daemon.ts \
-  --outfile /private/tmp/state-daemon-${APPROVED_COMMIT}.js
+  --outfile /private/tmp/state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}.js
 
 ps aux | rg 'state-daemon|bin/state-daemon|state_daemon' | rg -v rg || true
 launchctl print "gui/$(id -u)/com.agent-comms.state-daemon" || true
