@@ -75,6 +75,10 @@ describe('HANDOFF B communication invariants — PR-A must preserve pre-existing
     // §1.4 frozen text has three load-bearing substrings; drift on any
     // of them breaks the bot's guidance and the Stop hook contract.
     expect(SERVER).toContain('agent-comms channel events arrive as')
+    expect(SERVER).toContain('mcp__aun__send')
+    expect(SERVER).toContain('mcp__aun__notify')
+    expect(SERVER).toContain('mcp__agent_comms__send')
+    expect(SERVER).toContain('mcp__agent-comms__send')
     expect(SERVER).toContain('NEVER use the built-in SendMessage tool')
     expect(SERVER).toContain('NEVER reply only via stdout')
     expect(SERVER).toContain('enforced by a Stop hook')

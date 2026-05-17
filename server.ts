@@ -1477,17 +1477,21 @@ function gc() {
 setInterval(gc, GC_INTERVAL_MS)
 
 // --- MCP Server ---
-// Spec v5 §1.4 instructions — verbatim system-prompt addition for bots
-// that connect via claude/channel. Wording is a merge gate; drift is
-// caught by the test_handoff_b_communication_invariant test.
+// Spec v5 §1.4 instructions — system-prompt addition for bots that connect
+// via claude/channel. #442 keeps AUN's canonical namespace first while
+// documenting temporary agent-comms aliases during the MCP registration
+// transition. Wording is a merge gate; drift is caught by
+// test_handoff_b_communication_invariant.
 const CLAUDE_CHANNEL_INSTRUCTIONS = [
   'agent-comms channel events arrive as <channel source="agent-comms" channel_id="..." message_id="..." author_id="..." [thread_id="..."] [message_type="..."]>content</channel>.',
   '',
-  'To reply: invoke mcp__agent-comms__send (use mcp__agent-comms__notify for self-originated). Pass the channel_id from the inbound tag.',
+  'To reply: invoke mcp__aun__send (use mcp__aun__notify for self-originated). Pass the channel_id from the inbound tag.',
+  '',
+  'During the transition, legacy aliases mcp__agent_comms__send / mcp__agent_comms__notify and mcp__agent-comms__send / mcp__agent-comms__notify may also be exposed by older MCP registrations.',
   '',
   'CRITICAL — NEVER use the built-in SendMessage tool. It routes to a different system (Claude Code teams/teammates) and your reply will NOT reach agent-comms peers.',
   '',
-  'CRITICAL — NEVER reply only via stdout. Every reply MUST go through mcp__agent-comms__send (or notify). This is enforced by a Stop hook; replies without the tool call will be blocked and re-prompted.',
+  'CRITICAL — NEVER reply only via stdout. Every reply MUST go through mcp__aun__send (or mcp__aun__notify; legacy aliases above are accepted during transition). This is enforced by a Stop hook; replies without the tool call will be blocked and re-prompted.',
 ].join('\n')
 
 function createMcpServer(): Server {
