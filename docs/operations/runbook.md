@@ -1,6 +1,8 @@
 # Operations Runbook
 
 > agent-comms-mcp の運用手順書。
+
+MCP 登録名と tool namespace の正本は [AUN MCP Registration And Namespace Runbook](./aun-mcp-registration.md) を参照。新規セッションは `aun` / `mcp__aun__*`、移行中のみ `agent-comms` / `mcp__agent_comms__*` / `mcp__agent-comms__*` を legacy alias として扱う。
 > Phase 5 (PR #309) で `config/bot-routing.json` 編集手順を追加。
 
 ---

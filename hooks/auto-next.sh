@@ -21,5 +21,5 @@ set -euo pipefail
 EVENT="${CLAUDE_HOOK_EVENT_NAME:-SessionStart}"
 
 cat <<JSON
-{"hookSpecificOutput":{"hookEventName":"$EVENT","additionalContext":"auto-next: pending message_queue may be non-empty. Call \`mcp__agent-comms__next\` once; if waiting>0 process the message, otherwise no-op and continue."}}
+{"hookSpecificOutput":{"hookEventName":"$EVENT","additionalContext":"auto-next: pending message_queue may be non-empty. Call \`mcp__aun__next\` once; legacy aliases \`mcp__agent_comms__next\` / \`mcp__agent-comms__next\` are accepted during migration. If waiting>0 process the message, otherwise no-op and continue."}}
 JSON

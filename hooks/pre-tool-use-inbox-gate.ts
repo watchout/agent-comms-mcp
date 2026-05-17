@@ -19,12 +19,13 @@
  *     this gate forces the LLM to handle the inbox first.
  *
  * Allow-list (every other tool is blocked while inbox > 0):
- *   - mcp__agent-comms__next       (claim a pending row)
- *   - mcp__agent-comms__send       (reply to an active claim)
- *   - mcp__agent-comms__notify     (self-originated post, no claim)
- *   - mcp__agent-comms__skip       (operator drop)
- *   - mcp__agent-comms__fail       (error path)
- *   - mcp__agent-comms__reclaim    (manual orphan reclaim)
+ *   - mcp__aun__next               (claim a pending row)
+ *   - mcp__aun__send               (reply to an active claim)
+ *   - mcp__aun__notify             (self-originated post, no claim)
+ *   - mcp__aun__skip               (operator drop)
+ *   - mcp__aun__fail               (error path)
+ *   - mcp__aun__reclaim            (manual orphan reclaim)
+ *   - legacy aliases: mcp__agent_comms__* / mcp__agent-comms__*
  *
  * Failure modes (all fail-safe exit 0):
  *   - DATABASE_URL / AGENT_ID unset → no-op pass.
@@ -58,13 +59,16 @@ const ERROR_LOG = join(LOG_DIR, 'pre-tool-use-inbox-gate-errors.log')
 // Allow-list: any tool whose name matches one of these is permitted to
 // run regardless of inbox state. Everything else gets gated when the
 // inbox is non-empty.
+const MCP_NAMESPACES = ['aun', 'agent_comms', 'agent-comms'] as const
+const INBOX_TOOL_NAMES = ['next', 'send', 'notify', 'skip', 'fail', 'reclaim'] as const
+const CANONICAL_ALLOWED_TOOLS = INBOX_TOOL_NAMES.map(tool => `mcp__aun__${tool}`)
+const LEGACY_ALLOWED_TOOLS = MCP_NAMESPACES
+  .filter(ns => ns !== 'aun')
+  .flatMap(ns => INBOX_TOOL_NAMES.map(tool => `mcp__${ns}__${tool}`))
+
 const ALLOW_LIST = new Set<string>([
-  'mcp__agent-comms__next',
-  'mcp__agent-comms__send',
-  'mcp__agent-comms__notify',
-  'mcp__agent-comms__skip',
-  'mcp__agent-comms__fail',
-  'mcp__agent-comms__reclaim',
+  ...CANONICAL_ALLOWED_TOOLS,
+  ...LEGACY_ALLOWED_TOOLS,
 ])
 
 interface PreToolUsePayload { tool_name?: string }
@@ -91,9 +95,9 @@ function emitBlock(pendingCount: number): void {
   const additional =
     `ERROR [INBOX_GATE]: agent ${AGENT_ID} has ${pendingCount} unread message_queue row(s) (status='pending'). ` +
     `You MUST drain the inbox before running any other tool. Allowed tools while gated: ` +
-    `mcp__agent-comms__next, mcp__agent-comms__send, mcp__agent-comms__notify, ` +
-    `mcp__agent-comms__skip, mcp__agent-comms__fail, mcp__agent-comms__reclaim. ` +
-    `Call \`mcp__agent-comms__next\` now to claim and process the next message.`
+    `${CANONICAL_ALLOWED_TOOLS.join(', ')}. ` +
+    `Legacy aliases are also accepted during migration: ${LEGACY_ALLOWED_TOOLS.join(', ')}. ` +
+    `Call \`mcp__aun__next\` now to claim and process the next message.`
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: additional },
   }) + '\n')

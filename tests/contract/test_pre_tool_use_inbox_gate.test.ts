@@ -65,6 +65,8 @@ dbDescribe('test_pre_tool_use_inbox_gate — Issue #278 cycle 3', () => {
     const r = runGate('Bash')
     expect(r.status).toBe(2)
     expect(r.stdout).toContain('INBOX_GATE')
+    expect(r.stdout).toContain('mcp__aun__next')
+    expect(r.stdout).toContain('mcp__agent_comms__next')
     expect(r.stdout).toContain('mcp__agent-comms__next')
     expect(r.stdout).toContain('1 unread')
   })
@@ -79,6 +81,18 @@ dbDescribe('test_pre_tool_use_inbox_gate — Issue #278 cycle 3', () => {
   test('(allow-list) inbox-management tools are NEVER gated, even with a pending row', async () => {
     await seedPending()
     for (const tool of [
+      'mcp__aun__next',
+      'mcp__aun__send',
+      'mcp__aun__notify',
+      'mcp__aun__skip',
+      'mcp__aun__fail',
+      'mcp__aun__reclaim',
+      'mcp__agent_comms__next',
+      'mcp__agent_comms__send',
+      'mcp__agent_comms__notify',
+      'mcp__agent_comms__skip',
+      'mcp__agent_comms__fail',
+      'mcp__agent_comms__reclaim',
       'mcp__agent-comms__next',
       'mcp__agent-comms__send',
       'mcp__agent-comms__notify',

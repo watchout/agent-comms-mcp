@@ -5,7 +5,7 @@
 # Claude Code TUI sits idle when there is a pending backlog but no new
 # inbound message arrives to fire the wake-daemon. This hook closes the
 # gap by reading the pending count itself and, when > 0, driving the
-# TUI via `tmux send-keys` to call `mcp__agent-comms__next` once.
+# TUI via `tmux send-keys` to call `mcp__aun__next` once.
 #
 # --- Adapter / port architecture (PR #321 cycle 3, axis 5 BLOCK resolve) ---
 # This file is the thin orchestrator. The three variation axes (DB
@@ -74,7 +74,7 @@ total=$(aun_self_kick_db_query "$agent_id")
 # Kick — orchestrator core (intentionally NOT abstracted into an
 # adapter; over-abstraction is forbidden by the cycle 3 §3).
 touch "$lock" 2>/dev/null || true
-prompt="起動時 self-prime: pending ${total} 件。mcp__agent-comms__next を呼んで処理してください。"
+prompt="起動時 self-prime: pending ${total} 件。mcp__aun__next を呼んで処理してください。legacy alias: mcp__agent_comms__next / mcp__agent-comms__next"
 (
   sleep 3
   tmux send-keys -t "$session" "$prompt" 2>/dev/null || true
