@@ -5,13 +5,43 @@ authorizing a production restart. Do not restart `state_daemon`, mutate launchd,
 change DB rows, edit `.mcp.json`, or edit the bot registry until CTO explicitly
 approves the restart window.
 
-## Blockers Resolved
+## Restart Standard
+
+### Desired Plist And Environment
+
+These are the desired values for the next approved restart. They are not live
+mutation instructions until CTO approves the restart window.
+
+```text
+Label: com.agent-comms.state-daemon
+ProgramArguments.0: /Users/yuji/.bun/bin/bun
+ProgramArguments.1: <APPROVED_REPO>/bin/state-daemon.ts
+WorkingDirectory: <APPROVED_REPO>
+StandardOutPath: <APPROVED_REPO>/logs/state-daemon.out.log
+StandardErrorPath: <APPROVED_REPO>/logs/state-daemon.err.log
+EnvironmentVariables.NODE_ENV: production
+EnvironmentVariables.DATABASE_URL: postgresql:///agent_comms?host=/tmp
+EnvironmentVariables.PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+EnvironmentVariables.STATE_DAEMON_WAKE_DUPLICATE_SUPPRESS_SEC: 30
+KeepAlive: true
+ThrottleInterval: 10
+ProcessType: Background
+```
+
+`<APPROVED_REPO>` must be a clean checkout/worktree at
+`0b6efae21c49e85619394194a466f7120f79d964` or a later CTO-approved `main`
+commit. Do not use the dirty/behind developer checkout at
+`/Users/yuji/Developer/agent-comms-mcp` for restart.
 
 ### DB URL
 
 The observed launchd plist used `postgresql://localhost/agent_comms`, while
 operator verification used `postgresql:///agent_comms?host=/tmp`. Treat this as
 a release gate, not as an implicit migration.
+
+The restart standard is `postgresql:///agent_comms?host=/tmp`. Using TCP
+`localhost` requires separate CTO approval with connection-test evidence that
+it targets the same intended production database.
 
 Preflight command:
 
@@ -60,6 +90,18 @@ The production `state_daemon` restart adapter now calls
 `scripts/restart-bot.sh`, which exists in the repo and is already used by
 watchdog/operator paths. The previous `scripts/start-runbot.sh` reference was a
 blocker because that file was absent.
+
+Risk classification:
+
+- Severity: restart-readiness blocker for bot auto-restart paths.
+- Runtime impact before this PR: the daemon can still wake/observe queues, but
+  a dead TUI bot restart attempt fails with a missing-file error and escalates.
+- Data-safety impact: no direct queue-row mutation or terminal-close risk.
+- Resolution in this PR: call the existing repo-owned
+  `scripts/restart-bot.sh` launcher and pin that path in source tests.
+- Residual operational risk: `scripts/restart-bot.sh` may sync `.mcp.json` from
+  bot registry during bot restart, so do not force bot auto-restart in the first
+  smoke unless CTO explicitly approves that side effect.
 
 Preflight command:
 
@@ -111,6 +153,8 @@ COMMIT;"
 
 Pass criteria:
 
+- installed plist values match the desired values above, or every mismatch is
+  recorded as pending CTO-approved restart-window mutation
 - focused tests and build pass
 - installed service status is recorded before restart
 - `STALE_DISPATCH:%` count since #431 merge is zero or explicitly explained
