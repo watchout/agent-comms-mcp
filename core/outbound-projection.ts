@@ -8,7 +8,7 @@ export interface OutboundProjectionRoute {
   platform: 'discord'
   channelExternalId: string | null
   consumerAgentId: string | null
-  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
+  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> {
@@ -34,7 +34,7 @@ function ownerFromMetadata(raw: unknown): string | null {
 
 export async function resolveOutboundProjectionRoute(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord' },
+  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null },
 ): Promise<OutboundProjectionRoute> {
   const platform = input.platform ?? 'discord'
   let channelExternalId: string | null = null
@@ -66,6 +66,10 @@ export async function resolveOutboundProjectionRoute(
   }
 
   const policy = getChannelPolicy(input.channelId)
+  const nativeRoleOwner = input.senderAgentId ? policy.nativeRoleOutboundOwners[input.senderAgentId] : null
+  if (nativeRoleOwner) {
+    return { platform, channelExternalId, consumerAgentId: nativeRoleOwner, source: 'channel_policy_native_role_owner' }
+  }
   if (policy.adapterOwner) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, source: 'channel_policy_adapter_owner' }
   }

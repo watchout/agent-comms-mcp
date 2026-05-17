@@ -50,6 +50,41 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('channel_policy_adapter_owner')
   })
 
+  test('native-role owner overrides channel adapterOwner only for matching sender', async () => {
+    setRoutingConfig({
+      ch1: {
+        primary: 'primary-agent',
+        adapterOwner: 'agent-com-dev',
+        nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
+      },
+    })
+    const db = {
+      query: async () => ({ rows: [{ external_id: 'discord-ch', metadata: null }] }),
+    }
+    const codexCto = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-cto' })
+    expect(codexCto.consumerAgentId).toBe('codex-cto')
+    expect(codexCto.source).toBe('channel_policy_native_role_owner')
+
+    const otherAgent = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-aun' })
+    expect(otherAgent.consumerAgentId).toBe('agent-com-dev')
+    expect(otherAgent.source).toBe('channel_policy_adapter_owner')
+  })
+
+  test('explicit adapter metadata still wins over native-role policy', async () => {
+    setRoutingConfig({
+      ch1: {
+        adapterOwner: 'agent-com-dev',
+        nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
+      },
+    })
+    const db = {
+      query: async () => ({ rows: [{ external_id: 'discord-ch', metadata: { consumer_agent_id: 'metadata-owner' } }] }),
+    }
+    const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-cto' })
+    expect(route.consumerAgentId).toBe('metadata-owner')
+    expect(route.source).toBe('channel_adapter_metadata')
+  })
+
   test('channel primary remains a compatibility fallback', async () => {
     setRoutingConfig({ ch1: { primary: 'agent-com-dev' } })
     const db = {

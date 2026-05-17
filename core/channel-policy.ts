@@ -16,6 +16,8 @@ export interface ChannelPolicyEntry {
   primary: AgentId | null
   /** #410 — chat adapter process that owns projection for this channel. */
   adapterOwner: AgentId | null
+  /** #417 — sender-specific native role projection owner overrides. */
+  nativeRoleOutboundOwners: Record<AgentId, AgentId>
   /** §1.3 / §2.4 — outbound ACL allowlist. `null` = entry absent (legacy: all senders permitted). */
   outboundAllowlist: AgentId[] | null
 }
@@ -25,6 +27,7 @@ interface RoutingConfig {
   channels: Record<string, {
     primary?: AgentId | null
     adapterOwner?: AgentId | null
+    nativeRoleOutboundOwners?: Record<AgentId, AgentId>
     outboundAllowlist?: AgentId[]
   }>
 }
@@ -83,10 +86,19 @@ function loadConfig(): RoutingConfig {
 export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
   const config = loadConfig()
   const entry = config.channels[channel_id]
-  if (!entry) return { primary: null, adapterOwner: null, outboundAllowlist: null }
+  if (!entry) return { primary: null, adapterOwner: null, nativeRoleOutboundOwners: {}, outboundAllowlist: null }
+  const nativeRoleOutboundOwners =
+    entry.nativeRoleOutboundOwners && typeof entry.nativeRoleOutboundOwners === 'object'
+      ? Object.fromEntries(
+        Object.entries(entry.nativeRoleOutboundOwners)
+          .filter((kv): kv is [string, string] => typeof kv[1] === 'string' && kv[1].trim().length > 0)
+          .map(([sender, owner]) => [sender, owner.trim()]),
+      )
+      : {}
   return {
     primary: entry.primary ?? null,
     adapterOwner: entry.adapterOwner ?? null,
+    nativeRoleOutboundOwners,
     outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
   }
 }
