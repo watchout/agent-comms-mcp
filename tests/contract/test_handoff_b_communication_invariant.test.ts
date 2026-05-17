@@ -72,11 +72,35 @@ describe('HANDOFF B communication invariants — PR-A must preserve pre-existing
   })
 
   test('instructions string quotes spec v5 §1.4 verbatim — hook guidance present', () => {
-    // §1.4 frozen text has three load-bearing substrings; drift on any
-    // of them breaks the bot's guidance and the Stop hook contract.
+    // §1.4 / #442 text has load-bearing substrings; drift on any of
+    // them breaks the bot's guidance and the Stop hook contract.
     expect(SERVER).toContain('agent-comms channel events arrive as')
     expect(SERVER).toContain('NEVER use the built-in SendMessage tool')
     expect(SERVER).toContain('NEVER reply only via stdout')
     expect(SERVER).toContain('enforced by a Stop hook')
+  })
+
+  test('instructions prefer canonical mcp__aun__* and keep legacy aliases as migration-only', () => {
+    const instructionMatch = SERVER.match(/const CLAUDE_CHANNEL_INSTRUCTIONS = \[([\s\S]*?)\]\.join\('\\n'\)/)
+    expect(instructionMatch).not.toBeNull()
+    const instructions = instructionMatch?.[1] ?? ''
+
+    expect(instructions).toContain('mcp__aun__send')
+    expect(instructions).toContain('mcp__aun__notify')
+    expect(instructions).toContain('mcp__agent_comms__send')
+    expect(instructions).toContain('mcp__agent_comms__notify')
+    expect(instructions).toContain('mcp__agent-comms__send')
+    expect(instructions).toContain('mcp__agent-comms__notify')
+    expect(instructions).toContain('Prefer mcp__aun__* in fresh sessions')
+
+    const canonicalIndex = instructions.indexOf('mcp__aun__send')
+    const legacyHyphenIndex = instructions.indexOf('mcp__agent-comms__send')
+    const legacyUnderscoreIndex = instructions.indexOf('mcp__agent_comms__send')
+    expect(canonicalIndex).toBeGreaterThanOrEqual(0)
+    expect(legacyHyphenIndex).toBeGreaterThan(canonicalIndex)
+    expect(legacyUnderscoreIndex).toBeGreaterThan(canonicalIndex)
+
+    expect(instructions).not.toMatch(/To reply:\s*invoke mcp__agent-comms__send/)
+    expect(instructions).not.toMatch(/Every reply MUST go through mcp__agent-comms__send/)
   })
 })
