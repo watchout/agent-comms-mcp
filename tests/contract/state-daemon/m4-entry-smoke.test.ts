@@ -49,10 +49,10 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
     // field without ever pressing Enter. Pin both halves of the contract.
     expect(SRC).toMatch(/payload\.endsWith\('\\n'\)/)
     expect(SRC).toMatch(/send-keys[\s\S]*?'Enter'/)
-    // Restart launcher = scripts/start-runbot.sh (the existing launcher in
-    // tree; spec §13.2 referenced `scripts/start-bot.sh` as an example name
-    // only — see CTO L3 prep finding 2 in the PR description).
-    expect(SRC).toMatch(/scripts\/start-runbot\.sh/)
+    // Restart launcher = scripts/restart-bot.sh, the existing repo-owned
+    // restart entrypoint used by watchdog/operator paths.
+    expect(SRC).toMatch(/scripts\/restart-bot\.sh/)
+    expect(SRC).not.toMatch(/scripts\/start-runbot\.sh/)
   })
   test('env → config mapping covers all StateDaemonConfig knobs', () => {
     // Every public knob must have a STATE_DAEMON_* env mapping. Pin a sample.

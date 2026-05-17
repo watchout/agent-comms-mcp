@@ -185,7 +185,7 @@ export interface PgListenClient {
 export interface TmuxClient {
   sessionExists(session: string): Promise<boolean>
   sendKeys(session: string, payload: string): Promise<void>
-  /** §5.4 補強 #5 — restart launcher (existing `bin/start-bot.sh`-style hook). */
+  /** §5.4 補強 #5 — restart launcher (existing `scripts/restart-bot.sh` hook). */
   restartSession(agentId: string): Promise<void>
 }
 

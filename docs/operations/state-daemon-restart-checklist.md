@@ -2,6 +2,8 @@
 
 Formal `state_daemon` restart is blocked until #421 is complete and CTO
 explicitly approves the restart. This checklist is a preflight record only.
+Use `docs/operations/state-daemon-restart-readiness-runbook.md` for the
+blocker-resolution commands, approved restart commands, smoke, and rollback.
 
 ## Preconditions
 
@@ -16,6 +18,12 @@ explicitly approves the restart. This checklist is a preflight record only.
 ## Preflight Checks
 
 - Confirm `origin/main` includes the latest #421 merge commit.
+- Confirm the installed launchd `DATABASE_URL` matches the CTO-approved
+  production DB URL.
+- Confirm launchd points at a clean approved checkout, not a dirty developer
+  working tree.
+- Confirm the daemon restart launcher path resolves to
+  `scripts/restart-bot.sh`.
 - Run focused tests:
   - `bun test tests/contract/state-daemon/test_state_action_matrix.test.ts tests/contract/state-daemon/m2-sweep.test.ts tests/contract/state-daemon/test_per_bot_suppression.test.ts`
   - `bun build --target bun bin/state-daemon.ts --outfile /tmp/state-daemon-build.js`
