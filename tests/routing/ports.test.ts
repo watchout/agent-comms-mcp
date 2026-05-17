@@ -236,6 +236,25 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     ])
   })
 
+  test('§4.4 channel 1487368919613444156 — codex-cto can target codex-aun directly', () => {
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const cfg = JSON.parse(
+      fs.readFileSync(
+        path.join(new URL('../..', import.meta.url).pathname, 'config/bot-routing.json'),
+        'utf-8',
+      ),
+    )
+    setRoutingConfig({
+      '1487368919613444156': {
+        primary: cfg.channels['1487368919613444156']?.primary ?? 'agent-com-dev',
+        outboundAllowlist: cfg.channels['1487368919613444156'].outboundAllowlist,
+      },
+    })
+    const v = createOutboundPolicyValidator()
+    expect(v.validate('codex-cto', '1487368919613444156', ['codex-aun']).ok).toBe(true)
+  })
+
   test('§4.4 channel 1487368919613444156 — lead-sus / hotel-dev ok, unknown sender → violations contains it', () => {
     const fs = require('node:fs')
     const path = require('node:path')

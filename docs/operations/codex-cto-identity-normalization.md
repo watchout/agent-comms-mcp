@@ -9,6 +9,7 @@ CEO-approved Step 1 + Step 2:
 1. Move the existing CTO Discord identity from legacy `cto` to `codex-cto`.
 2. Migrate the `discord-cto` runtime to `AGENT_ID=codex-cto`.
 3. Let `codex-cto` egress through the CTO native Discord adapter identity while preserving #411 `adapterOwner` fallback for other agents.
+4. Keep `codex-aun` in channel `1487368919613444156` `outboundAllowlist` so direct `codex-cto` -> `codex-aun` communication is valid. This fixes the lead-relay gap where work could be stranded in relay queues that `codex-aun` cannot drain.
 
 ## Current State To Confirm
 
@@ -132,6 +133,12 @@ Resolution order:
 5. `primary`
 
 This preserves #411 `adapterOwner=agent-com-dev` for fine-grained agents while letting `codex-cto` rows be claimed by the `codex-cto` runtime.
+
+The same channel policy must keep both `codex-cto` and `codex-aun` in
+`outboundAllowlist`. Without `codex-aun`, a direct CTO instruction to
+`codex-aun` is rejected by outbound ACL and may be incorrectly rerouted through
+lead relay queues. The identity/token migration stays gated, but the routing
+policy must allow this direct pair before the migration window.
 
 ## Rollback
 
