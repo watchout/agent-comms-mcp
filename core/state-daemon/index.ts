@@ -423,7 +423,7 @@ export class StateDaemon {
       if (stale <= this.config.botDeadThresholdMs) continue
       // §5.4 / R7: TUI bot with stale last_seen_at gets restart attempted
       // regardless of whether the tmux_session field is currently populated
-      // — the launcher (start-runbot.sh) reattaches or recreates the session
+      // — the launcher (restart-bot.sh) reattaches or recreates the session
       // by agent_id, so a missing tmux_session value is not a blocker; it is
       // exactly the case we want restarted. Non-TUI runtimes are still alert-
       // only (cycle 1 auditor Axis 1: tmux_session 欠落 path も restart 試行へ).

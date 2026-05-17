@@ -61,7 +61,7 @@
   <!--
     Bug 2 fix (re-chain msg 250d01b0): launchd does NOT inherit a login
     shell PATH, so subprocess spawns (`tmux send-keys`, `bash
-    scripts/start-runbot.sh`, etc.) fail to resolve binaries that live
+    scripts/restart-bot.sh`, etc.) fail to resolve binaries that live
     under Homebrew. F15 forbids leaving PATH unset / relying on the
     system default. Pin the prefixes that the daemon actually shells
     out to: Homebrew (Apple Silicon), Homebrew (Intel), and the system

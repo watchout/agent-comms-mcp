@@ -98,12 +98,10 @@ class TmuxShellAdapter implements TmuxClient {
     await execFileAsync('tmux', ['send-keys', '-t', session, stripped, 'Enter'])
   }
   async restartSession(agentId: string): Promise<void> {
-    // Existing launcher: scripts/start-runbot.sh (the only start script
-    // present in this repo as of #323 m4 — spec §13.2 referenced
-    // `scripts/start-bot.sh` as a "例" but the actual file in tree is
-    // start-runbot.sh; if a different launcher is required for state-daemon
-    // restarts, an Open-decision §5 PR will swap this single line).
-    await execFileAsync('bash', ['scripts/start-runbot.sh', agentId])
+    // Existing launcher: scripts/restart-bot.sh is the repo-owned bot restart
+    // entrypoint. It resolves bot-registry.txt, cleans orphan ports, syncs
+    // .mcp.json from registry SSOT, and recreates the tmux session.
+    await execFileAsync('bash', ['scripts/restart-bot.sh', agentId])
   }
 }
 
