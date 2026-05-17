@@ -30,6 +30,6 @@ timeout 5 bun hooks/session-start-drain.ts >/dev/null 2>&1 || true
 
 EVENT="${CLAUDE_HOOK_EVENT_NAME:-SessionStart}"
 cat <<JSON
-{"hookSpecificOutput":{"hookEventName":"$EVENT","additionalContext":"session-start-drain: bounded auto-pull complete (latest N drained, auto-skip applied). pending message_queue may still hold unmatched rows; call mcp__agent-comms__next when ready."}}
+{"hookSpecificOutput":{"hookEventName":"$EVENT","additionalContext":"session-start-drain: bounded auto-pull complete (latest N drained, auto-skip applied). pending message_queue may still hold unmatched rows; call mcp__aun__next when ready. Legacy aliases mcp__agent_comms__next / mcp__agent-comms__next are accepted during migration."}}
 JSON
 exit 0

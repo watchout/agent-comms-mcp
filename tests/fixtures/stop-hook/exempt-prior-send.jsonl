@@ -1,4 +1,4 @@
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"<channel source=\"agent-comms\" channel_id=\"pilot-test-prior\" message_id=\"msg-5\">multi-turn request</channel>"}]}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me reply and then run a tool."},{"type":"tool_use","id":"tu_3","name":"mcp__agent-comms__send","input":{"reply_to":"msg-5","mentions":["bot-a"],"content":"ack"}}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me reply and then run a tool."},{"type":"tool_use","id":"tu_3","name":"mcp__aun__send","input":{"reply_to":"msg-5","mentions":["bot-a"],"content":"ack"}}]}}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_3","content":"sent"}]}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done — continuing with internal bookkeeping (no additional send needed)."}]}}

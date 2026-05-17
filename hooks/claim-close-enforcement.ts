@@ -136,8 +136,8 @@ function writeCounter(p: string, n: number): void {
 
 function emitBlock(reason: string): void {
   const additional = reason === 'open_claim'
-    ? 'ERROR: You still hold an open per-row claim on message_queue (status=read). You MUST close it via mcp__agent-comms__send (reply), mcp__agent-comms__skip (operator drop), or mcp__agent-comms__fail (error path) before the turn ends. Do not stop with a claim still open.'
-    : 'ERROR: pending message_queue rows for your agent_id remain unprocessed. Call mcp__agent-comms__next to claim and process the next message before stopping.'
+    ? 'ERROR: You still hold an open per-row claim on message_queue (status=read). You MUST close it via mcp__aun__send (reply), mcp__aun__skip (operator drop), or mcp__aun__fail (error path) before the turn ends. Legacy aliases mcp__agent_comms__* and mcp__agent-comms__* are accepted during migration. Do not stop with a claim still open.'
+    : 'ERROR: pending message_queue rows for your agent_id remain unprocessed. Call mcp__aun__next to claim and process the next message before stopping. Legacy aliases mcp__agent_comms__next and mcp__agent-comms__next are accepted during migration.'
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'Stop', additionalContext: additional },
   }) + '\n')

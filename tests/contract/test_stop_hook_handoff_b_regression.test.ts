@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path'
 //       discord-adapter etc. Static grep enforces this.
 //   (2) Hook settings.json shape is array-append-friendly — co-existing
 //       with PreToolUse / SessionStart / UserPromptSubmit entries.
-//   (3) `mcp__agent-comms__{send,notify}` names in the hook regex match
+//   (3) `mcp__aun__{send,notify}` plus legacy aliases in the hook regex match
 //       the tool names actually registered in server.ts today — a rename
 //       in the server must cause the hook to be updated in lockstep.
 
@@ -42,7 +42,7 @@ describe('test_stop_hook_handoff_b_regression — Stop hook does not disturb exi
       /(\s|^)(source|\.)\s+[^|#]*cli\//i,
       /(\s|^)(source|\.)\s+[^|#]*db\//i,
       /bun\s+run\s+[^|#]*server\.ts/i,
-      /mcp__agent-comms__(?!send|notify)/, // only send/notify tool names are mentioned
+      /mcp__aun__(?!send|notify)/, // only send/notify tool names are mentioned
     ]
     for (const pat of forbidden) {
       expect(src).not.toMatch(pat)
@@ -95,19 +95,20 @@ describe('test_stop_hook_handoff_b_regression — Stop hook does not disturb exi
     expect(round).toEqual(merged)
   })
 
-  test('(3) tool names used by the hook match real mcp__agent-comms__* registrations', () => {
-    // The hook's exact-match whitelist is `mcp__agent-comms__send` and
-    // `mcp__agent-comms__notify`. If server.ts ever renames or removes
-    // either, this test must start failing so the hook gets updated in
-    // the same PR — otherwise the block path would silently pass for
-    // the renamed tool.
+  test('(3) tool names used by the hook match real send/notify registrations plus namespace policy', () => {
+    // The hook's exact-match whitelist is canonical `mcp__aun__{send,notify}`
+    // plus legacy `mcp__agent_comms__*` / `mcp__agent-comms__*` aliases.
+    // If server.ts ever renames or removes either underlying tool, this
+    // test must start failing so the hook gets updated in the same PR.
     const server = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
     expect(server).toMatch(/name:\s*['"]send['"]/)
     expect(server).toMatch(/name:\s*['"]notify['"]/)
 
     const hook = readFileSync(HOOK_PATH, 'utf-8')
-    expect(hook).toContain('mcp__agent-comms__send')
-    expect(hook).toContain('mcp__agent-comms__notify')
+    for (const ns of ['aun', 'agent_comms', 'agent-comms']) {
+      expect(hook).toContain(`mcp__${ns}__send`)
+      expect(hook).toContain(`mcp__${ns}__notify`)
+    }
   })
 
   test('(4) hook execution does not open any DB / network handle (no side effects outside $AUN_*)', () => {

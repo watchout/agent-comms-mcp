@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 // Spec §4.2 negative:
 //   (a) text-only assistant turn + channel tag user turn → exit 2 with
 //       additionalContext matching §1.5 verbatim.
-//   (b) built-in SendMessage tool_use only (no mcp__agent-comms__*) → exit 2,
+//   (b) built-in SendMessage tool_use only (no AUN MCP send/notify) → exit 2,
 //       additionalContext must state "NOT via built-in SendMessage".
 //
 // §1.5 additionalContext text is a merge gate — the test asserts the exact
@@ -44,15 +44,19 @@ describe('test_stop_hook_negative — channel tag + no send/notify → block', (
     const ctx = parsed.hookSpecificOutput?.additionalContext ?? ''
     // §1.5 key substrings — drift on any of these is a regression.
     expect(ctx).toContain('ERROR:')
+    expect(ctx).toContain('mcp__aun__send')
+    expect(ctx).toContain('mcp__aun__notify')
+    expect(ctx).toContain('mcp__agent_comms__send')
+    expect(ctx).toContain('mcp__agent_comms__notify')
     expect(ctx).toContain('mcp__agent-comms__send')
     expect(ctx).toContain('mcp__agent-comms__notify')
     expect(ctx).toContain('<channel source="agent-comms">')
     expect(ctx).toContain('NOT via stdout')
     expect(ctx).toContain('NOT via built-in SendMessage')
-    expect(ctx).toContain('Invoke mcp__agent-comms__send')
+    expect(ctx).toContain('Invoke mcp__aun__send')
   })
 
-  test('built-in SendMessage only (no mcp__agent-comms__*) → exit 2 + NOT via built-in', () => {
+  test('built-in SendMessage only (no AUN MCP send/notify) → exit 2 + NOT via built-in', () => {
     const r = runHook(
       { transcript_path: join(FIXTURES, 'negative-sendmessage.jsonl'), session_id: 'neg-sm' },
       { AUN_LOG_DIR: join(tmpDir, 'logs'), AUN_STATE_DIR: join(tmpDir, 'state') },

@@ -170,6 +170,8 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       const log = readFileSync(stub.tmuxLog, 'utf-8')
       expect(log).toMatch(/send-keys/)
       expect(log).toMatch(/test-session/)
+      expect(log).toMatch(/mcp__aun__next/)
+      expect(log).toMatch(/mcp__agent_comms__next/)
       expect(log).toMatch(/mcp__agent-comms__next/)
       // Two send-keys calls: the prompt body and a separate Enter.
       const sendKeysLines = log.split('\n').filter(l => l.includes('send-keys'))

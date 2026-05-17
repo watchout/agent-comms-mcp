@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stop hook — enforce `mcp__agent-comms__send` / `mcp__agent-comms__notify`
+# Stop hook — enforce `mcp__aun__send` / `mcp__aun__notify`
+# while accepting legacy `mcp__agent_comms__*` / `mcp__agent-comms__*`.
 # invocation when the bot was woken by an agent-comms channel message.
 # Spec: specs/draft/2026-04-25-send-tool-enforcement-hook-spec-v7.md (PR-C).
 #
@@ -44,7 +45,7 @@ log_bypass(){ mk "$LOG_DIR"; printf '%s | %s\n' "$(now_utc)" "$*" >> "$BYPASS_LO
 emit_block() {
   # Spec §1.5 additionalContext — string verbatim (exact match is a test gate).
   cat <<'JSON'
-{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"ERROR: Your previous assistant turn did not invoke mcp__agent-comms__send or mcp__agent-comms__notify. You received a message via <channel source=\"agent-comms\">, you MUST reply through the tool — NOT via stdout, NOT via built-in SendMessage. Invoke mcp__agent-comms__send (pass channel_id from the inbound tag) now."}}
+{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"ERROR: Your previous assistant turn did not invoke mcp__aun__send or mcp__aun__notify. You received a message via <channel source=\"agent-comms\">, you MUST reply through the tool — NOT via stdout, NOT via built-in SendMessage. Invoke mcp__aun__send (pass channel_id from the inbound tag) now. Legacy aliases mcp__agent_comms__send / mcp__agent_comms__notify and mcp__agent-comms__send / mcp__agent-comms__notify are accepted during migration."}}
 JSON
 }
 
@@ -171,7 +172,11 @@ SUMMARY=$(printf '%s' "$TAIL_CLEAN" | jq -cs '
       last_user_text:    (if ($lu // -1) >= 0 then $turns[$lu].text else "" end),
       any_send_since_last_user:
         ([ $after[] | select(.role == "assistant") | .tools[]? ]
-         | any(. == "mcp__agent-comms__send" or . == "mcp__agent-comms__notify"))
+         | any(
+             . == "mcp__aun__send" or . == "mcp__aun__notify" or
+             . == "mcp__agent_comms__send" or . == "mcp__agent_comms__notify" or
+             . == "mcp__agent-comms__send" or . == "mcp__agent-comms__notify"
+           ))
     }
 ' 2>/dev/null) || {
   log_error "jq summary failed (session_id=$SESSION_ID)"
