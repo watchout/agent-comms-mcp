@@ -40,6 +40,8 @@ function seedQueue(opts: {
   ageSeconds: number
   content?: string
   source?: string
+  status?: string
+  claimedBy?: string | null
 }): number {
   return withDb((db) => {
     const messageId = randomUUID()
@@ -57,10 +59,22 @@ function seedQueue(opts: {
       message_type: opts.messageType,
       source: opts.source ?? 'agent-comms',
     })
+    const claimedAt = opts.claimedBy ? new Date(Date.now() - 30_000).toISOString() : null
+    const claimExpiresAt = opts.claimedBy ? new Date(Date.now() + 60_000).toISOString() : null
     const row = db.prepare(
-      `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
-       VALUES (?, ?, ?, 'pending', 0, ?) RETURNING id`,
-    ).get(TEST_AGENT, messageId, payload, createdAt) as { id: number }
+      `INSERT INTO message_queue
+        (agent_id, message_id, payload, status, priority, created_at, claimed_by, claimed_at, claim_expires_at)
+       VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?) RETURNING id`,
+    ).get(
+      TEST_AGENT,
+      messageId,
+      payload,
+      opts.status ?? 'pending',
+      createdAt,
+      opts.claimedBy ?? null,
+      claimedAt,
+      claimExpiresAt,
+    ) as { id: number }
     return row.id
   })
 }
@@ -196,5 +210,36 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     const body = JSON.parse(r.stdout)
     expect(body.waiting).toBe(3)
     expect(rows().map((row) => row.status)).toEqual(['pending', 'pending', 'pending'])
+  })
+
+  test('active received claim blocks selecting and claiming a newer instruction', () => {
+    const activeId = seedQueue({
+      messageType: 'request',
+      ageSeconds: 120,
+      status: 'received',
+      claimedBy: TEST_AGENT,
+      content: 'already active work',
+    })
+    const instructionId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 30,
+      content: 'CTO instruction: do not start while busy',
+    })
+
+    const dryRun = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10', '--dry-run'])
+    expect(dryRun.status).toBe(0)
+    const dryBody = JSON.parse(dryRun.stdout)
+    expect(dryBody.selection_reason).toBe('active_claim')
+    expect(dryBody.selected).toBeNull()
+    expect(dryBody.active_claim).toMatchObject({ busy: true, queue_id: activeId, status: 'received' })
+
+    const claimed = runAun(['next-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(claimed.status).toBe(0)
+    const claimBody = JSON.parse(claimed.stdout)
+    expect(claimBody.waiting).toBe(1)
+
+    const after = rows()
+    expect(after.find((row) => row.id === activeId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+    expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 })

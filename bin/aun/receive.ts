@@ -140,6 +140,14 @@ export interface ActionableReceiveSummary {
   waiting: number
   selected: DiagnosedQueueRow | null
   claimed: ClaimedMessage | null
+  active_claim: {
+    busy: boolean
+    queue_id: string | number | null
+    message_id: string | null
+    status: string | null
+    claimed_at: string | null
+    claim_expires_at: string | null
+  }
   skipped_non_action_count: number
   unknown_type_count: number
   selection_reason: string | null
@@ -1016,8 +1024,18 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             LIMIT $2`,
           [plan.env.AGENT_ID, maxInspect],
         )
+        const activeClaimRow = await tx.queryOne<Record<string, unknown>>(
+          `SELECT id, message_id, status, claimed_at, claim_expires_at
+             FROM message_queue
+            WHERE claimed_by = $1 AND status IN ('received', 'in_progress')
+            ORDER BY claimed_at DESC
+            LIMIT 1`,
+          [plan.env.AGENT_ID],
+        )
         const inspected = pendingRows.map(normalizeQueueRow)
-        const selected = selectActionableRow(inspected)
+        const selected = activeClaimRow
+          ? { row: null, reason: 'active_claim' }
+          : selectActionableRow(inspected)
         const selectedRaw = selected.row
           ? pendingRows.find((row) => String(row.id) === String(selected.row?.queue_id)) ?? null
           : null
@@ -1070,6 +1088,14 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           waiting,
           selected: selected.row,
           claimed,
+          active_claim: {
+            busy: !!activeClaimRow,
+            queue_id: activeClaimRow ? activeClaimRow.id as string | number : null,
+            message_id: (activeClaimRow?.message_id as string | null | undefined) ?? null,
+            status: (activeClaimRow?.status as string | null | undefined) ?? null,
+            claimed_at: normalizeDate(activeClaimRow?.claimed_at),
+            claim_expires_at: normalizeDate(activeClaimRow?.claim_expires_at),
+          },
           skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
           unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
           selection_reason: selected.reason,
