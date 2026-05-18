@@ -9,6 +9,7 @@
  *   - aun receive --agent-id <id> [--dry-run]
  *   - aun next --agent-id <id> [--dry-run]
  *   - aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]
+ *   - aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
  *   - aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
  *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
@@ -21,7 +22,7 @@ import { init } from './aun/init'
 import { uninstall } from './aun/uninstall'
 import { status } from './aun/status'
 import { start } from './aun/start'
-import { diagnoseReceive, drain, receive } from './aun/receive'
+import { diagnoseReceive, drain, receive, reconcile } from './aun/receive'
 import { notify, reply } from './aun/reply'
 import { codexRunnerTick } from './aun/codex-runner'
 
@@ -36,6 +37,7 @@ function printHelp(): void {
     '  aun receive --agent-id <id> [--dry-run]',
     '  aun next --agent-id <id> [--dry-run]',
     '  aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]',
+    '  aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
     '  aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
     '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
@@ -265,7 +267,32 @@ export function run(argv: string[] = process.argv): number {
 
 export async function runAsync(argv: string[] = process.argv): Promise<number> {
   const { subcommand, flags } = parseArgs(argv)
-  if (subcommand !== 'diagnose-receive') return run(argv)
+  if (subcommand !== 'diagnose-receive' && subcommand !== 'reconcile') return run(argv)
+
+  if (subcommand === 'reconcile') {
+    if (!flags['dry-run']) {
+      process.stderr.write('Error [RECONCILE_FAILED]: reconcile is read-only in this release; pass --dry-run\n')
+      return 2
+    }
+    const limitFlag = flags.limit
+    let limit: number | undefined
+    if (limitFlag !== undefined) {
+      if (typeof limitFlag !== 'string') {
+        process.stderr.write('Error [RECONCILE_FAILED]: --limit requires a value\n')
+        return 2
+      }
+      limit = Number(limitFlag)
+    }
+    const res = await reconcile({
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      dryRun: !!flags['dry-run'],
+      limit,
+      cursor: typeof flags.cursor === 'string' ? (flags.cursor as string) : undefined,
+    })
+    if (res.stdout) process.stdout.write(res.stdout)
+    if (res.stderr) process.stderr.write(res.stderr)
+    return res.code
+  }
 
   const maxInspectFlag = flags['max-inspect']
   let maxInspect: number | undefined
