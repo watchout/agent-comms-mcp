@@ -10,6 +10,17 @@ Draft implementation/design slice. This document does not activate a runtime,
 restart `state_daemon`, mutate production DB identity rows, edit broad
 `.mcp.json`, change bot registry, or migrate CTO tokens.
 
+## Status: Doc-Only Contract
+
+This PR is a doc-only design/contract slice. It is not the state_daemon
+execution implementation and does not make auto-receive production-ready by
+itself.
+
+The implemented code path still requires follow-up implementation PRs that add
+state_daemon planner/action execution boundaries and adapters. Until those code
+PRs are merged and separately activated, production state_daemon behavior is
+unchanged.
+
 ## Goal
 
 Make the first public-release auto-receive loop script-controlled while keeping
@@ -120,6 +131,41 @@ new lifecycle schema yet.
 notify fallback to report PASS, the original queue row remains unresolved until
 a lifecycle view or explicit close links that fallback to the original request.
 
+## Execution-State Boundary
+
+The Phase 1 auto-receive gate must cover the full communication execution path,
+not only initial pending delivery:
+
+| State | Boundary | Terminal? |
+|---|---|---:|
+| `pending` | `codex-runner` claims through existing `next`/`drain` semantics, retains `queue_id/message_id`, and emits ACK/progress with `reply --no-close` | no |
+| `received` | processing/start runner boundary moves work toward explicit `in_progress` ownership | no |
+| `in_progress` | result/done-ready boundary records that the assignee produced a result, but does not close the request automatically | no |
+| `done` / result-ready | final `reply --close --queue-id <id> --message-id <uuid>` only when explicit close intent exists | yes, only with explicit close |
+| failure/stall | emit diagnostic / `needs_info` / escalation; do not terminal-fail by age alone | no by default |
+
+ACK, progress, and result are communication lifecycle events. They must not be
+inferred from free-form LLM prose, Discord projection, or notify fallback. Final
+closure requires explicit close/cancel/supersede/fail semantics per #426.
+
+## Current Implementation Gap
+
+As of this PR, state_daemon still observes live `received` / `in_progress` work
+and reclaims expired `received` claims, but it does not execute the full control
+path:
+
+```text
+received -> in_progress -> done/result-ready -> replied/closed
+```
+
+The current daemon can wake or observe queue rows, but it does not yet own a
+Codex processing runner boundary for `received`, `in_progress`, or result-ready
+work.
+
+#433 / `invoke_codex_runner` references are design intent unless and until a
+separate implementation PR lands the actual planner/action/adapter code. This
+PR alone must not be treated as production activation.
+
 ## Actionable Selection Policy
 
 First slice keeps FIFO claim semantics for transport compatibility, but the
@@ -159,6 +205,50 @@ Likely implementation touch points:
 - `tests/contract/test_aun_codex_runner.test.ts`
 - new diagnostics or lifecycle view tests under `tests/contract/`
 - later #426 lifecycle module under `core/`
+
+## Next Code PR Target
+
+The next #439 implementation PR should add actual state_daemon planner/action
+boundaries and execution adapters:
+
+- `invoke_codex_runner` for `pending + eligible/idle Codex runtime`
+- `invoke_processing_runner` or equivalent for `received -> in_progress`
+- `invoke_result_runner` / `invoke_final_reply` or equivalent for result-ready
+  / explicit-close handling
+- duplicate runner prevention for busy/open-claim agents
+- controlled adapter command construction, no natural-language tmux prompt for
+  Codex runtime
+- failure/stall path as diagnostic / `needs_info` / escalation, not age-based
+  terminal fail
+- tests for planner selection and execution boundaries across `pending`,
+  `received`, `in_progress`, and done/result-ready states
+
+Suggested implementation files:
+
+- `core/state-daemon/action-planner.ts`
+- `core/state-daemon/index.ts`
+- `core/state-daemon/types.ts`
+- new `core/state-daemon/codex-runner-adapter.ts`
+- `bin/state-daemon.ts`
+
+Suggested tests:
+
+- `tests/contract/state-daemon/test_state_action_matrix.test.ts`
+- new `tests/contract/state-daemon/test_codex_runner_adapter.test.ts`
+- new `tests/contract/state-daemon/test_codex_runner_dispatch.test.ts`
+- tests covering `received`, `in_progress`, and done/result-ready paths
+- existing TUI wake tests proving `wake_pending` is unchanged
+
+## Product Boundary
+
+AUN owns communication completeness only: who has the next communication
+responsibility, whether a request/question/result is still open, and which
+explicit lifecycle event closes it.
+
+AUN must not absorb Shirube-style project management semantics such as backlog
+ownership, project decomposition, priority planning, capacity, milestones, or
+long-running workflow orchestration outside a specific AUN communication
+thread.
 
 ## Test Plan
 
