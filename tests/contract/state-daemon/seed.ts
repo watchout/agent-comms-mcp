@@ -68,7 +68,7 @@ export async function cleanAll(c: Client): Promise<void> {
 
 export interface SeedAgent {
   agent_id: string
-  runtime?: 'TUI' | 'SIG'
+  runtime?: 'TUI' | 'SIG' | 'codex' | 'codex-runner'
   tmux_session?: string | null
   status?: 'online' | 'offline' | 'idle' | 'busy' | 'restarting'
   last_seen_at?: Date | string

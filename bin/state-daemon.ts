@@ -26,6 +26,7 @@ import { Client } from 'pg'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
+import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
 import type {
   AlertSink,
   DBClient,
@@ -171,6 +172,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('abnormalActivityWindowMs', num('STATE_DAEMON_ABNORMAL_ACTIVITY_WINDOW_MS'))
   set('abnormalActivityThreshold', num('STATE_DAEMON_ABNORMAL_ACTIVITY_THRESHOLD'))
   set('dbErrorAlertThreshold', num('STATE_DAEMON_DB_ERROR_ALERT_THRESHOLD'))
+  set('codexRunnerEnabled', str('STATE_DAEMON_CODEX_RUNNER_ENABLED') === '1')
+  set('codexRunnerDatabaseUrl', str('STATE_DAEMON_CODEX_RUNNER_DATABASE_URL'))
+  set('codexRunnerAckContentMaxChars', num('STATE_DAEMON_CODEX_RUNNER_ACK_CONTENT_MAX_CHARS'))
   return cfg
 }
 
@@ -183,6 +187,7 @@ export async function main(): Promise<void> {
     db: new PgClientAdapter(queryClient),
     pgListen: new PgNotifyListenClient(connStr),
     tmux: new TmuxShellAdapter(),
+    codexRunner: new ExecFileCodexRunnerInvoker(process.cwd()),
     clock: { now: () => new Date() },
     metrics: new StdoutMetrics(),
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),

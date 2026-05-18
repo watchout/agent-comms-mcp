@@ -46,6 +46,12 @@ export interface StateDaemonConfig {
   gcIntervalMs: number               // default 3_600_000 (= 1 hour)
   gcBatchLimit: number               // default 1000 (spec invariant: batch delete to avoid deadlock)
 
+  // #439 Codex runner handoff. Disabled by default until operator-approved
+  // state_daemon restart/activation; tests enable it explicitly.
+  codexRunnerEnabled: boolean
+  codexRunnerDatabaseUrl: string
+  codexRunnerAckContentMaxChars: number
+
   /**
    * Test-only scope guard. When set, every queue / agents query the daemon
    * issues is filtered to `agent_id LIKE prefix||'%'`. Production MUST leave
@@ -83,6 +89,9 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   gcRepliedAfterSec: 604_800,
   gcIntervalMs: 3_600_000,
   gcBatchLimit: 1000,
+  codexRunnerEnabled: false,
+  codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
+  codexRunnerAckContentMaxChars: 240,
 }
 
 /**
@@ -203,10 +212,31 @@ export interface AlertSink {
   alert(content: string): Promise<void>
 }
 
+export interface CodexRunnerInvocation {
+  agentId: string
+  queueId: number
+  messageId: string | null
+  requester: string | null
+  databaseUrl: string
+  ackContent: string
+}
+
+export interface CodexRunnerResult {
+  ok: boolean
+  code: number
+  stdout?: string
+  stderr?: string
+}
+
+export interface CodexRunnerInvoker {
+  invoke(input: CodexRunnerInvocation): Promise<CodexRunnerResult>
+}
+
 export interface StateDaemonDeps {
   db: DBClient
   pgListen: PgListenClient
   tmux: TmuxClient
+  codexRunner?: CodexRunnerInvoker
   clock: Clock
   metrics: Metrics
   alert: AlertSink

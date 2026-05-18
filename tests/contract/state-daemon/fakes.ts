@@ -9,6 +9,9 @@
 import type {
   AlertSink,
   Clock,
+  CodexRunnerInvocation,
+  CodexRunnerInvoker,
+  CodexRunnerResult,
   DBClient,
   Metrics,
   PgListenClient,
@@ -110,6 +113,21 @@ export class FakeTmux implements TmuxClient {
     this.existingSessions = null
     this.sendKeysShouldThrow = false
     this.sendDelayMs = 0
+  }
+}
+
+export class FakeCodexRunner implements CodexRunnerInvoker {
+  invocations: CodexRunnerInvocation[] = []
+  result: CodexRunnerResult = { ok: true, code: 0, stdout: '{"ok":true}\n', stderr: '' }
+
+  async invoke(input: CodexRunnerInvocation): Promise<CodexRunnerResult> {
+    this.invocations.push(input)
+    return this.result
+  }
+
+  reset(): void {
+    this.invocations = []
+    this.result = { ok: true, code: 0, stdout: '{"ok":true}\n', stderr: '' }
   }
 }
 

@@ -1,5 +1,6 @@
 export type QueueActionKind =
   | 'wake_pending'
+  | 'invoke_codex_runner'
   | 'observe_busy'
   | 'reclaim_expired'
   | 'observe_received'
@@ -33,6 +34,12 @@ export interface PlannedQueueAction {
   terminal: boolean
 }
 
+const CODEX_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
+
+function isCodexRuntime(runtime: string | null): boolean {
+  return runtime !== null && CODEX_RUNTIMES.has(runtime)
+}
+
 const TERMINAL_STATUSES = new Set([
   'replied',
   'skipped',
@@ -61,6 +68,10 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
 
   if (row.status === 'pending') {
     if (!agent) return { kind: 'agent_missing', terminal: false }
+    if (isCodexRuntime(agent.runtime)) {
+      if (hasActiveClaim) return { kind: 'observe_busy', terminal: false }
+      return { kind: 'invoke_codex_runner', terminal: false }
+    }
     if (agent.runtime !== defaultRuntime) return { kind: 'runtime_skip', terminal: false }
     if (!agent.tmux_session) return { kind: 'tmux_missing', terminal: false }
     if (hasActiveClaim) return { kind: 'observe_busy', terminal: false }
