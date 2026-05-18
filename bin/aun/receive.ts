@@ -27,6 +27,10 @@ export interface DiagnoseReceiveOptions extends ReceiveOptions {
   maxInspect?: number
 }
 
+export interface ActionableReceiveOptions extends ReceiveOptions {
+  maxInspect?: number
+}
+
 export interface ReconcileOptions extends ReceiveOptions {
   limit?: number
   cursor?: string
@@ -123,6 +127,26 @@ export interface DiagnoseReceiveSummary {
 
 export interface DiagnoseReceiveResult extends ReceiveResult {
   summary?: DiagnoseReceiveSummary
+}
+
+export interface ActionableReceiveSummary {
+  ok: boolean
+  dry_run: boolean
+  mode: 'receive-actionable'
+  agent_id: string
+  expected_agent_id: string
+  max_inspect: number
+  inspected_count: number
+  waiting: number
+  selected: DiagnosedQueueRow | null
+  claimed: ClaimedMessage | null
+  skipped_non_action_count: number
+  unknown_type_count: number
+  selection_reason: string | null
+}
+
+export interface ActionableReceiveResult extends ReceiveResult {
+  summary?: ActionableReceiveSummary
 }
 
 export type ReconcileClass =
@@ -524,6 +548,40 @@ function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
   }
 }
 
+function selectActionableRow(rows: DiagnosedQueueRow[]): { row: DiagnosedQueueRow | null; reason: string | null } {
+  const actionable = rows.filter((row) => row.classification === 'actionable')
+  if (actionable.length === 0) return { row: null, reason: null }
+
+  const instructions = actionable.filter((row) => row.message_type === 'instruction')
+  if (instructions.length > 0) {
+    return {
+      row: instructions[instructions.length - 1],
+      reason: 'newest_explicit_instruction',
+    }
+  }
+
+  return {
+    row: actionable[0],
+    reason: 'oldest_actionable_fifo',
+  }
+}
+
+function claimedMessageFromRow(row: DiagnosedQueueRow, payload: Record<string, unknown>, waiting: number): ClaimedMessage {
+  return {
+    waiting,
+    mode: 'queue',
+    queue_id: row.queue_id,
+    message_id: row.message_id,
+    channel_id: typeof payload.channel_id === 'string' ? payload.channel_id : undefined,
+    thread_id: typeof payload.thread_id === 'string' ? payload.thread_id : null,
+    from: row.author_id ?? undefined,
+    content: typeof payload.content === 'string' ? payload.content : undefined,
+    message_type: row.message_type,
+    source: typeof payload.source === 'string' ? payload.source : null,
+    created_at: row.created_at ?? undefined,
+  }
+}
+
 function parseCursor(cursor?: string): { created_at: string; id: string } | null {
   if (!cursor) return null
   try {
@@ -917,6 +975,122 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
       code: 1,
       stdout: '',
       stderr: `Error [DIAGNOSE_RECEIVE_FAILED]: ${(err as Error).message}\n`,
+      plan,
+    }
+  }
+}
+
+export async function receiveActionable(opts: ActionableReceiveOptions = {}): Promise<ActionableReceiveResult> {
+  let plan: ReceivePlan
+  let maxInspect: number
+  try {
+    plan = buildCommandPlan(opts, ['bun', 'bin/aun.ts', 'receive-actionable'])
+    maxInspect = parseMaxInspect(opts.maxInspect)
+  } catch (err) {
+    return {
+      ok: false,
+      code: 2,
+      stdout: '',
+      stderr: `Error [RECEIVE_ACTIONABLE_FAILED]: ${(err as Error).message}\n`,
+      plan: {
+        repoRoot: opts.cwd ?? repoRoot(),
+        argv: ['bun', 'bin/aun.ts', 'receive-actionable'],
+        env: cleanEnv(opts.env ?? process.env),
+        databaseUrlCandidates: [],
+      },
+    }
+  }
+
+  try {
+    const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      return db.transaction<ActionableReceiveSummary>(async (tx) => {
+        const pendingRows = await tx.query<Record<string, unknown>>(
+          `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+                  mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.message_type AS stored_message_type,
+                  am.author_id AS stored_author_id
+             FROM message_queue mq
+             LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+            WHERE mq.agent_id = $1 AND mq.status = 'pending'
+            ORDER BY mq.priority DESC, mq.created_at ASC
+            LIMIT $2`,
+          [plan.env.AGENT_ID, maxInspect],
+        )
+        const inspected = pendingRows.map(normalizeQueueRow)
+        const selected = selectActionableRow(inspected)
+        const selectedRaw = selected.row
+          ? pendingRows.find((row) => String(row.id) === String(selected.row?.queue_id)) ?? null
+          : null
+        let claimed: ClaimedMessage | null = null
+
+        if (selected.row && selectedRaw && !opts.dryRun) {
+          const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+          const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
+          const update = await tx.execute(
+            `UPDATE message_queue
+                SET status = 'received',
+                    read_at = now(),
+                    claimed_by = $1,
+                    claimed_at = now(),
+                    claim_expires_at = $2
+              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
+            [plan.env.AGENT_ID, claimExpiresAt, selected.row.queue_id, plan.env.AGENT_ID],
+          )
+          if (update.rowCount !== 1) {
+            throw new Error(`selected queue row changed before claim: queue_id=${selected.row.queue_id}`)
+          }
+          await tx.execute(
+            `UPDATE agents SET
+               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
+               status_updated_at = now()
+             WHERE agent_id = $1`,
+            [plan.env.AGENT_ID],
+          )
+        }
+
+        const waitingRow = await tx.queryOne<{ n: number | string }>(
+          `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+          [plan.env.AGENT_ID],
+        )
+        const waiting = Number(waitingRow?.n ?? 0)
+        if (selected.row) {
+          const payload = selectedRaw ? parsePayload(selectedRaw.payload) : {}
+          claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting)
+        }
+
+        return {
+          ok: true,
+          dry_run: !!opts.dryRun,
+          mode: 'receive-actionable',
+          agent_id: plan.env.AGENT_ID,
+          expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+          max_inspect: maxInspect,
+          inspected_count: inspected.length,
+          waiting,
+          selected: selected.row,
+          claimed,
+          skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
+          unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
+          selection_reason: selected.reason,
+        }
+      })
+    })
+
+    return {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify(opts.dryRun ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
+      stderr: '',
+      plan,
+      summary,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: `Error [RECEIVE_ACTIONABLE_FAILED]: ${(err as Error).message}\n`,
       plan,
     }
   }
