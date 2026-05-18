@@ -39,16 +39,39 @@ function seedPending(content = 'codex runner request'): { messageId: string; que
   const db = new Database(dbPath)
   try {
     const messageId = randomUUID()
-    db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content)
-      VALUES (?, 'runner-ch', 'codex-cto', ?)`).run(messageId, content)
+    db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content, message_type)
+      VALUES (?, 'runner-ch', 'codex-cto', ?, 'instruction')`).run(messageId, content)
     const payload = JSON.stringify({
       content,
       channel_id: 'runner-ch',
       author_id: 'codex-cto',
       message_id: messageId,
+      message_type: 'instruction',
     })
     const row = db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status)
       VALUES ('codex-aun', ?, ?, 'pending') RETURNING id`).get(messageId, payload) as { id: number }
+    return { messageId, queueId: row.id }
+  } finally {
+    db.close()
+  }
+}
+
+function seedTypedPending(opts: { content: string; messageType: string; ageSeconds: number }): { messageId: string; queueId: number } {
+  const db = new Database(dbPath)
+  try {
+    const messageId = randomUUID()
+    const createdAt = new Date(Date.now() - opts.ageSeconds * 1000).toISOString()
+    db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, created_at)
+      VALUES (?, 'runner-ch', 'codex-cto', ?, ?, ?)`).run(messageId, opts.content, opts.messageType, createdAt)
+    const payload = JSON.stringify({
+      content: opts.content,
+      channel_id: 'runner-ch',
+      author_id: 'codex-cto',
+      message_id: messageId,
+      message_type: opts.messageType,
+    })
+    const row = db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status, created_at)
+      VALUES ('codex-aun', ?, ?, 'pending', ?) RETURNING id`).get(messageId, payload, createdAt) as { id: number }
     return { messageId, queueId: row.id }
   } finally {
     db.close()
@@ -90,6 +113,7 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
 
     expect(r.status).toBe(0)
     const body = JSON.parse(r.stdout)
+    expect(body.receive_mode).toBe('receive-actionable')
     expect(body.retained_count).toBe(1)
     expect(body.retained[0]).toMatchObject({
       queue_id: String(queueId),
@@ -101,6 +125,27 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
     expect(body.final_close_contract).toContain('--close --queue-id')
     expect(dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
       .toEqual({ status: 'received', claimed_by: 'codex-aun', replied_with: null })
+  })
+
+  test('uses actionable selection so stale non-action rows do not hide current instruction', () => {
+    const stale = seedTypedPending({ messageType: 'chat', ageSeconds: 300, content: 'old chat backlog' })
+    const current = seedTypedPending({ messageType: 'instruction', ageSeconds: 30, content: 'current CTO instruction' })
+
+    const r = runAun(['codex-runner', '--agent-id', 'codex-aun', '--limit', '1', '--max-inspect', '10'])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.receive_mode).toBe('receive-actionable')
+    expect(body.retained_count).toBe(1)
+    expect(body.retained[0]).toMatchObject({
+      queue_id: String(current.queueId),
+      content: 'current CTO instruction',
+      message_type: 'instruction',
+    })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [stale.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [current.queueId])[0])
+      .toEqual({ status: 'received', claimed_by: 'codex-aun' })
   })
 
   test('optional ACK uses no-close and leaves the claimed queue open', () => {
