@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -124,6 +124,12 @@ afterEach(() => {
 })
 
 describe('test_aun_reconcile_dry_run - read-only backlog reconciliation inventory', () => {
+  test('source pins PostgreSQL-safe message join casts for reconcile reads', () => {
+    const source = readFileSync(join(REPO_ROOT, 'bin', 'aun', 'receive.ts'), 'utf-8')
+    expect(source).toContain('LEFT JOIN agent_messages am ON am.id::text = mq.message_id')
+    expect(source).not.toContain('LEFT JOIN agent_messages am ON am.id = mq.message_id')
+  })
+
   test('requires explicit dry-run and never mutates queue state', () => {
     seedQueue({ messageType: 'instruction', ageSeconds: 60 })
 

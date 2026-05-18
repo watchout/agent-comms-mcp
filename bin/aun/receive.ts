@@ -794,7 +794,7 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
                 am.message_type AS stored_message_type,
                 am.author_id AS stored_author_id
            FROM message_queue mq
-           LEFT JOIN agent_messages am ON am.id = mq.message_id
+           LEFT JOIN agent_messages am ON am.id::text = mq.message_id
           WHERE mq.agent_id = $1 AND mq.status = 'pending'
           ORDER BY mq.priority DESC, mq.created_at ASC
           LIMIT $2`,
@@ -963,7 +963,7 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<ReconcileR
                 am.content AS stored_content,
                 am.source AS stored_source
            FROM message_queue mq
-           LEFT JOIN agent_messages am ON am.id = mq.message_id
+           LEFT JOIN agent_messages am ON am.id::text = mq.message_id
           WHERE mq.agent_id = $1
             ${cursorWhere}
           ORDER BY mq.created_at ASC, mq.id ASC
