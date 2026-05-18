@@ -35,6 +35,26 @@ describe('state_daemon state/action matrix planner', () => {
     })).toEqual({ kind: 'runtime_skip', terminal: false })
   })
 
+  test('pending + idle Codex runtime plans invoke_codex_runner', () => {
+    expect(planQueueAction({
+      row: { status: 'pending', claim_expires_at: null },
+      agent: { runtime: 'codex', tmux_session: null },
+      now,
+      defaultRuntime: 'TUI',
+      hasActiveClaim: false,
+    })).toEqual({ kind: 'invoke_codex_runner', terminal: false })
+  })
+
+  test('pending + busy Codex runtime plans observe_busy without duplicate runner', () => {
+    expect(planQueueAction({
+      row: { status: 'pending', claim_expires_at: null },
+      agent: { runtime: 'codex-runner', tmux_session: null },
+      now,
+      defaultRuntime: 'TUI',
+      hasActiveClaim: true,
+    })).toEqual({ kind: 'observe_busy', terminal: false })
+  })
+
   test('pending + missing tmux plans tmux_missing', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },

@@ -36,6 +36,7 @@ import {
   TmuxSendKeysError,
   type AlertSink,
   type Clock,
+  type CodexRunnerInvoker,
   type DBClient,
   type LivenessResult,
   type Metrics,
@@ -61,6 +62,8 @@ import { planQueueAction, type PlannedQueueAction } from './action-planner'
 interface QueueRow {
   id: number
   agent_id: string
+  message_id?: string | null
+  payload?: unknown
   status: string
   claim_expires_at: Date | null
   created_at: Date
@@ -86,6 +89,7 @@ export class StateDaemon {
   private readonly db: DBClient
   private readonly pgListen: PgListenClient
   private readonly tmux: TmuxClient
+  private readonly codexRunner: CodexRunnerInvoker | null
   private readonly clock: Clock
   private readonly metrics: Metrics
   private readonly alert: AlertSink
@@ -119,6 +123,7 @@ export class StateDaemon {
     this.db = deps.db
     this.pgListen = deps.pgListen
     this.tmux = deps.tmux
+    this.codexRunner = deps.codexRunner ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
@@ -227,7 +232,7 @@ export class StateDaemon {
   async handleQueueEvent(event: QueueEvent): Promise<void> {
     if (this.status !== 'running') return
     const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, status, claim_expires_at, created_at,
+      `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue WHERE id = $1`,
       [event.id],
@@ -557,7 +562,7 @@ export class StateDaemon {
     const bot = rows[0]
     const defaultRuntime = defaultConfigPort.getDefaultRuntime()
     let hasActiveClaim = false
-    if (bot && bot.runtime === defaultRuntime && bot.tmux_session) {
+    if (bot) {
       const activeClaims = await this.dbQuery(
         `SELECT 1 FROM message_queue
           WHERE agent_id=$1
@@ -651,6 +656,8 @@ export class StateDaemon {
 
   private async runObservedQueueAction(action: PlannedQueueAction, row: QueueRow): Promise<boolean> {
     switch (action.kind) {
+      case 'invoke_codex_runner':
+        return this.invokeCodexRunner(row)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
@@ -668,6 +675,81 @@ export class StateDaemon {
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
         return false
     }
+  }
+
+  private requesterFromPayload(payload: unknown): string | null {
+    if (!payload) return null
+    try {
+      const obj = typeof payload === 'string' ? JSON.parse(payload) : payload
+      if (!obj || typeof obj !== 'object') return null
+      const rec = obj as Record<string, unknown>
+      const requester = rec.author_id ?? rec.from ?? rec.requester
+      return typeof requester === 'string' && requester.trim() ? requester.trim() : null
+    } catch {
+      return null
+    }
+  }
+
+  private boundedAckContent(row: QueueRow): string {
+    const raw = `ACK: received by ${row.agent_id}; queue_id=${Number(row.id)}; message_id=${row.message_id ?? 'unknown'}; final close requires explicit --close.`
+    return raw.length <= this.config.codexRunnerAckContentMaxChars
+      ? raw
+      : raw.slice(0, this.config.codexRunnerAckContentMaxChars)
+  }
+
+  private async invokeCodexRunner(row: QueueRow): Promise<boolean> {
+    if (!this.config.codexRunnerEnabled) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
+      return false
+    }
+    if (!this.codexRunner) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_unconfigured' })
+      await this.alert.alert(`codex runner unavailable for ${row.agent_id}`)
+      return false
+    }
+
+    const now = this.clock.now()
+    const reserved = await this.dbQuery(
+      `UPDATE agents
+          SET last_wake_attempt_at=$1
+        WHERE agent_id=$2
+          AND (
+            last_wake_attempt_at IS NULL
+            OR last_wake_attempt_at <= $1::timestamptz - ($3 || ' seconds')::interval
+          )`,
+      [now, row.agent_id, this.config.wakeDuplicateSuppressSec],
+    )
+    if (reserved.rowCount === 0) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })
+      return false
+    }
+
+    const result = await this.codexRunner.invoke({
+      agentId: row.agent_id,
+      queueId: Number(row.id),
+      messageId: row.message_id ?? null,
+      requester: this.requesterFromPayload(row.payload),
+      databaseUrl: this.config.codexRunnerDatabaseUrl,
+      ackContent: this.boundedAckContent(row),
+    })
+    if (!result.ok) {
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, now],
+      )
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_error' })
+      await this.alert.alert(`codex runner failed for ${row.agent_id} queue_id=${row.id}: ${result.stderr ?? `exit ${result.code}`}`)
+      return false
+    }
+
+    await this.dbQuery(
+      `UPDATE message_queue SET last_wake_attempt_at=$1
+         WHERE id=$2 AND status='pending'`,
+      [now, row.id],
+    )
+    this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })
+    return true
   }
 
   private planAction(
@@ -700,7 +782,7 @@ export class StateDaemon {
   private async fetchPendingStale(): Promise<QueueRow[]> {
     const prefix = this.config.agentIdPrefix ? ` AND agent_id LIKE $3` : ''
     const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit]
-    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
+    let sql = `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
         WHERE status='pending'
