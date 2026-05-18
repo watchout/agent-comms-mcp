@@ -205,6 +205,13 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
     }
   }
 
+  let parsedBatch: { waiting?: number; capped?: boolean } = { waiting, capped }
+  try {
+    parsedBatch = JSON.parse(JSON.stringify({ waiting, capped }))
+  } catch {
+    parsedBatch = {}
+  }
+
   const acks: AckResult[] = []
   if (wantsAck(opts)) {
     for (const item of retained) {
@@ -253,10 +260,10 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       retained_count: retained.length,
       acked_count: acks.length,
       acks,
-      waiting,
+      waiting: parsedBatch.waiting ?? 0,
       limit,
       max_inspect: maxInspect,
-      capped,
+      capped: parsedBatch.capped ?? false,
       final_close_contract: 'aun reply --close --queue-id <id> --message-id <uuid>',
     }) + '\n',
     stderr: '',
