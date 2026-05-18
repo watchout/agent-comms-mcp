@@ -6,6 +6,8 @@
  * hand-type fragile raw CLI invocations.
  */
 import { spawnSync } from 'node:child_process'
+import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import type { DbAdapter } from '../../core/db/adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
@@ -23,6 +25,11 @@ export interface DrainOptions extends ReceiveOptions {
 
 export interface DiagnoseReceiveOptions extends ReceiveOptions {
   maxInspect?: number
+}
+
+export interface ReconcileOptions extends ReceiveOptions {
+  limit?: number
+  cursor?: string
 }
 
 export interface ReceivePlan {
@@ -118,6 +125,88 @@ export interface DiagnoseReceiveResult extends ReceiveResult {
   summary?: DiagnoseReceiveSummary
 }
 
+export type ReconcileClass =
+  | 'actionable_current'
+  | 'actionable_stale'
+  | 'active_claim'
+  | 'notify_fallback_result'
+  | 'duplicate_result'
+  | 'superseded_instruction'
+  | 'obsolete_notice'
+  | 'projection_only'
+  | 'identity_split'
+  | 'unknown_type'
+  | 'terminal_legacy_invariant'
+  | 'already_terminal'
+  | 'needs_operator_decision'
+
+export type ReconcileAction =
+  | 'keep_pending'
+  | 'claim_for_work'
+  | 'mark_replied'
+  | 'skip_obsolete'
+  | 'supersede'
+  | 'reroute'
+  | 'request_human_review'
+  | 'needs_info'
+  | 'fail_with_reason'
+
+export interface ReconcileFingerprint {
+  version: 1
+  algorithm: 'sha256'
+  canonical_fields: Record<string, unknown>
+  hash: string
+}
+
+export interface ReconcileRow {
+  queue_id: string | number
+  message_id: string | null
+  agent_id: string
+  status: string
+  message_type: string
+  author_id: string | null
+  source: string | null
+  created_at: string | null
+  claimed_by: string | null
+  claimed_at: string | null
+  claim_expires_at: string | null
+  replied_at: string | null
+  replied_with: string | null
+  failed_reason: string | null
+  done_at: string | null
+  classification: ReconcileClass
+  flags: string[]
+  proposed_action: ReconcileAction
+  required_authority: string
+  required_evidence: string[]
+  evidence: Record<string, unknown>
+  fingerprint: ReconcileFingerprint
+  content_preview: string
+  content_hash: string | null
+}
+
+export interface ReconcileSummary {
+  ok: boolean
+  dry_run: true
+  mode: 'reconcile'
+  agent_id: string
+  expected_agent_id: string
+  database: DiagnoseReceiveSummary['database']
+  limit: number
+  cursor: string | null
+  cursor_next: string | null
+  truncated: boolean
+  inspected_count: number
+  counts_by_class: Record<string, number>
+  counts_by_action: Record<string, number>
+  warnings: string[]
+  rows: ReconcileRow[]
+}
+
+export interface ReconcileResult extends ReceiveResult {
+  summary?: ReconcileSummary
+}
+
 const DEFAULT_DB_URLS = [
   'postgresql:///agent_comms?host=/tmp',
   'postgresql:///agent_comms?host=/private/tmp',
@@ -126,8 +215,12 @@ const DEFAULT_DB_URLS = [
 const DEFAULT_DRAIN_LIMIT = 20
 const DEFAULT_MAX_INSPECT = 50
 const MAX_INSPECT_CAP = 200
+const DEFAULT_RECONCILE_LIMIT = 50
+const MAX_RECONCILE_LIMIT = 200
 const ACTIONABLE_TYPES = new Set(['instruction', 'request', 'question'])
 const NON_ACTION_TYPES = new Set(['chat', 'notice', 'projection'])
+const TERMINAL_STATUSES = new Set(['done', 'replied', 'skipped', 'failed'])
+const ACTIVE_STATUSES = new Set(['read', 'received', 'in_progress'])
 
 export function repoRoot(): string {
   return resolve(import.meta.dir, '..', '..')
@@ -259,6 +352,14 @@ export function parseMaxInspect(maxInspect: number | undefined): number {
   return Math.min(maxInspect, MAX_INSPECT_CAP)
 }
 
+export function parseReconcileLimit(limit: number | undefined): number {
+  if (limit === undefined) return DEFAULT_RECONCILE_LIMIT
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error('--limit must be a positive integer')
+  }
+  return Math.min(limit, MAX_RECONCILE_LIMIT)
+}
+
 function parseClaim(stdout: string): ClaimedMessage {
   try {
     return JSON.parse(stdout) as ClaimedMessage
@@ -372,6 +473,23 @@ function parsePayload(payload: unknown): Record<string, unknown> {
   }
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  const obj = value as Record<string, unknown>
+  return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`).join(',')}}`
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function contentPreview(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const compact = value.replace(/\s+/g, ' ').trim()
+  return compact.length > 120 ? `${compact.slice(0, 117)}...` : compact
+}
+
 function resolveMessageType(row: Record<string, unknown>, payload: Record<string, unknown>): string {
   const payloadType = payload.message_type
   if (typeof payloadType === 'string' && payloadType.trim()) return payloadType.trim()
@@ -404,6 +522,217 @@ function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
     created_at: normalizeDate(row.created_at),
     classification: classifyMessageType(messageType),
   }
+}
+
+function parseCursor(cursor?: string): { created_at: string; id: string } | null {
+  if (!cursor) return null
+  try {
+    const raw = Buffer.from(cursor, 'base64url').toString('utf8')
+    const parsed = JSON.parse(raw)
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.created_at === 'string' &&
+      typeof parsed.id === 'string'
+    ) {
+      return { created_at: parsed.created_at, id: parsed.id }
+    }
+  } catch {}
+  throw new Error('--cursor must be an aun reconcile cursor')
+}
+
+function encodeCursor(row: ReconcileRow): string {
+  return Buffer.from(JSON.stringify({
+    created_at: row.created_at ?? '',
+    id: String(row.queue_id),
+  }), 'utf8').toString('base64url')
+}
+
+function terminalInvariantWarnings(row: Record<string, unknown>): string[] {
+  const status = String(row.status ?? '')
+  const warnings: string[] = []
+  if (status === 'replied') {
+    if (!row.replied_at) warnings.push('missing_replied_at')
+    if (!row.replied_with) warnings.push('missing_replied_with')
+  }
+  if (status === 'done' && !row.done_at) warnings.push('missing_done_at')
+  if ((status === 'skipped' || status === 'failed') && !row.failed_reason) warnings.push('missing_failed_reason')
+  if ((status === 'skipped' || status === 'failed') && !row.done_at) warnings.push('missing_done_at')
+  return warnings
+}
+
+function reconcileClassification(
+  row: Record<string, unknown>,
+  messageType: string,
+  payload: Record<string, unknown>,
+  terminalWarnings: string[],
+  ageDays: number | null,
+): ReconcileClass {
+  const status = String(row.status ?? '')
+  const agentId = String(row.agent_id ?? '')
+  const source = typeof payload.source === 'string'
+    ? payload.source
+    : typeof row.stored_source === 'string' ? row.stored_source : ''
+
+  if (terminalWarnings.length > 0) return 'terminal_legacy_invariant'
+  if (TERMINAL_STATUSES.has(status)) return 'already_terminal'
+  if (ACTIVE_STATUSES.has(status)) return 'active_claim'
+  if ((agentId === 'cto' || agentId === 'codex-cto') && status === 'pending') return 'identity_split'
+  if (messageType === 'projection' || source.includes('projection') || source.includes('relay')) return 'projection_only'
+  if (source === 'cli-notify' || source === 'notify' || String(payload.content ?? '').includes('fallback: notify')) {
+    return 'notify_fallback_result'
+  }
+  if (ACTIONABLE_TYPES.has(messageType)) return ageDays !== null && ageDays >= 7 ? 'actionable_stale' : 'actionable_current'
+  if (NON_ACTION_TYPES.has(messageType)) return 'obsolete_notice'
+  return 'unknown_type'
+}
+
+function proposedActionForClass(klass: ReconcileClass): {
+  action: ReconcileAction
+  authority: string
+  requiredEvidence: string[]
+} {
+  switch (klass) {
+    case 'actionable_current':
+    case 'actionable_stale':
+      return {
+        action: 'claim_for_work',
+        authority: 'routed_agent',
+        requiredEvidence: ['queue_id', 'message_id', 'message_type', 'author_id', 'created_at'],
+      }
+    case 'active_claim':
+      return {
+        action: 'keep_pending',
+        authority: 'any_reviewer',
+        requiredEvidence: ['claimed_by', 'claimed_at', 'claim_expires_at', 'status'],
+      }
+    case 'obsolete_notice':
+    case 'projection_only':
+      return {
+        action: 'request_human_review',
+        authority: 'cto_approved_reconciliation',
+        requiredEvidence: ['classification_reason', 'plan_hash', 'reviewer_approval'],
+      }
+    case 'identity_split':
+      return {
+        action: 'request_human_review',
+        authority: 'cto_or_alias_policy',
+        requiredEvidence: ['alias_rule_id', 'canonical_agent_id', 'reviewer_approval'],
+      }
+    case 'notify_fallback_result':
+      return {
+        action: 'request_human_review',
+        authority: 'cto_approved_reconciliation',
+        requiredEvidence: ['notify_message_id', 'source_queue_id', 'content_hash', 'reviewer_approval'],
+      }
+    case 'terminal_legacy_invariant':
+      return {
+        action: 'request_human_review',
+        authority: 'cto_approved_reconciliation',
+        requiredEvidence: ['observed_status', 'missing_terminal_fields', 'reviewer_approval'],
+      }
+    case 'already_terminal':
+      return {
+        action: 'keep_pending',
+        authority: 'any_reviewer',
+        requiredEvidence: ['terminal_status', 'terminal_evidence'],
+      }
+    case 'unknown_type':
+    default:
+      return {
+        action: 'request_human_review',
+        authority: 'any_reviewer',
+        requiredEvidence: ['raw_message_type', 'payload_keys', 'parser_warning'],
+      }
+  }
+}
+
+function normalizeReconcileRow(row: Record<string, unknown>): ReconcileRow {
+  const payload = parsePayload(row.payload)
+  const messageType = resolveMessageType(row, payload)
+  const payloadAuthor = payload.author_id
+  const storedAuthor = row.stored_author_id
+  const payloadContent = typeof payload.content === 'string' ? payload.content : ''
+  const storedContent = typeof row.stored_content === 'string' ? row.stored_content : ''
+  const content = payloadContent || storedContent
+  const source = typeof payload.source === 'string'
+    ? payload.source
+    : typeof row.stored_source === 'string' ? row.stored_source : null
+  const createdAt = normalizeDate(row.created_at)
+  const age = ageSeconds(row.created_at)
+  const ageDays = age === null ? null : Math.floor(age / 86_400)
+  const terminalWarnings = terminalInvariantWarnings(row)
+  const klass = reconcileClassification(row, messageType, payload, terminalWarnings, ageDays)
+  const proposal = proposedActionForClass(klass)
+  const flags = [
+    ...(terminalWarnings.length > 0 ? terminalWarnings : []),
+    ...(row.message_id ? [] : ['message_row_missing']),
+    ...(typeof row.payload === 'string' ? [] : ['payload_parse_error']),
+    ...(agentAliasFlag(String(row.agent_id ?? ''), String(payloadAuthor ?? storedAuthor ?? ''))),
+  ]
+  const canonicalFields = {
+    queue_id: String(row.id ?? ''),
+    message_id: (row.message_id as string | null | undefined) ?? null,
+    agent_id: String(row.agent_id ?? ''),
+    status: String(row.status ?? ''),
+    created_at: createdAt,
+    claimed_by: (row.claimed_by as string | null | undefined) ?? null,
+    claimed_at: normalizeDate(row.claimed_at),
+    claim_expires_at: normalizeDate(row.claim_expires_at),
+    replied_with: (row.replied_with as string | null | undefined) ?? null,
+    replied_at: normalizeDate(row.replied_at),
+    failed_reason: (row.failed_reason as string | null | undefined) ?? null,
+    done_at: normalizeDate(row.done_at),
+    payload_hash: typeof row.payload === 'string' ? sha256(row.payload) : null,
+    message_type: messageType,
+    author_id: typeof payloadAuthor === 'string'
+      ? payloadAuthor
+      : typeof storedAuthor === 'string' ? storedAuthor : null,
+    source,
+    content_hash: content ? sha256(content) : null,
+  }
+  return {
+    queue_id: row.id as string | number,
+    message_id: (row.message_id as string | null | undefined) ?? null,
+    agent_id: String(row.agent_id ?? ''),
+    status: String(row.status ?? ''),
+    message_type: messageType,
+    author_id: canonicalFields.author_id,
+    source,
+    created_at: createdAt,
+    claimed_by: (row.claimed_by as string | null | undefined) ?? null,
+    claimed_at: normalizeDate(row.claimed_at),
+    claim_expires_at: normalizeDate(row.claim_expires_at),
+    replied_at: normalizeDate(row.replied_at),
+    replied_with: (row.replied_with as string | null | undefined) ?? null,
+    failed_reason: (row.failed_reason as string | null | undefined) ?? null,
+    done_at: normalizeDate(row.done_at),
+    classification: klass,
+    flags,
+    proposed_action: proposal.action,
+    required_authority: proposal.authority,
+    required_evidence: proposal.requiredEvidence,
+    evidence: {
+      status: String(row.status ?? ''),
+      age_days: ageDays,
+      terminal_warnings: terminalWarnings,
+      payload_keys: Object.keys(payload).sort(),
+      note: 'dry-run only; no queue row was mutated',
+    },
+    fingerprint: {
+      version: 1,
+      algorithm: 'sha256',
+      canonical_fields: canonicalFields,
+      hash: sha256(stableJson(canonicalFields)),
+    },
+    content_preview: contentPreview(content),
+    content_hash: content ? sha256(content) : null,
+  }
+}
+
+function agentAliasFlag(agentId: string, authorId: string): string[] {
+  const pair = new Set([agentId, authorId])
+  return pair.has('cto') && pair.has('codex-cto') ? ['author_alias_mismatch'] : []
 }
 
 async function withDb<T>(
@@ -588,6 +917,108 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
       code: 1,
       stdout: '',
       stderr: `Error [DIAGNOSE_RECEIVE_FAILED]: ${(err as Error).message}\n`,
+      plan,
+    }
+  }
+}
+
+export async function reconcile(opts: ReconcileOptions = {}): Promise<ReconcileResult> {
+  let plan: ReceivePlan
+  let limit: number
+  let cursor: { created_at: string; id: string } | null
+  try {
+    plan = buildCommandPlan(opts, ['bun', 'bin/aun.ts', 'reconcile'])
+    limit = parseReconcileLimit(opts.limit)
+    cursor = parseCursor(opts.cursor)
+  } catch (err) {
+    return {
+      ok: false,
+      code: 2,
+      stdout: '',
+      stderr: `Error [RECONCILE_FAILED]: ${(err as Error).message}\n`,
+      plan: {
+        repoRoot: opts.cwd ?? repoRoot(),
+        argv: ['bun', 'bin/aun.ts', 'reconcile'],
+        env: cleanEnv(opts.env ?? process.env),
+        databaseUrlCandidates: [],
+      },
+    }
+  }
+
+  try {
+    const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      const params: unknown[] = [plan.env.AGENT_ID]
+      let cursorWhere = ''
+      if (cursor) {
+        params.push(cursor.created_at, cursor.id)
+        cursorWhere = `AND (mq.created_at > $2 OR (mq.created_at = $2 AND mq.id > $3))`
+      }
+      params.push(limit + 1)
+      const rows = await db.query<Record<string, unknown>>(
+        `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+                mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                mq.replied_at, mq.replied_with, mq.failed_reason, mq.done_at,
+                am.message_type AS stored_message_type,
+                am.author_id AS stored_author_id,
+                am.content AS stored_content,
+                am.source AS stored_source
+           FROM message_queue mq
+           LEFT JOIN agent_messages am ON am.id = mq.message_id
+          WHERE mq.agent_id = $1
+            ${cursorWhere}
+          ORDER BY mq.created_at ASC, mq.id ASC
+          LIMIT $${params.length}`,
+        params,
+      )
+
+      const pageRows = rows.slice(0, limit).map(normalizeReconcileRow)
+      const countsByClass: Record<string, number> = {}
+      const countsByAction: Record<string, number> = {}
+      const warnings = new Set<string>()
+      for (const row of pageRows) {
+        countsByClass[row.classification] = (countsByClass[row.classification] ?? 0) + 1
+        countsByAction[row.proposed_action] = (countsByAction[row.proposed_action] ?? 0) + 1
+        for (const flag of row.flags) warnings.add(flag)
+      }
+      if (rows.length > limit) warnings.add('batch_limit_truncated')
+
+      const last = pageRows[pageRows.length - 1] ?? null
+      const summary: ReconcileSummary = {
+        ok: true,
+        dry_run: true,
+        mode: 'reconcile',
+        agent_id: plan.env.AGENT_ID,
+        expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+        database: dbKind(plan.env) === 'sqlite'
+          ? { kind: 'sqlite', sqlite_path: plan.env.AGENT_COM_SQLITE_PATH ?? './agent-com.db' }
+          : { kind: 'postgres', url_candidates: plan.databaseUrlCandidates },
+        limit,
+        cursor: opts.cursor ?? null,
+        cursor_next: rows.length > limit && last ? encodeCursor(last) : null,
+        truncated: rows.length > limit,
+        inspected_count: pageRows.length,
+        counts_by_class: countsByClass,
+        counts_by_action: countsByAction,
+        warnings: Array.from(warnings).sort(),
+        rows: pageRows,
+      }
+      return summary
+    })
+
+    return {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify(summary) + '\n',
+      stderr: '',
+      plan,
+      summary,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: `Error [RECONCILE_FAILED]: ${(err as Error).message}\n`,
       plan,
     }
   }
