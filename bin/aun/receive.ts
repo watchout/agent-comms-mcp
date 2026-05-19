@@ -140,6 +140,7 @@ export interface ActionableReceiveSummary {
   waiting: number
   selected: DiagnosedQueueRow | null
   claimed: ClaimedMessage | null
+  blocked_reason: 'active_claim' | null
   active_claim: {
     busy: boolean
     queue_id: string | number | null
@@ -1171,8 +1172,16 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           ? pendingRows.find((row) => String(row.id) === String(selected.row?.queue_id)) ?? null
           : null
         let claimed: ClaimedMessage | null = null
+        const activeClaim = {
+          busy: !!activeClaimRow,
+          queue_id: activeClaimRow ? activeClaimRow.id as string | number : null,
+          message_id: (activeClaimRow?.message_id as string | null | undefined) ?? null,
+          status: (activeClaimRow?.status as string | null | undefined) ?? null,
+          claimed_at: normalizeDate(activeClaimRow?.claimed_at),
+          claim_expires_at: normalizeDate(activeClaimRow?.claim_expires_at),
+        }
 
-        if (selected.row && selectedRaw && !opts.dryRun) {
+        if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
           const update = await tx.execute(
@@ -1203,13 +1212,13 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           [plan.env.AGENT_ID],
         )
         const waiting = Number(waitingRow?.n ?? 0)
-        if (selected.row) {
+        if (selected.row && !activeClaim.busy) {
           const payload = selectedRaw ? parsePayload(selectedRaw.payload) : {}
           claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting)
         }
 
         return {
-          ok: true,
+          ok: !(activeClaim.busy && !opts.dryRun),
           dry_run: !!opts.dryRun,
           mode: 'receive-actionable',
           agent_id: plan.env.AGENT_ID,
@@ -1219,26 +1228,23 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           waiting,
           selected: selected.row,
           claimed,
-          active_claim: {
-            busy: !!activeClaimRow,
-            queue_id: activeClaimRow ? activeClaimRow.id as string | number : null,
-            message_id: (activeClaimRow?.message_id as string | null | undefined) ?? null,
-            status: (activeClaimRow?.status as string | null | undefined) ?? null,
-            claimed_at: normalizeDate(activeClaimRow?.claimed_at),
-            claim_expires_at: normalizeDate(activeClaimRow?.claim_expires_at),
-          },
+          blocked_reason: activeClaim.busy ? 'active_claim' : null,
+          active_claim: activeClaim,
           skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
           unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
-          selection_reason: selected.reason,
+          selection_reason: activeClaim.busy ? 'blocked_by_active_claim' : selected.reason,
         }
       })
     })
+    const blockedByActiveClaim = summary.blocked_reason === 'active_claim' && !opts.dryRun
 
     return {
-      ok: true,
-      code: 0,
-      stdout: JSON.stringify(opts.dryRun ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
-      stderr: '',
+      ok: !blockedByActiveClaim,
+      code: blockedByActiveClaim ? 1 : 0,
+      stdout: JSON.stringify(opts.dryRun || blockedByActiveClaim ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
+      stderr: blockedByActiveClaim
+        ? `Error [RECEIVE_ACTIONABLE_BLOCKED]: active claim exists for ${plan.env.AGENT_ID}; finish or expire queue_id=${summary.active_claim.queue_id}\n`
+        : '',
       plan,
       summary,
     }
