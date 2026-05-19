@@ -231,6 +231,10 @@ export class StateDaemon {
    */
   async handleQueueEvent(event: QueueEvent): Promise<void> {
     if (this.status !== 'running') return
+    if (!this.isAgentInScope(event.agent_id)) {
+      this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
+      return
+    }
     const { rows } = await this.dbQuery<QueueRow>(
       `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
@@ -355,14 +359,7 @@ export class StateDaemon {
     const cutoffSec = this.config.gcRepliedAfterSec
     const batchLimit = this.config.gcBatchLimit
     const params: unknown[] = [String(cutoffSec), batchLimit]
-    // agentIdPrefix is a test-only scope guard (types.ts:51); on the
-    // shared dev DB it keeps the GC from touching rows that belong to
-    // other test runs.
-    let prefixClause = ''
-    if (this.config.agentIdPrefix) {
-      prefixClause = ` AND agent_id LIKE $3`
-      params.push(this.config.agentIdPrefix + '%')
-    }
+    const scopeClause = this.agentScopeClause(params, 'agent_id')
     const r = await this.dbQuery<{ id: number }>(
       `DELETE FROM message_queue
          WHERE id IN (
@@ -370,7 +367,7 @@ export class StateDaemon {
             WHERE status = 'replied'
               AND replied_at IS NOT NULL
               AND replied_at < now() - ($1 || ' seconds')::interval
-              ${prefixClause}
+              ${scopeClause}
             ORDER BY replied_at ASC
             LIMIT $2
          )
@@ -399,10 +396,7 @@ export class StateDaemon {
              WHERE a.agent_id = mq.agent_id AND a.status = 'online'
           )`
     const params: unknown[] = [this.clock.now(), this.config.claimTtlSec]
-    if (this.config.agentIdPrefix) {
-      sql += ` AND mq.agent_id LIKE $3`
-      params.push(this.config.agentIdPrefix + '%')
-    }
+    sql += this.agentScopeClause(params, 'mq.agent_id')
     const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
     return { refreshed: rowCount, skipped: 0 }
@@ -414,10 +408,8 @@ export class StateDaemon {
     if (this.status !== 'running') return { checked: 0, restarted: 0, escalated: 0 }
     let sql = `SELECT agent_id, runtime, status, (metadata->>'tmux_session') AS tmux_session, last_seen_at FROM agents`
     const params: unknown[] = []
-    if (this.config.agentIdPrefix) {
-      sql += ` WHERE agent_id LIKE $1`
-      params.push(this.config.agentIdPrefix + '%')
-    }
+    const scopeClause = this.agentScopeClause(params, 'agent_id')
+    if (scopeClause) sql += ` WHERE ${scopeClause.replace(/^ AND /, '')}`
     const { rows } = await this.dbQuery<AgentRow>(sql, params)
     const result: LivenessResult = { checked: 0, restarted: 0, escalated: 0 }
     const now = this.clock.now().getTime()
@@ -769,28 +761,33 @@ export class StateDaemon {
 
   // ── Sweep fetch helpers ────────────────────────────────────────────────────
 
-  /**
-   * Test-only scope filter. Returns the SQL fragment + params suffix so each
-   * fetch helper can append it. In production (`agentIdPrefix` null) returns
-   * `''` and no extra params — zero behavioural impact.
-   */
-  private prefixClause(): { sql: string; params: unknown[] } {
-    if (!this.config.agentIdPrefix) return { sql: '', params: [] }
-    return { sql: ` AND agent_id LIKE $__::text`, params: [this.config.agentIdPrefix + '%'] }
+  private isAgentInScope(agentId: string): boolean {
+    if (this.config.agentIdPrefix && !agentId.startsWith(this.config.agentIdPrefix)) return false
+    if (this.config.agentAllowlist && !this.config.agentAllowlist.includes(agentId)) return false
+    return true
+  }
+
+  private agentScopeClause(params: unknown[], column: string): string {
+    let sql = ''
+    if (this.config.agentIdPrefix) {
+      params.push(this.config.agentIdPrefix + '%')
+      sql += ` AND ${column} LIKE $${params.length}`
+    }
+    if (this.config.agentAllowlist) {
+      params.push(this.config.agentAllowlist)
+      sql += ` AND ${column} = ANY($${params.length}::text[])`
+    }
+    return sql
   }
 
   private async fetchPendingStale(): Promise<QueueRow[]> {
-    const prefix = this.config.agentIdPrefix ? ` AND agent_id LIKE $3` : ''
     const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit]
     let sql = `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
         WHERE status='pending'
           AND created_at < $1::timestamptz - ($2)::interval`
-    if (this.config.agentIdPrefix) {
-      sql += ` AND agent_id LIKE $4`
-      params.push(this.config.agentIdPrefix + '%')
-    }
+    sql += this.agentScopeClause(params, 'agent_id')
     sql += ` ORDER BY created_at LIMIT $3`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
@@ -802,10 +799,7 @@ export class StateDaemon {
          FROM message_queue
         WHERE status='received' AND claim_expires_at < $1::timestamptz`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
-    if (this.config.agentIdPrefix) {
-      sql += ` AND agent_id LIKE $3`
-      params.push(this.config.agentIdPrefix + '%')
-    }
+    sql += this.agentScopeClause(params, 'agent_id')
     sql += ` ORDER BY claim_expires_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
@@ -822,10 +816,7 @@ export class StateDaemon {
             OR claim_expires_at >= $1::timestamptz
           )`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
-    if (this.config.agentIdPrefix) {
-      sql += ` AND agent_id LIKE $3`
-      params.push(this.config.agentIdPrefix + '%')
-    }
+    sql += this.agentScopeClause(params, 'agent_id')
     sql += ` ORDER BY created_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows

@@ -51,6 +51,7 @@ export interface StateDaemonConfig {
   codexRunnerEnabled: boolean
   codexRunnerDatabaseUrl: string
   codexRunnerAckContentMaxChars: number
+  agentAllowlist: string[] | null
 
   /**
    * Test-only scope guard. When set, every queue / agents query the daemon
@@ -92,6 +93,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   codexRunnerEnabled: false,
   codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
   codexRunnerAckContentMaxChars: 240,
+  agentAllowlist: null,
 }
 
 /**

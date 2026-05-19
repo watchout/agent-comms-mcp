@@ -148,6 +148,12 @@ function loadConfig(): Partial<StateDaemonConfig> {
     return Number.isFinite(n) ? n : undefined
   }
   const str = (k: string) => process.env[k]
+  const csv = (k: string) => {
+    const v = process.env[k]
+    if (!v) return undefined
+    const values = v.split(',').map((s) => s.trim()).filter(Boolean)
+    return values.length > 0 ? values : undefined
+  }
   const set = <K extends keyof StateDaemonConfig>(k: K, v: StateDaemonConfig[K] | undefined) => {
     if (v !== undefined) (cfg as any)[k] = v
   }
@@ -175,6 +181,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerEnabled', str('STATE_DAEMON_CODEX_RUNNER_ENABLED') === '1')
   set('codexRunnerDatabaseUrl', str('STATE_DAEMON_CODEX_RUNNER_DATABASE_URL'))
   set('codexRunnerAckContentMaxChars', num('STATE_DAEMON_CODEX_RUNNER_ACK_CONTENT_MAX_CHARS'))
+  set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
   return cfg
 }
 
