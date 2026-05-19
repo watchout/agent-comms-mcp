@@ -2055,6 +2055,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     let claimedMqId: number | string | null = null
     let fallbackReason: 'claim_expired' | 'claim_missing' | null = null
+    let fallbackSourceQueueId: string | null = null
     let txCommitted = false
     await txClient.query('BEGIN')
     try {
@@ -2079,6 +2080,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       if (decision.kind === 'fallback') {
         fallbackReason = decision.reason
+        const fallbackSource = await txClient.query<{ id: number | string }>(
+          `SELECT id FROM message_queue
+             WHERE message_id = $1 AND agent_id = $2
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1`,
+          [reply_to, agentId],
+        )
+        fallbackSourceQueueId = fallbackSource.rows[0]?.id !== undefined
+          ? String(fallbackSource.rows[0].id)
+          : null
         process.stderr.write(`agent-comms: send fallback to notify — ${agentId} reply_to=${reply_to} reason=${fallbackReason}\n`)
         // claimedMqId stays null → the downstream message_queue UPDATE
         // (status='replied') is gated on it and skipped in the
@@ -2274,7 +2285,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const partMeta = parts.length > 1
         ? { split_part: partIdx + 1, split_total: parts.length }
         : {}
-      const fullMetadata = { ...metadata, ...authMeta, ...partMeta }
+      const fallbackMeta = fallbackReason
+        ? {
+            fallback_notify: {
+              reason: fallbackReason,
+              source_message_id: reply_to,
+              source_queue_id: fallbackSourceQueueId,
+            },
+          }
+        : {}
+      const fullMetadata = { ...metadata, ...authMeta, ...partMeta, ...fallbackMeta }
 
       // Save to DB
       const id = await saveMessage({
