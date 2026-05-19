@@ -14,6 +14,9 @@
     - DATABASE_URL is required; it is left blank here so the operator must
       set it explicitly before loading. Loading without it makes the daemon
       crash-loop into the KeepAlive throttle until the env is fixed.
+    - If DATABASE_URL uses a local socket URL such as
+      postgresql:///agent_comms?host=/tmp, PGUSER/USER must be explicit
+      because launchd children do not reliably inherit a login user env.
     - StandardErrorPath is the canonical alert sink (see CompositeAlertSink
       in bin/state-daemon.ts).
     - ThrottleInterval=10 prevents tight-loop crashes from saturating the
@@ -73,6 +76,10 @@
     <string>production</string>
     <key>DATABASE_URL</key>
     <string>postgresql://localhost/agent_comms</string>
+    <key>PGUSER</key>
+    <string>yuji</string>
+    <key>USER</key>
+    <string>yuji</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
