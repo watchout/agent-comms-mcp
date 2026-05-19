@@ -10,6 +10,10 @@ export interface CodexRunnerCommand {
   env: Record<string, string>
 }
 
+function bunExecutable(): string {
+  return process.env.STATE_DAEMON_BUN_EXECUTABLE?.trim() || process.execPath
+}
+
 export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunnerCommand {
   const args = [
     'bin/aun.ts',
@@ -22,7 +26,7 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
     args.push('--ack-content', input.ackContent)
   }
   return {
-    command: 'bun',
+    command: bunExecutable(),
     args,
     env: {
       AGENT_ID: input.agentId,
