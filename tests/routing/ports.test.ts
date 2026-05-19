@@ -211,7 +211,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
   // length / order / forbidden additions are all gated by a single
   // assertion (cycle 1 `toContain` only verified inclusion, missed
   // contamination + reorder regressions).
-  test('§4.4 channel 1487368919613444156 — exact 10-bot allowlist + adapter owner', () => {
+  test('§4.4 channel 1487368919613444156 — exact 11-bot allowlist + adapter owner', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -228,6 +228,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
       'cto',
       'codex-cto',
       'codex-aun',
+      'codex-audit',
       'ceo',
       'auditor',
       'arc',
@@ -236,7 +237,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     ])
   })
 
-  test('§4.4 channel 1487368919613444156 — lead-sus / hotel-dev ok, unknown sender → violations contains it', () => {
+  test('§4.4 channel 1487368919613444156 — CTO direct routes + lead-sus / hotel-dev ok, unknown sender → violations contains it', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -252,6 +253,10 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
       },
     })
     const v = createOutboundPolicyValidator()
+    // #456 regression: CTO must be able to route direct work to codex-aun
+    // without lead-ama relay fallback. L2 audit routing also needs codex-audit.
+    expect(v.validate('codex-cto', '1487368919613444156', ['codex-aun']).ok).toBe(true)
+    expect(v.validate('codex-cto', '1487368919613444156', ['codex-audit']).ok).toBe(true)
     // lead-sus → lead-ama: ok
     expect(v.validate('lead-sus', '1487368919613444156', ['lead-ama']).ok).toBe(true)
     // hotel-dev → cto: ok

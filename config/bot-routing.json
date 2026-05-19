@@ -7,7 +7,7 @@
       "nativeRoleOutboundOwners": {
         "codex-cto": "codex-cto"
       },
-      "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "codex-cto", "codex-aun", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
+      "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "codex-cto", "codex-aun", "codex-audit", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
     }
   }
 }
