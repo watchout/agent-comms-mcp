@@ -58,12 +58,24 @@ describe('channel-policy (§1.8)', () => {
     expect(p.outboundAllowlist).toEqual(['alice', 'bob'])
   })
 
-  test('§3.7 / §1.8 reload is restart-only — file mutations after first read are ignored', () => {
+  test('§1.8 reloads file mutations in a long-lived process', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice' } })
     expect(getChannelPolicy('ch1').primary).toBe('alice')
-    // Mutate file directly, do NOT reset cache.
-    writeFileSync(TMP_CONFIG, JSON.stringify({ version: 1, channels: { ch1: { primary: 'bob' } } }), 'utf8')
-    expect(getChannelPolicy('ch1').primary).toBe('alice') // cache wins
+    // Mutate file directly, do NOT reset cache. Long-lived MCP servers must
+    // pick this up so ACL fixes do not require a client/session restart.
+    writeFileSync(TMP_CONFIG, JSON.stringify({ version: 1, channels: { ch1: { primary: 'bob', outboundAllowlist: ['bob'] } } }), 'utf8')
+    const p = getChannelPolicy('ch1')
+    expect(p.primary).toBe('bob')
+    expect(p.outboundAllowlist).toEqual(['bob'])
+  })
+
+  test('invalid reload keeps the last known valid config instead of relaxing ACL', () => {
+    setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
+    expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
+    writeFileSync(TMP_CONFIG, '{invalid-json', 'utf8')
+    const p = getChannelPolicy('ch1')
+    expect(p.primary).toBe('alice')
+    expect(p.outboundAllowlist).toEqual(['alice'])
   })
 })
 
@@ -308,8 +320,8 @@ describe('Phase 5 §3 anti-pattern source-pin', () => {
   test('§3.7 file watch reload — core/channel-policy.ts does not import fs.watch / chokidar', async () => {
     const text = await readRepo('core/channel-policy.ts')
     expect(text).not.toMatch(/fs\.watch|chokidar/)
-    // Positive pin: comment notes restart-only reload semantics.
-    expect(text).toContain('restart-only')
+    // Positive pin: reload is synchronous metadata revalidation, not a watcher.
+    expect(text).toContain('revalidated on access')
   })
 
   test('§3.6 group mention — InboundResolver does not implement @arc-team virtual fanout', async () => {

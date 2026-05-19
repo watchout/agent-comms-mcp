@@ -3,10 +3,11 @@
  *
  * Single source of truth for both server (`routeInbound`, `send/notify` validate)
  * and client (`send/notify` tool input validation, best-effort warning). The
- * file `<repo>/config/bot-routing.json` is read once at process start and
- * cached; reload is restart-only (§3.7 file watch reload anti-pattern, §1.8).
+ * file `<repo>/config/bot-routing.json` is cached and revalidated on access
+ * using file metadata. This keeps long-lived MCP processes from holding stale
+ * ACLs after an operator updates the routing file.
  */
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 export type AgentId = string
@@ -34,6 +35,9 @@ interface RoutingConfig {
 
 let cachedConfig: RoutingConfig | null = null
 let configLoadAttempted = false
+let cachedConfigPath: string | null = null
+let cachedConfigMtimeMs: number | null = null
+let cachedConfigSize: number | null = null
 
 /**
  * Locate `config/bot-routing.json`. Independent of CWD so MCP server +
@@ -48,9 +52,10 @@ function locateRoutingConfig(): string {
 }
 
 /**
- * Load + cache routing config. §3.7 / §1.8: restart-only reload — once the
- * cache is warm, file mutations do not propagate. Tests that need to reset
- * the cache should call {@link resetChannelPolicyCache}.
+ * Load + cache routing config. Long-lived MCP processes revalidate file
+ * metadata on each policy lookup so operator ACL updates are picked up without
+ * a process restart. Tests that need to reset the cache should call
+ * {@link resetChannelPolicyCache}.
  *
  * §4.5 / §3.4 ARC: file absent / parse error / schema invalid all
  * fall through to a permissive empty config (`channels: {}`). This is
@@ -60,25 +65,69 @@ function locateRoutingConfig(): string {
  * surprise rejections when ops have not yet authored a routing entry.
  */
 function loadConfig(): RoutingConfig {
-  if (cachedConfig !== null) return cachedConfig
-  if (configLoadAttempted && cachedConfig === null) return { version: 1, channels: {} }
+  const path = locateRoutingConfig()
+  let currentMtimeMs: number | null = null
+  let currentSize: number | null = null
+
+  try {
+    if (existsSync(path)) {
+      const stat = statSync(path)
+      currentMtimeMs = stat.mtimeMs
+      currentSize = stat.size
+    }
+  } catch {
+    currentMtimeMs = null
+    currentSize = null
+  }
+
+  if (
+    cachedConfig !== null &&
+    cachedConfigPath === path &&
+    cachedConfigMtimeMs === currentMtimeMs &&
+    cachedConfigSize === currentSize
+  ) {
+    return cachedConfig
+  }
+
+  if (
+    configLoadAttempted &&
+    cachedConfig === null &&
+    cachedConfigPath === path &&
+    currentMtimeMs === null
+  ) {
+    return { version: 1, channels: {} }
+  }
+
   configLoadAttempted = true
   try {
-    const path = locateRoutingConfig()
     if (!existsSync(path)) {
       cachedConfig = { version: 1, channels: {} }
+      cachedConfigPath = path
+      cachedConfigMtimeMs = null
+      cachedConfigSize = null
       return cachedConfig
     }
     const raw = readFileSync(path, 'utf8')
     const parsed = JSON.parse(raw) as RoutingConfig
     if (typeof parsed !== 'object' || parsed === null || typeof parsed.channels !== 'object') {
+      if (cachedConfig !== null) return cachedConfig
       cachedConfig = { version: 1, channels: {} }
+      cachedConfigPath = path
+      cachedConfigMtimeMs = currentMtimeMs
+      cachedConfigSize = currentSize
       return cachedConfig
     }
     cachedConfig = parsed
+    cachedConfigPath = path
+    cachedConfigMtimeMs = currentMtimeMs
+    cachedConfigSize = currentSize
     return cachedConfig
   } catch {
+    if (cachedConfig !== null) return cachedConfig
     cachedConfig = { version: 1, channels: {} }
+    cachedConfigPath = path
+    cachedConfigMtimeMs = currentMtimeMs
+    cachedConfigSize = currentSize
     return cachedConfig
   }
 }
@@ -107,4 +156,7 @@ export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
 export function resetChannelPolicyCache(): void {
   cachedConfig = null
   configLoadAttempted = false
+  cachedConfigPath = null
+  cachedConfigMtimeMs = null
+  cachedConfigSize = null
 }
