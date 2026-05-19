@@ -101,6 +101,7 @@ function loadConfig(): RoutingConfig {
   configLoadAttempted = true
   try {
     if (!existsSync(path)) {
+      if (cachedConfig !== null) return cachedConfig
       cachedConfig = { version: 1, channels: {} }
       cachedConfigPath = path
       cachedConfigMtimeMs = null

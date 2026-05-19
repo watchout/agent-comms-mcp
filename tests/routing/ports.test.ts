@@ -5,7 +5,7 @@
  * §4.4 outbound ACL reject / §4.5 failure modes / §4.6 cc[] body injection.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
+import { writeFileSync, unlinkSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   createInboundResolver,
@@ -73,6 +73,15 @@ describe('channel-policy (§1.8)', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
     writeFileSync(TMP_CONFIG, '{invalid-json', 'utf8')
+    const p = getChannelPolicy('ch1')
+    expect(p.primary).toBe('alice')
+    expect(p.outboundAllowlist).toEqual(['alice'])
+  })
+
+  test('missing-file reload keeps the last known valid config instead of relaxing ACL', () => {
+    setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
+    expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
+    rmSync(TMP_CONFIG, { force: true })
     const p = getChannelPolicy('ch1')
     expect(p.primary).toBe('alice')
     expect(p.outboundAllowlist).toEqual(['alice'])
