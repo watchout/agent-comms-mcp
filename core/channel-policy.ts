@@ -110,7 +110,13 @@ function loadConfig(): RoutingConfig {
     }
     const raw = readFileSync(path, 'utf8')
     const parsed = JSON.parse(raw) as RoutingConfig
-    if (typeof parsed !== 'object' || parsed === null || typeof parsed.channels !== 'object') {
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      typeof parsed.channels !== 'object' ||
+      parsed.channels === null ||
+      Array.isArray(parsed.channels)
+    ) {
       if (cachedConfig !== null) return cachedConfig
       cachedConfig = { version: 1, channels: {} }
       cachedConfigPath = path

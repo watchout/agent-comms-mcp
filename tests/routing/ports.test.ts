@@ -78,6 +78,15 @@ describe('channel-policy (§1.8)', () => {
     expect(p.outboundAllowlist).toEqual(['alice'])
   })
 
+  test('schema-invalid reload keeps the last known valid config instead of crashing or relaxing ACL', () => {
+    setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
+    expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
+    writeFileSync(TMP_CONFIG, JSON.stringify({ version: 1, channels: null }), 'utf8')
+    const p = getChannelPolicy('ch1')
+    expect(p.primary).toBe('alice')
+    expect(p.outboundAllowlist).toEqual(['alice'])
+  })
+
   test('missing-file reload keeps the last known valid config instead of relaxing ACL', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
