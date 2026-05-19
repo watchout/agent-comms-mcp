@@ -42,10 +42,16 @@ function requireText(value: string | undefined, label: string): string {
   return text
 }
 
+export function resolveWrapperBunExecutable(): string {
+  return process.env.AUN_BUN_EXECUTABLE?.trim()
+    || process.env.STATE_DAEMON_BUN_EXECUTABLE?.trim()
+    || process.execPath
+}
+
 export function buildReplyPlan(opts: ReplyOptions = {}): CommandPlan {
   const content = requireText(opts.content, '--content')
   const mentions = requireText(opts.mentions, '--mentions')
-  const argv = ['bun', 'cli/index.ts', 'send', '--content', content, '--mentions', mentions]
+  const argv = [resolveWrapperBunExecutable(), 'cli/index.ts', 'send', '--content', content, '--mentions', mentions]
   if (opts.messageType?.trim()) argv.push('--message-type', opts.messageType.trim())
   if (opts.queueId?.trim()) argv.push('--queue-id', opts.queueId.trim())
   if (opts.messageId?.trim()) argv.push('--message-id', opts.messageId.trim())
@@ -63,7 +69,7 @@ export function buildNotifyPlan(opts: NotifyOptions = {}): CommandPlan {
   const channel = requireText(opts.channel, '--channel')
   const content = requireText(opts.content, '--content')
   const mentions = requireText(opts.mentions, '--mentions')
-  const argv = ['bun', 'cli/index.ts', 'notify', '--channel', channel, '--content', content, '--mentions', mentions]
+  const argv = [resolveWrapperBunExecutable(), 'cli/index.ts', 'notify', '--channel', channel, '--content', content, '--mentions', mentions]
   if (opts.threadId?.trim()) argv.push('--thread-id', opts.threadId.trim())
   if (opts.messageType?.trim()) argv.push('--message-type', opts.messageType.trim())
   return buildCommandPlan(opts, argv)

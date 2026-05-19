@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
+import { buildNotifyPlan, buildReplyPlan, resolveWrapperBunExecutable } from '../../bin/aun/reply'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
@@ -79,6 +80,50 @@ afterEach(() => {
 })
 
 describe('test_aun_reply_notify_wrapper — claim close semantics', () => {
+  test('reply and notify wrapper plans do not rely on bare bun under launchd PATH', () => {
+    const originalAunOverride = process.env.AUN_BUN_EXECUTABLE
+    const originalStateDaemonOverride = process.env.STATE_DAEMON_BUN_EXECUTABLE
+    try {
+      delete process.env.AUN_BUN_EXECUTABLE
+      process.env.STATE_DAEMON_BUN_EXECUTABLE = ''
+      expect(resolveWrapperBunExecutable()).toBe(process.execPath)
+      expect(resolveWrapperBunExecutable()).not.toBe('bun')
+
+      process.env.STATE_DAEMON_BUN_EXECUTABLE = '/operator/bin/bun'
+      expect(resolveWrapperBunExecutable()).toBe('/operator/bin/bun')
+
+      process.env.AUN_BUN_EXECUTABLE = '/operator/aun-bun'
+      expect(resolveWrapperBunExecutable()).toBe('/operator/aun-bun')
+
+      const replyPlan = buildReplyPlan({
+        agentId: 'probe-dev',
+        content: 'done',
+        mentions: 'codex-cto',
+        env,
+      })
+      const notifyPlan = buildNotifyPlan({
+        agentId: 'probe-dev',
+        channel: 'probe-ch',
+        content: 'notice',
+        mentions: 'codex-cto',
+        env,
+      })
+      expect(replyPlan.argv[0]).toBe('/operator/aun-bun')
+      expect(notifyPlan.argv[0]).toBe('/operator/aun-bun')
+    } finally {
+      if (originalAunOverride === undefined) {
+        delete process.env.AUN_BUN_EXECUTABLE
+      } else {
+        process.env.AUN_BUN_EXECUTABLE = originalAunOverride
+      }
+      if (originalStateDaemonOverride === undefined) {
+        delete process.env.STATE_DAEMON_BUN_EXECUTABLE
+      } else {
+        process.env.STATE_DAEMON_BUN_EXECUTABLE = originalStateDaemonOverride
+      }
+    }
+  })
+
   test('active claim reply closes the original queue row and records replied_with', () => {
     const { queueId } = seedPending('active claim')
     const next = runAun(['receive', '--agent-id', 'probe-dev'])
