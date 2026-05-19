@@ -47,6 +47,32 @@ function daemon(clock: FakeClock, codexRunner: FakeCodexRunner, tmux = new FakeT
   return { daemon: d, metrics, alert, tmux }
 }
 
+function scopedDaemon(
+  clock: FakeClock,
+  codexRunner: FakeCodexRunner,
+  agentAllowlist: string[],
+  tmux = new FakeTmux(),
+) {
+  const metrics = new FakeMetrics()
+  const alert = new FakeAlertSink()
+  const d = new StateDaemon({
+    db: new PgDBClient(pg),
+    pgListen: new FakePgListen(),
+    tmux,
+    codexRunner,
+    clock,
+    metrics,
+    alert,
+    config: {
+      agentIdPrefix: 'sd-test-',
+      agentAllowlist,
+      codexRunnerEnabled: true,
+      codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
+    },
+  })
+  return { daemon: d, metrics, alert, tmux }
+}
+
 function disabledDaemon(clock: FakeClock, codexRunner: FakeCodexRunner) {
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
@@ -215,6 +241,61 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(runner.invocations).toHaveLength(0)
       expect(h.tmux.sentKeys).toHaveLength(1)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('agent allowlist ignores pg_notify rows outside the activation scope', async () => {
+    const allowed = makeAgentId('allowed-codex')
+    const blocked = makeAgentId('blocked-codex')
+    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'online' })
+    const blockedId = await seedQueueRow(pg, { agent_id: blocked, status: 'pending' })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = scopedDaemon(clock, runner, [allowed])
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: blockedId,
+        agent_id: blocked,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(0)
+      expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_scope_skipped_total', { path: 'notify' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_state_actions_total')).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('agent allowlist limits stale sweep wake to selected agents', async () => {
+    const allowed = makeAgentId('allowed-tui')
+    const blocked = makeAgentId('blocked-tui')
+    await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
+    await seedAgent(pg, { agent_id: blocked, runtime: 'TUI', tmux_session: `${blocked}-session`, status: 'online' })
+    const old = new Date('2026-05-18T00:00:00.000Z')
+    await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
+    await seedQueueRow(pg, { agent_id: blocked, status: 'pending', created_at: old })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:00:30.000Z')
+    const h = scopedDaemon(clock, runner, [allowed])
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+
+      expect(result.rewoken).toBe(1)
+      expect(h.tmux.sentKeys).toEqual([
+        { session: `${allowed}-session`, payload: 'Call the agent-comms next tool now. Do not call inbox.\n' },
+      ])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
     } finally {
       await h.daemon.stop()
