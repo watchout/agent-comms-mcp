@@ -40,9 +40,14 @@ const execFileAsync = promisify(execFile)
 
 // ── DBClient (single connection for queries; LISTEN uses its own client) ─────
 class PgClientAdapter implements DBClient {
+  private chain: Promise<void> = Promise.resolve()
+
   constructor(private client: Client) {}
+
   async query<T = any>(sql: string, params?: unknown[]) {
-    const r = await this.client.query(sql, params)
+    const run = this.chain.then(() => this.client.query(sql, params))
+    this.chain = run.then(() => undefined, () => undefined)
+    const r = await run
     return { rows: r.rows as T[], rowCount: r.rowCount ?? 0 }
   }
 }

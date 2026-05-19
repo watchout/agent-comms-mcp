@@ -29,6 +29,11 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
     expect(SRC).toMatch(/class StdoutMetrics/)
     expect(SRC).toMatch(/class CompositeAlertSink/)
   })
+  test('PgClientAdapter serializes queries on the single pg Client', () => {
+    expect(SRC).toMatch(/private chain: Promise<void> = Promise\.resolve\(\)/)
+    expect(SRC).toMatch(/this\.chain\.then\(\(\) => this\.client\.query\(sql, params\)\)/)
+    expect(SRC).toMatch(/this\.chain = run\.then\(\(\) => undefined, \(\) => undefined\)/)
+  })
   test('SIGTERM / SIGINT graceful shutdown wiring', () => {
     expect(SRC).toMatch(/process\.on\('SIGTERM'/)
     expect(SRC).toMatch(/process\.on\('SIGINT'/)
@@ -110,6 +115,10 @@ describe('m4 — launchd plist source-pin', () => {
   })
   test('DATABASE_URL is in EnvironmentVariables (operator must set before load)', () => {
     expect(PLIST).toMatch(/DATABASE_URL/)
+  })
+  test('socket PostgreSQL launchd env pins PGUSER and USER', () => {
+    expect(PLIST).toMatch(/<key>PGUSER<\/key>\s*<string>yuji<\/string>/)
+    expect(PLIST).toMatch(/<key>USER<\/key>\s*<string>yuji<\/string>/)
   })
   test('Bug 2 / F15 / R14 — EnvironmentVariables.PATH is non-empty and includes Homebrew', () => {
     // Cycle 2 fix (auditor Axis 4): launchd does not inherit a login
