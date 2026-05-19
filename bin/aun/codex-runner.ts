@@ -2,16 +2,24 @@
  * First Codex auto-receive runner split (#422).
  *
  * This is intentionally a thin DB-primary tick:
- * - claim work through the existing `aun drain` path
+ * - claim actionable work through the bounded `aun receive-actionable` path
  * - retain queue/message identity in structured JSON
  * - optionally emit ACK/progress through `reply --no-close`
  * - leave final completion to `reply --close --queue-id --message-id`
  */
-import { drain, parseDrainLimit, type ClaimedMessage, type ReceiveOptions } from './receive'
+import {
+  buildCommandPlan,
+  parseDrainLimit,
+  parseMaxInspect,
+  runCommandPlan,
+  type ClaimedMessage,
+  type ReceiveOptions,
+} from './receive'
 import { reply } from './reply'
 
 export interface CodexRunnerOptions extends ReceiveOptions {
   limit?: number
+  maxInspect?: number
   ackMentions?: string
   ackContent?: string
 }
@@ -80,10 +88,63 @@ function validateAckOptions(opts: CodexRunnerOptions): string | null {
   return null
 }
 
+function receiveOneActionable(opts: CodexRunnerOptions, maxInspect: number) {
+  const plan = buildCommandPlan(opts, [
+    'bun',
+    'bin/aun.ts',
+    'receive-actionable',
+    '--max-inspect',
+    String(maxInspect),
+  ])
+  if (opts.dryRun) {
+    return {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        dry_run: true,
+        mode: 'codex-runner',
+        receive_mode: 'receive-actionable',
+        cwd: plan.repoRoot,
+        argv: plan.argv,
+        agent_id: plan.env.AGENT_ID,
+        expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+        database_url_candidates: plan.databaseUrlCandidates,
+      }) + '\n',
+      stderr: '',
+      plan,
+      claimed: null as ClaimedMessage | null,
+    }
+  }
+
+  const result = runCommandPlan(plan)
+  if (!result.ok) return { ...result, plan, claimed: null as ClaimedMessage | null }
+  let body: ClaimedMessage
+  try {
+    body = JSON.parse(result.stdout) as ClaimedMessage
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: `Error [CODEX_RUNNER_PARSE_FAILED]: failed to parse receive-actionable JSON: ${(err as Error).message}\n`,
+      plan,
+      claimed: null as ClaimedMessage | null,
+    }
+  }
+  return {
+    ...result,
+    plan,
+    claimed: body.queue_id === undefined ? null : body,
+  }
+}
+
 export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResult {
   let limit: number
+  let maxInspect: number
   try {
     limit = parseDrainLimit(opts.limit)
+    maxInspect = parseMaxInspect(opts.maxInspect)
   } catch (err) {
     return {
       ok: false,
@@ -103,9 +164,38 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
     }
   }
 
-  let batch
+  let firstPlanAgentId: string | null = null
+  let firstPlanExpectedAgentId: string | null = null
+  let waiting = 0
+  let capped = false
+  const retained: RetainedWorkItem[] = []
   try {
-    batch = drain({ ...opts, limit })
+    for (let i = 0; i < limit; i++) {
+      const received = receiveOneActionable(opts, maxInspect)
+      firstPlanAgentId = firstPlanAgentId ?? received.plan.env.AGENT_ID
+      firstPlanExpectedAgentId = firstPlanExpectedAgentId ?? received.plan.env.AGENT_COM_EXPECTED_AGENT_ID
+      if (!received.ok) {
+        return {
+          ok: false,
+          code: received.code,
+          stdout: JSON.stringify({ ok: false, retained, waiting }) + '\n',
+          stderr: received.stderr,
+        }
+      }
+      if (!received.claimed) {
+        try {
+          const body = JSON.parse(received.stdout) as { waiting?: number }
+          waiting = body.waiting ?? waiting
+        } catch {}
+        break
+      }
+      const item = retainClaim(received.claimed)
+      if (item) retained.push(item)
+      waiting = received.claimed.waiting ?? 0
+      if (waiting <= 0) break
+      capped = retained.length >= limit && waiting > 0
+      if (capped) break
+    }
   } catch (err) {
     return {
       ok: false,
@@ -114,25 +204,13 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       stderr: `Error [AGENT_ID_MISMATCH]: ${(err as Error).message}\n`,
     }
   }
-  if (!batch.ok) {
-    return {
-      ok: false,
-      code: batch.code,
-      stdout: batch.stdout,
-      stderr: batch.stderr,
-    }
-  }
 
-  let parsedBatch: { waiting?: number; capped?: boolean } = {}
+  let parsedBatch: { waiting?: number; capped?: boolean } = { waiting, capped }
   try {
-    parsedBatch = JSON.parse(batch.stdout)
+    parsedBatch = JSON.parse(JSON.stringify({ waiting, capped }))
   } catch {
     parsedBatch = {}
   }
-
-  const retained = batch.claimed
-    .map(retainClaim)
-    .filter((item): item is RetainedWorkItem => item !== null)
 
   const acks: AckResult[] = []
   if (wantsAck(opts)) {
@@ -160,7 +238,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
           code: ack.code,
           stdout: JSON.stringify({
             ok: false,
-            agent_id: batch.plan.env.AGENT_ID,
+            agent_id: firstPlanAgentId,
             retained,
             acks,
           }) + '\n',
@@ -175,14 +253,16 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
     code: 0,
     stdout: JSON.stringify({
       ok: true,
-      agent_id: batch.plan.env.AGENT_ID,
-      expected_agent_id: batch.plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+      agent_id: firstPlanAgentId,
+      expected_agent_id: firstPlanExpectedAgentId,
+      receive_mode: 'receive-actionable',
       retained,
       retained_count: retained.length,
       acked_count: acks.length,
       acks,
       waiting: parsedBatch.waiting ?? 0,
       limit,
+      max_inspect: maxInspect,
       capped: parsedBatch.capped ?? false,
       final_close_contract: 'aun reply --close --queue-id <id> --message-id <uuid>',
     }) + '\n',
