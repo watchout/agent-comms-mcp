@@ -49,6 +49,11 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // CEO P1: the handler must surface the fallback in the return
     // value — silent reject is forbidden.
     expect(handler).toMatch(/fallback: notify \(reason: \$\{fallbackReason\}\)/)
+    // #453: fallback-result rows must carry deterministic source markers
+    // in metadata so reconcile can link the result without parsing prose.
+    expect(handler).toMatch(/fallback_notify:\s*\{/)
+    expect(handler).toMatch(/source_message_id:\s*reply_to/)
+    expect(handler).toMatch(/source_queue_id:\s*fallbackSourceQueueId/)
   })
   // Pre-existing latent fail: previously pinned the legacy claim status in
   // send-fallback-decision helper, but v0.9 (sub-PR 1 #347 + sub-PR 3 #350)

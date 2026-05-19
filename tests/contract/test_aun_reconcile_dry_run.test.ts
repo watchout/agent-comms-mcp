@@ -105,15 +105,17 @@ function seedFallbackResult(opts: {
   sourceMessageId?: string
   authorId?: string
   content?: string
+  metadata?: Record<string, unknown>
 }): string {
   return withDb((db) => {
     const messageId = randomUUID()
     const sourceMessage = opts.sourceMessageId ? ` source_message_id=${opts.sourceMessageId}` : ''
     const content = opts.content ?? `L1 PASS fallback result source_queue_id=${opts.sourceQueueId}${sourceMessage}`
+    const metadata = opts.metadata ? JSON.stringify(opts.metadata) : null
     db.prepare(
-      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source, created_at)
-       VALUES (?, 'reconcile-ch', ?, ?, 'report', 'cli-notify', ?)`,
-    ).run(messageId, opts.authorId ?? TEST_AGENT, content, new Date().toISOString())
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source, created_at, metadata, reply_to)
+       VALUES (?, 'reconcile-ch', ?, ?, 'report', 'cli-notify', ?, ?, ?)`,
+    ).run(messageId, opts.authorId ?? TEST_AGENT, content, new Date().toISOString(), metadata, opts.sourceMessageId ?? null)
     return messageId
   })
 }
@@ -304,8 +306,52 @@ describe('test_aun_reconcile_dry_run - read-only backlog reconciliation inventor
       source_queue_id: String(sourceQueueId),
       source_message_id: sourceMessageId,
       link_type: 'source_queue_id',
+      evidence_source: 'content_marker',
     })
     expect(body.rows[0].required_evidence).toContain('reviewer_approval')
+    expect(statuses()[0].status).toBe('pending')
+  })
+
+  test('links original pending request to invisible fallback metadata marker without closing it', () => {
+    const sourceQueueId = seedQueue({
+      messageType: 'instruction',
+      content: 'Please audit PR #453 fallback metadata',
+      ageSeconds: 300,
+    })
+    const sourceMessageId = queueMessageId(sourceQueueId)
+    const fallbackMessageId = seedFallbackResult({
+      sourceQueueId,
+      sourceMessageId,
+      authorId: TEST_AGENT,
+      content: 'L1 PASS fallback result without visible source markers',
+      metadata: {
+        fallback_notify: {
+          reason: 'claim_missing',
+          source_queue_id: String(sourceQueueId),
+          source_message_id: sourceMessageId,
+        },
+      },
+    })
+
+    const r = runAun(['reconcile', '--dry-run', '--agent-id', TEST_AGENT, '--limit', '5'])
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.rows[0]).toMatchObject({
+      queue_id: sourceQueueId,
+      classification: 'notify_fallback_result',
+      proposed_action: 'request_human_review',
+    })
+    expect(body.rows[0].flags).toContain('notify_fallback_result_found')
+    expect(body.rows[0].content_preview).toBe('Please audit PR #453 fallback metadata')
+    expect(body.rows[0].evidence.notify_fallback_result).toMatchObject({
+      found: true,
+      notify_message_id: fallbackMessageId,
+      notify_author_id: TEST_AGENT,
+      source_queue_id: String(sourceQueueId),
+      source_message_id: sourceMessageId,
+      link_type: 'source_queue_id',
+      evidence_source: 'metadata_marker',
+    })
     expect(statuses()[0].status).toBe('pending')
   })
 })

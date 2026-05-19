@@ -199,6 +199,7 @@ export interface NotifyFallbackEvidence {
   source_queue_id: string
   source_message_id: string | null
   link_type: 'source_queue_id' | 'source_message_id'
+  evidence_source: 'content_marker' | 'metadata_marker'
 }
 
 export interface ReconcileRow {
@@ -827,6 +828,23 @@ function markerPatternsForRow(row: Record<string, unknown>): Array<{ pattern: st
   ]
 }
 
+function metadataObject(value: unknown): Record<string, unknown> {
+  if (typeof value === 'object' && value !== null) return value as Record<string, unknown>
+  if (typeof value !== 'string' || value.trim().length === 0) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function fallbackNotifyMetadata(candidate: Record<string, unknown>): Record<string, unknown> {
+  const metadata = metadataObject(candidate.metadata)
+  const fallback = metadata.fallback_notify
+  return typeof fallback === 'object' && fallback !== null ? fallback as Record<string, unknown> : {}
+}
+
 async function loadNotifyFallbackEvidence(
   db: DbAdapter,
   rows: Array<Record<string, unknown>>,
@@ -845,11 +863,19 @@ async function loadNotifyFallbackEvidence(
       conditions.push(`am.content LIKE $${params.length}`)
       patternOwners.push({ queueId, sourceMessageId, linkType: marker.linkType })
     }
+    if (sourceMessageId) {
+      params.push(sourceMessageId)
+      conditions.push(`am.reply_to = $${params.length}`)
+      params.push(`%"source_message_id":"${sourceMessageId}"%`)
+      conditions.push(`am.metadata::text LIKE $${params.length}`)
+    }
+    params.push(`%"source_queue_id":"${queueId}"%`)
+    conditions.push(`am.metadata::text LIKE $${params.length}`)
   }
   if (conditions.length === 0) return new Map()
 
   const candidates = await db.query<Record<string, unknown>>(
-    `SELECT am.id, am.author_id, am.content, am.created_at
+    `SELECT am.id, am.author_id, am.content, am.created_at, am.reply_to, am.metadata
        FROM agent_messages am
       WHERE (${conditions.join(' OR ')})
       ORDER BY am.created_at ASC, am.id ASC
@@ -862,6 +888,25 @@ async function loadNotifyFallbackEvidence(
     const content = typeof candidate.content === 'string' ? candidate.content : ''
     for (const owner of patternOwners) {
       if (evidence.has(owner.queueId)) continue
+      const metadata = fallbackNotifyMetadata(candidate)
+      const metadataQueueId = typeof metadata.source_queue_id === 'string' ? metadata.source_queue_id : null
+      const metadataMessageId = typeof metadata.source_message_id === 'string' ? metadata.source_message_id : null
+      const metadataMatchesQueue = metadataQueueId === owner.queueId
+      const metadataMatchesMessage = !!owner.sourceMessageId && metadataMessageId === owner.sourceMessageId
+      if (metadataMatchesQueue || metadataMatchesMessage) {
+        evidence.set(owner.queueId, {
+          found: true,
+          notify_message_id: String(candidate.id ?? ''),
+          notify_author_id: typeof candidate.author_id === 'string' ? candidate.author_id : null,
+          notify_created_at: normalizeDate(candidate.created_at),
+          notify_content_hash: content ? sha256(content) : null,
+          source_queue_id: owner.queueId,
+          source_message_id: owner.sourceMessageId,
+          link_type: metadataMatchesQueue ? 'source_queue_id' : 'source_message_id',
+          evidence_source: 'metadata_marker',
+        })
+        continue
+      }
       const exactMarker = owner.linkType === 'source_queue_id'
         ? `source_queue_id=${owner.queueId}`
         : owner.sourceMessageId ? `source_message_id=${owner.sourceMessageId}` : ''
@@ -875,6 +920,7 @@ async function loadNotifyFallbackEvidence(
         source_queue_id: owner.queueId,
         source_message_id: owner.sourceMessageId,
         link_type: owner.linkType,
+        evidence_source: 'content_marker',
       })
     }
   }
