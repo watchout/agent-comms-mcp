@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
+import { resolveNestedBunExecutable } from '../../bin/aun/codex-runner'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
@@ -106,6 +107,34 @@ afterEach(() => {
 })
 
 describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
+  test('nested receive-actionable command does not rely on bare bun under launchd PATH', () => {
+    const originalAunOverride = process.env.AUN_BUN_EXECUTABLE
+    const originalOverride = process.env.STATE_DAEMON_BUN_EXECUTABLE
+    try {
+      delete process.env.AUN_BUN_EXECUTABLE
+      process.env.STATE_DAEMON_BUN_EXECUTABLE = ''
+      expect(resolveNestedBunExecutable()).toBe(process.execPath)
+      expect(resolveNestedBunExecutable()).not.toBe('bun')
+
+      process.env.STATE_DAEMON_BUN_EXECUTABLE = '/operator/bin/bun'
+      expect(resolveNestedBunExecutable()).toBe('/operator/bin/bun')
+
+      process.env.AUN_BUN_EXECUTABLE = '/operator/aun-bun'
+      expect(resolveNestedBunExecutable()).toBe('/operator/aun-bun')
+    } finally {
+      if (originalAunOverride === undefined) {
+        delete process.env.AUN_BUN_EXECUTABLE
+      } else {
+        process.env.AUN_BUN_EXECUTABLE = originalAunOverride
+      }
+      if (originalOverride === undefined) {
+        delete process.env.STATE_DAEMON_BUN_EXECUTABLE
+      } else {
+        process.env.STATE_DAEMON_BUN_EXECUTABLE = originalOverride
+      }
+    }
+  })
+
   test('claims pending work and retains queue/message identity', () => {
     const { messageId, queueId } = seedPending('retain identity')
 
