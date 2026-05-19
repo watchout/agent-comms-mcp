@@ -190,6 +190,17 @@ export interface ReconcileFingerprint {
   hash: string
 }
 
+export interface NotifyFallbackEvidence {
+  found: true
+  notify_message_id: string
+  notify_author_id: string | null
+  notify_created_at: string | null
+  notify_content_hash: string | null
+  source_queue_id: string
+  source_message_id: string | null
+  link_type: 'source_queue_id' | 'source_message_id'
+}
+
 export interface ReconcileRow {
   queue_id: string | number
   message_id: string | null
@@ -633,6 +644,7 @@ function reconcileClassification(
   payload: Record<string, unknown>,
   terminalWarnings: string[],
   ageDays: number | null,
+  notifyFallbackEvidence?: NotifyFallbackEvidence | null,
 ): ReconcileClass {
   const status = String(row.status ?? '')
   const agentId = String(row.agent_id ?? '')
@@ -643,6 +655,7 @@ function reconcileClassification(
   if (terminalWarnings.length > 0) return 'terminal_legacy_invariant'
   if (TERMINAL_STATUSES.has(status)) return 'already_terminal'
   if (ACTIVE_STATUSES.has(status)) return 'active_claim'
+  if (status === 'pending' && notifyFallbackEvidence?.found) return 'notify_fallback_result'
   if ((agentId === 'cto' || agentId === 'codex-cto') && status === 'pending') return 'identity_split'
   if (messageType === 'projection' || source.includes('projection') || source.includes('relay')) return 'projection_only'
   if (source === 'cli-notify' || source === 'notify' || String(payload.content ?? '').includes('fallback: notify')) {
@@ -714,6 +727,9 @@ function proposedActionForClass(klass: ReconcileClass): {
 }
 
 function normalizeReconcileRow(row: Record<string, unknown>): ReconcileRow {
+  const notifyFallbackEvidence = isNotifyFallbackEvidence(row.notify_fallback_evidence)
+    ? row.notify_fallback_evidence
+    : null
   const payload = parsePayload(row.payload)
   const messageType = resolveMessageType(row, payload)
   const payloadAuthor = payload.author_id
@@ -728,12 +744,13 @@ function normalizeReconcileRow(row: Record<string, unknown>): ReconcileRow {
   const age = ageSeconds(row.created_at)
   const ageDays = age === null ? null : Math.floor(age / 86_400)
   const terminalWarnings = terminalInvariantWarnings(row)
-  const klass = reconcileClassification(row, messageType, payload, terminalWarnings, ageDays)
+  const klass = reconcileClassification(row, messageType, payload, terminalWarnings, ageDays, notifyFallbackEvidence)
   const proposal = proposedActionForClass(klass)
   const flags = [
     ...(terminalWarnings.length > 0 ? terminalWarnings : []),
     ...(row.message_id ? [] : ['message_row_missing']),
     ...(typeof row.payload === 'string' ? [] : ['payload_parse_error']),
+    ...(notifyFallbackEvidence?.found ? ['notify_fallback_result_found'] : []),
     ...(agentAliasFlag(String(row.agent_id ?? ''), String(payloadAuthor ?? storedAuthor ?? ''))),
   ]
   const canonicalFields = {
@@ -783,6 +800,7 @@ function normalizeReconcileRow(row: Record<string, unknown>): ReconcileRow {
       age_days: ageDays,
       terminal_warnings: terminalWarnings,
       payload_keys: Object.keys(payload).sort(),
+      notify_fallback_result: notifyFallbackEvidence ?? null,
       note: 'dry-run only; no queue row was mutated',
     },
     fingerprint: {
@@ -794,6 +812,73 @@ function normalizeReconcileRow(row: Record<string, unknown>): ReconcileRow {
     content_preview: contentPreview(content),
     content_hash: content ? sha256(content) : null,
   }
+}
+
+function isNotifyFallbackEvidence(value: unknown): value is NotifyFallbackEvidence {
+  return typeof value === 'object' && value !== null && (value as { found?: unknown }).found === true
+}
+
+function markerPatternsForRow(row: Record<string, unknown>): Array<{ pattern: string; linkType: NotifyFallbackEvidence['link_type'] }> {
+  const queueId = String(row.id ?? '')
+  const messageId = typeof row.message_id === 'string' && row.message_id.length > 0 ? row.message_id : null
+  return [
+    { pattern: `%source_queue_id=${queueId}%`, linkType: 'source_queue_id' },
+    ...(messageId ? [{ pattern: `%source_message_id=${messageId}%`, linkType: 'source_message_id' as const }] : []),
+  ]
+}
+
+async function loadNotifyFallbackEvidence(
+  db: DbAdapter,
+  rows: Array<Record<string, unknown>>,
+): Promise<Map<string, NotifyFallbackEvidence>> {
+  const targets = rows.filter((row) => String(row.status ?? '') === 'pending')
+  if (targets.length === 0) return new Map()
+
+  const conditions: string[] = []
+  const params: unknown[] = []
+  const patternOwners: Array<{ queueId: string; sourceMessageId: string | null; linkType: NotifyFallbackEvidence['link_type'] }> = []
+  for (const row of targets) {
+    const queueId = String(row.id ?? '')
+    const sourceMessageId = typeof row.message_id === 'string' ? row.message_id : null
+    for (const marker of markerPatternsForRow(row)) {
+      params.push(marker.pattern)
+      conditions.push(`am.content LIKE $${params.length}`)
+      patternOwners.push({ queueId, sourceMessageId, linkType: marker.linkType })
+    }
+  }
+  if (conditions.length === 0) return new Map()
+
+  const candidates = await db.query<Record<string, unknown>>(
+    `SELECT am.id, am.author_id, am.content, am.created_at
+       FROM agent_messages am
+      WHERE (${conditions.join(' OR ')})
+      ORDER BY am.created_at ASC, am.id ASC
+      LIMIT 100`,
+    params,
+  )
+
+  const evidence = new Map<string, NotifyFallbackEvidence>()
+  for (const candidate of candidates) {
+    const content = typeof candidate.content === 'string' ? candidate.content : ''
+    for (const owner of patternOwners) {
+      if (evidence.has(owner.queueId)) continue
+      const exactMarker = owner.linkType === 'source_queue_id'
+        ? `source_queue_id=${owner.queueId}`
+        : owner.sourceMessageId ? `source_message_id=${owner.sourceMessageId}` : ''
+      if (!exactMarker || !content.includes(exactMarker)) continue
+      evidence.set(owner.queueId, {
+        found: true,
+        notify_message_id: String(candidate.id ?? ''),
+        notify_author_id: typeof candidate.author_id === 'string' ? candidate.author_id : null,
+        notify_created_at: normalizeDate(candidate.created_at),
+        notify_content_hash: content ? sha256(content) : null,
+        source_queue_id: owner.queueId,
+        source_message_id: owner.sourceMessageId,
+        link_type: owner.linkType,
+      })
+    }
+  }
+  return evidence
 }
 
 function agentAliasFlag(agentId: string, authorId: string): string[] {
@@ -1171,7 +1256,12 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<ReconcileR
         params,
       )
 
-      const pageRows = rows.slice(0, limit).map(normalizeReconcileRow)
+      const sourceRows = rows.slice(0, limit)
+      const fallbackEvidence = await loadNotifyFallbackEvidence(db, sourceRows)
+      const pageRows = sourceRows.map((row) => normalizeReconcileRow({
+        ...row,
+        notify_fallback_evidence: fallbackEvidence.get(String(row.id ?? '')) ?? null,
+      }))
       const countsByClass: Record<string, number> = {}
       const countsByAction: Record<string, number> = {}
       const warnings = new Set<string>()
