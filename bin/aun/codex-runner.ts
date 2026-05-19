@@ -88,9 +88,15 @@ function validateAckOptions(opts: CodexRunnerOptions): string | null {
   return null
 }
 
+export function resolveNestedBunExecutable(): string {
+  return process.env.AUN_BUN_EXECUTABLE?.trim()
+    || process.env.STATE_DAEMON_BUN_EXECUTABLE?.trim()
+    || process.execPath
+}
+
 function receiveOneActionable(opts: CodexRunnerOptions, maxInspect: number) {
   const plan = buildCommandPlan(opts, [
-    'bun',
+    resolveNestedBunExecutable(),
     'bin/aun.ts',
     'receive-actionable',
     '--max-inspect',
