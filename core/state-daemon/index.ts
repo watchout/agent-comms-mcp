@@ -716,6 +716,20 @@ export class StateDaemon {
       return false
     }
 
+    const current = await this.dbQuery<{ status: string }>(
+      `SELECT status FROM message_queue WHERE id=$1`,
+      [row.id],
+    )
+    if (current.rows[0]?.status !== 'pending') {
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, now],
+      )
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_stale_skipped' })
+      return false
+    }
+
     const result = await this.codexRunner.invoke({
       agentId: row.agent_id,
       queueId: Number(row.id),
