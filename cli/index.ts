@@ -31,6 +31,7 @@ import { fanoutToRecipients } from '../core/send-fanout'
 import { resolveOutboundProjectionRoute } from '../core/outbound-projection'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
+import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -1510,6 +1511,28 @@ async function diagnoseProjection(args: string[]) {
   }
 }
 
+async function diagnoseQueue(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? null
+  const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+  const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+
+  try {
+    const report = await buildQueueDoctorReport(db as any, { agentId, staleSeconds })
+
+    if (format === 'text') {
+      process.stdout.write(formatQueueDoctorText(report))
+      return
+    }
+
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com agents` — list registered agents as JSON.
  * MVP: no filters; reads the agents table verbatim.
@@ -1741,6 +1764,8 @@ if (command === 'channel') {
   await diagnoseDelivery([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'diagnose-projection') {
   await diagnoseProjection([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'diagnose-queue' || (command === 'queue' && subcommand === 'doctor')) {
+  await diagnoseQueue(command === 'queue' ? rest : [subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -1765,6 +1790,9 @@ Message I/O (requires AGENT_ID env var):
                                                        — JSON explanation for next/projection gaps
   diagnose-projection --channel <id> --from <agent> --to <agent>[,<agent>]
                                                        — terminal preview of surface/projection routing
+  diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+  queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — queue health blockers and stale-work diagnostics
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
