@@ -97,11 +97,15 @@ class TmuxShellAdapter implements TmuxClient {
     // typed into the input field as text and no LLM turn ever starts. The
     // earlier "no Enter literal needed" assumption (PR #330 cycle / Bug 1
     // fallout) is wrong under tmux's default key syntax. Correct shape
-    // strips the trailing LF and passes `Enter` as a SEPARATE argv so
-    // tmux interprets it as the Return key. F16 (forbidden in §3 of the
-    // re-chain dispatch) bans relying on embedded \n alone.
+    // strips the trailing LF, sends the prompt as literal text, then sends
+    // `Enter` in a second tmux call. Codex TUI can leave the prompt in the
+    // editor when literal text and Enter are sent in a single `send-keys`
+    // invocation, so keep the submit keypress separate.
     const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
-    await execFileAsync('tmux', ['send-keys', '-t', session, stripped, 'Enter'])
+    if (stripped.length > 0) {
+      await execFileAsync('tmux', ['send-keys', '-t', session, '-l', stripped])
+    }
+    await execFileAsync('tmux', ['send-keys', '-t', session, 'Enter'])
   }
   async restartSession(agentId: string): Promise<void> {
     // Existing launcher: scripts/restart-bot.sh is the repo-owned bot restart

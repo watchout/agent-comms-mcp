@@ -66,7 +66,7 @@ dDescribe('T19c — real tmux Enter-submission regression (PR #335 hotfix)', () 
     // (production-shape adapters compile + wire). The TmuxShellAdapter
     // class itself is internal and would require a full DaemonDeps
     // wiring to instantiate; the regression we want to gate is the argv
-    // SHAPE, so we re-issue the exact two-arg call below. If the
+    // SHAPE, so we re-issue the exact literal-send + Enter calls below. If the
     // production class signature drifts, the m4 source-pin catches it.
     const mod = await import('../../../bin/state-daemon')
     expect(typeof (mod as { main: () => unknown }).main).toBe('function')
@@ -75,10 +75,12 @@ dDescribe('T19c — real tmux Enter-submission regression (PR #335 hotfix)', () 
     execFileSync('tmux', ['send-keys', '-t', session, 'echo BASE-MARKER', 'Enter'])
     await new Promise((r) => setTimeout(r, 200))
 
-    // Now drive the production sendKeys shape: strip trailing \n + Enter argv.
+    // Now drive the production sendKeys shape: strip trailing \n, send the
+    // prompt as literal text, then send Enter as a separate keypress.
     const payload = 'echo SUBMIT-MARKER\n'
     const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
-    await execFileAsync('tmux', ['send-keys', '-t', session, stripped, 'Enter'])
+    await execFileAsync('tmux', ['send-keys', '-t', session, '-l', stripped])
+    await execFileAsync('tmux', ['send-keys', '-t', session, 'Enter'])
     await new Promise((r) => setTimeout(r, 300))
 
     // Capture the pane and verify both markers ran. If Enter never pressed,
