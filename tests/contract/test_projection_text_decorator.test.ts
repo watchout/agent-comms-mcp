@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { resolve } from 'node:path'
 import { decorateProjectedContent } from '../../core/projection-text-decorator'
 
 describe('projection text decorator', () => {
@@ -35,5 +36,13 @@ describe('projection text decorator', () => {
       consumerAgentId: 'agent-com-dev',
       recipients: ['codex-cto'],
     })).toBe('[codex-aun -> codex-cto]\nhello')
+  })
+
+  test('server and CLI outbound enqueue paths both apply the decorator', async () => {
+    const repoRoot = resolve(import.meta.dir, '..', '..')
+    const server = await Bun.file(resolve(repoRoot, 'server.ts')).text()
+    const cli = await Bun.file(resolve(repoRoot, 'cli/index.ts')).text()
+    expect((server.match(/decorateProjectedContent\(/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect((cli.match(/decorateProjectedContent\(/g) ?? []).length).toBeGreaterThanOrEqual(2)
   })
 })
