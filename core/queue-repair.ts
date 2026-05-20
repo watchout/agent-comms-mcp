@@ -222,13 +222,13 @@ export async function closeObsoletePendingQueueRows(
        refreshed_agents AS (
          UPDATE agents a SET
             status = CASE
-              WHEN aas.has_active_claims THEN 'busy'
-              WHEN a.status = 'busy' THEN 'idle'
+              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'
+              WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'
               ELSE a.status
             END,
             status_detail = CASE
-              WHEN aas.has_active_claims THEN 'message processing'
-              WHEN a.status IN ('busy', 'idle') THEN NULL
+              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'message processing'
+              WHEN NOT aas.has_active_claims AND a.status IN ('busy', 'idle') THEN NULL
               ELSE a.status_detail
             END,
             status_updated_at = now()
@@ -313,13 +313,13 @@ export async function reclaimExpiredQueueClaims(
        refreshed_agents AS (
          UPDATE agents a SET
             status = CASE
-              WHEN aas.has_active_claims THEN 'busy'
-              WHEN a.status = 'busy' THEN 'idle'
+              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'
+              WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'
               ELSE a.status
             END,
             status_detail = CASE
-              WHEN aas.has_active_claims THEN 'message processing'
-              WHEN a.status IN ('busy', 'idle') THEN NULL
+              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'message processing'
+              WHEN NOT aas.has_active_claims AND a.status IN ('busy', 'idle') THEN NULL
               ELSE a.status_detail
             END,
             status_updated_at = now()
