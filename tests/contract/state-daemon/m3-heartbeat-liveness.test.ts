@@ -190,6 +190,30 @@ describe('T22 dead_bot_tmux_missing_restart', () => {
       await h.daemon.stop()
     }
   })
+
+  test('Codex runtime stale last_seen_at: no restart or manual-intervention alert', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t22-codex-runner')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      status: 'idle',
+      last_seen_at: new Date(T0.getTime() - 180_000),
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.checkBotLiveness()
+      expect(result.restarted).toBe(0)
+      expect(result.escalated).toBe(0)
+      expect(h.tmux.restarts.length).toBe(0)
+      expect(h.alert.contains('manual intervention')).toBe(false)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'codex' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T23 ───────────────────────────────────────────────────────────────────────

@@ -59,6 +59,12 @@ import {
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 
+const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
+
+function isCodexRunnerRuntime(runtime: string | null): boolean {
+  return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
+}
+
 interface QueueRow {
   id: number
   agent_id: string
@@ -418,6 +424,10 @@ export class StateDaemon {
       const lastSeen = bot.last_seen_at ? new Date(bot.last_seen_at).getTime() : 0
       const stale = now - lastSeen
       if (stale <= this.config.botDeadThresholdMs) continue
+      if (isCodexRunnerRuntime(bot.runtime)) {
+        this.metrics.inc('state_daemon_bot_liveness_skipped_total', { runtime: bot.runtime })
+        continue
+      }
       // §5.4 / R7: TUI bot with stale last_seen_at gets restart attempted
       // regardless of whether the tmux_session field is currently populated
       // — the launcher (restart-bot.sh) reattaches or recreates the session
