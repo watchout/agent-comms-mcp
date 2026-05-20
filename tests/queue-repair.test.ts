@@ -35,6 +35,26 @@ describe('queue repair helpers', () => {
     expect(calls.join('\n')).not.toContain('UPDATE message_queue')
   })
 
+  test('reassign defaults to dry-run', async () => {
+    const calls: string[] = []
+    const db = {
+      async query(sql: string) {
+        calls.push(sql)
+        if (sql.includes('FROM agents')) return { rows: [{ agent_id: 'codex-aun', status: 'idle', metadata: {} }] }
+        if (sql.includes('FROM message_queue')) return { rows: [sample(10)] }
+        return { rows: [] }
+      },
+    }
+
+    const report = await reassignPendingQueueRows(db, {
+      fromAgentId: 'lead-ama',
+      toAgentId: 'codex-aun',
+    })
+
+    expect(report).toMatchObject({ action: 'reassign', dry_run: true })
+    expect(calls).not.toContain('BEGIN')
+  })
+
   test('reassign fails closed when the target is offline', async () => {
     const calls: string[] = []
     const db = {
@@ -76,12 +96,12 @@ describe('queue repair helpers', () => {
     expect(calls).not.toContain('BEGIN')
   })
 
-  test('close obsolete writes audit on mutation', async () => {
+  test('close obsolete defaults to dry-run', async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = []
     const db = {
       async query(sql: string, params?: unknown[]) {
         calls.push({ sql, params })
-        if (sql.includes('UPDATE message_queue')) return { rows: [sample(3)] }
+        if (sql.includes('FROM message_queue')) return { rows: [sample(3)] }
         return { rows: [] }
       },
     }
@@ -91,11 +111,81 @@ describe('queue repair helpers', () => {
       reason: 'retired identity',
     })
 
+    expect(report).toMatchObject({ action: 'close_obsolete', dry_run: true, affected_count: 2 })
+    expect(calls.some((call) => call.sql === 'BEGIN')).toBe(false)
+    expect(calls.join('\n')).not.toContain('UPDATE message_queue')
+  })
+
+  test('close obsolete writes audit on mutation', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const db = {
+      async query(sql: string, params?: unknown[]) {
+        calls.push({ sql, params })
+        if (sql.includes('WITH before AS')) return { rows: [{ ...sample(3), status: 'skipped', before_status: 'pending' }] }
+        return { rows: [] }
+      },
+    }
+
+    const report = await closeObsoletePendingQueueRows(db, {
+      agentId: 'lead-ama',
+      reason: 'retired identity',
+      dryRun: false,
+    })
+
     expect(report).toMatchObject({ action: 'close_obsolete', dry_run: false, affected_count: 2 })
     expect(calls.some((call) => call.sql === 'BEGIN')).toBe(true)
     expect(calls.some((call) => call.sql.includes('INSERT INTO audit_log'))).toBe(true)
     expect(calls.some((call) => call.sql === 'COMMIT')).toBe(true)
-    expect(calls.find((call) => call.sql.includes('UPDATE message_queue'))?.params).toContain('OBSOLETE:retired identity')
+    expect(calls.find((call) => call.sql.includes('WITH before AS'))?.params).toContain('OBSOLETE:retired identity')
+  })
+
+  test('close obsolete active rows requires an explicit queue id', async () => {
+    const db = { async query() { return { rows: [] } } }
+
+    await expect(closeObsoletePendingQueueRows(db, {
+      agentId: 'codex-audit',
+      reason: 'old claim',
+      includeActive: true,
+      dryRun: false,
+    })).rejects.toThrow('QUEUE_REPAIR_INCLUDE_ACTIVE_REQUIRES_QUEUE_ID')
+  })
+
+  test('close obsolete can terminalize one explicit active row and refresh the agent', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const db = {
+      async query(sql: string, params?: unknown[]) {
+        calls.push({ sql, params })
+        if (sql.includes('WITH before AS')) {
+          return {
+            rows: [{
+              ...sample(73958, 'codex-audit'),
+              status: 'skipped',
+              before_status: 'received',
+              total_count: 1,
+            }],
+          }
+        }
+        return { rows: [] }
+      },
+    }
+
+    const report = await closeObsoletePendingQueueRows(db, {
+      agentId: 'codex-audit',
+      reason: 'ceo presence broadcast',
+      queueId: '73958',
+      includeActive: true,
+      dryRun: false,
+    })
+
+    expect(report).toMatchObject({ action: 'close_obsolete', dry_run: false, affected_count: 1 })
+    const mutation = calls.find((call) => call.sql.includes('WITH before AS'))
+    expect(mutation?.sql).toContain("status IN ('pending', 'received', 'in_progress')")
+    expect(mutation?.sql).toContain('claimed_by = NULL')
+    expect(mutation?.sql).toContain('refreshed_agents AS')
+    expect(mutation?.params).toEqual(['codex-audit', '73958', 'OBSOLETE:ceo presence broadcast'])
+    const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_log'))
+    expect(String(audit?.params?.[3])).toContain('"include_active":true')
+    expect(String(audit?.params?.[3])).toContain('"before_statuses":{"received":1}')
   })
 
   test('reclaim expired supports agent-scoped dry-run', async () => {
@@ -125,7 +215,7 @@ describe('queue repair helpers', () => {
       },
     }
 
-    const report = await reclaimExpiredQueueClaims(db)
+    const report = await reclaimExpiredQueueClaims(db, { dryRun: false })
 
     expect(report).toMatchObject({ action: 'reclaim_expired', dry_run: false })
     const mutation = calls.find((call) => call.sql.includes('WITH reclaimed AS'))?.sql ?? ''

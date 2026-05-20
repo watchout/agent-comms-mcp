@@ -45,6 +45,14 @@ function result(action: QueueRepairResult['action'], dryRun: boolean, rows: any[
   }
 }
 
+function statusCounts(rows: any[]): Record<string, number> {
+  return rows.reduce((acc: Record<string, number>, row) => {
+    const status = String(row.before_status ?? row.status ?? 'unknown')
+    acc[status] = (acc[status] ?? 0) + 1
+    return acc
+  }, {})
+}
+
 function isRetiredAgent(row: any): boolean {
   const retired = row.retired ?? row.metadata?.retired
   return retired === true || retired === 'true'
@@ -74,7 +82,7 @@ export async function reassignPendingQueueRows(
   db: Queryable,
   input: { fromAgentId: string; toAgentId: string; dryRun?: boolean },
 ): Promise<QueueRepairResult> {
-  const dryRun = input.dryRun ?? false
+  const dryRun = input.dryRun ?? true
   if (input.fromAgentId === input.toAgentId) {
     throw new Error('QUEUE_REPAIR_SAME_AGENT')
   }
@@ -135,55 +143,95 @@ export async function reassignPendingQueueRows(
 
 export async function closeObsoletePendingQueueRows(
   db: Queryable,
-  input: { agentId: string; reason: string; dryRun?: boolean },
+  input: {
+    agentId: string
+    reason: string
+    dryRun?: boolean
+    queueId?: string | number | null
+    includeActive?: boolean
+  },
 ): Promise<QueueRepairResult> {
-  const dryRun = input.dryRun ?? false
+  const dryRun = input.dryRun ?? true
   const reason = input.reason.trim()
   if (!reason) {
     throw new Error('QUEUE_REPAIR_REASON_REQUIRED')
   }
+  if (input.includeActive && (input.queueId === undefined || input.queueId === null || String(input.queueId).trim() === '')) {
+    throw new Error('QUEUE_REPAIR_INCLUDE_ACTIVE_REQUIRES_QUEUE_ID')
+  }
   const failedReason = reason.startsWith('OBSOLETE') ? reason : `OBSOLETE:${reason}`
+  const params: unknown[] = [input.agentId]
+  const clauses = [`agent_id = $1`]
+  if (input.includeActive) {
+    clauses.push("status IN ('pending', 'received', 'in_progress')")
+  } else {
+    clauses.push("status = 'pending'")
+  }
+  if (input.queueId !== undefined && input.queueId !== null && String(input.queueId).trim() !== '') {
+    params.push(input.queueId)
+    clauses.push(`id = $${params.length}`)
+  }
+  const whereSql = clauses.join(' AND ')
 
   const selectSql = `
     SELECT id, agent_id, status, message_id, created_at,
            count(*) OVER ()::int AS total_count,
            left(payload, 180) AS content
       FROM message_queue
-     WHERE agent_id = $1
-       AND status = 'pending'
+     WHERE ${whereSql}
      ORDER BY created_at ASC
      LIMIT 50`
 
   if (dryRun) {
-    const preview = await db.query(selectSql, [input.agentId])
+    const preview = await db.query(selectSql, params)
     return result('close_obsolete', true, preview.rows)
   }
 
   await db.query('BEGIN')
   try {
+    const failedReasonParam = params.length + 1
     const closed = await db.query(
-      `WITH closed AS (
-         UPDATE message_queue
+      `WITH before AS (
+         SELECT id, agent_id, status, message_id
+           FROM message_queue
+          WHERE ${whereSql}
+       ),
+       closed AS (
+         UPDATE message_queue mq
             SET status = 'skipped',
-                failed_reason = $2,
+                failed_reason = $${failedReasonParam},
                 done_at = now(),
                 claimed_by = NULL,
                 claimed_at = NULL,
                 claim_expires_at = NULL
-          WHERE agent_id = $1
-            AND status = 'pending'
-          RETURNING id, agent_id, status, message_id, created_at, left(payload, 180) AS content
+           FROM before b
+          WHERE mq.id = b.id
+          RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
+                    b.status AS before_status,
+                    left(mq.payload, 180) AS content
+       ),
+       refreshed_agents AS (
+         UPDATE agents a SET
+            status = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
+            status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'message processing' ELSE NULL END,
+            status_updated_at = now()
+          WHERE a.agent_id IN (SELECT DISTINCT agent_id FROM closed)
+          RETURNING a.agent_id
        )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM closed
         ORDER BY created_at ASC
         LIMIT 50`,
-      [input.agentId, failedReason],
+      [...params, failedReason],
     )
     await writeAuditLog(db, 'queue.close_obsolete', input.agentId, input.agentId, {
       agent_id: input.agentId,
+      queue_id: input.queueId ?? null,
+      include_active: input.includeActive ?? false,
       reason: failedReason,
       affected_count: Number(closed.rows[0]?.total_count ?? closed.rows.length),
+      before_statuses: statusCounts(closed.rows),
+      after_status: 'skipped',
       sample_queue_ids: closed.rows.map((row) => row.id),
     })
     await db.query('COMMIT')
@@ -198,7 +246,7 @@ export async function reclaimExpiredQueueClaims(
   db: Queryable,
   input: { agentId?: string | null; dryRun?: boolean } = {},
 ): Promise<QueueRepairResult> {
-  const dryRun = input.dryRun ?? false
+  const dryRun = input.dryRun ?? true
   const agentFilter = input.agentId ? ' AND agent_id = $1' : ''
   const params = input.agentId ? [input.agentId] : []
 
