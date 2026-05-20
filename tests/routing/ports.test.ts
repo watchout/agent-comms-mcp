@@ -241,7 +241,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
   // length / order / forbidden additions are all gated by a single
   // assertion (cycle 1 `toContain` only verified inclusion, missed
   // contamination + reorder regressions).
-  test('§4.4 channel 1487368919613444156 — exact 11-bot allowlist + adapter owner', () => {
+  test('§4.4 channel 1487368919613444156 — exact 10-bot allowlist + adapter owner', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -254,7 +254,6 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     expect(cfg.channels['1487368919613444156']?.adapterOwner).toBe('agent-com-dev')
     expect(allowed).toEqual([
       'agent-com-dev',
-      'lead-ama',
       'cto',
       'codex-cto',
       'codex-aun',
@@ -267,7 +266,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     ])
   })
 
-  test('§4.4 channel 1487368919613444156 — CTO direct routes + lead-sus / hotel-dev ok, unknown sender → violations contains it', () => {
+  test('§4.4 channel 1487368919613444156 — CTO direct routes + codex-aun / hotel-dev ok, unknown sender → violations contains it', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -287,8 +286,8 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     // without lead-ama relay fallback. L2 audit routing also needs codex-audit.
     expect(v.validate('codex-cto', '1487368919613444156', ['codex-aun']).ok).toBe(true)
     expect(v.validate('codex-cto', '1487368919613444156', ['codex-audit']).ok).toBe(true)
-    // lead-sus → lead-ama: ok
-    expect(v.validate('lead-sus', '1487368919613444156', ['lead-ama']).ok).toBe(true)
+    // lead-sus → codex-aun: ok after lead-ama retirement.
+    expect(v.validate('lead-sus', '1487368919613444156', ['codex-aun']).ok).toBe(true)
     // hotel-dev → cto: ok
     expect(v.validate('hotel-dev', '1487368919613444156', ['cto']).ok).toBe(true)
     // cycle 2 rigor: unknown sender must reject AND surface the offender in
@@ -296,7 +295,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     // The integration layer maps this to the `OUTBOUND_ACL_VIOLATION` error
     // class (core/routing/server-integration.ts:92), so pinning `violations`
     // here is equivalent to pinning the violation kind at this port.
-    const r = v.validate('nonexistent-foo', '1487368919613444156', ['lead-ama'])
+    const r = v.validate('nonexistent-foo', '1487368919613444156', ['codex-aun'])
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.violations).toContain('nonexistent-foo')

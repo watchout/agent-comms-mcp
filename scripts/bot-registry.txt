@@ -23,6 +23,6 @@ discord-wbs|~/Developer/wbs|wbs-dev|8804|claude --mcp-config .mcp.json --dangero
 discord-secretary|~/Developer/secretary|secretary|8805|claude --mcp-config .mcp.json --dangerously-skip-permissions
 discord-webb|~/Developer/webb-dev|webb-dev|8806|claude --mcp-config .mcp.json --dangerously-skip-permissions
 discord-agent-mem|~/Developer/agent-memory|agent-mem-dev|8802|claude --mcp-config .mcp.json --dangerously-skip-permissions
-discord-lead-ama|~/Developer/lead-ama|lead-ama|8807|claude --mcp-config .mcp.json --dangerously-skip-permissions
+discord-aun|~/Developer/codex-aun|codex-aun|8807|AGENT_ID=codex-aun AGENT_COM_EXPECTED_AGENT_ID=codex-aun codex --dangerously-bypass-approvals-and-sandbox
 discord-lead-sus|~/Developer/lead-sus|lead-sus|8809|claude --mcp-config .mcp.json --dangerously-skip-permissions
 discord-lead-tuk|~/Developer/lead-tuk|lead-tuk|8830|claude --mcp-config .mcp.json --dangerously-skip-permissions
