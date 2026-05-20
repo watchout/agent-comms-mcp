@@ -19,7 +19,7 @@ describe('queue repair helpers', () => {
     const db = {
       async query(sql: string) {
         calls.push(sql)
-        if (sql.includes('FROM agents')) return { rows: [{ agent_id: 'codex-aun' }] }
+        if (sql.includes('FROM agents')) return { rows: [{ agent_id: 'codex-aun', status: 'idle', metadata: {} }] }
         if (sql.includes('FROM message_queue')) return { rows: [sample(1), sample(2)] }
         return { rows: [] }
       },
@@ -33,6 +33,47 @@ describe('queue repair helpers', () => {
 
     expect(report).toMatchObject({ action: 'reassign', dry_run: true, affected_count: 2 })
     expect(calls.join('\n')).not.toContain('UPDATE message_queue')
+  })
+
+  test('reassign fails closed when the target is offline', async () => {
+    const calls: string[] = []
+    const db = {
+      async query(sql: string) {
+        calls.push(sql)
+        if (sql.includes('FROM agents')) return { rows: [{ agent_id: 'lead-ama', status: 'offline', metadata: {} }] }
+        if (sql.includes('FROM message_queue')) return { rows: [sample(1)] }
+        return { rows: [] }
+      },
+    }
+
+    await expect(reassignPendingQueueRows(db, {
+      fromAgentId: 'arc',
+      toAgentId: 'lead-ama',
+      dryRun: true,
+    })).rejects.toThrow('QUEUE_REPAIR_TARGET_UNAVAILABLE:lead-ama:offline')
+
+    expect(calls.join('\n')).not.toContain('FROM message_queue')
+    expect(calls).not.toContain('BEGIN')
+  })
+
+  test('reassign fails closed when the target is retired even if status is idle', async () => {
+    const calls: string[] = []
+    const db = {
+      async query(sql: string) {
+        calls.push(sql)
+        if (sql.includes('FROM agents')) {
+          return { rows: [{ agent_id: 'lead-ama', status: 'idle', metadata: { retired: true }, retired: 'true' }] }
+        }
+        return { rows: [] }
+      },
+    }
+
+    await expect(reassignPendingQueueRows(db, {
+      fromAgentId: 'arc',
+      toAgentId: 'lead-ama',
+    })).rejects.toThrow('QUEUE_REPAIR_TARGET_UNAVAILABLE:lead-ama:idle')
+
+    expect(calls).not.toContain('BEGIN')
   })
 
   test('close obsolete writes audit on mutation', async () => {

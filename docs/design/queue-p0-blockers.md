@@ -260,6 +260,8 @@ Rules:
 
 - Every command must support dry-run.
 - Every mutation must write `audit_log`.
+- `queue reassign` must fail closed unless the destination identity exists and
+  has an active status (`online`, `idle`, or `busy`) and is not marked retired.
 - Retired identities must end with zero non-terminal rows.
 - No command may depend on direct tmux task injection.
 

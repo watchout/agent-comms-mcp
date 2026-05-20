@@ -45,6 +45,18 @@ function result(action: QueueRepairResult['action'], dryRun: boolean, rows: any[
   }
 }
 
+function isRetiredAgent(row: any): boolean {
+  const retired = row.retired ?? row.metadata?.retired
+  return retired === true || retired === 'true'
+}
+
+function assertReassignTargetAvailable(row: any, agentId: string) {
+  const status = String(row.status ?? '')
+  if (isRetiredAgent(row) || !['online', 'idle', 'busy'].includes(status)) {
+    throw new Error(`QUEUE_REPAIR_TARGET_UNAVAILABLE:${agentId}:${status || 'unknown'}`)
+  }
+}
+
 async function writeAuditLog(
   db: Queryable,
   eventType: string,
@@ -67,10 +79,14 @@ export async function reassignPendingQueueRows(
     throw new Error('QUEUE_REPAIR_SAME_AGENT')
   }
 
-  const target = await db.query('SELECT agent_id FROM agents WHERE agent_id = $1 LIMIT 1', [input.toAgentId])
+  const target = await db.query(
+    "SELECT agent_id, status, metadata, metadata->>'retired' AS retired FROM agents WHERE agent_id = $1 LIMIT 1",
+    [input.toAgentId],
+  )
   if (target.rows.length === 0) {
     throw new Error(`QUEUE_REPAIR_TARGET_NOT_FOUND:${input.toAgentId}`)
   }
+  assertReassignTargetAvailable(target.rows[0], input.toAgentId)
 
   const selectSql = `
     SELECT id, agent_id, status, message_id, created_at,
