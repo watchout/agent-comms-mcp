@@ -96,6 +96,41 @@ describe('queue repair helpers', () => {
     expect(calls).not.toContain('BEGIN')
   })
 
+  test('reassign writes enriched audit details on mutation', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const db = {
+      async query(sql: string, params?: unknown[]) {
+        calls.push({ sql, params })
+        if (sql.includes('FROM agents')) return { rows: [{ agent_id: 'codex-aun', status: 'idle', metadata: {} }] }
+        if (sql.includes('WITH before AS')) {
+          return {
+            rows: [{
+              ...sample(11, 'codex-aun'),
+              before_agent_id: 'lead-ama',
+              before_status: 'pending',
+            }],
+          }
+        }
+        return { rows: [] }
+      },
+    }
+
+    const report = await reassignPendingQueueRows(db, {
+      fromAgentId: 'lead-ama',
+      toAgentId: 'codex-aun',
+      dryRun: false,
+    })
+
+    expect(report).toMatchObject({ action: 'reassign', dry_run: false })
+    const mutation = calls.find((call) => call.sql.includes('WITH before AS'))
+    expect(mutation?.sql).toContain('b.agent_id AS before_agent_id')
+    expect(mutation?.sql).toContain('b.status AS before_status')
+    const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_log'))
+    expect(String(audit?.params?.[3])).toContain('"before_statuses":{"pending":1}')
+    expect(String(audit?.params?.[3])).toContain('"after_status":"pending"')
+    expect(String(audit?.params?.[3])).toContain('"after_agent_id":"codex-aun"')
+  })
+
   test('close obsolete defaults to dry-run', async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = []
     const db = {
@@ -216,7 +251,14 @@ describe('queue repair helpers', () => {
     const db = {
       async query(sql: string, params?: unknown[]) {
         calls.push({ sql, params })
-        if (sql.includes('WITH reclaimed AS')) return { rows: [sample(5, 'codex-cto')] }
+        if (sql.includes('WITH before AS')) {
+          return {
+            rows: [{
+              ...sample(5, 'codex-cto'),
+              before_status: 'received',
+            }],
+          }
+        }
         return { rows: [] }
       },
     }
@@ -224,13 +266,17 @@ describe('queue repair helpers', () => {
     const report = await reclaimExpiredQueueClaims(db, { dryRun: false })
 
     expect(report).toMatchObject({ action: 'reclaim_expired', dry_run: false })
-    const mutation = calls.find((call) => call.sql.includes('WITH reclaimed AS'))?.sql ?? ''
+    const mutation = calls.find((call) => call.sql.includes('WITH before AS'))?.sql ?? ''
     expect(mutation).toContain('refreshed_agents AS')
+    expect(mutation).toContain('b.status AS before_status')
     expect(mutation).toContain('SELECT DISTINCT agent_id FROM reclaimed')
     expect(mutation).toContain("WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'")
     expect(mutation).toContain("WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'")
     expect(mutation).toContain('ELSE a.status')
     expect(mutation).not.toContain("WHEN aas.has_active_claims THEN 'busy'")
     expect(mutation).not.toContain('id = ANY')
+    const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_log'))
+    expect(String(audit?.params?.[3])).toContain('"before_statuses":{"received":1}')
+    expect(String(audit?.params?.[3])).toContain('"after_status":"pending"')
   })
 })
