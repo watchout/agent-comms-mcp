@@ -5,7 +5,7 @@
       "primary": "agent-com-dev",
       "adapterOwner": "agent-com-dev",
       "nativeRoleOutboundOwners": {
-        "codex-cto": "codex-cto"
+        "codex-cto": "cto"
       },
       "outboundAllowlist": ["agent-com-dev", "lead-ama", "cto", "codex-cto", "codex-aun", "codex-audit", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
     }
