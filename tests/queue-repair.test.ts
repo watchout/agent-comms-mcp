@@ -182,6 +182,9 @@ describe('queue repair helpers', () => {
     expect(mutation?.sql).toContain("status IN ('pending', 'received', 'in_progress')")
     expect(mutation?.sql).toContain('claimed_by = NULL')
     expect(mutation?.sql).toContain('refreshed_agents AS')
+    expect(mutation?.sql).toContain("WHEN a.status = 'busy' THEN 'idle'")
+    expect(mutation?.sql).toContain('ELSE a.status')
+    expect(mutation?.sql).toContain("WHEN a.status IN ('busy', 'idle') THEN NULL")
     expect(mutation?.params).toEqual(['codex-audit', '73958', 'OBSOLETE:ceo presence broadcast'])
     const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_log'))
     expect(String(audit?.params?.[3])).toContain('"include_active":true')
@@ -221,6 +224,8 @@ describe('queue repair helpers', () => {
     const mutation = calls.find((call) => call.sql.includes('WITH reclaimed AS'))?.sql ?? ''
     expect(mutation).toContain('refreshed_agents AS')
     expect(mutation).toContain('SELECT DISTINCT agent_id FROM reclaimed')
+    expect(mutation).toContain("WHEN a.status = 'busy' THEN 'idle'")
+    expect(mutation).toContain('ELSE a.status')
     expect(mutation).not.toContain('id = ANY')
   })
 })
