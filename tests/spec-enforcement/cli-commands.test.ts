@@ -32,9 +32,11 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const CLI_PATH = join(REPO_ROOT, 'cli', 'index.ts')
 const PKG_PATH = join(REPO_ROOT, 'package.json')
 const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
+const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
+const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +61,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('diagnoseQueue handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function diagnoseQueue\s*\(/)
   })
+  test('repairQueue handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function repairQueue\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +87,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   test("'diagnose-queue' and 'queue doctor' commands invoke diagnoseQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'diagnose-queue'[\s\S]*?diagnoseQueue\(/)
     expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'doctor'[\s\S]*?diagnoseQueue\(/)
+  })
+  test("'queue' repair subcommands invoke repairQueue(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
   })
 })
 
@@ -281,6 +289,15 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(QUEUE_DOCTOR_SRC).toMatch(/expired_active_claim/)
     expect(QUEUE_DOCTOR_SRC).toMatch(/retired_or_offline_recipient/)
     expect(QUEUE_DOCTOR_SRC).toMatch(/outbound_pending_stale/)
+  })
+
+  test('queue repair commands are documented and audit logged', () => {
+    expect(CLI_SRC).toMatch(/queue reassign --from <agent> --to <agent> \[--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue close-obsolete --agent-id <agent> --reason <text> \[--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue reclaim-expired \[--agent-id <agent>\] \[--dry-run\]/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reassign/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/queue\.close_obsolete/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reclaim_expired/)
   })
 })
 

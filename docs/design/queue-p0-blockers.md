@@ -247,7 +247,10 @@ Status: implemented in this PR.
 
 ### Slice 2: Deterministic Cleanup
 
-Add guarded write commands:
+Status: implemented in this PR as guarded commands; live mutations require an
+operator decision after reviewing `--dry-run`.
+
+Added guarded write commands:
 
 - `agent-com queue reassign --from <old> --to <new> [--dry-run]`
 - `agent-com queue close-obsolete --agent-id <id> --reason <text> [--dry-run]`
