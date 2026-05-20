@@ -38,6 +38,8 @@ import type {
 
 const execFileAsync = promisify(execFile)
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 // ── DBClient (single connection for queries; LISTEN uses its own client) ─────
 class PgClientAdapter implements DBClient {
   private chain: Promise<void> = Promise.resolve()
@@ -103,8 +105,10 @@ class TmuxShellAdapter implements TmuxClient {
     // the line first and keep the submit keypress separate.
     const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
     await execFileAsync('tmux', ['send-keys', '-t', session, 'C-u'])
+    await sleep(100)
     if (stripped.length > 0) {
       await execFileAsync('tmux', ['send-keys', '-t', session, '-l', stripped])
+      await sleep(100)
     }
     await execFileAsync('tmux', ['send-keys', '-t', session, 'Enter'])
   }
