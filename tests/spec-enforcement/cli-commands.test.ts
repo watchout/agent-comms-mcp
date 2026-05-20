@@ -292,12 +292,14 @@ describe('T10 — queue doctor CLI surface', () => {
   })
 
   test('queue repair commands are documented and audit logged', () => {
-    expect(CLI_SRC).toMatch(/queue reassign --from <agent> --to <agent> \[--dry-run\]/)
-    expect(CLI_SRC).toMatch(/queue close-obsolete --agent-id <agent> --reason <text> \[--dry-run\]/)
-    expect(CLI_SRC).toMatch(/queue reclaim-expired \[--agent-id <agent>\] \[--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue reassign --from <agent> --to <agent> \[--execute\|--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue close-obsolete --agent-id <agent> --reason <text> \[--queue-id <id>\] \[--include-active\] \[--execute\|--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue reclaim-expired \[--agent-id <agent>\] \[--execute\|--dry-run\]/)
+    expect(CLI_SRC).toMatch(/dry-run by default/)
     expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reassign/)
     expect(QUEUE_REPAIR_SRC).toMatch(/queue\.close_obsolete/)
     expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reclaim_expired/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/QUEUE_REPAIR_INCLUDE_ACTIVE_REQUIRES_QUEUE_ID/)
   })
 })
 

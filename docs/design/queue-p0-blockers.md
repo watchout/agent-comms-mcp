@@ -248,17 +248,19 @@ Status: implemented in this PR.
 ### Slice 2: Deterministic Cleanup
 
 Status: implemented in this PR as guarded commands; live mutations require an
-operator decision after reviewing `--dry-run`.
+operator decision after reviewing the default dry-run output.
 
 Added guarded write commands:
 
-- `agent-com queue reassign --from <old> --to <new> [--dry-run]`
-- `agent-com queue close-obsolete --agent-id <id> --reason <text> [--dry-run]`
-- `agent-com queue reclaim-expired [--agent-id <id>] [--dry-run]`
+- `agent-com queue reassign --from <old> --to <new> [--execute|--dry-run]`
+- `agent-com queue close-obsolete --agent-id <id> --reason <text> [--queue-id <id>] [--include-active] [--execute|--dry-run]`
+- `agent-com queue reclaim-expired [--agent-id <id>] [--execute|--dry-run]`
 
 Rules:
 
-- Every command must support dry-run.
+- Every repair command is dry-run by default; mutation requires `--execute`.
+- Active `received` / `in_progress` rows can only be terminalized by
+  `close-obsolete` when both `--queue-id` and `--include-active` are explicit.
 - Every mutation must write `audit_log`.
 - `queue reassign` must fail closed unless the destination identity exists and
   has an active status (`online`, `idle`, or `busy`) and is not marked retired.

@@ -119,6 +119,21 @@ function flagEnabled(value: string | undefined): boolean {
   return !['', '0', 'false', 'no', 'off'].includes(value.toLowerCase())
 }
 
+function hasFlag(flags: Record<string, string>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(flags, key)
+}
+
+function parseRepairDryRun(flags: Record<string, string>): boolean {
+  const execute = flagEnabled(flags.execute)
+  const dryRun = flagEnabled(flags['dry-run'])
+  if (execute && dryRun) {
+    console.error('Error: use either --execute or --dry-run, not both')
+    process.exit(2)
+  }
+  if (hasFlag(flags, 'execute') && !execute) return true
+  return !execute
+}
+
 async function auditLog(db: Client, eventType: string, agentId: string | null, target: string | null, detail: Record<string, unknown>) {
   await db.query(
     'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
@@ -1536,7 +1551,7 @@ async function diagnoseQueue(args: string[]) {
 
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
-  const dryRun = flagEnabled(flags['dry-run'])
+  const dryRun = parseRepairDryRun(flags)
   const db = await getDb()
 
   try {
@@ -1544,7 +1559,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       const fromAgentId = flags.from
       const toAgentId = flags.to
       if (!fromAgentId || !toAgentId) {
-        console.error('Usage: agent-com queue reassign --from <agent> --to <agent> [--dry-run]')
+        console.error('Usage: agent-com queue reassign --from <agent> --to <agent> [--execute|--dry-run]')
         process.exit(2)
       }
       const report = await reassignPendingQueueRows(db as any, { fromAgentId, toAgentId, dryRun })
@@ -1556,10 +1571,16 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       const agentId = flags['agent-id']
       const reason = flags.reason
       if (!agentId || !reason) {
-        console.error('Usage: agent-com queue close-obsolete --agent-id <agent> --reason <text> [--dry-run]')
+        console.error('Usage: agent-com queue close-obsolete --agent-id <agent> --reason <text> [--queue-id <id>] [--include-active] [--execute|--dry-run]')
         process.exit(2)
       }
-      const report = await closeObsoletePendingQueueRows(db as any, { agentId, reason, dryRun })
+      const report = await closeObsoletePendingQueueRows(db as any, {
+        agentId,
+        reason,
+        queueId: flags['queue-id'] ?? null,
+        includeActive: flagEnabled(flags['include-active']),
+        dryRun,
+      })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }
@@ -1841,12 +1862,12 @@ Message I/O (requires AGENT_ID env var):
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
-  queue reassign --from <agent> --to <agent> [--dry-run]
-                                                       — reassign pending rows to a replacement identity
-  queue close-obsolete --agent-id <agent> --reason <text> [--dry-run]
-                                                       — close pending rows as skipped/obsolete
-  queue reclaim-expired [--agent-id <agent>] [--dry-run]
-                                                       — roll expired received/in_progress claims back to pending
+  queue reassign --from <agent> --to <agent> [--execute|--dry-run]
+                                                       — dry-run by default; reassign pending rows to a replacement identity
+  queue close-obsolete --agent-id <agent> --reason <text> [--queue-id <id>] [--include-active] [--execute|--dry-run]
+                                                       — dry-run by default; close obsolete pending rows, or one explicit active row
+  queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
+                                                       — dry-run by default; roll expired received/in_progress claims back to pending
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
