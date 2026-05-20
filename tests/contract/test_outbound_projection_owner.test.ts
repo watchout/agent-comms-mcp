@@ -94,4 +94,20 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.consumerAgentId).toBe('agent-com-dev')
     expect(route.source).toBe('channel_policy_primary')
   })
+
+  test('production agent-com channel projects logical codex-cto through the CTO token owner', async () => {
+    const cfg = await import('../../config/bot-routing.json')
+    setRoutingConfig(cfg.default.channels)
+    const db = {
+      query: async () => ({ rows: [{ external_id: '1487368919613444156', metadata: null }] }),
+    }
+
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: '1487368919613444156',
+      senderAgentId: 'codex-cto',
+    })
+
+    expect(route.consumerAgentId).toBe('cto')
+    expect(route.source).toBe('channel_policy_native_role_owner')
+  })
 })
