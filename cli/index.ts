@@ -29,6 +29,7 @@ import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
 import { resolveOutboundProjectionRoute } from '../core/outbound-projection'
+import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 
 // --- DB connection ---
@@ -877,7 +878,12 @@ async function sendMessage(args: string[]) {
           await db.query(
             `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
              VALUES ($1, $2, $3, $4, $5)`,
-            [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(content)],
+            [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(decorateProjectedContent({
+              content,
+              authorAgentId: agentId,
+              consumerAgentId: projection.consumerAgentId,
+              recipients: mentions,
+            }))],
           )
           outboundQueued = true
         } catch (err) {
@@ -1126,7 +1132,12 @@ async function notifyMessage(args: string[]) {
         await db.query(
           `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
            VALUES ($1, $2, $3, $4, $5)`,
-          [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(content)],
+          [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(decorateProjectedContent({
+            content,
+            authorAgentId: agentId,
+            consumerAgentId: projection.consumerAgentId,
+            recipients: mentions,
+          }))],
         )
         outboundQueued = true
       } catch (err) {

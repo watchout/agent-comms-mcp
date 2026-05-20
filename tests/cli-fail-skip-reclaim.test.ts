@@ -226,9 +226,11 @@ describe('T5 — truncateForDiscord (DISCORD_MAX=1900)', () => {
 describe('T5b — CLI + server outbound_queue INSERTs route through truncateForDiscord', () => {
   test('cli/index.ts imports + uses truncateForDiscord before outbound_queue INSERT', () => {
     expect(CLI_SRC).toContain(`import { truncateForDiscord } from '../core/truncate'`)
-    // send + notify both feed the INSERT via truncateForDiscord(content) while
-    // preserving canonical author and the adapter-owner consumer key.
-    expect(CLI_SRC).toMatch(/\[id,\s*agentId,\s*projection\.consumerAgentId,\s*discordExternalId,\s*truncateForDiscord\(content\)\]/)
+    // send + notify both feed the INSERT via truncateForDiscord(...) while
+    // preserving canonical author and the adapter-owner consumer key. The
+    // display-only projection decorator may wrap content before truncation.
+    expect(CLI_SRC).toContain('decorateProjectedContent')
+    expect(CLI_SRC).toMatch(/\[id,\s*agentId,\s*projection\.consumerAgentId,\s*discordExternalId,\s*truncateForDiscord\(decorateProjectedContent\(/)
   })
 
   test('server.ts imports + uses truncateForDiscord on outbound_queue INSERT', () => {
