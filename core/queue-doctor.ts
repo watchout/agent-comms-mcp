@@ -172,7 +172,7 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
        AND (
          a.agent_id IS NULL
          OR a.metadata->>'retired' = 'true'
-         OR a.status = 'offline'
+         OR a.status IN ('offline', 'disabled', 'disconnected')
        )
      ORDER BY mq.created_at ASC
      LIMIT 50`,
@@ -253,7 +253,7 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
     finding(
       'retired_or_offline_recipient',
       'blocker',
-      'pending rows addressed to retired, offline, or missing agents',
+      'pending rows addressed to retired, disabled, offline, or missing agents',
       retiredOrOffline.rows,
       'Reassign to replacement identity or close as obsolete; retired agents must not keep active queue.',
     ),

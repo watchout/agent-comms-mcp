@@ -73,4 +73,23 @@ describe('queue repair helpers', () => {
     expect(calls[0].params).toEqual(['codex-cto'])
     expect(calls[0].sql).toContain('claim_expires_at < now()')
   })
+
+  test('reclaim expired refreshes every affected agent from the mutation CTE', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const db = {
+      async query(sql: string, params?: unknown[]) {
+        calls.push({ sql, params })
+        if (sql.includes('WITH reclaimed AS')) return { rows: [sample(5, 'codex-cto')] }
+        return { rows: [] }
+      },
+    }
+
+    const report = await reclaimExpiredQueueClaims(db)
+
+    expect(report).toMatchObject({ action: 'reclaim_expired', dry_run: false })
+    const mutation = calls.find((call) => call.sql.includes('WITH reclaimed AS'))?.sql ?? ''
+    expect(mutation).toContain('refreshed_agents AS')
+    expect(mutation).toContain('SELECT DISTINCT agent_id FROM reclaimed')
+    expect(mutation).not.toContain('id = ANY')
+  })
 })

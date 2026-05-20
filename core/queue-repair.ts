@@ -218,20 +218,20 @@ export async function reclaimExpiredQueueClaims(
             AND claim_expires_at < now()
             ${agentFilter}
           RETURNING id, agent_id, status, message_id, created_at, left(payload, 180) AS content
+       ),
+       refreshed_agents AS (
+         UPDATE agents a SET
+            status = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
+            status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'message processing' ELSE NULL END,
+            status_updated_at = now()
+          WHERE a.agent_id IN (SELECT DISTINCT agent_id FROM reclaimed)
+          RETURNING a.agent_id
        )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM reclaimed
         ORDER BY created_at ASC
         LIMIT 50`,
       params,
-    )
-    await db.query(
-      `UPDATE agents a SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'message processing' ELSE NULL END,
-         status_updated_at = now()
-       WHERE a.agent_id IN (SELECT DISTINCT agent_id FROM message_queue WHERE id = ANY($1::bigint[]))`,
-      [reclaimed.rows.map((row) => row.id)],
     )
     await writeAuditLog(db, 'queue.reclaim_expired', input.agentId ?? null, input.agentId ?? null, {
       agent_id: input.agentId ?? null,
