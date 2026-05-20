@@ -51,6 +51,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('listAgents handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function listAgents\s*\(/)
   })
+  test('diagnoseProjection handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function diagnoseProjection\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +70,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'agents' command invokes listAgents()", () => {
     expect(CLI_SRC).toMatch(/command === 'agents'[\s\S]*?listAgents\(\)/)
+  })
+  test("'diagnose-projection' command invokes diagnoseProjection(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'diagnose-projection'[\s\S]*?diagnoseProjection\(/)
   })
 })
 
@@ -235,12 +241,24 @@ describe('T8 — thread_id flows from next → send → outbound', () => {
   test('sendMessage resolves channel_external_id via thread_adapters when threadId is set', () => {
     const body = sendMessageBody()
     const projectionSrc = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
-    expect(body).toMatch(/resolveOutboundProjectionRoute\(db as any,\s*\{\s*channelId,\s*threadId,\s*senderAgentId:\s*agentId\s*\}/)
+    expect(body).toMatch(/resolveOutboundProjectionRoute\(db as any,\s*\{\s*channelId,\s*threadId,\s*senderAgentId:\s*agentId,\s*recipientAgentIds:\s*mentions,\s*\}/)
     expect(projectionSrc).toMatch(/if\s*\(\s*input\.threadId\s*\)\s*\{[\s\S]{0,500}thread_adapters/)
   })
 })
 
-// T9 (Phase 1.5/2 Discord-failure preservation) was removed in Phase 3
+describe('T9 — projection diagnostics CLI surface', () => {
+  test('help documents diagnose-projection preview command', () => {
+    expect(CLI_SRC).toMatch(/diagnose-projection --channel <id> --from <agent> --to <agent>\[,<agent>\]/)
+    expect(CLI_SRC).toMatch(/terminal preview of surface\/projection routing/)
+  })
+
+  test('diagnoseProjection passes recipientAgentIds to the projection resolver', () => {
+    expect(CLI_SRC).toMatch(/const toAgentIds = [\s\S]*?\.split\(','/)
+    expect(CLI_SRC).toMatch(/resolveOutboundProjectionRoute\(db as any,\s*\{[\s\S]*?senderAgentId:\s*fromAgentId,[\s\S]*?recipientAgentIds:\s*toAgentIds,[\s\S]*?\}/)
+  })
+})
+
+// T10 (Phase 1.5/2 Discord-failure preservation) was removed in Phase 3
 // (Issue #129). The CLI no longer has a synchronous Discord-delivery
 // failure branch — `deliverToDiscord` is gone, and the outbound HTTP call
 // is now done by the receiver consumer (server.ts) on its 1-second tick.
