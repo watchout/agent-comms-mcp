@@ -114,12 +114,21 @@ export async function reassignPendingQueueRows(
   await db.query('BEGIN')
   try {
     const updated = await db.query(
-      `WITH moved AS (
-         UPDATE message_queue
-            SET agent_id = $2
+      `WITH before AS (
+         SELECT id, agent_id, status, message_id
+           FROM message_queue
           WHERE agent_id = $1
             AND status = 'pending'
-          RETURNING id, agent_id, status, message_id, created_at, left(payload, 180) AS content
+       ),
+       moved AS (
+         UPDATE message_queue mq
+            SET agent_id = $2
+           FROM before b
+          WHERE mq.id = b.id
+          RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
+                    b.agent_id AS before_agent_id,
+                    b.status AS before_status,
+                    left(mq.payload, 180) AS content
        )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM moved
@@ -131,6 +140,9 @@ export async function reassignPendingQueueRows(
       from_agent_id: input.fromAgentId,
       to_agent_id: input.toAgentId,
       affected_count: Number(updated.rows[0]?.total_count ?? updated.rows.length),
+      before_statuses: statusCounts(updated.rows),
+      after_status: 'pending',
+      after_agent_id: input.toAgentId,
       sample_queue_ids: updated.rows.map((row) => row.id),
     })
     await db.query('COMMIT')
@@ -288,18 +300,26 @@ export async function reclaimExpiredQueueClaims(
   await db.query('BEGIN')
   try {
     const reclaimed = await db.query(
-      `WITH reclaimed AS (
-         UPDATE message_queue
+      `WITH before AS (
+         SELECT id, agent_id, status, message_id
+           FROM message_queue
+          WHERE status IN ('received', 'in_progress')
+            AND claim_expires_at IS NOT NULL
+            AND claim_expires_at < now()
+            ${agentFilter}
+       ),
+       reclaimed AS (
+         UPDATE message_queue mq
             SET status = 'pending',
                 read_at = NULL,
                 claimed_by = NULL,
                 claimed_at = NULL,
                 claim_expires_at = NULL
-          WHERE status IN ('received', 'in_progress')
-            AND claim_expires_at IS NOT NULL
-            AND claim_expires_at < now()
-            ${agentFilter}
-          RETURNING id, agent_id, status, message_id, created_at, left(payload, 180) AS content
+           FROM before b
+          WHERE mq.id = b.id
+          RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
+                    b.status AS before_status,
+                    left(mq.payload, 180) AS content
        ),
        affected_agents AS (
          SELECT DISTINCT agent_id FROM reclaimed
@@ -336,6 +356,8 @@ export async function reclaimExpiredQueueClaims(
     await writeAuditLog(db, 'queue.reclaim_expired', input.agentId ?? null, input.agentId ?? null, {
       agent_id: input.agentId ?? null,
       affected_count: Number(reclaimed.rows[0]?.total_count ?? reclaimed.rows.length),
+      before_statuses: statusCounts(reclaimed.rows),
+      after_status: 'pending',
       sample_queue_ids: reclaimed.rows.map((row) => row.id),
     })
     await db.query('COMMIT')
