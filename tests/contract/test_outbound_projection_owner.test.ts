@@ -85,6 +85,72 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('channel_adapter_metadata')
   })
 
+  test('explicit adapter metadata still wins over recipient-facing projection', async () => {
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: { consumer_agent_id: 'metadata-owner' } }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
+          return { rows: [{ agent_id: 'codex-cto', metadata: { discord_id: 'cto-discord-id' } }] }
+        }
+        return { rows: [] }
+      },
+    }
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+    expect(route.consumerAgentId).toBe('metadata-owner')
+    expect(route.source).toBe('channel_adapter_metadata')
+  })
+
+  test('single recipient with Discord identity gets recipient-facing projection', async () => {
+    setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
+          return { rows: [{ agent_id: 'codex-cto', metadata: { discord_id: 'cto-discord-id' } }] }
+        }
+        return { rows: [] }
+      },
+    }
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+    expect(route.channelExternalId).toBe('discord-ch')
+    expect(route.consumerAgentId).toBe('codex-cto')
+    expect(route.source).toBe('recipient_default_projection')
+  })
+
+  test('multiple recipients do not use recipient-facing default projection', async () => {
+    setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
+    const db = {
+      query: async (sql: string) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents')) {
+          throw new Error('agents lookup should not run for multiple recipients')
+        }
+        return { rows: [] }
+      },
+    }
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto', 'ceo'],
+    })
+    expect(route.consumerAgentId).toBe('agent-com-dev')
+    expect(route.source).toBe('channel_policy_adapter_owner')
+  })
+
   test('channel primary remains a compatibility fallback', async () => {
     setRoutingConfig({ ch1: { primary: 'agent-com-dev' } })
     const db = {

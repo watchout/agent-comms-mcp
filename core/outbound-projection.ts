@@ -8,7 +8,7 @@ export interface OutboundProjectionRoute {
   platform: 'discord'
   channelExternalId: string | null
   consumerAgentId: string | null
-  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
+  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'recipient_default_projection' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> {
@@ -34,7 +34,7 @@ function ownerFromMetadata(raw: unknown): string | null {
 
 export async function resolveOutboundProjectionRoute(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null },
+  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null; recipientAgentIds?: string[] | null },
 ): Promise<OutboundProjectionRoute> {
   const platform = input.platform ?? 'discord'
   let channelExternalId: string | null = null
@@ -62,6 +62,22 @@ export async function resolveOutboundProjectionRoute(
     const owner = ownerFromMetadata(cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, source: 'channel_adapter_metadata' }
+    }
+  }
+
+  const recipients = (input.recipientAgentIds ?? []).filter((id) => typeof id === 'string' && id.trim().length > 0)
+  const singleRecipient = recipients.length === 1 ? recipients[0].trim() : null
+  if (singleRecipient) {
+    const rr = await db.query(
+      `SELECT agent_id, metadata FROM agents WHERE agent_id = $1`,
+      [singleRecipient],
+    ).catch(() => ({ rows: [] as any[] }))
+    if (rr.rows.length > 0) {
+      const metadata = parseMetadata(rr.rows[0].metadata)
+      const discordId = metadata.discord_id
+      if (typeof discordId === 'string' && discordId.trim().length > 0) {
+        return { platform, channelExternalId, consumerAgentId: singleRecipient, source: 'recipient_default_projection' }
+      }
     }
   }
 

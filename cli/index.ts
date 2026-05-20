@@ -865,7 +865,12 @@ async function sendMessage(args: string[]) {
       // queued. The receiver pipeline still picks up the agent_messages row
       // via pg_notify, so other bots see the message; only the human-facing
       // Discord display is skipped. We surface this in the response.
-      const projection = await resolveOutboundProjectionRoute(db as any, { channelId, threadId, senderAgentId: agentId })
+      const projection = await resolveOutboundProjectionRoute(db as any, {
+        channelId,
+        threadId,
+        senderAgentId: agentId,
+        recipientAgentIds: mentions,
+      })
       const discordExternalId = projection.channelExternalId
 
       let outboundQueued = false
@@ -1121,6 +1126,7 @@ async function notifyMessage(args: string[]) {
       channelId: resolvedChannelId,
       threadId: resolvedThreadId,
       senderAgentId: agentId,
+      recipientAgentIds: mentions,
     })
     const discordExternalId = projection.channelExternalId
 
@@ -1407,6 +1413,103 @@ async function diagnoseDelivery(args: string[]) {
   }
 }
 
+async function diagnoseProjection(args: string[]) {
+  const { flags } = parseArgs(args)
+  const channelId = flags.channel ?? flags['channel-id']
+  const threadId = flags['thread-id'] ?? null
+  const fromAgentId = flags.from ?? flags['from-agent-id'] ?? process.env.AGENT_ID ?? null
+  const toAgentIds = (flags.to ?? flags['to-agent-id'] ?? flags.mentions ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const format = flags.format ?? 'text'
+
+  if (!channelId || !fromAgentId || toAgentIds.length === 0) {
+    console.error('Usage: agent-com diagnose-projection --channel <id> --from <agent_id> --to <agent_id>[,<agent_id>] [--thread-id <id>] [--format json]')
+    process.exit(1)
+  }
+
+  const db = await getDb()
+  try {
+    const projection = await resolveOutboundProjectionRoute(db as any, {
+      channelId,
+      threadId,
+      senderAgentId: fromAgentId,
+      recipientAgentIds: toAgentIds,
+    })
+    const consumerAgentId = projection.consumerAgentId
+    const consumer = consumerAgentId
+      ? await db.query(
+        `SELECT agent_id, status, runtime, metadata
+           FROM agents WHERE agent_id = $1`,
+        [consumerAgentId],
+      ).catch(() => ({ rows: [] as any[] }))
+      : { rows: [] as any[] }
+    const consumerRow = consumer.rows[0] ?? null
+    const metadata = (() => {
+      if (!consumerRow?.metadata) return {}
+      if (typeof consumerRow.metadata === 'object') return consumerRow.metadata
+      try { return JSON.parse(consumerRow.metadata) } catch { return {} }
+    })() as Record<string, unknown>
+    const hasDiscordIdentity = typeof metadata.discord_id === 'string' && metadata.discord_id.trim().length > 0
+    const delegated = consumerAgentId !== null && consumerAgentId !== fromAgentId
+    const report = {
+      ok: true,
+      surface: {
+        provider: projection.platform,
+        channel_id: channelId,
+        thread_id: threadId,
+        external_id: projection.channelExternalId,
+      },
+      message: {
+        from_agent_id: fromAgentId,
+        to_agent_ids: toAgentIds,
+      },
+      resolved: {
+        consumer_agent_id: consumerAgentId,
+        projection_identity_id: consumerAgentId,
+        source: projection.source,
+        delegated,
+        discord_identity_present: hasDiscordIdentity,
+        consumer_status: consumerRow?.status ?? null,
+        consumer_runtime: consumerRow?.runtime ?? null,
+      },
+      preview: consumerAgentId
+        ? delegated
+          ? `[${fromAgentId} -> ${toAgentIds.join(',')}]\n本文...`
+          : '本文...'
+        : null,
+    }
+
+    if (format === 'json') {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    const lines = [
+      'Projection Preview',
+      '',
+      `Surface:  ${projection.platform} channel=${channelId}${threadId ? ` thread=${threadId}` : ''}`,
+      `External: ${projection.channelExternalId ?? '(none)'}`,
+      '',
+      `From:     ${fromAgentId}`,
+      `To:       ${toAgentIds.join(', ')}`,
+      '',
+      `Consumer: ${consumerAgentId ?? '(none)'}`,
+      `Identity: ${consumerAgentId ?? '(none)'}`,
+      `Source:   ${projection.source}`,
+      `Discord:  ${hasDiscordIdentity ? 'token identity present' : 'no token identity detected'}`,
+      `Status:   ${consumerRow?.status ?? '(unknown)'}${consumerRow?.runtime ? ` / ${consumerRow.runtime}` : ''}`,
+      '',
+      'Discord will show:',
+      report.preview ?? '(not projected)',
+    ]
+    process.stdout.write(`${lines.join('\n')}\n`)
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com agents` — list registered agents as JSON.
  * MVP: no filters; reads the agents table verbatim.
@@ -1636,6 +1739,8 @@ if (command === 'channel') {
   await reclaimMessages([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'diagnose-delivery') {
   await diagnoseDelivery([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'diagnose-projection') {
+  await diagnoseProjection([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -1658,6 +1763,8 @@ Message I/O (requires AGENT_ID env var):
   reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)
   diagnose-delivery [--queue-id <id>] [--message-id <uuid>] [--outbound-message-id <uuid>]
                                                        — JSON explanation for next/projection gaps
+  diagnose-projection --channel <id> --from <agent> --to <agent>[,<agent>]
+                                                       — terminal preview of surface/projection routing
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
