@@ -1,5 +1,6 @@
 export type QueueActionKind =
   | 'wake_pending'
+  | 'wake_received'
   | 'invoke_codex_runner'
   | 'observe_busy'
   | 'reclaim_expired'
@@ -59,7 +60,11 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
     if (row.claim_expires_at && new Date(row.claim_expires_at).getTime() < now.getTime()) {
       return { kind: 'reclaim_expired', terminal: false }
     }
-    return { kind: 'observe_received', terminal: false }
+    if (!agent) return { kind: 'observe_received', terminal: false }
+    if (isCodexRuntime(agent.runtime)) return { kind: 'observe_received', terminal: false }
+    if (agent.runtime !== defaultRuntime) return { kind: 'runtime_skip', terminal: false }
+    if (!agent.tmux_session) return { kind: 'tmux_missing', terminal: false }
+    return { kind: 'wake_received', terminal: false }
   }
 
   if (row.status === 'in_progress') {

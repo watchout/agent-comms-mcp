@@ -225,7 +225,7 @@ describe('T12b stale dispatch observation semantics', () => {
     }
   })
 
-  test('live received row is observed without wake, reclaim, or terminal close', async () => {
+  test('live received row gets process-start wake without reclaim or terminal close', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t12b-live')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
@@ -243,21 +243,32 @@ describe('T12b stale dispatch observation semantics', () => {
     try {
       const result = await h.daemon.sweepStale()
       expect(result.reclaimed).toBe(0)
-      expect(result.rewoken).toBe(0)
-      expect(h.tmux.sentKeys.length).toBe(0)
+      expect(result.rewoken).toBe(1)
+      expect(h.tmux.sentKeys).toEqual([
+        {
+          session: `${agent}-session`,
+          payload: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id, then complete the requested work. Do not call inbox or next.\n',
+        },
+      ])
       expect(h.metrics.countInc('state_daemon_state_actions_total', {
-        action: 'observe_received',
+        action: 'wake_received',
         status: 'received',
         terminal: 'false',
       })).toBe(1)
-      const row = (await pg.query(`SELECT status, claimed_by, replied_with, failed_reason FROM message_queue WHERE id=$1`, [id]))
-        .rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null }
-      expect(row).toEqual({
+      const row = (await pg.query(`SELECT status, claimed_by, replied_with, failed_reason, last_wake_attempt_at FROM message_queue WHERE id=$1`, [id]))
+        .rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null; last_wake_attempt_at: Date | null }
+      expect({
+        status: row.status,
+        claimed_by: row.claimed_by,
+        replied_with: row.replied_with,
+        failed_reason: row.failed_reason,
+      }).toEqual({
         status: 'received',
         claimed_by: agent,
         replied_with: null,
         failed_reason: null,
       })
+      expect(row.last_wake_attempt_at).not.toBeNull()
     } finally {
       await h.daemon.stop()
     }
@@ -472,6 +483,60 @@ describe('T16 pg_notify_immediate_dispatch', () => {
       await new Promise((r) => setTimeout(r, 50))
       expect(h.tmux.sentKeys.length).toBe(1)
       expect(h.metrics.observed('state_daemon_pg_notify_lag_ms').length).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('received UPDATE event drives process-start wake immediately after next claim', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t16-received')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      created_at: T0,
+      last_wake_attempt_at: null,
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+      })
+      expect(h.tmux.sentKeys).toHaveLength(1)
+
+      h.clock.advance(1000)
+      await pg.query(
+        `UPDATE message_queue
+            SET status='received',
+                claimed_by=$1,
+                claimed_at=$2,
+                claim_expires_at=$3
+          WHERE id=$4`,
+        [agent, h.clock.now(), new Date(h.clock.now().getTime() + 60_000), id],
+      )
+      await h.daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id,
+        agent_id: agent,
+        status: 'received',
+        claim_expires_at: new Date(h.clock.now().getTime() + 60_000).toISOString(),
+      })
+
+      expect(h.tmux.sentKeys).toEqual([
+        { session: `${agent}-session`, payload: 'Call the agent-comms next tool now. Do not call inbox.\n' },
+        {
+          session: `${agent}-session`,
+          payload: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id, then complete the requested work. Do not call inbox or next.\n',
+        },
+      ])
+      expect(h.metrics.countInc('state_daemon_state_actions_total', {
+        action: 'wake_received',
+        status: 'received',
+        terminal: 'false',
+      })).toBe(1)
     } finally {
       await h.daemon.stop()
     }

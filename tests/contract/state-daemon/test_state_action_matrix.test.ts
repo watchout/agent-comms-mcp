@@ -65,10 +65,20 @@ describe('state_daemon state/action matrix planner', () => {
     })).toEqual({ kind: 'tmux_missing', terminal: false })
   })
 
-  test('live received work is observed and remains non-terminal', () => {
+  test('live received TUI work plans process-start wake and remains non-terminal', () => {
     expect(planQueueAction({
       row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
       agent: tui,
+      now,
+      defaultRuntime: 'TUI',
+      hasActiveClaim: true,
+    })).toEqual({ kind: 'wake_received', terminal: false })
+  })
+
+  test('live received Codex runtime remains observed until a processing runner lands', () => {
+    expect(planQueueAction({
+      row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
+      agent: { runtime: 'codex', tmux_session: null },
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
