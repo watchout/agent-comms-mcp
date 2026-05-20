@@ -138,10 +138,18 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     for (const row of rows) {
       const parts = row.split('|')
       expect(parts.length).toBeGreaterThanOrEqual(5)
+      const [session, , agentId] = parts
       const command = parts.slice(4).join('|')
       expect(command).not.toContain('AGENT_COM_RUNTIME')
       expect(command).not.toContain('server:agent-comms')
-      expect(command.trimStart()).toMatch(/^claude\s+--mcp-config/)
+      if (session === 'discord-cto') {
+        expect(agentId).toBe('codex-cto')
+        expect(command.trimStart()).toMatch(
+          /^AGENT_ID=codex-cto\s+AGENT_COM_EXPECTED_AGENT_ID=codex-cto\s+codex\s+--dangerously-bypass-approvals-and-sandbox/,
+        )
+      } else {
+        expect(command.trimStart()).toMatch(/^claude\s+--mcp-config/)
+      }
     }
   })
 
