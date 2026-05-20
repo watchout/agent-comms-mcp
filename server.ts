@@ -2493,6 +2493,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         channelId: dest.channelId,
         threadId: dest.threadId,
         senderAgentId: agentId,
+        recipientAgentIds: mentions,
       })
       const externalId = projection.channelExternalId
       if (externalId) {
@@ -2879,6 +2880,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       channelId: dest.channelId,
       threadId: dest.threadId,
       senderAgentId: agentId,
+      recipientAgentIds: mentions,
     })
     const externalId = projection.channelExternalId
     if (externalId) {
