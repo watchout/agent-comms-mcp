@@ -301,6 +301,17 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reclaim_expired/)
     expect(QUEUE_REPAIR_SRC).toMatch(/QUEUE_REPAIR_INCLUDE_ACTIVE_REQUIRES_QUEUE_ID/)
   })
+
+  test('queue repair rejects --execute and --dry-run together before DB access', () => {
+    const result = spawnSync('bun', [CLI_PATH, 'queue', 'reclaim-expired', '--execute', '--dry-run'], {
+      env: { ...process.env, DATABASE_URL: '' },
+      encoding: 'utf-8',
+      cwd: REPO_ROOT,
+    })
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('use either --execute or --dry-run')
+  })
 })
 
 // T11 (Phase 1.5/2 Discord-failure preservation) was removed in Phase 3
