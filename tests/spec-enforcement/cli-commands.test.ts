@@ -31,8 +31,12 @@ import { spawnSync } from 'node:child_process'
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const CLI_PATH = join(REPO_ROOT, 'cli', 'index.ts')
 const PKG_PATH = join(REPO_ROOT, 'package.json')
+const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
+const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
+const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
+const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,6 +58,12 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('diagnoseProjection handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function diagnoseProjection\s*\(/)
   })
+  test('diagnoseQueue handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function diagnoseQueue\s*\(/)
+  })
+  test('repairQueue handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function repairQueue\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +83,13 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'diagnose-projection' command invokes diagnoseProjection(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'diagnose-projection'[\s\S]*?diagnoseProjection\(/)
+  })
+  test("'diagnose-queue' and 'queue doctor' commands invoke diagnoseQueue(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'diagnose-queue'[\s\S]*?diagnoseQueue\(/)
+    expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'doctor'[\s\S]*?diagnoseQueue\(/)
+  })
+  test("'queue' repair subcommands invoke repairQueue(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
   })
 })
 
@@ -258,7 +275,33 @@ describe('T9 — projection diagnostics CLI surface', () => {
   })
 })
 
-// T10 (Phase 1.5/2 Discord-failure preservation) was removed in Phase 3
+describe('T10 — queue doctor CLI surface', () => {
+  test('help documents diagnose-queue and queue doctor', () => {
+    expect(CLI_SRC).toMatch(/diagnose-queue \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/queue doctor \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/queue health blockers and stale-work diagnostics/)
+  })
+
+  test('diagnoseQueue reports the P0 blocker classes', () => {
+    expect(QUEUE_DOCTOR_SRC).toMatch(/legacy_status_mix/)
+    expect(QUEUE_DOCTOR_SRC).toMatch(/stale_pending/)
+    expect(QUEUE_DOCTOR_SRC).toMatch(/active_claim_missing_owner/)
+    expect(QUEUE_DOCTOR_SRC).toMatch(/expired_active_claim/)
+    expect(QUEUE_DOCTOR_SRC).toMatch(/retired_or_offline_recipient/)
+    expect(QUEUE_DOCTOR_SRC).toMatch(/outbound_pending_stale/)
+  })
+
+  test('queue repair commands are documented and audit logged', () => {
+    expect(CLI_SRC).toMatch(/queue reassign --from <agent> --to <agent> \[--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue close-obsolete --agent-id <agent> --reason <text> \[--dry-run\]/)
+    expect(CLI_SRC).toMatch(/queue reclaim-expired \[--agent-id <agent>\] \[--dry-run\]/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reassign/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/queue\.close_obsolete/)
+    expect(QUEUE_REPAIR_SRC).toMatch(/queue\.reclaim_expired/)
+  })
+})
+
+// T11 (Phase 1.5/2 Discord-failure preservation) was removed in Phase 3
 // (Issue #129). The CLI no longer has a synchronous Discord-delivery
 // failure branch — `deliverToDiscord` is gone, and the outbound HTTP call
 // is now done by the receiver consumer (server.ts) on its 1-second tick.

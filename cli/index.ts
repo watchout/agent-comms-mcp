@@ -31,6 +31,8 @@ import { fanoutToRecipients } from '../core/send-fanout'
 import { resolveOutboundProjectionRoute } from '../core/outbound-projection'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
+import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
+import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -1510,6 +1512,71 @@ async function diagnoseProjection(args: string[]) {
   }
 }
 
+async function diagnoseQueue(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? null
+  const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+  const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+
+  try {
+    const report = await buildQueueDoctorReport(db as any, { agentId, staleSeconds })
+
+    if (format === 'text') {
+      process.stdout.write(formatQueueDoctorText(report))
+      return
+    }
+
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  } finally {
+    await db.end()
+  }
+}
+
+async function repairQueue(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  const dryRun = flagEnabled(flags['dry-run'])
+  const db = await getDb()
+
+  try {
+    if (subcommand === 'reassign') {
+      const fromAgentId = flags.from
+      const toAgentId = flags.to
+      if (!fromAgentId || !toAgentId) {
+        console.error('Usage: agent-com queue reassign --from <agent> --to <agent> [--dry-run]')
+        process.exit(2)
+      }
+      const report = await reassignPendingQueueRows(db as any, { fromAgentId, toAgentId, dryRun })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'close-obsolete') {
+      const agentId = flags['agent-id']
+      const reason = flags.reason
+      if (!agentId || !reason) {
+        console.error('Usage: agent-com queue close-obsolete --agent-id <agent> --reason <text> [--dry-run]')
+        process.exit(2)
+      }
+      const report = await closeObsoletePendingQueueRows(db as any, { agentId, reason, dryRun })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'reclaim-expired') {
+      const report = await reclaimExpiredQueueClaims(db as any, { agentId: flags['agent-id'] ?? null, dryRun })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    console.error('Usage: agent-com queue <doctor|reassign|close-obsolete|reclaim-expired> ...')
+    process.exit(2)
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com agents` — list registered agents as JSON.
  * MVP: no filters; reads the agents table verbatim.
@@ -1741,6 +1808,12 @@ if (command === 'channel') {
   await diagnoseDelivery([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'diagnose-projection') {
   await diagnoseProjection([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'diagnose-queue') {
+  await diagnoseQueue([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'queue' && subcommand === 'doctor') {
+  await diagnoseQueue(rest)
+} else if (command === 'queue') {
+  await repairQueue(subcommand, rest)
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -1765,6 +1838,15 @@ Message I/O (requires AGENT_ID env var):
                                                        — JSON explanation for next/projection gaps
   diagnose-projection --channel <id> --from <agent> --to <agent>[,<agent>]
                                                        — terminal preview of surface/projection routing
+  diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+  queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — queue health blockers and stale-work diagnostics
+  queue reassign --from <agent> --to <agent> [--dry-run]
+                                                       — reassign pending rows to a replacement identity
+  queue close-obsolete --agent-id <agent> --reason <text> [--dry-run]
+                                                       — close pending rows as skipped/obsolete
+  queue reclaim-expired [--agent-id <agent>] [--dry-run]
+                                                       — roll expired received/in_progress claims back to pending
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
