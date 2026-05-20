@@ -116,6 +116,16 @@ describe('m4 — launchd plist source-pin', () => {
   test('DATABASE_URL is in EnvironmentVariables (operator must set before load)', () => {
     expect(PLIST).toMatch(/DATABASE_URL/)
   })
+  test('staged Codex/CTO rollout env is pinned for launchd', () => {
+    expect(PLIST).toMatch(/<key>STATE_DAEMON_CODEX_RUNNER_ENABLED<\/key>\s*<string>1<\/string>/)
+    expect(PLIST).toMatch(
+      /<key>STATE_DAEMON_CODEX_RUNNER_DATABASE_URL<\/key>\s*<string>postgresql:\/\/\/agent_comms\?host=\/tmp<\/string>/,
+    )
+    expect(PLIST).toMatch(
+      /<key>STATE_DAEMON_AGENT_ALLOWLIST<\/key>\s*<string>codex-audit,codex-aun,codex-cto<\/string>/,
+    )
+    expect(PLIST).toMatch(/<key>STATE_DAEMON_ALERT_CHANNEL<\/key>\s*<string>1487368919613444156<\/string>/)
+  })
   test('socket PostgreSQL launchd env pins PGUSER and USER', () => {
     expect(PLIST).toMatch(/<key>PGUSER<\/key>\s*<string>yuji<\/string>/)
     expect(PLIST).toMatch(/<key>USER<\/key>\s*<string>yuji<\/string>/)
