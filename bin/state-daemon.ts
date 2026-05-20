@@ -97,11 +97,12 @@ class TmuxShellAdapter implements TmuxClient {
     // typed into the input field as text and no LLM turn ever starts. The
     // earlier "no Enter literal needed" assumption (PR #330 cycle / Bug 1
     // fallout) is wrong under tmux's default key syntax. Correct shape
-    // strips the trailing LF, sends the prompt as literal text, then sends
-    // `Enter` in a second tmux call. Codex TUI can leave the prompt in the
-    // editor when literal text and Enter are sent in a single `send-keys`
-    // invocation, so keep the submit keypress separate.
+    // strips the trailing LF, clears any stale editor line, sends the prompt
+    // as literal text, then sends `Enter` in a second tmux call. Codex TUI can
+    // leave duplicate wake prompts in the editor when retries happen, so clear
+    // the line first and keep the submit keypress separate.
     const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
+    await execFileAsync('tmux', ['send-keys', '-t', session, 'C-u'])
     if (stripped.length > 0) {
       await execFileAsync('tmux', ['send-keys', '-t', session, '-l', stripped])
     }

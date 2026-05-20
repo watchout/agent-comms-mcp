@@ -75,10 +75,11 @@ dDescribe('T19c — real tmux Enter-submission regression (PR #335 hotfix)', () 
     execFileSync('tmux', ['send-keys', '-t', session, 'echo BASE-MARKER', 'Enter'])
     await new Promise((r) => setTimeout(r, 200))
 
-    // Now drive the production sendKeys shape: strip trailing \n, send the
-    // prompt as literal text, then send Enter as a separate keypress.
+    // Now drive the production sendKeys shape: strip trailing \n, clear the
+    // input line, send the prompt as literal text, then send Enter separately.
     const payload = 'echo SUBMIT-MARKER\n'
     const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
+    await execFileAsync('tmux', ['send-keys', '-t', session, 'C-u'])
     await execFileAsync('tmux', ['send-keys', '-t', session, '-l', stripped])
     await execFileAsync('tmux', ['send-keys', '-t', session, 'Enter'])
     await new Promise((r) => setTimeout(r, 300))

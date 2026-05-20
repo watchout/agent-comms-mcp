@@ -43,16 +43,18 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
     expect(SRC).toMatch(/LISTEN \$\{channel\}/)
     // The actual channel name is supplied by daemon.start() per types.ts.
   })
-  test('tmux adapter: has-session check + literal send-keys + separate Enter + restart launcher', () => {
+  test('tmux adapter: has-session check + clear line + literal send-keys + separate Enter + restart launcher', () => {
     expect(SRC).toMatch(/tmux.*has-session/)
     expect(SRC).toMatch(/send-keys.*-t/)
     // PR #335 hotfix pin (CTO d00d95b6 / CEO 0cd1cfd6): the daemon must
-    // strip the trailing `\n` from the payload, send the prompt as literal
-    // text, then pass a literal `'Enter'` in a separate tmux invocation.
+    // strip the trailing `\n` from the payload, clear any stale editor line,
+    // send the prompt as literal text, then pass a literal `'Enter'` in a
+    // separate tmux invocation.
     // tmux does NOT interpret an embedded LF as the Return key under the
     // default key syntax, and Codex TUI can fail to submit when prompt text
     // and Enter are sent in a single send-keys call.
     expect(SRC).toMatch(/payload\.endsWith\('\\n'\)/)
+    expect(SRC).toMatch(/send-keys[\s\S]*?'C-u'/)
     expect(SRC).toMatch(/send-keys[\s\S]*?'-l'[\s\S]*?stripped/)
     expect(SRC).toMatch(/send-keys[\s\S]*?'Enter'/)
     // Restart launcher = scripts/restart-bot.sh, the existing repo-owned
