@@ -120,10 +120,13 @@ describe('outbound mention snowflake conversion (CTO 24a25097)', () => {
     // path and the production fix lands on single-part outbound only.
     //
     // Match the pattern that wraps the first-part content in `partIdx === 0 &&
-    // mentionPrefix ? mentionPrefix + rawPartContent : rawPartContent`.
+    // mentionPrefix ? mentionPrefix + decoratedPartContent : ...`. The
+    // projection text decorator may transform rawPartContent before Discord
+    // enqueue, but the native Discord mention prefix must remain ahead of
+    // that display-only decoration so push notifications still fire.
     const callSiteCount = (src.match(/await mentionsToDiscordPrefix\(/g) ?? []).length
     expect(callSiteCount).toBe(2)  // send tool + notify tool
-    const wireCount = (src.match(/partIdx === 0 && mentionPrefix\s*\?\s*mentionPrefix \+ rawPartContent/g) ?? []).length
+    const wireCount = (src.match(/partIdx === 0 && mentionPrefix\s*\?\s*mentionPrefix \+ decoratedPartContent/g) ?? []).length
     expect(wireCount).toBe(2)
   })
 })

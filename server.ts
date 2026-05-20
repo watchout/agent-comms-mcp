@@ -109,6 +109,7 @@ import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
 import { resolveOutboundProjectionRoute } from './core/outbound-projection'
+import { decorateProjectedContent } from './core/projection-text-decorator'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -2503,9 +2504,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
           const partMessageId = partIds[partIdx]
           const rawPartContent = parts[partIdx]
+          const decoratedPartContent = decorateProjectedContent({
+            content: rawPartContent,
+            authorAgentId: agentId,
+            consumerAgentId: projection.consumerAgentId,
+            recipients: mentions,
+          })
           const partContent = partIdx === 0 && mentionPrefix
-            ? mentionPrefix + rawPartContent
-            : rawPartContent
+            ? mentionPrefix + decoratedPartContent
+            : decoratedPartContent
           try {
             await txClient.query(
               `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
@@ -2881,9 +2888,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
         const partMessageId = partIds[partIdx]
         const rawPartContent = parts[partIdx]
+        const decoratedPartContent = decorateProjectedContent({
+          content: rawPartContent,
+          authorAgentId: agentId,
+          consumerAgentId: projection.consumerAgentId,
+          recipients: mentions,
+        })
         const partContent = partIdx === 0 && mentionPrefix
-          ? mentionPrefix + rawPartContent
-          : rawPartContent
+          ? mentionPrefix + decoratedPartContent
+          : decoratedPartContent
         try {
           await client.query(
             `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
