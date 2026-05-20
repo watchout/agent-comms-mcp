@@ -210,12 +210,30 @@ export async function closeObsoletePendingQueueRows(
                     b.status AS before_status,
                     left(mq.payload, 180) AS content
        ),
+       affected_agents AS (
+         SELECT DISTINCT agent_id FROM closed
+       ),
+       agent_active_state AS (
+         SELECT a.agent_id,
+                EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) AS has_active_claims
+           FROM agents a
+           JOIN affected_agents aa ON aa.agent_id = a.agent_id
+       ),
        refreshed_agents AS (
          UPDATE agents a SET
-            status = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
-            status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'message processing' ELSE NULL END,
+            status = CASE
+              WHEN aas.has_active_claims THEN 'busy'
+              WHEN a.status = 'busy' THEN 'idle'
+              ELSE a.status
+            END,
+            status_detail = CASE
+              WHEN aas.has_active_claims THEN 'message processing'
+              WHEN a.status IN ('busy', 'idle') THEN NULL
+              ELSE a.status_detail
+            END,
             status_updated_at = now()
-          WHERE a.agent_id IN (SELECT DISTINCT agent_id FROM closed)
+           FROM agent_active_state aas
+          WHERE a.agent_id = aas.agent_id
           RETURNING a.agent_id
        )
        SELECT *, count(*) OVER ()::int AS total_count
@@ -283,12 +301,30 @@ export async function reclaimExpiredQueueClaims(
             ${agentFilter}
           RETURNING id, agent_id, status, message_id, created_at, left(payload, 180) AS content
        ),
+       affected_agents AS (
+         SELECT DISTINCT agent_id FROM reclaimed
+       ),
+       agent_active_state AS (
+         SELECT a.agent_id,
+                EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) AS has_active_claims
+           FROM agents a
+           JOIN affected_agents aa ON aa.agent_id = a.agent_id
+       ),
        refreshed_agents AS (
          UPDATE agents a SET
-            status = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
-            status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) THEN 'message processing' ELSE NULL END,
+            status = CASE
+              WHEN aas.has_active_claims THEN 'busy'
+              WHEN a.status = 'busy' THEN 'idle'
+              ELSE a.status
+            END,
+            status_detail = CASE
+              WHEN aas.has_active_claims THEN 'message processing'
+              WHEN a.status IN ('busy', 'idle') THEN NULL
+              ELSE a.status_detail
+            END,
             status_updated_at = now()
-          WHERE a.agent_id IN (SELECT DISTINCT agent_id FROM reclaimed)
+           FROM agent_active_state aas
+          WHERE a.agent_id = aas.agent_id
           RETURNING a.agent_id
        )
        SELECT *, count(*) OVER ()::int AS total_count
