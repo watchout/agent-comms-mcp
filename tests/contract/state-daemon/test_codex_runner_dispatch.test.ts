@@ -149,7 +149,9 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         requester: 'codex-cto',
         databaseUrl: 'postgresql:///agent_comms?host=/tmp',
       })
-      expect(runner.invocations[0].ackContent).toContain(`queue_id=${id}`)
+      expect(runner.invocations[0].ackContent).toContain('queue_id={queue_id}')
+      expect(runner.invocations[0].ackContent).toContain('message_id={message_id}')
+      expect(runner.invocations[0].ackContent).not.toContain(`queue_id=${id}`)
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)

@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { resolveNestedBunExecutable } from '../../bin/aun/codex-runner'
+import { renderAckContent, resolveNestedBunExecutable } from '../../bin/aun/codex-runner'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
@@ -196,6 +196,71 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
     expect(body.acks[0].stdout.close_mode).toBe('none')
     expect(dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
       .toEqual({ status: 'received', claimed_by: 'codex-aun', replied_with: null })
+  })
+
+  test('ACK content placeholders render from the actually claimed row identity', () => {
+    const { messageId, queueId } = seedPending('ack template')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--limit', '1',
+      '--ack-mentions', 'codex-cto',
+      '--ack-content', 'ACK: queue_id={queue_id}; message_id={message_id}; from={from}; channel={channel_id}',
+    ])
+
+    expect(r.status).toBe(0)
+    const ackMessage = dbRead(
+      `SELECT content, reply_to FROM agent_messages
+        WHERE author_id = 'codex-aun'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )[0]
+    expect(ackMessage).toEqual({
+      content: `ACK: queue_id=${queueId}; message_id=${messageId}; from=codex-cto; channel=runner-ch`,
+      reply_to: messageId,
+    })
+  })
+
+  test('ACK template follows actionable claim rather than an older skipped pending row', () => {
+    const stale = seedTypedPending({ messageType: 'chat', ageSeconds: 300, content: 'old chat backlog' })
+    const current = seedTypedPending({ messageType: 'instruction', ageSeconds: 30, content: 'current instruction' })
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--limit', '1',
+      '--max-inspect', '10',
+      '--ack-mentions', 'codex-cto',
+      '--ack-content', 'ACK: queue_id={queue_id}; message_id={message_id}',
+    ])
+
+    expect(r.status).toBe(0)
+    const ackMessage = dbRead(
+      `SELECT content, reply_to FROM agent_messages
+        WHERE author_id = 'codex-aun'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )[0]
+    expect(ackMessage).toEqual({
+      content: `ACK: queue_id=${current.queueId}; message_id=${current.messageId}`,
+      reply_to: current.messageId,
+    })
+    expect(ackMessage.content).not.toContain(`queue_id=${stale.queueId}`)
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [stale.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('renderAckContent leaves unknown template tokens untouched', () => {
+    expect(renderAckContent('queue={queue_id}; missing={unknown}', {
+      queue_id: '123',
+      message_id: 'msg-123',
+      channel_id: null,
+      thread_id: null,
+      from: null,
+      message_type: null,
+      content: '',
+    })).toBe('queue=123; missing={unknown}')
   })
 
   test('final close remains explicit after runner ACK/progress', () => {
