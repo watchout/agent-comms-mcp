@@ -23,6 +23,25 @@ AGENT_COMMS_TTL_SWEEP_DISABLED=1
 
 Do not mutate production DB identity rows, CTO tokens, bot registry, launchd state-daemon plist, or broad `.mcp.json` files as part of this runbook unless a separate approval explicitly authorizes that mutation.
 
+## Role Identity Guardrail
+
+Role labels such as AUN lead, L1, L2, and L3 are resolved by
+`config/agent-role-routing.json`; they are not MCP registration names and are
+not interchangeable with Discord display names.
+
+For the AUN development lead session, the runtime identity is `codex-aun`.
+If a session in the AUN lead workspace cannot notify `codex-cto` because the
+tool returns `SELF_SEND`, the session is registered as the wrong sender
+identity. Re-register or restart that MCP client with:
+
+```bash
+AGENT_ID=codex-aun
+AGENT_COM_EXPECTED_AGENT_ID=codex-aun
+```
+
+Do not normalize this into an operating pattern where a human relays L3
+approval requests. Relay is an incident workaround only.
+
 ## Codex Registration
 
 Config path:
