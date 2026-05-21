@@ -23,6 +23,7 @@ EnvironmentVariables.NODE_ENV: production
 EnvironmentVariables.DATABASE_URL: postgresql:///agent_comms?host=/tmp
 EnvironmentVariables.PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 EnvironmentVariables.STATE_DAEMON_WAKE_DUPLICATE_SUPPRESS_SEC: 30
+EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST: auditor,codex-audit,codex-aun,codex-cto
 KeepAlive: true
 ThrottleInterval: 10
 ProcessType: Background
@@ -57,6 +58,39 @@ Restart approval must name one canonical `DATABASE_URL`. If both commands point
 to the same PostgreSQL cluster, record that evidence in the issue. If one fails
 or they point to different clusters, update the installed plist only during the
 approved restart window.
+
+### Audit Wake Scope
+
+The PR audit path uses `auditor` for L1 and `codex-audit` for L2. The next
+approved restart profile must include both recipients in
+`STATE_DAEMON_AGENT_ALLOWLIST` so DB queue delivery and daemon wake behavior
+match for the full PR audit chain.
+
+```text
+auditor,codex-audit,codex-aun,codex-cto
+```
+
+`auditor` is a TUI/tmux L1 recipient. `codex-audit` and `codex-aun` use the
+Codex runner path. `codex-cto` remains a TUI/tmux recipient. If L1 audit moves
+to a different identity later, change the PR audit runbook and this allowlist
+in the same reviewed PR; do not leave queue fanout pointing at an identity that
+the daemon is not allowed to wake.
+
+Preflight command:
+
+```bash
+plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST raw \
+  ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
+
+psql 'postgresql:///agent_comms?host=/tmp' -P pager=off -c "
+SELECT id, agent_id, message_id, status, created_at, last_wake_attempt_at,
+       claimed_by, claimed_at
+  FROM message_queue
+  WHERE agent_id IN ('auditor','codex-audit')
+    AND status IN ('pending','received','in_progress')
+  ORDER BY created_at DESC
+  LIMIT 20;"
+```
 
 ### Approved Checkout
 
@@ -123,6 +157,7 @@ Run these before asking CTO for restart approval:
 CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-#432-or-later-merge-commit>'
 APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}
 DATABASE_URL='postgresql:///agent_comms?host=/tmp'
+APPROVED_AGENT_ALLOWLIST='auditor,codex-audit,codex-aun,codex-cto'
 
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
@@ -137,6 +172,10 @@ bun --cwd "$APPROVED_REPO" build --target bun bin/state-daemon.ts \
 
 ps aux | rg 'state-daemon|bin/state-daemon|state_daemon' | rg -v rg || true
 launchctl print "gui/$(id -u)/com.agent-comms.state-daemon" || true
+CURRENT_AGENT_ALLOWLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST raw \
+  ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
+printf 'installed STATE_DAEMON_AGENT_ALLOWLIST=%s\n' "$CURRENT_AGENT_ALLOWLIST"
+printf 'approved  STATE_DAEMON_AGENT_ALLOWLIST=%s\n' "$APPROVED_AGENT_ALLOWLIST"
 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
 BEGIN READ ONLY;
@@ -153,6 +192,13 @@ SELECT id, agent_id, message_id, status, created_at, read_at,
   FROM message_queue
   WHERE status IN ('received','in_progress')
   ORDER BY created_at;
+SELECT id, agent_id, message_id, status, created_at, last_wake_attempt_at,
+       claimed_by, claimed_at
+  FROM message_queue
+  WHERE agent_id IN ('auditor','codex-audit')
+    AND status IN ('pending','received','in_progress')
+  ORDER BY created_at DESC
+  LIMIT 20;
 COMMIT;"
 ```
 
@@ -160,6 +206,11 @@ Pass criteria:
 
 - installed plist values match the desired values above, or every mismatch is
   recorded as pending CTO-approved restart-window mutation
+- L1 `auditor` and L2 `codex-audit` are both included in the approved
+  `STATE_DAEMON_AGENT_ALLOWLIST`, unless the PR audit routing policy was
+  explicitly changed in the same reviewed release
+- pending audit rows are accounted for; no row is stranded only because its
+  `agent_id` is outside the daemon allowlist
 - focused tests and build pass
 - installed service status is recorded before restart
 - `STALE_DISPATCH:%` count since #431 merge is zero or explicitly explained
@@ -175,6 +226,7 @@ approved `DATABASE_URL` and approved checkout path.
 ```bash
 APPROVED_REPO=/path/approved-clean-checkout
 APPROVED_DATABASE_URL='postgresql:///agent_comms?host=/tmp'
+APPROVED_AGENT_ALLOWLIST='auditor,codex-audit,codex-aun,codex-cto'
 PLIST=~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
 
 plutil -replace ProgramArguments.1 -string "$APPROVED_REPO/bin/state-daemon.ts" "$PLIST"
@@ -182,6 +234,7 @@ plutil -replace WorkingDirectory -string "$APPROVED_REPO" "$PLIST"
 plutil -replace StandardOutPath -string "$APPROVED_REPO/logs/state-daemon.out.log" "$PLIST"
 plutil -replace StandardErrorPath -string "$APPROVED_REPO/logs/state-daemon.err.log" "$PLIST"
 plutil -replace EnvironmentVariables.DATABASE_URL -string "$APPROVED_DATABASE_URL" "$PLIST"
+plutil -replace EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST -string "$APPROVED_AGENT_ALLOWLIST" "$PLIST"
 
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -205,6 +258,9 @@ After approved restart:
 7. Send final with `aun reply --close --queue-id <id> --message-id <uuid>`.
 8. Verify only the final close terminal-closes the queue.
 9. Verify outbound delivery projection for the final reply.
+10. Send a CTO-approved controlled PR-audit wake to the chosen L1 identity and
+    verify its queue row is either claimed automatically or documented as a
+    deliberate manual-only exception.
 
 ## Rollback
 
