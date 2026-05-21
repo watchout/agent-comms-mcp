@@ -168,6 +168,11 @@ LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.
 
 ## Runtime Adapter Boundary
 
+For the cross-runtime adapter contract, see
+`docs/design/llm-runtime-adapter-boundary.md`. This document owns the receive
+state machine; the adapter boundary document owns how Codex, Claude Code, and
+future runtimes map that state machine to runtime-specific CLI/SDK invocation.
+
 | Runtime | Primary receive mechanism |
 |---|---|
 | Codex | script invocation of `next` plus a Codex runner adapter |
