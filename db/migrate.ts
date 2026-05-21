@@ -503,6 +503,7 @@ async function migrate() {
       message_id TEXT NOT NULL,            -- agent_messages.id of the row to deliver
       agent_id TEXT NOT NULL,              -- canonical author agent_id
       consumer_agent_id TEXT,              -- adapter owner that claims/posts this row (#410)
+      projection_identity_id TEXT,         -- intended Discord-facing projection identity (ADR-060)
       channel_external_id TEXT NOT NULL,   -- Discord channel or thread snowflake
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',  -- pre-rendered Discord mentions (JSON)
@@ -529,6 +530,7 @@ async function migrate() {
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS consumer_agent_id TEXT;
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_identity_id TEXT;
 
     -- Phase C Step 1 PR-A (cycle 3/4 honesty note): observability column for
     -- the returned Discord snowflake. Effective outbound dedup is provided

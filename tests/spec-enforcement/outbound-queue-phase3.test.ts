@@ -70,6 +70,7 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     expect(ddl).toMatch(/message_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/agent_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/consumer_agent_id\s+TEXT/)
+    expect(ddl).toMatch(/projection_identity_id\s+TEXT/)
     expect(ddl).toMatch(/channel_external_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/content\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/mentions_display\s+TEXT/)
@@ -288,6 +289,12 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
   test('migrate.ts adds discord_message_id column on outbound_queue', () => {
     expect(MIGRATE_SRC).toMatch(
       /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS discord_message_id TEXT/,
+    )
+  })
+
+  test('migrate.ts adds ADR-060 projection_identity_id column on outbound_queue', () => {
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_identity_id TEXT/,
     )
   })
 
