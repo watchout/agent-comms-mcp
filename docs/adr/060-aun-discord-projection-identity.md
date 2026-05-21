@@ -182,6 +182,8 @@ and logs.
   - `outbound_queue.consumer_agent_id=agent-com-dev`
   - `outbound_queue.projection_identity_id` records intended native projection
     or fallback identity according to resolver contract
+  - the persisted `intended_projection_identity_id` field preserves the
+    pre-fallback target when fallback occurs
   - row reaches `status=sent`
   - `discord_message_id` is populated
 - Native healthy projection:

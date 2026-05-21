@@ -503,7 +503,7 @@ async function migrate() {
       message_id TEXT NOT NULL,            -- agent_messages.id of the row to deliver
       agent_id TEXT NOT NULL,              -- canonical author agent_id
       consumer_agent_id TEXT,              -- adapter owner that claims/posts this row (#410)
-      projection_identity_id TEXT,         -- intended Discord-facing projection identity (ADR-060)
+      projection_identity_id TEXT,         -- resolved Discord-facing projection identity after fallback (ADR-060)
       intended_projection_identity_id TEXT,-- configured/native projection intent before fallback (ADR-060)
       projection_source TEXT,              -- resolver source for projection identity (ADR-060)
       projection_fallback_reason TEXT,     -- fallback/unavailable reason, if any (ADR-060)
