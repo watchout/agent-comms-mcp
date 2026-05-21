@@ -88,6 +88,22 @@ function validateAckOptions(opts: CodexRunnerOptions): string | null {
   return null
 }
 
+export function renderAckContent(template: string, item: RetainedWorkItem): string {
+  const values: Record<string, string> = {
+    queue_id: item.queue_id,
+    message_id: item.message_id,
+    channel_id: item.channel_id ?? '',
+    thread_id: item.thread_id ?? '',
+    from: item.from ?? '',
+    message_type: item.message_type ?? '',
+  }
+  let rendered = template
+  for (const [key, value] of Object.entries(values)) {
+    rendered = rendered.split(`{${key}}`).join(value)
+  }
+  return rendered
+}
+
 export function resolveNestedBunExecutable(): string {
   return process.env.AUN_BUN_EXECUTABLE?.trim()
     || process.env.STATE_DAEMON_BUN_EXECUTABLE?.trim()
@@ -223,7 +239,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
     for (const item of retained) {
       const ack = reply({
         ...opts,
-        content: opts.ackContent,
+        content: renderAckContent(opts.ackContent ?? '', item),
         mentions: opts.ackMentions,
         queueId: item.queue_id,
         messageId: item.message_id,

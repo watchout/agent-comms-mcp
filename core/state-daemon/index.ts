@@ -765,7 +765,7 @@ export class StateDaemon {
   }
 
   private boundedAckContent(row: QueueRow): string {
-    const raw = `ACK: received by ${row.agent_id}; queue_id=${Number(row.id)}; message_id=${row.message_id ?? 'unknown'}; final close requires explicit --close.`
+    const raw = `ACK: received by ${row.agent_id}; queue_id={queue_id}; message_id={message_id}; final close requires explicit --close.`
     return raw.length <= this.config.codexRunnerAckContentMaxChars
       ? raw
       : raw.slice(0, this.config.codexRunnerAckContentMaxChars)
