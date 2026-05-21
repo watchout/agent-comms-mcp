@@ -155,10 +155,13 @@ describe('SqliteAdapter', () => {
     expect(row?.content).toBe('hello discord')
   })
 
-  it('outbound_queue has ADR-060 projection identity column', async () => {
+  it('outbound_queue has ADR-060 projection identity evidence columns', async () => {
     const cols = await adapter.query("PRAGMA table_info(outbound_queue)")
     const names = cols.map((c: any) => c.name)
     expect(names).toContain('projection_identity_id')
+    expect(names).toContain('intended_projection_identity_id')
+    expect(names).toContain('projection_source')
+    expect(names).toContain('projection_fallback_reason')
   })
 })
 

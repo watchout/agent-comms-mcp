@@ -2516,14 +2516,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             : decoratedPartContent
           try {
             await txClient.query(
-              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
-               VALUES ($1, $2, $3, $4, $5, $6)`,
+              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
               // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars to
               // match spec §5.3 エラーハンドリング. truncateForPlatform's 2000-char
               // limit is the raw Discord hard cap; truncateForDiscord bakes in
               // 100 chars of headroom for mentions / reply markers / Discord
               // server-side reformat.
-              [partMessageId, agentId, projection.consumerAgentId, projection.projectionIdentityId, externalId, truncateForDiscord(partContent)],
+              [
+                partMessageId,
+                agentId,
+                projection.consumerAgentId,
+                projection.projectionIdentityId,
+                projection.intendedProjectionIdentityId,
+                projection.projectionSource,
+                projection.projectionFallbackReason,
+                externalId,
+                truncateForDiscord(partContent),
+              ],
             )
           } catch (err) {
             // ARC codex audit (PR#135): do NOT silently swallow. The
@@ -2901,11 +2911,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : decoratedPartContent
         try {
           await client.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
             // v2.1.0: clamp at DISCORD_MAX (1900) before enqueue — see send-tool
             // call site above for rationale.
-            [partMessageId, agentId, projection.consumerAgentId, projection.projectionIdentityId, externalId, truncateForDiscord(partContent)],
+            [
+              partMessageId,
+              agentId,
+              projection.consumerAgentId,
+              projection.projectionIdentityId,
+              projection.intendedProjectionIdentityId,
+              projection.projectionSource,
+              projection.projectionFallbackReason,
+              externalId,
+              truncateForDiscord(partContent),
+            ],
           )
         } catch (err) {
           process.stderr.write(`agent-comms: notify outbound_queue INSERT failed: ${err}\n`)

@@ -71,6 +71,9 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     expect(ddl).toMatch(/agent_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/consumer_agent_id\s+TEXT/)
     expect(ddl).toMatch(/projection_identity_id\s+TEXT/)
+    expect(ddl).toMatch(/intended_projection_identity_id\s+TEXT/)
+    expect(ddl).toMatch(/projection_source\s+TEXT/)
+    expect(ddl).toMatch(/projection_fallback_reason\s+TEXT/)
     expect(ddl).toMatch(/channel_external_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/content\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/mentions_display\s+TEXT/)
@@ -185,12 +188,12 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
     // Anchor on the send-tool send loop. We can't extract the loop body
     // perfectly without parsing TS, so check that the send handler contains
     // ADR-060 PR3: write both delivery consumer and projection identity.
-    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/)
+    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/)
   })
   test('server send + notify write projection_identity_id from the ADR-060 resolver', () => {
-    const inserts = [...SERVER_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/g)]
+    const inserts = [...SERVER_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/g)]
     expect(inserts.length).toBeGreaterThanOrEqual(2)
-    const bindings = [...SERVER_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*externalId/g)]
+    const bindings = [...SERVER_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*externalId/g)]
     expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
   test('send-tool resolves channel_external_id via thread_adapters then channel_adapters', () => {
@@ -250,12 +253,12 @@ function sendMessageBody(): string {
 describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('sendMessage INSERTs into outbound_queue', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/)
+    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/)
   })
   test('CLI send + notify write projection_identity_id from the ADR-060 resolver', () => {
-    const inserts = [...CLI_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/g)]
+    const inserts = [...CLI_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/g)]
     expect(inserts.length).toBeGreaterThanOrEqual(2)
-    const bindings = [...CLI_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*discordExternalId/g)]
+    const bindings = [...CLI_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId/g)]
     expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
   test('sendMessage resolves channel_external_id via thread_adapters then channel_adapters', () => {
@@ -307,6 +310,17 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
   test('migrate.ts adds ADR-060 projection_identity_id column on outbound_queue', () => {
     expect(MIGRATE_SRC).toMatch(
       /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_identity_id TEXT/,
+    )
+  })
+  test('migrate.ts adds ADR-060 projection diagnostic evidence columns on outbound_queue', () => {
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS intended_projection_identity_id TEXT/,
+    )
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_source TEXT/,
+    )
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_fallback_reason TEXT/,
     )
   })
 

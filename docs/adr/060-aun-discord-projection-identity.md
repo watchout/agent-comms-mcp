@@ -32,7 +32,7 @@ AUN outbound projection uses four distinct identity roles.
 |---|---|---|---|
 | Canonical AUN author | `agent_messages.author_id`, `outbound_queue.agent_id` | Agent that authored the durable AUN message or owns the work result | AUN routing and audit model |
 | Delivery adapter runtime owner | `outbound_queue.consumer_agent_id` | Adapter process allowed to claim and post the outbound row | Channel metadata / routing policy |
-| Discord projection identity | `outbound_queue.projection_identity_id` | Intended Discord-facing display/post identity | Projection resolver |
+| Discord projection identity | `outbound_queue.projection_identity_id` | Resolved Discord-facing display/post identity after fallback | Projection resolver |
 | Presence identity | `presence_identity_id` | Optional Discord online/presence identity | Model only at first; not authoritative AUN status |
 
 `consumer_agent_id` must never carry Discord display semantics. It answers
@@ -111,6 +111,7 @@ Introduce a pure resolver that returns:
 - `channelExternalId`
 - `consumerAgentId`
 - `projectionIdentityId`
+- `intendedProjectionIdentityId`
 - `projectionSource`
 - `projectionFallbackReason`
 
@@ -134,12 +135,23 @@ delivery and projection identity fields:
 - `channel_external_id`
 - `content`
 
+### PR 4: Projection evidence and diagnostics
+
+Add persisted projection evidence so operators can distinguish a healthy native
+projection from a fallback to the channel adapter owner without reverse-
+engineering the row after the fact:
+
+- `intended_projection_identity_id`
+- `projection_source`
+- `projection_fallback_reason`
+
+Extend MCP `send` / `notify`, CLI `send` / `notify`, and legacy infra producers
+to write these evidence fields alongside `projection_identity_id`.
+
 For the #456/#469 follow-up, `codex-cto -> codex-aun` must keep passing ACL. If
 `codex-cto` native projection is not healthy, Discord projection must be sent by
 the channel adapter owner (`agent-com-dev` in the current channel), not left
 pending under `consumer_agent_id=codex-cto`.
-
-### PR 4: Consumer and diagnostics
 
 Keep outbound claiming keyed by `consumer_agent_id`, with legacy fallback to
 `agent_id` for older rows.
@@ -149,6 +161,7 @@ Diagnostics must show:
 - `author_id`
 - `consumer_agent_id`
 - `projection_identity_id`
+- `intended_projection_identity_id`
 - `projection_source`
 - `projection_health`
 - `projection_fallback_reason`

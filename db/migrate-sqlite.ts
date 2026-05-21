@@ -130,6 +130,9 @@ export function migrateSqlite(dbPath?: string): void {
       agent_id TEXT NOT NULL,
       consumer_agent_id TEXT,
       projection_identity_id TEXT,
+      intended_projection_identity_id TEXT,
+      projection_source TEXT,
+      projection_fallback_reason TEXT,
       channel_external_id TEXT NOT NULL,
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',
@@ -165,6 +168,15 @@ export function migrateSqlite(dbPath?: string): void {
   }
   if (!oqColNames.has('projection_identity_id')) {
     gatedExec(`ALTER TABLE outbound_queue ADD COLUMN projection_identity_id TEXT`)
+  }
+  if (!oqColNames.has('intended_projection_identity_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN intended_projection_identity_id TEXT`)
+  }
+  if (!oqColNames.has('projection_source')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN projection_source TEXT`)
+  }
+  if (!oqColNames.has('projection_fallback_reason')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN projection_fallback_reason TEXT`)
   }
 
   gatedExec(`
