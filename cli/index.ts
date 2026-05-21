@@ -28,7 +28,7 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
-import { resolveOutboundProjectionDecision, resolveOutboundProjectionRoute } from '../core/outbound-projection'
+import { resolveOutboundProjectionDecision } from '../core/outbound-projection'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
@@ -898,14 +898,24 @@ async function sendMessage(args: string[]) {
           // enqueue so an over-long LLM reply is truncated once, deterministically,
           // instead of being split across retries inside the Discord adapter.
           await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [id, agentId, projection.consumerAgentId, projection.projectionIdentityId, discordExternalId, truncateForDiscord(decorateProjectedContent({
-              content,
-              authorAgentId: agentId,
-              consumerAgentId: projection.consumerAgentId,
-              recipients: mentions,
-            }))],
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              id,
+              agentId,
+              projection.consumerAgentId,
+              projection.projectionIdentityId,
+              projection.intendedProjectionIdentityId,
+              projection.projectionSource,
+              projection.projectionFallbackReason,
+              discordExternalId,
+              truncateForDiscord(decorateProjectedContent({
+                content,
+                authorAgentId: agentId,
+                consumerAgentId: projection.consumerAgentId,
+                recipients: mentions,
+              })),
+            ],
           )
           outboundQueued = true
         } catch (err) {
@@ -1153,14 +1163,24 @@ async function notifyMessage(args: string[]) {
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [id, agentId, projection.consumerAgentId, projection.projectionIdentityId, discordExternalId, truncateForDiscord(decorateProjectedContent({
-            content,
-            authorAgentId: agentId,
-            consumerAgentId: projection.consumerAgentId,
-            recipients: mentions,
-          }))],
+          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            id,
+            agentId,
+            projection.consumerAgentId,
+            projection.projectionIdentityId,
+            projection.intendedProjectionIdentityId,
+            projection.projectionSource,
+            projection.projectionFallbackReason,
+            discordExternalId,
+            truncateForDiscord(decorateProjectedContent({
+              content,
+              authorAgentId: agentId,
+              consumerAgentId: projection.consumerAgentId,
+              recipients: mentions,
+            })),
+          ],
         )
         outboundQueued = true
       } catch (err) {
@@ -1394,7 +1414,9 @@ async function diagnoseDelivery(args: string[]) {
 
     if (outboundMessageId) {
       const outbound = await db.query(
-        `SELECT id, message_id, agent_id, consumer_agent_id, channel_external_id,
+        `SELECT id, message_id, agent_id, consumer_agent_id,
+                projection_identity_id, intended_projection_identity_id,
+                projection_source, projection_fallback_reason, channel_external_id,
                 status, attempts, max_attempts, last_error, sent_at, discord_message_id
            FROM outbound_queue
           WHERE message_id = $1
@@ -1421,7 +1443,25 @@ async function diagnoseDelivery(args: string[]) {
         }
         consumerRow.has_discord_id = typeof metadata.discord_id === 'string' && metadata.discord_id.length > 0
       }
-      report.outbound = diagnoseOutboundQueueRow(row, consumerRow ?? null)
+      const projectionIdentityId = row?.projection_identity_id ?? null
+      const projection = projectionIdentityId
+        ? await db.query(
+          `SELECT agent_id, status, metadata
+             FROM agents WHERE agent_id = $1`,
+          [projectionIdentityId],
+        ).catch(() => ({ rows: [] as any[] }))
+        : { rows: [] as any[] }
+      const projectionRow = projection.rows[0]
+      if (projectionRow) {
+        let metadata: Record<string, unknown> = {}
+        if (projectionRow.metadata && typeof projectionRow.metadata === 'object') {
+          metadata = projectionRow.metadata
+        } else if (typeof projectionRow.metadata === 'string') {
+          try { metadata = JSON.parse(projectionRow.metadata) } catch {}
+        }
+        projectionRow.has_discord_id = typeof metadata.discord_id === 'string' && metadata.discord_id.length > 0
+      }
+      report.outbound = diagnoseOutboundQueueRow(row, consumerRow ?? null, projectionRow ?? null)
     }
 
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
@@ -1448,7 +1488,7 @@ async function diagnoseProjection(args: string[]) {
 
   const db = await getDb()
   try {
-    const projection = await resolveOutboundProjectionRoute(db as any, {
+    const projection = await resolveOutboundProjectionDecision(db as any, {
       channelId,
       threadId,
       senderAgentId: fromAgentId,
@@ -1469,6 +1509,22 @@ async function diagnoseProjection(args: string[]) {
       try { return JSON.parse(consumerRow.metadata) } catch { return {} }
     })() as Record<string, unknown>
     const hasDiscordIdentity = typeof metadata.discord_id === 'string' && metadata.discord_id.trim().length > 0
+    const projectionIdentityId = projection.projectionIdentityId
+    const projectionAgent = projectionIdentityId
+      ? await db.query(
+        `SELECT agent_id, status, runtime, metadata
+           FROM agents WHERE agent_id = $1`,
+        [projectionIdentityId],
+      ).catch(() => ({ rows: [] as any[] }))
+      : { rows: [] as any[] }
+    const projectionRow = projectionAgent.rows[0] ?? null
+    const projectionMetadata = (() => {
+      if (!projectionRow?.metadata) return {}
+      if (typeof projectionRow.metadata === 'object') return projectionRow.metadata
+      try { return JSON.parse(projectionRow.metadata) } catch { return {} }
+    })() as Record<string, unknown>
+    const projectionHasDiscordIdentity =
+      typeof projectionMetadata.discord_id === 'string' && projectionMetadata.discord_id.trim().length > 0
     const delegated = consumerAgentId !== null && consumerAgentId !== fromAgentId
     const report = {
       ok: true,
@@ -1484,12 +1540,18 @@ async function diagnoseProjection(args: string[]) {
       },
       resolved: {
         consumer_agent_id: consumerAgentId,
-        projection_identity_id: consumerAgentId,
-        source: projection.source,
+        consumer_source: projection.consumerSource,
+        projection_identity_id: projection.projectionIdentityId,
+        intended_projection_identity_id: projection.intendedProjectionIdentityId,
+        projection_source: projection.projectionSource,
+        projection_fallback_reason: projection.projectionFallbackReason,
         delegated,
-        discord_identity_present: hasDiscordIdentity,
+        consumer_discord_identity_present: hasDiscordIdentity,
+        projection_discord_identity_present: projectionHasDiscordIdentity,
         consumer_status: consumerRow?.status ?? null,
         consumer_runtime: consumerRow?.runtime ?? null,
+        projection_status: projectionRow?.status ?? null,
+        projection_runtime: projectionRow?.runtime ?? null,
       },
       preview: consumerAgentId
         ? delegated
@@ -1513,10 +1575,15 @@ async function diagnoseProjection(args: string[]) {
       `To:       ${toAgentIds.join(', ')}`,
       '',
       `Consumer: ${consumerAgentId ?? '(none)'}`,
-      `Identity: ${consumerAgentId ?? '(none)'}`,
-      `Source:   ${projection.source}`,
-      `Discord:  ${hasDiscordIdentity ? 'token identity present' : 'no token identity detected'}`,
-      `Status:   ${consumerRow?.status ?? '(unknown)'}${consumerRow?.runtime ? ` / ${consumerRow.runtime}` : ''}`,
+      `Identity: ${projection.projectionIdentityId ?? '(none)'}`,
+      `Intended: ${projection.intendedProjectionIdentityId ?? '(none)'}`,
+      `Consumer source:   ${projection.consumerSource}`,
+      `Projection source: ${projection.projectionSource}`,
+      `Fallback reason:   ${projection.projectionFallbackReason ?? '(none)'}`,
+      `Consumer Discord:  ${hasDiscordIdentity ? 'token identity present' : 'no token identity detected'}`,
+      `Projection Discord: ${projectionHasDiscordIdentity ? 'token identity present' : 'no token identity detected'}`,
+      `Consumer status:   ${consumerRow?.status ?? '(unknown)'}${consumerRow?.runtime ? ` / ${consumerRow.runtime}` : ''}`,
+      `Projection status: ${projectionRow?.status ?? '(unknown)'}${projectionRow?.runtime ? ` / ${projectionRow.runtime}` : ''}`,
       '',
       'Discord will show:',
       report.preview ?? '(not projected)',

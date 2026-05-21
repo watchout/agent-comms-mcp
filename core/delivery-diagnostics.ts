@@ -15,6 +15,10 @@ export type OutboundQueueRow = {
   message_id: string
   agent_id: string
   consumer_agent_id?: string | null
+  projection_identity_id?: string | null
+  intended_projection_identity_id?: string | null
+  projection_source?: string | null
+  projection_fallback_reason?: string | null
   channel_external_id: string
   status: string
   attempts: number
@@ -67,11 +71,25 @@ export function diagnoseInboundQueueRow(row: InboundQueueRow | null): Record<str
 export function diagnoseOutboundQueueRow(
   row: OutboundQueueRow | null,
   consumer: { agent_id: string | null; status: string | null; has_discord_id?: boolean | null } | null,
+  projection: { agent_id: string | null; status: string | null; has_discord_id?: boolean | null } | null = null,
 ): Record<string, unknown> {
   if (!row) {
     return { ok: false, kind: 'outbound', reason: 'outbound_row_not_found', deliverable: false }
   }
   const consumerAgentId = row.consumer_agent_id ?? row.agent_id
+  const projectionIdentityId = row.projection_identity_id ?? null
+  let projectionHealth = 'not_recorded'
+  if (projectionIdentityId) {
+    if (!projection) {
+      projectionHealth = 'agent_not_registered'
+    } else if (projection.has_discord_id === false) {
+      projectionHealth = 'missing_discord_identity'
+    } else if (projection.status === 'offline' || projection.status === 'disconnected' || projection.status === 'failed') {
+      projectionHealth = 'unhealthy'
+    } else {
+      projectionHealth = 'healthy'
+    }
+  }
   let reason = 'deliverable_pending'
   let deliverable = row.status === 'pending'
   if (row.status === 'sent') {
@@ -100,6 +118,11 @@ export function diagnoseOutboundQueueRow(
     message_id: row.message_id,
     author_id: row.agent_id,
     consumer_agent_id: consumerAgentId,
+    projection_identity_id: projectionIdentityId,
+    intended_projection_identity_id: row.intended_projection_identity_id ?? null,
+    projection_source: row.projection_source ?? null,
+    projection_fallback_reason: row.projection_fallback_reason ?? null,
+    projection_health: projectionHealth,
     channel_external_id: row.channel_external_id,
     status: row.status,
     attempts: row.attempts,
@@ -108,6 +131,7 @@ export function diagnoseOutboundQueueRow(
     sent_at: row.sent_at,
     discord_message_id: row.discord_message_id,
     consumer_status: consumer?.status ?? null,
+    projection_status: projection?.status ?? null,
     deliverable,
     reason,
   }

@@ -152,9 +152,22 @@ export async function runOnce(client: Client, now: Date = new Date()): Promise<{
 async function postToOutbound(client: Client, content: string): Promise<void> {
   const messageId = randomUUID()
   await client.query(
-    `INSERT INTO outbound_queue (message_id, agent_id, channel_external_id, content)
-     VALUES ($1, $2, $3, $4)`,
-    [messageId, SENDER_AGENT_ID, CHANNEL_ID, content],
+    `INSERT INTO outbound_queue
+       (message_id, agent_id, consumer_agent_id, projection_identity_id,
+        intended_projection_identity_id, projection_source, projection_fallback_reason,
+        channel_external_id, content)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      messageId,
+      SENDER_AGENT_ID,
+      SENDER_AGENT_ID,
+      SENDER_AGENT_ID,
+      SENDER_AGENT_ID,
+      'sender_native_projection',
+      null,
+      CHANNEL_ID,
+      content,
+    ],
   )
 }
 

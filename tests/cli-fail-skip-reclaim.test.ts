@@ -230,7 +230,9 @@ describe('T5b — CLI + server outbound_queue INSERTs route through truncateForD
     // preserving canonical author and the adapter-owner consumer key. The
     // display-only projection decorator may wrap content before truncation.
     expect(CLI_SRC).toContain('decorateProjectedContent')
-    expect(CLI_SRC).toMatch(/\[id,\s*agentId,\s*projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*discordExternalId,\s*truncateForDiscord\(decorateProjectedContent\(/)
+    expect(CLI_SRC).toMatch(
+      /\[\s*id,\s*agentId,\s*projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId,\s*truncateForDiscord\(decorateProjectedContent\(/,
+    )
   })
 
   test('server.ts imports + uses truncateForDiscord on outbound_queue INSERT', () => {

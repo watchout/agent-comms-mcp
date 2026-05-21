@@ -271,7 +271,11 @@ describe('T9 — projection diagnostics CLI surface', () => {
 
   test('diagnoseProjection passes recipientAgentIds to the projection resolver', () => {
     expect(CLI_SRC).toMatch(/const toAgentIds = [\s\S]*?\.split\(','/)
-    expect(CLI_SRC).toMatch(/resolveOutboundProjectionRoute\(db as any,\s*\{[\s\S]*?senderAgentId:\s*fromAgentId,[\s\S]*?recipientAgentIds:\s*toAgentIds,[\s\S]*?\}/)
+    expect(CLI_SRC).toMatch(/resolveOutboundProjectionDecision\(db as any,\s*\{[\s\S]*?senderAgentId:\s*fromAgentId,[\s\S]*?recipientAgentIds:\s*toAgentIds,[\s\S]*?\}/)
+    expect(CLI_SRC).toMatch(/projection_source/)
+    expect(CLI_SRC).toMatch(/projection_fallback_reason/)
+    expect(CLI_SRC).toMatch(/Consumer status:/)
+    expect(CLI_SRC).toMatch(/Projection status:/)
   })
 })
 
