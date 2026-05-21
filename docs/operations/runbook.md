@@ -106,7 +106,39 @@ bun cli/index.ts diagnose-delivery --message-id <agent_messages_or_message_queue
 - `outbound.consumer_agent_id`: projection owner (`agent-com-dev` 等)。
 - `outbound.reason`: pending なのに projection されない機械可読理由。
 
-## 3. Legacy Pre-#411 Outbound Cleanup (#412)
+## 3. Queue Normalization Plan
+
+Use this before mutating production queue state. It wraps `diagnose-queue` into
+an ordered, read-only plan with candidate counts, scoped dry-run commands, and
+the execute command only where the existing guarded repair path can safely do
+the write.
+
+Global view:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts queue normalize --format text --stale-minutes 15
+```
+
+Agent-scoped view:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts queue normalize --agent-id codex-aun --format json
+```
+
+Rules:
+
+- `queue normalize` is read-only. It rejects `--execute`.
+- Apply only the reported repair command after reviewing its dry-run output.
+- Every mutating repair command must remain queue-id scoped unless the operator
+  intentionally wants to drain every pending row for that agent.
+- Historical `read` / `skipped` / `failed` rows are audit history. Do not delete
+  or rewrite them until a terminal-state archive policy is approved.
+- Stale `outbound_queue` rows must be classified by display value and projection
+  evidence before re-projecting or marking obsolete.
+
+## 4. Legacy Pre-#411 Outbound Cleanup (#412)
 
 Use this only for `outbound_queue` rows created before the #411 adapter-owner projection fix, where `consumer_agent_id IS NULL` leaves Discord projection unclaimed or misdiagnosed.
 
@@ -141,7 +173,7 @@ DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
 
 Stop and escalate if dry-run shows unexpected `backfill_consumer` rows, rows outside channel `1487368919613444156`, or content that could create stale duplicate Discord posts.
 
-## 4. Codex CTO Identity Normalization (#417)
+## 5. Codex CTO Identity Normalization (#417)
 
 The detailed mutation plan, rollback, and E2E smoke checklist live in:
 
@@ -151,6 +183,6 @@ docs/operations/codex-cto-identity-normalization.md
 
 Do not mutate production identity rows, `/Users/yuji/Developer/tech-lead/.mcp.json`, `scripts/bot-registry.txt`, or restart `discord-cto` until the #417 plan is reviewed and approved for an execution window.
 
-## 5. その他運用 (既存項目)
+## 6. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)
