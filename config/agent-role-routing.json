@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "channelId": "1487368919613444156",
+  "roles": {
+    "aun_development_lead": {
+      "agentId": "codex-aun",
+      "description": "AUN development lead and implementation owner",
+      "mcpRegistration": "aun",
+      "requiredEnv": {
+        "AGENT_ID": "codex-aun",
+        "AGENT_COM_EXPECTED_AGENT_ID": "codex-aun"
+      },
+      "selfSendTo": ["codex-cto"],
+      "selfSendInterpretation": "If an AUN lead session cannot notify codex-cto because of SELF_SEND, the local MCP registration is running as codex-cto and must be fixed before governance handoff."
+    },
+    "pr_audit_l1": {
+      "agentId": "auditor",
+      "description": "Independent L1 PR audit",
+      "expectedRuntime": "TUI"
+    },
+    "pr_audit_l2": {
+      "agentId": "codex-audit",
+      "description": "Independent L2 PR audit",
+      "expectedRuntime": "runtime row decides dispatch path"
+    },
+    "pr_approval_l3": {
+      "agentId": "codex-cto",
+      "description": "CTO/L3 approval before merge",
+      "legacyAgentIds": ["cto"],
+      "newWorkAllowedViaLegacyIds": false
+    }
+  },
+  "legacyAgentIds": {
+    "cto": {
+      "canonicalAgentId": "codex-cto",
+      "status": "disabled",
+      "newWorkAllowed": false,
+      "reason": "The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto."
+    }
+  },
+  "mcpNamespacePolicy": {
+    "canonicalRegistration": "aun",
+    "legacyRegistrations": ["agent-comms"],
+    "canonicalToolPrefix": "mcp__aun__",
+    "legacyToolPrefixes": ["mcp__agent_comms__", "mcp__agent-comms__"]
+  }
+}
