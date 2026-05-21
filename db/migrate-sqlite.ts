@@ -129,6 +129,7 @@ export function migrateSqlite(dbPath?: string): void {
       message_id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       consumer_agent_id TEXT,
+      projection_identity_id TEXT,
       channel_external_id TEXT NOT NULL,
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',
@@ -161,6 +162,9 @@ export function migrateSqlite(dbPath?: string): void {
   }
   if (!oqColNames.has('consumer_agent_id')) {
     gatedExec(`ALTER TABLE outbound_queue ADD COLUMN consumer_agent_id TEXT`)
+  }
+  if (!oqColNames.has('projection_identity_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN projection_identity_id TEXT`)
   }
 
   gatedExec(`

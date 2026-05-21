@@ -19,6 +19,8 @@ export interface ChannelPolicyEntry {
   adapterOwner: AgentId | null
   /** #417 — sender-specific native role projection owner overrides. */
   nativeRoleOutboundOwners: Record<AgentId, AgentId>
+  /** ADR-060 — sender-specific native projection identity intent, not delivery ownership. */
+  nativeProjectionIdentities: Record<AgentId, AgentId>
   /** §1.3 / §2.4 — outbound ACL allowlist. `null` = entry absent (legacy: all senders permitted). */
   outboundAllowlist: AgentId[] | null
 }
@@ -29,6 +31,7 @@ interface RoutingConfig {
     primary?: AgentId | null
     adapterOwner?: AgentId | null
     nativeRoleOutboundOwners?: Record<AgentId, AgentId>
+    nativeProjectionIdentities?: Record<AgentId, AgentId>
     outboundAllowlist?: AgentId[]
   }>
 }
@@ -142,7 +145,15 @@ function loadConfig(): RoutingConfig {
 export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
   const config = loadConfig()
   const entry = config.channels[channel_id]
-  if (!entry) return { primary: null, adapterOwner: null, nativeRoleOutboundOwners: {}, outboundAllowlist: null }
+  if (!entry) {
+    return {
+      primary: null,
+      adapterOwner: null,
+      nativeRoleOutboundOwners: {},
+      nativeProjectionIdentities: {},
+      outboundAllowlist: null,
+    }
+  }
   const nativeRoleOutboundOwners =
     entry.nativeRoleOutboundOwners && typeof entry.nativeRoleOutboundOwners === 'object'
       ? Object.fromEntries(
@@ -151,10 +162,19 @@ export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
           .map(([sender, owner]) => [sender, owner.trim()]),
       )
       : {}
+  const nativeProjectionIdentities =
+    entry.nativeProjectionIdentities && typeof entry.nativeProjectionIdentities === 'object'
+      ? Object.fromEntries(
+        Object.entries(entry.nativeProjectionIdentities)
+          .filter((kv): kv is [string, string] => typeof kv[1] === 'string' && kv[1].trim().length > 0)
+          .map(([sender, identity]) => [sender, identity.trim()]),
+      )
+      : {}
   return {
     primary: entry.primary ?? null,
     adapterOwner: entry.adapterOwner ?? null,
     nativeRoleOutboundOwners,
+    nativeProjectionIdentities,
     outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
   }
 }

@@ -154,6 +154,12 @@ describe('SqliteAdapter', () => {
     )
     expect(row?.content).toBe('hello discord')
   })
+
+  it('outbound_queue has ADR-060 projection identity column', async () => {
+    const cols = await adapter.query("PRAGMA table_info(outbound_queue)")
+    const names = cols.map((c: any) => c.name)
+    expect(names).toContain('projection_identity_id')
+  })
 })
 
 describe('migrateSqlite', () => {

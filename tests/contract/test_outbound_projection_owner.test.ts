@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
-import { resolveOutboundProjectionRoute } from '../../core/outbound-projection'
+import { resolveOutboundProjectionDecision, resolveOutboundProjectionRoute } from '../../core/outbound-projection'
 import { resetChannelPolicyCache } from '../../core/channel-policy'
 
 const TMP_CONFIG = `/tmp/outbound-projection-${process.pid}-${Date.now()}.json`
@@ -175,5 +175,165 @@ describe('#410 outbound projection owner resolution', () => {
 
     expect(route.consumerAgentId).toBe('codex-cto')
     expect(route.source).toBe('channel_policy_native_role_owner')
+  })
+})
+
+describe('ADR-060 outbound projection identity decision', () => {
+  test('recipient-facing projection no longer changes the delivery consumer', async () => {
+    setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
+          return { rows: [{ agent_id: 'codex-cto', status: 'idle', metadata: { discord_id: 'cto-discord-id' } }] }
+        }
+        return { rows: [] }
+      },
+    }
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+
+    expect(decision.channelExternalId).toBe('discord-ch')
+    expect(decision.consumerAgentId).toBe('agent-com-dev')
+    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.projectionIdentityId).toBe('codex-cto')
+    expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
+    expect(decision.projectionSource).toBe('recipient_default_projection')
+    expect(decision.projectionFallbackReason).toBeNull()
+  })
+
+  test('native projection mapping controls projection identity only', async () => {
+    setRoutingConfig({
+      ch1: {
+        primary: 'primary-agent',
+        adapterOwner: 'agent-com-dev',
+        nativeProjectionIdentities: { 'codex-cto': 'codex-cto' },
+      },
+    })
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
+          return { rows: [{ agent_id: 'codex-cto', status: 'idle', metadata: { discord_id: 'cto-discord-id' } }] }
+        }
+        return { rows: [] }
+      },
+    }
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-cto',
+    })
+
+    expect(decision.consumerAgentId).toBe('agent-com-dev')
+    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.projectionIdentityId).toBe('codex-cto')
+    expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
+    expect(decision.projectionSource).toBe('sender_native_projection')
+    expect(decision.projectionFallbackReason).toBeNull()
+  })
+
+  test('legacy native-role owner is treated as projection intent, not consumer override', async () => {
+    setRoutingConfig({
+      ch1: {
+        primary: 'primary-agent',
+        adapterOwner: 'agent-com-dev',
+        nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
+      },
+    })
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
+          return { rows: [{ agent_id: 'codex-cto', status: 'offline', metadata: { discord_id: 'cto-discord-id' } }] }
+        }
+        return { rows: [] }
+      },
+    }
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-cto',
+    })
+
+    expect(decision.consumerAgentId).toBe('agent-com-dev')
+    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.projectionIdentityId).toBe('agent-com-dev')
+    expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
+    expect(decision.projectionSource).toBe('fallback_adapter_owner')
+    expect(decision.projectionFallbackReason).toBe('native_projection_unhealthy')
+  })
+
+  test('unregistered native projection falls back to adapter owner with evidence', async () => {
+    setRoutingConfig({
+      ch1: {
+        primary: 'primary-agent',
+        adapterOwner: 'agent-com-dev',
+        nativeProjectionIdentities: { 'codex-cto': 'codex-cto' },
+      },
+    })
+    const db = {
+      query: async (sql: string) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents')) {
+          return { rows: [] }
+        }
+        return { rows: [] }
+      },
+    }
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-cto',
+    })
+
+    expect(decision.consumerAgentId).toBe('agent-com-dev')
+    expect(decision.projectionIdentityId).toBe('agent-com-dev')
+    expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
+    expect(decision.projectionSource).toBe('fallback_adapter_owner')
+    expect(decision.projectionFallbackReason).toBe('native_projection_unregistered')
+  })
+
+  test('healthy sender-native projection can win when recipient projection is unhealthy', async () => {
+    setRoutingConfig({
+      ch1: {
+        primary: 'primary-agent',
+        adapterOwner: 'agent-com-dev',
+        nativeProjectionIdentities: { 'codex-cto': 'codex-cto-native' },
+      },
+    })
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('channel_adapters')) {
+          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-aun') {
+          return { rows: [{ agent_id: 'codex-aun', status: 'offline', metadata: { discord_id: 'aun-discord-id' } }] }
+        }
+        if (sql.includes('agents') && params?.[0] === 'codex-cto-native') {
+          return { rows: [{ agent_id: 'codex-cto-native', status: 'idle', metadata: { discord_id: 'cto-discord-id' } }] }
+        }
+        return { rows: [] }
+      },
+    }
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['codex-aun'],
+    })
+
+    expect(decision.consumerAgentId).toBe('agent-com-dev')
+    expect(decision.projectionIdentityId).toBe('codex-cto-native')
+    expect(decision.intendedProjectionIdentityId).toBe('codex-cto-native')
+    expect(decision.projectionSource).toBe('sender_native_projection')
+    expect(decision.projectionFallbackReason).toBeNull()
   })
 })

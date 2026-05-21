@@ -7,10 +7,10 @@ import { PgAdapter } from './pg-adapter'
 import { SqliteAdapter } from './sqlite-adapter'
 import type { DbAdapter } from './adapter'
 
-export function createDbAdapter(): DbAdapter {
-  const dbType = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
+export function createDbAdapter(databaseUrl = process.env.DATABASE_URL): DbAdapter {
+  const dbType = process.env.AGENT_COM_DB || (databaseUrl ? 'postgres' : 'sqlite')
   if (dbType === 'postgres' || dbType === 'postgresql') {
-    return new PgAdapter()
+    return new PgAdapter(databaseUrl)
   }
   return new SqliteAdapter()
 }
