@@ -12,6 +12,10 @@ import { join } from 'node:path'
 
 export type AgentId = string
 
+type Queryable = {
+  query(sql: string, params?: unknown[]): Promise<{ rows: any[] }>
+}
+
 export interface ChannelPolicyEntry {
   /** §1.3 / §2.3 — inbound default recipient when no `mention` is present. */
   primary: AgentId | null
@@ -41,6 +45,72 @@ let configLoadAttempted = false
 let cachedConfigPath: string | null = null
 let cachedConfigMtimeMs: number | null = null
 let cachedConfigSize: number | null = null
+let dbPolicySnapshot: RoutingConfig | null = null
+
+function parseStringArray(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  } catch {}
+  return trimmed.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function parseStringMap(raw: unknown): Record<string, string> | undefined {
+  if (!raw) return undefined
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim().length > 0)
+        .map(([key, value]) => [key, value.trim()]),
+    )
+  }
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined
+  try {
+    const parsed = JSON.parse(raw)
+    return parseStringMap(parsed)
+  } catch {
+    return undefined
+  }
+}
+
+function normalizePolicyEntry(entry: RoutingConfig['channels'][string] | undefined): ChannelPolicyEntry {
+  if (!entry) {
+    return {
+      primary: null,
+      adapterOwner: null,
+      nativeRoleOutboundOwners: {},
+      nativeProjectionIdentities: {},
+      outboundAllowlist: null,
+    }
+  }
+  const nativeRoleOutboundOwners =
+    entry.nativeRoleOutboundOwners && typeof entry.nativeRoleOutboundOwners === 'object'
+      ? Object.fromEntries(
+        Object.entries(entry.nativeRoleOutboundOwners)
+          .filter((kv): kv is [string, string] => typeof kv[1] === 'string' && kv[1].trim().length > 0)
+          .map(([sender, owner]) => [sender, owner.trim()]),
+      )
+      : {}
+  const nativeProjectionIdentities =
+    entry.nativeProjectionIdentities && typeof entry.nativeProjectionIdentities === 'object'
+      ? Object.fromEntries(
+        Object.entries(entry.nativeProjectionIdentities)
+          .filter((kv): kv is [string, string] => typeof kv[1] === 'string' && kv[1].trim().length > 0)
+          .map(([sender, identity]) => [sender, identity.trim()]),
+      )
+      : {}
+  return {
+    primary: entry.primary ?? null,
+    adapterOwner: entry.adapterOwner ?? null,
+    nativeRoleOutboundOwners,
+    nativeProjectionIdentities,
+    outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
+  }
+}
 
 /**
  * Locate `config/bot-routing.json`. Independent of CWD so MCP server +
@@ -143,39 +213,47 @@ function loadConfig(): RoutingConfig {
 }
 
 export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
+  const dbEntry = dbPolicySnapshot?.channels[channel_id]
+  if (dbEntry) return normalizePolicyEntry(dbEntry)
+
   const config = loadConfig()
   const entry = config.channels[channel_id]
-  if (!entry) {
-    return {
-      primary: null,
-      adapterOwner: null,
-      nativeRoleOutboundOwners: {},
-      nativeProjectionIdentities: {},
-      outboundAllowlist: null,
+  return normalizePolicyEntry(entry)
+}
+
+export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ loaded: boolean; count: number }> {
+  try {
+    const result = await db.query(
+      `SELECT channel_id,
+              primary_agent_id,
+              adapter_owner_agent_id,
+              outbound_allowlist,
+              native_role_outbound_owners,
+              native_projection_identities
+         FROM channel_routing_policy
+        ORDER BY channel_id`,
+    )
+    const channels: RoutingConfig['channels'] = {}
+    for (const row of result.rows) {
+      const channelId = typeof row.channel_id === 'string' ? row.channel_id.trim() : ''
+      if (!channelId) continue
+      channels[channelId] = {
+        primary: typeof row.primary_agent_id === 'string' && row.primary_agent_id.trim() ? row.primary_agent_id.trim() : null,
+        adapterOwner: typeof row.adapter_owner_agent_id === 'string' && row.adapter_owner_agent_id.trim() ? row.adapter_owner_agent_id.trim() : null,
+        outboundAllowlist: parseStringArray(row.outbound_allowlist),
+        nativeRoleOutboundOwners: parseStringMap(row.native_role_outbound_owners),
+        nativeProjectionIdentities: parseStringMap(row.native_projection_identities),
+      }
     }
-  }
-  const nativeRoleOutboundOwners =
-    entry.nativeRoleOutboundOwners && typeof entry.nativeRoleOutboundOwners === 'object'
-      ? Object.fromEntries(
-        Object.entries(entry.nativeRoleOutboundOwners)
-          .filter((kv): kv is [string, string] => typeof kv[1] === 'string' && kv[1].trim().length > 0)
-          .map(([sender, owner]) => [sender, owner.trim()]),
-      )
-      : {}
-  const nativeProjectionIdentities =
-    entry.nativeProjectionIdentities && typeof entry.nativeProjectionIdentities === 'object'
-      ? Object.fromEntries(
-        Object.entries(entry.nativeProjectionIdentities)
-          .filter((kv): kv is [string, string] => typeof kv[1] === 'string' && kv[1].trim().length > 0)
-          .map(([sender, identity]) => [sender, identity.trim()]),
-      )
-      : {}
-  return {
-    primary: entry.primary ?? null,
-    adapterOwner: entry.adapterOwner ?? null,
-    nativeRoleOutboundOwners,
-    nativeProjectionIdentities,
-    outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
+    dbPolicySnapshot = { version: 1, channels }
+    return { loaded: true, count: Object.keys(channels).length }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/channel_routing_policy/i.test(message) && /(does not exist|no such table|no such column)/i.test(message)) {
+      dbPolicySnapshot = null
+      return { loaded: false, count: 0 }
+    }
+    throw err
   }
 }
 
@@ -186,4 +264,5 @@ export function resetChannelPolicyCache(): void {
   cachedConfigPath = null
   cachedConfigMtimeMs = null
   cachedConfigSize = null
+  dbPolicySnapshot = null
 }

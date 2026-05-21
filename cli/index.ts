@@ -35,6 +35,7 @@ import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doc
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
+import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -123,6 +124,29 @@ function flagEnabled(value: string | undefined): boolean {
 
 function hasFlag(flags: Record<string, string>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key)
+}
+
+function parseCsvFlag(value: string | undefined): string[] | null {
+  if (value === undefined) return null
+  const trimmed = value.trim()
+  if (trimmed === '' || trimmed === '-' || trimmed === 'none' || trimmed === 'null') return []
+  return trimmed.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function parsePolicyArray(raw: unknown): string[] | null {
+  if (Array.isArray(raw)) {
+    return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  }
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed === '-' || trimmed === 'none' || trimmed === 'null') return null
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    }
+  } catch {}
+  return trimmed.split(',').map((item) => item.trim()).filter(Boolean)
 }
 
 function parseRepairDryRun(flags: Record<string, string>): boolean {
@@ -225,6 +249,418 @@ async function channelMembers(args: string[]) {
   console.log(`Members (${members.length}):`)
   for (const m of members) console.log(`  - ${m}`)
   await db.end()
+}
+
+function botRoutingConfigPath(): string {
+  if (process.env.AGENT_COM_BOT_ROUTING_PATH) return process.env.AGENT_COM_BOT_ROUTING_PATH
+  const repoRoot = new URL('..', import.meta.url).pathname
+  return join(repoRoot, 'config', 'bot-routing.json')
+}
+
+function parseJsonObject(raw: unknown): Record<string, unknown> {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw !== 'string' || raw.trim() === '') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function parseDbStringArray(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  if (typeof raw !== 'string' || raw.trim() === '') return []
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return trimmed.slice(1, -1).split(',').map((item) => item.trim().replace(/^"|"$/g, '')).filter(Boolean)
+  }
+  const parsed = parsePolicyArray(trimmed)
+  return parsed ?? []
+}
+
+type BootstrapAgent = {
+  agent_id: string
+  agent_type: string
+  runtime: string
+  status: string
+  metadata: Record<string, unknown>
+}
+
+function isReadyProjectionOwner(agent: BootstrapAgent | undefined): boolean {
+  if (!agent || agent.agent_type === 'human') return false
+  if (!['idle', 'online', 'busy'].includes(agent.status)) return false
+  const discordId = agent.metadata.discord_id
+  return typeof discordId === 'string' && discordId.trim().length > 0
+}
+
+function ownerFromAdapterMetadata(raw: unknown): string | null {
+  const metadata = parseJsonObject(raw)
+  const value = metadata.consumer_agent_id
+    ?? metadata.adapter_owner
+    ?? metadata.adapterOwner
+    ?? metadata.owner_agent_id
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
+function isMissingColumnError(err: unknown, column: string): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return new RegExp(column, 'i').test(message) && /(no such column|column .* does not exist|does not exist)/i.test(message)
+}
+
+function chooseBootstrapOwner(row: any, members: string[], agents: Map<string, BootstrapAgent>): string | null {
+  const metadataOwner = ownerFromAdapterMetadata(row.adapter_metadata)
+  if (metadataOwner && isReadyProjectionOwner(agents.get(metadataOwner))) return metadataOwner
+
+  const channelName = String(row.name ?? '').toLowerCase()
+  const preferredByChannel = [
+    [/audit|approval/, 'auditor'],
+    [/ceo-vice|executive/, 'vice'],
+  ] as Array<[RegExp, string]>
+  for (const [pattern, agentId] of preferredByChannel) {
+    if (pattern.test(channelName) && members.includes(agentId) && isReadyProjectionOwner(agents.get(agentId))) {
+      return agentId
+    }
+  }
+
+  const candidates = members
+    .map((agentId, index) => ({ agentId, index, agent: agents.get(agentId) }))
+    .filter((item) => isReadyProjectionOwner(item.agent))
+    .map((item) => {
+      let score = 0
+      if (item.agentId.endsWith('-dev')) score += 50
+      if (item.agentId.includes('lead')) score += 45
+      if (item.agent?.runtime === 'TUI') score += 10
+      if (item.agentId.startsWith('codex-')) score -= 20
+      if (item.agentId === 'auditor') score += 5
+      return { ...item, score }
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+
+  return candidates[0]?.agentId ?? null
+}
+
+async function buildDirectoryBootstrapPolicies(db: Client, flags: Record<string, string>) {
+  const includeDm = flagEnabled(flags['include-dm'])
+  const overwrite = flagEnabled(flags.overwrite)
+  const extraAllowlist = parseCsvFlag(flags['extra-allowlist']) ?? []
+  let agentRows
+  try {
+    agentRows = await db.query(
+      `SELECT agent_id, agent_type, runtime, status, metadata
+         FROM agents
+        ORDER BY agent_id`,
+    )
+  } catch (err) {
+    if (!isMissingColumnError(err, 'runtime')) throw err
+    agentRows = await db.query(
+      `SELECT agent_id, agent_type, cli_type AS runtime, status, metadata
+         FROM agents
+        ORDER BY agent_id`,
+    )
+  }
+  const agents = new Map<string, BootstrapAgent>(
+    agentRows.rows.map((row: any) => [
+      String(row.agent_id),
+      {
+        agent_id: String(row.agent_id),
+        agent_type: String(row.agent_type ?? ''),
+        runtime: String(row.runtime ?? ''),
+        status: String(row.status ?? ''),
+        metadata: parseJsonObject(row.metadata),
+      },
+    ]),
+  )
+  const existing = await db.query(`SELECT channel_id FROM channel_routing_policy`)
+  const existingPolicyChannels = new Set(existing.rows.map((row: any) => String(row.channel_id)))
+  const channelRows = await db.query(
+    `SELECT c.id, c.name, c.type, c.members, ca.metadata AS adapter_metadata
+       FROM channels c
+       JOIN channel_adapters ca
+         ON ca.channel_id = c.id
+        AND ca.platform = 'discord'
+      ORDER BY c.name, c.id`,
+  )
+
+  const policies: Array<{
+    channel_id: string
+    channel_name: string | null
+    primary_agent_id: string
+    adapter_owner_agent_id: string
+    outbound_allowlist: string[]
+    native_role_outbound_owners: Record<string, unknown>
+    native_projection_identities: Record<string, unknown>
+    policy_source: string
+  }> = []
+  const skipped: Array<{ channel_id: string; channel_name: string | null; reason: string }> = []
+
+  for (const row of channelRows.rows) {
+    const channelId = String(row.id)
+    const channelName = row.name ? String(row.name) : null
+    if (!includeDm && String(row.type ?? '') === 'dm') {
+      skipped.push({ channel_id: channelId, channel_name: channelName, reason: 'dm_skipped' })
+      continue
+    }
+    if (!overwrite && existingPolicyChannels.has(channelId)) {
+      skipped.push({ channel_id: channelId, channel_name: channelName, reason: 'policy_exists' })
+      continue
+    }
+    const members = parseDbStringArray(row.members)
+    const owner = chooseBootstrapOwner(row, members, agents)
+    if (!owner) {
+      skipped.push({ channel_id: channelId, channel_name: channelName, reason: 'no_ready_discord_bot_member' })
+      continue
+    }
+    const outboundAllowlist = [...new Set([...members, ...extraAllowlist].filter(Boolean))]
+    policies.push({
+      channel_id: channelId,
+      channel_name: channelName,
+      primary_agent_id: owner,
+      adapter_owner_agent_id: owner,
+      outbound_allowlist: outboundAllowlist,
+      native_role_outbound_owners: {},
+      native_projection_identities: {},
+      policy_source: 'directory_bootstrap',
+    })
+  }
+
+  return { policies, skipped, overwrite, include_dm: includeDm, extra_allowlist: extraAllowlist }
+}
+
+async function assertPolicyAgentsExist(db: Client, agentIds: string[]) {
+  const ids = [...new Set(agentIds.filter(Boolean))]
+  if (ids.length === 0) return
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ')
+  const rows = await db.query(`SELECT agent_id FROM agents WHERE agent_id IN (${placeholders})`, ids)
+  const found = new Set(rows.rows.map((row: any) => String(row.agent_id)))
+  const missing = ids.filter((id) => !found.has(id))
+  if (missing.length > 0) {
+    throw new Error(`unknown policy agent_id(s): ${missing.join(', ')}`)
+  }
+}
+
+async function assertPolicyChannelsExist(db: Client, channelIds: string[]) {
+  const ids = [...new Set(channelIds.filter(Boolean))]
+  if (ids.length === 0) return
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ')
+  const rows = await db.query(`SELECT id FROM channels WHERE id IN (${placeholders})`, ids)
+  const found = new Set(rows.rows.map((row: any) => String(row.id)))
+  const missing = ids.filter((id) => !found.has(id))
+  if (missing.length > 0) {
+    throw new Error(`unknown policy channel_id(s): ${missing.join(', ')}`)
+  }
+}
+
+function normalizePolicyRowForOutput(row: any) {
+  return {
+    channel_id: row.channel_id,
+    primary_agent_id: row.primary_agent_id ?? null,
+    adapter_owner_agent_id: row.adapter_owner_agent_id ?? null,
+    outbound_allowlist: parsePolicyArray(row.outbound_allowlist),
+    native_role_outbound_owners: parseJsonObject(row.native_role_outbound_owners),
+    native_projection_identities: parseJsonObject(row.native_projection_identities),
+    policy_source: row.policy_source,
+    updated_at: row.updated_at,
+  }
+}
+
+async function upsertChannelPolicy(db: Client, policy: {
+  channel_id: string
+  primary_agent_id: string | null
+  adapter_owner_agent_id: string | null
+  outbound_allowlist: string[] | null
+  native_role_outbound_owners: Record<string, unknown>
+  native_projection_identities: Record<string, unknown>
+  policy_source: string
+}) {
+  await db.query(
+    `INSERT INTO channel_routing_policy (
+       channel_id,
+       primary_agent_id,
+       adapter_owner_agent_id,
+       outbound_allowlist,
+       native_role_outbound_owners,
+       native_projection_identities,
+       policy_source,
+       updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+     ON CONFLICT (channel_id) DO UPDATE SET
+       primary_agent_id = EXCLUDED.primary_agent_id,
+       adapter_owner_agent_id = EXCLUDED.adapter_owner_agent_id,
+       outbound_allowlist = EXCLUDED.outbound_allowlist,
+       native_role_outbound_owners = EXCLUDED.native_role_outbound_owners,
+       native_projection_identities = EXCLUDED.native_projection_identities,
+       policy_source = EXCLUDED.policy_source,
+       updated_at = now()`,
+    [
+      policy.channel_id,
+      policy.primary_agent_id,
+      policy.adapter_owner_agent_id,
+      policy.outbound_allowlist === null ? null : JSON.stringify(policy.outbound_allowlist),
+      JSON.stringify(policy.native_role_outbound_owners),
+      JSON.stringify(policy.native_projection_identities),
+      policy.policy_source,
+    ],
+  )
+}
+
+async function channelPolicy(args: string[]) {
+  const [action, ...rest] = args
+  const { positional, flags } = parseArgs(rest)
+  const format = flags.format ?? 'text'
+  const db = await getDb()
+  try {
+    if (action === 'list') {
+      const rows = await db.query(
+        `SELECT channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist,
+                native_role_outbound_owners, native_projection_identities, policy_source, updated_at
+           FROM channel_routing_policy
+          ORDER BY channel_id`,
+      )
+      const policies = rows.rows.map(normalizePolicyRowForOutput)
+      if (format === 'json') {
+        process.stdout.write(`${JSON.stringify({ ok: true, policies }, null, 2)}\n`)
+        return
+      }
+      console.log(`Channel policies (${policies.length}):`)
+      for (const row of policies) {
+        console.log(`  ${row.channel_id}: primary=${row.primary_agent_id ?? '-'} adapter=${row.adapter_owner_agent_id ?? '-'} allowlist=${JSON.stringify(row.outbound_allowlist ?? null)} source=${row.policy_source}`)
+      }
+      return
+    }
+
+    if (action === 'import-json') {
+      const dryRun = parseRepairDryRun(flags)
+      const path = flags.path ?? botRoutingConfigPath()
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
+        channels?: Record<string, {
+          primary?: string | null
+          adapterOwner?: string | null
+          outboundAllowlist?: string[]
+          nativeRoleOutboundOwners?: Record<string, unknown>
+          nativeProjectionIdentities?: Record<string, unknown>
+        }>
+      }
+      const policies = Object.entries(parsed.channels ?? {}).map(([channelId, entry]) => ({
+        channel_id: channelId,
+        primary_agent_id: entry.primary ?? null,
+        adapter_owner_agent_id: entry.adapterOwner ?? null,
+        outbound_allowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
+        native_role_outbound_owners: parseJsonObject(entry.nativeRoleOutboundOwners),
+          native_projection_identities: parseJsonObject(entry.nativeProjectionIdentities),
+          policy_source: 'json_import',
+        }))
+      await assertPolicyChannelsExist(db, policies.map((policy) => policy.channel_id))
+      for (const policy of policies) {
+        await assertPolicyAgentsExist(db, [
+          policy.primary_agent_id ?? '',
+          policy.adapter_owner_agent_id ?? '',
+          ...(policy.outbound_allowlist ?? []),
+          ...Object.values(policy.native_role_outbound_owners).filter((v): v is string => typeof v === 'string'),
+          ...Object.values(policy.native_projection_identities).filter((v): v is string => typeof v === 'string'),
+        ])
+      }
+      if (!dryRun) {
+        for (const policy of policies) await upsertChannelPolicy(db, policy)
+        await auditLog(db, 'channel.policy_import_json', 'cli', null, { path, count: policies.length })
+        await refreshChannelPolicyDbSnapshot(db as any)
+      }
+      process.stdout.write(`${JSON.stringify({ ok: true, dry_run: dryRun, count: policies.length, policies }, null, 2)}\n`)
+      return
+    }
+
+    if (action === 'bootstrap') {
+      const dryRun = parseRepairDryRun(flags)
+      const bootstrap = await buildDirectoryBootstrapPolicies(db, flags)
+      await assertPolicyChannelsExist(db, bootstrap.policies.map((policy) => policy.channel_id))
+      for (const policy of bootstrap.policies) {
+        await assertPolicyAgentsExist(db, [
+          policy.primary_agent_id,
+          policy.adapter_owner_agent_id,
+          ...policy.outbound_allowlist,
+        ])
+      }
+      if (!dryRun) {
+        for (const policy of bootstrap.policies) {
+          await upsertChannelPolicy(db, {
+            channel_id: policy.channel_id,
+            primary_agent_id: policy.primary_agent_id,
+            adapter_owner_agent_id: policy.adapter_owner_agent_id,
+            outbound_allowlist: policy.outbound_allowlist,
+            native_role_outbound_owners: policy.native_role_outbound_owners,
+            native_projection_identities: policy.native_projection_identities,
+            policy_source: policy.policy_source,
+          })
+        }
+        await auditLog(db, 'channel.policy_bootstrap_directory', 'cli', null, {
+          count: bootstrap.policies.length,
+          skipped_count: bootstrap.skipped.length,
+          overwrite: bootstrap.overwrite,
+          include_dm: bootstrap.include_dm,
+          extra_allowlist: bootstrap.extra_allowlist,
+        })
+        await refreshChannelPolicyDbSnapshot(db as any)
+      }
+      process.stdout.write(`${JSON.stringify({
+        ok: true,
+        dry_run: dryRun,
+        count: bootstrap.policies.length,
+        skipped_count: bootstrap.skipped.length,
+        policies: bootstrap.policies,
+        skipped: bootstrap.skipped,
+      }, null, 2)}\n`)
+      return
+    }
+
+    if (action === 'set') {
+      const channelId = positional[0]
+      if (!channelId) {
+        console.error('Usage: agent-com channel policy set <channel_id> [--primary <agent|none>] [--adapter-owner <agent|none>] [--allowlist <a,b|none>] [--execute|--dry-run]')
+        process.exit(1)
+      }
+      const dryRun = parseRepairDryRun(flags)
+      const existing = await db.query(
+        `SELECT channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist,
+                native_role_outbound_owners, native_projection_identities
+           FROM channel_routing_policy
+          WHERE channel_id = $1`,
+        [channelId],
+      )
+      const current = existing.rows[0] ?? {}
+      const allowlistFlag = parseCsvFlag(flags.allowlist)
+      const policy = {
+        channel_id: channelId,
+        primary_agent_id: flags.primary === undefined ? current.primary_agent_id ?? null : (flags.primary === 'none' ? null : flags.primary),
+        adapter_owner_agent_id: flags['adapter-owner'] === undefined ? current.adapter_owner_agent_id ?? null : (flags['adapter-owner'] === 'none' ? null : flags['adapter-owner']),
+        outbound_allowlist: flags.allowlist === undefined
+          ? parsePolicyArray(current.outbound_allowlist)
+          : (allowlistFlag && allowlistFlag.length > 0 ? allowlistFlag : null),
+        native_role_outbound_owners: parseJsonObject(current.native_role_outbound_owners),
+        native_projection_identities: parseJsonObject(current.native_projection_identities),
+        policy_source: 'cli',
+      }
+      await assertPolicyChannelsExist(db, [channelId])
+      await assertPolicyAgentsExist(db, [
+        policy.primary_agent_id ?? '',
+        policy.adapter_owner_agent_id ?? '',
+        ...(policy.outbound_allowlist ?? []),
+      ])
+      if (!dryRun) {
+        await upsertChannelPolicy(db, policy)
+        await auditLog(db, 'channel.policy_set', 'cli', channelId, policy)
+        await refreshChannelPolicyDbSnapshot(db as any)
+      }
+      process.stdout.write(`${JSON.stringify({ ok: true, dry_run: dryRun, policy }, null, 2)}\n`)
+      return
+    }
+
+    console.error('Usage: agent-com channel policy <list|import-json|bootstrap|set> ...')
+    process.exit(1)
+  } finally {
+    await db.end()
+  }
 }
 
 async function agentRegister(args: string[]) {
@@ -1894,8 +2330,9 @@ if (command === 'channel') {
   else if (subcommand === 'add-member') await channelAddMember(rest)
   else if (subcommand === 'remove-member') await channelRemoveMember(rest)
   else if (subcommand === 'members') await channelMembers(rest)
+  else if (subcommand === 'policy') await channelPolicy(rest)
   else {
-    console.error('Usage: agent-com channel <create|add-member|remove-member|members> ...')
+    console.error('Usage: agent-com channel <create|add-member|remove-member|members|policy> ...')
     process.exit(1)
   }
 } else if (command === 'agent') {
@@ -1950,6 +2387,10 @@ Commands:
   channel add-member <channel_id> <agent_id>
   channel remove-member <channel_id> <agent_id>
   channel members <channel_id>
+  channel policy list [--format json|text]
+  channel policy import-json [--execute|--dry-run] [--path <file>]
+  channel policy bootstrap [--execute|--dry-run] [--extra-allowlist <a,b>] [--overwrite]
+  channel policy set <channel_id> [--primary <agent|none>] [--adapter-owner <agent|none>] [--allowlist <a,b|none>] [--execute|--dry-run]
   agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code]
   status
 

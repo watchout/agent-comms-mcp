@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getChannelPolicy } from './channel-policy'
+import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './channel-policy'
 
 type Queryable = {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[] }>
@@ -183,6 +183,7 @@ function channelWarnings(row: any, activeMemberCount: number): string[] {
 }
 
 export async function buildDirectoryReport(db: Queryable): Promise<DirectoryReport> {
+  const policySnapshot = await refreshChannelPolicyDbSnapshot(db)
   const agentRows = await queryAgentRows(db)
   const channelRows = await db.query(
     `SELECT c.id, c.name, c.type, c.members,
@@ -312,7 +313,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     agents,
     channels,
     roles,
-    warnings,
+    warnings: policySnapshot.loaded ? warnings : [...warnings, 'channel_policy_db_table_missing_json_fallback_active'],
   }
 }
 

@@ -71,6 +71,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('directory handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function directory\s*\(/)
   })
+  test('channelPolicy handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function channelPolicy\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +103,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'directory' command invokes directory(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'directory'[\s\S]*?directory\(/)
+  })
+  test("'channel policy' subcommands invoke channelPolicy(...)", () => {
+    expect(CLI_SRC).toMatch(/subcommand === 'policy'[\s\S]*?channelPolicy\(rest\)/)
   })
 })
 
@@ -345,6 +351,23 @@ describe('T11 — bot/channel directory CLI surface', () => {
     expect(DIRECTORY_SRC).toMatch(/stable logical slug/)
     expect(DIRECTORY_SRC).toMatch(/JSON is bootstrap\/policy compatibility/)
     expect(DIRECTORY_SRC).toMatch(/channel_id_looks_like_platform_external_id/)
+  })
+})
+
+describe('T12 — DB-backed channel policy CLI surface', () => {
+  test('help documents DB policy management commands', () => {
+    expect(CLI_SRC).toMatch(/channel policy list \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/channel policy import-json \[--execute\|--dry-run\]/)
+    expect(CLI_SRC).toMatch(/channel policy bootstrap \[--execute\|--dry-run\]/)
+    expect(CLI_SRC).toMatch(/channel policy set <channel_id> \[--primary <agent\|none>\]/)
+  })
+
+  test('policy commands are dry-run by default and audit mutating writes', () => {
+    expect(CLI_SRC).toMatch(/channel\.policy_import_json/)
+    expect(CLI_SRC).toMatch(/channel\.policy_bootstrap_directory/)
+    expect(CLI_SRC).toMatch(/channel\.policy_set/)
+    expect(CLI_SRC).toMatch(/parseRepairDryRun\(flags\)/)
+    expect(CLI_SRC).toMatch(/refreshChannelPolicyDbSnapshot/)
   })
 })
 
