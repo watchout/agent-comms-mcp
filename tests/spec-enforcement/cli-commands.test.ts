@@ -32,10 +32,12 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const CLI_PATH = join(REPO_ROOT, 'cli', 'index.ts')
 const PKG_PATH = join(REPO_ROOT, 'package.json')
 const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
+const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts')
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
+const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
@@ -284,6 +286,8 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/diagnose-queue \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/queue doctor \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/queue health blockers and stale-work diagnostics/)
+    expect(CLI_SRC).toMatch(/queue normalize \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/dry-run normalization plan with scoped repair commands/)
   })
 
   test('diagnoseQueue reports the P0 blocker classes', () => {
@@ -296,6 +300,10 @@ describe('T10 — queue doctor CLI surface', () => {
   })
 
   test('queue repair commands are documented and audit logged', () => {
+    expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
+    expect(CLI_SRC).toMatch(/subcommand === 'normalize'[\s\S]*?buildQueueNormalizationReport/)
+    expect(QUEUE_NORMALIZATION_SRC).toMatch(/deriveQueueNormalizationReport/)
+    expect(QUEUE_NORMALIZATION_SRC).toMatch(/approval_required/)
     expect(CLI_SRC).toMatch(/queue reassign --from <agent> --to <agent> \[--execute\|--dry-run\]/)
     expect(CLI_SRC).toMatch(/queue close-obsolete --agent-id <agent> --reason <text> \[--queue-id <id>\] \[--include-active\] \[--execute\|--dry-run\]/)
     expect(CLI_SRC).toMatch(/queue reclaim-expired \[--agent-id <agent>\] \[--execute\|--dry-run\]/)

@@ -32,6 +32,7 @@ import { resolveOutboundProjectionDecision } from '../core/outbound-projection'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
+import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 
 // --- DB connection ---
@@ -1618,10 +1619,28 @@ async function diagnoseQueue(args: string[]) {
 
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
+  if (subcommand === 'normalize' && hasFlag(flags, 'execute')) {
+    console.error('Error: queue normalize is read-only; run the reported repair command with --execute after review')
+    process.exit(2)
+  }
   const dryRun = parseRepairDryRun(flags)
   const db = await getDb()
 
   try {
+    if (subcommand === 'normalize') {
+      const agentId = flags['agent-id'] ?? null
+      const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+      const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+      const format = flags.format ?? 'json'
+      const report = await buildQueueNormalizationReport(db as any, { agentId, staleSeconds })
+      if (format === 'text') {
+        process.stdout.write(formatQueueNormalizationText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      return
+    }
+
     if (subcommand === 'reassign') {
       const fromAgentId = flags.from
       const toAgentId = flags.to
@@ -1658,7 +1677,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com queue <doctor|reassign|close-obsolete|reclaim-expired> ...')
+    console.error('Usage: agent-com queue <doctor|normalize|reassign|close-obsolete|reclaim-expired> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -1929,6 +1948,8 @@ Message I/O (requires AGENT_ID env var):
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
+  queue normalize [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — dry-run normalization plan with scoped repair commands
   queue reassign --from <agent> --to <agent> [--execute|--dry-run]
                                                        — dry-run by default; reassign pending rows to a replacement identity
   queue close-obsolete --agent-id <agent> --reason <text> [--queue-id <id>] [--include-active] [--execute|--dry-run]

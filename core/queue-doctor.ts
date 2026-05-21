@@ -8,6 +8,7 @@ export type QueueDoctorOptions = {
 export type QueueDoctorSample = {
   queue_id: string | number
   agent_id: string
+  message_id: string | null
   status: string
   created_at: string | Date | null
   age_seconds: number
@@ -54,6 +55,7 @@ function groupSamples(rows: any[]): Pick<QueueDoctorFinding, 'count' | 'sample_c
       samples.push({
         queue_id: row.id,
         agent_id: row.agent_id,
+        message_id: row.message_id ?? null,
         status: row.status,
         created_at: row.created_at ?? null,
         age_seconds: Number(row.age_seconds ?? 0),
@@ -107,7 +109,7 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
   )
 
   const baseSelect = `
-    SELECT mq.id, mq.agent_id, mq.status, mq.created_at, mq.claimed_by,
+    SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.created_at, mq.claimed_by,
            mq.claimed_at, mq.claim_expires_at, mq.done_at,
            count(*) OVER ()::int AS total_count,
            extract(epoch from (now() - mq.created_at))::int AS age_seconds,
@@ -202,7 +204,7 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
     ? ' AND coalesce(oq.consumer_agent_id, oq.agent_id) = $2'
     : ''
   const outboundRows = await db.query(
-    `SELECT oq.id, coalesce(oq.consumer_agent_id, oq.agent_id) AS agent_id,
+    `SELECT oq.id, oq.message_id, coalesce(oq.consumer_agent_id, oq.agent_id) AS agent_id,
             oq.status, oq.created_at,
             count(*) OVER ()::int AS total_count,
             extract(epoch from (now() - oq.created_at))::int AS age_seconds,
