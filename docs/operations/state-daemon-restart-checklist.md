@@ -22,6 +22,9 @@ blocker-resolution commands, approved restart commands, smoke, and rollback.
   production DB URL.
 - Confirm launchd points at a clean approved checkout, not a dirty developer
   working tree.
+- Confirm `STATE_DAEMON_AGENT_ALLOWLIST` includes both PR audit recipients:
+  `auditor` for L1 and `codex-audit` for L2, unless the PR audit routing policy
+  was changed in the same reviewed release.
 - Confirm the daemon restart launcher path resolves to
   `scripts/restart-bot.sh`.
 - Run focused tests:
@@ -30,6 +33,8 @@ blocker-resolution commands, approved restart commands, smoke, and rollback.
 - Check recent queue failures:
   - no new `STALE_DISPATCH:%` failures in the target observation window
   - no active `received` / `in_progress` row is being terminal-closed by age
+  - no `auditor` / `codex-audit` queue row is stranded only because its
+    recipient is outside the daemon allowlist
 - Confirm state/action metrics are available:
   - `state_daemon_state_actions_total{action,status,terminal}`
   - `state_daemon_pg_notify_errors_total`
