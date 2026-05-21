@@ -184,14 +184,20 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
   test('send-tool INSERTs into outbound_queue with the right column tuple', () => {
     // Anchor on the send-tool send loop. We can't extract the loop body
     // perfectly without parsing TS, so check that the send handler contains
-    // a `(message_id, agent_id, consumer_agent_id, channel_external_id, content)` INSERT.
-    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*channel_external_id,\s*content\)/)
+    // ADR-060 PR3: write both delivery consumer and projection identity.
+    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/)
+  })
+  test('server send + notify write projection_identity_id from the ADR-060 resolver', () => {
+    const inserts = [...SERVER_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/g)]
+    expect(inserts.length).toBeGreaterThanOrEqual(2)
+    const bindings = [...SERVER_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*externalId/g)]
+    expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
   test('send-tool resolves channel_external_id via thread_adapters then channel_adapters', () => {
     // Both lookups live in the #410 projection helper so threads land in the
     // right place while also resolving the adapter owner.
     const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
-    expect(SERVER_SRC).toMatch(/resolveOutboundProjectionRoute/)
+    expect(SERVER_SRC).toMatch(/resolveOutboundProjectionDecision/)
     expect(projection).toMatch(/SELECT external_id,\s*metadata FROM thread_adapters WHERE thread_id\s*=\s*\$1 AND platform\s*=\s*\$2/)
     expect(projection).toMatch(/SELECT external_id,\s*metadata FROM channel_adapters WHERE channel_id\s*=\s*\$1 AND platform\s*=\s*\$2/)
   })
@@ -244,12 +250,18 @@ function sendMessageBody(): string {
 describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('sendMessage INSERTs into outbound_queue', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*channel_external_id,\s*content\)/)
+    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/)
+  })
+  test('CLI send + notify write projection_identity_id from the ADR-060 resolver', () => {
+    const inserts = [...CLI_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*channel_external_id,\s*content\)/g)]
+    expect(inserts.length).toBeGreaterThanOrEqual(2)
+    const bindings = [...CLI_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*discordExternalId/g)]
+    expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
   test('sendMessage resolves channel_external_id via thread_adapters then channel_adapters', () => {
     const body = sendMessageBody()
     const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
-    expect(body).toMatch(/resolveOutboundProjectionRoute/)
+    expect(body).toMatch(/resolveOutboundProjectionDecision/)
     expect(projection).toMatch(/SELECT external_id,\s*metadata FROM thread_adapters/)
     expect(projection).toMatch(/SELECT external_id,\s*metadata FROM channel_adapters/)
   })

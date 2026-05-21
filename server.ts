@@ -108,7 +108,7 @@ import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-d
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
-import { resolveOutboundProjectionRoute } from './core/outbound-projection'
+import { resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 
 // --- Load Config ---
@@ -2489,7 +2489,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // outbound INSERT failure rolls back the entire send (including the
     // 'replied' UPDATE), so the caller can retry via `next` → `send`.
     {
-      const projection = await resolveOutboundProjectionRoute(txClient, {
+      const projection = await resolveOutboundProjectionDecision(txClient, {
         channelId: dest.channelId,
         threadId: dest.threadId,
         senderAgentId: agentId,
@@ -2516,14 +2516,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             : decoratedPartContent
           try {
             await txClient.query(
-              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
-               VALUES ($1, $2, $3, $4, $5)`,
+              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
               // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars to
               // match spec §5.3 エラーハンドリング. truncateForPlatform's 2000-char
               // limit is the raw Discord hard cap; truncateForDiscord bakes in
               // 100 chars of headroom for mentions / reply markers / Discord
               // server-side reformat.
-              [partMessageId, agentId, projection.consumerAgentId, externalId, truncateForDiscord(partContent)],
+              [partMessageId, agentId, projection.consumerAgentId, projection.projectionIdentityId, externalId, truncateForDiscord(partContent)],
             )
           } catch (err) {
             // ARC codex audit (PR#135): do NOT silently swallow. The
@@ -2876,7 +2876,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // spec §4.3 step 7 — outbound_queue INSERT per part.
-    const projection = await resolveOutboundProjectionRoute(client, {
+    const projection = await resolveOutboundProjectionDecision(client, {
       channelId: dest.channelId,
       threadId: dest.threadId,
       senderAgentId: agentId,
@@ -2901,11 +2901,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : decoratedPartContent
         try {
           await client.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
             // v2.1.0: clamp at DISCORD_MAX (1900) before enqueue — see send-tool
             // call site above for rationale.
-            [partMessageId, agentId, projection.consumerAgentId, externalId, truncateForDiscord(partContent)],
+            [partMessageId, agentId, projection.consumerAgentId, projection.projectionIdentityId, externalId, truncateForDiscord(partContent)],
           )
         } catch (err) {
           process.stderr.write(`agent-comms: notify outbound_queue INSERT failed: ${err}\n`)
