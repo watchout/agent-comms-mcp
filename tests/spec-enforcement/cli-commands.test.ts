@@ -34,11 +34,13 @@ const PKG_PATH = join(REPO_ROOT, 'package.json')
 const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
 const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts')
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
+const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
 const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
+const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,6 +68,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('repairQueue handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function repairQueue\s*\(/)
   })
+  test('directory handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function directory\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +97,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
+  })
+  test("'directory' command invokes directory(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'directory'[\s\S]*?directory\(/)
   })
 })
 
@@ -323,6 +331,20 @@ describe('T10 — queue doctor CLI surface', () => {
 
     expect(result.status).toBe(2)
     expect(result.stderr).toContain('use either --execute or --dry-run')
+  })
+})
+
+describe('T11 — bot/channel directory CLI surface', () => {
+  test('help documents the directory report', () => {
+    expect(CLI_SRC).toMatch(/directory \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/bot\/channel directory and sendability report/)
+  })
+
+  test('directory report pins DB as SSOT and JSON as seed/export policy', () => {
+    expect(DIRECTORY_SRC).toMatch(/db_ssot/)
+    expect(DIRECTORY_SRC).toMatch(/stable logical slug/)
+    expect(DIRECTORY_SRC).toMatch(/JSON is bootstrap\/policy compatibility/)
+    expect(DIRECTORY_SRC).toMatch(/channel_id_looks_like_platform_external_id/)
   })
 })
 

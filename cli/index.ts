@@ -33,6 +33,7 @@ import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
+import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 
 // --- DB connection ---
@@ -1702,6 +1703,22 @@ async function listAgents() {
   }
 }
 
+async function directory(args: string[]) {
+  const { flags } = parseArgs(args)
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+  try {
+    const report = await buildDirectoryReport(db as any)
+    if (format === 'text') {
+      process.stdout.write(formatDirectoryText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com status` — system or per-agent status (v1.0.2 §6.5).
  *
@@ -1921,6 +1938,8 @@ if (command === 'channel') {
   await diagnoseQueue(rest)
 } else if (command === 'queue') {
   await repairQueue(subcommand, rest)
+} else if (command === 'directory') {
+  await directory([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -1956,6 +1975,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run by default; close obsolete pending rows, or one explicit active row
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
                                                        — dry-run by default; roll expired received/in_progress claims back to pending
+  directory [--format json|text]                       — bot/channel directory and sendability report
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
