@@ -28,7 +28,7 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
-import { resolveOutboundProjectionRoute } from '../core/outbound-projection'
+import { resolveOutboundProjectionDecision, resolveOutboundProjectionRoute } from '../core/outbound-projection'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
@@ -882,7 +882,7 @@ async function sendMessage(args: string[]) {
       // queued. The receiver pipeline still picks up the agent_messages row
       // via pg_notify, so other bots see the message; only the human-facing
       // Discord display is skipped. We surface this in the response.
-      const projection = await resolveOutboundProjectionRoute(db as any, {
+      const projection = await resolveOutboundProjectionDecision(db as any, {
         channelId,
         threadId,
         senderAgentId: agentId,
@@ -898,9 +898,9 @@ async function sendMessage(args: string[]) {
           // enqueue so an over-long LLM reply is truncated once, deterministically,
           // instead of being split across retries inside the Discord adapter.
           await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(decorateProjectedContent({
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [id, agentId, projection.consumerAgentId, projection.projectionIdentityId, discordExternalId, truncateForDiscord(decorateProjectedContent({
               content,
               authorAgentId: agentId,
               consumerAgentId: projection.consumerAgentId,
@@ -1139,7 +1139,7 @@ async function notifyMessage(args: string[]) {
       }
     }
 
-    const projection = await resolveOutboundProjectionRoute(db as any, {
+    const projection = await resolveOutboundProjectionDecision(db as any, {
       channelId: resolvedChannelId,
       threadId: resolvedThreadId,
       senderAgentId: agentId,
@@ -1153,9 +1153,9 @@ async function notifyMessage(args: string[]) {
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [id, agentId, projection.consumerAgentId, discordExternalId, truncateForDiscord(decorateProjectedContent({
+          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, channel_external_id, content)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [id, agentId, projection.consumerAgentId, projection.projectionIdentityId, discordExternalId, truncateForDiscord(decorateProjectedContent({
             content,
             authorAgentId: agentId,
             consumerAgentId: projection.consumerAgentId,
