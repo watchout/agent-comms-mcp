@@ -1,5 +1,14 @@
 # #417 Codex CTO Identity Normalization Runbook
 
+> **ADR-060 legacy note (2026-05-21):** This runbook records the pre-ADR-060
+> native-role outbound model used during the #417 identity normalization plan.
+> It is still useful as historical execution context for moving the Discord CTO
+> runtime from `cto` to `codex-cto`, but its outbound projection expectations are
+> not the target model for new implementation work. For PR 2+ of ADR-060, treat
+> `nativeRoleOutboundOwners` as deprecated compatibility input and keep
+> `consumer_agent_id` as delivery adapter ownership only. Native Discord display
+> intent must move to the ADR-060 projection identity model.
+
 This runbook is planning-only until CEO/CTO approve an execution window. Do not run production DB mutation, `.mcp.json` edits, `bot-registry.txt` edits, or `discord-cto` restarts from this PR.
 
 ## Scope
@@ -108,6 +117,13 @@ Do not rename the tmux session in the first cut. Keeping `discord-cto` reduces o
 
 ## Native-Role Outbound Override
 
+This section describes the legacy compatibility behavior that existed before
+ADR-060. Do not use it as the design target for new outbound projection slices.
+Under ADR-060, `nativeRoleOutboundOwners` may be read only to infer legacy
+intent during migration; it must not become a consumer-owner override in the new
+model. `consumer_agent_id` answers "which adapter runtime consumes this outbound
+row?", while Discord display identity belongs in the projection identity model.
+
 `config/bot-routing.json` supports `nativeRoleOutboundOwners` per channel:
 
 ```json
@@ -152,6 +168,11 @@ Rollback success returns exactly `cto`.
 ## E2E Smoke Plan
 
 Do this after approved DB/runtime mutation and controlled restart.
+
+This smoke plan validates the legacy #417 native-role migration. For ADR-060 PR
+2+ implementation smoke, update the outbound expectations so native-unavailable
+projection falls back to the channel adapter owner while recording the intended
+projection identity and fallback reason.
 
 1. Discord/DB ingress:
    - inject or send in channel `1487368919613444156`:
