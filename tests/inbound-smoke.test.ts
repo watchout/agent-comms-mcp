@@ -114,6 +114,93 @@ describe('inbound smoke evidence report', () => {
     expect(report.blockers[0]).toContain('input_mentions_not_channel_members:unknown-bot')
   })
 
+  test('blocks when a mentioned recipient is not enqueued', async () => {
+    const db = {
+      async query(sql: string) {
+        if (sql.includes('FROM channels c')) {
+          return [{
+            channel_id: 'agent-com',
+            name: 'agent-com',
+            members: ['codex-aun', 'auditor'],
+            external_id: '1487368919613444156',
+            adapter_owner_agent_id: 'agent-com-dev',
+          }]
+        }
+        if (sql.includes('FROM message_queue')) return [{ agent_id: 'auditor', status: 'pending', count: '1' }]
+        return []
+      },
+      async queryOne(sql: string) {
+        if (sql.includes('COUNT(DISTINCT am.id)')) return { count: '0' }
+        if (sql.includes('FROM agent_messages')) {
+          return {
+            id: '00000000-0000-4000-8000-000000000004',
+            channel_id: 'agent-com',
+            author_id: 'ceo-discord',
+            input_mentions: ['codex-aun'],
+            created_at: '2026-05-23T00:00:00.000Z',
+          }
+        }
+        return null
+      },
+      async execute() {
+        throw new Error('not used')
+      },
+      async transaction() {
+        throw new Error('not used')
+      },
+      async close() {},
+    }
+
+    const report = await buildInboundSmokeReport(db as any, { provider: 'discord' })
+
+    expect(report.summary.blocked).toBe(1)
+    expect(report.blockers).toContain('agent-com:mentioned_recipient_not_enqueued:codex-aun')
+    expect(report.blockers).toContain('agent-com:unexpected_enqueued_recipient:auditor')
+  })
+
+  test('blocks when any mentioned recipient is missing from queue rows', async () => {
+    const db = {
+      async query(sql: string) {
+        if (sql.includes('FROM channels c')) {
+          return [{
+            channel_id: 'agent-com',
+            name: 'agent-com',
+            members: ['codex-aun', 'auditor'],
+            external_id: '1487368919613444156',
+            adapter_owner_agent_id: 'agent-com-dev',
+          }]
+        }
+        if (sql.includes('FROM message_queue')) return [{ agent_id: 'codex-aun', status: 'pending', count: '1' }]
+        return []
+      },
+      async queryOne(sql: string) {
+        if (sql.includes('COUNT(DISTINCT am.id)')) return { count: '0' }
+        if (sql.includes('FROM agent_messages')) {
+          return {
+            id: '00000000-0000-4000-8000-000000000005',
+            channel_id: 'agent-com',
+            author_id: 'ceo-discord',
+            input_mentions: ['codex-aun', 'auditor'],
+            created_at: '2026-05-23T00:00:00.000Z',
+          }
+        }
+        return null
+      },
+      async execute() {
+        throw new Error('not used')
+      },
+      async transaction() {
+        throw new Error('not used')
+      },
+      async close() {},
+    }
+
+    const report = await buildInboundSmokeReport(db as any, { provider: 'discord' })
+
+    expect(report.summary.blocked).toBe(1)
+    expect(report.blockers[0]).toContain('mentioned_recipient_not_enqueued:auditor')
+  })
+
   test('blocks bot-authored duplicate evidence', async () => {
     const db = {
       async query(sql: string) {

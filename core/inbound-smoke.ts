@@ -184,6 +184,7 @@ export async function buildInboundSmokeReport(
     const inputMentions = asStringArray(latest?.input_mentions)
     const invalidMentions = inputMentions.filter((agentId) => !members.includes(agentId))
     const queueRows = latest?.id ? await queryQueueRows(db, String(latest.id)) : []
+    const queuedAgentIds = new Set(queueRows.map((row) => row.agent_id))
     const botDuplicateCount = await queryBotDuplicateCount(db, channelId, provider, cutoff)
     const blockers: string[] = []
     const warnings: string[] = []
@@ -192,6 +193,12 @@ export async function buildInboundSmokeReport(
     if (latest && inputMentions.length === 0) warnings.push('mention_resolution_not_observed')
     if (latest && queueRows.length === 0) warnings.push('message_queue_enqueue_not_observed')
     if (invalidMentions.length > 0) blockers.push(`input_mentions_not_channel_members:${invalidMentions.join(',')}`)
+    if (inputMentions.length > 0) {
+      const missingMentionQueues = inputMentions.filter((agentId) => !queuedAgentIds.has(agentId))
+      const unexpectedQueueRows = [...queuedAgentIds].filter((agentId) => !inputMentions.includes(agentId))
+      if (missingMentionQueues.length > 0) blockers.push(`mentioned_recipient_not_enqueued:${missingMentionQueues.join(',')}`)
+      if (unexpectedQueueRows.length > 0) blockers.push(`unexpected_enqueued_recipient:${unexpectedQueueRows.join(',')}`)
+    }
     if (botDuplicateCount === null) warnings.push('bot_duplicate_query_unavailable')
     else if (botDuplicateCount > 0) blockers.push(`bot_authored_duplicate_rows:${botDuplicateCount}`)
 
