@@ -37,6 +37,14 @@ import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
+import {
+  acquireControlPlaneLease,
+  heartbeatControlPlaneLease,
+  releaseControlPlaneLease,
+  verifyControlPlaneFence,
+  type LeasePurpose,
+  type LeaseScopeType,
+} from '../core/control-plane-leases'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -125,6 +133,16 @@ function flagEnabled(value: string | undefined): boolean {
 
 function hasFlag(flags: Record<string, string>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key)
+}
+
+function parsePositiveIntFlag(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(`Error: --${name} must be a positive integer`)
+    process.exit(2)
+  }
+  return parsed
 }
 
 function parseCsvFlag(value: string | undefined): string[] | null {
@@ -2355,6 +2373,141 @@ async function daemon(args: string[]) {
   await new Promise(() => {})
 }
 
+function resolveLeaseHolderAgentId(args: string[], flags: Record<string, string>, required: boolean): string | undefined {
+  if (flags['holder-agent-id']) return assertExpectedAgentId(flags['holder-agent-id'], 'lease')
+  if (flags['agent-id'] || process.env.AGENT_ID) return resolveAgentId(args, 'lease')
+  if (required) {
+    console.error('Error: --holder-agent-id, --agent-id, or AGENT_ID is required for lease mutation')
+    process.exit(2)
+  }
+  return undefined
+}
+
+function parseLeaseTtlMs(flags: Record<string, string>): number {
+  if (flags['ttl-ms']) return parsePositiveIntFlag(flags['ttl-ms'], 30_000, 'ttl-ms')
+  return parsePositiveIntFlag(flags['ttl-sec'], 30, 'ttl-sec') * 1000
+}
+
+function parseLeaseMetadata(value: string | undefined): Record<string, unknown> {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {}
+  console.error('Error: --metadata must be a JSON object')
+  process.exit(2)
+}
+
+function requireLeaseFlag(flags: Record<string, string>, name: string): string {
+  const value = flags[name]
+  if (!value) {
+    console.error(`Error: --${name} is required`)
+    process.exit(2)
+  }
+  return value
+}
+
+const LEASE_SCOPE_TYPES = new Set(['connector_instance', 'channel_binding', 'queue_partition', 'runtime_instance'])
+const LEASE_PURPOSES = new Set(['inbound', 'outbound', 'worker', 'leader', 'presence', 'maintenance'])
+
+function parseLeaseScopeType(flags: Record<string, string>): LeaseScopeType {
+  const value = requireLeaseFlag(flags, 'scope-type')
+  if (!LEASE_SCOPE_TYPES.has(value)) {
+    console.error(`Error: --scope-type must be one of ${Array.from(LEASE_SCOPE_TYPES).join(', ')}`)
+    process.exit(2)
+  }
+  return value as LeaseScopeType
+}
+
+function parseLeasePurpose(flags: Record<string, string>): LeasePurpose {
+  const value = flags.purpose ?? 'worker'
+  if (!LEASE_PURPOSES.has(value)) {
+    console.error(`Error: --purpose must be one of ${Array.from(LEASE_PURPOSES).join(', ')}`)
+    process.exit(2)
+  }
+  return value as LeasePurpose
+}
+
+function parseFencingToken(flags: Record<string, string>): number {
+  const raw = requireLeaseFlag(flags, 'fencing-token')
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error('Error: --fencing-token must be a positive integer')
+    process.exit(2)
+  }
+  return parsed
+}
+
+async function leaseCommand(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  const db = await getDb()
+  const adapter = (db as any).__adapter as DbAdapter
+  try {
+    if (subcommand === 'acquire') {
+      const result = await acquireControlPlaneLease(adapter, {
+        scopeType: parseLeaseScopeType(flags),
+        scopeId: requireLeaseFlag(flags, 'scope-id'),
+        purpose: parseLeasePurpose(flags),
+        holderAgentId: resolveLeaseHolderAgentId(args, flags, true),
+        holderRuntimeInstanceId: flags['holder-runtime-instance-id'],
+        holderConnectorInstanceId: flags['holder-connector-instance-id'],
+        ttlMs: parseLeaseTtlMs(flags),
+        metadata: parseLeaseMetadata(flags.metadata),
+      })
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      if (!result.ok) process.exitCode = 1
+      return
+    }
+
+    if (subcommand === 'heartbeat') {
+      const result = await heartbeatControlPlaneLease(adapter, {
+        leaseId: requireLeaseFlag(flags, 'lease-id'),
+        fencingToken: parseFencingToken(flags),
+        holderAgentId: resolveLeaseHolderAgentId(args, flags, false),
+        holderRuntimeInstanceId: flags['holder-runtime-instance-id'],
+        holderConnectorInstanceId: flags['holder-connector-instance-id'],
+        ttlMs: parseLeaseTtlMs(flags),
+      })
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      if (!result.ok) process.exitCode = 1
+      return
+    }
+
+    if (subcommand === 'release') {
+      const result = await releaseControlPlaneLease(adapter, {
+        leaseId: requireLeaseFlag(flags, 'lease-id'),
+        fencingToken: parseFencingToken(flags),
+        holderAgentId: resolveLeaseHolderAgentId(args, flags, false),
+        holderRuntimeInstanceId: flags['holder-runtime-instance-id'],
+        holderConnectorInstanceId: flags['holder-connector-instance-id'],
+      })
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      if (!result.ok) process.exitCode = 1
+      return
+    }
+
+    if (subcommand === 'verify') {
+      const result = await verifyControlPlaneFence(adapter, {
+        leaseId: requireLeaseFlag(flags, 'lease-id'),
+        fencingToken: parseFencingToken(flags),
+        holderAgentId: resolveLeaseHolderAgentId(args, flags, false),
+        holderRuntimeInstanceId: flags['holder-runtime-instance-id'],
+        holderConnectorInstanceId: flags['holder-connector-instance-id'],
+      })
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      if (!result.ok) process.exitCode = 1
+      return
+    }
+
+    console.error('Usage: agent-com lease <acquire|heartbeat|release|verify> ...')
+    process.exit(2)
+  } finally {
+    await db.end()
+  }
+}
+
 // --- Main ---
 const [, , command, subcommand, ...rest] = process.argv
 
@@ -2380,6 +2533,8 @@ if (command === 'channel') {
   await heartbeat([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'daemon') {
   await daemon([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'lease') {
+  await leaseCommand(subcommand, rest)
 } else if (command === 'next') {
   await nextMessage()
 } else if (command === 'send') {
@@ -2453,6 +2608,14 @@ Message I/O (requires AGENT_ID env var):
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
+  lease acquire --scope-type <type> --scope-id <id> [--purpose outbound] --holder-agent-id <agent> [--ttl-sec 30]
+                                                       — acquire a control-plane lease and fencing token
+  lease heartbeat --lease-id <id> --fencing-token <n> [--holder-agent-id <agent>] [--ttl-sec 30]
+                                                       — extend an active lease if the fence still matches
+  lease verify --lease-id <id> --fencing-token <n> [--holder-agent-id <agent>]
+                                                       — fail closed unless the active fence still matches
+  lease release --lease-id <id> --fencing-token <n> [--holder-agent-id <agent>]
+                                                       — release an active lease
   daemon [--poll-interval 3000]                       — long-running poll driver (non-MCP envs)`)
   if (command) process.exit(1)
 }
