@@ -2,6 +2,8 @@
 
 Date: 2026-05-22
 
+Development principles: [`aun-development-principles.md`](./aun-development-principles.md).
+
 ## Decision
 
 AUN should not use a single central router process for all channels, and it

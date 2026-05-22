@@ -2,6 +2,8 @@
 
 Issues: #422, #426
 
+Development principles: [`aun-development-principles.md`](./aun-development-principles.md).
+
 ## Decision
 
 Codex auto-receive must be a DB-primary runner that preserves request lifecycle

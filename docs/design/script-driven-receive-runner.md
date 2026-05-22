@@ -1,5 +1,7 @@
 # Script-Driven Receive Runner
 
+Development principles: [`aun-development-principles.md`](./aun-development-principles.md).
+
 ## Decision
 
 AUN receive must be script-driven and spec-driven.

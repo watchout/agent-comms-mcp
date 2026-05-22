@@ -14,6 +14,8 @@ The UI registration and search behavior is defined in
 [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).
 The distributed worker/connector lease model is defined in
 [`distributed-control-plane-foundation.md`](./distributed-control-plane-foundation.md).
+The default development stance is defined in
+[`aun-development-principles.md`](./aun-development-principles.md).
 Channel membership and routing policy continue to reference stable `agent_id`
 values; UI and future external agent registration should additionally expose
 `agent_uri`, workspace bindings, runtime instances, endpoints, and identity
