@@ -188,8 +188,43 @@ describe('migrateSqlite', () => {
     expect(names).toContain('channel_routing_policy')
     expect(names).toContain('role_routing')
     expect(names).toContain('agent_aliases')
+    expect(names).toContain('agent_workspaces')
+    expect(names).toContain('agent_workspace_bindings')
+    expect(names).toContain('agent_runtime_instances')
+    expect(names).toContain('agent_endpoints')
+    expect(names).toContain('agent_identity_keys')
     expect(names).toContain('audit_log')
     expect(names).toContain('threads')
+    db.close()
+  })
+
+  it('creates agent identity/runtime foundation columns', () => {
+    migrateSqlite(MIGRATE_DB)
+
+    const db = new (require('bun:sqlite').Database)(MIGRATE_DB)
+    const cols = db.prepare("PRAGMA table_info(agents)").all()
+    const names = cols.map((c: any) => c.name)
+
+    expect(names).toContain('agent_uri')
+    expect(names).toContain('identity_scope')
+    expect(names).toContain('trust_status')
+    expect(names).toContain('auth_method')
+    expect(names).toContain('auth_subject')
+    expect(names).toContain('disabled_at')
+    expect(names).toContain('identity_metadata')
+
+    db.prepare("INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, ?)").run(
+      'identity-foundation-bot',
+      'Identity Foundation Bot',
+      'dev',
+    )
+    const row = db.prepare("SELECT agent_uri, identity_scope, trust_status, auth_method FROM agents WHERE agent_id = ?")
+      .get('identity-foundation-bot') as any
+    expect(row.agent_uri).toBe('aun://default/agents/identity-foundation-bot')
+    expect(row.identity_scope).toBe('local')
+    expect(row.trust_status).toBe('local')
+    expect(row.auth_method).toBe('local')
+
     db.close()
   })
 })
