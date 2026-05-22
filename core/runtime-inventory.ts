@@ -6,6 +6,7 @@ type RuntimeInventoryOptions = {
   staleMinutes?: number
   expectedCommit?: string | null
   provider?: string
+  bindingRole?: string
 }
 
 export type RuntimeInventoryAgent = {
@@ -59,6 +60,7 @@ export type RuntimeInventoryPolicyGap = {
   channel_name: string | null
   adapter_owner_agent_id: string
   provider: string
+  binding_role: string
   reason: 'missing_active_binding' | 'active_binding_wrong_owner'
   active_binding_agents: string[]
 }
@@ -75,6 +77,7 @@ export type RuntimeInventoryReport = {
     stale_minutes: number
     expected_commit: string | null
     provider: string
+    binding_role: string
   }
   summary: {
     agents: number
@@ -183,6 +186,7 @@ export async function buildRuntimeInventoryReport(
   const staleMinutes = options.staleMinutes ?? 15
   const expectedCommit = options.expectedCommit ?? null
   const provider = options.provider ?? 'discord'
+  const bindingRole = options.bindingRole ?? 'outbound'
   const staleMs = staleMinutes * 60_000
   const nowMs = Date.now()
 
@@ -239,16 +243,17 @@ export async function buildRuntimeInventoryReport(
   }
 
   const activeBindingCountByConnector = new Map<string, number>()
-  const activeBindingAgentsByChannel = new Map<string, string[]>()
+  const policyBindingAgentsByChannel = new Map<string, string[]>()
   for (const row of bindingRows) {
     if (row.status !== 'active') continue
     const connectorId = normalizeString(row.connector_instance_id)
     if (connectorId) activeBindingCountByConnector.set(connectorId, (activeBindingCountByConnector.get(connectorId) ?? 0) + 1)
+    if (String(row.binding_role) !== bindingRole) continue
     const agentId = normalizeString(row.connector_agent_id)
     if (agentId) {
-      const agents = activeBindingAgentsByChannel.get(String(row.channel_id)) ?? []
+      const agents = policyBindingAgentsByChannel.get(String(row.channel_id)) ?? []
       agents.push(agentId)
-      activeBindingAgentsByChannel.set(String(row.channel_id), [...new Set(agents)])
+      policyBindingAgentsByChannel.set(String(row.channel_id), [...new Set(agents)])
     }
   }
 
@@ -337,13 +342,14 @@ export async function buildRuntimeInventoryReport(
   for (const policy of policyRows) {
     const owner = normalizeString(policy.adapter_owner_agent_id)
     if (!owner) continue
-    const activeAgents = activeBindingAgentsByChannel.get(String(policy.channel_id)) ?? []
+    const activeAgents = policyBindingAgentsByChannel.get(String(policy.channel_id)) ?? []
     if (activeAgents.length === 0) {
       policyGaps.push({
         channel_id: String(policy.channel_id),
         channel_name: normalizeString(policy.channel_name),
         adapter_owner_agent_id: owner,
         provider,
+        binding_role: bindingRole,
         reason: 'missing_active_binding',
         active_binding_agents: [],
       })
@@ -353,6 +359,7 @@ export async function buildRuntimeInventoryReport(
         channel_name: normalizeString(policy.channel_name),
         adapter_owner_agent_id: owner,
         provider,
+        binding_role: bindingRole,
         reason: 'active_binding_wrong_owner',
         active_binding_agents: activeAgents,
       })
@@ -384,6 +391,7 @@ export async function buildRuntimeInventoryReport(
       stale_minutes: staleMinutes,
       expected_commit: expectedCommit,
       provider,
+      binding_role: bindingRole,
     },
     summary: {
       agents: agents.length,
@@ -420,7 +428,7 @@ export function formatRuntimeInventoryText(report: RuntimeInventoryReport): stri
   for (const connector of report.connectors) {
     lines.push(`  ${connector.agent_id}/${connector.provider}: status=${connector.status} uri=${connector.connector_uri ?? '-'} runtime=${connector.runtime_instance_id ?? '-'} bindings=${connector.active_binding_count}${connector.warnings.length ? ` warnings=${connector.warnings.join(',')}` : ''}`)
   }
-  lines.push('', 'Policy Gaps:')
+  lines.push('', `Policy Gaps (${report.options.binding_role}):`)
   if (report.policy_gaps.length === 0) {
     lines.push('  none')
   } else {

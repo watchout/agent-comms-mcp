@@ -132,7 +132,7 @@ Runtime adoption must be evidence-based before any connector is treated as
 healthy. The read-only operator report is:
 
 ```text
-agent-com runtime inventory --format json
+agent-com runtime inventory --format json --binding-role outbound
 ```
 
 The report joins:
@@ -144,9 +144,11 @@ The report joins:
 - `channel_routing_policy`
 
 It reports runtime freshness, commit evidence, connector-to-runtime linkage,
-binding ownership, and legacy policy projection gaps. This is intentionally
-read-only: it does not stop sessions, restart workers, rewrite routing policy,
-or claim queues.
+binding ownership, and legacy policy projection gaps for the requested binding
+role. The default is `outbound`, matching `sync-connectors` and preventing an
+unrelated active `inbound`/`presence`/`worker` binding from hiding an outbound
+projection gap. This is intentionally read-only: it does not stop sessions,
+restart workers, rewrite routing policy, or claim queues.
 
 The final design rule is that local process evidence is operational evidence
 only. A local path, tmux session name, or Discord identity must never become
@@ -227,7 +229,7 @@ The runtime freshness slice adds:
 
 - `agent-com runtime inventory`
 - read-only runtime/connector/binding freshness evidence
-- policy gap detection before connector execute/canary steps
+- binding-role-scoped policy gap detection before connector execute/canary steps
 - optional expected commit comparison for stale checkout detection
 
 ## Acceptance Criteria

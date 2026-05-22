@@ -24,11 +24,17 @@ async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<
       INSERT INTO channels (id, name, type, members)
       VALUES
         ('hotel-channel', 'hotel-kanri', 'channel', '["hotel-dev"]'),
+        ('bidirectional-channel', 'bidirectional-gap', 'channel', '["hotel-dev"]'),
+        ('role-gap-channel', 'role-gap', 'channel', '["hotel-dev"]'),
+        ('wrong-owner-channel', 'wrong-owner', 'channel', '["hotel-dev", "stale-dev"]'),
         ('gap-channel', 'gap', 'channel', '["gap-dev"]');
 
       INSERT INTO channel_routing_policy (channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist)
       VALUES
         ('hotel-channel', 'hotel-dev', 'hotel-dev', '["hotel-dev"]'),
+        ('bidirectional-channel', 'hotel-dev', 'hotel-dev', '["hotel-dev"]'),
+        ('role-gap-channel', 'hotel-dev', 'hotel-dev', '["hotel-dev"]'),
+        ('wrong-owner-channel', 'hotel-dev', 'hotel-dev', '["hotel-dev", "stale-dev"]'),
         ('gap-channel', 'gap-dev', 'gap-dev', '["gap-dev"]');
 
       INSERT INTO agent_runtime_instances
@@ -46,7 +52,10 @@ async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<
       INSERT INTO channel_connector_bindings
         (channel_binding_id, channel_id, provider, connector_instance_id, binding_role, status)
       VALUES
-        ('binding-hotel', 'hotel-channel', 'discord', 'connector-hotel', 'outbound', 'active');
+        ('binding-hotel', 'hotel-channel', 'discord', 'connector-hotel', 'outbound', 'active'),
+        ('binding-bidirectional-gap', 'bidirectional-channel', 'discord', 'connector-hotel', 'bidirectional', 'active'),
+        ('binding-role-gap', 'role-gap-channel', 'discord', 'connector-hotel', 'inbound', 'active'),
+        ('binding-wrong-owner', 'wrong-owner-channel', 'discord', 'connector-stale', 'outbound', 'active');
     `)
     seed.close()
 
@@ -76,20 +85,72 @@ describe('runtime inventory', () => {
       expect(stale?.freshness).toBe('stale')
       expect(stale?.warnings).toContain('runtime_stale')
       expect(stale?.warnings).toContain('runtime_commit_mismatch')
-      expect(hotelConnector?.active_binding_count).toBe(1)
+      expect(hotelConnector?.active_binding_count).toBe(3)
       expect(report.policy_gaps).toEqual([
+        {
+          channel_id: 'bidirectional-channel',
+          channel_name: 'bidirectional-gap',
+          adapter_owner_agent_id: 'hotel-dev',
+          provider: 'discord',
+          binding_role: 'outbound',
+          reason: 'missing_active_binding',
+          active_binding_agents: [],
+        },
         {
           channel_id: 'gap-channel',
           channel_name: 'gap',
           adapter_owner_agent_id: 'gap-dev',
           provider: 'discord',
+          binding_role: 'outbound',
           reason: 'missing_active_binding',
           active_binding_agents: [],
         },
+        {
+          channel_id: 'role-gap-channel',
+          channel_name: 'role-gap',
+          adapter_owner_agent_id: 'hotel-dev',
+          provider: 'discord',
+          binding_role: 'outbound',
+          reason: 'missing_active_binding',
+          active_binding_agents: [],
+        },
+        {
+          channel_id: 'wrong-owner-channel',
+          channel_name: 'wrong-owner',
+          adapter_owner_agent_id: 'hotel-dev',
+          provider: 'discord',
+          binding_role: 'outbound',
+          reason: 'active_binding_wrong_owner',
+          active_binding_agents: ['stale-dev'],
+        },
       ])
       expect(report.blockers).toContain('stale-dev:runtime_stale')
+      expect(report.blockers).toContain('bidirectional-channel:missing_active_binding')
       expect(report.blockers).toContain('gap-channel:missing_active_binding')
+      expect(report.blockers).toContain('role-gap-channel:missing_active_binding')
+      expect(report.blockers).toContain('wrong-owner-channel:active_binding_wrong_owner')
       expect(formatRuntimeInventoryText(report)).toContain('Runtime Inventory')
+    })
+  })
+
+  test('policy gaps are scoped to the requested binding role', async () => {
+    await withRuntimeDb(async (db) => {
+      const report = await buildRuntimeInventoryReport(db, {
+        staleMinutes: 60,
+        bindingRole: 'inbound',
+      })
+
+      expect(report.options.binding_role).toBe('inbound')
+      expect(report.policy_gaps.map((gap) => gap.channel_id)).not.toContain('role-gap-channel')
+      expect(report.policy_gaps).toContainEqual({
+        channel_id: 'hotel-channel',
+        channel_name: 'hotel-kanri',
+        adapter_owner_agent_id: 'hotel-dev',
+        provider: 'discord',
+        binding_role: 'inbound',
+        reason: 'missing_active_binding',
+        active_binding_agents: [],
+      })
     })
   })
 })

@@ -2236,7 +2236,7 @@ async function directory(args: string[]) {
 async function runtimeCommand(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand !== 'inventory') {
-    console.error('Usage: agent-com runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--provider discord]')
+    console.error('Usage: agent-com runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--provider discord] [--binding-role outbound]')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
@@ -2247,6 +2247,7 @@ async function runtimeCommand(subcommand: string | undefined, args: string[]) {
       staleMinutes,
       expectedCommit: flags['expected-commit'] ?? null,
       provider: flags.provider ?? 'discord',
+      bindingRole: flags['binding-role'] ?? 'outbound',
     })
     if (format === 'text') {
       process.stdout.write(formatRuntimeInventoryText(report))
@@ -2660,7 +2661,7 @@ Message I/O (requires AGENT_ID env var):
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
                                                        — dry-run by default; roll expired received/in_progress claims back to pending
   directory [--format json|text]                       — bot/channel directory and sendability report
-  runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>]
+  runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--binding-role outbound]
                                                        — read-only runtime/connector/binding freshness report
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status

@@ -375,6 +375,7 @@ describe('T11 — bot/channel directory CLI surface', () => {
 describe('T11b — runtime inventory CLI surface', () => {
   test('help documents the runtime inventory report', () => {
     expect(CLI_SRC).toMatch(/runtime inventory \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/\[--binding-role outbound\]/)
     expect(CLI_SRC).toMatch(/read-only runtime\/connector\/binding freshness report/)
   })
 
@@ -384,6 +385,7 @@ describe('T11b — runtime inventory CLI surface', () => {
     expect(RUNTIME_INVENTORY_SRC).toMatch(/connector_instances/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/channel_connector_bindings/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/channel_routing_policy/)
+    expect(RUNTIME_INVENTORY_SRC).toMatch(/binding_role/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/missing_active_binding/)
     expect(RUNTIME_INVENTORY_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
   })
