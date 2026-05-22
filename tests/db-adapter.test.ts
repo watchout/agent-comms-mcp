@@ -193,6 +193,9 @@ describe('migrateSqlite', () => {
     expect(names).toContain('agent_runtime_instances')
     expect(names).toContain('agent_endpoints')
     expect(names).toContain('agent_identity_keys')
+    expect(names).toContain('connector_instances')
+    expect(names).toContain('channel_connector_bindings')
+    expect(names).toContain('control_plane_leases')
     expect(names).toContain('audit_log')
     expect(names).toContain('threads')
     db.close()
@@ -286,6 +289,159 @@ describe('migrateSqlite', () => {
     expect(() => db.prepare("INSERT INTO channel_routing_policy (channel_id) VALUES (NULL)").run()).toThrow()
     expect(() => db.prepare("INSERT INTO role_routing (role_key) VALUES (NULL)").run()).toThrow()
     expect(() => db.prepare("INSERT INTO agent_aliases (alias, canonical_agent_id) VALUES (NULL, ?)").run('sqlite-foundation-pk-bot')).toThrow()
+
+    db.close()
+  })
+
+  it('creates distributed control plane tables and lease constraints', () => {
+    migrateSqlite(MIGRATE_DB)
+
+    const db = new (require('bun:sqlite').Database)(MIGRATE_DB)
+
+    const mqCols = db.prepare("PRAGMA table_info(message_queue)").all()
+    const mqNames = mqCols.map((c: any) => c.name)
+    expect(mqNames).toContain('assigned_runtime_instance_id')
+    expect(mqNames).toContain('claimed_runtime_instance_id')
+    expect(mqNames).toContain('channel_binding_id')
+    expect(mqNames).toContain('ordering_key')
+
+    const oqCols = db.prepare("PRAGMA table_info(outbound_queue)").all()
+    const oqNames = oqCols.map((c: any) => c.name)
+    expect(oqNames).toContain('delivery_connector_instance_id')
+    expect(oqNames).toContain('channel_binding_id')
+    expect(oqNames).toContain('claimed_runtime_instance_id')
+
+    db.prepare("INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, ?)").run(
+      'control-plane-bot',
+      'Control Plane Bot',
+      'dev',
+    )
+    db.prepare("INSERT INTO channels (id, name) VALUES (?, ?)").run(
+      'control-plane-channel',
+      'Control Plane Channel',
+    )
+    db.prepare("INSERT INTO agent_runtime_instances (agent_id, runtime_engine, status) VALUES (?, ?, ?)").run(
+      'control-plane-bot',
+      'codex',
+      'active',
+    )
+    const runtime = db.prepare(
+      "SELECT runtime_instance_id FROM agent_runtime_instances WHERE agent_id = ? ORDER BY started_at DESC LIMIT 1",
+    ).get('control-plane-bot') as any
+
+    db.prepare(
+      `INSERT INTO connector_instances
+         (agent_id, runtime_instance_id, provider, connector_uri, status)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      'control-plane-bot',
+      runtime.runtime_instance_id,
+      'discord',
+      'discord://control-plane-bot',
+      'active',
+    )
+    const connector = db.prepare(
+      "SELECT connector_instance_id FROM connector_instances WHERE connector_uri = ?",
+    ).get('discord://control-plane-bot') as any
+    expect(typeof connector.connector_instance_id).toBe('string')
+    expect(connector.connector_instance_id.length).toBeGreaterThan(0)
+
+    db.prepare(
+      `INSERT INTO channel_connector_bindings
+         (channel_id, provider, connector_instance_id, binding_role, ordering_scope)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      'control-plane-channel',
+      'discord',
+      connector.connector_instance_id,
+      'outbound',
+      'thread',
+    )
+    const binding = db.prepare(
+      "SELECT channel_binding_id FROM channel_connector_bindings WHERE channel_id = ?",
+    ).get('control-plane-channel') as any
+    expect(typeof binding.channel_binding_id).toBe('string')
+    expect(binding.channel_binding_id.length).toBeGreaterThan(0)
+
+    db.prepare(
+      `INSERT INTO control_plane_leases
+         (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
+          holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+30 seconds'))`,
+    ).run(
+      'channel_binding',
+      binding.channel_binding_id,
+      'outbound',
+      'control-plane-bot',
+      runtime.runtime_instance_id,
+      connector.connector_instance_id,
+      1,
+    )
+    expect(() => db.prepare(
+      `INSERT INTO control_plane_leases
+         (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id, fencing_token, expires_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now', '+30 seconds'))`,
+    ).run(
+      'channel_binding',
+      binding.channel_binding_id,
+      'outbound',
+      'control-plane-bot',
+      2,
+    )).toThrow()
+
+    db.prepare(
+      "UPDATE control_plane_leases SET status = 'released', released_at = datetime('now') WHERE lease_scope_id = ?",
+    ).run(binding.channel_binding_id)
+    db.prepare(
+      `INSERT INTO control_plane_leases
+         (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id, fencing_token, expires_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now', '+30 seconds'))`,
+    ).run(
+      'channel_binding',
+      binding.channel_binding_id,
+      'outbound',
+      'control-plane-bot',
+      3,
+    )
+
+    db.prepare(
+      `INSERT INTO message_queue
+         (agent_id, message_id, payload, assigned_runtime_instance_id, channel_binding_id, ordering_key)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'control-plane-bot',
+      'control-plane-message',
+      '{"content":"hello"}',
+      runtime.runtime_instance_id,
+      binding.channel_binding_id,
+      'thread:alpha',
+    )
+    db.prepare(
+      `INSERT INTO outbound_queue
+         (message_id, agent_id, channel_external_id, content, delivery_connector_instance_id,
+          channel_binding_id, claimed_runtime_instance_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      'control-plane-message',
+      'control-plane-bot',
+      '123',
+      'hello',
+      connector.connector_instance_id,
+      binding.channel_binding_id,
+      runtime.runtime_instance_id,
+    )
+
+    expect(() => db.prepare(
+      "INSERT INTO connector_instances (connector_instance_id, agent_id) VALUES (NULL, ?)",
+    ).run('control-plane-bot')).toThrow()
+    expect(() => db.prepare(
+      "INSERT INTO channel_connector_bindings (channel_binding_id, channel_id) VALUES (NULL, ?)",
+    ).run('control-plane-channel')).toThrow()
+    expect(() => db.prepare(
+      `INSERT INTO control_plane_leases
+         (lease_id, lease_scope_type, lease_scope_id, fencing_token, expires_at)
+       VALUES (NULL, ?, ?, ?, datetime('now', '+30 seconds'))`,
+    ).run('channel_binding', binding.channel_binding_id, 4)).toThrow()
 
     db.close()
   })

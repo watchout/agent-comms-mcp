@@ -12,6 +12,10 @@ identity/runtime split is defined in
 [`agent-identity-runtime-foundation.md`](./agent-identity-runtime-foundation.md).
 The UI registration and search behavior is defined in
 [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).
+The distributed worker/connector lease model is defined in
+[`distributed-control-plane-foundation.md`](./distributed-control-plane-foundation.md).
+The default development stance is defined in
+[`aun-development-principles.md`](./aun-development-principles.md).
 Channel membership and routing policy continue to reference stable `agent_id`
 values; UI and future external agent registration should additionally expose
 `agent_uri`, workspace bindings, runtime instances, endpoints, and identity
@@ -64,6 +68,10 @@ Already DB-backed:
 - `channels`: channel rows and member lists
 - `channel_adapters`: platform mapping such as Discord channel id
 - `thread_adapters`: platform mapping for threads
+- `connector_instances`: provider-facing connector workers and credentials
+- `channel_connector_bindings`: channel-to-connector roles and ordering policy
+- `control_plane_leases`: short-lived worker claims over connectors, bindings,
+  partitions, and runtimes
 - `channel_routing_policy`: runtime channel primary, Discord adapter owner,
   outbound allowlist, and native projection maps
 - `role_routing`: DB target table for governance role routing

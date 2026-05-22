@@ -398,6 +398,73 @@ export function migrateSqlite(dbPath?: string): void {
   `)
 
   gatedExec(`
+    CREATE TABLE IF NOT EXISTS connector_instances (
+      connector_instance_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL,
+      provider TEXT NOT NULL DEFAULT 'discord',
+      connector_kind TEXT NOT NULL DEFAULT 'chat_adapter',
+      transport TEXT NOT NULL DEFAULT 'discord_gateway',
+      connector_uri TEXT,
+      status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered', 'active', 'standby', 'draining', 'stopped', 'disabled')),
+      trust_status TEXT NOT NULL DEFAULT 'local' CHECK (trust_status IN ('local', 'unverified', 'verified', 'revoked', 'disabled')),
+      capabilities TEXT NOT NULL DEFAULT '{}',
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT,
+      disabled_at TEXT
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_connector_instances_agent_status ON connector_instances(agent_id, status)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_connector_instances_runtime ON connector_instances(runtime_instance_id) WHERE runtime_instance_id IS NOT NULL`)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_instances_provider_uri ON connector_instances(provider, connector_uri) WHERE connector_uri IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS channel_connector_bindings (
+      channel_binding_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL DEFAULT 'discord',
+      connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL,
+      binding_role TEXT NOT NULL DEFAULT 'outbound' CHECK (binding_role IN ('inbound', 'outbound', 'bidirectional', 'projection', 'presence', 'worker')),
+      priority INTEGER NOT NULL DEFAULT 100,
+      max_concurrency INTEGER NOT NULL DEFAULT 1,
+      ordering_scope TEXT NOT NULL DEFAULT 'thread' CHECK (ordering_scope IN ('none', 'channel', 'thread', 'custom')),
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'standby', 'disabled')),
+      policy_source TEXT NOT NULL DEFAULT 'db',
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_channel_connector_bindings_channel ON channel_connector_bindings(channel_id, provider, binding_role, status)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_channel_connector_bindings_connector ON channel_connector_bindings(connector_instance_id) WHERE connector_instance_id IS NOT NULL`)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_connector_bindings_active_unique ON channel_connector_bindings(channel_id, provider, binding_role, connector_instance_id) WHERE status = 'active' AND connector_instance_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS control_plane_leases (
+      lease_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      lease_scope_type TEXT NOT NULL CHECK (lease_scope_type IN ('connector_instance', 'channel_binding', 'queue_partition', 'runtime_instance')),
+      lease_scope_id TEXT NOT NULL,
+      lease_purpose TEXT NOT NULL DEFAULT 'worker' CHECK (lease_purpose IN ('inbound', 'outbound', 'worker', 'leader', 'presence', 'maintenance')),
+      holder_agent_id TEXT REFERENCES agents(agent_id) ON DELETE SET NULL,
+      holder_runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL,
+      holder_connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL,
+      fencing_token INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'released', 'expired', 'revoked')),
+      acquired_at TEXT NOT NULL DEFAULT (datetime('now')),
+      heartbeat_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL,
+      released_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}'
+    )
+  `)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_control_plane_leases_active_scope ON control_plane_leases(lease_scope_type, lease_scope_id, lease_purpose) WHERE status = 'active'`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_control_plane_leases_expiry ON control_plane_leases(status, expires_at)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_control_plane_leases_holder_runtime ON control_plane_leases(holder_runtime_instance_id) WHERE holder_runtime_instance_id IS NOT NULL`)
+
+  gatedExec(`
     CREATE TABLE IF NOT EXISTS channel_routing_policy (
       channel_id TEXT PRIMARY KEY NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
       primary_agent_id TEXT REFERENCES agents(agent_id),
@@ -480,6 +547,37 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type, created_at DESC)`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_audit_log_agent ON audit_log(agent_id, created_at DESC)`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC)`)
+
+  const mqControlCols = db.query(`PRAGMA table_info(message_queue)`).all() as Array<{ name: string }>
+  const mqControlColNames = new Set(mqControlCols.map((c) => c.name))
+  if (!mqControlColNames.has('assigned_runtime_instance_id')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN assigned_runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL`)
+  }
+  if (!mqControlColNames.has('claimed_runtime_instance_id')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN claimed_runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL`)
+  }
+  if (!mqControlColNames.has('channel_binding_id')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN channel_binding_id TEXT REFERENCES channel_connector_bindings(channel_binding_id) ON DELETE SET NULL`)
+  }
+  if (!mqControlColNames.has('ordering_key')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN ordering_key TEXT`)
+  }
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_mq_assigned_runtime ON message_queue(assigned_runtime_instance_id, status, priority DESC, created_at ASC) WHERE assigned_runtime_instance_id IS NOT NULL AND status = 'pending'`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_mq_channel_binding_ordering ON message_queue(channel_binding_id, ordering_key, status, created_at ASC) WHERE channel_binding_id IS NOT NULL`)
+
+  const oqControlCols = db.query(`PRAGMA table_info(outbound_queue)`).all() as Array<{ name: string }>
+  const oqControlColNames = new Set(oqControlCols.map((c) => c.name))
+  if (!oqControlColNames.has('delivery_connector_instance_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN delivery_connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL`)
+  }
+  if (!oqControlColNames.has('channel_binding_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN channel_binding_id TEXT REFERENCES channel_connector_bindings(channel_binding_id) ON DELETE SET NULL`)
+  }
+  if (!oqControlColNames.has('claimed_runtime_instance_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN claimed_runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL`)
+  }
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_delivery_connector_pending ON outbound_queue(delivery_connector_instance_id, status, next_retry_at) WHERE delivery_connector_instance_id IS NOT NULL AND status = 'pending'`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_channel_binding_pending ON outbound_queue(channel_binding_id, status, next_retry_at) WHERE channel_binding_id IS NOT NULL AND status = 'pending'`)
 
   db.close()
   console.log(`SQLite migration complete: ${path}`)

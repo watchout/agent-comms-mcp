@@ -55,6 +55,10 @@ has operational ownership: process health, credentials, supported surfaces, and
 claim authority. This is the provider-neutral equivalent of the current
 `consumer_agent_id` responsibility.
 
+The first schema foundation for this concept is `connector_instances` plus
+`channel_connector_bindings` and `control_plane_leases`; see
+[`distributed-control-plane-foundation.md`](./distributed-control-plane-foundation.md).
+
 ### `agent_surface_projection`
 
 Matrix table or derived policy that answers how an AUN agent should appear on a
@@ -100,7 +104,9 @@ read the same result. This prevents the UI from showing one route while
 
 ## Current Slice
 
-The first terminal UI slice is `agent-com diagnose-projection`.
+The first terminal UI slice is `agent-com diagnose-projection`. The first
+distributed-control-plane schema slice adds connector, binding, and lease
+records without changing live routing behavior.
 
 It previews the projection decision for:
 
@@ -136,7 +142,7 @@ presets over the matrix; the matrix is the durable policy.
 
 ## Non-goals For This Slice
 
-- no DB schema migration for the full matrix yet
+- no DB schema migration for the full agent x surface projection matrix yet
 - no provider implementation beyond the existing Discord projection path
 - no requirement for one adapter process per bot
 - no requirement for internal worker bots to own external provider tokens
