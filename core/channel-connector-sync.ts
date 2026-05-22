@@ -109,6 +109,7 @@ async function buildSyncPlan(
 ): Promise<{ planned: ChannelConnectorSyncItem[]; skipped: ChannelConnectorSyncSkipped[] }> {
   const planned: ChannelConnectorSyncItem[] = []
   const skipped: ChannelConnectorSyncSkipped[] = []
+  const plannedConnectorUris = new Set<string>()
 
   for (const row of rows) {
     const channelId = String(row.channel_id)
@@ -146,6 +147,7 @@ async function buildSyncPlan(
           AND connector_uri = $2`,
       [provider, uri],
     )
+    const connectorPlannedEarlier = !connector && plannedConnectorUris.has(uri)
     if (connector?.status === 'disabled') {
       skipped.push({
         channel_id: channelId,
@@ -189,9 +191,10 @@ async function buildSyncPlan(
       connector_uri: uri,
       connector_instance_id: connector?.connector_instance_id ?? null,
       channel_binding_id: matchingBinding?.channel_binding_id ?? null,
-      connector_action: connector ? 'reuse' : 'create',
+      connector_action: connector || connectorPlannedEarlier ? 'reuse' : 'create',
       binding_action: matchingBinding ? 'reuse' : 'create',
     })
+    if (!connector && !connectorPlannedEarlier) plannedConnectorUris.add(uri)
   }
 
   return { planned, skipped }
@@ -199,6 +202,17 @@ async function buildSyncPlan(
 
 async function ensureConnector(db: DbAdapter, item: ChannelConnectorSyncItem, bindingRole: BindingRole): Promise<string> {
   if (item.connector_instance_id) return item.connector_instance_id
+  const existing = await db.queryOne<ConnectorRow>(
+    `SELECT connector_instance_id, agent_id, status
+       FROM connector_instances
+      WHERE provider = $1
+        AND connector_uri = $2`,
+    [item.provider, item.connector_uri],
+  )
+  if (existing) {
+    if (existing.status === 'disabled') throw new Error(`CONNECTOR_DISABLED: ${item.connector_uri}`)
+    return existing.connector_instance_id
+  }
   await db.execute(
     `INSERT INTO connector_instances (
        agent_id, provider, connector_kind, transport, connector_uri,
@@ -273,8 +287,11 @@ export async function syncChannelPolicyConnectors(
 
   if (!options.dryRun) {
     await db.transaction(async (tx) => {
+      const connectorIdsByUri = new Map<string, string>()
       for (const item of planned) {
-        const connectorInstanceId = await ensureConnector(tx, item, bindingRole)
+        const cachedConnectorId = connectorIdsByUri.get(item.connector_uri)
+        const connectorInstanceId = cachedConnectorId ?? (await ensureConnector(tx, item, bindingRole))
+        connectorIdsByUri.set(item.connector_uri, connectorInstanceId)
         await ensureBinding(tx, item, connectorInstanceId, bindingRole, orderingScope, maxConcurrency)
       }
     })
