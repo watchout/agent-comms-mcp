@@ -36,6 +36,7 @@ const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
+const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
@@ -43,6 +44,7 @@ const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
+const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,15 +369,24 @@ describe('T12 — DB-backed channel policy CLI surface', () => {
     expect(CLI_SRC).toMatch(/channel policy list \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/channel policy import-json \[--execute\|--dry-run\]/)
     expect(CLI_SRC).toMatch(/channel policy bootstrap \[--execute\|--dry-run\]/)
+    expect(CLI_SRC).toMatch(/channel policy sync-connectors \[--channel <id\|name>\]/)
     expect(CLI_SRC).toMatch(/channel policy set <channel_id> \[--primary <agent\|none>\]/)
   })
 
   test('policy commands are dry-run by default and audit mutating writes', () => {
     expect(CLI_SRC).toMatch(/channel\.policy_import_json/)
     expect(CLI_SRC).toMatch(/channel\.policy_bootstrap_directory/)
+    expect(CLI_SRC).toMatch(/channel\.policy_sync_connectors/)
     expect(CLI_SRC).toMatch(/channel\.policy_set/)
     expect(CLI_SRC).toMatch(/parseRepairDryRun\(flags\)/)
     expect(CLI_SRC).toMatch(/refreshChannelPolicyDbSnapshot/)
+  })
+
+  test('connector sync maps legacy routing policy into control-plane connector tables', () => {
+    expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/channel_routing_policy/)
+    expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/connector_instances/)
+    expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/channel_connector_bindings/)
+    expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/active_binding_conflict/)
   })
 })
 
