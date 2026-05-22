@@ -150,17 +150,27 @@ The model is designed for a zero-trust enterprise deployment path:
 - channel membership, connector binding, and projection identity are separate
   policy layers
 
-## Current Slice
+## Implementation Status
 
-This slice adds the schema and design foundation only:
+The first slice added the schema and design foundation:
 
 - `connector_instances`
 - `channel_connector_bindings`
 - `control_plane_leases`
 - queue reference columns for future runtime/connector claims
 
-It does not change live routing behavior. Existing `consumer_agent_id` and
-`channel_routing_policy` behavior remains the active path.
+The next implementation slice adds script-controlled lease primitives:
+
+- acquire an active lease for a scope and purpose
+- atomically expire stale active leases before takeover
+- assign monotonic fencing tokens per scope and purpose
+- heartbeat active leases only when the fence and optional holder still match
+- verify a fence before worker-side commits
+- release active leases without allowing expired stale holders to mutate state
+
+These primitives do not change live routing behavior by themselves. Existing
+`consumer_agent_id` and `channel_routing_policy` behavior remains the active
+path until a channel or connector explicitly opts into lease-backed workers.
 
 ## Acceptance Criteria
 

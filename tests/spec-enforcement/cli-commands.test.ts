@@ -35,12 +35,14 @@ const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
 const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts')
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
+const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
 const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
+const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,6 +76,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('channelPolicy handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function channelPolicy\s*\(/)
   })
+  test('leaseCommand handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function leaseCommand\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +111,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'channel policy' subcommands invoke channelPolicy(...)", () => {
     expect(CLI_SRC).toMatch(/subcommand === 'policy'[\s\S]*?channelPolicy\(rest\)/)
+  })
+  test("'lease' command invokes leaseCommand(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'lease'[\s\S]*?leaseCommand\(subcommand, rest\)/)
   })
 })
 
@@ -368,6 +376,32 @@ describe('T12 — DB-backed channel policy CLI surface', () => {
     expect(CLI_SRC).toMatch(/channel\.policy_set/)
     expect(CLI_SRC).toMatch(/parseRepairDryRun\(flags\)/)
     expect(CLI_SRC).toMatch(/refreshChannelPolicyDbSnapshot/)
+  })
+})
+
+describe('T13 — control-plane lease CLI surface', () => {
+  test('help documents script-controlled lease operations', () => {
+    expect(CLI_SRC).toMatch(/lease acquire --scope-type <type> --scope-id <id>/)
+    expect(CLI_SRC).toMatch(/acquire a control-plane lease and fencing token/)
+    expect(CLI_SRC).toMatch(/lease heartbeat --lease-id <id> --fencing-token <n>/)
+    expect(CLI_SRC).toMatch(/lease verify --lease-id <id> --fencing-token <n>/)
+    expect(CLI_SRC).toMatch(/lease release --lease-id <id> --fencing-token <n>/)
+  })
+
+  test('lease commands call the provider-neutral control-plane helper', () => {
+    expect(CLI_SRC).toMatch(/acquireControlPlaneLease\(adapter/)
+    expect(CLI_SRC).toMatch(/heartbeatControlPlaneLease\(adapter/)
+    expect(CLI_SRC).toMatch(/verifyControlPlaneFence\(adapter/)
+    expect(CLI_SRC).toMatch(/releaseControlPlaneLease\(adapter/)
+    expect(CLI_SRC).toMatch(/--metadata must be a JSON object/)
+  })
+
+  test('lease helper enforces active uniqueness, expiry takeover, and fencing token checks', () => {
+    expect(CONTROL_PLANE_LEASES_SRC).toMatch(/status = 'expired'/)
+    expect(CONTROL_PLANE_LEASES_SRC).toMatch(/MAX\(fencing_token\)/)
+    expect(CONTROL_PLANE_LEASES_SRC).toMatch(/active_lease_exists/)
+    expect(CONTROL_PLANE_LEASES_SRC).toMatch(/fencing_token_mismatch/)
+    expect(CONTROL_PLANE_LEASES_SRC).toMatch(/holder_mismatch/)
   })
 })
 
