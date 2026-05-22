@@ -34,6 +34,7 @@ import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/deliv
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
+import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
@@ -2232,6 +2233,31 @@ async function directory(args: string[]) {
   }
 }
 
+async function runtimeCommand(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  if (subcommand !== 'inventory') {
+    console.error('Usage: agent-com runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--provider discord]')
+    process.exit(2)
+  }
+  const format = flags.format ?? 'json'
+  const staleMinutes = parsePositiveIntFlag(flags['stale-minutes'], 15, 'stale-minutes')
+  const db = await getDb()
+  try {
+    const report = await buildRuntimeInventoryReport((db as any).__adapter, {
+      staleMinutes,
+      expectedCommit: flags['expected-commit'] ?? null,
+      provider: flags.provider ?? 'discord',
+    })
+    if (format === 'text') {
+      process.stdout.write(formatRuntimeInventoryText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com status` — system or per-agent status (v1.0.2 §6.5).
  *
@@ -2591,6 +2617,8 @@ if (command === 'channel') {
   await repairQueue(subcommand, rest)
 } else if (command === 'directory') {
   await directory([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
+} else if (command === 'runtime') {
+  await runtimeCommand(subcommand, rest)
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -2632,6 +2660,8 @@ Message I/O (requires AGENT_ID env var):
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
                                                        — dry-run by default; roll expired received/in_progress claims back to pending
   directory [--format json|text]                       — bot/channel directory and sendability report
+  runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>]
+                                                       — read-only runtime/connector/binding freshness report
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat                                           — update last_seen_at
