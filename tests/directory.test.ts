@@ -37,6 +37,7 @@ describe('bot/channel directory report', () => {
     const aun = report.agents.find((agent) => agent.agent_id === 'codex-aun')
     const legacy = report.agents.find((agent) => agent.agent_id === 'cto')
     const agentCom = report.channels.find((channel) => channel.name === 'agent-com')
+    const mentionAgentCom = report.mention_directory.channels.find((channel) => channel.name === 'agent-com')
 
     expect(report.summary.agent_count).toBe(4)
     expect(aun?.sendability).toBe('ready')
@@ -45,6 +46,9 @@ describe('bot/channel directory report', () => {
     expect(legacy?.warnings).toContain('disabled')
     expect(legacy?.warnings).toContain('display_name_not_unique')
     expect(agentCom?.warnings).toContain('channel_id_looks_like_platform_external_id')
+    expect(mentionAgentCom?.recommended.map((candidate) => candidate.agent_id)).toContain('codex-aun')
+    expect(mentionAgentCom?.candidates.find((candidate) => candidate.agent_id === 'ceo')?.queue_target).toBe(false)
+    expect(report.mention_directory.policy.final_send_must_revalidate_db).toBe(true)
     expect(report.id_policy.db_ssot).toBe(true)
     expect(formatDirectoryText(report)).toContain('Bot / Channel Directory')
   })

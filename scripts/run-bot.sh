@@ -62,6 +62,19 @@ MAX_PAIR_BOUNCE="${MAX_PAIR_BOUNCE:-3}"
 RUN_BOT_LOG_FILE="${RUN_BOT_LOG_FILE:-${PROJECT_DIR}/logs/run-bot-${AGENT_ID}.log}"
 MAX_SEND_RETRIES=3
 
+if [ -z "${AGENT_COM_RUNTIME_INSTANCE_ID:-}" ]; then
+  if command -v uuidgen >/dev/null 2>&1; then
+    AGENT_COM_RUNTIME_INSTANCE_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  else
+    AGENT_COM_RUNTIME_INSTANCE_ID="$(bun -e 'console.log(crypto.randomUUID())')"
+  fi
+  export AGENT_COM_RUNTIME_INSTANCE_ID
+fi
+export AGENT_COM_RUNTIME_PROCESS_ID="${AGENT_COM_RUNTIME_PROCESS_ID:-$$}"
+export AGENT_COM_RUNTIME_ENGINE="${AGENT_COM_RUNTIME_ENGINE:-run-bot}"
+export AGENT_COM_RUNTIME_KIND="${AGENT_COM_RUNTIME_KIND:-local_process}"
+export AGENT_COM_CHECKOUT_PATH="${AGENT_COM_CHECKOUT_PATH:-$PROJECT_DIR}"
+
 # ── (8) consumer 排他 (PID kill -0 alive check) ─────────────────────────────
 # Stale PID files after a crash are overwritten silently; a PID that is still
 # alive rejects the new runner so two bots never share the same queue slot.

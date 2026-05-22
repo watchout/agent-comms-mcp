@@ -44,6 +44,45 @@ export type DirectoryRole = {
   warnings: string[]
 }
 
+export type MentionDirectoryCandidate = {
+  agent_id: string
+  display_name: string
+  agent_type: string
+  status: string
+  sendability: DirectorySendability
+  queue_target: boolean
+  recommended: boolean
+  has_discord_identity: boolean
+  has_active_connector: boolean
+  hard_block_reasons: string[]
+  warnings: string[]
+}
+
+export type MentionDirectoryPolicyEntry = {
+  agent_id: string
+  reason: string
+}
+
+export type MentionDirectoryChannel = {
+  channel_id: string
+  name: string | null
+  adapter_owner: string | null
+  primary: string | null
+  recommended: MentionDirectoryCandidate[]
+  candidates: MentionDirectoryCandidate[]
+  excluded_policy_entries: MentionDirectoryPolicyEntry[]
+}
+
+export type MentionDirectory = {
+  policy: {
+    db_ssot: boolean
+    final_send_must_revalidate_db: boolean
+    hard_blocks: string[]
+    runtime_offline_enforcement: string
+  }
+  channels: MentionDirectoryChannel[]
+}
+
 export type DirectoryReport = {
   ok: true
   generated_at: string
@@ -66,6 +105,7 @@ export type DirectoryReport = {
   }
   agents: DirectoryAgent[]
   channels: DirectoryChannel[]
+  mention_directory: MentionDirectory
   roles: DirectoryRole[]
   warnings: string[]
 }
@@ -182,6 +222,29 @@ function channelWarnings(row: any, activeMemberCount: number): string[] {
   return warnings
 }
 
+function mentionHardBlocks(agent: DirectoryAgent | null): string[] {
+  if (!agent) return ['agent_missing']
+  if (agent.status === 'disabled') return ['disabled']
+  if (agent.status === 'failed' || agent.status === 'disconnected') return [agent.status]
+  return []
+}
+
+function mentionWarnings(agent: DirectoryAgent, hasActiveConnector: boolean): string[] {
+  const warnings: string[] = []
+  if (agent.status === 'offline') warnings.push('offline_runtime_not_enforced_until_runtime_instances')
+  if (agent.agent_type === 'human') warnings.push('human_recipient_not_a_bot_queue_worker')
+  if (!agent.has_discord_identity) warnings.push('missing_discord_identity_for_native_mention')
+  if (!hasActiveConnector && agent.agent_type !== 'human') warnings.push('no_active_connector')
+  return warnings
+}
+
+function policyEntryReason(agentId: string, members: string[], agent: DirectoryAgent | null): string | null {
+  if (!agent) return 'agent_missing'
+  if (!members.includes(agentId)) return 'not_channel_member'
+  const hardBlocks = mentionHardBlocks(agent)
+  return hardBlocks[0] ?? null
+}
+
 export async function buildDirectoryReport(db: Queryable): Promise<DirectoryReport> {
   const policySnapshot = await refreshChannelPolicyDbSnapshot(db)
   const agentRows = await queryAgentRows(db)
@@ -195,6 +258,11 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
         AND ca.platform = 'discord'
       ORDER BY c.name, c.id`,
   )
+  const connectorRows = await db.query(
+    `SELECT agent_id, provider, status
+       FROM connector_instances
+      WHERE status = 'active'`,
+  ).catch(() => ({ rows: [] as any[] }))
 
   const displayNameCounts = new Map<string, number>()
   for (const row of agentRows) {
@@ -206,6 +274,11 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   for (const row of agentRows) {
     agentStatus.set(String(row.agent_id), String(row.status ?? ''))
   }
+  const activeConnectorAgents = new Set(
+    connectorRows.rows
+      .filter((row) => String(row.status ?? '') === 'active')
+      .map((row) => String(row.agent_id)),
+  )
 
   const channelsByAgent = new Map<string, string[]>()
   for (const row of channelRows.rows) {
@@ -237,6 +310,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       warnings: agentWarnings(row, channelCount, (displayNameCounts.get(String(row.display_name ?? '')) ?? 0) > 1),
     }
   })
+  const agentsById = new Map(agents.map((agent) => [agent.agent_id, agent]))
 
   const channels: DirectoryChannel[] = channelRows.rows.map((row) => {
     const members = parseMembers(row.members)
@@ -258,6 +332,70 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       outbound_allowlist: policy.outboundAllowlist,
       native_projection_count: Object.keys(policy.nativeProjectionIdentities).length + Object.keys(policy.nativeRoleOutboundOwners).length,
       warnings: channelWarnings(row, activeMemberCount),
+    }
+  })
+
+  const mentionChannels: MentionDirectoryChannel[] = channelRows.rows.map((row) => {
+    const channelId = String(row.id)
+    const members = parseMembers(row.members)
+    const policy = getChannelPolicy(channelId)
+    const candidates = members
+      .map((agentId): MentionDirectoryCandidate | null => {
+        const agent = agentsById.get(agentId) ?? null
+        if (!agent) {
+          return {
+            agent_id: agentId,
+            display_name: agentId,
+            agent_type: 'unknown',
+            status: 'missing',
+            sendability: 'blocked',
+            queue_target: false,
+            recommended: false,
+            has_discord_identity: false,
+            has_active_connector: false,
+            hard_block_reasons: ['agent_missing'],
+            warnings: [],
+          }
+        }
+        const hasActiveConnector = activeConnectorAgents.has(agent.agent_id)
+        const hardBlocks = mentionHardBlocks(agent)
+        const queueTarget = agent.agent_type !== 'human' && hardBlocks.length === 0
+        const recommended =
+          queueTarget &&
+          (agent.sendability === 'ready' || agent.sendability === 'queueable') &&
+          agent.status !== 'offline'
+        return {
+          agent_id: agent.agent_id,
+          display_name: agent.display_name,
+          agent_type: agent.agent_type,
+          status: agent.status,
+          sendability: agent.sendability,
+          queue_target: queueTarget,
+          recommended,
+          has_discord_identity: agent.has_discord_identity,
+          has_active_connector: hasActiveConnector,
+          hard_block_reasons: hardBlocks,
+          warnings: mentionWarnings(agent, hasActiveConnector),
+        }
+      })
+      .filter((candidate): candidate is MentionDirectoryCandidate => candidate !== null)
+      .sort((a, b) => a.agent_id.localeCompare(b.agent_id))
+
+    const excludedPolicyEntries = (policy.outboundAllowlist ?? [])
+      .map((agentId): MentionDirectoryPolicyEntry | null => {
+        const reason = policyEntryReason(agentId, members, agentsById.get(agentId) ?? null)
+        return reason ? { agent_id: agentId, reason } : null
+      })
+      .filter((entry): entry is MentionDirectoryPolicyEntry => entry !== null)
+
+    return {
+      channel_id: channelId,
+      name: row.name ? String(row.name) : null,
+      adapter_owner: policy.adapterOwner,
+      primary: policy.primary,
+      recommended: candidates.filter((candidate) => candidate.recommended),
+      candidates,
+      excluded_policy_entries: excludedPolicyEntries,
     }
   })
 
@@ -312,6 +450,15 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     },
     agents,
     channels,
+    mention_directory: {
+      policy: {
+        db_ssot: true,
+        final_send_must_revalidate_db: true,
+        hard_blocks: ['agent_missing', 'not_channel_member', 'disabled', 'failed', 'disconnected'],
+        runtime_offline_enforcement: 'offline is warning-only until agent_runtime_instances heartbeat evidence is populated',
+      },
+      channels: mentionChannels,
+    },
     roles,
     warnings: policySnapshot.loaded ? warnings : [...warnings, 'channel_policy_db_table_missing_json_fallback_active'],
   }
