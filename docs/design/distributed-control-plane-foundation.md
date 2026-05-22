@@ -111,6 +111,21 @@ use without breaking existing bots:
 
 Current code may leave these columns null. New workers can opt in gradually.
 
+## Legacy Policy Projection
+
+During rollout, `channel_routing_policy` remains the active routing source.
+Connector adoption is an explicit projection step:
+
+```text
+channel_routing_policy.adapter_owner_agent_id
+  -> connector_instances
+  -> channel_connector_bindings
+```
+
+The projection must be script-controlled and dry-run-first. It may create
+provider-neutral connector and binding rows, but it must not rewrite legacy
+routing policy or switch live queue behavior by itself.
+
 ## Claim Model
 
 Workers claim work directly from the queue. There is no central process that

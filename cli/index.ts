@@ -45,6 +45,7 @@ import {
   type LeasePurpose,
   type LeaseScopeType,
 } from '../core/control-plane-leases'
+import { syncChannelPolicyConnectors, type BindingRole, type OrderingScope } from '../core/channel-connector-sync'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -643,6 +644,31 @@ async function channelPolicy(args: string[]) {
       return
     }
 
+    if (action === 'sync-connectors') {
+      const dryRun = parseRepairDryRun(flags)
+      const maxConcurrency = parsePositiveIntFlag(flags['max-concurrency'], 1, 'max-concurrency')
+      const report = await syncChannelPolicyConnectors((db as any).__adapter, {
+        dryRun,
+        channel: flags.channel ?? null,
+        provider: flags.provider ?? 'discord',
+        bindingRole: (flags['binding-role'] ?? 'outbound') as BindingRole,
+        orderingScope: (flags['ordering-scope'] ?? 'thread') as OrderingScope,
+        maxConcurrency,
+      })
+      if (!dryRun) {
+        await auditLog(db, 'channel.policy_sync_connectors', 'cli', flags.channel ?? null, {
+          provider: report.provider,
+          binding_role: report.binding_role,
+          planned_count: report.planned.length,
+          skipped_count: report.skipped.length,
+          created_connectors: report.created_connectors,
+          created_bindings: report.created_bindings,
+        })
+      }
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
     if (action === 'set') {
       const channelId = positional[0]
       if (!channelId) {
@@ -685,7 +711,7 @@ async function channelPolicy(args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com channel policy <list|import-json|bootstrap|set> ...')
+    console.error('Usage: agent-com channel policy <list|import-json|bootstrap|sync-connectors|set> ...')
     process.exit(1)
   } finally {
     await db.end()
@@ -2578,6 +2604,7 @@ Commands:
   channel policy list [--format json|text]
   channel policy import-json [--execute|--dry-run] [--path <file>]
   channel policy bootstrap [--execute|--dry-run] [--extra-allowlist <a,b>] [--overwrite]
+  channel policy sync-connectors [--channel <id|name>] [--provider discord] [--execute|--dry-run]
   channel policy set <channel_id> [--primary <agent|none>] [--adapter-owner <agent|none>] [--allowlist <a,b|none>] [--execute|--dry-run]
   agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code]
   status
