@@ -13,6 +13,7 @@ import {
   createOutboundPolicyValidator,
   createMessageBodyDecorator,
   getChannelPolicy,
+  refreshChannelPolicyDbSnapshot,
   resetChannelPolicyCache,
 } from '../../core/routing'
 
@@ -94,6 +95,48 @@ describe('channel-policy (§1.8)', () => {
     const p = getChannelPolicy('ch1')
     expect(p.primary).toBe('alice')
     expect(p.outboundAllowlist).toEqual(['alice'])
+  })
+
+  test('DB channel_routing_policy snapshot overrides JSON and falls back by channel', async () => {
+    setRoutingConfig({
+      ch1: { primary: 'json-primary', adapterOwner: 'json-owner', outboundAllowlist: ['json-primary'] },
+      ch2: { primary: 'json-only', outboundAllowlist: ['json-only'] },
+    })
+    const loaded = await refreshChannelPolicyDbSnapshot({
+      async query() {
+        return {
+          rows: [
+            {
+              channel_id: 'ch1',
+              primary_agent_id: 'db-primary',
+              adapter_owner_agent_id: 'db-owner',
+              outbound_allowlist: '["db-primary","db-owner"]',
+              native_role_outbound_owners: '{"codex-cto":"codex-cto"}',
+              native_projection_identities: '{}',
+            },
+          ],
+        }
+      },
+    })
+
+    expect(loaded).toEqual({ loaded: true, count: 1 })
+    expect(getChannelPolicy('ch1').primary).toBe('db-primary')
+    expect(getChannelPolicy('ch1').adapterOwner).toBe('db-owner')
+    expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['db-primary', 'db-owner'])
+    expect(getChannelPolicy('ch1').nativeRoleOutboundOwners['codex-cto']).toBe('codex-cto')
+    expect(getChannelPolicy('ch2').primary).toBe('json-only')
+  })
+
+  test('DB policy table missing keeps JSON fallback active', async () => {
+    setRoutingConfig({ ch1: { primary: 'json-primary' } })
+    const loaded = await refreshChannelPolicyDbSnapshot({
+      async query() {
+        throw new Error('relation "channel_routing_policy" does not exist')
+      },
+    })
+
+    expect(loaded).toEqual({ loaded: false, count: 0 })
+    expect(getChannelPolicy('ch1').primary).toBe('json-primary')
   })
 })
 

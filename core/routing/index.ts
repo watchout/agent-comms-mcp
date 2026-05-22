@@ -25,5 +25,5 @@ export type { OutboundPolicyValidator } from './ports/outbound-policy-validator'
 export { createMessageBodyDecorator } from './ports/message-body-decorator'
 export type { MessageBodyDecorator } from './ports/message-body-decorator'
 
-export { getChannelPolicy, resetChannelPolicyCache } from '../channel-policy'
+export { getChannelPolicy, refreshChannelPolicyDbSnapshot, resetChannelPolicyCache } from '../channel-policy'
 export type { AgentId, ChannelPolicyEntry } from '../channel-policy'

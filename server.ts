@@ -110,6 +110,7 @@ import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
 import { resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
+import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -2110,6 +2111,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         [reply_to],
       )
       const phase5Channel: string = claimChannelRow.rows[0]?.channel_id ?? ''
+      await refreshChannelPolicyDbSnapshot(txClient)
       // UNKNOWN_AGENT reject: real agent registry lookup via refreshAgentCache().
       const knownAgents = await refreshAgentCache()
       const phase5 = resolvePhase5({
@@ -2745,6 +2747,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // mentions[]-only branch is gone). ADR-041 amendment 2026-05-05.
     {
       const knownAgentsN = await refreshAgentCache()
+      await refreshChannelPolicyDbSnapshot(client)
       const phase5 = resolvePhase5({
         sender: agentId,
         channel_id: dest.channelId,

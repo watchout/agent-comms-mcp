@@ -260,6 +260,47 @@ export function migrateSqlite(dbPath?: string): void {
   `)
 
   gatedExec(`
+    CREATE TABLE IF NOT EXISTS channel_routing_policy (
+      channel_id TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+      primary_agent_id TEXT REFERENCES agents(agent_id),
+      adapter_owner_agent_id TEXT REFERENCES agents(agent_id),
+      outbound_allowlist TEXT,
+      native_role_outbound_owners TEXT NOT NULL DEFAULT '{}',
+      native_projection_identities TEXT NOT NULL DEFAULT '{}',
+      policy_source TEXT NOT NULL DEFAULT 'db',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_channel_routing_policy_primary ON channel_routing_policy(primary_agent_id) WHERE primary_agent_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_channel_routing_policy_adapter_owner ON channel_routing_policy(adapter_owner_agent_id) WHERE adapter_owner_agent_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS role_routing (
+      role_key TEXT PRIMARY KEY,
+      channel_id TEXT REFERENCES channels(id),
+      agent_id TEXT REFERENCES agents(agent_id),
+      description TEXT,
+      new_work_allowed INTEGER NOT NULL DEFAULT 1,
+      policy_source TEXT NOT NULL DEFAULT 'db',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_role_routing_agent ON role_routing(agent_id) WHERE agent_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_aliases (
+      alias TEXT PRIMARY KEY,
+      canonical_agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+      new_work_allowed INTEGER NOT NULL DEFAULT 1,
+      reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  gatedExec(`
     CREATE TABLE IF NOT EXISTS thread_adapters (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       thread_id TEXT NOT NULL REFERENCES threads(id),
@@ -286,6 +327,21 @@ export function migrateSqlite(dbPath?: string): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6)))),
+      event_type TEXT NOT NULL,
+      agent_id TEXT,
+      target TEXT,
+      detail TEXT,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type, created_at DESC)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_audit_log_agent ON audit_log(agent_id, created_at DESC)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC)`)
 
   db.close()
   console.log(`SQLite migration complete: ${path}`)

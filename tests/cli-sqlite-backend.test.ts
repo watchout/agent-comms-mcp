@@ -187,6 +187,23 @@ describe('F3 — agent-com send (SQLite)', () => {
     expect(fail.status).not.toBe(0)
     expect(fail.stderr).toContain('INVALID_REPLY_TO')
   })
+
+  test('rejects DB channel policy outbound allowlist violations before writing reply rows', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
+    db.close()
+    const { queueId } = seedPendingMessage('acl send')
+    runCli(['next'])
+
+    const blocked = runCli(['send', '--content', 'blocked send', '--mentions', 'cto'])
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
+    const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
+    expect(q[0].status).toBe('received')
+    expect(q[0].replied_with).toBeNull()
+    const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked send'`)
+    expect(written.length).toBe(0)
+  })
 })
 
 describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #224 cycle 2)', () => {
@@ -306,5 +323,19 @@ describe('F5 — agent-com notify (SQLite)', () => {
     // notify should NOT flip the agent's busy/idle state — it stays whatever
     // it was (we seeded 'idle' in beforeEach).
     expect(a[0].status).toBe('idle')
+  })
+
+  test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
+    db.close()
+
+    const blocked = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'blocked notify'])
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
+    const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked notify'`)
+    expect(written.length).toBe(0)
+    const queued = dbRead(`SELECT id FROM message_queue WHERE payload LIKE '%blocked notify%'`)
+    expect(queued.length).toBe(0)
   })
 })

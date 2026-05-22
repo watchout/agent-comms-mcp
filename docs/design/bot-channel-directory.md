@@ -54,17 +54,26 @@ Already DB-backed:
 - `channels`: channel rows and member lists
 - `channel_adapters`: platform mapping such as Discord channel id
 - `thread_adapters`: platform mapping for threads
+- `channel_routing_policy`: runtime channel primary, Discord adapter owner,
+  outbound allowlist, and native projection maps
+- `role_routing`: DB target table for governance role routing
+- `agent_aliases`: DB target table for legacy-to-canonical identity aliases
 
-Still JSON-backed:
+Compatibility JSON:
 
 - `config/bot-routing.json`
 - `config/agent-role-routing.json`
 
-## Target Tables
+`config/bot-routing.json` remains a seed/fallback source. Runtime routing reads
+prefer `channel_routing_policy` when rows exist and fall back to JSON by channel
+while rollout is incomplete.
 
-Move user-editable policy out of JSON into DB tables in a later migration.
+## Target Directory Tables
 
-Proposed tables:
+The first policy tables now exist. Additional UI-facing directory tables can be
+added later without changing routing semantics.
+
+Candidate tables:
 
 ```text
 agent_directory
@@ -83,34 +92,12 @@ channel_directory
   display_label text not null
   purpose text
   ui_visible boolean
-
-channel_routing_policy
-  channel_id references channels(id)
-  primary_agent_id references agents(agent_id)
-  adapter_owner_agent_id references agents(agent_id)
-  outbound_allowlist text[]
-  policy_source text
-
-role_routing
-  role_key text primary key
-  channel_id references channels(id)
-  agent_id references agents(agent_id)
-  description text
-  new_work_allowed boolean
-
-agent_aliases
-  alias text primary key
-  canonical_agent_id references agents(agent_id)
-  new_work_allowed boolean
-  reason text
 ```
 
-The exact schema can be refined, but the important split is stable identity,
-display labels, platform adapters, and routing policy.
+The important split is stable identity, display labels, platform adapters, and
+routing policy.
 
 ## JSON Policy
-
-After the DB tables exist:
 
 - JSON may seed default rows.
 - JSON may export a snapshot for review.
@@ -125,7 +112,7 @@ combines:
 - live `agents`
 - live `channels`
 - live `channel_adapters`
-- current channel policy from `config/bot-routing.json`
+- DB channel policy from `channel_routing_policy`, with JSON fallback by channel
 - current role routing from `config/agent-role-routing.json`
 
 Use:
@@ -143,12 +130,65 @@ The report marks:
 - channel ids that look like platform ids
 - governance roles and unusable role targets
 
+## Policy Commands
+
+List active DB policy:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts channel policy list --format json
+```
+
+Seed DB policy from the compatibility JSON:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts channel policy import-json --dry-run
+```
+
+Bootstrap policy candidates from live channel membership and Discord adapter
+rows:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts channel policy bootstrap --dry-run \
+  --extra-allowlist codex-aun,codex-cto,codex-audit
+```
+
+The bootstrap command is intentionally dry-run by default. Executing it broadens
+runtime send permissions and should go through PR/audit approval before
+production use:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts channel policy bootstrap --execute \
+  --extra-allowlist codex-aun,codex-cto,codex-audit
+```
+
+## Other-Channel AUN Readiness
+
+For AUN to function in a non-`agent-com` Discord channel, that channel needs:
+
+- a `channels` row and a Discord `channel_adapters` row
+- a `channel_routing_policy` row with `primary_agent_id`
+- a `channel_routing_policy.adapter_owner_agent_id` pointing at a ready bot
+  member with a Discord identity
+- an `outbound_allowlist` containing the sender and intended recipients, for
+  example `codex-aun` plus the channel's local bot
+- the adapter owner bot process running so it can claim outbound rows
+
+If bootstrap reports `no_ready_discord_bot_member`, routing policy alone is not
+enough; a channel-local bot must be registered, given a Discord identity, and
+started before AUN can post through that channel.
+
 ## Migration Path
 
 1. Keep existing `agents`, `channels`, and adapter tables.
 2. Add read-only directory reporting.
-3. Add DB policy tables with backfill from JSON.
-4. Teach routing reads to prefer DB policy and fall back to JSON.
+3. Add DB policy tables with backfill from JSON. Done for
+   `channel_routing_policy`, `role_routing`, and `agent_aliases`.
+4. Teach routing reads to prefer DB policy and fall back to JSON. Done for
+   channel policy.
 5. Add UI writes to DB only.
 6. Keep JSON export/import for backup and review.
 7. Remove JSON runtime dependency after one full release cycle.

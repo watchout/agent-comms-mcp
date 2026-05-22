@@ -1,4 +1,4 @@
-import { getChannelPolicy } from './channel-policy'
+import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './channel-policy'
 
 export type Queryable = {
   query: (sql: string, params?: any[]) => Promise<{ rows: any[] }>
@@ -146,6 +146,7 @@ export async function resolveOutboundProjectionRoute(
   db: Queryable,
   input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null; recipientAgentIds?: string[] | null },
 ): Promise<OutboundProjectionRoute> {
+  await refreshChannelPolicyDbSnapshot(db)
   const platform = input.platform ?? 'discord'
   let channelExternalId: string | null = null
 
@@ -209,6 +210,7 @@ export async function resolveOutboundProjectionDecision(
   db: Queryable,
   input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null; recipientAgentIds?: string[] | null },
 ): Promise<OutboundProjectionDecision> {
+  await refreshChannelPolicyDbSnapshot(db)
   const base = await resolveSurfaceAndConsumer(db, input)
   const recipients = (input.recipientAgentIds ?? []).filter((id) => typeof id === 'string' && id.trim().length > 0)
   const singleRecipient = recipients.length === 1 ? recipients[0].trim() : null
