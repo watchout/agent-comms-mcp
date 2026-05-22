@@ -126,6 +126,36 @@ The projection must be script-controlled and dry-run-first. It may create
 provider-neutral connector and binding rows, but it must not rewrite legacy
 routing policy or switch live queue behavior by itself.
 
+## Runtime Inventory
+
+Runtime adoption must be evidence-based before any connector is treated as
+healthy. The read-only operator report is:
+
+```text
+agent-com runtime inventory --format json --binding-role outbound
+```
+
+The report joins:
+
+- `agents`
+- `agent_runtime_instances`
+- `connector_instances`
+- `channel_connector_bindings`
+- `channel_routing_policy`
+
+It reports runtime freshness, commit evidence, connector-to-runtime linkage,
+binding ownership, and legacy policy projection gaps for the requested binding
+role. The default is `outbound`, matching `sync-connectors` and preventing an
+unrelated active `inbound`/`presence`/`worker` binding from hiding an outbound
+projection gap. This is intentionally read-only: it does not stop sessions,
+restart workers, rewrite routing policy, or claim queues.
+
+The final design rule is that local process evidence is operational evidence
+only. A local path, tmux session name, or Discord identity must never become
+the enterprise trust root. They can help diagnose a local rollout, but authority
+must come from the DB-backed logical identity, connector binding, lease, and
+future authenticated endpoint/key records.
+
 ## Claim Model
 
 Workers claim work directly from the queue. There is no central process that
@@ -186,6 +216,21 @@ The next implementation slice adds script-controlled lease primitives:
 These primitives do not change live routing behavior by themselves. Existing
 `consumer_agent_id` and `channel_routing_policy` behavior remains the active
 path until a channel or connector explicitly opts into lease-backed workers.
+
+The connector projection slice adds:
+
+- `agent-com channel policy sync-connectors`
+- dry-run-first projection from `channel_routing_policy.adapter_owner_agent_id`
+  into `connector_instances` and `channel_connector_bindings`
+- audit logging for explicit `--execute`
+- no automatic switch of live queue behavior
+
+The runtime freshness slice adds:
+
+- `agent-com runtime inventory`
+- read-only runtime/connector/binding freshness evidence
+- binding-role-scoped policy gap detection before connector execute/canary steps
+- optional expected commit comparison for stale checkout detection
 
 ## Acceptance Criteria
 
