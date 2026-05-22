@@ -227,4 +227,66 @@ describe('migrateSqlite', () => {
 
     db.close()
   })
+
+  it('generates SQLite foundation IDs and rejects NULL text primary keys', () => {
+    migrateSqlite(MIGRATE_DB)
+
+    const db = new (require('bun:sqlite').Database)(MIGRATE_DB)
+    db.prepare("INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'SQLite Foundation PK Bot',
+      'dev',
+    )
+
+    db.prepare("INSERT INTO agent_runtime_instances (agent_id) VALUES (?)").run('sqlite-foundation-pk-bot')
+    db.prepare("INSERT INTO agent_runtime_instances (agent_id) VALUES (?)").run('sqlite-foundation-pk-bot')
+    const runtimeIds = db.prepare("SELECT runtime_instance_id FROM agent_runtime_instances WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')
+      .map((row: any) => row.runtime_instance_id)
+    expect(runtimeIds).toHaveLength(2)
+    expect(runtimeIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(runtimeIds).size).toBe(2)
+
+    db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'local://sqlite-foundation-pk-bot/one',
+    )
+    db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'local://sqlite-foundation-pk-bot/two',
+    )
+    const endpointIds = db.prepare("SELECT endpoint_id FROM agent_endpoints WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')
+      .map((row: any) => row.endpoint_id)
+    expect(endpointIds).toHaveLength(2)
+    expect(endpointIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(endpointIds).size).toBe(2)
+
+    db.prepare("INSERT INTO agent_identity_keys (agent_id, public_key, fingerprint) VALUES (?, ?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'public-key-one',
+      'fingerprint-one',
+    )
+    db.prepare("INSERT INTO agent_identity_keys (agent_id, public_key, fingerprint) VALUES (?, ?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'public-key-two',
+      'fingerprint-two',
+    )
+    const keyIds = db.prepare("SELECT key_id FROM agent_identity_keys WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')
+      .map((row: any) => row.key_id)
+    expect(keyIds).toHaveLength(2)
+    expect(keyIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(keyIds).size).toBe(2)
+
+    expect(() => db.prepare("INSERT INTO agent_workspaces (workspace_id, name) VALUES (NULL, ?)").run('bad')).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id) VALUES (NULL, ?)").run('sqlite-foundation-pk-bot')).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_endpoints (endpoint_id, agent_id, endpoint_uri) VALUES (NULL, ?, ?)").run('sqlite-foundation-pk-bot', 'local://bad')).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_identity_keys (key_id, agent_id, public_key, fingerprint) VALUES (NULL, ?, ?, ?)").run('sqlite-foundation-pk-bot', 'bad-key', 'bad-fingerprint')).toThrow()
+    expect(() => db.prepare("INSERT INTO channel_routing_policy (channel_id) VALUES (NULL)").run()).toThrow()
+    expect(() => db.prepare("INSERT INTO role_routing (role_key) VALUES (NULL)").run()).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_aliases (alias, canonical_agent_id) VALUES (NULL, ?)").run('sqlite-foundation-pk-bot')).toThrow()
+
+    db.close()
+  })
 })

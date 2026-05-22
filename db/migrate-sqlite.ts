@@ -16,12 +16,13 @@ export function migrateSqlite(dbPath?: string): void {
     assertDestructiveMigrationAllowed(sql)
     db.exec(sql)
   }
+  const uuidDefault = `(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))))`
   gatedExec('PRAGMA journal_mode = WAL')
   gatedExec('PRAGMA foreign_keys = ON')
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_messages (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       channel_id TEXT,
       thread_id TEXT,
       author_id TEXT NOT NULL,
@@ -181,7 +182,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agents (
-      agent_id TEXT PRIMARY KEY,
+      agent_id TEXT PRIMARY KEY NOT NULL,
       display_name TEXT NOT NULL DEFAULT '',
       agent_type TEXT NOT NULL DEFAULT 'dev',
       cli_type TEXT,
@@ -268,7 +269,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_workspaces (
-      workspace_id TEXT PRIMARY KEY,
+      workspace_id TEXT PRIMARY KEY NOT NULL,
       org_id TEXT NOT NULL DEFAULT 'default',
       name TEXT NOT NULL,
       workspace_type TEXT NOT NULL DEFAULT 'local_path',
@@ -298,7 +299,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_runtime_instances (
-      runtime_instance_id TEXT PRIMARY KEY,
+      runtime_instance_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
       workspace_id TEXT REFERENCES agent_workspaces(workspace_id) ON DELETE SET NULL,
       runtime_engine TEXT NOT NULL DEFAULT 'unknown',
@@ -322,7 +323,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_endpoints (
-      endpoint_id TEXT PRIMARY KEY,
+      endpoint_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
       endpoint_uri TEXT NOT NULL,
       transport TEXT NOT NULL DEFAULT 'local',
@@ -342,7 +343,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_identity_keys (
-      key_id TEXT PRIMARY KEY,
+      key_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
       key_type TEXT NOT NULL DEFAULT 'ed25519',
       public_key TEXT NOT NULL,
@@ -359,7 +360,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS channels (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       name TEXT,
       type TEXT DEFAULT 'channel',
       topic TEXT,
@@ -370,7 +371,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS threads (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       channel_id TEXT REFERENCES channels(id),
       name TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -398,7 +399,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS channel_routing_policy (
-      channel_id TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+      channel_id TEXT PRIMARY KEY NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
       primary_agent_id TEXT REFERENCES agents(agent_id),
       adapter_owner_agent_id TEXT REFERENCES agents(agent_id),
       outbound_allowlist TEXT,
@@ -414,7 +415,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS role_routing (
-      role_key TEXT PRIMARY KEY,
+      role_key TEXT PRIMARY KEY NOT NULL,
       channel_id TEXT REFERENCES channels(id),
       agent_id TEXT REFERENCES agents(agent_id),
       description TEXT,
@@ -428,7 +429,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_aliases (
-      alias TEXT PRIMARY KEY,
+      alias TEXT PRIMARY KEY NOT NULL,
       canonical_agent_id TEXT NOT NULL REFERENCES agents(agent_id),
       new_work_allowed INTEGER NOT NULL DEFAULT 1,
       reason TEXT,
@@ -460,14 +461,14 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS duplicate_hashes (
-      hash TEXT PRIMARY KEY,
+      hash TEXT PRIMARY KEY NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS audit_log (
-      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6)))),
+      id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       event_type TEXT NOT NULL,
       agent_id TEXT,
       target TEXT,
