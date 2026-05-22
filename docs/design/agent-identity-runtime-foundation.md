@@ -18,6 +18,12 @@ Discord adapter. Those concepts are separate records:
   workspace.
 - `agent_runtime_instances`: what is currently running for an identity, such
   as Codex, Claude Code, a local tmux process, or a future remote worker.
+- `connector_instances`: provider-facing connector processes that can speak to
+  Discord, Slack, webhook, or future AUN-native surfaces.
+- `channel_connector_bindings`: which connector roles are allowed to handle a
+  channel without requiring one session per channel.
+- `control_plane_leases`: short-lived worker claims for connector, channel
+  binding, queue partition, or runtime scopes.
 - `agent_endpoints`: how the identity can be reached.
 - `agent_identity_keys`: public keys and fingerprints for future signed
   external identity.
@@ -144,3 +150,5 @@ this identity's stable address?".
 
 The UI registration, search, and binding behavior is specified in
 [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).
+The distributed worker/connector lease behavior is specified in
+[`distributed-control-plane-foundation.md`](./distributed-control-plane-foundation.md).
