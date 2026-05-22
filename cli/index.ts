@@ -36,6 +36,7 @@ import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
+import { createOutboundPolicyValidator } from '../core/routing'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -175,6 +176,16 @@ async function pgNotify(db: Client, channel: string, payload: Record<string, unk
   } catch (err) {
     process.stderr.write(`agent-com: pg_notify failed (non-fatal): ${err}\n`)
   }
+}
+
+async function validateCliOutboundPolicy(
+  db: Client,
+  sender: string,
+  channelId: string,
+  recipients: string[],
+): Promise<{ ok: true } | { ok: false; violations: string[] }> {
+  await refreshChannelPolicyDbSnapshot(db as any)
+  return createOutboundPolicyValidator().validate(sender, channelId, recipients)
 }
 
 // --- Commands ---
@@ -1242,6 +1253,22 @@ async function sendMessage(args: string[]) {
         }
       }
 
+      const aclResult = await validateCliOutboundPolicy(db, agentId, channelId, mentions)
+      if (!aclResult.ok) {
+        const detail = `sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist`
+        if (explicitClose) {
+          writeFailureJson('OUTBOUND_ACL_VIOLATION', detail, {
+            queue_id: target.queue_id,
+            message_id: replyTo,
+            channel_id: channelId,
+            violations: aclResult.violations,
+          })
+        } else {
+          console.error(`Error [OUTBOUND_ACL_VIOLATION]: ${detail}`)
+          throw new CliSendExit(1)
+        }
+      }
+
       const id = randomUUID()
       // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
       // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
@@ -1539,6 +1566,12 @@ async function notifyMessage(args: string[]) {
     const members: string[] = ch.rows[0].members ?? []
     if (!members.includes(agentId)) {
       console.error(`Error: ${agentId} is not a member of channel ${resolvedChannelId}`)
+      process.exit(1)
+    }
+
+    const aclResult = await validateCliOutboundPolicy(db, agentId, resolvedChannelId, mentions)
+    if (!aclResult.ok) {
+      console.error(`Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist`)
       process.exit(1)
     }
 
