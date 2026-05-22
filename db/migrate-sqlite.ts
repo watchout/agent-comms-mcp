@@ -16,12 +16,13 @@ export function migrateSqlite(dbPath?: string): void {
     assertDestructiveMigrationAllowed(sql)
     db.exec(sql)
   }
+  const uuidDefault = `(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))))`
   gatedExec('PRAGMA journal_mode = WAL')
   gatedExec('PRAGMA foreign_keys = ON')
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_messages (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       channel_id TEXT,
       thread_id TEXT,
       author_id TEXT NOT NULL,
@@ -181,7 +182,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agents (
-      agent_id TEXT PRIMARY KEY,
+      agent_id TEXT PRIMARY KEY NOT NULL,
       display_name TEXT NOT NULL DEFAULT '',
       agent_type TEXT NOT NULL DEFAULT 'dev',
       cli_type TEXT,
@@ -198,6 +199,13 @@ export function migrateSqlite(dbPath?: string): void {
       -- claim model on message_queue (claimed_by / claimed_at /
       -- claim_expires_at) replaces it.
       metadata TEXT DEFAULT '{}',
+      agent_uri TEXT,
+      identity_scope TEXT NOT NULL DEFAULT 'local',
+      trust_status TEXT NOT NULL DEFAULT 'local',
+      auth_method TEXT NOT NULL DEFAULT 'local',
+      auth_subject TEXT,
+      disabled_at TEXT,
+      identity_metadata TEXT NOT NULL DEFAULT '{}',
       -- Issue #287 (PR-0 cycle 5 axis 4) — inbox cursor persistence
       -- mirrors PG schema added in db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
       -- so SQLite-backed deployments survive session restarts identically.
@@ -219,10 +227,140 @@ export function migrateSqlite(dbPath?: string): void {
   if (!agentsColNames.has('last_wake_attempt_at')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN last_wake_attempt_at TEXT`)
   }
+  if (!agentsColNames.has('agent_uri')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN agent_uri TEXT`)
+  }
+  if (!agentsColNames.has('identity_scope')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN identity_scope TEXT NOT NULL DEFAULT 'local'`)
+  }
+  if (!agentsColNames.has('trust_status')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN trust_status TEXT NOT NULL DEFAULT 'local'`)
+  }
+  if (!agentsColNames.has('auth_method')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'local'`)
+  }
+  if (!agentsColNames.has('auth_subject')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN auth_subject TEXT`)
+  }
+  if (!agentsColNames.has('disabled_at')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN disabled_at TEXT`)
+  }
+  if (!agentsColNames.has('identity_metadata')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN identity_metadata TEXT NOT NULL DEFAULT '{}'`)
+  }
+  gatedExec(`UPDATE agents SET agent_uri = 'aun://default/agents/' || agent_id WHERE agent_uri IS NULL OR agent_uri = ''`)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_agent_uri ON agents(agent_uri) WHERE agent_uri IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_identity_scope ON agents(identity_scope)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_trust_status ON agents(trust_status)`)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_agent_uri_after_insert
+    AFTER INSERT ON agents
+    WHEN NEW.agent_uri IS NULL OR NEW.agent_uri = ''
+    BEGIN
+      UPDATE agents
+         SET agent_uri = 'aun://default/agents/' || NEW.agent_id,
+             identity_scope = COALESCE(NULLIF(NEW.identity_scope, ''), 'local'),
+             trust_status = COALESCE(NULLIF(NEW.trust_status, ''), 'local'),
+             auth_method = COALESCE(NULLIF(NEW.auth_method, ''), 'local'),
+             identity_metadata = COALESCE(NEW.identity_metadata, '{}')
+       WHERE agent_id = NEW.agent_id;
+    END;
+  `)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_workspaces (
+      workspace_id TEXT PRIMARY KEY NOT NULL,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      name TEXT NOT NULL,
+      workspace_type TEXT NOT NULL DEFAULT 'local_path',
+      local_path TEXT,
+      repo_url TEXT,
+      default_branch TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_workspaces_org ON agent_workspaces(org_id)`)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_workspaces_local_path ON agent_workspaces(org_id, local_path) WHERE local_path IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_workspace_bindings (
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      workspace_id TEXT NOT NULL REFERENCES agent_workspaces(workspace_id) ON DELETE CASCADE,
+      binding_role TEXT NOT NULL DEFAULT 'primary',
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (agent_id, workspace_id, binding_role)
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_workspace_bindings_workspace ON agent_workspace_bindings(workspace_id) WHERE active = 1`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_runtime_instances (
+      runtime_instance_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      workspace_id TEXT REFERENCES agent_workspaces(workspace_id) ON DELETE SET NULL,
+      runtime_engine TEXT NOT NULL DEFAULT 'unknown',
+      runtime_kind TEXT NOT NULL DEFAULT 'local_process',
+      host_id TEXT,
+      session_name TEXT,
+      process_id INTEGER,
+      port INTEGER,
+      checkout_path TEXT,
+      commit_sha TEXT,
+      endpoint_uri TEXT,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      stopped_at TEXT,
+      last_seen_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}'
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_runtime_instances_agent_status ON agent_runtime_instances(agent_id, status, started_at DESC)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_runtime_instances_workspace ON agent_runtime_instances(workspace_id) WHERE workspace_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_endpoints (
+      endpoint_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      endpoint_uri TEXT NOT NULL,
+      transport TEXT NOT NULL DEFAULT 'local',
+      auth_method TEXT NOT NULL DEFAULT 'local',
+      trust_status TEXT NOT NULL DEFAULT 'local',
+      public_key_fingerprint TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT,
+      UNIQUE(agent_id, endpoint_uri)
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_endpoints_uri ON agent_endpoints(endpoint_uri)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_endpoints_status ON agent_endpoints(status)`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_identity_keys (
+      key_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      key_type TEXT NOT NULL DEFAULT 'ed25519',
+      public_key TEXT NOT NULL,
+      fingerprint TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'active',
+      valid_from TEXT NOT NULL DEFAULT (datetime('now')),
+      valid_until TEXT,
+      revoked_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_identity_keys_agent_status ON agent_identity_keys(agent_id, status)`)
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS channels (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       name TEXT,
       type TEXT DEFAULT 'channel',
       topic TEXT,
@@ -233,7 +371,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS threads (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL,
       channel_id TEXT REFERENCES channels(id),
       name TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -261,7 +399,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS channel_routing_policy (
-      channel_id TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+      channel_id TEXT PRIMARY KEY NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
       primary_agent_id TEXT REFERENCES agents(agent_id),
       adapter_owner_agent_id TEXT REFERENCES agents(agent_id),
       outbound_allowlist TEXT,
@@ -277,7 +415,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS role_routing (
-      role_key TEXT PRIMARY KEY,
+      role_key TEXT PRIMARY KEY NOT NULL,
       channel_id TEXT REFERENCES channels(id),
       agent_id TEXT REFERENCES agents(agent_id),
       description TEXT,
@@ -291,7 +429,7 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agent_aliases (
-      alias TEXT PRIMARY KEY,
+      alias TEXT PRIMARY KEY NOT NULL,
       canonical_agent_id TEXT NOT NULL REFERENCES agents(agent_id),
       new_work_allowed INTEGER NOT NULL DEFAULT 1,
       reason TEXT,
@@ -323,14 +461,14 @@ export function migrateSqlite(dbPath?: string): void {
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS duplicate_hashes (
-      hash TEXT PRIMARY KEY,
+      hash TEXT PRIMARY KEY NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS audit_log (
-      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6)))),
+      id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       event_type TEXT NOT NULL,
       agent_id TEXT,
       target TEXT,

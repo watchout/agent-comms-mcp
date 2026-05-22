@@ -188,8 +188,105 @@ describe('migrateSqlite', () => {
     expect(names).toContain('channel_routing_policy')
     expect(names).toContain('role_routing')
     expect(names).toContain('agent_aliases')
+    expect(names).toContain('agent_workspaces')
+    expect(names).toContain('agent_workspace_bindings')
+    expect(names).toContain('agent_runtime_instances')
+    expect(names).toContain('agent_endpoints')
+    expect(names).toContain('agent_identity_keys')
     expect(names).toContain('audit_log')
     expect(names).toContain('threads')
+    db.close()
+  })
+
+  it('creates agent identity/runtime foundation columns', () => {
+    migrateSqlite(MIGRATE_DB)
+
+    const db = new (require('bun:sqlite').Database)(MIGRATE_DB)
+    const cols = db.prepare("PRAGMA table_info(agents)").all()
+    const names = cols.map((c: any) => c.name)
+
+    expect(names).toContain('agent_uri')
+    expect(names).toContain('identity_scope')
+    expect(names).toContain('trust_status')
+    expect(names).toContain('auth_method')
+    expect(names).toContain('auth_subject')
+    expect(names).toContain('disabled_at')
+    expect(names).toContain('identity_metadata')
+
+    db.prepare("INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, ?)").run(
+      'identity-foundation-bot',
+      'Identity Foundation Bot',
+      'dev',
+    )
+    const row = db.prepare("SELECT agent_uri, identity_scope, trust_status, auth_method FROM agents WHERE agent_id = ?")
+      .get('identity-foundation-bot') as any
+    expect(row.agent_uri).toBe('aun://default/agents/identity-foundation-bot')
+    expect(row.identity_scope).toBe('local')
+    expect(row.trust_status).toBe('local')
+    expect(row.auth_method).toBe('local')
+
+    db.close()
+  })
+
+  it('generates SQLite foundation IDs and rejects NULL text primary keys', () => {
+    migrateSqlite(MIGRATE_DB)
+
+    const db = new (require('bun:sqlite').Database)(MIGRATE_DB)
+    db.prepare("INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'SQLite Foundation PK Bot',
+      'dev',
+    )
+
+    db.prepare("INSERT INTO agent_runtime_instances (agent_id) VALUES (?)").run('sqlite-foundation-pk-bot')
+    db.prepare("INSERT INTO agent_runtime_instances (agent_id) VALUES (?)").run('sqlite-foundation-pk-bot')
+    const runtimeIds = db.prepare("SELECT runtime_instance_id FROM agent_runtime_instances WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')
+      .map((row: any) => row.runtime_instance_id)
+    expect(runtimeIds).toHaveLength(2)
+    expect(runtimeIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(runtimeIds).size).toBe(2)
+
+    db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'local://sqlite-foundation-pk-bot/one',
+    )
+    db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'local://sqlite-foundation-pk-bot/two',
+    )
+    const endpointIds = db.prepare("SELECT endpoint_id FROM agent_endpoints WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')
+      .map((row: any) => row.endpoint_id)
+    expect(endpointIds).toHaveLength(2)
+    expect(endpointIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(endpointIds).size).toBe(2)
+
+    db.prepare("INSERT INTO agent_identity_keys (agent_id, public_key, fingerprint) VALUES (?, ?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'public-key-one',
+      'fingerprint-one',
+    )
+    db.prepare("INSERT INTO agent_identity_keys (agent_id, public_key, fingerprint) VALUES (?, ?, ?)").run(
+      'sqlite-foundation-pk-bot',
+      'public-key-two',
+      'fingerprint-two',
+    )
+    const keyIds = db.prepare("SELECT key_id FROM agent_identity_keys WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')
+      .map((row: any) => row.key_id)
+    expect(keyIds).toHaveLength(2)
+    expect(keyIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
+    expect(new Set(keyIds).size).toBe(2)
+
+    expect(() => db.prepare("INSERT INTO agent_workspaces (workspace_id, name) VALUES (NULL, ?)").run('bad')).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id) VALUES (NULL, ?)").run('sqlite-foundation-pk-bot')).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_endpoints (endpoint_id, agent_id, endpoint_uri) VALUES (NULL, ?, ?)").run('sqlite-foundation-pk-bot', 'local://bad')).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_identity_keys (key_id, agent_id, public_key, fingerprint) VALUES (NULL, ?, ?, ?)").run('sqlite-foundation-pk-bot', 'bad-key', 'bad-fingerprint')).toThrow()
+    expect(() => db.prepare("INSERT INTO channel_routing_policy (channel_id) VALUES (NULL)").run()).toThrow()
+    expect(() => db.prepare("INSERT INTO role_routing (role_key) VALUES (NULL)").run()).toThrow()
+    expect(() => db.prepare("INSERT INTO agent_aliases (alias, canonical_agent_id) VALUES (NULL, ?)").run('sqlite-foundation-pk-bot')).toThrow()
+
     db.close()
   })
 })

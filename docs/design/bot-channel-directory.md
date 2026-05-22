@@ -7,6 +7,16 @@ membership, and user-editable routing state. JSON files remain useful for
 bootstrap, seed data, export/import, tests, and emergency GitOps review, but
 they should not be the long-term UI editing surface.
 
+Agent identity is distinct from workspaces and running LLM processes. The
+identity/runtime split is defined in
+[`agent-identity-runtime-foundation.md`](./agent-identity-runtime-foundation.md).
+The UI registration and search behavior is defined in
+[`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).
+Channel membership and routing policy continue to reference stable `agent_id`
+values; UI and future external agent registration should additionally expose
+`agent_uri`, workspace bindings, runtime instances, endpoints, and identity
+keys.
+
 ## Stable IDs
 
 `agent_id` is a stable logical slug.
