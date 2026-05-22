@@ -141,3 +141,6 @@ Phase 3: signed remote agents.
 work?". `runtime_instance_id` answers "what is running now?". `endpoint_uri`
 answers "where can this identity be reached?". `agent_uri` answers "what is
 this identity's stable address?".
+
+The UI registration, search, and binding behavior is specified in
+[`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).

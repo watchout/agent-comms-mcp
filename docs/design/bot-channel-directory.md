@@ -10,6 +10,8 @@ they should not be the long-term UI editing surface.
 Agent identity is distinct from workspaces and running LLM processes. The
 identity/runtime split is defined in
 [`agent-identity-runtime-foundation.md`](./agent-identity-runtime-foundation.md).
+The UI registration and search behavior is defined in
+[`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).
 Channel membership and routing policy continue to reference stable `agent_id`
 values; UI and future external agent registration should additionally expose
 `agent_uri`, workspace bindings, runtime instances, endpoints, and identity
