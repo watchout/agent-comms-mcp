@@ -1,13 +1,15 @@
 # Bot Registry — SESSION|PROJECT_DIR|AGENT_ID|PORT|COMMAND
-# COMMAND is the exact claude startup command. Watchdog/restart use this verbatim.
+# COMMAND is the exact runtime startup command. Watchdog/restart use this verbatim.
 # Restored to stdio + channel plugin mode (Phase 5)
 #
 # Runtime identity lock rollout:
-# - Codex-backed sessions must set AGENT_ID=<agent_id> and
-#   AGENT_COM_EXPECTED_AGENT_ID=<agent_id> in their process environment.
+# - Codex-backed sessions must pass MCP config overrides because Codex reads
+#   ~/.codex/config.toml before project .mcp.json. Keep agent-comms disabled
+#   when aun is the active registration to avoid duplicate MCP runtimes.
 # - Claude sessions remain compatible without AGENT_COM_EXPECTED_AGENT_ID until
 #   each session is migrated to script-controlled identity.
-discord-cto|~/Developer/tech-lead|codex-cto|8789|AGENT_ID=codex-cto AGENT_COM_EXPECTED_AGENT_ID=codex-cto codex --dangerously-bypass-approvals-and-sandbox
+codex-audit|~/Developer/codex-audit|codex-audit|8840|codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.agent-comms.enabled=false' -c 'mcp_servers.wasurezu.enabled=false' -c 'mcp_servers.aun.env.AGENT_ID="codex-audit"' -c 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="codex-audit"' -c 'mcp_servers.aun.env.DATABASE_URL="postgresql:///agent_comms?host=/tmp"' -c 'mcp_servers.aun.env.WEBHOOK_PORT="8840"' -c 'mcp_servers.aun.env.DISCORD_STATE_DIR="/Users/yuji/.claude/channels/codex-audit"'
+discord-cto|~/Developer/codex|codex-cto|8789|codex --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.agent-comms.enabled=false' -c 'mcp_servers.aun.env.AGENT_ID="codex-cto"' -c 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="codex-cto"' -c 'mcp_servers.aun.env.DATABASE_URL="postgresql:///agent_comms?host=/tmp"' -c 'mcp_servers.aun.env.WEBHOOK_PORT="8789"' -c 'mcp_servers.aun.env.DISCORD_STATE_DIR="/Users/yuji/.claude/channels/discord-cto"' -c 'mcp_servers.wasurezu.env.AGENT_MEMORY_AGENT_ID="codex-cto"' -c 'mcp_servers.wasurezu.env.AGENT_MEMORY_PROJECT="codex"'
 discord-haishin|~/Developer/haishin-puls-hub|haishin-dev|8792|claude --mcp-config .mcp.json --dangerously-skip-permissions
 discord-nyusatsu|~/Developer/nyusatsu|nyusatsu-dev|8793|claude --mcp-config .mcp.json --dangerously-skip-permissions
 discord-adf|~/Developer/ai-dev-framework|adf-lead|8794|claude --mcp-config .mcp.json --dangerously-skip-permissions

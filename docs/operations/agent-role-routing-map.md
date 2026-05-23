@@ -42,6 +42,37 @@ The MCP registration name should be `aun`. Legacy `agent-comms` registrations
 may remain only as temporary compatibility aliases and must carry the same
 `AGENT_ID` / `AGENT_COM_EXPECTED_AGENT_ID` pair.
 
+## Codex Runtime Restart SSOT
+
+Codex-backed governance runtimes must be restarted through
+`scripts/bot-registry.txt`, not ad hoc tmux commands. Codex reads
+`~/.codex/config.toml` before project `.mcp.json`, so the registry command must
+carry explicit MCP overrides for the runtime identity.
+
+Required registry rows:
+
+| Session | Project dir | agent_id | Port | Notes |
+|---|---|---:|---:|---|
+| `codex-audit` | `~/Developer/codex-audit` | `codex-audit` | `8840` | L2 audit runtime. Disable `wasurezu` unless explicitly needed. |
+| `discord-cto` | `~/Developer/codex` | `codex-cto` | `8789` | L3/CTO runtime. Keep `wasurezu` identity aligned to `codex-cto` / `codex`. |
+
+Restart commands:
+
+```bash
+scripts/restart-bot.sh codex-audit
+scripts/restart-bot.sh discord-cto
+```
+
+Pass criteria after restart:
+
+- `agent_runtime_instances` has fresh `running` rows for `codex-audit` and
+  `codex-cto`.
+- `codex-audit` listens on `127.0.0.1:8840`.
+- `codex-cto` listens on `127.0.0.1:8789`.
+- Both runtime rows report the same `commit_sha` as the deployed AUN checkout.
+- `message_queue` active count and `outbound_queue` active count do not
+  increase during restart.
+
 ## Read-Only Preflight
 
 Before PR governance handoff, verify the role map against live registration
