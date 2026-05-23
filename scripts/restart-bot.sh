@@ -60,6 +60,13 @@ tmux send-keys -t "$SESSION" "$CLAUDE_CMD" Enter
 
 # Step 5: Wait for TUI prompt and auto-confirm
 sleep 3
-tmux send-keys -t "$SESSION" Enter
+PANE_TEXT=$(tmux capture-pane -pt "$SESSION" -S -40 2>/dev/null || true)
+if printf '%s\n' "$CLAUDE_CMD" | grep -qE '(^|[[:space:]])codex([[:space:]]|$)' \
+  && printf '%s\n' "$PANE_TEXT" | grep -q "Update now"; then
+  # Codex update prompts default to updating; choose the non-update option.
+  tmux send-keys -t "$SESSION" 2 Enter
+else
+  tmux send-keys -t "$SESSION" Enter
+fi
 
 echo "[restart-bot] ${SESSION} started in ${PROJECT_DIR_EXPANDED}"

@@ -171,7 +171,21 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
-  test('10. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
+  test('10. restart-bot.sh avoids accepting Codex update prompts during automated restarts', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
+    const step5 = script.slice(
+      script.indexOf('# Step 5: Wait for TUI prompt and auto-confirm'),
+      script.indexOf('echo "[restart-bot] ${SESSION} started'),
+    )
+
+    expect(step5).toContain('tmux capture-pane -pt "$SESSION"')
+    expect(step5).toContain("grep -qE '(^|[[:space:]])codex([[:space:]]|$)'")
+    expect(step5).toContain('grep -q "Update now"')
+    expect(step5).toContain('tmux send-keys -t "$SESSION" 2 Enter')
+    expect(step5).toContain('tmux send-keys -t "$SESSION" Enter')
+  })
+
+  test('11. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
     // Phase C I4: dual mode removed. Restart-phantom-prompt fix
     // (2026-04-21): `server:agent-comms` removed from DEFAULT_CMD.
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
@@ -202,7 +216,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(afterConnect).toMatch(/discordClients\.set\(\s*AGENT_ID\s*,\s*discord\s*\)/)
   })
 
-  test('11. server.ts DEFAULT_CLAUDE_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
+  test('13. server.ts DEFAULT_CLAUDE_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
     // Phase C I4: dual mode removed. Restart-phantom-prompt fix
     // (2026-04-21): `server:agent-comms` removed from DEFAULT_CLAUDE_CMD.
     const line = SERVER_SRC
@@ -214,7 +228,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
-  test('13. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {
+  test('14. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {
     // Regression class: the 2026-04-13 CTO wedged-consumer incident. An
     // awaited call (Discord REST or `pg` query) never settled, so the
     // try/finally never ran and `outboundConsumerInFlight` stayed true
