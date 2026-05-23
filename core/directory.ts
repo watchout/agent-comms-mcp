@@ -201,6 +201,11 @@ async function queryAgentRows(db: Queryable): Promise<any[]> {
   }
 }
 
+function metadataString(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key]
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
 function agentWarnings(row: any, channelCount: number, duplicateDisplayName: boolean): string[] {
   const warnings: string[] = []
   const status = String(row.status ?? '')
@@ -208,6 +213,7 @@ function agentWarnings(row: any, channelCount: number, duplicateDisplayName: boo
   if (status === 'offline' || status === 'disconnected') warnings.push('offline')
   if (channelCount === 0 && row.agent_type !== 'human') warnings.push('no_channel_membership')
   if (duplicateDisplayName) warnings.push('display_name_not_unique')
+  if (row.__duplicate_discord_identity === true) warnings.push('discord_identity_not_unique')
   const metadata = parseMetadata(row.metadata)
   if (metadata.project_dir || metadata.projectDir) warnings.push('project_dir_is_metadata_not_identity')
   return warnings
@@ -234,6 +240,7 @@ function mentionWarnings(agent: DirectoryAgent, hasActiveConnector: boolean): st
   if (agent.status === 'offline') warnings.push('offline_runtime_not_enforced_until_runtime_instances')
   if (agent.agent_type === 'human') warnings.push('human_recipient_not_a_bot_queue_worker')
   if (!agent.has_discord_identity) warnings.push('missing_discord_identity_for_native_mention')
+  if (agent.warnings.includes('discord_identity_not_unique')) warnings.push('discord_identity_not_unique')
   if (!hasActiveConnector && agent.agent_type !== 'human') warnings.push('no_active_connector')
   return warnings
 }
@@ -265,9 +272,12 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   ).catch(() => ({ rows: [] as any[] }))
 
   const displayNameCounts = new Map<string, number>()
+  const discordIdentityCounts = new Map<string, number>()
   for (const row of agentRows) {
     const name = String(row.display_name ?? '')
     displayNameCounts.set(name, (displayNameCounts.get(name) ?? 0) + 1)
+    const discordId = metadataString(parseMetadata(row.metadata), 'discord_id')
+    if (discordId) discordIdentityCounts.set(discordId, (discordIdentityCounts.get(discordId) ?? 0) + 1)
   }
 
   const agentStatus = new Map<string, string>()
@@ -295,7 +305,8 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     const metadata = parseMetadata(row.metadata)
     const channels = channelsByAgent.get(agentId) ?? []
     const channelCount = channels.length
-    const discordId = metadata.discord_id
+    const discordId = metadataString(metadata, 'discord_id')
+    row.__duplicate_discord_identity = discordId !== null && (discordIdentityCounts.get(discordId) ?? 0) > 1
     return {
       agent_id: agentId,
       display_name: String(row.display_name ?? agentId),
@@ -305,7 +316,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       sendability: sendabilityFor(String(row.agent_type ?? ''), String(row.status ?? ''), channelCount),
       channel_count: channelCount,
       channels,
-      has_discord_identity: typeof discordId === 'string' && discordId.trim().length > 0,
+      has_discord_identity: discordId !== null,
       tmux_session: typeof metadata.tmux_session === 'string' ? metadata.tmux_session : null,
       warnings: agentWarnings(row, channelCount, (displayNameCounts.get(String(row.display_name ?? '')) ?? 0) > 1),
     }
@@ -423,6 +434,9 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   }
   if (agents.some((agent) => agent.warnings.includes('display_name_not_unique'))) {
     warnings.push('some_display_names_are_not_unique')
+  }
+  if (agents.some((agent) => agent.warnings.includes('discord_identity_not_unique'))) {
+    warnings.push('some_discord_identities_are_not_unique')
   }
   if (roles.some((role) => role.warnings.includes('target_agent_missing') || role.warnings.includes('target_agent_blocked'))) {
     warnings.push('role_routing_has_unusable_targets')

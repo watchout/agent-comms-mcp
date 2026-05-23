@@ -443,8 +443,12 @@ describe('DiscordAdapter — D1 self-registration', () => {
   test('ready handler self-registers discord_id when agentId + dbQuery are set', () => {
     const readyIdx = ADAPTER_SOURCE.indexOf("this.client.once('ready'")
     expect(readyIdx).toBeGreaterThan(-1)
-    const body = ADAPTER_SOURCE.slice(readyIdx, readyIdx + 2000)
+    const body = ADAPTER_SOURCE.slice(readyIdx, readyIdx + 2800)
     expect(body).toContain('this.agentId && this.dbQuery')
+    expect(body).toContain("metadata->>'discord_id' = $1")
+    expect(body).toContain('agent_id <> $2')
+    expect(body).toContain('D1 duplicate discord identity blocked')
+    expect(body).toContain('this.client?.destroy()')
     expect(body).toContain('UPDATE agents')
     expect(body).toContain("jsonb_build_object('discord_id', $1::text)")
     // Idempotency guard so we do not write the same value on every reconnect
