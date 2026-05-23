@@ -19,11 +19,11 @@
       because launchd children do not reliably inherit a login user env.
     - StandardErrorPath is the canonical alert sink (see CompositeAlertSink
       in bin/state-daemon.ts).
-    - STATE_DAEMON_AGENT_ALLOWLIST is intentionally explicit during the
-      staged rollout. PR audit wake scope includes auditor (L1, TUI/tmux)
-      and codex-audit (L2, Codex runner) so queue delivery and wake semantics
-      match. codex-aun uses the Codex runner path while codex-cto remains a
-      TUI session woken through tmux.
+    - STATE_DAEMON_AGENT_DENYLIST excludes disabled/test/human identities from
+      automatic wake. Normal bot rollout is DB-driven: add an enabled agent
+      with channel membership and tmux/runtime metadata, and the daemon can
+      wake it without a plist edit. STATE_DAEMON_AGENT_ALLOWLIST remains a
+      supported emergency narrowing override, but production leaves it unset.
     - ThrottleInterval=10 prevents tight-loop crashes from saturating the
       logs / DB.
     - SIG runtime bots are not restarted by this daemon (spec §6.3 / R8 / F5);
@@ -85,8 +85,8 @@
     <string>1</string>
     <key>STATE_DAEMON_CODEX_RUNNER_DATABASE_URL</key>
     <string>postgresql:///agent_comms?host=/tmp</string>
-    <key>STATE_DAEMON_AGENT_ALLOWLIST</key>
-    <string>auditor,codex-audit,codex-aun,codex-cto</string>
+    <key>STATE_DAEMON_AGENT_DENYLIST</key>
+    <string>adf-dev,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown</string>
     <key>STATE_DAEMON_ALERT_CHANNEL</key>
     <string>1487368919613444156</string>
     <key>PGUSER</key>

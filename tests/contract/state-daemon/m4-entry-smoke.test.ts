@@ -76,6 +76,7 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
       'STATE_DAEMON_BOT_RESTART_MAX_PER_HOUR',
       'STATE_DAEMON_DB_ERROR_ALERT_THRESHOLD',
       'STATE_DAEMON_AGENT_ALLOWLIST',
+      'STATE_DAEMON_AGENT_DENYLIST',
     ]
     for (const k of expected) expect(SRC).toContain(k)
   })
@@ -121,14 +122,15 @@ describe('m4 — launchd plist source-pin', () => {
   test('DATABASE_URL is in EnvironmentVariables (operator must set before load)', () => {
     expect(PLIST).toMatch(/DATABASE_URL/)
   })
-  test('staged audit/Codex/CTO rollout env is pinned for launchd', () => {
+  test('DB-driven fleet rollout env is pinned for launchd', () => {
     expect(PLIST).toMatch(/<key>STATE_DAEMON_CODEX_RUNNER_ENABLED<\/key>\s*<string>1<\/string>/)
     expect(PLIST).toMatch(
       /<key>STATE_DAEMON_CODEX_RUNNER_DATABASE_URL<\/key>\s*<string>postgresql:\/\/\/agent_comms\?host=\/tmp<\/string>/,
     )
     expect(PLIST).toMatch(
-      /<key>STATE_DAEMON_AGENT_ALLOWLIST<\/key>\s*<string>auditor,codex-audit,codex-aun,codex-cto<\/string>/,
+      /<key>STATE_DAEMON_AGENT_DENYLIST<\/key>\s*<string>adf-dev,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown<\/string>/,
     )
+    expect(PLIST).not.toMatch(/<key>STATE_DAEMON_AGENT_ALLOWLIST<\/key>/)
     expect(PLIST).toMatch(/<key>STATE_DAEMON_ALERT_CHANNEL<\/key>\s*<string>1487368919613444156<\/string>/)
   })
   test('socket PostgreSQL launchd env pins PGUSER and USER', () => {

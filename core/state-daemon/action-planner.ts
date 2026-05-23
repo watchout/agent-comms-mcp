@@ -10,6 +10,7 @@ export type QueueActionKind =
   | 'runtime_skip'
   | 'tmux_missing'
   | 'agent_missing'
+  | 'agent_inactive'
   | 'observe_unknown'
 
 export interface PlannerQueueRow {
@@ -20,6 +21,7 @@ export interface PlannerQueueRow {
 export interface PlannerAgentRow {
   runtime: string | null
   tmux_session: string | null
+  status?: string | null
 }
 
 export interface PlanQueueActionInput {
@@ -39,6 +41,10 @@ const CODEX_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'
 
 function isCodexRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNTIMES.has(runtime)
+}
+
+function isInactiveAgent(status: string | null | undefined): boolean {
+  return status === 'disabled' || status === 'offline' || status === 'retired'
 }
 
 const TERMINAL_STATUSES = new Set([
@@ -61,6 +67,7 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
       return { kind: 'reclaim_expired', terminal: false }
     }
     if (!agent) return { kind: 'observe_received', terminal: false }
+    if (isInactiveAgent(agent.status)) return { kind: 'agent_inactive', terminal: false }
     if (isCodexRuntime(agent.runtime)) return { kind: 'observe_received', terminal: false }
     if (agent.runtime !== defaultRuntime) return { kind: 'runtime_skip', terminal: false }
     if (!agent.tmux_session) return { kind: 'tmux_missing', terminal: false }
@@ -73,6 +80,7 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
 
   if (row.status === 'pending') {
     if (!agent) return { kind: 'agent_missing', terminal: false }
+    if (isInactiveAgent(agent.status)) return { kind: 'agent_inactive', terminal: false }
     if (isCodexRuntime(agent.runtime)) {
       if (hasActiveClaim) return { kind: 'observe_busy', terminal: false }
       return { kind: 'invoke_codex_runner', terminal: false }

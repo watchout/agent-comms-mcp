@@ -65,6 +65,18 @@ describe('state_daemon state/action matrix planner', () => {
     })).toEqual({ kind: 'tmux_missing', terminal: false })
   })
 
+  test('pending + inactive agent is observed without wake', () => {
+    for (const status of ['disabled', 'offline', 'retired']) {
+      expect(planQueueAction({
+        row: { status: 'pending', claim_expires_at: null },
+        agent: { runtime: 'TUI', tmux_session: 'agent-session', status },
+        now,
+        defaultRuntime: 'TUI',
+        hasActiveClaim: false,
+      })).toEqual({ kind: 'agent_inactive', terminal: false })
+    }
+  })
+
   test('live received TUI work plans process-start wake and remains non-terminal', () => {
     expect(planQueueAction({
       row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
@@ -73,6 +85,16 @@ describe('state_daemon state/action matrix planner', () => {
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
     })).toEqual({ kind: 'wake_received', terminal: false })
+  })
+
+  test('live received inactive agent is observed without wake', () => {
+    expect(planQueueAction({
+      row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
+      agent: { runtime: 'TUI', tmux_session: 'agent-session', status: 'offline' },
+      now,
+      defaultRuntime: 'TUI',
+      hasActiveClaim: true,
+    })).toEqual({ kind: 'agent_inactive', terminal: false })
   })
 
   test('live received Codex runtime remains observed until a processing runner lands', () => {
