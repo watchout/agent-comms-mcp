@@ -98,6 +98,21 @@ fleet is treated as fully autonomous.
 
 ## Verification Queries
 
+Scripted report:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts fleet readiness \
+  --format text \
+  --denylist 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown' \
+  --smoke-run-id 20260523T160628 \
+  --require-smoke
+```
+
+This report is read-only and classifies every agent as `ready`,
+`activation_candidate`, or `excluded` from DB evidence. Use it before and after
+any activation or smoke run so readiness decisions stay script-controlled.
+
 Active queue check:
 
 ```sql

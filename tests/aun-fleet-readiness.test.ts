@@ -1,0 +1,108 @@
+import { describe, expect, test } from 'bun:test'
+import type { DbAdapter } from '../core/db'
+import {
+  buildAunFleetReadinessReport,
+  formatAunFleetReadinessText,
+} from '../core/aun-fleet-readiness'
+
+function fakeDb(): DbAdapter {
+  const query = async (sql: string) => {
+    if (sql.includes('FROM agents')) {
+      return [
+        { agent_id: 'codex-aun', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-aun' } },
+        { agent_id: 'ready-dev', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-ready' } },
+        { agent_id: 'offline-dev', status: 'offline', runtime: 'TUI', metadata: { tmux_session: 'discord-offline' } },
+        { agent_id: 'missing-runtime', status: 'idle', runtime: 'TUI', metadata: {} },
+        { agent_id: 'test-bot', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-test' } },
+      ]
+    }
+    if (sql.includes('FROM channels')) {
+      return [
+        { id: 'agent-com', name: 'agent-com', members: ['codex-aun', 'ready-dev', 'offline-dev', 'missing-runtime'] },
+        { id: 'test', name: 'test', members: ['test-bot'] },
+      ]
+    }
+    if (sql.includes('FROM agent_runtime_instances')) return []
+    if (sql.includes("status IN ('pending','received','in_progress')")) return []
+    if (sql.includes('FROM message_queue') && sql.includes('payload LIKE')) {
+      return [
+        {
+          id: 101,
+          agent_id: 'ready-dev',
+          status: 'done',
+          payload: JSON.stringify({
+            author_id: 'codex-aun',
+            content: 'AUN send/receive smoke RUN1 for ready-dev. Please reply exactly: ACK-ready-dev-RUN1.',
+          }),
+        },
+        {
+          id: 102,
+          agent_id: 'codex-aun',
+          status: 'done',
+          payload: JSON.stringify({
+            author_id: 'ready-dev',
+            content: 'ACK-ready-dev-RUN1',
+          }),
+        },
+        {
+          id: 201,
+          agent_id: 'offline-dev',
+          status: 'in_progress',
+          payload: JSON.stringify({
+            author_id: 'codex-aun',
+            content: 'AUN send/receive smoke RUN1 for offline-dev. Please reply exactly: ACK-offline-dev-RUN1.',
+          }),
+        },
+      ]
+    }
+    if (sql.includes('FROM agent_messages')) {
+      return [
+        { id: 'm1', author_id: 'ready-dev', content: 'ACK-ready-dev-RUN1' },
+      ]
+    }
+    return []
+  }
+  return {
+    query,
+    queryOne: async () => null,
+    execute: async () => ({ rowCount: 0 }),
+    transaction: async (fn) => fn(fakeDb()),
+    close: async () => {},
+  }
+}
+
+describe('AUN fleet readiness', () => {
+  test('classifies ready, activation candidate, and excluded agents from DB evidence', async () => {
+    const report = await buildAunFleetReadinessReport(fakeDb(), {
+      denylist: ['test-bot'],
+      smokeRunId: 'RUN1',
+      requireSmoke: true,
+    })
+
+    const byAgent = Object.fromEntries(report.agents.map((agent) => [agent.agent_id, agent]))
+    expect(byAgent['ready-dev'].readiness).toBe('ready')
+    expect(byAgent['ready-dev'].smoke?.passed).toBe(true)
+    expect(byAgent['offline-dev'].readiness).toBe('activation_candidate')
+    expect(byAgent['offline-dev'].blockers).toContain('inactive_status')
+    expect(byAgent['offline-dev'].blockers).toContain('smoke_request_not_terminal')
+    expect(byAgent['missing-runtime'].blockers).toContain('no_runtime_evidence')
+    expect(byAgent['missing-runtime'].blockers).toContain('smoke_missing')
+    expect(byAgent['test-bot'].readiness).toBe('excluded')
+    expect(byAgent['test-bot'].actions).toContain('remove from STATE_DAEMON_AGENT_DENYLIST in a reviewed PR before activation')
+    expect(report.summary).toMatchObject({ agents: 5, ready: 2, excluded: 1 })
+  })
+
+  test('formats a compact operator report', async () => {
+    const report = await buildAunFleetReadinessReport(fakeDb(), {
+      denylist: ['test-bot'],
+      smokeRunId: 'RUN1',
+    })
+    const text = formatAunFleetReadinessText(report)
+
+    expect(text).toContain('AUN Fleet Readiness')
+    expect(text).toContain('READY')
+    expect(text).toContain('ready-dev')
+    expect(text).toContain('ACTIVATION CANDIDATE')
+    expect(text).toContain('offline-dev')
+  })
+})

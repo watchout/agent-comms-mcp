@@ -36,6 +36,7 @@ import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
+import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from '../core/runtime-heartbeat'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
@@ -2287,6 +2288,31 @@ async function inboundCommand(subcommand: string | undefined, args: string[]) {
   }
 }
 
+async function fleetCommand(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  if (subcommand !== 'readiness') {
+    console.error('Usage: agent-com fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke]')
+    process.exit(2)
+  }
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+  try {
+    const report = await buildAunFleetReadinessReport((db as any).__adapter, {
+      denylist: parseCsvFlag(flags.denylist ?? process.env.STATE_DAEMON_AGENT_DENYLIST ?? undefined) ?? [],
+      smokeRunId: flags['smoke-run-id'] ?? null,
+      requireSmoke: hasFlag(flags, 'require-smoke') ? flagEnabled(flags['require-smoke']) : undefined,
+      operatorAgentId: flags['operator-agent-id'] ?? 'codex-aun',
+    })
+    if (format === 'text') {
+      process.stdout.write(formatAunFleetReadinessText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com status` — system or per-agent status (v1.0.2 §6.5).
  *
@@ -2673,6 +2699,8 @@ if (command === 'channel') {
   await runtimeCommand(subcommand, rest)
 } else if (command === 'inbound') {
   await inboundCommand(subcommand, rest)
+} else if (command === 'fleet') {
+  await fleetCommand(subcommand, rest)
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -2718,6 +2746,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only runtime/connector/binding freshness report
   inbound smoke [--format json|text] [--window-hours 168]
                                                        — read-only Discord inbound smoke evidence by channel
+  fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke]
+                                                       — read-only all-agent AUN readiness gates and activation blockers
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat [--runtime-instance-id <uuid>]           — update last_seen_at and optional runtime heartbeat evidence
