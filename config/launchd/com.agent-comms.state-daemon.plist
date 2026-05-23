@@ -86,7 +86,7 @@
     <key>STATE_DAEMON_CODEX_RUNNER_DATABASE_URL</key>
     <string>postgresql:///agent_comms?host=/tmp</string>
     <key>STATE_DAEMON_AGENT_DENYLIST</key>
-    <string>adf-dev,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown</string>
+    <string>adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown</string>
     <key>STATE_DAEMON_ALERT_CHANNEL</key>
     <string>1487368919613444156</string>
     <key>PGUSER</key>
