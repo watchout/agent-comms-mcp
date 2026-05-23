@@ -60,11 +60,16 @@ import {
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
+const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const WAKE_PENDING_PROMPT = 'Call the agent-comms next tool now. Do not call inbox.\n'
 const WAKE_RECEIVED_PROMPT = 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id, then complete the requested work. Do not call inbox or next.\n'
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
+}
+
+function isInactiveAgentStatus(status: string | null | undefined): boolean {
+  return status !== null && status !== undefined && INACTIVE_AGENT_STATUSES.has(status)
 }
 
 interface QueueRow {
@@ -428,6 +433,10 @@ export class StateDaemon {
     const result: LivenessResult = { checked: 0, restarted: 0, escalated: 0 }
     const now = this.clock.now().getTime()
     for (const bot of rows) {
+      if (isInactiveAgentStatus(bot.status)) {
+        this.metrics.inc('state_daemon_bot_liveness_skipped_total', { status: bot.status ?? 'unknown' })
+        continue
+      }
       result.checked++
       const lastSeen = bot.last_seen_at ? new Date(bot.last_seen_at).getTime() : 0
       const stale = now - lastSeen
@@ -742,6 +751,9 @@ export class StateDaemon {
       case 'tmux_missing':
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_tmux_session' })
         return false
+      case 'agent_inactive':
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_inactive_skipped' })
+        return false
       case 'observe_busy':
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })
         return false
@@ -859,6 +871,7 @@ export class StateDaemon {
 
   private isAgentInScope(agentId: string): boolean {
     if (this.config.agentIdPrefix && !agentId.startsWith(this.config.agentIdPrefix)) return false
+    if (this.config.agentDenylist && this.config.agentDenylist.includes(agentId)) return false
     if (this.config.agentAllowlist && !this.config.agentAllowlist.includes(agentId)) return false
     return true
   }
@@ -868,6 +881,10 @@ export class StateDaemon {
     if (this.config.agentIdPrefix) {
       params.push(this.config.agentIdPrefix + '%')
       sql += ` AND ${column} LIKE $${params.length}`
+    }
+    if (this.config.agentDenylist) {
+      params.push(this.config.agentDenylist)
+      sql += ` AND NOT (${column} = ANY($${params.length}::text[]))`
     }
     if (this.config.agentAllowlist) {
       params.push(this.config.agentAllowlist)

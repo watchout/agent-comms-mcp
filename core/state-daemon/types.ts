@@ -51,7 +51,16 @@ export interface StateDaemonConfig {
   codexRunnerEnabled: boolean
   codexRunnerDatabaseUrl: string
   codexRunnerAckContentMaxChars: number
+  /**
+   * Optional emergency narrowing gate. Production should normally leave this
+   * null so DB agent/channel state decides the fleet surface.
+   */
   agentAllowlist: string[] | null
+  /**
+   * Normal fleet exclusion gate. Keep disabled/test/human identities here when
+   * they should never be woken by state_daemon even if a queue row is inserted.
+   */
+  agentDenylist: string[] | null
 
   /**
    * Test-only scope guard. When set, every queue / agents query the daemon
@@ -94,6 +103,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
   codexRunnerAckContentMaxChars: 240,
   agentAllowlist: null,
+  agentDenylist: null,
 }
 
 /**

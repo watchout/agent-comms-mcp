@@ -74,6 +74,32 @@ function scopedDaemon(
   return { daemon: d, metrics, alert, tmux }
 }
 
+function denylistDaemon(
+  clock: FakeClock,
+  codexRunner: FakeCodexRunner,
+  agentDenylist: string[],
+  tmux = new FakeTmux(),
+) {
+  const metrics = new FakeMetrics()
+  const alert = new FakeAlertSink()
+  const d = new StateDaemon({
+    db: new PgDBClient(pg),
+    pgListen: new FakePgListen(),
+    tmux,
+    codexRunner,
+    clock,
+    metrics,
+    alert,
+    config: {
+      agentIdPrefix: 'sd-test-',
+      agentDenylist,
+      codexRunnerEnabled: true,
+      codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
+    },
+  })
+  return { daemon: d, metrics, alert, tmux }
+}
+
 function disabledDaemon(clock: FakeClock, codexRunner: FakeCodexRunner) {
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
@@ -372,6 +398,87 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         { session: `${allowed}-session`, payload: 'Call the agent-comms next tool now. Do not call inbox.\n' },
       ])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('agent denylist excludes stale sweep wake while preserving fleet default', async () => {
+    const allowed = makeAgentId('denied-sweep-allowed')
+    const denied = makeAgentId('denied-sweep-blocked')
+    await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
+    await seedAgent(pg, { agent_id: denied, runtime: 'TUI', tmux_session: `${denied}-session`, status: 'online' })
+    const old = new Date('2026-05-18T00:00:00.000Z')
+    await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
+    await seedQueueRow(pg, { agent_id: denied, status: 'pending', created_at: old })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:00:30.000Z')
+    const h = denylistDaemon(clock, runner, [denied])
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+
+      expect(result.rewoken).toBe(1)
+      expect(h.tmux.sentKeys).toEqual([
+        { session: `${allowed}-session`, payload: 'Call the agent-comms next tool now. Do not call inbox.\n' },
+      ])
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('agent denylist ignores pg_notify rows while allowing non-denied fleet rows', async () => {
+    const allowed = makeAgentId('denied-sibling-allowed')
+    const denied = makeAgentId('denied-sibling-blocked')
+    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online' })
+    const deniedId = await seedQueueRow(pg, { agent_id: denied, status: 'pending' })
+    const allowedId = await seedQueueRow(pg, { agent_id: allowed, status: 'pending' })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = denylistDaemon(clock, runner, [denied])
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: deniedId,
+        agent_id: denied,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: allowedId,
+        agent_id: allowed,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations.map((x) => x.agentId)).toEqual([allowed])
+      expect(h.metrics.countInc('state_daemon_scope_skipped_total', { path: 'notify' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('offline agents are not auto-restarted when full-fleet scope is enabled', async () => {
+    const agent = makeAgentId('offline-no-restart')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', tmux_session: null, status: 'offline' })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:05:00.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.checkBotLiveness()
+
+      expect(result).toEqual({ checked: 0, restarted: 0, escalated: 0 })
+      expect(h.tmux.restarts).toEqual([])
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'offline' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
