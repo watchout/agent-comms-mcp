@@ -26,7 +26,7 @@ EnvironmentVariables.STATE_DAEMON_WAKE_DUPLICATE_SUPPRESS_SEC: 30
 EnvironmentVariables.STATE_DAEMON_CODEX_RUNNER_ENABLED: 1
 EnvironmentVariables.STATE_DAEMON_CODEX_RUNNER_DATABASE_URL: postgresql:///agent_comms?host=/tmp
 EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST: <unset>
-EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST: adf-dev,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown
+EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST: adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown
 KeepAlive: true
 ThrottleInterval: 10
 ProcessType: Background
@@ -169,7 +169,7 @@ Run these before asking CTO for restart approval:
 CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-main-merge-commit>'
 APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}
 DATABASE_URL='postgresql:///agent_comms?host=/tmp'
-APPROVED_AGENT_DENYLIST='adf-dev,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
+APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
 
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
@@ -248,7 +248,7 @@ approved `DATABASE_URL` and approved checkout path.
 ```bash
 APPROVED_REPO=/path/approved-clean-checkout
 APPROVED_DATABASE_URL='postgresql:///agent_comms?host=/tmp'
-APPROVED_AGENT_DENYLIST='adf-dev,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
+APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
 PLIST=~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
 
 plutil -replace ProgramArguments.1 -string "$APPROVED_REPO/bin/state-daemon.ts" "$PLIST"
