@@ -37,6 +37,7 @@ const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const RUNTIME_INVENTORY_PATH = join(REPO_ROOT, 'core', 'runtime-inventory.ts')
 const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
+const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
 
@@ -47,6 +48,7 @@ const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const RUNTIME_INVENTORY_SRC = readFileSync(RUNTIME_INVENTORY_PATH, 'utf-8')
 const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
+const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
@@ -91,6 +93,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('leaseCommand handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function leaseCommand\s*\(/)
   })
+  test('fleetCommand handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function fleetCommand\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +137,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'lease' command invokes leaseCommand(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'lease'[\s\S]*?leaseCommand\(subcommand, rest\)/)
+  })
+  test("'fleet' command invokes fleetCommand(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'fleet'[\s\S]*?fleetCommand\(subcommand, rest\)/)
   })
 })
 
@@ -414,6 +422,21 @@ describe('T11c — inbound smoke evidence CLI surface', () => {
     expect(INBOUND_SMOKE_SRC).toMatch(/message_queue rows exist for routed recipients/)
     expect(INBOUND_SMOKE_SRC).toMatch(/bot-authored duplicate rows are absent/)
     expect(INBOUND_SMOKE_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
+  })
+})
+
+describe('T11d — AUN fleet readiness CLI surface', () => {
+  test('help documents the fleet readiness report', () => {
+    expect(CLI_SRC).toMatch(/fleet readiness \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/read-only all-agent AUN readiness gates and activation blockers/)
+  })
+
+  test('fleet readiness is DB-evidence based and read-only', () => {
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/db_is_source_of_truth/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/STATE_DAEMON_AGENT_DENYLIST/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/smoke_request_not_terminal/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/smoke_ack_missing/)
+    expect(AUN_FLEET_READINESS_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
   })
 })
 
