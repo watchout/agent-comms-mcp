@@ -30,7 +30,11 @@ blocker-resolution commands, approved restart commands, smoke, and rollback.
 - Confirm the daemon restart launcher path resolves to
   `scripts/restart-bot.sh`.
 - Run focused tests:
-  - `bun test tests/contract/state-daemon/test_state_action_matrix.test.ts tests/contract/state-daemon/m2-sweep.test.ts tests/contract/state-daemon/test_per_bot_suppression.test.ts`
+  - Use an isolated PostgreSQL database, not the live `agent_comms` database.
+    A running production `state_daemon` scans DB-primary queue rows and can
+    wake or mutate `sd-test-*` fixture rows in the shared DB, producing false
+    failures and non-representative evidence.
+  - `DATABASE_URL='postgresql:///<isolated_test_db>?host=/tmp' bun test tests/contract/state-daemon/test_state_action_matrix.test.ts tests/contract/state-daemon/m2-sweep.test.ts tests/contract/state-daemon/test_per_bot_suppression.test.ts`
   - `bun build --target bun bin/state-daemon.ts --outfile /tmp/state-daemon-build.js`
 - Check recent queue failures:
   - no new `STALE_DISPATCH:%` failures in the target observation window

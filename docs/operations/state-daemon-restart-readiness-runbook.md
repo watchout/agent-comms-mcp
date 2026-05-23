@@ -81,10 +81,8 @@ than hard-coded into launchd scope.
 Preflight command:
 
 ```bash
-CURRENT_AGENT_ALLOWLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST raw \
-  ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
-CURRENT_AGENT_DENYLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST raw \
-  ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
+CURRENT_AGENT_ALLOWLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST raw ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
+CURRENT_AGENT_DENYLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST raw ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
 printf 'installed STATE_DAEMON_AGENT_ALLOWLIST=%s\n' "$CURRENT_AGENT_ALLOWLIST"
 printf 'installed STATE_DAEMON_AGENT_DENYLIST=%s\n' "$CURRENT_AGENT_DENYLIST"
 
@@ -126,7 +124,7 @@ git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
 git worktree add --detach "$APPROVED_REPO" "$CTO_APPROVED_STATE_DAEMON_COMMIT"
 git -C "$APPROVED_REPO" status --short
-bun --cwd "$APPROVED_REPO" install --frozen-lockfile
+(cd "$APPROVED_REPO" && bun install --frozen-lockfile)
 ```
 
 The installed launchd `WorkingDirectory`, `ProgramArguments`, and log paths must
@@ -174,13 +172,28 @@ APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-te
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
 git -C "$APPROVED_REPO" diff --check
-bun --cwd "$APPROVED_REPO" test \
-  tests/contract/state-daemon/test_state_action_matrix.test.ts \
-  tests/contract/state-daemon/m2-sweep.test.ts \
-  tests/contract/state-daemon/test_per_bot_suppression.test.ts \
-  tests/contract/state-daemon/m4-entry-smoke.test.ts
-bun --cwd "$APPROVED_REPO" build --target bun bin/state-daemon.ts \
-  --outfile /private/tmp/state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}.js
+
+# Run state_daemon contract tests against an isolated PostgreSQL database.
+# Do not point these tests at the live `agent_comms` DB: the currently
+# running production daemon can observe and mutate `sd-test-*` fixture rows,
+# which turns operator preflight into a race against the live supervisor.
+STATE_DAEMON_TEST_SHA="$(printf '%s' "$CTO_APPROVED_STATE_DAEMON_COMMIT" | cut -c1-12)"
+STATE_DAEMON_TEST_DB="agent_comms_sd_${STATE_DAEMON_TEST_SHA}_$(date +%Y%m%d%H%M%S)"
+createdb "$STATE_DAEMON_TEST_DB"
+trap 'dropdb --if-exists "$STATE_DAEMON_TEST_DB"' EXIT
+(
+  cd "$APPROVED_REPO"
+  DATABASE_URL="postgresql:///${STATE_DAEMON_TEST_DB}?host=/tmp" \
+    bun run db/migrate.ts
+  DATABASE_URL="postgresql:///${STATE_DAEMON_TEST_DB}?host=/tmp" \
+    bun test \
+      tests/contract/state-daemon/test_state_action_matrix.test.ts \
+      tests/contract/state-daemon/m2-sweep.test.ts \
+      tests/contract/state-daemon/test_per_bot_suppression.test.ts \
+      tests/contract/state-daemon/m4-entry-smoke.test.ts
+  bun build --target bun bin/state-daemon.ts \
+    --outfile /private/tmp/state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}.js
+)
 
 ps aux | rg 'state-daemon|bin/state-daemon|state_daemon' | rg -v rg || true
 launchctl print "gui/$(id -u)/com.agent-comms.state-daemon" || true
