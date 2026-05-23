@@ -135,25 +135,26 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     const registry = readFileSync(join(REPO_ROOT, 'scripts', 'bot-registry.txt'), 'utf-8')
     const rows = registry.split('\n').filter(line => line.trim().length > 0 && !line.trim().startsWith('#'))
     expect(rows.length).toBeGreaterThan(0)
+    const codexBacked = new Set(['codex-audit', 'discord-cto', 'discord-arc', 'discord-secretary', 'discord-aun'])
     for (const row of rows) {
       const parts = row.split('|')
       expect(parts.length).toBeGreaterThanOrEqual(5)
-      const [session, , agentId] = parts
+      const [session, projectDir, agentId, port] = parts
       const command = parts.slice(4).join('|')
       expect(command).not.toContain('AGENT_COM_RUNTIME')
       expect(command).not.toContain('server:agent-comms')
-      if (session === 'codex-audit' || session === 'discord-cto') {
-        expect(['codex-audit', 'codex-cto']).toContain(agentId)
+      if (session === 'discord-arc') {
+        expect(projectDir).toBe('~/Developer/iyasaka-arc')
+      }
+      if (codexBacked.has(session)) {
         const trimmed = command.trimStart()
         expect(trimmed).toMatch(/^codex\s+--dangerously-bypass-approvals-and-sandbox/)
         expect(trimmed).toContain("mcp_servers.agent-comms.enabled=false")
         expect(trimmed).toContain(`mcp_servers.aun.env.AGENT_ID="${agentId}"`)
         expect(trimmed).toContain(`mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`)
-      } else if (session === 'discord-aun') {
-        expect(agentId).toBe('codex-aun')
-        expect(command.trimStart()).toMatch(
-          new RegExp(`^AGENT_ID=${agentId}\\s+AGENT_COM_EXPECTED_AGENT_ID=${agentId}\\s+codex\\s+--dangerously-bypass-approvals-and-sandbox`),
-        )
+        expect(trimmed).toContain('mcp_servers.aun.env.DATABASE_URL="postgresql:///agent_comms?host=/tmp"')
+        expect(trimmed).toContain(`mcp_servers.aun.env.WEBHOOK_PORT="${port}"`)
+        expect(trimmed).toContain(`mcp_servers.aun.env.DISCORD_STATE_DIR="/Users/yuji/.claude/channels/${session}"`)
       } else {
         expect(command.trimStart()).toMatch(/^claude\s+--mcp-config/)
       }
