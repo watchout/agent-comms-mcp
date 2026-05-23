@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveAgentFromDiscordIdInMembers, type DbAdapter } from '../../core/route-message-db'
+import { resolveAgentFromDiscordId, resolveAgentFromDiscordIdInMembers, type DbAdapter } from '../../core/route-message-db'
 
 function fakeDb(rows: Array<{ agent_id: string }>): DbAdapter {
   return {
@@ -10,6 +10,14 @@ function fakeDb(rows: Array<{ agent_id: string }>): DbAdapter {
 }
 
 describe('member-scoped adapter identity resolver', () => {
+  test('global resolver fails closed on duplicate external IDs', async () => {
+    const result = await resolveAgentFromDiscordId(
+      fakeDb([{ agent_id: 'adf-dev' }, { agent_id: 'adf-lead' }]),
+      '1486171173980209162',
+    )
+    expect(result).toBeNull()
+  })
+
   test('resolves exactly one channel member', async () => {
     const result = await resolveAgentFromDiscordIdInMembers(
       fakeDb([{ agent_id: 'codex-aun' }]),

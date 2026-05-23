@@ -44,6 +44,45 @@ export type DirectoryRole = {
   warnings: string[]
 }
 
+export type MentionDirectoryCandidate = {
+  agent_id: string
+  display_name: string
+  agent_type: string
+  status: string
+  sendability: DirectorySendability
+  queue_target: boolean
+  recommended: boolean
+  has_discord_identity: boolean
+  has_active_connector: boolean
+  hard_block_reasons: string[]
+  warnings: string[]
+}
+
+export type MentionDirectoryPolicyEntry = {
+  agent_id: string
+  reason: string
+}
+
+export type MentionDirectoryChannel = {
+  channel_id: string
+  name: string | null
+  adapter_owner: string | null
+  primary: string | null
+  recommended: MentionDirectoryCandidate[]
+  candidates: MentionDirectoryCandidate[]
+  excluded_policy_entries: MentionDirectoryPolicyEntry[]
+}
+
+export type MentionDirectory = {
+  policy: {
+    db_ssot: boolean
+    final_send_must_revalidate_db: boolean
+    hard_blocks: string[]
+    runtime_offline_enforcement: string
+  }
+  channels: MentionDirectoryChannel[]
+}
+
 export type DirectoryReport = {
   ok: true
   generated_at: string
@@ -66,6 +105,7 @@ export type DirectoryReport = {
   }
   agents: DirectoryAgent[]
   channels: DirectoryChannel[]
+  mention_directory: MentionDirectory
   roles: DirectoryRole[]
   warnings: string[]
 }
@@ -161,6 +201,11 @@ async function queryAgentRows(db: Queryable): Promise<any[]> {
   }
 }
 
+function metadataString(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key]
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
 function agentWarnings(row: any, channelCount: number, duplicateDisplayName: boolean): string[] {
   const warnings: string[] = []
   const status = String(row.status ?? '')
@@ -168,6 +213,7 @@ function agentWarnings(row: any, channelCount: number, duplicateDisplayName: boo
   if (status === 'offline' || status === 'disconnected') warnings.push('offline')
   if (channelCount === 0 && row.agent_type !== 'human') warnings.push('no_channel_membership')
   if (duplicateDisplayName) warnings.push('display_name_not_unique')
+  if (row.__duplicate_discord_identity === true) warnings.push('discord_identity_not_unique')
   const metadata = parseMetadata(row.metadata)
   if (metadata.project_dir || metadata.projectDir) warnings.push('project_dir_is_metadata_not_identity')
   return warnings
@@ -180,6 +226,30 @@ function channelWarnings(row: any, activeMemberCount: number): string[] {
   if (activeMemberCount === 0) warnings.push('no_active_members')
   if (!row.discord_external_id) warnings.push('missing_discord_adapter')
   return warnings
+}
+
+function mentionHardBlocks(agent: DirectoryAgent | null): string[] {
+  if (!agent) return ['agent_missing']
+  if (agent.status === 'disabled') return ['disabled']
+  if (agent.status === 'failed' || agent.status === 'disconnected') return [agent.status]
+  return []
+}
+
+function mentionWarnings(agent: DirectoryAgent, hasActiveConnector: boolean): string[] {
+  const warnings: string[] = []
+  if (agent.status === 'offline') warnings.push('offline_runtime_not_enforced_until_runtime_instances')
+  if (agent.agent_type === 'human') warnings.push('human_recipient_not_a_bot_queue_worker')
+  if (!agent.has_discord_identity) warnings.push('missing_discord_identity_for_native_mention')
+  if (agent.warnings.includes('discord_identity_not_unique')) warnings.push('discord_identity_not_unique')
+  if (!hasActiveConnector && agent.agent_type !== 'human') warnings.push('no_active_connector')
+  return warnings
+}
+
+function policyEntryReason(agentId: string, members: string[], agent: DirectoryAgent | null): string | null {
+  if (!agent) return 'agent_missing'
+  if (!members.includes(agentId)) return 'not_channel_member'
+  const hardBlocks = mentionHardBlocks(agent)
+  return hardBlocks[0] ?? null
 }
 
 export async function buildDirectoryReport(db: Queryable): Promise<DirectoryReport> {
@@ -195,17 +265,30 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
         AND ca.platform = 'discord'
       ORDER BY c.name, c.id`,
   )
+  const connectorRows = await db.query(
+    `SELECT agent_id, provider, status
+       FROM connector_instances
+      WHERE status = 'active'`,
+  ).catch(() => ({ rows: [] as any[] }))
 
   const displayNameCounts = new Map<string, number>()
+  const discordIdentityCounts = new Map<string, number>()
   for (const row of agentRows) {
     const name = String(row.display_name ?? '')
     displayNameCounts.set(name, (displayNameCounts.get(name) ?? 0) + 1)
+    const discordId = metadataString(parseMetadata(row.metadata), 'discord_id')
+    if (discordId) discordIdentityCounts.set(discordId, (discordIdentityCounts.get(discordId) ?? 0) + 1)
   }
 
   const agentStatus = new Map<string, string>()
   for (const row of agentRows) {
     agentStatus.set(String(row.agent_id), String(row.status ?? ''))
   }
+  const activeConnectorAgents = new Set(
+    connectorRows.rows
+      .filter((row) => String(row.status ?? '') === 'active')
+      .map((row) => String(row.agent_id)),
+  )
 
   const channelsByAgent = new Map<string, string[]>()
   for (const row of channelRows.rows) {
@@ -222,7 +305,8 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     const metadata = parseMetadata(row.metadata)
     const channels = channelsByAgent.get(agentId) ?? []
     const channelCount = channels.length
-    const discordId = metadata.discord_id
+    const discordId = metadataString(metadata, 'discord_id')
+    row.__duplicate_discord_identity = discordId !== null && (discordIdentityCounts.get(discordId) ?? 0) > 1
     return {
       agent_id: agentId,
       display_name: String(row.display_name ?? agentId),
@@ -232,11 +316,12 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       sendability: sendabilityFor(String(row.agent_type ?? ''), String(row.status ?? ''), channelCount),
       channel_count: channelCount,
       channels,
-      has_discord_identity: typeof discordId === 'string' && discordId.trim().length > 0,
+      has_discord_identity: discordId !== null,
       tmux_session: typeof metadata.tmux_session === 'string' ? metadata.tmux_session : null,
       warnings: agentWarnings(row, channelCount, (displayNameCounts.get(String(row.display_name ?? '')) ?? 0) > 1),
     }
   })
+  const agentsById = new Map(agents.map((agent) => [agent.agent_id, agent]))
 
   const channels: DirectoryChannel[] = channelRows.rows.map((row) => {
     const members = parseMembers(row.members)
@@ -258,6 +343,70 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       outbound_allowlist: policy.outboundAllowlist,
       native_projection_count: Object.keys(policy.nativeProjectionIdentities).length + Object.keys(policy.nativeRoleOutboundOwners).length,
       warnings: channelWarnings(row, activeMemberCount),
+    }
+  })
+
+  const mentionChannels: MentionDirectoryChannel[] = channelRows.rows.map((row) => {
+    const channelId = String(row.id)
+    const members = parseMembers(row.members)
+    const policy = getChannelPolicy(channelId)
+    const candidates = members
+      .map((agentId): MentionDirectoryCandidate | null => {
+        const agent = agentsById.get(agentId) ?? null
+        if (!agent) {
+          return {
+            agent_id: agentId,
+            display_name: agentId,
+            agent_type: 'unknown',
+            status: 'missing',
+            sendability: 'blocked',
+            queue_target: false,
+            recommended: false,
+            has_discord_identity: false,
+            has_active_connector: false,
+            hard_block_reasons: ['agent_missing'],
+            warnings: [],
+          }
+        }
+        const hasActiveConnector = activeConnectorAgents.has(agent.agent_id)
+        const hardBlocks = mentionHardBlocks(agent)
+        const queueTarget = agent.agent_type !== 'human' && hardBlocks.length === 0
+        const recommended =
+          queueTarget &&
+          (agent.sendability === 'ready' || agent.sendability === 'queueable') &&
+          agent.status !== 'offline'
+        return {
+          agent_id: agent.agent_id,
+          display_name: agent.display_name,
+          agent_type: agent.agent_type,
+          status: agent.status,
+          sendability: agent.sendability,
+          queue_target: queueTarget,
+          recommended,
+          has_discord_identity: agent.has_discord_identity,
+          has_active_connector: hasActiveConnector,
+          hard_block_reasons: hardBlocks,
+          warnings: mentionWarnings(agent, hasActiveConnector),
+        }
+      })
+      .filter((candidate): candidate is MentionDirectoryCandidate => candidate !== null)
+      .sort((a, b) => a.agent_id.localeCompare(b.agent_id))
+
+    const excludedPolicyEntries = (policy.outboundAllowlist ?? [])
+      .map((agentId): MentionDirectoryPolicyEntry | null => {
+        const reason = policyEntryReason(agentId, members, agentsById.get(agentId) ?? null)
+        return reason ? { agent_id: agentId, reason } : null
+      })
+      .filter((entry): entry is MentionDirectoryPolicyEntry => entry !== null)
+
+    return {
+      channel_id: channelId,
+      name: row.name ? String(row.name) : null,
+      adapter_owner: policy.adapterOwner,
+      primary: policy.primary,
+      recommended: candidates.filter((candidate) => candidate.recommended),
+      candidates,
+      excluded_policy_entries: excludedPolicyEntries,
     }
   })
 
@@ -286,6 +435,9 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   if (agents.some((agent) => agent.warnings.includes('display_name_not_unique'))) {
     warnings.push('some_display_names_are_not_unique')
   }
+  if (agents.some((agent) => agent.warnings.includes('discord_identity_not_unique'))) {
+    warnings.push('some_discord_identities_are_not_unique')
+  }
   if (roles.some((role) => role.warnings.includes('target_agent_missing') || role.warnings.includes('target_agent_blocked'))) {
     warnings.push('role_routing_has_unusable_targets')
   }
@@ -312,6 +464,15 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     },
     agents,
     channels,
+    mention_directory: {
+      policy: {
+        db_ssot: true,
+        final_send_must_revalidate_db: true,
+        hard_blocks: ['agent_missing', 'not_channel_member', 'disabled', 'failed', 'disconnected'],
+        runtime_offline_enforcement: 'offline is warning-only until agent_runtime_instances heartbeat evidence is populated',
+      },
+      channels: mentionChannels,
+    },
     roles,
     warnings: policySnapshot.loaded ? warnings : [...warnings, 'channel_policy_db_table_missing_json_fallback_active'],
   }

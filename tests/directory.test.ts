@@ -16,7 +16,7 @@ describe('bot/channel directory report', () => {
             rows: [
               { agent_id: 'codex-aun', display_name: 'AUN', agent_type: 'dev', runtime: 'TUI', status: 'idle', metadata: { discord_id: '1', tmux_session: 'codex-aun' } },
               { agent_id: 'codex-cto', display_name: 'CTO', agent_type: 'dev', runtime: 'TUI', status: 'idle', metadata: { discord_id: '2' } },
-              { agent_id: 'cto', display_name: 'CTO', agent_type: 'dev', runtime: 'TUI', status: 'disabled', metadata: {} },
+              { agent_id: 'cto', display_name: 'CTO', agent_type: 'dev', runtime: 'TUI', status: 'disabled', metadata: { discord_id: '2' } },
               { agent_id: 'ceo', display_name: 'CEO', agent_type: 'human', runtime: 'discord', status: 'online', metadata: { discord_id: '3' } },
             ],
           }
@@ -35,8 +35,10 @@ describe('bot/channel directory report', () => {
 
     const report = await buildDirectoryReport(db)
     const aun = report.agents.find((agent) => agent.agent_id === 'codex-aun')
+    const cto = report.agents.find((agent) => agent.agent_id === 'codex-cto')
     const legacy = report.agents.find((agent) => agent.agent_id === 'cto')
     const agentCom = report.channels.find((channel) => channel.name === 'agent-com')
+    const mentionAgentCom = report.mention_directory.channels.find((channel) => channel.name === 'agent-com')
 
     expect(report.summary.agent_count).toBe(4)
     expect(aun?.sendability).toBe('ready')
@@ -44,8 +46,14 @@ describe('bot/channel directory report', () => {
     expect(legacy?.sendability).toBe('blocked')
     expect(legacy?.warnings).toContain('disabled')
     expect(legacy?.warnings).toContain('display_name_not_unique')
+    expect(legacy?.warnings).toContain('discord_identity_not_unique')
+    expect(cto?.warnings).toContain('discord_identity_not_unique')
     expect(agentCom?.warnings).toContain('channel_id_looks_like_platform_external_id')
+    expect(mentionAgentCom?.recommended.map((candidate) => candidate.agent_id)).toContain('codex-aun')
+    expect(mentionAgentCom?.candidates.find((candidate) => candidate.agent_id === 'ceo')?.queue_target).toBe(false)
+    expect(report.mention_directory.policy.final_send_must_revalidate_db).toBe(true)
     expect(report.id_policy.db_ssot).toBe(true)
+    expect(report.warnings).toContain('some_discord_identities_are_not_unique')
     expect(formatDirectoryText(report)).toContain('Bot / Channel Directory')
   })
 

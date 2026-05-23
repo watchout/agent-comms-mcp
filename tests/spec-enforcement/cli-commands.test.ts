@@ -36,6 +36,7 @@ const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const RUNTIME_INVENTORY_PATH = join(REPO_ROOT, 'core', 'runtime-inventory.ts')
+const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
 
@@ -45,6 +46,7 @@ const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const RUNTIME_INVENTORY_SRC = readFileSync(RUNTIME_INVENTORY_PATH, 'utf-8')
+const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
@@ -79,6 +81,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   })
   test('runtimeCommand handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function runtimeCommand\s*\(/)
+  })
+  test('inboundCommand handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function inboundCommand\s*\(/)
   })
   test('channelPolicy handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function channelPolicy\s*\(/)
@@ -118,6 +123,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'runtime' command invokes runtimeCommand(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'runtime'[\s\S]*?runtimeCommand\(subcommand, rest\)/)
+  })
+  test("'inbound' command invokes inboundCommand(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'inbound'[\s\S]*?inboundCommand\(subcommand, rest\)/)
   })
   test("'channel policy' subcommands invoke channelPolicy(...)", () => {
     expect(CLI_SRC).toMatch(/subcommand === 'policy'[\s\S]*?channelPolicy\(rest\)/)
@@ -369,6 +377,8 @@ describe('T11 — bot/channel directory CLI surface', () => {
     expect(DIRECTORY_SRC).toMatch(/stable logical slug/)
     expect(DIRECTORY_SRC).toMatch(/JSON is bootstrap\/policy compatibility/)
     expect(DIRECTORY_SRC).toMatch(/channel_id_looks_like_platform_external_id/)
+    expect(DIRECTORY_SRC).toMatch(/final_send_must_revalidate_db/)
+    expect(DIRECTORY_SRC).toMatch(/offline is warning-only until agent_runtime_instances/)
   })
 })
 
@@ -388,6 +398,22 @@ describe('T11b — runtime inventory CLI surface', () => {
     expect(RUNTIME_INVENTORY_SRC).toMatch(/binding_role/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/missing_active_binding/)
     expect(RUNTIME_INVENTORY_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
+  })
+})
+
+describe('T11c — inbound smoke evidence CLI surface', () => {
+  test('help documents the inbound smoke report', () => {
+    expect(CLI_SRC).toMatch(/inbound smoke \[--format json\|text\] \[--window-hours 168\]/)
+    expect(CLI_SRC).toMatch(/read-only Discord inbound smoke evidence by channel/)
+  })
+
+  test('inbound smoke is DB-evidence based and read-only', () => {
+    expect(INBOUND_SMOKE_SRC).toMatch(/db_evidence_required/)
+    expect(INBOUND_SMOKE_SRC).toMatch(/agent_messages\.source=discord/)
+    expect(INBOUND_SMOKE_SRC).toMatch(/input_mentions resolved to channel members/)
+    expect(INBOUND_SMOKE_SRC).toMatch(/message_queue rows exist for routed recipients/)
+    expect(INBOUND_SMOKE_SRC).toMatch(/bot-authored duplicate rows are absent/)
+    expect(INBOUND_SMOKE_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
   })
 })
 
@@ -418,6 +444,11 @@ describe('T12 — DB-backed channel policy CLI surface', () => {
 })
 
 describe('T13 — control-plane lease CLI surface', () => {
+  test('help documents runtime heartbeat evidence option', () => {
+    expect(CLI_SRC).toMatch(/heartbeat \[--runtime-instance-id <uuid>\]/)
+    expect(CLI_SRC).toMatch(/optional runtime heartbeat evidence/)
+  })
+
   test('help documents script-controlled lease operations', () => {
     expect(CLI_SRC).toMatch(/lease acquire --scope-type <type> --scope-id <id>/)
     expect(CLI_SRC).toMatch(/acquire a control-plane lease and fencing token/)

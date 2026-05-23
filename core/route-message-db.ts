@@ -78,10 +78,10 @@ export async function isHumanAgent(db: DbAdapter | null, authorId: string): Prom
 export async function resolveAgentFromDiscordId(db: DbAdapter | null, discordId: string): Promise<string | null> {
   if (!db) return null
   const r = await db.query(
-    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1",
+    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 ORDER BY agent_id",
     [discordId],
   )
-  return r.rows.length > 0 ? r.rows[0].agent_id : null
+  return r.rows.length === 1 ? r.rows[0].agent_id : null
 }
 
 /**

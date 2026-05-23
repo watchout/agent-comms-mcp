@@ -263,6 +263,24 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       // robust fix that always re-asserts the right value at connection time).
       if (this.agentId && this.dbQuery) {
         try {
+          const conflicts = await this.dbQuery(
+            `SELECT agent_id
+               FROM agents
+              WHERE metadata->>'discord_id' = $1
+                AND agent_id <> $2
+              ORDER BY agent_id`,
+            [c.user.id, this.agentId],
+          )
+          if (conflicts.rows.length > 0) {
+            const conflictingAgents = conflicts.rows.map((row) => String(row.agent_id)).join(',')
+            process.stderr.write(
+              `discord-adapter: D1 duplicate discord identity blocked discord_id=${c.user.id} agent=${this.agentId} conflicts=${conflictingAgents}\n`,
+            )
+            this.client?.destroy()
+            this.client = null
+            return
+          }
+
           await this.dbQuery(
             `UPDATE agents
                 SET metadata = COALESCE(metadata, '{}'::jsonb)
@@ -276,8 +294,10 @@ export class DiscordAdapter implements UIAdapter, Adapter {
           )
         } catch (err) {
           process.stderr.write(
-            `discord-adapter: D1 self-register failed for agent=${this.agentId} (non-fatal): ${err}\n`,
+            `discord-adapter: D1 self-register failed closed for agent=${this.agentId}: ${err}\n`,
           )
+          this.client?.destroy()
+          this.client = null
         }
       }
     })

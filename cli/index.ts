@@ -35,6 +35,8 @@ import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doc
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
+import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
+import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from '../core/runtime-heartbeat'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
@@ -2259,6 +2261,32 @@ async function runtimeCommand(subcommand: string | undefined, args: string[]) {
   }
 }
 
+async function inboundCommand(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  if (subcommand !== 'smoke') {
+    console.error('Usage: agent-com inbound smoke [--format json|text] [--window-hours 168] [--provider discord] [--binding-role outbound|any]')
+    process.exit(2)
+  }
+  const format = flags.format ?? 'json'
+  const windowHours = parsePositiveIntFlag(flags['window-hours'], 168, 'window-hours')
+  const bindingRole = flags['binding-role'] === 'any' ? null : (flags['binding-role'] ?? null)
+  const db = await getDb()
+  try {
+    const report = await buildInboundSmokeReport((db as any).__adapter, {
+      windowHours,
+      provider: flags.provider ?? 'discord',
+      bindingRole,
+    })
+    if (format === 'text') {
+      process.stdout.write(formatInboundSmokeText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com status` — system or per-agent status (v1.0.2 §6.5).
  *
@@ -2343,6 +2371,8 @@ async function status(args: string[]) {
  */
 async function heartbeat(args: string[]) {
   const agentId = resolveAgentId(args, 'heartbeat')
+  const { flags } = parseArgs(args)
+  const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID ?? null
   const db = await getDb()
   try {
     // ARC codex audit (PR#139): spec requires disconnected→idle recovery on heartbeat.
@@ -2352,7 +2382,28 @@ async function heartbeat(args: string[]) {
        WHERE agent_id = $1`,
       [agentId],
     )
-    process.stdout.write(JSON.stringify({ ok: true, agent_id: agentId, last_seen_at: new Date().toISOString() }) + '\n')
+    const runtime = runtimeInstanceId
+      ? await heartbeatRuntimeInstance(db as any, {
+          runtimeInstanceId,
+          agentId,
+          runtimeEngine: flags['runtime-engine'] ?? process.env.AGENT_COM_RUNTIME_ENGINE ?? process.env.AGENT_COM_RUNTIME ?? 'unknown',
+          runtimeKind: flags['runtime-kind'] ?? process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
+          sessionName: flags['session-name'] ?? inferRuntimeSessionName(),
+          processId: process.env.AGENT_COM_RUNTIME_PROCESS_ID ? Number.parseInt(process.env.AGENT_COM_RUNTIME_PROCESS_ID, 10) : null,
+          port: parseRuntimePort(),
+          checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
+          commitSha: process.env.AGENT_COM_COMMIT_SHA ?? null,
+          endpointUri: process.env.AGENT_COM_ENDPOINT_URI ?? null,
+          metadata: { source: 'agent-com heartbeat' },
+        })
+      : null
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      agent_id: agentId,
+      last_seen_at: new Date().toISOString(),
+      runtime_instance_id: runtime?.runtime_instance_id ?? null,
+      runtime_connector_rows_updated: runtime?.connector_rows_updated ?? 0,
+    }) + '\n')
   } finally {
     await db.end()
   }
@@ -2620,6 +2671,8 @@ if (command === 'channel') {
   await directory([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'runtime') {
   await runtimeCommand(subcommand, rest)
+} else if (command === 'inbound') {
+  await inboundCommand(subcommand, rest)
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -2663,9 +2716,11 @@ Message I/O (requires AGENT_ID env var):
   directory [--format json|text]                       — bot/channel directory and sendability report
   runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--binding-role outbound]
                                                        — read-only runtime/connector/binding freshness report
+  inbound smoke [--format json|text] [--window-hours 168]
+                                                       — read-only Discord inbound smoke evidence by channel
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
-  heartbeat                                           — update last_seen_at
+  heartbeat [--runtime-instance-id <uuid>]           — update last_seen_at and optional runtime heartbeat evidence
   lease acquire --scope-type <type> --scope-id <id> [--purpose outbound] --holder-agent-id <agent> [--ttl-sec 30]
                                                        — acquire a control-plane lease and fencing token
   lease heartbeat --lease-id <id> --fencing-token <n> [--holder-agent-id <agent>] [--ttl-sec 30]

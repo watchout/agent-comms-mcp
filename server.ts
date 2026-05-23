@@ -111,6 +111,7 @@ import { truncateForDiscord } from './core/truncate'
 import { resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
+import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -192,6 +193,8 @@ function loadConfig(): Config {
 
 const config = loadConfig()
 const AGENT_ID = config.agent_id
+const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID || randomUUID()
+process.env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_INSTANCE_ID
 const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
 if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
   process.stderr.write(
@@ -321,6 +324,38 @@ const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? Stri
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
 const REPLY_CHAIN_DEPTH = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
+const SERVER_ROOT = dirname(new URL(import.meta.url).pathname)
+
+function currentRuntimeCommitSha(): string | null {
+  if (process.env.AGENT_COM_COMMIT_SHA?.trim()) return process.env.AGENT_COM_COMMIT_SHA.trim()
+  try {
+    return execSync(`git -C "${SERVER_ROOT}" rev-parse HEAD`, { encoding: 'utf-8' }).trim()
+  } catch {
+    return null
+  }
+}
+const RUNTIME_COMMIT_SHA = currentRuntimeCommitSha()
+
+async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  await heartbeatRuntimeInstance(client, {
+    runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    agentId: AGENT_ID,
+    runtimeEngine: config.agent.runtime,
+    runtimeKind: process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
+    sessionName: inferRuntimeSessionName(),
+    processId: process.pid,
+    port: parseRuntimePort(),
+    checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
+    commitSha: RUNTIME_COMMIT_SHA,
+    endpointUri: `http://127.0.0.1:${WEBHOOK_PORT}`,
+    metadata: {
+      source: 'server.ts',
+      server_root: SERVER_ROOT,
+    },
+  }).catch((err) => {
+    process.stderr.write(`agent-comms: runtime heartbeat evidence failed (non-fatal): ${err}\n`)
+  })
+}
 
 // --- SSE Transport (Phase 3 → Phase C I5: unified, TRANSPORT_MODE removed) ---
 const SSE_PORT = parseInt(process.env.AGENT_COMMS_PORT ?? '8800', 10)
@@ -986,6 +1021,7 @@ async function registerAgent(): Promise<void> {
      config.agent.metadata ? JSON.stringify(config.agent.metadata) : null]
   )
   process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
+  await heartbeatRuntimeEvidence(client)
 
   // pg_notify: agent.online + audit_log
   await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: AGENT_ID, org_id: 'default' }))
@@ -996,6 +1032,7 @@ async function registerAgent(): Promise<void> {
     const c = await tryGetDb()
     if (c) {
       await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+      await heartbeatRuntimeEvidence(c)
     }
   }, 5 * 60 * 1000)
 
@@ -1054,6 +1091,14 @@ async function unregisterAgent(): Promise<void> {
   const client = await tryGetDb()
   if (client) {
     await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+    await client.query(
+      `UPDATE agent_runtime_instances
+          SET status = 'stopped',
+              stopped_at = now(),
+              last_seen_at = now()
+        WHERE runtime_instance_id = $1`,
+      [RUNTIME_INSTANCE_ID],
+    ).catch(() => {})
     // pg_notify: agent.offline + audit_log
     await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.offline', agent_id: AGENT_ID, org_id: 'default' }))
     await writeAuditLog('agent.offline', AGENT_ID, AGENT_ID, {})
