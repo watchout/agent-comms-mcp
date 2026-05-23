@@ -185,6 +185,18 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(step5).toContain('tmux send-keys -t "$SESSION" Enter')
   })
 
+  test('10b. sync-mcp-config.sh pins identity, DB socket, and server checkout', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'sync-mcp-config.sh'), 'utf-8')
+
+    expect(script).toContain('AGENT_COM_EXPECTED_AGENT_ID')
+    expect(script).toContain('postgresql:///agent_comms?host=/tmp')
+    expect(script).toContain('AGENT_COMMS_SERVER_PATH')
+    expect(script).toContain('endsWith(\'/server.ts\')')
+    expect(script).toContain('DATABASE_URL')
+    expect(script).toContain('DATABASE_URL: updated')
+    expect(script).not.toContain("oldDb||'(none)'")
+  })
+
   test('11. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
     // Phase C I4: dual mode removed. Restart-phantom-prompt fix
     // (2026-04-21): `server:agent-comms` removed from DEFAULT_CMD.
