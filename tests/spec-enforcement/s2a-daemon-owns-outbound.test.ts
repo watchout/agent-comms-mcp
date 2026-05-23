@@ -142,8 +142,15 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
       const command = parts.slice(4).join('|')
       expect(command).not.toContain('AGENT_COM_RUNTIME')
       expect(command).not.toContain('server:agent-comms')
-      if (session === 'discord-cto' || session === 'discord-aun') {
-        expect(['codex-cto', 'codex-aun']).toContain(agentId)
+      if (session === 'codex-audit' || session === 'discord-cto') {
+        expect(['codex-audit', 'codex-cto']).toContain(agentId)
+        const trimmed = command.trimStart()
+        expect(trimmed).toMatch(/^codex\s+--dangerously-bypass-approvals-and-sandbox/)
+        expect(trimmed).toContain("mcp_servers.agent-comms.enabled=false")
+        expect(trimmed).toContain(`mcp_servers.aun.env.AGENT_ID="${agentId}"`)
+        expect(trimmed).toContain(`mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`)
+      } else if (session === 'discord-aun') {
+        expect(agentId).toBe('codex-aun')
         expect(command.trimStart()).toMatch(
           new RegExp(`^AGENT_ID=${agentId}\\s+AGENT_COM_EXPECTED_AGENT_ID=${agentId}\\s+codex\\s+--dangerously-bypass-approvals-and-sandbox`),
         )

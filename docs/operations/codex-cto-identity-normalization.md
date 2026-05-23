@@ -101,14 +101,16 @@ Do not rewrite historical `agent_messages.author_id = 'cto'` or `message_queue.a
 
 After DB mutation approval:
 
-1. Update `/Users/yuji/Developer/tech-lead/.mcp.json`:
-   - `AGENT_ID=codex-cto`
-   - `AGENT_COM_EXPECTED_AGENT_ID=codex-cto`
-   - keep `WEBHOOK_PORT=8789`
-   - keep `DISCORD_STATE_DIR=/Users/yuji/.claude/channels/discord-cto`
-   - keep the existing Discord token
+1. Update the runtime source to `~/Developer/codex`.
+   Codex reads `~/.codex/config.toml` before project `.mcp.json`, so the
+   controlled runtime command must pass explicit MCP overrides:
+   - `mcp_servers.aun.env.AGENT_ID="codex-cto"`
+   - `mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="codex-cto"`
+   - `mcp_servers.aun.env.WEBHOOK_PORT="8789"`
+   - `mcp_servers.aun.env.DISCORD_STATE_DIR="/Users/yuji/.claude/channels/discord-cto"`
+   - `mcp_servers.agent-comms.enabled=false` while `aun` is the active MCP registration
 2. Update `scripts/bot-registry.txt` operational mapping:
-   - `discord-cto|~/Developer/tech-lead|codex-cto|8789|...`
+   - `discord-cto|~/Developer/codex|codex-cto|8789|...`
 3. Controlled restart:
    - stop/restart `discord-cto`
    - verify the runtime registers as `codex-cto`
