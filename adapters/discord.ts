@@ -50,6 +50,14 @@ function checkMentioned(msg: Message, botUserId: string): boolean {
   return msg.mentions.users.has(botUserId)
 }
 
+export function shouldIgnoreDiscordInboundMessage(
+  msg: { author: { id: string; bot?: boolean } },
+  ownUserId: string | null | undefined,
+): boolean {
+  if (msg.author.bot === true) return true
+  return Boolean(ownUserId && msg.author.id === ownUserId)
+}
+
 // --- Typing indicator management ---
 const typingIntervals = new Map<string, NodeJS.Timeout>()
 const TYPING_INTERVAL_MS = 8_000
@@ -221,7 +229,7 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     })
 
     this.client.on('messageCreate', (msg) => {
-      if (msg.author.id === this.client?.user?.id) return
+      if (shouldIgnoreDiscordInboundMessage(msg, this.client?.user?.id)) return
       this.handleInbound(msg).catch((e) =>
         process.stderr.write(`discord-adapter: handleInbound error: ${e}\n`),
       )

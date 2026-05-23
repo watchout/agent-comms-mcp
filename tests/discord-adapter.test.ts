@@ -8,6 +8,19 @@
  * tests/route-message.test.ts (spec §20 廃止: file-based access + plugin:discord).
  */
 import { describe, test, expect } from 'bun:test'
+import { shouldIgnoreDiscordInboundMessage } from '../adapters/discord'
+
+describe('Inbound bot-authored message guard', () => {
+  test('ignores all bot-authored Discord messages before inbound routing', () => {
+    expect(shouldIgnoreDiscordInboundMessage({ author: { id: 'other-bot', bot: true } }, 'this-bot')).toBe(true)
+    expect(shouldIgnoreDiscordInboundMessage({ author: { id: 'this-bot', bot: true } }, 'this-bot')).toBe(true)
+  })
+
+  test('keeps human-authored Discord messages unless they are impossible self echoes', () => {
+    expect(shouldIgnoreDiscordInboundMessage({ author: { id: 'human', bot: false } }, 'this-bot')).toBe(false)
+    expect(shouldIgnoreDiscordInboundMessage({ author: { id: 'this-bot', bot: false } }, 'this-bot')).toBe(true)
+  })
+})
 
 describe('Outbound endpoint contract', () => {
   test('POST /send requires chat_id and text', () => {
