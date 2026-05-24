@@ -2413,6 +2413,23 @@ async function status(args: string[]) {
                    (status = 'idle') DESC,
                    agent_id`,
       )
+
+      // Per-agent live workspace lookup. Pulled from agent_runtime_instances
+      // so the value reflects the *actually running* checkout, not a stale
+      // metadata field. SQLite tests use bun:sqlite which has had this
+      // table since the NORM-020 migration, but the column set is small
+      // so we tolerate an empty result silently.
+      const workspaceRes = await db.query(
+        `SELECT agent_id, checkout_path
+           FROM agent_runtime_instances
+          WHERE status = 'running' AND checkout_path IS NOT NULL`,
+      ).catch(() => ({ rows: [] as any[] }))
+      const workspaceByAgent = new Map<string, string>()
+      for (const r of workspaceRes.rows) {
+        // If two runtimes share an agent_id (shouldn't happen, but
+        // codex-aun lane is still normalising), prefer the first seen.
+        if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
+      }
       const queueRes = await db.query(
         `SELECT agent_id,
                 status,
@@ -2467,6 +2484,7 @@ async function status(args: string[]) {
             last_seen_at: a.last_seen_at,
             discord_id: a.discord_id ?? null,
             tmux_session: a.tmux_session ?? null,
+            workspace: workspaceByAgent.get(a.agent_id) ?? null,
             retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
             queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
           })),
@@ -2480,20 +2498,34 @@ async function status(args: string[]) {
       console.log(`Channels: ${chCount.rows[0].cnt} · Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total · Messages (1h): ${msgRecent.rows[0].cnt}`)
       console.log('')
       console.log('--- agents (active, non-disabled) ---')
-      console.log('agent_id'.padEnd(20) + 'status'.padEnd(10) + 'runtime'.padEnd(8) + 'pend/recv/inflight'.padEnd(20) + 'oldest'.padEnd(22) + 'last_seen')
+      console.log(
+        'agent_id'.padEnd(20) +
+        'status'.padEnd(10) +
+        'runtime'.padEnd(8) +
+        'pend/recv/inflight'.padEnd(20) +
+        'discord_id'.padEnd(22) +
+        'workspace'.padEnd(42) +
+        'last_seen',
+      )
+      // Common workspace prefix shrunk to `~` so the column fits on a
+      // standard terminal. Full path remains in --format json output.
+      const HOME = process.env.HOME ?? ''
       for (const a of agentsRes.rows) {
         const q = queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null }
         const qStr = `${q.pending}/${q.received}/${q.in_progress}`
-        const oldest = q.oldest ? new Date(q.oldest).toISOString().replace('T', ' ').slice(0, 19) : '-'
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
         const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
         const statusStr = retiredText ? `${a.status}*ret` : a.status
+        const discordId = a.discord_id ?? '-'
+        const wsRaw = workspaceByAgent.get(a.agent_id)
+        const ws = wsRaw ? (HOME && wsRaw.startsWith(HOME) ? '~' + wsRaw.slice(HOME.length) : wsRaw) : '-'
         console.log(
           a.agent_id.padEnd(20) +
           (statusStr ?? '?').padEnd(10) +
           (a.runtime ?? '?').padEnd(8) +
           qStr.padEnd(20) +
-          oldest.padEnd(22) +
+          discordId.padEnd(22) +
+          ws.padEnd(42) +
           lastSeen,
         )
       }

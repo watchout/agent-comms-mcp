@@ -139,3 +139,25 @@ describe('#530 status — text mode + --brief backward compat', () => {
     expect(r.stdout).not.toContain('drift warnings')
   })
 })
+
+describe('#530 status — discord_id + workspace columns (CEO follow-up)', () => {
+  test('JSON exposes discord_id and workspace per agent', () => {
+    const db = new Database(dbPath)
+    db.exec(`UPDATE agents SET metadata = '{"discord_id":"1234567890"}' WHERE agent_id='bot-a'`)
+    db.exec(`INSERT INTO agent_runtime_instances (agent_id, runtime_engine, runtime_kind, status, checkout_path, started_at, last_seen_at) VALUES ('bot-a', 'TUI', 'local_process', 'running', '/Users/x/Developer/bot-a', datetime('now'), datetime('now'))`)
+    db.close()
+    const r = runCli(['status', '--format', 'json'])
+    expect(r.status).toBe(0)
+    const payload = JSON.parse(r.stdout.trim())
+    const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
+    expect(botA.discord_id).toBe('1234567890')
+    expect(botA.workspace).toBe('/Users/x/Developer/bot-a')
+  })
+
+  test('text mode header includes discord_id and workspace columns', () => {
+    const r = runCli(['status'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('discord_id')
+    expect(r.stdout).toContain('workspace')
+  })
+})
