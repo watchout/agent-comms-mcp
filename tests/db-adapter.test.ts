@@ -231,6 +231,47 @@ describe('migrateSqlite', () => {
     db.close()
   })
 
+  it('upgrades legacy agents tables without non-constant ALTER defaults', () => {
+    const legacyPath = '/tmp/agent-com-test-legacy-agents.db'
+    try { unlinkSync(legacyPath) } catch {}
+    const legacy = new (require('bun:sqlite').Database)(legacyPath)
+    legacy.exec(`
+      CREATE TABLE agents (
+        agent_id TEXT PRIMARY KEY NOT NULL,
+        display_name TEXT NOT NULL DEFAULT '',
+        agent_type TEXT NOT NULL DEFAULT 'dev',
+        cli_type TEXT,
+        status TEXT NOT NULL DEFAULT 'offline',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `)
+    legacy.prepare(
+      "INSERT INTO agents (agent_id, display_name, agent_type, cli_type, status) VALUES (?, ?, ?, ?, ?)",
+    ).run('legacy-profile-bot', 'Legacy Profile Bot', 'dev', 'codex', 'idle')
+    legacy.close()
+
+    expect(() => migrateSqlite(legacyPath)).not.toThrow()
+
+    const db = new (require('bun:sqlite').Database)(legacyPath)
+    const cols = db.prepare("PRAGMA table_info(agents)").all()
+    const names = cols.map((c: any) => c.name)
+    expect(names).toContain('registered_at')
+    expect(names).toContain('runtime')
+    expect(names).toContain('home_directory')
+    expect(names).toContain('provider_token_source_ref')
+
+    const row = db.prepare(
+      "SELECT runtime, registered_at, expected_provider_identity, profile_enabled, profile_source FROM agents WHERE agent_id = ?",
+    ).get('legacy-profile-bot') as any
+    expect(row.runtime).toBe('codex')
+    expect(row.registered_at).not.toBeNull()
+    expect(row.expected_provider_identity).toBe('{}')
+    expect(row.profile_enabled).toBe(1)
+    expect(row.profile_source).toBe('legacy')
+    db.close()
+    try { unlinkSync(legacyPath) } catch {}
+  })
+
   it('generates SQLite foundation IDs and rejects NULL text primary keys', () => {
     migrateSqlite(MIGRATE_DB)
 

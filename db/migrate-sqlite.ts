@@ -183,8 +183,10 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`
     CREATE TABLE IF NOT EXISTS agents (
       agent_id TEXT PRIMARY KEY NOT NULL,
+      org_id TEXT NOT NULL DEFAULT 'default',
       display_name TEXT NOT NULL DEFAULT '',
       agent_type TEXT NOT NULL DEFAULT 'dev',
+      runtime TEXT,
       cli_type TEXT,
       discord_token TEXT,
       discord_user_id TEXT,
@@ -206,18 +208,33 @@ export function migrateSqlite(dbPath?: string): void {
       auth_subject TEXT,
       disabled_at TEXT,
       identity_metadata TEXT NOT NULL DEFAULT '{}',
+      home_directory TEXT,
+      runtime_engine_preference TEXT,
+      provider_token_source_ref TEXT,
+      expected_provider_identity TEXT NOT NULL DEFAULT '{}',
+      profile_enabled INTEGER NOT NULL DEFAULT 1,
+      profile_revision INTEGER NOT NULL DEFAULT 1,
+      profile_source TEXT NOT NULL DEFAULT 'legacy',
+      profile_updated_at TEXT,
       -- Issue #287 (PR-0 cycle 5 axis 4) — inbox cursor persistence
       -- mirrors PG schema added in db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
       -- so SQLite-backed deployments survive session restarts identically.
       inbox_cursor_at TEXT,
       inbox_cursor_id TEXT,
       last_wake_attempt_at TEXT,
+      registered_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
   // Idempotent ADD COLUMN for pre-#287 SQLite DBs.
   const agentsCols = db.query(`PRAGMA table_info(agents)`).all() as Array<{ name: string }>
   const agentsColNames = new Set(agentsCols.map((c) => c.name))
+  if (!agentsColNames.has('org_id')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN org_id TEXT NOT NULL DEFAULT 'default'`)
+  }
+  if (!agentsColNames.has('runtime')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN runtime TEXT`)
+  }
   if (!agentsColNames.has('inbox_cursor_at')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN inbox_cursor_at TEXT`)
   }
@@ -256,10 +273,45 @@ export function migrateSqlite(dbPath?: string): void {
   if (!agentsColNames.has('identity_metadata')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN identity_metadata TEXT NOT NULL DEFAULT '{}'`)
   }
+  if (!agentsColNames.has('home_directory')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN home_directory TEXT`)
+  }
+  if (!agentsColNames.has('runtime_engine_preference')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN runtime_engine_preference TEXT`)
+  }
+  if (!agentsColNames.has('provider_token_source_ref')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN provider_token_source_ref TEXT`)
+  }
+  if (!agentsColNames.has('expected_provider_identity')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN expected_provider_identity TEXT NOT NULL DEFAULT '{}'`)
+  }
+  if (!agentsColNames.has('profile_enabled')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN profile_enabled INTEGER NOT NULL DEFAULT 1`)
+  }
+  if (!agentsColNames.has('profile_revision')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN profile_revision INTEGER NOT NULL DEFAULT 1`)
+  }
+  if (!agentsColNames.has('profile_source')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN profile_source TEXT NOT NULL DEFAULT 'legacy'`)
+  }
+  if (!agentsColNames.has('profile_updated_at')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN profile_updated_at TEXT`)
+  }
+  if (!agentsColNames.has('registered_at')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN registered_at TEXT`)
+  }
   gatedExec(`UPDATE agents SET agent_uri = 'aun://default/agents/' || agent_id WHERE agent_uri IS NULL OR agent_uri = ''`)
+  gatedExec(`UPDATE agents SET expected_provider_identity = '{}' WHERE expected_provider_identity IS NULL`)
+  gatedExec(`UPDATE agents SET profile_enabled = 1 WHERE profile_enabled IS NULL`)
+  gatedExec(`UPDATE agents SET profile_revision = 1 WHERE profile_revision IS NULL OR profile_revision < 1`)
+  gatedExec(`UPDATE agents SET profile_source = 'legacy' WHERE profile_source IS NULL OR profile_source = ''`)
+  gatedExec(`UPDATE agents SET runtime = cli_type WHERE (runtime IS NULL OR runtime = '' OR runtime = 'unknown') AND cli_type IS NOT NULL`)
+  gatedExec(`UPDATE agents SET registered_at = COALESCE(registered_at, created_at, datetime('now')) WHERE registered_at IS NULL OR registered_at = ''`)
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_agent_uri ON agents(agent_uri) WHERE agent_uri IS NOT NULL`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_identity_scope ON agents(identity_scope)`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_trust_status ON agents(trust_status)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_home_directory ON agents(org_id, home_directory) WHERE home_directory IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_profile_enabled ON agents(profile_enabled)`)
   gatedExec(`
     CREATE TRIGGER IF NOT EXISTS trg_agents_agent_uri_after_insert
     AFTER INSERT ON agents
@@ -270,7 +322,21 @@ export function migrateSqlite(dbPath?: string): void {
              identity_scope = COALESCE(NULLIF(NEW.identity_scope, ''), 'local'),
              trust_status = COALESCE(NULLIF(NEW.trust_status, ''), 'local'),
              auth_method = COALESCE(NULLIF(NEW.auth_method, ''), 'local'),
-             identity_metadata = COALESCE(NEW.identity_metadata, '{}')
+             identity_metadata = COALESCE(NEW.identity_metadata, '{}'),
+             expected_provider_identity = COALESCE(NEW.expected_provider_identity, '{}'),
+             profile_enabled = COALESCE(NEW.profile_enabled, 1),
+             profile_revision = COALESCE(NULLIF(NEW.profile_revision, 0), 1),
+             profile_source = COALESCE(NULLIF(NEW.profile_source, ''), 'legacy')
+       WHERE agent_id = NEW.agent_id;
+    END;
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_runtime_after_insert
+    AFTER INSERT ON agents
+    WHEN (NEW.runtime IS NULL OR NEW.runtime = '' OR NEW.runtime = 'unknown') AND NEW.cli_type IS NOT NULL
+    BEGIN
+      UPDATE agents
+         SET runtime = NEW.cli_type
        WHERE agent_id = NEW.agent_id;
     END;
   `)

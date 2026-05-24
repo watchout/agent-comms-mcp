@@ -107,6 +107,117 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
     expect(names).toContain('channel_adapters')
     expect(names).toContain('thread_adapters')
   })
+  test('agents has NORM-021 bot profile SSOT columns', () => {
+    const rows = dbRead(`PRAGMA table_info(agents)`)
+    const names = rows.map((r: any) => r.name)
+    expect(names).toContain('home_directory')
+    expect(names).toContain('runtime_engine_preference')
+    expect(names).toContain('provider_token_source_ref')
+    expect(names).toContain('expected_provider_identity')
+    expect(names).toContain('profile_enabled')
+    expect(names).toContain('profile_revision')
+  })
+})
+
+describe('F1b — agent profile SSOT CLI (SQLite)', () => {
+  test('profile set is dry-run by default and execute stores one editable bot profile', () => {
+    const dry = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--runtime-engine', 'codex',
+      '--token-source-ref', 'local-env:DISCORD_BOT_TOKEN',
+      '--expected-provider', 'discord',
+      '--expected-provider-subject', '123456789012345678',
+    ])
+    expect(dry.status).toBe(0)
+    const dryPayload = JSON.parse(dry.stdout)
+    expect(dryPayload.dry_run).toBe(true)
+    expect(dbRead(`SELECT home_directory FROM agents WHERE agent_id = 'probe-f'`)[0].home_directory).toBeNull()
+
+    const executed = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--runtime-engine', 'codex',
+      '--token-source-ref', 'local-env:DISCORD_BOT_TOKEN',
+      '--expected-provider', 'discord',
+      '--expected-provider-subject', '123456789012345678',
+      '--execute',
+    ])
+    expect(executed.status).toBe(0)
+    const payload = JSON.parse(executed.stdout)
+    expect(payload.profile.agent_id).toBe('probe-f')
+    expect(String(payload.profile.home_directory).endsWith('/Developer/probe-f')).toBe(true)
+    expect(payload.profile.runtime_engine_preference).toBe('codex')
+    expect(payload.profile.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
+    expect(payload.profile.expected_provider_identity).toMatchObject({
+      provider: 'discord',
+      subject_id: '123456789012345678',
+    })
+
+    const stored = dbRead(`SELECT home_directory, runtime_engine_preference, provider_token_source_ref, expected_provider_identity FROM agents WHERE agent_id = 'probe-f'`)[0]
+    expect(String(stored.home_directory).endsWith('/Developer/probe-f')).toBe(true)
+    expect(stored.runtime_engine_preference).toBe('codex')
+    expect(stored.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
+    expect(JSON.parse(stored.expected_provider_identity).subject_id).toBe('123456789012345678')
+
+    const partial = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--runtime-engine', 'claude-code',
+      '--execute',
+    ])
+    expect(partial.status).toBe(0)
+    const preserved = dbRead(`SELECT home_directory, runtime_engine_preference, provider_token_source_ref FROM agents WHERE agent_id = 'probe-f'`)[0]
+    expect(String(preserved.home_directory).endsWith('/Developer/probe-f')).toBe(true)
+    expect(preserved.runtime_engine_preference).toBe('claude-code')
+    expect(preserved.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
+
+    const cleared = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', 'none',
+      '--runtime-engine', 'none',
+      '--token-source-ref', 'none',
+      '--expected-provider', 'none',
+      '--expected-provider-subject', 'none',
+      '--execute',
+    ])
+    expect(cleared.status).toBe(0)
+    const clearedStored = dbRead(`SELECT home_directory, runtime_engine_preference, provider_token_source_ref, expected_provider_identity FROM agents WHERE agent_id = 'probe-f'`)[0]
+    expect(clearedStored.home_directory).toBeNull()
+    expect(clearedStored.runtime_engine_preference).toBeNull()
+    expect(clearedStored.provider_token_source_ref).toBeNull()
+    expect(JSON.parse(clearedStored.expected_provider_identity)).toEqual({})
+  })
+
+  test('profile set rejects raw-token-looking provider token sources', () => {
+    const blocked = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--token-source-ref', 'abc.def.ghi12345678901234567890123456789012345678901234567890',
+      '--execute',
+    ])
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('raw token')
+  })
+
+  test('profile doctor fails missing bot profile home and passes after profile set', () => {
+    const failing = runCli(['agent', 'profile', 'doctor'])
+    expect(failing.status).toBe(1)
+    const failingPayload = JSON.parse(failing.stdout)
+    expect(failingPayload.ok).toBe(false)
+    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_home_directory' })
+
+    const fixed = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--execute',
+    ])
+    expect(fixed.status).toBe(0)
+
+    const passing = runCli(['agent', 'profile', 'doctor'])
+    expect(passing.status).toBe(0)
+    const passingPayload = JSON.parse(passing.stdout)
+    expect(passingPayload.ok).toBe(true)
+    expect(passingPayload.blockers).toEqual([])
+  })
 })
 
 describe('F2 — agent-com next (SQLite)', () => {
