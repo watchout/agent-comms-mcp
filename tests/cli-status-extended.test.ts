@@ -171,10 +171,10 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
     expect(botA.launch_dir).toBe('/Users/x/launch/bot-a')
   })
 
-  test('text mode header includes discord_name and launch_dir columns', () => {
+  test('text mode header includes discord_id and launch_dir columns', () => {
     const r = runCli(['status'])
     expect(r.status).toBe(0)
-    expect(r.stdout).toContain('discord_name')
+    expect(r.stdout).toContain('discord_id')
     expect(r.stdout).toContain('launch_dir')
   })
 

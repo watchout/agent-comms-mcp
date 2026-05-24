@@ -2544,7 +2544,7 @@ async function status(args: string[]) {
       console.log('--- agents (active, non-disabled) ---')
       console.log(
         'agent_id'.padEnd(20) +
-        'discord_name'.padEnd(20) +
+        'discord_id'.padEnd(22) +
         'status'.padEnd(10) +
         'pend/recv/inflight'.padEnd(20) +
         'launch_dir'.padEnd(36) +
@@ -2563,19 +2563,16 @@ async function status(args: string[]) {
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
         const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
         const statusStr = retiredText ? `${a.status}*ret` : a.status
-        // Resolution chain for the text column: cached metadata
-        // (codex-aun NORM-020 writer, not yet shipped) → display_name
-        // → placeholder. Live Discord API resolution is deferred to
-        // the codex-aun lane per CEO directive 2026-05-24
-        // (msg `7d778234`); this CLI is a consumer.
-        const cached = a.discord_username_cached as string | null | undefined
-        const discordName = cached
-          ?? (a.display_name && a.display_name !== a.agent_id ? `${a.display_name} (db)` : (a.discord_id ? '(pending NORM-020)' : '-'))
+        // Per CEO 2026-05-24 directive (msg `768a62b7`): show the
+        // raw discord_id only — name resolution is codex-aun lane
+        // (NORM-020). JSON still exposes display_name and
+        // discord_username_cached for dashboards.
+        const discordId = a.discord_id ?? '-'
         const launchRaw = launchDirByAgent.get(a.agent_id)
         const launch = launchRaw ? shrinkHome(launchRaw) : '-'
         console.log(
           a.agent_id.padEnd(20) +
-          discordName.padEnd(20) +
+          discordId.padEnd(22) +
           (statusStr ?? '?').padEnd(10) +
           qStr.padEnd(20) +
           launch.padEnd(36) +
