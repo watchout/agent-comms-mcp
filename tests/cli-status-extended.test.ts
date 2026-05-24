@@ -172,21 +172,22 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
   })
 
   test('text mode header includes discord_name and launch_dir columns', () => {
-    const r = runCli(['status', '--no-discord-fetch'])
+    const r = runCli(['status'])
     expect(r.status).toBe(0)
     expect(r.stdout).toContain('discord_name')
     expect(r.stdout).toContain('launch_dir')
   })
 
-  test('--no-discord-fetch skips API lookup; discord_username is null in JSON', () => {
+  test('JSON exposes cached metadata.discord_username and display_name (no live API call)', () => {
     const db = new Database(dbPath)
-    db.exec(`UPDATE agents SET metadata = '{"discord_id":"99887766"}' WHERE agent_id='bot-a'`)
+    db.exec(`UPDATE agents SET metadata = '{"discord_id":"99887766","discord_username":"BotA-Display"}', display_name = 'BotA-Display' WHERE agent_id='bot-a'`)
     db.close()
-    const r = runCli(['status', '--format', 'json', '--no-discord-fetch'])
+    const r = runCli(['status', '--format', 'json'])
     expect(r.status).toBe(0)
     const payload = JSON.parse(r.stdout.trim())
     const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
     expect(botA.discord_id).toBe('99887766')
-    expect(botA.discord_username).toBe(null)
+    expect(botA.discord_username_cached).toBe('BotA-Display')
+    expect(botA.display_name).toBe('BotA-Display')
   })
 })

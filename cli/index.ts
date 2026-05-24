@@ -2434,36 +2434,13 @@ async function status(args: string[]) {
         if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
       }
 
-      // Per-agent Discord bot username lookup. CEO 2026-05-24 directive
-      // (msg `3675c37e`): seeing the Discord-side name alongside the
-      // numeric ID is what makes the table 「スッキリ通る」. We resolve
-      // via Discord's `GET /users/{id}` with the shared bot token —
-      // each request is independent so we run them in parallel and
-      // fall back to '?' on any failure (missing token, API rate
-      // limit, etc.) rather than blocking the status output. Skip
-      // entirely when --no-discord-fetch is passed (CI / offline).
-      const discordUsernameById = new Map<string, string>()
-      const skipDiscord = hasFlag(flags, 'no-discord-fetch')
-      const botToken = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
-      if (!skipDiscord && botToken) {
-        const ids = Array.from(new Set(
-          agentsRes.rows.map((a: any) => a.discord_id).filter((x: any) => !!x),
-        )) as string[]
-        const fetches = ids.map(async (id) => {
-          try {
-            const res = await fetch(`https://discord.com/api/v10/users/${id}`, {
-              headers: { Authorization: `Bot ${botToken}` },
-            })
-            if (!res.ok) return
-            const body = await res.json() as { username?: string; global_name?: string }
-            const name = body.global_name || body.username
-            if (name) discordUsernameById.set(id, name)
-          } catch {
-            // best-effort, swallow
-          }
-        })
-        await Promise.all(fetches)
-      }
+      // Per CEO 2026-05-24 directive (msg `7d778234`): the live Discord
+      // API resolution path is removed. codex-aun lane (NORM-020) owns
+      // the per-bot connector/runtime identity work that will persist
+      // discord_username into the agents row at heartbeat time. The
+      // status CLI conforms to that spec once it lands. Until then,
+      // fall through to metadata.discord_username (read-only consumer)
+      // → display_name → placeholder.
 
       // 起動ディレクトリ (launch directory) per CEO 2026-05-24 directive
       // (msg `d19f1f6e`). Distinct from runtime workspace: scripts/bot-registry.txt
@@ -2533,33 +2510,28 @@ async function status(args: string[]) {
           agents_online: parseInt(agOnline.rows[0].cnt),
           agents_total: parseInt(agTotal.rows[0].cnt),
           messages_1h: parseInt(msgRecent.rows[0].cnt),
-          agents: agentsRes.rows.map(a => {
+          agents: agentsRes.rows.map(a => ({
             // Resolution order for the human-facing bot name:
-            //   1. Discord API (live, requires DISCORD_BOT_TOKEN env)
-            //   2. agents.metadata.discord_username (cached from a
-            //      prior resolution — populated by a future writer)
-            //   3. agents.display_name (DB row; drifted on legacy rows)
-            //   4. null
+            //   1. agents.metadata.discord_username (cached — populated
+            //      by a future writer in the codex-aun NORM-020 lane)
+            //   2. agents.display_name (DB row; drifted on legacy rows)
+            //   3. null
             // The chain is exposed individually in JSON so dashboards
             // can prefer the source they trust.
-            const discordUsernameLive = a.discord_id ? (discordUsernameById.get(a.discord_id) ?? null) : null
-            return ({
-              agent_id: a.agent_id,
-              agent_type: a.agent_type,
-              runtime: a.runtime,
-              status: a.status,
-              display_name: a.display_name ?? null,
-              last_seen_at: a.last_seen_at,
-              discord_id: a.discord_id ?? null,
-              discord_username: discordUsernameLive,
-              discord_username_cached: a.discord_username_cached ?? null,
-              tmux_session: a.tmux_session ?? null,
-              launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
-              workspace: workspaceByAgent.get(a.agent_id) ?? null,
-              retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
-              queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
-            })
-          }),
+            agent_id: a.agent_id,
+            agent_type: a.agent_type,
+            runtime: a.runtime,
+            status: a.status,
+            display_name: a.display_name ?? null,
+            last_seen_at: a.last_seen_at,
+            discord_id: a.discord_id ?? null,
+            discord_username_cached: a.discord_username_cached ?? null,
+            tmux_session: a.tmux_session ?? null,
+            launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
+            workspace: workspaceByAgent.get(a.agent_id) ?? null,
+            retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
+            queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
+          })),
           drifts,
         }) + '\n')
         return
@@ -2591,15 +2563,14 @@ async function status(args: string[]) {
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
         const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
         const statusStr = retiredText ? `${a.status}*ret` : a.status
-        // Resolution order for the text column — live API → cached
-        // metadata → display_name → placeholder. Operators get the
-        // best available name even when no token is exported, instead
-        // of the misleading '(no-token)' column we showed in cycle 1.
-        const live = a.discord_id ? discordUsernameById.get(a.discord_id) : undefined
+        // Resolution chain for the text column: cached metadata
+        // (codex-aun NORM-020 writer, not yet shipped) → display_name
+        // → placeholder. Live Discord API resolution is deferred to
+        // the codex-aun lane per CEO directive 2026-05-24
+        // (msg `7d778234`); this CLI is a consumer.
         const cached = a.discord_username_cached as string | null | undefined
-        const discordName = live
-          ?? cached
-          ?? (a.display_name && a.display_name !== a.agent_id ? `${a.display_name} (db)` : (a.discord_id ? '(no-token)' : '-'))
+        const discordName = cached
+          ?? (a.display_name && a.display_name !== a.agent_id ? `${a.display_name} (db)` : (a.discord_id ? '(pending NORM-020)' : '-'))
         const launchRaw = launchDirByAgent.get(a.agent_id)
         const launch = launchRaw ? shrinkHome(launchRaw) : '-'
         console.log(
