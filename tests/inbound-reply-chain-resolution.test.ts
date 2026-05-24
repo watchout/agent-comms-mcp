@@ -41,6 +41,8 @@ interface SaveMessageCapture {
   message_type?: string
   reply_to?: string
   metadata?: Record<string, unknown>
+  author_bot?: boolean
+  input_mentions?: string[] | null
 }
 
 type ParentLookupMode =
@@ -296,7 +298,7 @@ describe('PR-β cycle 3 — handleInboundMessage 2-step lookup + early capture +
       senderIsHuman: !msg.authorAgentId,
       noMentions: msg.mentions.length === 0,
     })
-    const { deps, routeCalls } = makeDeps({
+    const { deps, saved, routeCalls } = makeDeps({
       parentLookup: { kind: 'column', row: { id: 'parent-uuid', author_id: 'origin-bot' } },
       registeredChannel: true,
       receiverIsMember: true,
@@ -312,6 +314,8 @@ describe('PR-β cycle 3 — handleInboundMessage 2-step lookup + early capture +
 
     expect(routeCalls.length).toBe(1)
     expect(routeCalls[0].mentions).toEqual(['origin-bot'])
+    expect(saved[0].author_bot).toBe(false)
+    expect(saved[0].input_mentions).toEqual(['origin-bot'])
   })
 
   test('case 5 — explicit mentions → routeInbound spy receives unchanged mentions', async () => {
@@ -321,7 +325,7 @@ describe('PR-β cycle 3 — handleInboundMessage 2-step lookup + early capture +
       senderIsHuman: !msg.authorAgentId,
       noMentions: msg.mentions.length === 0,
     })
-    const { deps, routeCalls } = makeDeps({
+    const { deps, saved, routeCalls } = makeDeps({
       parentLookup: { kind: 'column', row: { id: 'parent-uuid', author_id: 'origin-bot' } },
       registeredChannel: true,
       receiverIsMember: true,
@@ -337,5 +341,7 @@ describe('PR-β cycle 3 — handleInboundMessage 2-step lookup + early capture +
 
     expect(routeCalls.length).toBe(1)
     expect(routeCalls[0].mentions).toEqual(['some-bot'])
+    expect(saved[0].author_bot).toBe(false)
+    expect(saved[0].input_mentions).toEqual(['some-bot'])
   })
 })
