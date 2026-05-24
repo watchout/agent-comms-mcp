@@ -63,6 +63,9 @@ import {
   type ChannelInfo,
   type RouteResult,
 } from './core/route-message'
+// #527 — channel.primary lookup for no-mention single-recipient routing.
+// In-process cache, populated from `config/bot-routing.json`.
+import { getChannelPolicy } from './core/channel-policy'
 import {
   checkBotHealth as checkBotHealthCore,
   type BotHealthResult,
@@ -2394,7 +2397,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       const delivery = routeInbound(
         { authorAgentId: agentId, authorIsBot: senderIsBot, content: partContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
-        { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
+        { channelId: dest.channelId, threadId: dest.threadId, members: dest.members, primary: getChannelPolicy(dest.channelId).primary },
         allAgentInfos,
       )
       lastDelivery = delivery
@@ -2891,7 +2894,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       const delivery = routeInbound(
         { authorAgentId: agentId, authorIsBot: senderIsBot, content: partContent, mentions: sendMentions, messageType: message_type ?? 'chat' },
-        { channelId: dest.channelId, threadId: dest.threadId, members: dest.members },
+        { channelId: dest.channelId, threadId: dest.threadId, members: dest.members, primary: getChannelPolicy(dest.channelId).primary },
         allAgentInfos,
       )
       lastDelivery = delivery
