@@ -89,6 +89,7 @@ export type RouteDropReason =
   | 'observer_mode'
   | 'mention_not_in_array'
   | 'sender_not_a_member'
+  | 'human_agent_no_queue'
 
 /** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
  *
