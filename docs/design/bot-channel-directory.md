@@ -183,17 +183,41 @@ DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
   --extra-allowlist codex-aun,codex-cto,codex-audit
 ```
 
+## Effective Delivery Ownership
+
+The long-term UI should not expose one required "owner" field for every
+channel. Users should register agents, connectors, tokens, and channel access;
+the system then derives the effective delivery owner.
+
+For provider-backed surfaces such as Discord:
+
+1. A token-bearing connector owns its own provider UI identity.
+2. Provider discovery records which channels that connector can read or write.
+3. If exactly one active connector can write to a channel for a role, it becomes
+   the effective delivery owner for that surface/role.
+4. If multiple connectors are eligible, the UI asks for an explicit preference
+   or priority.
+5. `channel_routing_policy.adapter_owner_agent_id` remains a compatibility
+   fallback and explicit override, not the normal operator-facing setup step.
+
+This keeps MCP/UI setup small enough for users to operate. Channel membership,
+logical primary agent, outbound allowlist, and effective delivery connector are
+separate concepts; only conflicts or special routing should require per-channel
+owner editing.
+
 ## Other-Channel AUN Readiness
 
 For AUN to function in a non-`agent-com` Discord channel, that channel needs:
 
 - a `channels` row and a Discord `channel_adapters` row
 - a `channel_routing_policy` row with `primary_agent_id`
-- a `channel_routing_policy.adapter_owner_agent_id` pointing at a ready bot
-  member with a Discord identity
+- an effective delivery owner, derived from an active connector with provider
+  access evidence or, during mixed rollout, from
+  `channel_routing_policy.adapter_owner_agent_id`
 - an `outbound_allowlist` containing the sender and intended recipients, for
   example `codex-aun` plus the channel's local bot
-- the adapter owner bot process running so it can claim outbound rows
+- the effective delivery connector process running so it can claim outbound
+  rows
 
 If bootstrap reports `no_ready_discord_bot_member`, routing policy alone is not
 enough; a channel-local bot must be registered, given a Discord identity, and

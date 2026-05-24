@@ -25,7 +25,7 @@ must not store either as the identity. Local paths create or match
 
 ## User-Facing Objects
 
-Agent:
+Bot profile:
 
 - `agent_id`
 - `agent_uri`
@@ -33,9 +33,23 @@ Agent:
 - `identity_scope`
 - `trust_status`
 - `auth_method`
+- `home_directory`
+- provider token source reference
+- expected provider identity
+- enabled/disabled state
 - current channels and routing roles
 - active runtime summary
-- workspace bindings
+
+The bot profile is the only normal editable source of truth for local MVP. The
+UI must not ask operators to separately edit workspace rows, runtime rows,
+connector rows, credential rows, provider identity rows, and provider access
+rows for the same bot. Those rows are generated or refreshed from the bot
+profile and discovery evidence.
+
+The same rule applies to AI assistants. They may call a typed operation to
+change the bot profile, but they must not directly write derived rows as if they
+were configuration. Derived rows are recomputed by deterministic projectors,
+runtime heartbeat, or provider discovery.
 
 Workspace:
 
@@ -75,7 +89,9 @@ Channel binding:
 
 - channel membership from `channels.members`
 - primary owner from `channel_routing_policy.primary_agent_id`
-- adapter owner from `channel_routing_policy.adapter_owner_agent_id`
+- effective delivery owner derived from active connector/provider access
+- adapter owner from `channel_routing_policy.adapter_owner_agent_id` only as a
+  compatibility fallback or explicit override
 - outbound allowlist from `channel_routing_policy.outbound_allowlist`
 
 ## Search Inputs
@@ -143,15 +159,17 @@ Candidate shape:
 }
 ```
 
-## Local Path Registration Flow
+## Local Bot Registration Flow
 
 Input:
 
+- `agent_id`
 - `local_path`
-- optional `agent_id`
 - optional `display_name`
 - optional `runtime_engine`
 - optional `session_name`
+- optional provider token source
+- optional expected provider identity
 
 Read-only discovery:
 
@@ -164,18 +182,21 @@ Read-only discovery:
 
 Create/update rules:
 
-1. If an exact workspace exists, do not create a duplicate workspace.
-2. If an exact agent exists, bind the workspace to that agent after operator
-   confirmation.
+1. Create or update one local bot profile rooted in `agents`.
+2. Store the canonical local path once as the bot profile home directory or the
+   single implementation-owned local workspace reference.
 3. If no agent exists, create a new local `agents` row with
    `identity_scope='local'`, `trust_status='local'`, and
    `auth_method='local'`.
 4. Create `agent_uri` as `aun://<org_id>/agents/<agent_id>`.
-5. Create or update `agent_workspace_bindings`.
+5. Recompute workspace index rows only if the implementation keeps them; do not
+   require the operator or AI assistant to edit them.
 6. Create an `agent_runtime_instances` row only when an actual runtime is
-   launched or imported.
-7. Do not change channel membership or adapter ownership as a side effect of
-   path registration.
+   launched, imported, or heartbeats.
+7. Recompute connector, credential, provider identity, and channel access
+   evidence from token/provider discovery through deterministic code.
+8. Do not change channel membership or adapter ownership as a side effect of
+   bot registration.
 
 ## Runtime Swap Flow
 
@@ -231,19 +252,30 @@ Actions:
 
 - add/remove channel member
 - set primary agent
-- set adapter owner
+- review effective delivery owner
+- set adapter owner only as an advanced override
 - update outbound allowlist
 - assign role routing
 
 Rules:
 
-- Adapter owners for Discord projection must have a usable Discord identity.
+- Token-bearing connectors should automatically become eligible delivery owners
+  for provider surfaces where discovered channel permissions allow them to post.
+- The UI must not force users to set an adapter owner for every channel when a
+  single eligible connector can be derived from provider identity and channel
+  access evidence.
+- Adapter owner fields are compatibility/fallback controls, not the primary
+  product-facing mental model.
+- Explicit adapter owners for Discord projection must have a usable Discord
+  identity.
 - External agents cannot be adapter owners until verified remote delivery is
   implemented.
 - Membership does not imply adapter ownership.
 - Adapter ownership does not imply full outbound allowlist access.
 - Every routing change must write an audit event.
 - The UI must show the effective route before saving.
+- If multiple token-bearing connectors can post to the same channel, the UI must
+  show the candidates and require an explicit priority or override.
 
 ## Conflict Rules
 
@@ -260,13 +292,13 @@ Warn and require confirmation:
 - same local path bound to multiple agents
 - same agent with multiple active local runtimes
 - same channel with multiple possible adapter owners
-- runtime checkout path differs from workspace path
+- runtime checkout path differs from the bot profile home directory
 - existing `bot-registry.txt` disagrees with DB binding
 
 Allow:
 
-- multiple agents bound to one workspace when the operator confirms distinct
-  roles
+- multiple agents associated with one repository only when the operator
+  confirms distinct roles
 - one agent with multiple stopped runtime histories
 - one agent with multiple endpoints when only one is active
 
@@ -300,9 +332,13 @@ The UI must write audit rows for:
 
 - agent create/update
 - agent trust/auth change
-- workspace create/update
-- workspace binding create/update
+- bot profile home directory create/update
+- generated workspace/index refresh, when the implementation keeps workspace
+  indexes
 - runtime instance import/start/stop
+- connector credential evidence refresh
+- provider identity evidence refresh
+- provider channel access refresh
 - endpoint create/update/disable
 - identity key add/revoke
 - channel member add/remove
@@ -317,25 +353,27 @@ Future UI/API handlers should be shaped around deterministic operations:
 
 ```text
 searchAgentCandidates(input) -> candidates + conflicts + recommended_actions
-registerLocalAgent(input) -> agent + workspace + binding
-bindWorkspace(agent_id, workspace_id, role)
-createRuntimeInstance(agent_id, workspace_id, runtime)
+registerLocalBotProfile(input) -> bot_profile + generated_evidence
+refreshBotEvidence(agent_id) -> runtime + connector + credential + provider_access evidence
+createRuntimeInstance(agent_id, runtime)
 registerExternalEndpoint(agent_uri, endpoint)
 setChannelMembership(channel_id, agent_id, action)
 setChannelRoutingPolicy(channel_id, policy_patch)
 ```
 
 These operations must be idempotent where practical. Search must be read-only.
+Direct writes to derived tables are not part of the normal UI/API surface.
 
 ## Phase 1 Acceptance Criteria
 
 The first UI-backed local registry is acceptable when:
 
 - a local path can be searched and matched to an existing agent
-- a local path can create a new local agent and workspace binding
+- a local path can create or update one local bot profile
 - a runtime engine can be swapped without changing `agent_id`
 - channel membership can be edited separately from runtime registration
-- adapter owner assignment validates readiness
+- effective delivery owner is derived from connector/access evidence, with
+  adapter owner override hidden behind an advanced flow
 - conflicts are visible before write
 - every mutating action writes audit evidence
 - external endpoint registration is visible but disabled/unverified only
