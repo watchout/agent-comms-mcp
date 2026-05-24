@@ -12,6 +12,8 @@
  *
  *   - `claim_present` → use the existing reply path; `claimedMqId`
  *     identifies the row to mark `'replied'` after the outbound INSERT.
+ *     Both `received` and `in_progress` are active claims: `processing`
+ *     advances a claimed row to `in_progress` before the LLM replies.
  *   - `fallback` (claim_expired | claim_missing) → skip the
  *     `message_queue` UPDATE and emit
  *     `| fallback: notify (reason: ...)` on the success return.
@@ -64,9 +66,14 @@ export async function decideSendFallback(
 ): Promise<SendFallbackDecision> {
   // 1. Strict claim probe (FOR UPDATE so the caller can rely on the
   //    row lock for the remainder of the handler).
+  //
+  // `processing` changes a claimed row from received -> in_progress.
+  // A subsequent `send` must still close the same claim as replied;
+  // otherwise the normal next -> processing -> send path falls back to
+  // notify and leaves the queue row open.
   const claimRow = await txClient.query<{ id: number | string }>(
     `SELECT id FROM message_queue
-        WHERE message_id = $1 AND claimed_by = $2 AND status = 'received'
+        WHERE message_id = $1 AND claimed_by = $2 AND status IN ('received', 'in_progress')
         FOR UPDATE`,
     [reply_to, agentId],
   )
