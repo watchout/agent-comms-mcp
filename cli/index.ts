@@ -2399,6 +2399,10 @@ async function heartbeat(args: string[]) {
   const agentId = resolveAgentId(args, 'heartbeat')
   const { flags } = parseArgs(args)
   const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID ?? null
+  const discordToken = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
+  const discordTokenFingerprint = discordToken.trim()
+    ? createHash('sha256').update(discordToken.trim()).digest('hex')
+    : null
   const db = await getDb()
   try {
     // ARC codex audit (PR#139): spec requires disconnected→idle recovery on heartbeat.
@@ -2420,7 +2424,17 @@ async function heartbeat(args: string[]) {
           checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
           commitSha: process.env.AGENT_COM_COMMIT_SHA ?? null,
           endpointUri: process.env.AGENT_COM_ENDPOINT_URI ?? null,
+          connectorProvider: discordTokenFingerprint ? 'discord' : null,
+          connectorUri: discordTokenFingerprint ? `discord://agents/${agentId}` : null,
+          connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
+          connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
           metadata: { source: 'agent-com heartbeat' },
+          connectorMetadata: discordTokenFingerprint
+            ? {
+                token_fingerprint: discordTokenFingerprint,
+                token_source: process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : 'DISCORD_BOT_TOKEN',
+              }
+            : undefined,
         })
       : null
     process.stdout.write(JSON.stringify({
@@ -2428,6 +2442,8 @@ async function heartbeat(args: string[]) {
       agent_id: agentId,
       last_seen_at: new Date().toISOString(),
       runtime_instance_id: runtime?.runtime_instance_id ?? null,
+      runtime_workspace_id: runtime?.workspace_id ?? null,
+      runtime_connector_rows_upserted: runtime?.connector_rows_upserted ?? 0,
       runtime_connector_rows_updated: runtime?.connector_rows_updated ?? 0,
     }) + '\n')
   } finally {

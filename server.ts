@@ -336,7 +336,14 @@ function currentRuntimeCommitSha(): string | null {
 }
 const RUNTIME_COMMIT_SHA = currentRuntimeCommitSha()
 
+function tokenFingerprint(token: string): string | null {
+  const trimmed = token.trim()
+  if (!trimmed) return null
+  return createHash('sha256').update(trimmed).digest('hex')
+}
+
 async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  const discordTokenFingerprint = tokenFingerprint(DISCORD_BOT_TOKEN)
   await heartbeatRuntimeInstance(client, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
@@ -348,10 +355,20 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
     commitSha: RUNTIME_COMMIT_SHA,
     endpointUri: `http://127.0.0.1:${WEBHOOK_PORT}`,
+    connectorProvider: discordTokenFingerprint ? 'discord' : null,
+    connectorUri: discordTokenFingerprint ? `discord://agents/${AGENT_ID}` : null,
+    connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
+    connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
     metadata: {
       source: 'server.ts',
       server_root: SERVER_ROOT,
     },
+    connectorMetadata: discordTokenFingerprint
+      ? {
+          token_fingerprint: discordTokenFingerprint,
+          token_source: process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : 'DISCORD_BOT_TOKEN',
+        }
+      : undefined,
   }).catch((err) => {
     process.stderr.write(`agent-comms: runtime heartbeat evidence failed (non-fatal): ${err}\n`)
   })
