@@ -23,7 +23,7 @@ import type { Client } from 'pg'
 import { truncateForDiscord } from '../core/truncate'
 import { createDbAdapter, type DbAdapter } from '../core/db'
 import { readFileSync, existsSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
@@ -725,23 +725,336 @@ async function channelPolicy(args: string[]) {
 async function agentRegister(args: string[]) {
   const { positional, flags } = parseArgs(args)
   const agentId = positional[0]
-  if (!agentId) { console.error('Usage: agent-com agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code]'); process.exit(1) }
+  if (!agentId) {
+    console.error('Usage: agent-com agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>]')
+    process.exit(1)
+  }
 
-  const displayName = flags['display-name'] ?? agentId
-  const agentType = flags.type ?? 'dev'
-  const runtime = flags.runtime ?? 'claude-code'
+  const profile = buildBotProfileInput(agentId, flags, {
+    displayName: flags['display-name'] ?? agentId,
+    agentType: flags.type ?? 'dev',
+    runtime: flags.runtime ?? 'claude-code',
+  })
 
   const db = await getDb()
-  await db.query(
-    `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, registered_at)
-     VALUES ($1, 'default', $2, $3, $4, 'offline', now())
-     ON CONFLICT (agent_id) DO UPDATE SET display_name = $2, agent_type = $3, runtime = $4`,
-    [agentId, displayName, agentType, runtime]
+  try {
+    const row = await upsertBotProfile(db, profile, 'agent.register')
+    await auditLog(db, 'agent.register', 'cli', agentId, {
+      display_name: row.display_name,
+      agent_type: row.agent_type,
+      runtime: row.runtime,
+      home_directory: row.home_directory,
+      runtime_engine_preference: row.runtime_engine_preference,
+      provider_token_source_ref: row.provider_token_source_ref ? '(set)' : null,
+      expected_provider_identity: parseJsonObject(row.expected_provider_identity),
+      profile_enabled: row.profile_enabled,
+      profile_revision: row.profile_revision,
+    })
+    await pgNotify(db, 'agent_events', { event: 'agent.register', agent_id: agentId })
+    console.log(`Agent '${agentId}' registered (${row.display_name}, ${row.agent_type}/${row.runtime}, profile_revision=${row.profile_revision})`)
+  } finally {
+    await db.end()
+  }
+}
+
+type BotProfileInput = {
+  agentId: string
+  displayName?: string | null
+  agentType?: string | null
+  runtime?: string | null
+  homeDirectory?: string | null
+  runtimeEnginePreference?: string | null
+  providerTokenSourceRef?: string | null
+  expectedProviderIdentity?: Record<string, unknown> | null
+  profileEnabled?: boolean | null
+}
+
+function normalizeNullableText(raw: string | undefined): string | null | undefined {
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed === 'none' || trimmed === 'null') return null
+  return trimmed
+}
+
+function normalizeHomeDirectory(raw: string | undefined): string | null | undefined {
+  const value = normalizeNullableText(raw)
+  if (value === undefined || value === null) return value
+  const expanded = value.startsWith('~/') ? join(homedir(), value.slice(2)) : value
+  return resolve(expanded)
+}
+
+function parseOptionalBoolean(raw: string | undefined, name: string): boolean | null | undefined {
+  if (raw === undefined) return undefined
+  const value = raw.trim().toLowerCase()
+  if (['true', '1', 'yes', 'enabled', 'enable'].includes(value)) return true
+  if (['false', '0', 'no', 'disabled', 'disable'].includes(value)) return false
+  if (['none', 'null'].includes(value)) return null
+  throw new Error(`${name} must be true or false`)
+}
+
+function looksLikeRawSecret(value: string): boolean {
+  const trimmed = value.trim()
+  if (/^(bot|bearer)\s+/i.test(trimmed)) return true
+  if (trimmed.length > 50 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(trimmed)) return true
+  return false
+}
+
+function buildExpectedProviderIdentity(flags: Record<string, string>): Record<string, unknown> | null | undefined {
+  const provider = normalizeNullableText(flags['expected-provider'])
+  const subject = normalizeNullableText(flags['expected-provider-subject'] ?? flags['expected-provider-id'])
+  const kind = normalizeNullableText(flags['expected-provider-kind'])
+  if (provider === undefined && subject === undefined && kind === undefined) return undefined
+  if (provider === null || subject === null) return null
+  if (!provider || !subject) {
+    throw new Error('--expected-provider and --expected-provider-subject must be provided together')
+  }
+  return {
+    provider,
+    subject_id: subject,
+    ...(kind ? { identity_kind: kind } : {}),
+    source: 'bot_profile',
+  }
+}
+
+function buildBotProfileInput(
+  agentId: string,
+  flags: Record<string, string>,
+  defaults: Partial<BotProfileInput> = {},
+): BotProfileInput {
+  const tokenSource = normalizeNullableText(flags['token-source-ref'] ?? flags['provider-token-source-ref'])
+  if (typeof tokenSource === 'string' && looksLikeRawSecret(tokenSource)) {
+    throw new Error('provider token source must be a non-secret reference, not a raw token')
+  }
+  const displayName = normalizeNullableText(flags['display-name'])
+  const agentType = normalizeNullableText(flags.type)
+  const runtime = normalizeNullableText(flags.runtime)
+  const homeDirectory = normalizeHomeDirectory(flags['home-directory'] ?? flags.home)
+  const runtimeEnginePreference = normalizeNullableText(flags['runtime-engine'] ?? flags['runtime-engine-preference'])
+  const expectedProviderIdentity = buildExpectedProviderIdentity(flags)
+  const profileEnabled = parseOptionalBoolean(flags.enabled, '--enabled')
+  return {
+    agentId,
+    displayName: displayName !== undefined ? displayName : defaults.displayName,
+    agentType: agentType !== undefined ? agentType : defaults.agentType,
+    runtime: runtime !== undefined ? runtime : defaults.runtime,
+    homeDirectory: homeDirectory !== undefined ? homeDirectory : defaults.homeDirectory,
+    runtimeEnginePreference: runtimeEnginePreference !== undefined ? runtimeEnginePreference : defaults.runtimeEnginePreference,
+    providerTokenSourceRef: tokenSource !== undefined ? tokenSource : defaults.providerTokenSourceRef,
+    expectedProviderIdentity: expectedProviderIdentity !== undefined ? expectedProviderIdentity : defaults.expectedProviderIdentity,
+    profileEnabled: profileEnabled !== undefined ? profileEnabled : defaults.profileEnabled,
+  }
+}
+
+async function upsertBotProfile(db: Client, input: BotProfileInput, source: string): Promise<any> {
+  const expectedIdentityJson = input.expectedProviderIdentity === null
+    ? null
+    : JSON.stringify(input.expectedProviderIdentity ?? {})
+  const enabled = input.profileEnabled
+  const hasDisplayName = input.displayName !== undefined
+  const hasAgentType = input.agentType !== undefined
+  const hasRuntime = input.runtime !== undefined
+  const hasHomeDirectory = input.homeDirectory !== undefined
+  const hasRuntimeEnginePreference = input.runtimeEnginePreference !== undefined
+  const hasProviderTokenSourceRef = input.providerTokenSourceRef !== undefined
+  const hasExpectedProviderIdentity = input.expectedProviderIdentity !== undefined
+  const hasProfileEnabled = input.profileEnabled !== undefined && input.profileEnabled !== null
+  const result = await db.query(
+    `INSERT INTO agents (
+       agent_id, org_id, display_name, agent_type, runtime, status, registered_at,
+       home_directory, runtime_engine_preference, provider_token_source_ref,
+       expected_provider_identity, profile_enabled, profile_revision,
+       profile_source, profile_updated_at, disabled_at
+     )
+     VALUES (
+       $1, 'default',
+       CASE WHEN $11 THEN COALESCE($2, $1) ELSE $1 END,
+       CASE WHEN $12 THEN COALESCE($3, 'dev') ELSE 'dev' END,
+       CASE WHEN $13 THEN COALESCE($4, 'unknown') ELSE 'unknown' END,
+       CASE WHEN $18 AND $9 = false THEN 'disabled' ELSE 'offline' END, now(),
+       CASE WHEN $14 THEN $5 ELSE NULL END,
+       CASE WHEN $15 THEN $6 ELSE NULL END,
+       CASE WHEN $16 THEN $7 ELSE NULL END,
+       CASE WHEN $17 THEN COALESCE($8::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
+       CASE WHEN $18 THEN COALESCE($9, true) ELSE true END,
+       1, $10, now(), CASE WHEN $18 AND $9 = false THEN now() ELSE NULL END
+     )
+     ON CONFLICT (agent_id) DO UPDATE SET
+       display_name = CASE WHEN $11 THEN COALESCE($2, agents.agent_id) ELSE agents.display_name END,
+       agent_type = CASE WHEN $12 THEN COALESCE($3, agents.agent_type) ELSE agents.agent_type END,
+       runtime = CASE WHEN $13 THEN COALESCE($4, agents.runtime) ELSE agents.runtime END,
+       home_directory = CASE WHEN $14 THEN $5 ELSE agents.home_directory END,
+       runtime_engine_preference = CASE WHEN $15 THEN $6 ELSE agents.runtime_engine_preference END,
+       provider_token_source_ref = CASE WHEN $16 THEN $7 ELSE agents.provider_token_source_ref END,
+       expected_provider_identity = CASE WHEN $17 THEN COALESCE($8::jsonb, '{}'::jsonb) ELSE agents.expected_provider_identity END,
+       profile_enabled = CASE WHEN $18 THEN COALESCE($9, agents.profile_enabled) ELSE agents.profile_enabled END,
+       disabled_at = CASE
+         WHEN $18 AND $9 = false THEN COALESCE(agents.disabled_at, now())
+         WHEN $18 AND $9 = true THEN NULL
+         ELSE agents.disabled_at
+       END,
+       status = CASE
+         WHEN $18 AND $9 = false THEN 'disabled'
+         WHEN $18 AND $9 = true AND agents.status = 'disabled' THEN 'offline'
+         ELSE agents.status
+       END,
+       profile_revision = COALESCE(agents.profile_revision, 1) + 1,
+       profile_source = $10,
+       profile_updated_at = now()
+     RETURNING agent_id, display_name, agent_type, runtime, status,
+       home_directory, runtime_engine_preference, provider_token_source_ref,
+       expected_provider_identity, profile_enabled, profile_revision,
+       profile_source, profile_updated_at`,
+    [
+      input.agentId,
+      input.displayName,
+      input.agentType,
+      input.runtime,
+      input.homeDirectory,
+      input.runtimeEnginePreference,
+      input.providerTokenSourceRef,
+      expectedIdentityJson,
+      enabled,
+      source,
+      hasDisplayName,
+      hasAgentType,
+      hasRuntime,
+      hasHomeDirectory,
+      hasRuntimeEnginePreference,
+      hasProviderTokenSourceRef,
+      hasExpectedProviderIdentity,
+      hasProfileEnabled,
+    ],
   )
-  await auditLog(db, 'agent.register', 'cli', agentId, { display_name: displayName, agent_type: agentType, runtime })
-  await pgNotify(db, 'agent_events', { event: 'agent.register', agent_id: agentId })
-  console.log(`Agent '${agentId}' registered (${displayName}, ${agentType}/${runtime})`)
-  await db.end()
+  return result.rows[0]
+}
+
+function botProfileForOutput(row: any): Record<string, unknown> {
+  return {
+    agent_id: row.agent_id,
+    display_name: row.display_name,
+    agent_type: row.agent_type,
+    runtime: row.runtime,
+    status: row.status,
+    home_directory: row.home_directory ?? null,
+    runtime_engine_preference: row.runtime_engine_preference ?? null,
+    provider_token_source_ref: row.provider_token_source_ref ?? null,
+    expected_provider_identity: parseJsonObject(row.expected_provider_identity),
+    profile_enabled: row.profile_enabled === true || row.profile_enabled === 1 || row.profile_enabled === '1',
+    profile_revision: Number(row.profile_revision ?? 1),
+    profile_source: row.profile_source ?? 'legacy',
+    profile_updated_at: row.profile_updated_at ?? null,
+  }
+}
+
+async function selectBotProfile(db: Client, agentId: string): Promise<any | null> {
+  const result = await db.query(
+    `SELECT agent_id, display_name, agent_type, runtime, status,
+            home_directory, runtime_engine_preference, provider_token_source_ref,
+            expected_provider_identity, profile_enabled, profile_revision,
+            profile_source, profile_updated_at
+       FROM agents
+      WHERE agent_id = $1`,
+    [agentId],
+  )
+  return result.rows[0] ?? null
+}
+
+async function agentProfile(args: string[]) {
+  const [action, ...rest] = args
+  const { positional, flags } = parseArgs(rest)
+  const db = await getDb()
+  try {
+    if (action === 'get') {
+      const agentId = positional[0] ?? flags['agent-id']
+      if (!agentId) {
+        console.error('Usage: agent-com agent profile get <agent_id>')
+        process.exit(2)
+      }
+      const row = await selectBotProfile(db, agentId)
+      if (!row) {
+        console.error(`Error [AGENT_NOT_FOUND]: ${agentId}`)
+        process.exit(1)
+      }
+      process.stdout.write(`${JSON.stringify({ ok: true, profile: botProfileForOutput(row) }, null, 2)}\n`)
+      return
+    }
+
+    if (action === 'set') {
+      const agentId = positional[0] ?? flags['agent-id']
+      if (!agentId) {
+        console.error('Usage: agent-com agent profile set <agent_id> [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider <provider>] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const input = buildBotProfileInput(agentId, flags)
+      const dryRun = parseRepairDryRun(flags)
+      const before = await selectBotProfile(db, agentId)
+      const preview = {
+        agent_id: agentId,
+        changes: {
+          display_name: input.displayName,
+          agent_type: input.agentType,
+          runtime: input.runtime,
+          home_directory: input.homeDirectory,
+          runtime_engine_preference: input.runtimeEnginePreference,
+          provider_token_source_ref: input.providerTokenSourceRef ? '(set)' : input.providerTokenSourceRef,
+          expected_provider_identity: input.expectedProviderIdentity,
+          profile_enabled: input.profileEnabled,
+        },
+      }
+      if (dryRun) {
+        process.stdout.write(`${JSON.stringify({ ok: true, dry_run: true, before: before ? botProfileForOutput(before) : null, preview }, null, 2)}\n`)
+        return
+      }
+      const row = await upsertBotProfile(db, input, 'agent.profile.set')
+      await auditLog(db, 'agent.profile_set', 'cli', agentId, {
+        before: before ? botProfileForOutput(before) : null,
+        after: botProfileForOutput(row),
+      })
+      process.stdout.write(`${JSON.stringify({ ok: true, dry_run: false, profile: botProfileForOutput(row) }, null, 2)}\n`)
+      return
+    }
+
+    if (action === 'doctor') {
+      const rows = await db.query(
+        `SELECT agent_id, display_name, agent_type, status, home_directory,
+                provider_token_source_ref, profile_enabled
+           FROM agents
+          WHERE agent_type <> 'human'
+            AND COALESCE(profile_enabled, true) = true
+          ORDER BY agent_id`,
+      )
+      const blockers: Array<Record<string, unknown>> = []
+      const homeByPath = new Map<string, string[]>()
+      for (const row of rows.rows) {
+        const agentId = String(row.agent_id)
+        const home = typeof row.home_directory === 'string' ? row.home_directory : ''
+        if (!home) blockers.push({ agent_id: agentId, code: 'missing_home_directory' })
+        else {
+          const agents = homeByPath.get(home) ?? []
+          agents.push(agentId)
+          homeByPath.set(home, agents)
+        }
+        if (typeof row.provider_token_source_ref === 'string' && looksLikeRawSecret(row.provider_token_source_ref)) {
+          blockers.push({ agent_id: agentId, code: 'raw_secret_like_token_source_ref' })
+        }
+      }
+      for (const [home_directory, agents] of homeByPath.entries()) {
+        if (agents.length > 1) blockers.push({ code: 'duplicate_home_directory', home_directory, agents })
+      }
+      process.stdout.write(`${JSON.stringify({
+        ok: blockers.length === 0,
+        checked_agents: rows.rows.length,
+        blockers,
+      }, null, 2)}\n`)
+      if (blockers.length > 0) process.exitCode = 1
+      return
+    }
+
+    console.error('Usage: agent-com agent profile <get|set|doctor> ...')
+    process.exit(2)
+  } finally {
+    await db.end()
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2210,11 +2523,17 @@ async function listAgents() {
   const db = await getDb()
   try {
     const r = await db.query(
-      `SELECT agent_id, display_name, agent_type, runtime, status, channel_port, registered_at
+      `SELECT agent_id, display_name, agent_type, runtime, status, channel_port, registered_at,
+              home_directory, runtime_engine_preference, provider_token_source_ref,
+              expected_provider_identity, profile_enabled, profile_revision, profile_source
        FROM agents
        ORDER BY agent_id`,
     )
-    process.stdout.write(JSON.stringify(r.rows, null, 2) + '\n')
+    process.stdout.write(JSON.stringify(r.rows.map((row: any) => ({
+      ...row,
+      expected_provider_identity: parseJsonObject(row.expected_provider_identity),
+      profile_enabled: row.profile_enabled === true || row.profile_enabled === 1 || row.profile_enabled === '1',
+    })), null, 2) + '\n')
   } finally {
     await db.end()
   }
@@ -2870,8 +3189,9 @@ if (command === 'channel') {
   }
 } else if (command === 'agent') {
   if (subcommand === 'register') await agentRegister(rest)
+  else if (subcommand === 'profile') await agentProfile(rest)
   else {
-    console.error('Usage: agent-com agent <register> ...')
+    console.error('Usage: agent-com agent <register|profile> ...')
     process.exit(1)
   }
 } else if (command === 'status') {
@@ -2933,7 +3253,10 @@ Commands:
   channel policy bootstrap [--execute|--dry-run] [--extra-allowlist <a,b>] [--overwrite]
   channel policy sync-connectors [--channel <id|name>] [--provider discord] [--execute|--dry-run]
   channel policy set <channel_id> [--primary <agent|none>] [--adapter-owner <agent|none>] [--allowlist <a,b|none>] [--execute|--dry-run]
-  agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code]
+  agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>]
+  agent profile get <agent_id>
+  agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
+  agent profile doctor
   status
 
 Message I/O (requires AGENT_ID env var):

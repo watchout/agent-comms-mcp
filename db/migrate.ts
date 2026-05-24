@@ -166,6 +166,17 @@ async function migrate() {
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS auth_subject TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS identity_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+      -- NORM-021 bot profile SSOT. These are the normal operator-editable
+      -- local profile fields. Workspace/runtime/connector rows are generated
+      -- evidence and must not duplicate these as manual setup.
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS home_directory TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_engine_preference TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS provider_token_source_ref TEXT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS expected_provider_identity JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS profile_enabled BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS profile_revision INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS profile_source TEXT NOT NULL DEFAULT 'legacy';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS profile_updated_at TIMESTAMPTZ;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$;
     UPDATE agents
@@ -188,6 +199,18 @@ async function migrate() {
       END IF;
       IF NEW.identity_metadata IS NULL THEN
         NEW.identity_metadata := '{}'::jsonb;
+      END IF;
+      IF NEW.expected_provider_identity IS NULL THEN
+        NEW.expected_provider_identity := '{}'::jsonb;
+      END IF;
+      IF NEW.profile_enabled IS NULL THEN
+        NEW.profile_enabled := true;
+      END IF;
+      IF NEW.profile_revision IS NULL OR NEW.profile_revision < 1 THEN
+        NEW.profile_revision := 1;
+      END IF;
+      IF NEW.profile_source IS NULL OR NEW.profile_source = '' THEN
+        NEW.profile_source := 'legacy';
       END IF;
       RETURN NEW;
     END;
@@ -217,6 +240,10 @@ async function migrate() {
       WHERE agent_uri IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_agents_identity_scope ON agents(identity_scope);
     CREATE INDEX IF NOT EXISTS idx_agents_trust_status ON agents(trust_status);
+    CREATE INDEX IF NOT EXISTS idx_agents_home_directory
+      ON agents(org_id, home_directory)
+      WHERE home_directory IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_agents_profile_enabled ON agents(profile_enabled);
 
     CREATE TABLE IF NOT EXISTS agent_workspaces (
       workspace_id TEXT PRIMARY KEY,

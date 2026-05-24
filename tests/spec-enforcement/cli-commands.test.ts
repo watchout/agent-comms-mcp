@@ -96,6 +96,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('fleetCommand handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function fleetCommand\s*\(/)
   })
+  test('agentProfile handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function agentProfile\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,6 +143,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
   test("'fleet' command invokes fleetCommand(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'fleet'[\s\S]*?fleetCommand\(subcommand, rest\)/)
+  })
+  test("'agent profile' subcommands invoke agentProfile(...)", () => {
+    expect(CLI_SRC).toMatch(/command === 'agent'[\s\S]*?subcommand === 'profile'[\s\S]*?agentProfile\(rest\)/)
   })
 })
 
