@@ -206,3 +206,56 @@ describe('T5: happy-path regression — valid mention still enqueues, no drop lo
     expect(dropEventsForB.length).toBe(0)
   })
 })
+
+describe('T6: human agents are dropped from pushTargets (no message_queue insert)', () => {
+  test('recipient with agentType=human is dropped with HUMAN_AGENT_NO_QUEUE', () => {
+    const { events } = captureLogger()
+
+    const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'ceo'], type: 'channel' }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'ceo', agentType: 'human', observerMode: false, discordId: '1227059781265653783' },
+    ]
+    const msg = {
+      authorAgentId: 'agent-a',
+      authorIsBot: true,
+      content: 'thanks <@ceo>',
+      mentions: ['ceo'],
+      messageType: 'chat',
+    }
+
+    const result = routeMessage(msg, channel, agents, 'inbound')
+
+    expect(result.pushTargets).not.toContain('ceo')
+    expect(result.dropTargets['ceo']).toBe('HUMAN_AGENT_NO_QUEUE')
+
+    const dropEvents = events.filter((e) => e.event === 'route_drop' && e.reason === 'human_agent_no_queue')
+    expect(dropEvents.length).toBe(1)
+    expect(dropEvents[0].recipient_agent_id).toBe('ceo')
+
+    const counters = getObservabilityCounters()
+    expect(counters['route_message_drops_total|reason=human_agent_no_queue']).toBe(1)
+  })
+
+  test('CEO bypass (senderIsHuman + noMentions) still does not push to humans', () => {
+    captureLogger()
+
+    const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'ceo'], type: 'channel' }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'ceo', agentType: 'human', observerMode: false, discordId: '1227059781265653783' },
+    ]
+    const msg = {
+      authorAgentId: 'ceo',
+      authorIsBot: false,
+      content: 'no mentions here',
+      mentions: [],
+      messageType: 'chat',
+    }
+
+    const result = routeMessage(msg, channel, agents, 'inbound')
+
+    // self-send skip removes ceo; only agent-a remains.
+    expect(result.pushTargets).toEqual(['agent-a'])
+  })
+})

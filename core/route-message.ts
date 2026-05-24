@@ -296,6 +296,18 @@ export function routeMessage(
     // Self-send prevention
     if (agent.agentId === msg.authorAgentId) continue
 
+    // Human agents (e.g. CEO) have no LLM runtime and never consume
+    // `message_queue`. Push targets are LLM-bound by definition; if we
+    // leave humans in here, every bot reply to CEO inserts a queue row
+    // that no one drains (observed 2026-05-24: 48 stale rows accreted
+    // on `ceo`). Discord delivery still happens for humans via
+    // `outbound_queue` — that path is independent of pushTargets.
+    if (agent.agentType === 'human') {
+      dropTargets[agent.agentId] = 'HUMAN_AGENT_NO_QUEUE'
+      emitRouteDrop('human_agent_no_queue', agent.agentId, logCtx)
+      continue
+    }
+
     // Must be a channel member
     if (!channel.members.includes(agent.agentId)) {
       dropTargets[agent.agentId] = 'NOT_A_MEMBER'
