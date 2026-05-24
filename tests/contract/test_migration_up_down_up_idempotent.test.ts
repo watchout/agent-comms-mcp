@@ -22,6 +22,8 @@ const STAGE_B_UP = join(REPO_ROOT, 'db/migrations/2026-04-30-routing-v3-stage-b.
 const STAGE_B_DOWN = join(REPO_ROOT, 'db/migrations/2026-04-30-routing-v3-stage-b.down.sql')
 const DROP_CMI_UP = join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.up.sql')
 const DROP_CMI_DOWN = join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.down.sql')
+const BOT_PROFILE_UP = join(REPO_ROOT, 'db/migrations/2026-05-25-bot-profile-ssot.up.sql')
+const BOT_PROFILE_DOWN = join(REPO_ROOT, 'db/migrations/2026-05-25-bot-profile-ssot.down.sql')
 
 // PR #340 (incident #339): the destructive-migration gate in
 // db/migrate.ts rejects DROP COLUMN / TRUNCATE / etc. unless
@@ -83,6 +85,9 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
         AFTER INSERT OR UPDATE OF status, claim_expires_at ON message_queue
         FOR EACH ROW EXECUTE FUNCTION notify_queue_event()
     `)
+    try {
+      await applyUpMigrationFile(BOT_PROFILE_UP)
+    } catch {}
 
     await client.end()
     if (priorDestructiveGate === undefined) {
@@ -148,5 +153,76 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
 
     // re-up is idempotent (DROP COLUMN IF EXISTS).
     await applyUpMigrationFile(DROP_CMI_UP)
+  })
+
+  test('bot-profile-ssot — down restores trigger body, up re-adds profile defaults', async () => {
+    await applyUpMigrationFile(BOT_PROFILE_UP)
+    expect(await columnExists('agents', 'home_directory')).toBe(true)
+    expect(await columnExists('agents', 'expected_provider_identity')).toBe(true)
+
+    await client.query(`DELETE FROM agents WHERE agent_id LIKE '__norm021_roundtrip_%'`)
+    await client.query(
+      `INSERT INTO agents (
+         agent_id, display_name, agent_type, runtime,
+         expected_provider_identity, profile_enabled, profile_revision, profile_source
+       )
+       VALUES ($1, $1, 'dev', 'codex', NULL, NULL, NULL, '')`,
+      ['__norm021_roundtrip_up__'],
+    )
+    const upRow = await client.query(
+      `SELECT expected_provider_identity, profile_enabled, profile_revision, profile_source
+         FROM agents
+        WHERE agent_id = $1`,
+      ['__norm021_roundtrip_up__'],
+    )
+    expect(upRow.rows[0].expected_provider_identity).toEqual({})
+    expect(upRow.rows[0].profile_enabled).toBe(true)
+    expect(upRow.rows[0].profile_revision).toBe(1)
+    expect(upRow.rows[0].profile_source).toBe('legacy')
+
+    await applyDownMigration(BOT_PROFILE_DOWN)
+    expect(await columnExists('agents', 'home_directory')).toBe(false)
+    expect(await columnExists('agents', 'expected_provider_identity')).toBe(false)
+    const downFunction = await client.query<{ body: string }>(
+      `SELECT pg_get_functiondef('set_agent_identity_defaults()'::regprocedure) AS body`,
+    )
+    expect(downFunction.rows[0].body).not.toContain('expected_provider_identity')
+    expect(downFunction.rows[0].body).not.toContain('profile_enabled')
+
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime)
+       VALUES ($1, $1, 'dev', 'codex')`,
+      ['__norm021_roundtrip_down__'],
+    )
+
+    await applyUpMigrationFile(BOT_PROFILE_UP)
+    expect(await columnExists('agents', 'home_directory')).toBe(true)
+    expect(await columnExists('agents', 'expected_provider_identity')).toBe(true)
+    const reUpFunction = await client.query<{ body: string }>(
+      `SELECT pg_get_functiondef('set_agent_identity_defaults()'::regprocedure) AS body`,
+    )
+    expect(reUpFunction.rows[0].body).toContain('expected_provider_identity')
+    expect(reUpFunction.rows[0].body).toContain('profile_enabled')
+
+    await client.query(
+      `INSERT INTO agents (
+         agent_id, display_name, agent_type, runtime,
+         expected_provider_identity, profile_enabled, profile_revision, profile_source
+       )
+       VALUES ($1, $1, 'dev', 'codex', NULL, NULL, 0, '')`,
+      ['__norm021_roundtrip_reup__'],
+    )
+    const reUpRow = await client.query(
+      `SELECT expected_provider_identity, profile_enabled, profile_revision, profile_source
+         FROM agents
+        WHERE agent_id = $1`,
+      ['__norm021_roundtrip_reup__'],
+    )
+    expect(reUpRow.rows[0].expected_provider_identity).toEqual({})
+    expect(reUpRow.rows[0].profile_enabled).toBe(true)
+    expect(reUpRow.rows[0].profile_revision).toBe(1)
+    expect(reUpRow.rows[0].profile_source).toBe('legacy')
+
+    await client.query(`DELETE FROM agents WHERE agent_id LIKE '__norm021_roundtrip_%'`)
   })
 })
