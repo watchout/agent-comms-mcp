@@ -28,6 +28,7 @@ This roadmap applies together with:
 - [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md)
 - [`../spec/aun-bot-profile-table-reduction-audit.md`](../spec/aun-bot-profile-table-reduction-audit.md)
 - [`../spec/aun-communication-stability-mvp-impl.md`](../spec/aun-communication-stability-mvp-impl.md)
+- [`../spec/norm-025-provider-identity-registry-impl.md`](../spec/norm-025-provider-identity-registry-impl.md)
 - [`../spec/norm-030-connector-credential-registry-impl.md`](../spec/norm-030-connector-credential-registry-impl.md)
 - [`../spec/norm-035-provider-channel-access-impl.md`](../spec/norm-035-provider-channel-access-impl.md)
 - [`../spec/norm-036-effective-delivery-owner-resolver-impl.md`](../spec/norm-036-effective-delivery-owner-resolver-impl.md)
@@ -74,7 +75,12 @@ MVP is complete only when all of the following are true:
    - every active Discord-capable process has a `connector_instances` row
      derived from the bot profile token source and linked to runtime evidence
      without storing raw tokens
+   - every active Discord-capable identity has an
+     `agent_provider_identities` row for its provider-facing bot/user id
+     (`bot_id` in Discord operator language)
 2. Token identity is unambiguous:
+   - a provider subject id such as a Discord bot/user id maps to only one
+     active agent
    - a live Discord token fingerprint maps to only one active connector owner
    - duplicate token fingerprints are blocked or reported before routing use
    - connector credentials are represented by non-secret fingerprint and

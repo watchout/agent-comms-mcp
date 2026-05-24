@@ -572,6 +572,63 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_instances_provider_uri ON connector_instances(provider, connector_uri) WHERE connector_uri IS NOT NULL`)
 
   gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_provider_identities (
+      provider_identity_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      provider TEXT NOT NULL DEFAULT 'discord',
+      provider_subject_id TEXT NOT NULL,
+      identity_kind TEXT NOT NULL DEFAULT 'bot_user' CHECK (identity_kind IN ('bot_user', 'human_user', 'webhook', 'app', 'service_account', 'unknown')),
+      display_name TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'revoked', 'stale')),
+      trust_status TEXT NOT NULL DEFAULT 'local' CHECK (trust_status IN ('local', 'unverified', 'verified', 'revoked', 'disabled')),
+      connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT,
+      UNIQUE(agent_id, provider, identity_kind),
+      UNIQUE(provider, provider_subject_id)
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_provider_identities_agent ON agent_provider_identities(agent_id, provider, status)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_provider_identities_connector ON agent_provider_identities(connector_instance_id) WHERE connector_instance_id IS NOT NULL`)
+  gatedExec(`
+    INSERT INTO agent_provider_identities (
+      agent_id, provider, provider_subject_id, identity_kind, display_name,
+      status, trust_status, metadata
+    )
+    SELECT agent_id,
+           'discord',
+           json_extract(metadata, '$.discord_id'),
+           CASE WHEN agent_type = 'human' THEN 'human_user' ELSE 'bot_user' END,
+           display_name,
+           'active',
+           COALESCE(NULLIF(trust_status, ''), 'local'),
+           '{"source":"agents.metadata.discord_id_backfill"}'
+      FROM agents
+     WHERE json_extract(metadata, '$.discord_id') IS NOT NULL
+       AND json_extract(metadata, '$.discord_id') <> ''
+    ON CONFLICT(agent_id, provider, identity_kind) DO UPDATE SET
+      provider_subject_id = excluded.provider_subject_id,
+      display_name = excluded.display_name,
+      status = CASE
+                 WHEN agent_provider_identities.status IN ('disabled', 'revoked')
+                   THEN agent_provider_identities.status
+                 ELSE 'active'
+               END,
+      trust_status = CASE
+                       WHEN agent_provider_identities.trust_status IN ('disabled', 'revoked')
+                         THEN agent_provider_identities.trust_status
+                       ELSE excluded.trust_status
+                     END,
+      last_seen_at = datetime('now'),
+      updated_at = datetime('now'),
+      metadata = '{"source":"agents.metadata.discord_id_backfill"}'
+  `)
+
+  gatedExec(`
     CREATE TABLE IF NOT EXISTS channel_connector_bindings (
       channel_binding_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,

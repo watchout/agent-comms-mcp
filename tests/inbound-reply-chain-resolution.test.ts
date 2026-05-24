@@ -113,6 +113,11 @@ function makeDeps(opts: {
         return { rows: [{ id: channelId, members, type: 'group', thread_id: null } as any] }
       }
       // §2.2 mock split — loadAgentInfo: WHERE agent_id = $1
+      if (s.includes('from agents a') && s.includes('where a.agent_id = $1')) {
+        return {
+          rows: [{ agent_id: receiverAgentId, agent_type: 'dev', observer_mode: false, discord_id: null } as any],
+        }
+      }
       if (s.includes('from agents') && s.includes('where agent_id = $1')) {
         return {
           rows: [{ agent_id: receiverAgentId, status: 'active', discord_id: null } as any],

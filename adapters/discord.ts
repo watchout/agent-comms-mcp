@@ -142,8 +142,34 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       const agentId = mention.slice(1) // remove @
       try {
         const r = await this.dbQuery(
-          "SELECT metadata->>'discord_id' as discord_id FROM agents WHERE agent_id = $1",
-          [agentId]
+          `SELECT COALESCE(
+                    (
+                      SELECT provider_subject_id
+                        FROM agent_provider_identities
+                       WHERE agent_id = $1
+                         AND provider = 'discord'
+                         AND status = 'active'
+                         AND identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
+                       ORDER BY CASE identity_kind
+                                  WHEN 'bot_user' THEN 0
+                                  WHEN 'human_user' THEN 1
+                                  ELSE 2
+                                END
+                       LIMIT 1
+                    ),
+                    (
+                      SELECT metadata->>'discord_id'
+                        FROM agents
+                       WHERE agent_id = $1
+                         AND NOT EXISTS (
+                           SELECT 1
+                             FROM agent_provider_identities
+                            WHERE agent_id = $1
+                              AND provider = 'discord'
+                         )
+                    )
+                  ) AS discord_id`,
+          [agentId],
         )
         if (r.rows.length > 0 && r.rows[0].discord_id) {
           result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
@@ -163,8 +189,27 @@ export class DiscordAdapter implements UIAdapter, Adapter {
       const discordId = mention.replace(/<@!?(\d+)>/, '$1')
       try {
         const r = await this.dbQuery(
-          "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1",
-          [discordId]
+          `SELECT agent_id
+             FROM (
+               SELECT agent_id, 0 AS priority
+                 FROM agent_provider_identities
+                WHERE provider = 'discord'
+                  AND provider_subject_id = $1
+                  AND status = 'active'
+               UNION ALL
+               SELECT agent_id, 1 AS priority
+                 FROM agents
+                WHERE metadata->>'discord_id' = $1
+                  AND NOT EXISTS (
+                    SELECT 1
+                      FROM agent_provider_identities
+                     WHERE provider = 'discord'
+                       AND provider_subject_id = $1
+                  )
+             ) candidates
+            ORDER BY priority, agent_id
+            LIMIT 1`,
+          [discordId],
         )
         if (r.rows.length > 0) {
           result = result.replace(mention, `@${r.rows[0].agent_id}`)
@@ -264,25 +309,65 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     this.client.once('ready', async (c) => {
       process.stderr.write(`discord-adapter: connected as ${c.user.tag}\n`)
 
-      // ADR-040 D1: self-register Discord identity into agents.metadata.discord_id
-      // so the mention resolver can map <@discord_user_id> back to this agent_id.
-      // Without this, every restart leaves the bot invisible to humans (D8 was the
-      // interim fix that prevented registerAgent from wiping the column; D1 is the
-      // robust fix that always re-asserts the right value at connection time).
+      // ADR-040 D1 / NORM-025: self-register the Discord provider identity.
+      // agent_provider_identities is the authority; agents.metadata.discord_id is
+      // retained as a compatibility mirror during rollout.
       if (this.agentId && this.dbQuery) {
         try {
+          const ownIdentity = await this.dbQuery(
+            `SELECT provider_subject_id, status, trust_status
+               FROM agent_provider_identities
+              WHERE agent_id = $1
+                AND provider = 'discord'
+                AND identity_kind = 'bot_user'`,
+            [this.agentId],
+          )
+          if (ownIdentity.rows.length > 0) {
+            const row = ownIdentity.rows[0]
+            const status = String(row.status ?? '')
+            const trustStatus = String(row.trust_status ?? '')
+            const configuredSubject = row.provider_subject_id ? String(row.provider_subject_id) : ''
+            if (status === 'disabled' || status === 'revoked' || trustStatus === 'disabled' || trustStatus === 'revoked') {
+              process.stderr.write(
+                `discord-adapter: NORM-025 provider identity blocked agent=${this.agentId} status=${status} trust_status=${trustStatus}\n`,
+              )
+              this.client?.destroy()
+              this.client = null
+              return
+            }
+            if (configuredSubject && configuredSubject !== c.user.id) {
+              process.stderr.write(
+                `discord-adapter: NORM-025 provider identity mismatch blocked agent=${this.agentId} configured=${configuredSubject} actual=${c.user.id}\n`,
+              )
+              this.client?.destroy()
+              this.client = null
+              return
+            }
+          }
+
           const conflicts = await this.dbQuery(
-            `SELECT agent_id
-               FROM agents
-              WHERE metadata->>'discord_id' = $1
-                AND agent_id <> $2
-              ORDER BY agent_id`,
+            `SELECT DISTINCT agent_id, source
+               FROM (
+                 SELECT agent_id, 'agent_provider_identities' AS source
+                   FROM agent_provider_identities
+                  WHERE provider = 'discord'
+                    AND provider_subject_id = $1
+                    AND agent_id <> $2
+                 UNION ALL
+                 SELECT agent_id, 'agents.metadata.discord_id' AS source
+                   FROM agents
+                  WHERE metadata->>'discord_id' = $1
+                    AND agent_id <> $2
+               ) conflicts
+              ORDER BY agent_id, source`,
             [c.user.id, this.agentId],
           )
           if (conflicts.rows.length > 0) {
-            const conflictingAgents = conflicts.rows.map((row) => String(row.agent_id)).join(',')
+            const conflictingAgents = conflicts.rows
+              .map((row) => `${String(row.agent_id)}:${String(row.source)}`)
+              .join(',')
             process.stderr.write(
-              `discord-adapter: D1 duplicate discord identity blocked discord_id=${c.user.id} agent=${this.agentId} conflicts=${conflictingAgents}\n`,
+              `discord-adapter: NORM-025 duplicate provider identity blocked provider=discord subject=${c.user.id} agent=${this.agentId} conflicts=${conflictingAgents}\n`,
             )
             this.client?.destroy()
             this.client = null
@@ -297,12 +382,41 @@ export class DiscordAdapter implements UIAdapter, Adapter {
                 AND COALESCE(metadata->>'discord_id', '') <> $1::text`,
             [c.user.id, this.agentId],
           )
+          await this.dbQuery(
+            `INSERT INTO agent_provider_identities (
+               agent_id, provider, provider_subject_id, identity_kind, display_name,
+               status, trust_status, metadata, last_seen_at, updated_at
+             )
+             VALUES (
+               $2, 'discord', $1::text, 'bot_user', $3::text,
+               'active', 'local', jsonb_build_object('source', 'discord_adapter_ready'),
+               now(), now()
+             )
+             ON CONFLICT (agent_id, provider, identity_kind) DO UPDATE SET
+               provider_subject_id = EXCLUDED.provider_subject_id,
+               display_name = EXCLUDED.display_name,
+               status = CASE
+                          WHEN agent_provider_identities.status IN ('disabled', 'revoked')
+                            THEN agent_provider_identities.status
+                          ELSE 'active'
+                        END,
+               trust_status = CASE
+                                WHEN agent_provider_identities.trust_status IN ('disabled', 'revoked')
+                                  THEN agent_provider_identities.trust_status
+                                ELSE COALESCE(agent_provider_identities.trust_status, EXCLUDED.trust_status)
+                              END,
+               last_seen_at = now(),
+               updated_at = now(),
+               metadata = COALESCE(agent_provider_identities.metadata, '{}'::jsonb)
+                       || jsonb_build_object('source', 'discord_adapter_ready')`,
+            [c.user.id, this.agentId, c.user.tag],
+          )
           process.stderr.write(
-            `discord-adapter: D1 self-registered discord_id=${c.user.id} for agent=${this.agentId}\n`,
+            `discord-adapter: NORM-025 self-registered discord provider identity subject=${c.user.id} for agent=${this.agentId}\n`,
           )
         } catch (err) {
           process.stderr.write(
-            `discord-adapter: D1 self-register failed closed for agent=${this.agentId}: ${err}\n`,
+            `discord-adapter: NORM-025 self-register failed closed for agent=${this.agentId}: ${err}\n`,
           )
           this.client?.destroy()
           this.client = null
