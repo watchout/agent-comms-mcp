@@ -2414,11 +2414,12 @@ async function status(args: string[]) {
                    agent_id`,
       )
 
-      // Per-agent live workspace lookup. Pulled from agent_runtime_instances
-      // so the value reflects the *actually running* checkout, not a stale
-      // metadata field. SQLite tests use bun:sqlite which has had this
-      // table since the NORM-020 migration, but the column set is small
-      // so we tolerate an empty result silently.
+      // Per-agent live runtime workspace lookup. Pulled from
+      // agent_runtime_instances so the value reflects the *actually
+      // running* checkout, not a stale metadata field. SQLite tests use
+      // bun:sqlite which has had this table since the NORM-020
+      // migration, but the column set is small so we tolerate an empty
+      // result silently.
       const workspaceRes = await db.query(
         `SELECT agent_id, checkout_path
            FROM agent_runtime_instances
@@ -2429,6 +2430,29 @@ async function status(args: string[]) {
         // If two runtimes share an agent_id (shouldn't happen, but
         // codex-aun lane is still normalising), prefer the first seen.
         if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
+      }
+
+      // 起動ディレクトリ (launch directory) per CEO 2026-05-24 directive
+      // (msg `d19f1f6e`). Distinct from runtime workspace: scripts/bot-registry.txt
+      // column 2 is the operator-declared home directory used to launch the
+      // bot (e.g. ~/Developer/codex for codex-cto). Runtime checkout (above)
+      // is wherever the running process happens to be, which can be a
+      // sibling clone — they often diverge during codex-aun lane
+      // normalisation work.
+      const launchDirByAgent = new Map<string, string>()
+      const registryPath = process.env.AUN_REGISTRY_PATH ?? join(process.cwd(), 'scripts/bot-registry.txt')
+      if (existsSync(registryPath)) {
+        try {
+          for (const raw of readFileSync(registryPath, 'utf-8').split('\n')) {
+            const line = raw.trim()
+            if (!line || line.startsWith('#')) continue
+            const [, projectDir, agentId] = line.split('|')
+            if (agentId && projectDir) launchDirByAgent.set(agentId.trim(), projectDir.trim())
+          }
+        } catch {
+          // best-effort; missing/unreadable registry just leaves the
+          // column empty rather than failing the whole status call.
+        }
       }
       const queueRes = await db.query(
         `SELECT agent_id,
@@ -2484,6 +2508,7 @@ async function status(args: string[]) {
             last_seen_at: a.last_seen_at,
             discord_id: a.discord_id ?? null,
             tmux_session: a.tmux_session ?? null,
+            launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
             workspace: workspaceByAgent.get(a.agent_id) ?? null,
             retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
             queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
@@ -2504,12 +2529,16 @@ async function status(args: string[]) {
         'runtime'.padEnd(8) +
         'pend/recv/inflight'.padEnd(20) +
         'discord_id'.padEnd(22) +
-        'workspace'.padEnd(42) +
+        'launch_dir'.padEnd(36) +
         'last_seen',
       )
-      // Common workspace prefix shrunk to `~` so the column fits on a
-      // standard terminal. Full path remains in --format json output.
+      // `launch_dir` is the bot-registry.txt operator-declared launch
+      // directory, distinct from the runtime workspace (= what the
+      // process is actually executing inside). Both are exposed in
+      // --format json under `launch_dir` and `workspace` respectively
+      // so dashboards can compare them.
       const HOME = process.env.HOME ?? ''
+      const shrinkHome = (p: string) => (HOME && p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p)
       for (const a of agentsRes.rows) {
         const q = queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null }
         const qStr = `${q.pending}/${q.received}/${q.in_progress}`
@@ -2517,15 +2546,15 @@ async function status(args: string[]) {
         const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
         const statusStr = retiredText ? `${a.status}*ret` : a.status
         const discordId = a.discord_id ?? '-'
-        const wsRaw = workspaceByAgent.get(a.agent_id)
-        const ws = wsRaw ? (HOME && wsRaw.startsWith(HOME) ? '~' + wsRaw.slice(HOME.length) : wsRaw) : '-'
+        const launchRaw = launchDirByAgent.get(a.agent_id)
+        const launch = launchRaw ? shrinkHome(launchRaw) : '-'
         console.log(
           a.agent_id.padEnd(20) +
           (statusStr ?? '?').padEnd(10) +
           (a.runtime ?? '?').padEnd(8) +
           qStr.padEnd(20) +
           discordId.padEnd(22) +
-          ws.padEnd(42) +
+          launch.padEnd(36) +
           lastSeen,
         )
       }
