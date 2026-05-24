@@ -625,6 +625,7 @@ async function saveMessage(msg: {
   metadata?: Record<string, unknown>; depth?: number
   // ADR-026: unified schema fields
   source?: string; thread_id?: string; direction?: string; role?: string
+  author_bot?: boolean
   session_id?: string; project?: string
   // Issue #266: raw args.mentions snapshot for outbound trace.
   input_mentions?: string[] | null
@@ -644,13 +645,14 @@ async function saveMessage(msg: {
   const discordMessageId = (msg.metadata as Record<string, unknown> | undefined)?.discord_message_id as string | undefined ?? null
 
   const inputMentions = msg.input_mentions && msg.input_mentions.length > 0 ? msg.input_mentions : null
+  const authorBot = msg.author_bot ?? msg.role !== 'user'
 
   // Path A — outbound or no-discord-id row: plain INSERT (no dedup column).
   if (!discordMessageId) {
     await client.query(
-      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, input_mentions)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-      [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
+      `INSERT INTO agent_messages (id, channel_id, author_id, author_bot, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, input_mentions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      [id, msg.channel_id, msg.author_id, authorBot, msg.content, msg.message_type ?? 'chat',
        msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
        msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
        msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, inputMentions]
@@ -662,11 +664,11 @@ async function saveMessage(msg: {
   // NOTE: ON CONFLICT must REPEAT the partial-index predicate so the planner matches
   //       uq_agent_messages_discord_id (Spike 2 finding, code 42P10 otherwise).
   const insertResult = await client.query(
-    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, discord_message_id, input_mentions)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    `INSERT INTO agent_messages (id, channel_id, author_id, author_bot, content, message_type, reply_to, metadata, depth, source, thread_id, direction, role, session_id, project, discord_message_id, input_mentions)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      ON CONFLICT (discord_message_id) WHERE discord_message_id IS NOT NULL DO NOTHING
      RETURNING id`,
-    [id, msg.channel_id, msg.author_id, msg.content, msg.message_type ?? 'chat',
+     [id, msg.channel_id, msg.author_id, authorBot, msg.content, msg.message_type ?? 'chat',
      msg.reply_to ?? null, msg.metadata ? JSON.stringify(msg.metadata) : null, msg.depth ?? 0,
      msg.source ?? 'agent-comms', msg.thread_id ?? null, msg.direction ?? 'inbound',
      msg.role ?? 'agent', msg.session_id ?? null, msg.project ?? null, discordMessageId, inputMentions]

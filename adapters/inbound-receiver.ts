@@ -96,8 +96,10 @@ export interface InboundReceiverDeps {
     thread_id?: string | null
     direction?: string
     role?: string
+    author_bot?: boolean
     session_id?: string
     project?: string
+    input_mentions?: string[] | null
   }) => Promise<string>
   validateIncomingAuth: (
     metadata: Record<string, any> | null,
@@ -522,7 +524,17 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // Step 2: DB save (always) — non-fatal. 'to' is NOT set here; it is
+  // Step 2: Resolve the final mention list before persistence so the
+  // inbound DB row carries the same recipient evidence used by routing.
+  const incomingMentions = mentions ?? []
+  const autoFilled = applyMentionsAutoFill(
+    incomingMentions,
+    resolvedReplyToUuid,
+    resolvedReplyToAuthor,
+  )
+  const resolvedMentions = autoFilled ?? incomingMentions
+
+  // Step 3: DB save (always) — non-fatal. 'to' is NOT set here; it is
   // set ONLY after routeInbound confirms delivery (prevents poll bypass
   // of the mentions filter, §5.1).
   const messageId = await d.saveMessage({
@@ -537,6 +549,7 @@ export async function handleInboundMessage(params: {
     thread_id: resolved?.threadId ?? null,
     direction: 'inbound',
     role: authorIsBot ? 'agent' : 'user',
+    author_bot: authorIsBot,
     metadata: {
       [`${platform}_message_id`]: externalMessageId,
       [`${platform}_channel_id`]: externalChannelId,
@@ -544,12 +557,13 @@ export async function handleInboundMessage(params: {
       mentions: mentions ?? [],
       ...(attachments ? { attachments } : {}),
     },
+    input_mentions: resolvedMentions,
   }).catch(err => {
     writeStderr(`agent-comms: inbound DB persist failed (non-fatal): ${err}\n`)
     return undefined
   })
 
-  // Step 3: Channel not registered → drop.
+  // Step 4: Channel not registered → drop.
   if (!resolved) {
     writeStderr(
       `agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`,
@@ -557,7 +571,7 @@ export async function handleInboundMessage(params: {
     return { delivered: false, messageId, reason: 'CHANNEL_UNKNOWN' }
   }
 
-  // Step 4: Load agent info for **all channel members**, not just the
+  // Step 5: Load agent info for **all channel members**, not just the
   // receiver daemon's own AGENT_ID. spec §13.1: inbound is one shared
   // adapter that fans out to N bot-indexed message_queue rows. Pre-fix
   // we passed `[agentInfo]` (the receiver only) which made
@@ -587,21 +601,14 @@ export async function handleInboundMessage(params: {
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
   }
 
-  // Step 5: Resolve sender agent_id.
+  // Step 6: Resolve sender agent_id.
   const senderAgentId = await resolveAgentFromDiscordId(coreDb, authorExternalId)
 
-  // Step 6: Pure routing decision (§5.1).
+  // Step 7: Pure routing decision (§5.1).
   // PR-β §1/§2: apply mentions auto-fill BEFORE routeInbound. When the
   // sender omitted explicit mentions but the reply_to chain identifies a
   // known parent author, route the reply to that author. §3 Forbidden:
   // applyMentionsAutoFill must not be bypassed on any inbound path.
-  const incomingMentions = mentions ?? []
-  const autoFilled = applyMentionsAutoFill(
-    incomingMentions,
-    resolvedReplyToUuid,
-    resolvedReplyToAuthor,
-  )
-  const resolvedMentions = autoFilled ?? incomingMentions
   // PR-β cycle 3 §1.2: dispatch via the early-captured local. The
   // literal token `routeInbound(` still appears in `routeInboundImpl`
   // and in this comment so source-grep regression tests (saveMessage
