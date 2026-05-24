@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-04-27
+> 最終更新: 2026-05-24
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
@@ -17,6 +17,7 @@
 | phase-c-redef-approval.md | — | Phase C 完了条件の再定義 (CEO 承認 2026-04-17) | 2026-04-17 |
 | wave-rollout-rules.md | provisional | Phase C aun deployment の operational contract — wave 1-3 entry/exit/rollback、`回帰なし` metric set、completion judgment (PR #254) | 2026-04-27 |
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
+| design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定 | 2026-05-24 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-04-27 |
 
 ---
@@ -62,6 +63,12 @@
 - 運用同期（DB → Discord）
 - 6テーブル構成（agents, agent_adapters, channels, channel_adapters, threads, thread_adapters）
 - access.json完全廃止
+
+### design/aun-normalization-roadmap.md（AUN正常化ロードマップ）
+- AUN正常化をMVP/v1/v2のフェーズゲートで管理する
+- DB正本、runtime/workspace/connector、token一意性、queue安全性、channel assignment、state-daemon、smoke/auditのMVP完了条件を固定する
+- 実装PRをNORM/REG/CONN/LEASE/AUTH/TRAN/EXT/OBS sliceに分解する
+- 「見つかった不整合を都度直す」進め方を禁止し、phase/slice分類後に実装する
 
 ---
 
