@@ -2368,23 +2368,224 @@ async function status(args: string[]) {
         console.log(`Current message: ${result.current_message_id ?? 'none'}`)
       }
     } else {
+      // #530 — system-wide status. Two output modes:
+      //   --brief  → legacy minimal summary (kept for backward compat /
+      //              scripting callers that depend on the pre-#530 shape).
+      //   default  → rich tables: agents (one row per active agent_id) and
+      //              queue summary (pending/received/in_progress per agent
+      //              with oldest-row age). Drift warnings (retired agents
+      //              still receiving queue rows, etc.) follow the tables.
+      // --format json → extended schema (additive over the brief shape).
       const chCount = await db.query('SELECT COUNT(*) as cnt FROM channels')
       const agOnline = await db.query("SELECT COUNT(*) as cnt FROM agents WHERE status = 'online'")
       const agTotal = await db.query('SELECT COUNT(*) as cnt FROM agents')
       const msgRecent = await db.query("SELECT COUNT(*) as cnt FROM agent_messages WHERE created_at > now() - interval '1 hour'")
+      const brief = hasFlag(flags, 'brief')
+
+      if (brief && format !== 'json') {
+        console.log('=== agent-com status ===')
+        console.log(`DB: connected`)
+        console.log(`Channels: ${chCount.rows[0].cnt}`)
+        console.log(`Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total`)
+        console.log(`Messages (1h): ${msgRecent.rows[0].cnt}`)
+        return
+      }
+
+      // Detailed view (also feeds JSON output) — keep the query set small
+      // and DB-only so this command stays a pure observability tool.
+      // `metadata->>'…'` is a PG operator that the SQLite adapter rewrites
+      // to `json_extract(metadata, '$.…')`. Avoid `a.metadata->>…` because
+      // the adapter regex captures only the bare column name, leaving
+      // `a.` orphaned in front of the rewritten function call. Plain
+      // `metadata->>…` is unambiguous since `agents` is the sole FROM table.
+      const agentsRes = await db.query(
+        `SELECT agent_id,
+                agent_type,
+                runtime,
+                status,
+                display_name,
+                last_seen_at,
+                metadata->>'discord_id' AS discord_id,
+                metadata->>'tmux_session' AS tmux_session,
+                metadata->>'discord_username' AS discord_username_cached,
+                metadata->>'retired' AS retired_raw
+           FROM agents
+          WHERE disabled_at IS NULL
+          ORDER BY (status = 'busy') DESC,
+                   (status = 'idle') DESC,
+                   agent_id`,
+      )
+
+      // Per-agent live runtime workspace lookup. Pulled from
+      // agent_runtime_instances so the value reflects the *actually
+      // running* checkout, not a stale metadata field. SQLite tests use
+      // bun:sqlite which has had this table since the NORM-020
+      // migration, but the column set is small so we tolerate an empty
+      // result silently.
+      const workspaceRes = await db.query(
+        `SELECT agent_id, checkout_path
+           FROM agent_runtime_instances
+          WHERE status = 'running' AND checkout_path IS NOT NULL`,
+      ).catch(() => ({ rows: [] as any[] }))
+      const workspaceByAgent = new Map<string, string>()
+      for (const r of workspaceRes.rows) {
+        // If two runtimes share an agent_id (shouldn't happen, but
+        // codex-aun lane is still normalising), prefer the first seen.
+        if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
+      }
+
+      // Per CEO 2026-05-24 directive (msg `7d778234`): the live Discord
+      // API resolution path is removed. codex-aun lane (NORM-020) owns
+      // the per-bot connector/runtime identity work that will persist
+      // discord_username into the agents row at heartbeat time. The
+      // status CLI conforms to that spec once it lands. Until then,
+      // fall through to metadata.discord_username (read-only consumer)
+      // → display_name → placeholder.
+
+      // 起動ディレクトリ (launch directory) per CEO 2026-05-24 directive
+      // (msg `d19f1f6e`). Distinct from runtime workspace: scripts/bot-registry.txt
+      // column 2 is the operator-declared home directory used to launch the
+      // bot (e.g. ~/Developer/codex for codex-cto). Runtime checkout (above)
+      // is wherever the running process happens to be, which can be a
+      // sibling clone — they often diverge during codex-aun lane
+      // normalisation work.
+      const launchDirByAgent = new Map<string, string>()
+      const registryPath = process.env.AUN_REGISTRY_PATH ?? join(process.cwd(), 'scripts/bot-registry.txt')
+      if (existsSync(registryPath)) {
+        try {
+          for (const raw of readFileSync(registryPath, 'utf-8').split('\n')) {
+            const line = raw.trim()
+            if (!line || line.startsWith('#')) continue
+            const [, projectDir, agentId] = line.split('|')
+            if (agentId && projectDir) launchDirByAgent.set(agentId.trim(), projectDir.trim())
+          }
+        } catch {
+          // best-effort; missing/unreadable registry just leaves the
+          // column empty rather than failing the whole status call.
+        }
+      }
+      const queueRes = await db.query(
+        `SELECT agent_id,
+                status,
+                COUNT(*)::int AS n,
+                MIN(created_at) AS oldest
+           FROM message_queue
+          WHERE status IN ('pending','received','in_progress')
+          GROUP BY agent_id, status
+          ORDER BY agent_id, status`,
+      )
+
+      // Pivot queue rows into per-agent { pending, received, in_progress, oldest }.
+      type QueueAgg = { pending: number; received: number; in_progress: number; oldest: string | null }
+      const queueByAgent = new Map<string, QueueAgg>()
+      for (const r of queueRes.rows) {
+        const agg = queueByAgent.get(r.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null }
+        ;(agg as any)[r.status] = parseInt(r.n)
+        if (agg.oldest == null || (r.oldest && new Date(r.oldest) < new Date(agg.oldest))) {
+          agg.oldest = r.oldest
+        }
+        queueByAgent.set(r.agent_id, agg)
+      }
+
+      // Drift warnings — pure DB findings, no shell-out. Each entry is a
+      // short string the operator can paste into a follow-up issue.
+      const drifts: string[] = []
+      for (const a of agentsRes.rows) {
+        const q = queueByAgent.get(a.agent_id)
+        const retired = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
+        if (retired && q && (q.pending + q.received + q.in_progress) > 0) {
+          drifts.push(`retired agent '${a.agent_id}' still has ${q.pending + q.received + q.in_progress} queued rows`)
+        }
+        if (a.agent_type === 'human' && q && (q.pending + q.received + q.in_progress) > 0) {
+          drifts.push(`human agent '${a.agent_id}' has ${q.pending + q.received + q.in_progress} queued rows — PR #533 fix should have prevented this; check fleet runtime build`)
+        }
+        if (a.runtime === 'TUI' && (!a.tmux_session || a.tmux_session === '')) {
+          drifts.push(`agent '${a.agent_id}' runtime=TUI but metadata.tmux_session is missing`)
+        }
+      }
+
       if (format === 'json') {
         process.stdout.write(JSON.stringify({
           channels: parseInt(chCount.rows[0].cnt),
           agents_online: parseInt(agOnline.rows[0].cnt),
           agents_total: parseInt(agTotal.rows[0].cnt),
           messages_1h: parseInt(msgRecent.rows[0].cnt),
+          agents: agentsRes.rows.map(a => ({
+            // Resolution order for the human-facing bot name:
+            //   1. agents.metadata.discord_username (cached — populated
+            //      by a future writer in the codex-aun NORM-020 lane)
+            //   2. agents.display_name (DB row; drifted on legacy rows)
+            //   3. null
+            // The chain is exposed individually in JSON so dashboards
+            // can prefer the source they trust.
+            agent_id: a.agent_id,
+            agent_type: a.agent_type,
+            runtime: a.runtime,
+            status: a.status,
+            display_name: a.display_name ?? null,
+            last_seen_at: a.last_seen_at,
+            discord_id: a.discord_id ?? null,
+            discord_username_cached: a.discord_username_cached ?? null,
+            tmux_session: a.tmux_session ?? null,
+            launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
+            workspace: workspaceByAgent.get(a.agent_id) ?? null,
+            retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
+            queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
+          })),
+          drifts,
         }) + '\n')
+        return
+      }
+
+      console.log('=== agent-com status ===')
+      console.log(`DB: connected`)
+      console.log(`Channels: ${chCount.rows[0].cnt} · Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total · Messages (1h): ${msgRecent.rows[0].cnt}`)
+      console.log('')
+      console.log('--- agents (active, non-disabled) ---')
+      console.log(
+        'agent_id'.padEnd(20) +
+        'discord_id'.padEnd(22) +
+        'status'.padEnd(10) +
+        'pend/recv/inflight'.padEnd(20) +
+        'launch_dir'.padEnd(36) +
+        'last_seen',
+      )
+      // `launch_dir` is the bot-registry.txt operator-declared launch
+      // directory, distinct from the runtime workspace (= what the
+      // process is actually executing inside). Both are exposed in
+      // --format json under `launch_dir` and `workspace` respectively
+      // so dashboards can compare them.
+      const HOME = process.env.HOME ?? ''
+      const shrinkHome = (p: string) => (HOME && p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p)
+      for (const a of agentsRes.rows) {
+        const q = queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null }
+        const qStr = `${q.pending}/${q.received}/${q.in_progress}`
+        const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
+        const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
+        const statusStr = retiredText ? `${a.status}*ret` : a.status
+        // Per CEO 2026-05-24 directive (msg `768a62b7`): show the
+        // raw discord_id only — name resolution is codex-aun lane
+        // (NORM-020). JSON still exposes display_name and
+        // discord_username_cached for dashboards.
+        const discordId = a.discord_id ?? '-'
+        const launchRaw = launchDirByAgent.get(a.agent_id)
+        const launch = launchRaw ? shrinkHome(launchRaw) : '-'
+        console.log(
+          a.agent_id.padEnd(20) +
+          discordId.padEnd(22) +
+          (statusStr ?? '?').padEnd(10) +
+          qStr.padEnd(20) +
+          launch.padEnd(36) +
+          lastSeen,
+        )
+      }
+      if (drifts.length > 0) {
+        console.log('')
+        console.log(`--- drift warnings (${drifts.length}) ---`)
+        for (const d of drifts) console.log(`! ${d}`)
       } else {
-        console.log('=== agent-com status ===')
-        console.log(`DB: connected`)
-        console.log(`Channels: ${chCount.rows[0].cnt}`)
-        console.log(`Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total`)
-        console.log(`Messages (1h): ${msgRecent.rows[0].cnt}`)
+        console.log('')
+        console.log('--- drift warnings: none ---')
       }
     }
   } finally {
