@@ -171,10 +171,22 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
     expect(botA.launch_dir).toBe('/Users/x/launch/bot-a')
   })
 
-  test('text mode header includes discord_id and launch_dir columns', () => {
-    const r = runCli(['status'])
+  test('text mode header includes discord_name and launch_dir columns', () => {
+    const r = runCli(['status', '--no-discord-fetch'])
     expect(r.status).toBe(0)
-    expect(r.stdout).toContain('discord_id')
+    expect(r.stdout).toContain('discord_name')
     expect(r.stdout).toContain('launch_dir')
+  })
+
+  test('--no-discord-fetch skips API lookup; discord_username is null in JSON', () => {
+    const db = new Database(dbPath)
+    db.exec(`UPDATE agents SET metadata = '{"discord_id":"99887766"}' WHERE agent_id='bot-a'`)
+    db.close()
+    const r = runCli(['status', '--format', 'json', '--no-discord-fetch'])
+    expect(r.status).toBe(0)
+    const payload = JSON.parse(r.stdout.trim())
+    const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
+    expect(botA.discord_id).toBe('99887766')
+    expect(botA.discord_username).toBe(null)
   })
 })

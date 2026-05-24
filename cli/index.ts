@@ -2432,6 +2432,37 @@ async function status(args: string[]) {
         if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
       }
 
+      // Per-agent Discord bot username lookup. CEO 2026-05-24 directive
+      // (msg `3675c37e`): seeing the Discord-side name alongside the
+      // numeric ID is what makes the table 「スッキリ通る」. We resolve
+      // via Discord's `GET /users/{id}` with the shared bot token —
+      // each request is independent so we run them in parallel and
+      // fall back to '?' on any failure (missing token, API rate
+      // limit, etc.) rather than blocking the status output. Skip
+      // entirely when --no-discord-fetch is passed (CI / offline).
+      const discordUsernameById = new Map<string, string>()
+      const skipDiscord = hasFlag(flags, 'no-discord-fetch')
+      const botToken = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
+      if (!skipDiscord && botToken) {
+        const ids = Array.from(new Set(
+          agentsRes.rows.map((a: any) => a.discord_id).filter((x: any) => !!x),
+        )) as string[]
+        const fetches = ids.map(async (id) => {
+          try {
+            const res = await fetch(`https://discord.com/api/v10/users/${id}`, {
+              headers: { Authorization: `Bot ${botToken}` },
+            })
+            if (!res.ok) return
+            const body = await res.json() as { username?: string; global_name?: string }
+            const name = body.global_name || body.username
+            if (name) discordUsernameById.set(id, name)
+          } catch {
+            // best-effort, swallow
+          }
+        })
+        await Promise.all(fetches)
+      }
+
       // 起動ディレクトリ (launch directory) per CEO 2026-05-24 directive
       // (msg `d19f1f6e`). Distinct from runtime workspace: scripts/bot-registry.txt
       // column 2 is the operator-declared home directory used to launch the
@@ -2507,6 +2538,7 @@ async function status(args: string[]) {
             status: a.status,
             last_seen_at: a.last_seen_at,
             discord_id: a.discord_id ?? null,
+            discord_username: a.discord_id ? (discordUsernameById.get(a.discord_id) ?? null) : null,
             tmux_session: a.tmux_session ?? null,
             launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
             workspace: workspaceByAgent.get(a.agent_id) ?? null,
@@ -2525,10 +2557,9 @@ async function status(args: string[]) {
       console.log('--- agents (active, non-disabled) ---')
       console.log(
         'agent_id'.padEnd(20) +
+        'discord_name'.padEnd(20) +
         'status'.padEnd(10) +
-        'runtime'.padEnd(8) +
         'pend/recv/inflight'.padEnd(20) +
-        'discord_id'.padEnd(22) +
         'launch_dir'.padEnd(36) +
         'last_seen',
       )
@@ -2545,15 +2576,16 @@ async function status(args: string[]) {
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
         const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
         const statusStr = retiredText ? `${a.status}*ret` : a.status
-        const discordId = a.discord_id ?? '-'
+        const discordName = a.discord_id
+          ? (discordUsernameById.get(a.discord_id) ?? (botToken ? '?' : '(no-token)'))
+          : '-'
         const launchRaw = launchDirByAgent.get(a.agent_id)
         const launch = launchRaw ? shrinkHome(launchRaw) : '-'
         console.log(
           a.agent_id.padEnd(20) +
+          discordName.padEnd(20) +
           (statusStr ?? '?').padEnd(10) +
-          (a.runtime ?? '?').padEnd(8) +
           qStr.padEnd(20) +
-          discordId.padEnd(22) +
           launch.padEnd(36) +
           lastSeen,
         )
