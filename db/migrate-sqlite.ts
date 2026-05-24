@@ -186,7 +186,7 @@ export function migrateSqlite(dbPath?: string): void {
       org_id TEXT NOT NULL DEFAULT 'default',
       display_name TEXT NOT NULL DEFAULT '',
       agent_type TEXT NOT NULL DEFAULT 'dev',
-      runtime TEXT,
+      runtime TEXT NOT NULL DEFAULT 'TUI',
       cli_type TEXT,
       discord_token TEXT,
       discord_user_id TEXT,
@@ -231,9 +231,6 @@ export function migrateSqlite(dbPath?: string): void {
   const agentsColNames = new Set(agentsCols.map((c) => c.name))
   if (!agentsColNames.has('org_id')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN org_id TEXT NOT NULL DEFAULT 'default'`)
-  }
-  if (!agentsColNames.has('runtime')) {
-    gatedExec(`ALTER TABLE agents ADD COLUMN runtime TEXT`)
   }
   if (!agentsColNames.has('inbox_cursor_at')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN inbox_cursor_at TEXT`)
@@ -305,7 +302,8 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`UPDATE agents SET profile_enabled = 1 WHERE profile_enabled IS NULL`)
   gatedExec(`UPDATE agents SET profile_revision = 1 WHERE profile_revision IS NULL OR profile_revision < 1`)
   gatedExec(`UPDATE agents SET profile_source = 'legacy' WHERE profile_source IS NULL OR profile_source = ''`)
-  gatedExec(`UPDATE agents SET runtime = cli_type WHERE (runtime IS NULL OR runtime = '' OR runtime = 'unknown') AND cli_type IS NOT NULL`)
+  gatedExec(`UPDATE agents SET runtime = cli_type WHERE (runtime IS NULL OR runtime = '' OR runtime = 'unknown' OR runtime = 'TUI') AND cli_type IS NOT NULL AND cli_type <> ''`)
+  gatedExec(`UPDATE agents SET runtime = 'TUI' WHERE runtime IS NULL OR runtime = '' OR runtime = 'unknown'`)
   gatedExec(`UPDATE agents SET registered_at = COALESCE(registered_at, created_at, datetime('now')) WHERE registered_at IS NULL OR registered_at = ''`)
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_agent_uri ON agents(agent_uri) WHERE agent_uri IS NOT NULL`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_identity_scope ON agents(identity_scope)`)
