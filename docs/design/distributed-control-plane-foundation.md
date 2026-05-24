@@ -68,6 +68,13 @@ Bindings carry:
 This lets a small number of connector workers cover many channels without
 making one worker the universal bottleneck.
 
+Bindings should be derived from provider capability where possible. For example,
+if a Discord connector owns a bot token and provider discovery proves that bot
+can post to a channel, that connector is an eligible delivery owner for the
+Discord surface. Operators should not have to manually set a channel owner for
+every channel unless multiple eligible connectors conflict, HA/fallback policy
+is needed, or migration requires an explicit override.
+
 ### `control_plane_leases`
 
 Short-lived claims over connector instances, channel bindings, queue partitions,
@@ -110,6 +117,10 @@ use without breaking existing bots:
 - `outbound_queue.claimed_runtime_instance_id`
 
 Current code may leave these columns null. New workers can opt in gradually.
+During migration, `channel_routing_policy.adapter_owner_agent_id` is the legacy
+fallback. In the target model, effective delivery ownership is resolved from
+active connectors, provider identity, channel access evidence, and optional
+explicit priority/override.
 
 ## Legacy Policy Projection
 
@@ -125,6 +136,11 @@ channel_routing_policy.adapter_owner_agent_id
 The projection must be script-controlled and dry-run-first. It may create
 provider-neutral connector and binding rows, but it must not rewrite legacy
 routing policy or switch live queue behavior by itself.
+
+The projection should prefer discovered connector capability over hand-authored
+per-channel owner data. Legacy `adapter_owner_agent_id` can seed initial
+bindings, but the UI target is "register connector and discover usable
+channels", not "configure an owner field on every channel".
 
 ## Runtime Inventory
 

@@ -21,6 +21,7 @@ Core AUN concepts are provider-neutral:
 - `agent_id`
 - runtime instance
 - connector instance
+- provider identity
 - channel binding
 - queue row
 - control-plane lease
@@ -94,6 +95,7 @@ Trusted actions must flow through explicit records:
 - agent identity
 - runtime instance
 - connector instance
+- provider identity
 - endpoint or key
 - channel membership and routing policy
 - control-plane lease
@@ -167,4 +169,3 @@ For `totonoe` and the hotel channels, early Discord canaries should use
 channel adapters, connector bindings, routing policy, projection identity, and
 queue evidence. Do not add channel-specific scripts or Discord-only core
 routing shortcuts for speed.
-

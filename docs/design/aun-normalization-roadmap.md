@@ -22,6 +22,11 @@ This roadmap applies together with:
 - [`bot-channel-directory.md`](./bot-channel-directory.md)
 - [`distributed-control-plane-foundation.md`](./distributed-control-plane-foundation.md)
 - [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md)
+- [`../spec/aun-bot-profile-table-reduction-audit.md`](../spec/aun-bot-profile-table-reduction-audit.md)
+- [`../spec/aun-communication-stability-mvp-impl.md`](../spec/aun-communication-stability-mvp-impl.md)
+- [`../spec/norm-030-connector-credential-registry-impl.md`](../spec/norm-030-connector-credential-registry-impl.md)
+- [`../spec/norm-035-provider-channel-access-impl.md`](../spec/norm-035-provider-channel-access-impl.md)
+- [`../spec/norm-036-effective-delivery-owner-resolver-impl.md`](../spec/norm-036-effective-delivery-owner-resolver-impl.md)
 
 ## North Star
 
@@ -32,8 +37,11 @@ projections. They are not the product identity.
 The final architecture has these properties:
 
 - stable `agent_id` and `agent_uri`
-- DB-backed workspaces, runtime instances, connector instances, endpoints,
-  channel bindings, routing policy, queue state, leases, and audit evidence
+- one editable bot profile per local bot, with DB-backed derived evidence for
+  runtimes, connectors, provider identities, channel bindings, routing policy,
+  queue state, leases, and audit
+- derived evidence is created by deterministic code from the bot profile and
+  discovery, not by user or AI duplication of the same setting
 - deterministic CLI or daemon actions for every state transition
 - provider-neutral routing with Discord as one connector
 - no one-channel-one-script duplication
@@ -52,15 +60,23 @@ MVP is complete only when all of the following are true:
 
 1. DB registry is authoritative for active local operation:
    - every active local bot has an `agents` row
-   - every active local bot has an `agent_workspaces` row when it is tied to a
-     checkout path
-   - every active local bot has an `agent_workspace_bindings` row
+   - every active local bot has one editable bot profile containing its
+     canonical home directory or local workspace reference
+   - workspace/index tables, when present, are generated from the bot profile
+     and not separate manual configuration
+   - derived rows are rebuildable from the bot profile plus runtime/provider
+     discovery evidence
    - every active local process emits an `agent_runtime_instances` heartbeat
    - every active Discord-capable process has a `connector_instances` row
-     linked to the runtime without storing raw tokens
+     derived from the bot profile token source and linked to runtime evidence
+     without storing raw tokens
 2. Token identity is unambiguous:
    - a live Discord token fingerprint maps to only one active connector owner
    - duplicate token fingerprints are blocked or reported before routing use
+   - connector credentials are represented by non-secret fingerprint and
+     secret reference records, not raw token storage
+   - provider channel read/write access is discovered or explicitly overridden
+     before a connector is treated as a delivery owner
    - raw token values are never stored or printed in diagnostics
 3. Queue state is mechanically safe:
    - `next -> processing -> send/done` is a valid happy path
@@ -71,7 +87,9 @@ MVP is complete only when all of the following are true:
    - every operational Discord channel has a `channels` row
    - every operational Discord channel has a `channel_adapters` row
    - every operational channel has `channel_routing_policy`
-   - adapter owner and primary agent are clear
+   - effective delivery owner can be derived from connector credentials and
+     provider access, or falls back to an explicit legacy override with evidence
+   - primary agent is clear where a channel has a local project owner
    - outbound allowlist contains the intended sender/recipient set
    - disabled or non-member recipients fail closed
 5. Runtime liveness is observable:
@@ -117,8 +135,11 @@ channels without manual DB surgery or session folklore.
 
 v1 is complete when:
 
-- CLI and/or UI can register local agents, workspaces, runtimes, connectors,
-  and channel bindings
+- CLI and/or UI can register one local bot profile and let AUN derive
+  workspaces, runtimes, connectors, credentials, provider identities, and
+  channel access evidence
+- AI assistants and operators mutate the bot profile through typed commands;
+  they do not directly author the derived evidence tables
 - channel policy updates are DB writes with audit events
 - agent search works by `agent_id`, `agent_uri`, local path, repo URL, session
   name, connector metadata, and channel membership evidence
@@ -164,8 +185,12 @@ Every implementation PR must declare which slice and phase gate it advances.
 |---|---|---|---|
 | NORM-000 | MVP | This roadmap and SSOT references | docs updated, PR review/audit |
 | NORM-010 | MVP | Queue claim/send consistency | tests proving `processing` claims can close via `send` |
-| NORM-020 | MVP | Runtime/workspace/connector heartbeat registration | runtime heartbeat inserts registry rows and connector fingerprint evidence |
-| NORM-030 | MVP | Token uniqueness and connector ownership guard | duplicate active token fingerprint is blocked or strict-doctor failed |
+| NORM-020 | MVP | Bot profile and runtime heartbeat registration | one editable bot profile exists; runtime/connector evidence is generated from discovery |
+| NORM-021 | MVP | Bot table reduction and script rewrite | normal setup edits one profile; workspace/runtime/connector/credential/provider evidence is generated or migration-only |
+| NORM-025 | MVP | Provider identity registry for Discord bot/user/app ids | provider subject rows are DB authority, duplicates fail closed, metadata fallback remains mixed-fleet safe |
+| NORM-030 | MVP | Connector credential registry and token uniqueness | non-secret credential records exist, duplicate active token fingerprint is blocked or strict-doctor failed |
+| NORM-035 | MVP | Provider channel access discovery | connector read/write access per provider channel is recorded without raw token output |
+| NORM-036 | MVP | Effective delivery owner resolver | delivery owner derives from connector/access evidence or returns deterministic ambiguity/failure |
 | NORM-040 | MVP | `aun doctor --strict` registry/queue/channel checks | deterministic nonzero exit on drift, zero exit on clean fixture |
 | NORM-050 | MVP | Channel/bot assignment reconcile | dry-run plan, audited execute path, no raw token output |
 | NORM-060 | MVP | Full-channel smoke runner | DB evidence for inbound, queue, processing, outbound, audit |
@@ -192,6 +217,12 @@ state-daemon behavior must include:
 5. audit evidence or an explicit reason audit is not applicable
 6. confirmation that raw secrets are neither stored nor printed
 
+For identity, routing, runtime, connector, queue, or state-daemon behavior that
+bridges abstract design to code, create a doc-only impl contract PR first and
+audit that PR before merging the implementation PR. Emergency stabilization may
+open the implementation PR in parallel, but merge remains blocked until the impl
+contract is audited and referenced.
+
 Do not merge implementation that only says "works in Discord" or "tmux output
 looks right". Provider output can support the claim, but the gate is DB,
 deterministic command output, CI, and audit evidence.
@@ -211,4 +242,3 @@ When a new defect or request appears:
 This keeps short-term Discord/internal stabilization aligned with the final
 enterprise control-plane design without allowing every future feature to delay
 normalization.
-
