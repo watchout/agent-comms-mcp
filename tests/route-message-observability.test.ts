@@ -368,3 +368,53 @@ describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
     expect(result.dropTargets['agent-b']).toBe('NOT_PRIMARY_NO_MENTION')
   })
 })
+
+describe('T8: #527 cycle 3 — Discord inbound parser passes @everyone / @here through to routing', () => {
+  // Pure regression for the GROUP_KEYWORDS allowlist used by
+  // extractDiscordMentions() in server.ts. We re-implement just the filter
+  // (the rest of extractDiscordMentions is DB-bound) and assert that
+  // 'everyone' and 'here' survive when they are not channel members. This
+  // mirrors the production path: parseMentions() captures the literal,
+  // GROUP_KEYWORDS.has() lets it through, routeMessage() then fanouts.
+  test('GROUP_KEYWORDS lets @everyone and @here through the member filter', () => {
+    const { GROUP_KEYWORDS } = require('../core/send-errors')
+    const members = new Set(['agent-a'])
+    const parsed = parseMentions('hello @everyone and @here and @agent-b')
+    const filtered = parsed.filter((id: string) => members.has(id) || GROUP_KEYWORDS.has(id))
+    expect(filtered).toContain('everyone')
+    expect(filtered).toContain('here')
+    // agent-b is not a member and not a group keyword → filtered out
+    expect(filtered).not.toContain('agent-b')
+  })
+
+  test('end-to-end: @everyone survives parse → filter → routeMessage fanout overrides primary', () => {
+    const { GROUP_KEYWORDS } = require('../core/send-errors')
+    const channel: ChannelInfo = {
+      channelId: 'ch-1',
+      members: ['agent-a', 'agent-b'],
+      type: 'channel',
+      primary: 'agent-a',
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const memberSet = new Set(channel.members)
+    const content = 'announce @everyone'
+    // Reproduce extractDiscordMentions:1291 filter (server.ts) — only the
+    // native-mention slice is exercised here; the <@discord_id> slice is
+    // DB-bound and out of scope for this pure regression.
+    const mentions = parseMentions(content)
+      .filter((id: string) => memberSet.has(id) || GROUP_KEYWORDS.has(id))
+    expect(mentions).toContain('everyone')
+
+    const result = routeMessage(
+      { authorAgentId: 'ceo', authorIsBot: false, content, mentions, messageType: 'chat' },
+      channel,
+      agents,
+      'inbound',
+    )
+    // primary-only would be ['agent-a']; broadcast must fan out to both
+    expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
+  })
+})

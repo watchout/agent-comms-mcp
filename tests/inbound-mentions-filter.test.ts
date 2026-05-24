@@ -51,13 +51,13 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 
   test('also parses @agent_id native mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
     expect(fnBody).toContain('parseMentions(content)')
   })
 
   test('deduplicates mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
     expect(fnBody).toContain('new Set(')
   })
 
@@ -68,7 +68,7 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   // to those that actually appear as <@...> in the content text.
   test('filters rawDiscordUserIds to IDs present in content (excludes reply auto-mention)', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
     expect(fnBody).toContain('contentIdSet')
     expect(fnBody).toMatch(/if\s*\(!contentIdSet\.has\(discordId\)\)\s*continue/)
   })

@@ -79,6 +79,7 @@ import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
+  GROUP_KEYWORDS,
 } from './core/send-errors'
 import { isDuplicateNonceError } from './core/outbound-delivery'
 import {
@@ -1286,9 +1287,12 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
     }
   }
 
-  // 3. Parse @agent_id style mentions (agent-comms native format)
+  // 3. Parse @agent_id style mentions (agent-comms native format).
+  // #527 cycle 3: GROUP_KEYWORDS now includes 'everyone' and 'here' so
+  // those broadcast escape hatches survive into core routing instead of
+  // being filtered out at the receiver boundary.
   const nativeMentions = parseMentions(content)
-    .filter((agentId) => !memberSet || memberSet.has(agentId) || ['all', 'dev', 'org'].includes(agentId))
+    .filter((agentId) => !memberSet || memberSet.has(agentId) || GROUP_KEYWORDS.has(agentId))
   return [...new Set([...agentIds, ...nativeMentions])]
 }
 
@@ -2269,7 +2273,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       if (dest.members.includes(mention)) {
         inChannelTargets.push(mention)
-      } else if (mention !== 'all' && mention !== 'dev' && mention !== 'org') {
+      } else if (!GROUP_KEYWORDS.has(mention)) {
         outChannelTargets.push(mention)
       }
     }

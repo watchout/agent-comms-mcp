@@ -6,8 +6,14 @@
  * passed in as plain values so tests can exercise the logic without mocks.
  */
 
-/** Group keywords that are always valid mentions (bypass agent_id validation). */
-const GROUP_KEYWORDS = new Set(['all', 'dev', 'org'])
+/** Group keywords that are always valid mentions (bypass agent_id validation).
+ *
+ * `everyone` / `here` were added in #527 as broadcast escape hatches for
+ * inbound posts when `channel.primary` is set — without them in this
+ * allowlist, `extractDiscordMentions()` filters them out before routing
+ * and `@everyone` / `@here` silently degrade to primary-only.
+ */
+export const GROUP_KEYWORDS = new Set(['all', 'dev', 'org', 'everyone', 'here'])
 
 /**
  * Build the NOT_MENTIONED error message body.
