@@ -245,6 +245,14 @@ export function migrateSqlite(dbPath?: string): void {
   if (!agentsColNames.has('disabled_at')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN disabled_at TEXT`)
   }
+  // #530: the `status` CLI extension joins on agents.runtime to surface
+  // TUI bots without tmux_session metadata as drift. SQLite was missing
+  // the column (PG has had it since the pre-#341 migration); add it
+  // here with the same default the runtime self-register path uses
+  // (server.ts uses 'TUI' as the implicit fallback when bots register).
+  if (!agentsColNames.has('runtime')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'TUI'`)
+  }
   if (!agentsColNames.has('identity_metadata')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN identity_metadata TEXT NOT NULL DEFAULT '{}'`)
   }

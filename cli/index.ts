@@ -2368,23 +2368,142 @@ async function status(args: string[]) {
         console.log(`Current message: ${result.current_message_id ?? 'none'}`)
       }
     } else {
+      // #530 — system-wide status. Two output modes:
+      //   --brief  → legacy minimal summary (kept for backward compat /
+      //              scripting callers that depend on the pre-#530 shape).
+      //   default  → rich tables: agents (one row per active agent_id) and
+      //              queue summary (pending/received/in_progress per agent
+      //              with oldest-row age). Drift warnings (retired agents
+      //              still receiving queue rows, etc.) follow the tables.
+      // --format json → extended schema (additive over the brief shape).
       const chCount = await db.query('SELECT COUNT(*) as cnt FROM channels')
       const agOnline = await db.query("SELECT COUNT(*) as cnt FROM agents WHERE status = 'online'")
       const agTotal = await db.query('SELECT COUNT(*) as cnt FROM agents')
       const msgRecent = await db.query("SELECT COUNT(*) as cnt FROM agent_messages WHERE created_at > now() - interval '1 hour'")
+      const brief = hasFlag(flags, 'brief')
+
+      if (brief && format !== 'json') {
+        console.log('=== agent-com status ===')
+        console.log(`DB: connected`)
+        console.log(`Channels: ${chCount.rows[0].cnt}`)
+        console.log(`Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total`)
+        console.log(`Messages (1h): ${msgRecent.rows[0].cnt}`)
+        return
+      }
+
+      // Detailed view (also feeds JSON output) — keep the query set small
+      // and DB-only so this command stays a pure observability tool.
+      // `metadata->>'…'` is a PG operator that the SQLite adapter rewrites
+      // to `json_extract(metadata, '$.…')`. Avoid `a.metadata->>…` because
+      // the adapter regex captures only the bare column name, leaving
+      // `a.` orphaned in front of the rewritten function call. Plain
+      // `metadata->>…` is unambiguous since `agents` is the sole FROM table.
+      const agentsRes = await db.query(
+        `SELECT agent_id,
+                agent_type,
+                runtime,
+                status,
+                last_seen_at,
+                metadata->>'discord_id' AS discord_id,
+                metadata->>'tmux_session' AS tmux_session,
+                metadata->>'retired' AS retired_raw
+           FROM agents
+          WHERE disabled_at IS NULL
+          ORDER BY (status = 'busy') DESC,
+                   (status = 'idle') DESC,
+                   agent_id`,
+      )
+      const queueRes = await db.query(
+        `SELECT agent_id,
+                status,
+                COUNT(*)::int AS n,
+                MIN(created_at) AS oldest
+           FROM message_queue
+          WHERE status IN ('pending','received','in_progress')
+          GROUP BY agent_id, status
+          ORDER BY agent_id, status`,
+      )
+
+      // Pivot queue rows into per-agent { pending, received, in_progress, oldest }.
+      type QueueAgg = { pending: number; received: number; in_progress: number; oldest: string | null }
+      const queueByAgent = new Map<string, QueueAgg>()
+      for (const r of queueRes.rows) {
+        const agg = queueByAgent.get(r.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null }
+        ;(agg as any)[r.status] = parseInt(r.n)
+        if (agg.oldest == null || (r.oldest && new Date(r.oldest) < new Date(agg.oldest))) {
+          agg.oldest = r.oldest
+        }
+        queueByAgent.set(r.agent_id, agg)
+      }
+
+      // Drift warnings — pure DB findings, no shell-out. Each entry is a
+      // short string the operator can paste into a follow-up issue.
+      const drifts: string[] = []
+      for (const a of agentsRes.rows) {
+        const q = queueByAgent.get(a.agent_id)
+        const retired = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
+        if (retired && q && (q.pending + q.received + q.in_progress) > 0) {
+          drifts.push(`retired agent '${a.agent_id}' still has ${q.pending + q.received + q.in_progress} queued rows`)
+        }
+        if (a.agent_type === 'human' && q && (q.pending + q.received + q.in_progress) > 0) {
+          drifts.push(`human agent '${a.agent_id}' has ${q.pending + q.received + q.in_progress} queued rows — PR #533 fix should have prevented this; check fleet runtime build`)
+        }
+        if (a.runtime === 'TUI' && (!a.tmux_session || a.tmux_session === '')) {
+          drifts.push(`agent '${a.agent_id}' runtime=TUI but metadata.tmux_session is missing`)
+        }
+      }
+
       if (format === 'json') {
         process.stdout.write(JSON.stringify({
           channels: parseInt(chCount.rows[0].cnt),
           agents_online: parseInt(agOnline.rows[0].cnt),
           agents_total: parseInt(agTotal.rows[0].cnt),
           messages_1h: parseInt(msgRecent.rows[0].cnt),
+          agents: agentsRes.rows.map(a => ({
+            agent_id: a.agent_id,
+            agent_type: a.agent_type,
+            runtime: a.runtime,
+            status: a.status,
+            last_seen_at: a.last_seen_at,
+            discord_id: a.discord_id ?? null,
+            tmux_session: a.tmux_session ?? null,
+            retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
+            queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
+          })),
+          drifts,
         }) + '\n')
+        return
+      }
+
+      console.log('=== agent-com status ===')
+      console.log(`DB: connected`)
+      console.log(`Channels: ${chCount.rows[0].cnt} · Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total · Messages (1h): ${msgRecent.rows[0].cnt}`)
+      console.log('')
+      console.log('--- agents (active, non-disabled) ---')
+      console.log('agent_id'.padEnd(20) + 'status'.padEnd(10) + 'runtime'.padEnd(8) + 'pend/recv/inflight'.padEnd(20) + 'oldest'.padEnd(22) + 'last_seen')
+      for (const a of agentsRes.rows) {
+        const q = queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null }
+        const qStr = `${q.pending}/${q.received}/${q.in_progress}`
+        const oldest = q.oldest ? new Date(q.oldest).toISOString().replace('T', ' ').slice(0, 19) : '-'
+        const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
+        const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
+        const statusStr = retiredText ? `${a.status}*ret` : a.status
+        console.log(
+          a.agent_id.padEnd(20) +
+          (statusStr ?? '?').padEnd(10) +
+          (a.runtime ?? '?').padEnd(8) +
+          qStr.padEnd(20) +
+          oldest.padEnd(22) +
+          lastSeen,
+        )
+      }
+      if (drifts.length > 0) {
+        console.log('')
+        console.log(`--- drift warnings (${drifts.length}) ---`)
+        for (const d of drifts) console.log(`! ${d}`)
       } else {
-        console.log('=== agent-com status ===')
-        console.log(`DB: connected`)
-        console.log(`Channels: ${chCount.rows[0].cnt}`)
-        console.log(`Agents: ${agOnline.rows[0].cnt} online / ${agTotal.rows[0].cnt} total`)
-        console.log(`Messages (1h): ${msgRecent.rows[0].cnt}`)
+        console.log('')
+        console.log('--- drift warnings: none ---')
       }
     }
   } finally {
