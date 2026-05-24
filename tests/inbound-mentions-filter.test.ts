@@ -51,13 +51,13 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
 
   test('also parses @agent_id native mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
     expect(fnBody).toContain('parseMentions(content)')
   })
 
   test('deduplicates mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
     expect(fnBody).toContain('new Set(')
   })
 
@@ -68,7 +68,7 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   // to those that actually appear as <@...> in the content text.
   test('filters rawDiscordUserIds to IDs present in content (excludes reply auto-mention)', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 2600)
+    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
     expect(fnBody).toContain('contentIdSet')
     expect(fnBody).toMatch(/if\s*\(!contentIdSet\.has\(discordId\)\)\s*continue/)
   })
@@ -128,17 +128,22 @@ describe('routeInbound — Pure function (§5.1)', () => {
     expect(fnBody).toContain('isDm')
   })
 
-  test('emergency bypass + Issue #278 §B CEO bypass (human author + no mentions → fanout)', () => {
+  test('emergency bypass + Issue #527 no-mention primary routing (supersedes #278 §B fanout)', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
     const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain('isEmergency')
     expect(fnBody).not.toContain('isCeo')
-    // Issue #278 (B) — senderIsHuman + noMentions is now a bypass:
-    // human posts without explicit mentions fan out to every (non-self,
-    // non-observer) bot member of the channel. The legacy negative pin
-    // ("not used as bypass condition") was correct for pre-Stage-B
-    // behavior and is now retired; the new pin is the positive shape.
-    expect(fnBody).toContain('senderIsHuman && noMentions')
+    // Issue #527 — when channel.primary is set, no-mention messages route
+    // only to that primary instead of fanning out (#278 §B supersede).
+    // When channel.primary is unset, the legacy #278 §B fanback is kept
+    // for backward compat (only when sender is human). Source-pin both
+    // shapes so a regression to either old or new path is caught.
+    expect(fnBody).toContain('if (noMentions)')
+    expect(fnBody).toContain('channel.primary')
+    expect(fnBody).toContain('NOT_PRIMARY_NO_MENTION')
+    expect(fnBody).toContain('if (senderIsHuman)')
+    // Behavioural cover: T7.a-e in tests/route-message-observability.test.ts
+    // and case 4 below for the fanback path.
   })
 
   test('observer mode agents are dropped', () => {

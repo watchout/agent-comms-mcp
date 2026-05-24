@@ -259,3 +259,162 @@ describe('T6: human agents are dropped from pushTargets (no message_queue insert
     expect(result.pushTargets).toEqual(['agent-a'])
   })
 })
+
+describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
+  test('no-mention with channel.primary → route only to primary, drop others as NOT_PRIMARY_NO_MENTION', () => {
+    const { events } = captureLogger()
+
+    const channel: ChannelInfo = {
+      channelId: 'ch-1',
+      members: ['agent-a', 'agent-b', 'agent-c'],
+      type: 'channel',
+      primary: 'agent-a',
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-c', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const msg = {
+      authorAgentId: 'ceo',
+      authorIsBot: false,
+      content: 'hello fleet (no mention)',
+      mentions: [],
+      messageType: 'chat',
+    }
+
+    const result = routeMessage(msg, channel, agents, 'inbound')
+
+    expect(result.pushTargets).toEqual(['agent-a'])
+    expect(result.dropTargets['agent-b']).toBe('NOT_PRIMARY_NO_MENTION')
+    expect(result.dropTargets['agent-c']).toBe('NOT_PRIMARY_NO_MENTION')
+
+    const drops = events.filter((e) => e.event === 'route_drop' && e.reason === 'not_primary_no_mention')
+    expect(drops.length).toBe(2)
+  })
+
+  test('no-mention WITHOUT channel.primary → legacy fanout preserved (backward compat)', () => {
+    captureLogger()
+
+    const channel: ChannelInfo = {
+      channelId: 'ch-1',
+      members: ['agent-a', 'agent-b'],
+      type: 'channel',
+      // primary omitted
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const msg = {
+      authorAgentId: 'ceo',
+      authorIsBot: false,
+      content: 'legacy ceo bypass',
+      mentions: [],
+      messageType: 'chat',
+    }
+
+    const result = routeMessage(msg, channel, agents, 'inbound')
+    expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
+  })
+
+  test('@everyone fanout even when channel.primary is set', () => {
+    captureLogger()
+
+    const channel: ChannelInfo = {
+      channelId: 'ch-1',
+      members: ['agent-a', 'agent-b', 'agent-c'],
+      type: 'channel',
+      primary: 'agent-a',
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-c', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const msg = {
+      authorAgentId: 'ceo',
+      authorIsBot: false,
+      content: 'announce @everyone',
+      mentions: ['everyone'],
+      messageType: 'chat',
+    }
+
+    const result = routeMessage(msg, channel, agents, 'inbound')
+    expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b', 'agent-c'])
+  })
+
+  test('@all alias still works (regression)', () => {
+    const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const msg = { authorAgentId: 'ceo', authorIsBot: false, content: 'all hands @all', mentions: ['all'], messageType: 'chat' }
+    const result = routeMessage(msg, channel, agents, 'inbound')
+    expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
+  })
+
+  test('bot sender with no mentions and primary set → primary-only (no legacy fanout for bots)', () => {
+    const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const msg = { authorAgentId: 'other-bot', authorIsBot: true, content: 'silent bot post', mentions: [], messageType: 'chat' }
+    const result = routeMessage(msg, channel, agents, 'inbound')
+    // bot + no mention + primary set → route only to primary
+    expect(result.pushTargets).toEqual(['agent-a'])
+    expect(result.dropTargets['agent-b']).toBe('NOT_PRIMARY_NO_MENTION')
+  })
+})
+
+describe('T8: #527 cycle 3 — Discord inbound parser passes @everyone / @here through to routing', () => {
+  // Pure regression for the GROUP_KEYWORDS allowlist used by
+  // extractDiscordMentions() in server.ts. We re-implement just the filter
+  // (the rest of extractDiscordMentions is DB-bound) and assert that
+  // 'everyone' and 'here' survive when they are not channel members. This
+  // mirrors the production path: parseMentions() captures the literal,
+  // GROUP_KEYWORDS.has() lets it through, routeMessage() then fanouts.
+  test('GROUP_KEYWORDS lets @everyone and @here through the member filter', () => {
+    const { GROUP_KEYWORDS } = require('../core/send-errors')
+    const members = new Set(['agent-a'])
+    const parsed = parseMentions('hello @everyone and @here and @agent-b')
+    const filtered = parsed.filter((id: string) => members.has(id) || GROUP_KEYWORDS.has(id))
+    expect(filtered).toContain('everyone')
+    expect(filtered).toContain('here')
+    // agent-b is not a member and not a group keyword → filtered out
+    expect(filtered).not.toContain('agent-b')
+  })
+
+  test('end-to-end: @everyone survives parse → filter → routeMessage fanout overrides primary', () => {
+    const { GROUP_KEYWORDS } = require('../core/send-errors')
+    const channel: ChannelInfo = {
+      channelId: 'ch-1',
+      members: ['agent-a', 'agent-b'],
+      type: 'channel',
+      primary: 'agent-a',
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const memberSet = new Set(channel.members)
+    const content = 'announce @everyone'
+    // Reproduce extractDiscordMentions:1291 filter (server.ts) — only the
+    // native-mention slice is exercised here; the <@discord_id> slice is
+    // DB-bound and out of scope for this pure regression.
+    const mentions = parseMentions(content)
+      .filter((id: string) => memberSet.has(id) || GROUP_KEYWORDS.has(id))
+    expect(mentions).toContain('everyone')
+
+    const result = routeMessage(
+      { authorAgentId: 'ceo', authorIsBot: false, content, mentions, messageType: 'chat' },
+      channel,
+      agents,
+      'inbound',
+    )
+    // primary-only would be ['agent-a']; broadcast must fan out to both
+    expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
+  })
+})

@@ -47,6 +47,11 @@ import {
   type DbAdapter,
 } from '../core/route-message-db'
 import { persistInboundDelivery } from '../core/inbound-delivery'
+// #527 — channel.primary lookup for routeInbound no-mention single-recipient
+// routing on the Discord inbound path. resolveInboundChannel intentionally
+// stays a DB-only function; the policy snapshot lives in channel-policy
+// (config/bot-routing.json cached in-process).
+import { getChannelPolicy } from '../core/channel-policy'
 import { applyMentionsAutoFill } from '../core/agent-cache'
 import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
 import { notifySenderAndObserve } from '../core/sender-feedback-emit'
@@ -625,6 +630,10 @@ export async function handleInboundMessage(params: {
     threadId: resolved.threadId,
     members: resolved.members,
     type: resolved.type,
+    // #527 — populate channel.primary so routeMessage routes no-mention
+    // inbound only to that primary. Without this the Discord inbound path
+    // still hit the legacy #278 §B fanback (L2 audit msg 8c5b3f5a).
+    primary: getChannelPolicy(resolved.channelId).primary,
   }
   // Chat adapter IDs must already be translated into agent_id mentions
   // before core routing. Do not re-resolve external IDs here: the DB

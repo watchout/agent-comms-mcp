@@ -35,6 +35,11 @@ export interface ChannelInfo {
   threadId?: string | null
   members: string[]
   type?: string  // 'dm' etc.
+  // #527: When set, no-mention inbound messages route to this single agent
+  // instead of fanning out to every channel member. Callers populate from
+  // `bot-routing.json` channel.primary via `core/channel-policy.ts`. If
+  // omitted the legacy fanout behaviour is preserved (backward compat).
+  primary?: string | null
 }
 
 export interface RouteResult {
@@ -90,6 +95,7 @@ export type RouteDropReason =
   | 'mention_not_in_array'
   | 'sender_not_a_member'
   | 'human_agent_no_queue'
+  | 'not_primary_no_mention'
 
 /** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
  *
@@ -335,22 +341,42 @@ export function routeMessage(
       continue
     }
 
-    // Issue #278 (B) — CEO bypass routing. When a human author posts a
-    // message with no explicit mentions, every (non-observer, non-self)
-    // bot member of the channel is treated as a push target. The CEO
-    // routinely posts directives without listing every bot by name; the
-    // legacy NOT_MENTIONED drop made those messages invisible to the
-    // fleet. DM channels are excluded by the early-return above
-    // (always push). Emergencies are also handled above. Auto-skip
-    // patterns are applied at queue INSERT (Stage A, #276-A) so they
-    // do not need to be re-checked here.
-    if (senderIsHuman && noMentions) {
-      pushTargets.push(agent.agentId)
-      continue
+    // Issue #527 — no-mention inbound primary routing. When the message has
+    // no explicit mentions and the channel declares a `primary` agent
+    // (`bot-routing.json` channel.primary), route only to that primary
+    // instead of fanning out to every member. This replaces the old "CEO
+    // bypass = push to all" behaviour (Issue #278 B) that produced
+    // multi-bot responses to a single CEO chat. `@everyone` / `@here` /
+    // `@all` are recognised below as explicit broadcast triggers, so
+    // users still have an escape hatch for genuine fleet announcements.
+    // Backward compat: when channel.primary is undefined, fall back to
+    // the legacy CEO bypass (push to every bot when sender is human).
+    if (noMentions) {
+      if (channel.primary != null) {
+        if (agent.agentId === channel.primary) {
+          pushTargets.push(agent.agentId)
+        } else {
+          dropTargets[agent.agentId] = 'NOT_PRIMARY_NO_MENTION'
+          emitRouteDrop('not_primary_no_mention', agent.agentId, logCtx)
+        }
+        continue
+      }
+      if (senderIsHuman) {
+        // Legacy fallback: pre-#527 behaviour (#278 B). Kept so the
+        // fix is non-breaking when channel.primary is not yet wired.
+        pushTargets.push(agent.agentId)
+        continue
+      }
     }
 
-    // Group mentions (@all, @dev, @org)
+    // Group / broadcast mentions (@all, @everyone, @here, @dev, @org).
+    // `@everyone` / `@here` are recognised as broadcast escape hatches per
+    // #527 so users can still fanout intentionally when channel.primary is
+    // set. Outbound bot sends still strip these via FORBIDDEN_PATTERNS in
+    // server.ts; this only changes inbound interpretation.
     if (msg.mentions.includes('all') ||
+        msg.mentions.includes('everyone') ||
+        msg.mentions.includes('here') ||
         (msg.mentions.includes('dev') && agent.agentType === 'dev') ||
         (msg.mentions.includes('org') && agent.agentType === 'org')) {
       pushTargets.push(agent.agentId)
