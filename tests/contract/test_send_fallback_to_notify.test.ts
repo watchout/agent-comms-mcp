@@ -83,7 +83,7 @@ function requireDb() {
  */
 async function seedOriginal(opts: {
   channelId?: string | null
-  withClaim?: 'received' | 'replied' | null
+  withClaim?: 'received' | 'in_progress' | 'replied' | null
   claimedBy?: string
 }): Promise<string> {
   const msgId = randomUUID()
@@ -115,9 +115,19 @@ async function inTx<T>(fn: (txClient: Client) => Promise<T>): Promise<T> {
 }
 
 describe('test_send_fallback_to_notify — decideSendFallback decision tree', () => {
-  test.skip('TODO #338 sub-PR 9 v0.9 schema T-1 (existing reply path): claim with status=read → claim_present', async () => {
+  test('T-1 (existing reply path): active claim with status=received → claim_present', async () => {
     requireDb()
     const replyTo = await seedOriginal({ withClaim: 'received' })
+    const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
+    expect(decision.kind).toBe('claim_present')
+    if (decision.kind === 'claim_present') {
+      expect(decision.claimedMqId).toBeDefined()
+    }
+  })
+
+  test('T-1b (processed reply path): active claim with status=in_progress → claim_present', async () => {
+    requireDb()
+    const replyTo = await seedOriginal({ withClaim: 'in_progress' })
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
     expect(decision.kind).toBe('claim_present')
     if (decision.kind === 'claim_present') {
