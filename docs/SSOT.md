@@ -31,6 +31,17 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 6. **bashが実行できれば、どのLLM CLIでも接続可能**
 7. **PostgreSQLでもSQLiteでも同じCLIコマンドが動く**
 
+### 1.5 AUN正常化フェーズゲート
+
+AUNの正常化は `docs/design/aun-normalization-roadmap.md` を従属する詳細仕様として扱う。
+identity / runtime / workspace / connector / channel routing / queue /
+state-daemon / audit に関わる変更は、MVP / v1 / v2 のいずれのフェーズゲートを
+進めるのかを明示してから実装する。
+
+正常化MVPは、人間がDiscordやtmuxを見て判断する状態では完了としない。DB正本、
+deterministic CLI output、CI、provider delivery evidence、audit evidenceにより
+`aun doctor --strict` 相当で機械判定できる状態を完了条件とする。
+
 ---
 
 ## 2. アーキテクチャ
