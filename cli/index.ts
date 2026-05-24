@@ -2403,9 +2403,11 @@ async function status(args: string[]) {
                 agent_type,
                 runtime,
                 status,
+                display_name,
                 last_seen_at,
                 metadata->>'discord_id' AS discord_id,
                 metadata->>'tmux_session' AS tmux_session,
+                metadata->>'discord_username' AS discord_username_cached,
                 metadata->>'retired' AS retired_raw
            FROM agents
           WHERE disabled_at IS NULL
@@ -2531,20 +2533,33 @@ async function status(args: string[]) {
           agents_online: parseInt(agOnline.rows[0].cnt),
           agents_total: parseInt(agTotal.rows[0].cnt),
           messages_1h: parseInt(msgRecent.rows[0].cnt),
-          agents: agentsRes.rows.map(a => ({
-            agent_id: a.agent_id,
-            agent_type: a.agent_type,
-            runtime: a.runtime,
-            status: a.status,
-            last_seen_at: a.last_seen_at,
-            discord_id: a.discord_id ?? null,
-            discord_username: a.discord_id ? (discordUsernameById.get(a.discord_id) ?? null) : null,
-            tmux_session: a.tmux_session ?? null,
-            launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
-            workspace: workspaceByAgent.get(a.agent_id) ?? null,
-            retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
-            queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
-          })),
+          agents: agentsRes.rows.map(a => {
+            // Resolution order for the human-facing bot name:
+            //   1. Discord API (live, requires DISCORD_BOT_TOKEN env)
+            //   2. agents.metadata.discord_username (cached from a
+            //      prior resolution — populated by a future writer)
+            //   3. agents.display_name (DB row; drifted on legacy rows)
+            //   4. null
+            // The chain is exposed individually in JSON so dashboards
+            // can prefer the source they trust.
+            const discordUsernameLive = a.discord_id ? (discordUsernameById.get(a.discord_id) ?? null) : null
+            return ({
+              agent_id: a.agent_id,
+              agent_type: a.agent_type,
+              runtime: a.runtime,
+              status: a.status,
+              display_name: a.display_name ?? null,
+              last_seen_at: a.last_seen_at,
+              discord_id: a.discord_id ?? null,
+              discord_username: discordUsernameLive,
+              discord_username_cached: a.discord_username_cached ?? null,
+              tmux_session: a.tmux_session ?? null,
+              launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
+              workspace: workspaceByAgent.get(a.agent_id) ?? null,
+              retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
+              queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
+            })
+          }),
           drifts,
         }) + '\n')
         return
@@ -2576,9 +2591,15 @@ async function status(args: string[]) {
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toISOString().replace('T', ' ').slice(0, 19) : 'never'
         const retiredText = a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1
         const statusStr = retiredText ? `${a.status}*ret` : a.status
-        const discordName = a.discord_id
-          ? (discordUsernameById.get(a.discord_id) ?? (botToken ? '?' : '(no-token)'))
-          : '-'
+        // Resolution order for the text column — live API → cached
+        // metadata → display_name → placeholder. Operators get the
+        // best available name even when no token is exported, instead
+        // of the misleading '(no-token)' column we showed in cycle 1.
+        const live = a.discord_id ? discordUsernameById.get(a.discord_id) : undefined
+        const cached = a.discord_username_cached as string | null | undefined
+        const discordName = live
+          ?? cached
+          ?? (a.display_name && a.display_name !== a.agent_id ? `${a.display_name} (db)` : (a.discord_id ? '(no-token)' : '-'))
         const launchRaw = launchDirByAgent.get(a.agent_id)
         const launch = launchRaw ? shrinkHome(launchRaw) : '-'
         console.log(
