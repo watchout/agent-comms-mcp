@@ -83,6 +83,22 @@ dbDescribe('test_watchdog — Issue #278 §E + §G-1 detection + rate limit', ()
     expect(crashed.some(a => a.agentId === agentId)).toBe(false)
   })
 
+  test('profile_enabled=false is excluded from auto-restart candidates', async () => {
+    const agentId = `${TEST_PREFIX}-profile-disabled`
+    await seedAgent({ id: agentId, status: 'idle', lastSeenSecondsAgo: 600 })
+    await client.query(`UPDATE agents SET profile_enabled = false WHERE agent_id = $1`, [agentId])
+    const crashed = await findCrashedAgents(client)
+    expect(crashed.some(a => a.agentId === agentId)).toBe(false)
+  })
+
+  test('disabled_at rows are excluded from auto-restart candidates', async () => {
+    const agentId = `${TEST_PREFIX}-disabled-at`
+    await seedAgent({ id: agentId, status: 'idle', lastSeenSecondsAgo: 600 })
+    await client.query(`UPDATE agents SET disabled_at = now() WHERE agent_id = $1`, [agentId])
+    const crashed = await findCrashedAgents(client)
+    expect(crashed.some(a => a.agentId === agentId)).toBe(false)
+  })
+
   test('agent_type=system (infra bots) is excluded', async () => {
     const agentId = `${TEST_PREFIX}-system`
     await seedAgent({ id: agentId, status: 'busy', lastSeenSecondsAgo: 600, agentType: 'system' })
