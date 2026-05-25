@@ -338,17 +338,20 @@ describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () =
   test('isHumanAgent SQL accepts both agent_id and discord_id', () => {
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function isHumanAgent(')
     expect(fnIdx).toBeGreaterThan(-1)
-    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 800)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1400)
     expect(body).toContain('agent_id = $1')
+    expect(body).toContain('agent_provider_identities')
+    expect(body).toContain('provider_subject_id = $1')
     expect(body).toContain("metadata->>'discord_id' = $1")
-    // Both forms in the same query — a plain OR is fine
-    expect(body).toMatch(/agent_id = \$1 OR metadata->>'discord_id' = \$1/)
+    expect(body).toContain('OR EXISTS')
   })
 
   test('getAgentDiscordId helper exists (new in D7)', () => {
     expect(CORE_DB_SOURCE).toContain('export async function getAgentDiscordId(')
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function getAgentDiscordId(')
-    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 500)
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1400)
+    expect(body).toContain('agent_provider_identities')
+    expect(body).toContain('provider_subject_id')
     expect(body).toContain("metadata->>'discord_id'")
     expect(body).toContain('WHERE agent_id = $1')
   })
@@ -376,10 +379,13 @@ describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () =
     expect(body).not.toContain('msg.mentions.includes(agent.discordId)')
   })
 
-  test('loadAgentInfo populates discordId from metadata', () => {
+  test('loadAgentInfo populates discordId from provider identity with metadata fallback', () => {
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function loadAgentInfo(')
-    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1500)
-    expect(body).toContain("metadata->>'discord_id' AS discord_id")
+    const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 2600)
+    expect(body).toContain('agent_provider_identities')
+    expect(body).toContain('provider_subject_id')
+    expect(body).toContain("metadata->>'discord_id'")
+    expect(body).toContain('AS discord_id')
     expect(body).toContain('discordId: r.rows[0].discord_id ?? null')
     // Fallback (DB unavailable) must include discordId: null
     expect(body).toContain('discordId: null')
@@ -443,13 +449,16 @@ describe('DiscordAdapter — D1 self-registration', () => {
   test('ready handler self-registers discord_id when agentId + dbQuery are set', () => {
     const readyIdx = ADAPTER_SOURCE.indexOf("this.client.once('ready'")
     expect(readyIdx).toBeGreaterThan(-1)
-    const body = ADAPTER_SOURCE.slice(readyIdx, readyIdx + 2800)
+    const body = ADAPTER_SOURCE.slice(readyIdx, readyIdx + 5000)
     expect(body).toContain('this.agentId && this.dbQuery')
+    expect(body).toContain('agent_provider_identities')
+    expect(body).toContain('provider_subject_id')
     expect(body).toContain("metadata->>'discord_id' = $1")
     expect(body).toContain('agent_id <> $2')
-    expect(body).toContain('D1 duplicate discord identity blocked')
+    expect(body).toContain('duplicate provider identity blocked')
     expect(body).toContain('this.client?.destroy()')
     expect(body).toContain('UPDATE agents')
+    expect(body).toContain('INSERT INTO agent_provider_identities')
     expect(body).toContain("jsonb_build_object('discord_id', $1::text)")
     // Idempotency guard so we do not write the same value on every reconnect
     expect(body).toContain("COALESCE(metadata->>'discord_id', '') <> $1::text")

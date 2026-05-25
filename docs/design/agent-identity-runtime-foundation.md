@@ -20,6 +20,9 @@ Discord adapter. Those concepts are separate records:
   as Codex, Claude Code, a local tmux process, or a future remote worker.
 - `connector_instances`: provider-facing connector processes that can speak to
   Discord, Slack, webhook, or future AUN-native surfaces.
+- `agent_provider_identities`: provider-facing bot, user, webhook, app, or
+  service-account subjects controlled by an agent, such as a Discord bot user
+  id.
 - `channel_connector_bindings`: which connector roles are allowed to handle a
   channel without requiring one session per channel.
 - `control_plane_leases`: short-lived worker claims for connector, channel
@@ -52,7 +55,19 @@ agent_uri: aun://default/agents/agent-mem-dev
 
 `agent_uri` is the durable address that can survive UI, remote endpoints, and
 cross-environment registration. It must not encode a local path, tmux session,
-or model provider.
+model provider, or Discord bot id.
+
+Provider identity:
+
+```text
+agent_provider_identities.provider: discord
+agent_provider_identities.provider_subject_id: 1491404979477676053
+agent_provider_identities.identity_kind: bot_user
+```
+
+This is the normalized record for what operators often call `bot_id`.
+`agents.metadata.discord_id` can exist as a rollout compatibility mirror, but
+new routing and diagnostics must prefer `agent_provider_identities`.
 
 ## Runtime Model
 
@@ -102,6 +117,9 @@ The target bar is large-enterprise adoption. The foundation must support:
   change the identity.
 - Endpoint evidence: remote or local endpoints are records, not implicit
   process environment assumptions.
+- Provider identity evidence: external bot/user/app ids are records, not loose
+  JSON metadata. A provider subject id must not map to more than one active
+  agent.
 - Auditability: registration, trust changes, endpoint changes, key changes,
   and routing changes must be audit events before UI-driven self-service.
 
@@ -144,9 +162,11 @@ Phase 3: signed remote agents.
 ## Operational Rule
 
 `agent_id` answers "who is responsible?". `workspace_id` answers "where do they
-work?". `runtime_instance_id` answers "what is running now?". `endpoint_uri`
-answers "where can this identity be reached?". `agent_uri` answers "what is
-this identity's stable address?".
+work?". `runtime_instance_id` answers "what is running now?".
+`connector_instance_id` answers "which connector process can speak to a
+provider?". `provider_identity_id` answers "which provider-facing bot/user/app
+identity is bound?". `endpoint_uri` answers "where can this identity be
+reached?". `agent_uri` answers "what is this identity's stable address?".
 
 The UI registration, search, and binding behavior is specified in
 [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md).

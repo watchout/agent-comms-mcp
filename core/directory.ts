@@ -270,13 +270,41 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
        FROM connector_instances
       WHERE status = 'active'`,
   ).catch(() => ({ rows: [] as any[] }))
+  const providerIdentityRows = await db.query(
+    `SELECT agent_id, provider_subject_id, status, trust_status, identity_kind
+       FROM agent_provider_identities
+      WHERE provider = 'discord'
+      ORDER BY agent_id, identity_kind`,
+  ).catch(() => ({ rows: [] as any[] }))
+
+  const providerIdentityKnownAgents = new Set<string>()
+  const activeDiscordIdentityByAgent = new Map<string, string>()
+  for (const row of providerIdentityRows.rows) {
+    const agentId = String(row.agent_id ?? '')
+    const subjectId = String(row.provider_subject_id ?? '')
+    if (!agentId || !subjectId) continue
+    providerIdentityKnownAgents.add(agentId)
+    if (String(row.status ?? '') !== 'active') continue
+    if (String(row.trust_status ?? '') === 'disabled' || String(row.trust_status ?? '') === 'revoked') continue
+    if (!activeDiscordIdentityByAgent.has(agentId)) {
+      activeDiscordIdentityByAgent.set(agentId, subjectId)
+    }
+  }
+
+  const discordIdentityFor = (row: any): string | null => {
+    const agentId = String(row.agent_id ?? '')
+    const providerSubjectId = activeDiscordIdentityByAgent.get(agentId)
+    if (providerSubjectId) return providerSubjectId
+    if (providerIdentityKnownAgents.has(agentId)) return null
+    return metadataString(parseMetadata(row.metadata), 'discord_id')
+  }
 
   const displayNameCounts = new Map<string, number>()
   const discordIdentityCounts = new Map<string, number>()
   for (const row of agentRows) {
     const name = String(row.display_name ?? '')
     displayNameCounts.set(name, (displayNameCounts.get(name) ?? 0) + 1)
-    const discordId = metadataString(parseMetadata(row.metadata), 'discord_id')
+    const discordId = discordIdentityFor(row)
     if (discordId) discordIdentityCounts.set(discordId, (discordIdentityCounts.get(discordId) ?? 0) + 1)
   }
 
@@ -305,7 +333,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     const metadata = parseMetadata(row.metadata)
     const channels = channelsByAgent.get(agentId) ?? []
     const channelCount = channels.length
-    const discordId = metadataString(metadata, 'discord_id')
+    const discordId = discordIdentityFor(row)
     row.__duplicate_discord_identity = discordId !== null && (discordIdentityCounts.get(discordId) ?? 0) > 1
     return {
       agent_id: agentId,

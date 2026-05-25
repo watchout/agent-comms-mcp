@@ -25,6 +25,16 @@ export interface DbAdapter {
 /** A minimal "DB unavailable" sentinel — caller decides what to do. */
 export type DbResult<T> = T | null
 
+function isMissingProviderIdentityTable(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as any).code) : ''
+  const message = err instanceof Error ? err.message : String(err)
+  return code === '42P01' || /agent_provider_identities.*(does not exist|no such table)/i.test(message)
+}
+
+function usableProviderIdentityPredicate(alias: string): string {
+  return `${alias}.status = 'active' AND ${alias}.trust_status NOT IN ('disabled', 'revoked')`
+}
+
 /** Get a message by ID from agent_messages */
 export async function getMessageById(
   db: DbAdapter | null,
@@ -66,21 +76,78 @@ export async function getMessageById(
  */
 export async function isHumanAgent(db: DbAdapter | null, authorId: string): Promise<boolean> {
   if (!db) return false // safe default: don't assume human without DB
-  const r = await db.query(
-    `SELECT agent_type FROM agents
-     WHERE agent_id = $1 OR metadata->>'discord_id' = $1`,
-    [authorId],
-  )
+  let r: { rows: any[] }
+  try {
+    r = await db.query(
+      `SELECT a.agent_type
+         FROM agents a
+        WHERE a.agent_id = $1
+           OR EXISTS (
+                SELECT 1
+                  FROM agent_provider_identities api
+                 WHERE api.agent_id = a.agent_id
+                   AND api.provider = 'discord'
+                   AND api.provider_subject_id = $1
+                   AND ${usableProviderIdentityPredicate('api')}
+              )
+           OR (
+                a.metadata->>'discord_id' = $1
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM agent_provider_identities api
+                   WHERE api.provider = 'discord'
+                     AND api.provider_subject_id = $1
+                )
+              )
+        ORDER BY CASE WHEN a.agent_id = $1 THEN 0 ELSE 1 END
+        LIMIT 1`,
+      [authorId],
+    )
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    r = await db.query(
+      `SELECT agent_type FROM agents
+       WHERE agent_id = $1 OR metadata->>'discord_id' = $1`,
+      [authorId],
+    )
+  }
   return r.rows.length > 0 && r.rows[0].agent_type === 'human'
 }
 
-/** Resolve Discord user ID → core agent_id via agents.metadata.discord_id */
+/** Resolve Discord user ID → core agent_id via provider identities. */
 export async function resolveAgentFromDiscordId(db: DbAdapter | null, discordId: string): Promise<string | null> {
   if (!db) return null
-  const r = await db.query(
-    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 ORDER BY agent_id",
-    [discordId],
-  )
+  let r: { rows: any[] }
+  try {
+    r = await db.query(
+      `SELECT agent_id
+         FROM (
+           SELECT api.agent_id
+             FROM agent_provider_identities api
+            WHERE api.provider = 'discord'
+              AND api.provider_subject_id = $1
+              AND ${usableProviderIdentityPredicate('api')}
+           UNION
+           SELECT agent_id
+             FROM agents
+            WHERE metadata->>'discord_id' = $1
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM agent_provider_identities
+                 WHERE provider = 'discord'
+                   AND provider_subject_id = $1
+              )
+         ) candidates
+        ORDER BY agent_id`,
+      [discordId],
+    )
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    r = await db.query(
+      "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 ORDER BY agent_id",
+      [discordId],
+    )
+  }
   return r.rows.length === 1 ? r.rows[0].agent_id : null
 }
 
@@ -98,10 +165,39 @@ export async function resolveAgentFromDiscordIdInMembers(
   members: readonly string[],
 ): Promise<{ agentId: string } | { error: 'not_found' | 'ambiguous'; candidates: string[] }> {
   if (!db || members.length === 0) return { error: 'not_found', candidates: [] }
-  const r = await db.query<{ agent_id: string }>(
-    "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 AND agent_id = ANY($2::text[]) ORDER BY agent_id",
-    [discordId, members],
-  )
+  let r: { rows: { agent_id: string }[] }
+  try {
+    r = await db.query<{ agent_id: string }>(
+      `SELECT agent_id
+         FROM (
+           SELECT api.agent_id
+             FROM agent_provider_identities api
+            WHERE api.provider = 'discord'
+              AND api.provider_subject_id = $1
+              AND ${usableProviderIdentityPredicate('api')}
+              AND api.agent_id = ANY($2::text[])
+           UNION
+           SELECT agent_id
+             FROM agents
+            WHERE metadata->>'discord_id' = $1
+              AND agent_id = ANY($2::text[])
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM agent_provider_identities
+                 WHERE provider = 'discord'
+                   AND provider_subject_id = $1
+              )
+         ) candidates
+        ORDER BY agent_id`,
+      [discordId, members],
+    )
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    r = await db.query<{ agent_id: string }>(
+      "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 AND agent_id = ANY($2::text[]) ORDER BY agent_id",
+      [discordId, members],
+    )
+  }
   const candidates = r.rows.map((row) => row.agent_id)
   if (candidates.length === 1) return { agentId: candidates[0] }
   if (candidates.length > 1) return { error: 'ambiguous', candidates }
@@ -109,17 +205,52 @@ export async function resolveAgentFromDiscordIdInMembers(
 }
 
 /**
- * ADR-040 D7: fetch `agents.metadata.discord_id` for a given agent_id.
+ * ADR-040 D7 / NORM-025: fetch the Discord provider identity for a given agent_id.
  * Used by `resolveSendDestination` to compare a bot's own Discord user ID
  * against `<@discord_user_id>` mentions in the original message. Without
  * this the bot can't see that it was mentioned by its Discord identity.
  */
 export async function getAgentDiscordId(db: DbAdapter | null, agentId: string): Promise<string | null> {
   if (!db) return null
-  const r = await db.query(
-    "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
-    [agentId],
-  )
+  let r: { rows: any[] }
+  try {
+    r = await db.query(
+      `SELECT COALESCE(
+                (
+                  SELECT api.provider_subject_id
+                    FROM agent_provider_identities api
+                   WHERE api.agent_id = $1
+                     AND api.provider = 'discord'
+                     AND ${usableProviderIdentityPredicate('api')}
+                     AND api.identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
+                   ORDER BY CASE api.identity_kind
+                              WHEN 'bot_user' THEN 0
+                              WHEN 'human_user' THEN 1
+                              ELSE 2
+                            END
+                   LIMIT 1
+                ),
+                (
+                  SELECT metadata->>'discord_id'
+                    FROM agents
+                   WHERE agent_id = $1
+                     AND NOT EXISTS (
+                       SELECT 1
+                         FROM agent_provider_identities
+                        WHERE agent_id = $1
+                          AND provider = 'discord'
+                     )
+                )
+              ) AS discord_id`,
+      [agentId],
+    )
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    r = await db.query(
+      "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
+      [agentId],
+    )
+  }
   return r.rows.length > 0 ? r.rows[0].discord_id ?? null : null
 }
 
@@ -173,11 +304,47 @@ export async function resolveInboundChannel(
  */
 export async function loadAgentInfo(db: DbAdapter | null, agentId: string): Promise<AgentInfo | null> {
   if (!db) return { agentId, agentType: 'dev', observerMode: false, discordId: null }  // fallback
-  const r = await db.query(
-    `SELECT agent_id, agent_type, observer_mode, metadata->>'discord_id' AS discord_id
-       FROM agents WHERE agent_id = $1`,
-    [agentId],
-  )
+  let r: { rows: any[] }
+  try {
+    r = await db.query(
+      `SELECT a.agent_id, a.agent_type, a.observer_mode,
+              COALESCE(
+                (
+                  SELECT provider_subject_id
+                    FROM agent_provider_identities api
+                   WHERE api.agent_id = a.agent_id
+                     AND api.provider = 'discord'
+                     AND ${usableProviderIdentityPredicate('api')}
+                     AND api.identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
+                   ORDER BY CASE api.identity_kind
+                              WHEN 'bot_user' THEN 0
+                              WHEN 'human_user' THEN 1
+                              ELSE 2
+                            END
+                   LIMIT 1
+                ),
+                (
+                  SELECT a.metadata->>'discord_id'
+                   WHERE NOT EXISTS (
+                     SELECT 1
+                       FROM agent_provider_identities api
+                      WHERE api.agent_id = a.agent_id
+                        AND api.provider = 'discord'
+                   )
+                )
+              ) AS discord_id
+         FROM agents a
+        WHERE a.agent_id = $1`,
+      [agentId],
+    )
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    r = await db.query(
+      `SELECT agent_id, agent_type, observer_mode, metadata->>'discord_id' AS discord_id
+         FROM agents WHERE agent_id = $1`,
+      [agentId],
+    )
+  }
   if (r.rows.length === 0) return null
   return {
     agentId: r.rows[0].agent_id,

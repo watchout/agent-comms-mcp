@@ -63,21 +63,62 @@ function ownerFromMetadata(raw: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+async function discordIdentityState(
+  db: Queryable,
+  agentId: string,
+): Promise<{ registered: boolean; usable: boolean }> {
+  const identities = await db.query(
+    `SELECT provider_subject_id, status, trust_status
+       FROM agent_provider_identities
+      WHERE agent_id = $1
+        AND provider = 'discord'
+        AND identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')`,
+    [agentId],
+  ).catch(() => ({ rows: [] as any[] }))
+  if (identities.rows.length > 0) {
+    const registered = identities.rows.some((row) => {
+      const subject = row.provider_subject_id
+      return typeof subject === 'string' && subject.trim().length > 0
+    })
+    const usable = identities.rows.some((row) => {
+      const subject = row.provider_subject_id
+      const status = String(row.status ?? '')
+      const trustStatus = String(row.trust_status ?? '')
+      return (
+        typeof subject === 'string' &&
+        subject.trim().length > 0 &&
+        status === 'active' &&
+        trustStatus !== 'disabled' &&
+        trustStatus !== 'revoked'
+      )
+    })
+    return { registered, usable }
+  }
+
+  const rr = await db.query(
+    `SELECT metadata FROM agents WHERE agent_id = $1`,
+    [agentId],
+  ).catch(() => ({ rows: [] as any[] }))
+  if (rr.rows.length === 0) return { registered: false, usable: false }
+  const metadata = parseMetadata(rr.rows[0].metadata)
+  const discordId = metadata.discord_id
+  const usable = typeof discordId === 'string' && discordId.trim().length > 0
+  return { registered: usable, usable }
+}
+
 async function projectionHealth(
   db: Queryable,
   agentId: string,
 ): Promise<{ registered: boolean; healthy: boolean }> {
   const rr = await db.query(
-    `SELECT agent_id, status, metadata FROM agents WHERE agent_id = $1`,
+    `SELECT agent_id, status FROM agents WHERE agent_id = $1`,
     [agentId],
   ).catch(() => ({ rows: [] as any[] }))
   if (rr.rows.length === 0) return { registered: false, healthy: false }
-  const metadata = parseMetadata(rr.rows[0].metadata)
-  const discordId = metadata.discord_id
-  const registered = typeof discordId === 'string' && discordId.trim().length > 0
+  const identity = await discordIdentityState(db, agentId)
   const status = typeof rr.rows[0].status === 'string' ? rr.rows[0].status : null
   const unhealthyStatus = status === 'offline' || status === 'disconnected' || status === 'failed'
-  return { registered, healthy: registered && !unhealthyStatus }
+  return { registered: identity.registered, healthy: identity.usable && !unhealthyStatus }
 }
 
 async function resolveSurfaceAndConsumer(
@@ -179,11 +220,15 @@ export async function resolveOutboundProjectionRoute(
   const recipients = (input.recipientAgentIds ?? []).filter((id) => typeof id === 'string' && id.trim().length > 0)
   const singleRecipient = recipients.length === 1 ? recipients[0].trim() : null
   if (singleRecipient) {
+    const identity = await discordIdentityState(db, singleRecipient)
+    if (identity.usable) {
+      return { platform, channelExternalId, consumerAgentId: singleRecipient, source: 'recipient_default_projection' }
+    }
     const rr = await db.query(
       `SELECT agent_id, metadata FROM agents WHERE agent_id = $1`,
       [singleRecipient],
     ).catch(() => ({ rows: [] as any[] }))
-    if (rr.rows.length > 0) {
+    if (!identity.registered && rr.rows.length > 0) {
       const metadata = parseMetadata(rr.rows[0].metadata)
       const discordId = metadata.discord_id
       if (typeof discordId === 'string' && discordId.trim().length > 0) {

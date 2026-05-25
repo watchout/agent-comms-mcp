@@ -74,6 +74,19 @@ Runtime instance:
 - `status`
 - `last_seen_at`
 
+Provider identity:
+
+- `provider_identity_id`
+- `agent_id`
+- `provider`
+- `provider_subject_id` (shown as `bot_id` for Discord bot identities)
+- `identity_kind`
+- `display_name`
+- `status`
+- `trust_status`
+- `connector_instance_id`
+- `last_seen_at`
+
 Endpoint:
 
 - `endpoint_id`
@@ -108,6 +121,7 @@ The UI must support these search inputs:
 - endpoint URI
 - channel name or id
 - Discord user id or channel id, when adapter metadata is available
+- provider subject id / bot id
 
 An internal path and an external URI are valid entry points, but they select
 different records:
@@ -137,7 +151,8 @@ Recommended ranking:
 | 85 | exact `repo_url` |
 | 80 | exact endpoint URI |
 | 75 | exact tmux/session name with live runtime |
-| 70 | exact Discord user id in `agents.metadata.discord_id` |
+| 70 | exact provider subject id in `agent_provider_identities` |
+| 65 | rollout-only Discord user id mirror in `agents.metadata.discord_id` |
 | 60 | display name or workspace name |
 | 50 | channel membership or routing owner |
 | 40 | runtime engine / tag / metadata match |
