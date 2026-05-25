@@ -22,6 +22,7 @@ working state; this roadmap remains the contract.
 This roadmap applies together with:
 
 - [`aun-development-principles.md`](./aun-development-principles.md)
+- [`aun-enterprise-control-plane-direction.md`](./aun-enterprise-control-plane-direction.md)
 - [`agent-identity-runtime-foundation.md`](./agent-identity-runtime-foundation.md)
 - [`bot-channel-directory.md`](./bot-channel-directory.md)
 - [`distributed-control-plane-foundation.md`](./distributed-control-plane-foundation.md)
@@ -37,6 +38,12 @@ This roadmap applies together with:
 AUN is a durable control plane for LLM agents. Discord, tmux, Codex, Claude
 Code, local paths, and future remote workers are runtimes, connectors, or
 projections. They are not the product identity.
+
+The public and enterprise direction is fixed in
+[`aun-enterprise-control-plane-direction.md`](./aun-enterprise-control-plane-direction.md):
+AUN should be designed as a durable agent control plane / agent operations
+mesh, with internal Discord stabilization implemented as the first local
+deployment of that model rather than as a Discord-specific product branch.
 
 The final architecture has these properties:
 

@@ -42,11 +42,31 @@ state-daemon / audit に関わる変更は、MVP / v1 / v2 のいずれのフェ
 deterministic CLI output、CI、provider delivery evidence、audit evidenceにより
 `aun doctor --strict` 相当で機械判定できる状態を完了条件とする。
 
+### 1.6 AUN Enterprise Direction
+
+AUNの長期設計方向は
+`docs/design/aun-enterprise-control-plane-direction.md` を従属する詳細設計制約として扱う。
+
+AUNはDiscord bot群ではなく、LLM agent向けの durable control plane /
+agent operations mesh として設計する。Discord、tmux、Codex、Claude Code、
+local path、provider token、MCP transport は surface / runtime / connector /
+projection であり、core identity ではない。
+
+既存のlocal Discord運用はMVPの第一surfaceとして扱う。短期安定化のための修正でも、
+agent identity、runtime、connector、queue claim、lease、audit、secret handling、
+observability が将来のenterprise設計を壊さないことをPR単位で確認する。
+
 ---
 
 ## 2. アーキテクチャ
 
 ### 2.1 全体構造（Phase 5 統合版）
+
+この節はlocal MVP互換の実装構成を説明する。AUNのenterprise targetは
+`docs/design/distributed-control-plane-foundation.md` と
+`docs/design/aun-enterprise-control-plane-direction.md` に従い、DBをcoordination
+pointとしてruntime/connector workersが直接claimする構成へ進める。1プロセス構成は
+local deployment shapeであり、core identityや将来のavailability modelではない。
 
 ```
 server.ts（1プロセスで全機能）

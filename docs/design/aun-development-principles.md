@@ -12,6 +12,10 @@ runtimes during rollout, but the product being built is a durable control plane
 for LLM agents. Near-term internal stability work must stay on the same path as
 the long-term enterprise design.
 
+The strategic direction and market position are recorded in
+[`aun-enterprise-control-plane-direction.md`](./aun-enterprise-control-plane-direction.md).
+These principles are the day-to-day implementation rules for that direction.
+
 ## Non-Negotiable Principles
 
 ### 1. Control Plane First
