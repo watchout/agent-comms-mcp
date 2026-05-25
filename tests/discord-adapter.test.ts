@@ -10,6 +10,9 @@
 import { describe, test, expect } from 'bun:test'
 import { DiscordAdapter, shouldIgnoreDiscordInboundMessage } from '../adapters/discord'
 
+const USABLE_PROVIDER_IDENTITY_PREDICATE =
+  "api.status = 'active' AND api.trust_status NOT IN ('disabled', 'revoked')"
+
 describe('Inbound bot-authored message guard', () => {
   test('ignores all bot-authored Discord messages before inbound routing', () => {
     expect(shouldIgnoreDiscordInboundMessage({ author: { id: 'other-bot', bot: true } }, 'this-bot')).toBe(true)
@@ -55,6 +58,48 @@ describe('Discord mention conversion pre-migration fallback', () => {
 
     await expect(adapter.convertMentionsFromDiscord('ping <@!123456789012345678>')).resolves.toBe('ping @agent-com-dev')
     expect(calls.length).toBe(2)
+  })
+})
+
+describe('Discord mention conversion provider identity trust status', () => {
+  test('does not convert outbound mentions through revoked provider identities', async () => {
+    const adapter = new DiscordAdapter()
+    let sawProviderIdentityQuery = false
+
+    adapter.setDbQuery(async (sql, params) => {
+      expect(params).toEqual(['agent-com-dev'])
+      if (!sql.includes('agent_provider_identities')) return { rows: [] }
+      sawProviderIdentityQuery = true
+      return {
+        rows: [{
+          discord_id: sql.includes(USABLE_PROVIDER_IDENTITY_PREDICATE)
+            ? null
+            : '123456789012345678',
+        }],
+      }
+    })
+
+    await expect(adapter.convertMentionsToDiscord('ping @agent-com-dev')).resolves.toBe('ping @agent-com-dev')
+    expect(sawProviderIdentityQuery).toBe(true)
+  })
+
+  test('does not convert inbound mentions through disabled provider identities', async () => {
+    const adapter = new DiscordAdapter()
+    let sawProviderIdentityQuery = false
+
+    adapter.setDbQuery(async (sql, params) => {
+      expect(params).toEqual(['123456789012345678'])
+      if (!sql.includes('agent_provider_identities')) return { rows: [] }
+      sawProviderIdentityQuery = true
+      return {
+        rows: sql.includes(USABLE_PROVIDER_IDENTITY_PREDICATE)
+          ? []
+          : [{ agent_id: 'agent-com-dev' }],
+      }
+    })
+
+    await expect(adapter.convertMentionsFromDiscord('ping <@123456789012345678>')).resolves.toBe('ping <@123456789012345678>')
+    expect(sawProviderIdentityQuery).toBe(true)
   })
 })
 

@@ -271,7 +271,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       WHERE status = 'active'`,
   ).catch(() => ({ rows: [] as any[] }))
   const providerIdentityRows = await db.query(
-    `SELECT agent_id, provider_subject_id, status, identity_kind
+    `SELECT agent_id, provider_subject_id, status, trust_status, identity_kind
        FROM agent_provider_identities
       WHERE provider = 'discord'
       ORDER BY agent_id, identity_kind`,
@@ -285,6 +285,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     if (!agentId || !subjectId) continue
     providerIdentityKnownAgents.add(agentId)
     if (String(row.status ?? '') !== 'active') continue
+    if (String(row.trust_status ?? '') === 'disabled' || String(row.trust_status ?? '') === 'revoked') continue
     if (!activeDiscordIdentityByAgent.has(agentId)) {
       activeDiscordIdentityByAgent.set(agentId, subjectId)
     }

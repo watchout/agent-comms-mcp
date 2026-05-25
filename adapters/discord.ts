@@ -71,6 +71,91 @@ function isMissingProviderIdentityTable(err: unknown): boolean {
     || /(does not exist|no such table).*agent_provider_identities/i.test(message)
 }
 
+function usableProviderIdentityPredicate(alias: string): string {
+  return `${alias}.status = 'active' AND ${alias}.trust_status NOT IN ('disabled', 'revoked')`
+}
+
+type DbQueryFn = (sql: string, params?: any[]) => Promise<{ rows: any[] }>
+
+async function queryDiscordIdForAgent(dbQuery: DbQueryFn, agentId: string): Promise<string | null> {
+  try {
+    const r = await dbQuery(
+      `SELECT COALESCE(
+                (
+                  SELECT api.provider_subject_id
+                    FROM agent_provider_identities api
+                   WHERE api.agent_id = $1
+                     AND api.provider = 'discord'
+                     AND ${usableProviderIdentityPredicate('api')}
+                     AND api.identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
+                   ORDER BY CASE api.identity_kind
+                              WHEN 'bot_user' THEN 0
+                              WHEN 'human_user' THEN 1
+                              ELSE 2
+                            END
+                   LIMIT 1
+                ),
+                (
+                  SELECT metadata->>'discord_id'
+                    FROM agents
+                   WHERE agent_id = $1
+                     AND NOT EXISTS (
+                       SELECT 1
+                         FROM agent_provider_identities
+                        WHERE agent_id = $1
+                          AND provider = 'discord'
+                     )
+                )
+              ) AS discord_id`,
+      [agentId],
+    )
+    return r.rows.length > 0 ? r.rows[0].discord_id ?? null : null
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    const r = await dbQuery(
+      "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
+      [agentId],
+    )
+    return r.rows.length > 0 ? r.rows[0].discord_id ?? null : null
+  }
+}
+
+async function queryAgentIdForDiscordId(dbQuery: DbQueryFn, discordId: string): Promise<string | null> {
+  try {
+    const r = await dbQuery(
+      `SELECT agent_id
+         FROM (
+           SELECT api.agent_id, 0 AS priority
+             FROM agent_provider_identities api
+            WHERE api.provider = 'discord'
+              AND api.provider_subject_id = $1
+              AND ${usableProviderIdentityPredicate('api')}
+           UNION ALL
+           SELECT agent_id, 1 AS priority
+             FROM agents
+            WHERE metadata->>'discord_id' = $1
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM agent_provider_identities
+                 WHERE provider = 'discord'
+                   AND provider_subject_id = $1
+              )
+         ) candidates
+        ORDER BY priority, agent_id
+        LIMIT 1`,
+      [discordId],
+    )
+    return r.rows.length > 0 ? r.rows[0].agent_id ?? null : null
+  } catch (err) {
+    if (!isMissingProviderIdentityTable(err)) throw err
+    const r = await dbQuery(
+      "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 ORDER BY agent_id",
+      [discordId],
+    )
+    return r.rows.length === 1 ? r.rows[0].agent_id : null
+  }
+}
+
 function startTypingInternal(channel: { sendTyping: () => Promise<void>; id: string }): void {
   stopTypingInternal(channel.id)
   channel.sendTyping().catch(() => {})
@@ -142,109 +227,34 @@ export class DiscordAdapter implements UIAdapter, Adapter {
 
   /** Convert core @agent_id mentions to Discord <@discord_id> */
   async convertMentionsToDiscord(content: string): Promise<string> {
-    if (!this.dbQuery) return content
+    const dbQuery = this.dbQuery
+    if (!dbQuery) return content
     const mentions = content.match(/@([\w][\w-]*)/g)
     if (!mentions) return content
     let result = content
     for (const mention of mentions) {
       const agentId = mention.slice(1) // remove @
       try {
-        const r = await this.dbQuery(
-          `SELECT COALESCE(
-                    (
-                      SELECT provider_subject_id
-                        FROM agent_provider_identities
-                       WHERE agent_id = $1
-                         AND provider = 'discord'
-                         AND status = 'active'
-                         AND identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
-                       ORDER BY CASE identity_kind
-                                  WHEN 'bot_user' THEN 0
-                                  WHEN 'human_user' THEN 1
-                                  ELSE 2
-                                END
-                       LIMIT 1
-                    ),
-                    (
-                      SELECT metadata->>'discord_id'
-                        FROM agents
-                       WHERE agent_id = $1
-                         AND NOT EXISTS (
-                           SELECT 1
-                             FROM agent_provider_identities
-                            WHERE agent_id = $1
-                              AND provider = 'discord'
-                         )
-                    )
-                  ) AS discord_id`,
-          [agentId],
-        )
-        if (r.rows.length > 0 && r.rows[0].discord_id) {
-          result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
-        }
-      } catch (err) {
-        if (!isMissingProviderIdentityTable(err)) continue
-        try {
-          const r = await this.dbQuery(
-            "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
-            [agentId],
-          )
-          if (r.rows.length > 0 && r.rows[0].discord_id) {
-            result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
-          }
-        } catch {}
-      }
+        const discordId = await queryDiscordIdForAgent(dbQuery, agentId)
+        if (discordId) result = result.replace(mention, `<@${discordId}>`)
+      } catch {}
     }
     return result
   }
 
   /** Convert Discord <@discord_id> mentions to core @agent_id */
   async convertMentionsFromDiscord(content: string): Promise<string> {
-    if (!this.dbQuery) return content
+    const dbQuery = this.dbQuery
+    if (!dbQuery) return content
     const mentions = content.match(/<@!?(\d+)>/g)
     if (!mentions) return content
     let result = content
     for (const mention of mentions) {
       const discordId = mention.replace(/<@!?(\d+)>/, '$1')
       try {
-        const r = await this.dbQuery(
-          `SELECT agent_id
-             FROM (
-               SELECT agent_id, 0 AS priority
-                 FROM agent_provider_identities
-                WHERE provider = 'discord'
-                  AND provider_subject_id = $1
-                  AND status = 'active'
-               UNION ALL
-               SELECT agent_id, 1 AS priority
-                 FROM agents
-                WHERE metadata->>'discord_id' = $1
-                  AND NOT EXISTS (
-                    SELECT 1
-                      FROM agent_provider_identities
-                     WHERE provider = 'discord'
-                       AND provider_subject_id = $1
-                  )
-             ) candidates
-            ORDER BY priority, agent_id
-            LIMIT 1`,
-          [discordId],
-        )
-        if (r.rows.length > 0) {
-          result = result.replace(mention, `@${r.rows[0].agent_id}`)
-        }
-      } catch (err) {
-        if (!isMissingProviderIdentityTable(err)) continue
-        try {
-          const r = await this.dbQuery(
-            "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 ORDER BY agent_id",
-            [discordId],
-          )
-          if (r.rows.length === 1) {
-            result = result.replace(mention, `@${r.rows[0].agent_id}`)
-          }
-        } catch {}
-      }
+        const agentId = await queryAgentIdForDiscordId(dbQuery, discordId)
+        if (agentId) result = result.replace(mention, `@${agentId}`)
+      } catch {}
     }
     return result
   }

@@ -31,6 +31,10 @@ function isMissingProviderIdentityTable(err: unknown): boolean {
   return code === '42P01' || /agent_provider_identities.*(does not exist|no such table)/i.test(message)
 }
 
+function usableProviderIdentityPredicate(alias: string): string {
+  return `${alias}.status = 'active' AND ${alias}.trust_status NOT IN ('disabled', 'revoked')`
+}
+
 /** Get a message by ID from agent_messages */
 export async function getMessageById(
   db: DbAdapter | null,
@@ -84,7 +88,7 @@ export async function isHumanAgent(db: DbAdapter | null, authorId: string): Prom
                  WHERE api.agent_id = a.agent_id
                    AND api.provider = 'discord'
                    AND api.provider_subject_id = $1
-                   AND api.status = 'active'
+                   AND ${usableProviderIdentityPredicate('api')}
               )
            OR (
                 a.metadata->>'discord_id' = $1
@@ -118,11 +122,11 @@ export async function resolveAgentFromDiscordId(db: DbAdapter | null, discordId:
     r = await db.query(
       `SELECT agent_id
          FROM (
-           SELECT agent_id
-             FROM agent_provider_identities
-            WHERE provider = 'discord'
-              AND provider_subject_id = $1
-              AND status = 'active'
+           SELECT api.agent_id
+             FROM agent_provider_identities api
+            WHERE api.provider = 'discord'
+              AND api.provider_subject_id = $1
+              AND ${usableProviderIdentityPredicate('api')}
            UNION
            SELECT agent_id
              FROM agents
@@ -166,12 +170,12 @@ export async function resolveAgentFromDiscordIdInMembers(
     r = await db.query<{ agent_id: string }>(
       `SELECT agent_id
          FROM (
-           SELECT agent_id
-             FROM agent_provider_identities
-            WHERE provider = 'discord'
-              AND provider_subject_id = $1
-              AND status = 'active'
-              AND agent_id = ANY($2::text[])
+           SELECT api.agent_id
+             FROM agent_provider_identities api
+            WHERE api.provider = 'discord'
+              AND api.provider_subject_id = $1
+              AND ${usableProviderIdentityPredicate('api')}
+              AND api.agent_id = ANY($2::text[])
            UNION
            SELECT agent_id
              FROM agents
@@ -213,13 +217,13 @@ export async function getAgentDiscordId(db: DbAdapter | null, agentId: string): 
     r = await db.query(
       `SELECT COALESCE(
                 (
-                  SELECT provider_subject_id
-                    FROM agent_provider_identities
-                   WHERE agent_id = $1
-                     AND provider = 'discord'
-                     AND status = 'active'
-                     AND identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
-                   ORDER BY CASE identity_kind
+                  SELECT api.provider_subject_id
+                    FROM agent_provider_identities api
+                   WHERE api.agent_id = $1
+                     AND api.provider = 'discord'
+                     AND ${usableProviderIdentityPredicate('api')}
+                     AND api.identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
+                   ORDER BY CASE api.identity_kind
                               WHEN 'bot_user' THEN 0
                               WHEN 'human_user' THEN 1
                               ELSE 2
@@ -310,7 +314,7 @@ export async function loadAgentInfo(db: DbAdapter | null, agentId: string): Prom
                     FROM agent_provider_identities api
                    WHERE api.agent_id = a.agent_id
                      AND api.provider = 'discord'
-                     AND api.status = 'active'
+                     AND ${usableProviderIdentityPredicate('api')}
                      AND api.identity_kind IN ('bot_user', 'human_user', 'service_account', 'app')
                    ORDER BY CASE api.identity_kind
                               WHEN 'bot_user' THEN 0
