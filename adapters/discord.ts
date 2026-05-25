@@ -63,6 +63,14 @@ const typingIntervals = new Map<string, NodeJS.Timeout>()
 const TYPING_INTERVAL_MS = 8_000
 const TYPING_TIMEOUT_MS = 5 * 60_000
 
+function isMissingProviderIdentityTable(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as any).code) : ''
+  const message = err instanceof Error ? err.message : String(err)
+  return code === '42P01'
+    || /agent_provider_identities.*(does not exist|no such table)/i.test(message)
+    || /(does not exist|no such table).*agent_provider_identities/i.test(message)
+}
+
 function startTypingInternal(channel: { sendTyping: () => Promise<void>; id: string }): void {
   stopTypingInternal(channel.id)
   channel.sendTyping().catch(() => {})
@@ -174,7 +182,18 @@ export class DiscordAdapter implements UIAdapter, Adapter {
         if (r.rows.length > 0 && r.rows[0].discord_id) {
           result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
         }
-      } catch {}
+      } catch (err) {
+        if (!isMissingProviderIdentityTable(err)) continue
+        try {
+          const r = await this.dbQuery(
+            "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
+            [agentId],
+          )
+          if (r.rows.length > 0 && r.rows[0].discord_id) {
+            result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
+          }
+        } catch {}
+      }
     }
     return result
   }
@@ -214,7 +233,18 @@ export class DiscordAdapter implements UIAdapter, Adapter {
         if (r.rows.length > 0) {
           result = result.replace(mention, `@${r.rows[0].agent_id}`)
         }
-      } catch {}
+      } catch (err) {
+        if (!isMissingProviderIdentityTable(err)) continue
+        try {
+          const r = await this.dbQuery(
+            "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1 ORDER BY agent_id",
+            [discordId],
+          )
+          if (r.rows.length === 1) {
+            result = result.replace(mention, `@${r.rows[0].agent_id}`)
+          }
+        } catch {}
+      }
     }
     return result
   }
