@@ -4,8 +4,9 @@
  * Replaces `bin/wake-daemon.ts` with a single daemon that:
  *   - Subscribes to `pg_notify('queue_event')` for immediate dispatch (§6.2).
  *   - Runs a 30s cron sweep over message_queue rows for §4.3 row 2-6.
- *   - Refreshes claim TTLs every 30s for live `agents.status='online'` bots
- *     holding `received` rows (§5.1 / R4 / 補強 #1).
+ *   - Refreshes claim TTLs every 30s for live `agents.status IN
+ *     ('online','busy')` bots holding active `received` / `in_progress` rows
+ *     (§5.1 / R4 / 補強 #1).
  *   - Polls `agents.last_seen_at` every 30s; restarts TUI bots with missing
  *     tmux sessions (§5.4 / R7 / 補強 #5), with a 1h/N rate limit (F8).
  *   - Manages a dynamic-capacity wake pool (§5.2 / 補強 #2).
@@ -408,11 +409,12 @@ export class StateDaemon {
     let sql = `UPDATE message_queue mq
           SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
               last_heartbeat_at = $1::timestamptz
-        WHERE mq.status = 'received'
+        WHERE mq.status IN ('received', 'in_progress')
           AND mq.claim_expires_at > $1::timestamptz
           AND EXISTS (
             SELECT 1 FROM agents a
-             WHERE a.agent_id = mq.agent_id AND a.status = 'online'
+             WHERE a.agent_id = mq.agent_id
+               AND a.status IN ('online', 'busy')
           )`
     const params: unknown[] = [this.clock.now(), this.config.claimTtlSec]
     sql += this.agentScopeClause(params, 'mq.agent_id')
@@ -910,7 +912,8 @@ export class StateDaemon {
     let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
-        WHERE status='received' AND claim_expires_at < $1::timestamptz`
+        WHERE status IN ('received', 'in_progress')
+          AND claim_expires_at < $1::timestamptz`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'agent_id')
     sql += ` ORDER BY claim_expires_at LIMIT $2`
@@ -923,11 +926,7 @@ export class StateDaemon {
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
         WHERE status IN ('received', 'in_progress')
-          AND (
-            status <> 'received'
-            OR claim_expires_at IS NULL
-            OR claim_expires_at >= $1::timestamptz
-          )`
+          AND (claim_expires_at IS NULL OR claim_expires_at >= $1::timestamptz)`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'agent_id')
     sql += ` ORDER BY created_at LIMIT $2`

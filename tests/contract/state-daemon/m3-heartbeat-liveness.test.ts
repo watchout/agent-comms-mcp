@@ -59,6 +59,64 @@ function buildHarness(t0: Date, configOverride: Partial<typeof DEFAULT_CONFIG> =
   return { daemon, clock, tmux, metrics, alert, pgListen }
 }
 
+describe('T21 active claim heartbeat refresh', () => {
+  test('busy bot with live in_progress claim → claim_expires_at extended', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t21-busy-in-progress')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: new Date(T0.getTime() + 30_000),
+      claimed_by: agent,
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60 })
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.refreshClaims()
+      expect(result.refreshed).toBe(1)
+      expect(h.metrics.countInc('state_daemon_heartbeat_refresh_total', { result: 'ok' })).toBe(1)
+      const r = await pg.query(
+        `SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
+      expect(Math.abs(new Date(row.claim_expires_at!).getTime() - (T0.getTime() + 60_000))).toBeLessThan(1500)
+      expect(Math.abs(new Date(row.last_heartbeat_at!).getTime() - T0.getTime())).toBeLessThan(1500)
+      expect(h.tmux.sentKeys.length).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('idle bot with live in_progress claim is not refreshed', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t21-idle-in-progress')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'idle' })
+    const originalExpiry = new Date(T0.getTime() + 30_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: originalExpiry,
+      claimed_by: agent,
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60 })
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.refreshClaims()
+      expect(result.refreshed).toBe(0)
+      const r = await pg.query(`SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(originalExpiry.getTime())
+      expect(row.last_heartbeat_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+})
+
 // ── T21 ───────────────────────────────────────────────────────────────────────
 describe.skip('TODO #338 sub-PR 9 v0.9 schema T21 heartbeat_refresh_extends_claim', () => {
   test('online bot with live claim → claim_expires_at extended to now+claimTtl + last_heartbeat_at set', async () => {
