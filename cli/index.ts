@@ -942,7 +942,7 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        CASE WHEN $13 THEN COALESCE($4, 'unknown') ELSE 'unknown' END,
        CASE WHEN $18 AND $9 = false THEN 'disabled' ELSE 'offline' END, now(),
        CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
-       CASE WHEN $24 THEN $23::bigint ELSE (SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents) END,
+       CASE WHEN $24 THEN $23::bigint ELSE NULL END,
        CASE WHEN $26 THEN $25 ELSE $27 END,
        CASE WHEN $22 THEN $21::int ELSE NULL END,
        CASE WHEN $14 THEN $5 ELSE NULL END,
@@ -957,7 +957,7 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        agent_type = CASE WHEN $12 THEN COALESCE($3, agents.agent_type) ELSE agents.agent_type END,
        runtime = CASE WHEN $13 THEN COALESCE($4, agents.runtime) ELSE agents.runtime END,
        metadata = CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE agents.metadata END,
-       ui_id = CASE WHEN $24 THEN $23::bigint ELSE COALESCE(agents.ui_id, (SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents)) END,
+       ui_id = CASE WHEN $24 THEN $23::bigint ELSE agents.ui_id END,
        ui_handle = CASE WHEN $26 THEN $25 ELSE COALESCE(NULLIF(agents.ui_handle, ''), $27) END,
        channel_port = CASE WHEN $22 THEN $21::int ELSE agents.channel_port END,
        home_directory = CASE WHEN $14 THEN $5 ELSE agents.home_directory END,
@@ -1012,13 +1012,20 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
       defaultUiHandle,
     ],
   )
-  await db.query(
-    `SELECT setval(
-       'agent_ui_id_seq',
-       GREATEST((SELECT COALESCE(MAX(ui_id), 0) FROM agents), 1),
-       (SELECT COALESCE(MAX(ui_id), 0) FROM agents) > 0
-     )`,
-  ).catch(() => ({ rows: [] as any[] }))
+  if (hasUiId) {
+    await db.query(
+      `SELECT setval(
+         'agent_ui_id_seq',
+         GREATEST(
+           (SELECT COALESCE(MAX(ui_id), 0) FROM agents),
+           (SELECT last_value FROM agent_ui_id_seq),
+           1
+         ),
+         (SELECT COALESCE(MAX(ui_id), 0) FROM agents) > 0
+           OR (SELECT is_called FROM agent_ui_id_seq)
+       )`,
+    ).catch(() => ({ rows: [] as any[] }))
+  }
   return result.rows[0]
 }
 
