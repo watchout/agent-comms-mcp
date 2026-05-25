@@ -132,7 +132,11 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 sleep 1
 
 # Step 3: Sync .mcp.json with registry (SSOT enforcement)
-PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")
+if [ "$PROFILE_SOURCE" = "agents.profile" ]; then
+  PROJECT_DIR_EXPANDED="$PROJECT_DIR"
+else
+  PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")
+fi
 if [ -n "${AGENT_ID:-}" ] && [ -n "${PORT:-}" ]; then
   sync_mcp_config "$SESSION" "$PROJECT_DIR_EXPANDED" "$AGENT_ID" "$PORT" || true
 fi
