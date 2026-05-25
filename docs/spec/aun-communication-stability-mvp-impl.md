@@ -229,13 +229,14 @@ Do not execute data cleanup before the structural slices below exist.
 | Order | Slice | Required before data execution |
 |---:|---|---|
 | 1 | NORM-020 bot profile and runtime heartbeat | active bot profile and runtime evidence are visible |
-| 2 | NORM-025 provider identity registry | provider subjects are DB authority |
-| 3 | NORM-030 connector credential registry | token ownership is non-secret and unique |
-| 4 | NORM-035 provider channel access discovery | connector read/write access is known |
-| 5 | NORM-036 effective delivery owner resolver | posting owner is derived or diagnosed |
-| 6 | NORM-040 strict doctor | structural gaps fail deterministically |
-| 7 | NORM-050 data reconcile | execute only after dry-run plan and audit |
-| 8 | NORM-060 fleet smoke | prove inbound, queue, claim, reply, outbound |
+| 2 | NORM-021 bot table reduction and script rewrite | normal setup edits one profile; derived rows and scripts are profile/projector-owned |
+| 3 | NORM-025 provider identity registry | provider subjects are DB authority |
+| 4 | NORM-030 connector credential registry | token ownership is non-secret and unique |
+| 5 | NORM-035 provider channel access discovery | connector read/write access is known |
+| 6 | NORM-036 effective delivery owner resolver | posting owner is derived or diagnosed |
+| 7 | NORM-040 strict doctor | structural gaps fail deterministically |
+| 8 | NORM-050 data reconcile | execute only after dry-run plan and audit |
+| 9 | NORM-060 fleet smoke | prove inbound, queue, claim, reply, outbound |
 
 Read-only inventory can happen at any time. Write-mode data reconciliation
 cannot.
