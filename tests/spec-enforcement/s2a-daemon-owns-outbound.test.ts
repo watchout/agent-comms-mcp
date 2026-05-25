@@ -198,6 +198,31 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).not.toContain("oldDb||'(none)'")
   })
 
+  test('10c. restart-bot.sh resolves the DB bot profile before bot-registry fallback', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
+    const dbLoadIdx = script.indexOf('load_db_profile || true')
+    const registryIdx = script.indexOf('# Try to resolve from registry')
+
+    expect(dbLoadIdx).toBeGreaterThan(-1)
+    expect(registryIdx).toBeGreaterThan(-1)
+    expect(dbLoadIdx).toBeLessThan(registryIdx)
+    expect(script).toContain('FROM agents')
+    expect(script).toContain("metadata->>'tmux_session'")
+    expect(script).toContain('runtime_engine_preference')
+    expect(script).toContain('PROFILE_SOURCE="agents.profile"')
+    expect(script).toContain('refusing registry fallback to avoid drift')
+    expect(script).toContain('build_profile_command "$AGENT_ID" "$SESSION" "$PORT"')
+    expect(script).toContain('AGENT_COMMS_RESTART_DRY_RUN')
+    expect(script).toContain("-F '|'")
+    expect(script).toContain("IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT RUNTIME_ENGINE")
+    expect(script).toContain('[ -z "${RUNTIME_ENGINE:-}" ]')
+    expect(script).toContain('if [ "$PROFILE_SOURCE" = "agents.profile" ]; then')
+    expect(script).toContain('PROJECT_DIR_EXPANDED="$PROJECT_DIR"')
+    expect(script).toContain('PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")')
+    expect(script).not.toContain("COALESCE(NULLIF(metadata->>'tmux_session', ''), agent_id)")
+    expect(script).not.toContain("COALESCE(NULLIF(runtime_engine_preference, ''), runtime, '')")
+  })
+
   test('11. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
     // Phase C I4: dual mode removed. Restart-phantom-prompt fix
     // (2026-04-21): `server:agent-comms` removed from DEFAULT_CMD.
