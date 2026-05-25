@@ -14,8 +14,8 @@ slice's scope shifts.
 
 | Status | Count |
 |---|---|
-| Done | 1 |
-| In progress | 4 |
+| Done | 2 |
+| In progress | 3 |
 | Spec ready, impl pending | 4 |
 | Not started | 5 |
 
@@ -27,16 +27,23 @@ slice's scope shifts.
   (035ccfb).
 - No further PR expected unless the roadmap itself is revised.
 
-### NORM-010 — Queue claim/send consistency 🟡 partial
+### NORM-010 — Queue claim/send consistency ✅ done
 
 - Latest progress: PR #533 (claim treats in-progress as active, 0c5c11b).
 - Remaining: contract test demonstrating `next → processing → send` closes the
   claim across fallback paths (notify, missing claim).
+  Status: satisfied by this PR; the line is retained as the audit trail for
+  the item that closed this slice.
+- Completion: contract coverage now proves `next -> processing -> reply --close`
+  closes the same queue row with `replied_with` evidence.
 - Owner: agent-com-dev.
-- Expected PRs: 1 (test-only, behaviour already shipped).
+- Expected PRs: 0.
 - Depends on: none.
-- Completion evidence: contract test in `tests/contract/` proving the claim is
-  closed by `send` without a separate `done` call.
+- Completion evidence:
+  `tests/contract/test_aun_durable_reply_close_wrapper.test.ts` covers the
+  received -> in_progress -> replied path without a separate `done` call;
+  `tests/contract/test_send_fallback_to_notify.test.ts` covers processed
+  in-progress claims and claim-missing fallback decisions.
 
 ### NORM-020 — Bot profile and runtime heartbeat registration 🟡 in progress
 
