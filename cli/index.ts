@@ -37,7 +37,13 @@ import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
-import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from '../core/runtime-heartbeat'
+import {
+  deterministicWorkspaceId,
+  heartbeatRuntimeInstance,
+  inferRuntimeSessionName,
+  inferWorkspaceName,
+  parseRuntimePort,
+} from '../core/runtime-heartbeat'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
@@ -769,6 +775,15 @@ type BotProfileInput = {
   profileEnabled?: boolean | null
 }
 
+type BotProfileProjection = {
+  agent_id: string
+  profile_revision: number
+  dry_run?: boolean
+  blockers: Array<Record<string, unknown>>
+  actions: Array<Record<string, unknown>>
+  deferred: Array<Record<string, unknown>>
+}
+
 function normalizeNullableText(raw: string | undefined): string | null | undefined {
   if (raw === undefined) return undefined
   const trimmed = raw.trim()
@@ -959,6 +974,266 @@ async function selectBotProfile(db: Client, agentId: string): Promise<any | null
   return result.rows[0] ?? null
 }
 
+function profileEnabled(row: any): boolean {
+  return row.profile_enabled === true || row.profile_enabled === 1 || row.profile_enabled === '1'
+}
+
+function expectedProviderIdentity(row: any): Record<string, unknown> {
+  return parseJsonObject(row.expected_provider_identity)
+}
+
+function expectedProvider(row: any): string | null {
+  const identity = expectedProviderIdentity(row)
+  const provider = identity.provider
+  return typeof provider === 'string' && provider.trim() ? provider.trim() : null
+}
+
+function buildProfileProjection(row: any): BotProfileProjection {
+  const agentId = String(row.agent_id)
+  const orgId = String(row.org_id ?? 'default')
+  const homeDirectory = typeof row.home_directory === 'string' && row.home_directory.trim()
+    ? row.home_directory.trim()
+    : null
+  const revision = Number(row.profile_revision ?? 1)
+  const projection: BotProfileProjection = {
+    agent_id: agentId,
+    profile_revision: revision,
+    blockers: [],
+    actions: [],
+    deferred: [],
+  }
+
+  if (!profileEnabled(row)) {
+    projection.blockers.push({ code: 'profile_disabled' })
+    return projection
+  }
+  if (!homeDirectory) {
+    projection.blockers.push({ code: 'missing_home_directory' })
+  } else {
+    const workspaceId = deterministicWorkspaceId(orgId, homeDirectory)
+    projection.actions.push({
+      table: 'agent_workspaces',
+      action: 'upsert',
+      workspace_id: workspaceId,
+      org_id: orgId,
+      local_path: homeDirectory,
+      name: inferWorkspaceName(homeDirectory, agentId),
+      source: 'bot_profile_projector',
+      profile_revision: revision,
+    })
+    projection.actions.push({
+      table: 'agent_workspace_bindings',
+      action: 'upsert',
+      agent_id: agentId,
+      workspace_id: workspaceId,
+      binding_role: 'primary',
+      source: 'bot_profile_projector',
+      profile_revision: revision,
+    })
+  }
+
+  const provider = expectedProvider(row)
+  const tokenSourceRef = typeof row.provider_token_source_ref === 'string' && row.provider_token_source_ref.trim()
+    ? row.provider_token_source_ref.trim()
+    : null
+  if (provider && tokenSourceRef) {
+    projection.actions.push({
+      table: 'connector_instances',
+      action: 'upsert',
+      agent_id: agentId,
+      provider,
+      connector_uri: `${provider}://agents/${agentId}`,
+      status: 'registered',
+      source: 'bot_profile_projector',
+      profile_revision: revision,
+    })
+    projection.deferred.push({
+      table: 'connector_credentials',
+      reason: 'credential table/projector is a later slice; token source ref is kept on the profile only',
+    })
+    projection.deferred.push({
+      table: 'agent_provider_identities',
+      reason: 'provider identity verification requires provider discovery',
+      expected_provider_identity: expectedProviderIdentity(row),
+    })
+    projection.deferred.push({
+      table: 'provider_channel_access',
+      reason: 'channel access requires provider discovery and must not be manually configured per channel',
+    })
+  } else if (provider || tokenSourceRef) {
+    projection.deferred.push({
+      table: 'connector_instances',
+      reason: 'connector evidence requires both expected provider identity and token source reference',
+      has_provider: Boolean(provider),
+      has_token_source_ref: Boolean(tokenSourceRef),
+    })
+  }
+
+  return projection
+}
+
+async function selectProjectableProfiles(db: Client, agentId: string | null): Promise<any[]> {
+  if (agentId) {
+    const result = await db.query(
+      `SELECT agent_id, org_id, display_name, agent_type, runtime, status,
+              home_directory, runtime_engine_preference, provider_token_source_ref,
+              expected_provider_identity, profile_enabled, profile_revision,
+              profile_source, profile_updated_at
+         FROM agents
+        WHERE agent_id = $1`,
+      [agentId],
+    )
+    return result.rows
+  }
+  const result = await db.query(
+    `SELECT agent_id, org_id, display_name, agent_type, runtime, status,
+            home_directory, runtime_engine_preference, provider_token_source_ref,
+            expected_provider_identity, profile_enabled, profile_revision,
+            profile_source, profile_updated_at
+       FROM agents
+      WHERE agent_type <> 'human'
+        AND COALESCE(profile_enabled, true) = true
+      ORDER BY agent_id`,
+  )
+  return result.rows
+}
+
+function actionForTable(projection: BotProfileProjection, table: string): Record<string, unknown> | null {
+  return projection.actions.find((action) => action.table === table) ?? null
+}
+
+async function applyProfileProjection(db: Client, row: any, projection: BotProfileProjection): Promise<void> {
+  if (projection.blockers.length > 0) return
+  const workspaceAction = actionForTable(projection, 'agent_workspaces')
+  if (workspaceAction) {
+    const metadata = JSON.stringify({
+      source: 'bot_profile_projector',
+      agent_id: projection.agent_id,
+      profile_revision: projection.profile_revision,
+    })
+    const existing = await db.query(
+      `SELECT workspace_id
+         FROM agent_workspaces
+        WHERE org_id = $1
+          AND local_path = $2
+        LIMIT 1`,
+      [workspaceAction.org_id, workspaceAction.local_path],
+    )
+    if (existing.rows[0]?.workspace_id) {
+      await db.query(
+        `UPDATE agent_workspaces
+            SET name = $2,
+                workspace_type = 'local_path',
+                metadata = COALESCE($3::jsonb, '{}'::jsonb),
+                updated_at = now()
+          WHERE workspace_id = $1`,
+        [existing.rows[0].workspace_id, workspaceAction.name, metadata],
+      )
+      workspaceAction.workspace_id = existing.rows[0].workspace_id
+    } else {
+      await db.query(
+        `INSERT INTO agent_workspaces
+           (workspace_id, org_id, name, workspace_type, local_path, metadata, updated_at)
+         VALUES
+           ($1, $2, $3, 'local_path', $4, COALESCE($5::jsonb, '{}'::jsonb), now())`,
+        [
+          workspaceAction.workspace_id,
+          workspaceAction.org_id,
+          workspaceAction.name,
+          workspaceAction.local_path,
+          metadata,
+        ],
+      )
+    }
+  }
+
+  const bindingAction = actionForTable(projection, 'agent_workspace_bindings')
+  if (bindingAction) {
+    const workspaceId = workspaceAction?.workspace_id ?? bindingAction.workspace_id
+    await db.query(
+      `INSERT INTO agent_workspace_bindings
+         (agent_id, workspace_id, binding_role, active, updated_at)
+       VALUES
+         ($1, $2, $3, true, now())
+       ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET
+         active = true,
+         updated_at = now()`,
+      [projection.agent_id, workspaceId, bindingAction.binding_role],
+    )
+  }
+
+  const connectorAction = actionForTable(projection, 'connector_instances')
+  if (connectorAction) {
+    const metadata = JSON.stringify({
+      source: 'bot_profile_projector',
+      agent_id: projection.agent_id,
+      profile_revision: projection.profile_revision,
+      expected_provider_identity: expectedProviderIdentity(row),
+      token_source_ref_set: Boolean(row.provider_token_source_ref),
+    })
+    const capabilities = JSON.stringify({ roles: ['profile_projection'], source: 'bot_profile_projector' })
+    const existing = await db.query(
+      `SELECT connector_instance_id, status
+         FROM connector_instances
+        WHERE provider = $1
+          AND connector_uri = $2
+        LIMIT 1`,
+      [connectorAction.provider, connectorAction.connector_uri],
+    )
+    if (existing.rows[0]?.connector_instance_id) {
+      await db.query(
+        `UPDATE connector_instances
+            SET agent_id = $2,
+                connector_kind = 'chat_adapter',
+                transport = $3,
+                status = CASE
+                  WHEN status = 'disabled' THEN status
+                  WHEN status = 'active' THEN status
+                  ELSE 'registered'
+                END,
+                trust_status = CASE
+                  WHEN trust_status IN ('revoked', 'disabled') THEN trust_status
+                  ELSE 'local'
+                END,
+                capabilities = COALESCE($4::jsonb, '{}'::jsonb),
+                metadata = COALESCE($5::jsonb, '{}'::jsonb),
+                updated_at = now()
+          WHERE connector_instance_id = $1`,
+        [
+          existing.rows[0].connector_instance_id,
+          projection.agent_id,
+          `${connectorAction.provider}_gateway`,
+          capabilities,
+          metadata,
+        ],
+      )
+    } else {
+      await db.query(
+        `INSERT INTO connector_instances
+           (agent_id, provider, connector_kind, transport, connector_uri,
+            status, trust_status, capabilities, metadata, updated_at)
+         VALUES
+           ($1, $2, 'chat_adapter', $3, $4,
+            'registered', 'local', COALESCE($5::jsonb, '{}'::jsonb), COALESCE($6::jsonb, '{}'::jsonb), now())`,
+        [
+          projection.agent_id,
+          connectorAction.provider,
+          `${connectorAction.provider}_gateway`,
+          connectorAction.connector_uri,
+          capabilities,
+          metadata,
+        ],
+      )
+    }
+  }
+
+  await auditLog(db, 'agent.profile_project', 'cli', projection.agent_id, {
+    profile_revision: projection.profile_revision,
+    actions: projection.actions,
+    deferred: projection.deferred,
+  })
+}
+
 async function agentProfile(args: string[]) {
   const [action, ...rest] = args
   const { positional, flags } = parseArgs(rest)
@@ -1014,7 +1289,36 @@ async function agentProfile(args: string[]) {
       return
     }
 
+    if (action === 'project') {
+      const all = flags.all === 'true' || flags.all === '1' || flags.all === ''
+      const agentId = positional[0] ?? flags['agent-id'] ?? null
+      if (!agentId && !all) {
+        console.error('Usage: agent-com agent profile project <agent_id>|--all [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const dryRun = parseRepairDryRun(flags)
+      const rows = await selectProjectableProfiles(db, agentId)
+      if (agentId && rows.length === 0) {
+        console.error(`Error [AGENT_NOT_FOUND]: ${agentId}`)
+        process.exit(1)
+      }
+      const projections = rows.map((row) => buildProfileProjection(row))
+      if (!dryRun) {
+        for (let index = 0; index < rows.length; index += 1) {
+          await applyProfileProjection(db, rows[index], projections[index])
+        }
+      }
+      process.stdout.write(`${JSON.stringify({
+        ok: projections.every((projection) => projection.blockers.length === 0),
+        dry_run: dryRun,
+        projected_agents: projections.length,
+        projections,
+      }, null, 2)}\n`)
+      return
+    }
+
     if (action === 'doctor') {
+      const strict = flags.strict === 'true' || flags.strict === '1' || flags.strict === ''
       const rows = await db.query(
         `SELECT agent_id, display_name, agent_type, status, home_directory,
                 provider_token_source_ref, profile_enabled
@@ -1041,8 +1345,77 @@ async function agentProfile(args: string[]) {
       for (const [home_directory, agents] of homeByPath.entries()) {
         if (agents.length > 1) blockers.push({ code: 'duplicate_home_directory', home_directory, agents })
       }
+      const tokenRefs = new Map<string, string[]>()
+      for (const row of rows.rows) {
+        if (typeof row.provider_token_source_ref !== 'string' || !row.provider_token_source_ref.trim()) continue
+        const agents = tokenRefs.get(row.provider_token_source_ref) ?? []
+        agents.push(String(row.agent_id))
+        tokenRefs.set(row.provider_token_source_ref, agents)
+      }
+      for (const [provider_token_source_ref, agents] of tokenRefs.entries()) {
+        if (agents.length > 1) blockers.push({ code: 'duplicate_provider_token_source_ref', provider_token_source_ref, agents })
+      }
+      if (strict) {
+        const workspaceRows = await db.query(
+          `SELECT a.agent_id, a.home_directory, b.workspace_id
+             FROM agents a
+             LEFT JOIN agent_workspaces w
+               ON w.org_id = COALESCE(a.org_id, 'default')
+              AND w.local_path = a.home_directory
+             LEFT JOIN agent_workspace_bindings b
+               ON b.agent_id = a.agent_id
+              AND b.workspace_id = w.workspace_id
+              AND b.binding_role = 'primary'
+              AND b.active = true
+            WHERE a.agent_type <> 'human'
+              AND COALESCE(a.profile_enabled, true) = true
+              AND a.home_directory IS NOT NULL`,
+        )
+        for (const row of workspaceRows.rows) {
+          if (!row.workspace_id) {
+            blockers.push({
+              agent_id: row.agent_id,
+              code: 'missing_profile_projected_workspace_binding',
+              home_directory: row.home_directory,
+            })
+          }
+        }
+        const runtimeRows = await db.query(
+          `SELECT runtime_instance_id, agent_id
+             FROM agent_runtime_instances
+            WHERE status IN ('running', 'active')
+              AND workspace_id IS NULL
+            ORDER BY agent_id, started_at DESC`,
+        ).catch(() => ({ rows: [] as any[] }))
+        for (const row of runtimeRows.rows) {
+          blockers.push({
+            agent_id: row.agent_id,
+            runtime_instance_id: row.runtime_instance_id,
+            code: 'runtime_missing_workspace_profile_linkage',
+          })
+        }
+        const connectorRows = await db.query(
+          `SELECT connector_instance_id, agent_id, provider, connector_uri, metadata
+             FROM connector_instances
+            WHERE status IN ('registered', 'active', 'standby')
+            ORDER BY agent_id, provider, connector_uri`,
+        ).catch(() => ({ rows: [] as any[] }))
+        for (const row of connectorRows.rows) {
+          const metadata = parseJsonObject(row.metadata)
+          if (metadata.source !== 'bot_profile_projector' && metadata.source !== 'runtime_heartbeat') {
+            blockers.push({
+              agent_id: row.agent_id,
+              connector_instance_id: row.connector_instance_id,
+              provider: row.provider,
+              connector_uri: row.connector_uri,
+              code: 'connector_missing_profile_source_evidence',
+            })
+          }
+        }
+      }
       process.stdout.write(`${JSON.stringify({
         ok: blockers.length === 0,
+        strict,
         checked_agents: rows.rows.length,
         blockers,
       }, null, 2)}\n`)
@@ -1050,7 +1423,7 @@ async function agentProfile(args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com agent profile <get|set|doctor> ...')
+    console.error('Usage: agent-com agent profile <get|set|project|doctor> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -3256,7 +3629,8 @@ Commands:
   agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>]
   agent profile get <agent_id>
   agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
-  agent profile doctor
+  agent profile project <agent_id>|--all [--execute|--dry-run]
+  agent profile doctor [--strict]
   status
 
 Message I/O (requires AGENT_ID env var):

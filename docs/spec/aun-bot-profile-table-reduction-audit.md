@@ -4,6 +4,20 @@ Date: 2026-05-25
 Status: Pre-implementation audit target
 Phase: MVP internal normalization
 
+## Implementation Progress
+
+- PR #539 established the editable bot profile root on `agents` and added
+  `agent profile get|set|doctor`.
+- The next implementation slice adds a profile projector:
+  - `agent profile project <agent_id>|--all` is dry-run by default.
+  - `--execute` materializes deterministic workspace, workspace binding, and
+    connector evidence from the profile.
+  - `agent profile doctor --strict` reports missing projected evidence and
+    duplicate token source references.
+- Credential, provider identity, and provider channel access rows remain
+  deferred evidence tables until provider discovery is implemented. They must
+  not become manual setup inputs.
+
 ## Purpose
 
 This audit checks the bot-related database and scripts against the local MVP

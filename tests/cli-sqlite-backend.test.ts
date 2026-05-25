@@ -198,6 +198,97 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(blocked.stderr).toContain('raw token')
   })
 
+  test('profile project is dry-run first and materializes derived workspace plus connector evidence', () => {
+    const profile = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--runtime-engine', 'codex',
+      '--token-source-ref', 'local-env:PROBE_DISCORD_TOKEN',
+      '--expected-provider', 'discord',
+      '--expected-provider-subject', '123456789012345678',
+      '--execute',
+    ])
+    expect(profile.status).toBe(0)
+
+    const dry = runCli(['agent', 'profile', 'project', 'probe-f'])
+    expect(dry.status).toBe(0)
+    const dryPayload = JSON.parse(dry.stdout)
+    expect(dryPayload.dry_run).toBe(true)
+    expect(dryPayload.projections[0].actions.map((a: any) => a.table)).toEqual([
+      'agent_workspaces',
+      'agent_workspace_bindings',
+      'connector_instances',
+    ])
+    expect(dbRead(`SELECT * FROM agent_workspaces`)).toHaveLength(0)
+    expect(dbRead(`SELECT * FROM connector_instances`)).toHaveLength(0)
+
+    const executed = runCli(['agent', 'profile', 'project', 'probe-f', '--execute'])
+    expect(executed.status).toBe(0)
+    const payload = JSON.parse(executed.stdout)
+    expect(payload.dry_run).toBe(false)
+    expect(payload.ok).toBe(true)
+
+    const workspaces = dbRead(`SELECT workspace_id, local_path, metadata FROM agent_workspaces`)
+    expect(workspaces).toHaveLength(1)
+    expect(String(workspaces[0].local_path).endsWith('/Developer/probe-f')).toBe(true)
+    expect(JSON.parse(workspaces[0].metadata)).toMatchObject({
+      source: 'bot_profile_projector',
+      agent_id: 'probe-f',
+    })
+    const bindings = dbRead(`SELECT agent_id, workspace_id, binding_role, active FROM agent_workspace_bindings`)
+    expect(bindings).toEqual([
+      {
+        agent_id: 'probe-f',
+        workspace_id: workspaces[0].workspace_id,
+        binding_role: 'primary',
+        active: 1,
+      },
+    ])
+    const connectors = dbRead(`SELECT agent_id, provider, connector_uri, status, metadata FROM connector_instances`)
+    expect(connectors).toHaveLength(1)
+    expect(connectors[0]).toMatchObject({
+      agent_id: 'probe-f',
+      provider: 'discord',
+      connector_uri: 'discord://agents/probe-f',
+      status: 'registered',
+    })
+    expect(JSON.parse(connectors[0].metadata)).toMatchObject({
+      source: 'bot_profile_projector',
+      agent_id: 'probe-f',
+      token_source_ref_set: true,
+    })
+
+    const strict = runCli(['agent', 'profile', 'doctor', '--strict'])
+    expect(strict.status).toBe(0)
+    expect(JSON.parse(strict.stdout).ok).toBe(true)
+  })
+
+  test('profile doctor enforces one token source reference per active agent', () => {
+    const first = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--token-source-ref', 'local-env:DUP_TOKEN',
+      '--execute',
+    ])
+    expect(first.status).toBe(0)
+    const second = runCli([
+      'agent', 'profile', 'set', 'probe-g',
+      '--home-directory', '~/Developer/probe-g',
+      '--token-source-ref', 'local-env:DUP_TOKEN',
+      '--execute',
+    ])
+    expect(second.status).toBe(0)
+
+    const failing = runCli(['agent', 'profile', 'doctor'])
+    expect(failing.status).toBe(1)
+    const payload = JSON.parse(failing.stdout)
+    expect(payload.blockers).toContainEqual({
+      code: 'duplicate_provider_token_source_ref',
+      provider_token_source_ref: 'local-env:DUP_TOKEN',
+      agents: ['probe-f', 'probe-g'],
+    })
+  })
+
   test('profile doctor fails missing bot profile home and passes after profile set', () => {
     const failing = runCli(['agent', 'profile', 'doctor'])
     expect(failing.status).toBe(1)
