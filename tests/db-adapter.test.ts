@@ -257,13 +257,17 @@ describe('migrateSqlite', () => {
     const names = cols.map((c: any) => c.name)
     expect(names).toContain('registered_at')
     expect(names).toContain('runtime')
+    expect(names).toContain('ui_id')
+    expect(names).toContain('ui_handle')
     expect(names).toContain('home_directory')
     expect(names).toContain('provider_token_source_ref')
 
     const row = db.prepare(
-      "SELECT runtime, registered_at, expected_provider_identity, profile_enabled, profile_source FROM agents WHERE agent_id = ?",
+      "SELECT runtime, ui_id, ui_handle, registered_at, expected_provider_identity, profile_enabled, profile_source FROM agents WHERE agent_id = ?",
     ).get('legacy-profile-bot') as any
     expect(row.runtime).toBe('codex')
+    expect(row.ui_id).toBe(1)
+    expect(row.ui_handle).toBe('legacy-profile-bot')
     expect(row.registered_at).not.toBeNull()
     expect(row.expected_provider_identity).toBe('{}')
     expect(row.profile_enabled).toBe(1)

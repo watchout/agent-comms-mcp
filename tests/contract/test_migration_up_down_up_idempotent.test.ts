@@ -24,6 +24,8 @@ const DROP_CMI_UP = join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-curre
 const DROP_CMI_DOWN = join(REPO_ROOT, 'db/migrations/2026-04-30-stage-b-drop-current-message-id.down.sql')
 const BOT_PROFILE_UP = join(REPO_ROOT, 'db/migrations/2026-05-25-bot-profile-ssot.up.sql')
 const BOT_PROFILE_DOWN = join(REPO_ROOT, 'db/migrations/2026-05-25-bot-profile-ssot.down.sql')
+const UI_IDENTITY_UP = join(REPO_ROOT, 'db/migrations/2026-05-26-agent-ui-identity-binding.up.sql')
+const UI_IDENTITY_DOWN = join(REPO_ROOT, 'db/migrations/2026-05-26-agent-ui-identity-binding.down.sql')
 
 // PR #340 (incident #339): the destructive-migration gate in
 // db/migrate.ts rejects DROP COLUMN / TRUNCATE / etc. unless
@@ -87,6 +89,7 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     `)
     try {
       await applyUpMigrationFile(BOT_PROFILE_UP)
+      await applyUpMigrationFile(UI_IDENTITY_UP)
     } catch {}
 
     await client.end()
@@ -224,5 +227,50 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     expect(reUpRow.rows[0].profile_source).toBe('legacy')
 
     await client.query(`DELETE FROM agents WHERE agent_id LIKE '__norm021_roundtrip_%'`)
+  })
+
+  test('agent-ui-identity-binding — down removes UI identity columns, up restores trigger defaults', async () => {
+    await applyUpMigrationFile(BOT_PROFILE_UP)
+    await applyUpMigrationFile(UI_IDENTITY_UP)
+    expect(await columnExists('agents', 'ui_id')).toBe(true)
+    expect(await columnExists('agents', 'ui_handle')).toBe(true)
+    expect(await indexExists('uq_agents_ui_id_active')).toBe(true)
+    expect(await indexExists('uq_agents_ui_handle_active')).toBe(true)
+
+    await client.query(`DELETE FROM agents WHERE agent_id LIKE '__ui_identity_roundtrip_%'`)
+    await client.query(
+      `INSERT INTO agents (
+         agent_id, display_name, agent_type, runtime,
+         metadata, ui_id, ui_handle, profile_enabled
+       )
+       VALUES ($1, $1, 'dev', 'codex', $2::jsonb, NULL, '', true)`,
+      ['__ui_identity_roundtrip_up__', JSON.stringify({ replaces: 'lead-ui-roundtrip' })],
+    )
+    const upRow = await client.query(
+      `SELECT ui_id, ui_handle
+         FROM agents
+        WHERE agent_id = $1`,
+      ['__ui_identity_roundtrip_up__'],
+    )
+    expect(Number(upRow.rows[0].ui_id)).toBeGreaterThan(0)
+    expect(upRow.rows[0].ui_handle).toBe('lead-ui-roundtrip')
+
+    await applyDownMigration(UI_IDENTITY_DOWN)
+    expect(await columnExists('agents', 'ui_id')).toBe(false)
+    expect(await columnExists('agents', 'ui_handle')).toBe(false)
+    const downFunction = await client.query<{ body: string }>(
+      `SELECT pg_get_functiondef('set_agent_identity_defaults()'::regprocedure) AS body`,
+    )
+    expect(downFunction.rows[0].body).not.toContain('ui_handle')
+
+    await applyUpMigrationFile(UI_IDENTITY_UP)
+    expect(await columnExists('agents', 'ui_id')).toBe(true)
+    expect(await columnExists('agents', 'ui_handle')).toBe(true)
+    const reUpFunction = await client.query<{ body: string }>(
+      `SELECT pg_get_functiondef('set_agent_identity_defaults()'::regprocedure) AS body`,
+    )
+    expect(reUpFunction.rows[0].body).toContain('ui_handle')
+
+    await client.query(`DELETE FROM agents WHERE agent_id LIKE '__ui_identity_roundtrip_%'`)
   })
 })

@@ -767,6 +767,8 @@ async function agentRegister(args: string[]) {
 
 type BotProfileInput = {
   agentId: string
+  uiId?: number | null
+  uiHandle?: string | null
   displayName?: string | null
   agentType?: string | null
   runtime?: string | null
@@ -822,6 +824,17 @@ function parseOptionalPort(raw: string | undefined, name: string): number | null
   return port
 }
 
+function parseOptionalUiId(raw: string | undefined, name: string): number | null | undefined {
+  if (raw === undefined) return undefined
+  const value = raw.trim().toLowerCase()
+  if (value === '' || value === 'none' || value === 'null') return null
+  const uiId = Number(value)
+  if (!Number.isSafeInteger(uiId) || uiId <= 0) {
+    throw new Error(`${name} must be a positive integer`)
+  }
+  return uiId
+}
+
 function looksLikeRawSecret(value: string): boolean {
   const trimmed = value.trim()
   if (/^(bot|bearer)\s+/i.test(trimmed)) return true
@@ -855,6 +868,8 @@ function buildBotProfileInput(
   if (typeof tokenSource === 'string' && looksLikeRawSecret(tokenSource)) {
     throw new Error('provider token source must be a non-secret reference, not a raw token')
   }
+  const uiId = parseOptionalUiId(flags['ui-id'], '--ui-id')
+  const uiHandle = normalizeNullableText(flags['ui-handle'] ?? flags.handle)
   const displayName = normalizeNullableText(flags['display-name'])
   const agentType = normalizeNullableText(flags.type)
   const runtime = normalizeNullableText(flags.runtime)
@@ -866,6 +881,8 @@ function buildBotProfileInput(
   const profileEnabled = parseOptionalBoolean(flags.enabled, '--enabled')
   return {
     agentId,
+    uiId: uiId !== undefined ? uiId : defaults.uiId,
+    uiHandle: uiHandle !== undefined ? uiHandle : defaults.uiHandle,
     displayName: displayName !== undefined ? displayName : defaults.displayName,
     agentType: agentType !== undefined ? agentType : defaults.agentType,
     runtime: runtime !== undefined ? runtime : defaults.runtime,
@@ -884,6 +901,8 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
     ? null
     : JSON.stringify(input.expectedProviderIdentity ?? {})
   const enabled = input.profileEnabled
+  const hasUiId = input.uiId !== undefined && input.uiId !== null
+  const hasUiHandle = input.uiHandle !== undefined
   const hasDisplayName = input.displayName !== undefined
   const hasAgentType = input.agentType !== undefined
   const hasRuntime = input.runtime !== undefined
@@ -894,21 +913,25 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
   const hasProviderTokenSourceRef = input.providerTokenSourceRef !== undefined
   const hasExpectedProviderIdentity = input.expectedProviderIdentity !== undefined
   const hasProfileEnabled = input.profileEnabled !== undefined && input.profileEnabled !== null
+  const existing = await db.query(
+    `SELECT metadata FROM agents WHERE agent_id = $1`,
+    [input.agentId],
+  ).catch(() => ({ rows: [] as any[] }))
+  const existingMetadata = parseJsonObject(existing.rows[0]?.metadata)
   let metadataForWrite: string | null = null
   if (hasTmuxSession) {
-    const existing = await db.query(
-      `SELECT metadata FROM agents WHERE agent_id = $1`,
-      [input.agentId],
-    ).catch(() => ({ rows: [] as any[] }))
-    const metadata = parseJsonObject(existing.rows[0]?.metadata)
+    const metadata = { ...existingMetadata }
     if (input.tmuxSession === null) delete metadata.tmux_session
     else metadata.tmux_session = input.tmuxSession
     metadataForWrite = JSON.stringify(metadata)
   }
+  const defaultUiHandle = typeof existingMetadata.replaces === 'string' && existingMetadata.replaces.trim()
+    ? existingMetadata.replaces.trim()
+    : input.agentId
   const result = await db.query(
     `INSERT INTO agents (
        agent_id, org_id, display_name, agent_type, runtime, status, registered_at,
-       metadata, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
+       metadata, ui_id, ui_handle, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
        expected_provider_identity, profile_enabled, profile_revision,
        profile_source, profile_updated_at, disabled_at
      )
@@ -919,6 +942,8 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        CASE WHEN $13 THEN COALESCE($4, 'unknown') ELSE 'unknown' END,
        CASE WHEN $18 AND $9 = false THEN 'disabled' ELSE 'offline' END, now(),
        CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
+       CASE WHEN $24 THEN $23::bigint ELSE (SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents) END,
+       CASE WHEN $26 THEN $25 ELSE $27 END,
        CASE WHEN $22 THEN $21::int ELSE NULL END,
        CASE WHEN $14 THEN $5 ELSE NULL END,
        CASE WHEN $15 THEN $6 ELSE NULL END,
@@ -932,6 +957,8 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        agent_type = CASE WHEN $12 THEN COALESCE($3, agents.agent_type) ELSE agents.agent_type END,
        runtime = CASE WHEN $13 THEN COALESCE($4, agents.runtime) ELSE agents.runtime END,
        metadata = CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE agents.metadata END,
+       ui_id = CASE WHEN $24 THEN $23::bigint ELSE COALESCE(agents.ui_id, (SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents)) END,
+       ui_handle = CASE WHEN $26 THEN $25 ELSE COALESCE(NULLIF(agents.ui_handle, ''), $27) END,
        channel_port = CASE WHEN $22 THEN $21::int ELSE agents.channel_port END,
        home_directory = CASE WHEN $14 THEN $5 ELSE agents.home_directory END,
        runtime_engine_preference = CASE WHEN $15 THEN $6 ELSE agents.runtime_engine_preference END,
@@ -952,7 +979,7 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        profile_source = $10,
        profile_updated_at = now()
      RETURNING agent_id, display_name, agent_type, runtime, status,
-       metadata, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
+       metadata, ui_id, ui_handle, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
        expected_provider_identity, profile_enabled, profile_revision,
        profile_source, profile_updated_at`,
     [
@@ -978,8 +1005,20 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
       hasTmuxSession,
       input.channelPort,
       hasChannelPort,
+      input.uiId,
+      hasUiId,
+      input.uiHandle,
+      hasUiHandle,
+      defaultUiHandle,
     ],
   )
+  await db.query(
+    `SELECT setval(
+       'agent_ui_id_seq',
+       GREATEST((SELECT COALESCE(MAX(ui_id), 0) FROM agents), 1),
+       (SELECT COALESCE(MAX(ui_id), 0) FROM agents) > 0
+     )`,
+  ).catch(() => ({ rows: [] as any[] }))
   return result.rows[0]
 }
 
@@ -987,6 +1026,8 @@ function botProfileForOutput(row: any): Record<string, unknown> {
   const metadata = parseJsonObject(row.metadata)
   return {
     agent_id: row.agent_id,
+    ui_id: row.ui_id === null || row.ui_id === undefined ? null : Number(row.ui_id),
+    ui_handle: row.ui_handle ?? null,
     display_name: row.display_name,
     agent_type: row.agent_type,
     runtime: row.runtime,
@@ -1009,7 +1050,7 @@ function botProfileForOutput(row: any): Record<string, unknown> {
 async function selectBotProfile(db: Client, agentId: string): Promise<any | null> {
   const result = await db.query(
     `SELECT agent_id, display_name, agent_type, runtime, status,
-            metadata, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
+            metadata, ui_id, ui_handle, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
             expected_provider_identity, profile_enabled, profile_revision,
             profile_source, profile_updated_at
        FROM agents
@@ -1036,8 +1077,13 @@ function expectedProvider(row: any): string | null {
 function buildProfileProjection(row: any): BotProfileProjection {
   const agentId = String(row.agent_id)
   const orgId = String(row.org_id ?? 'default')
+  const metadata = parseJsonObject(row.metadata)
   const homeDirectory = typeof row.home_directory === 'string' && row.home_directory.trim()
     ? row.home_directory.trim()
+    : null
+  const uiId = Number(row.ui_id)
+  const uiHandle = typeof row.ui_handle === 'string' && row.ui_handle.trim()
+    ? row.ui_handle.trim()
     : null
   const revision = Number(row.profile_revision ?? 1)
   const projection: BotProfileProjection = {
@@ -1051,6 +1097,27 @@ function buildProfileProjection(row: any): BotProfileProjection {
   if (!profileEnabled(row)) {
     projection.blockers.push({ code: 'profile_disabled' })
     return projection
+  }
+  if (!Number.isSafeInteger(uiId) || uiId <= 0) {
+    projection.blockers.push({ code: 'missing_ui_id' })
+  }
+  if (!uiHandle) {
+    projection.blockers.push({ code: 'missing_ui_handle' })
+  }
+  const replacedAlias = typeof metadata.replaces === 'string' && metadata.replaces.trim()
+    ? metadata.replaces.trim()
+    : null
+  if (replacedAlias && replacedAlias !== agentId) {
+    projection.actions.push({
+      table: 'agent_aliases',
+      action: 'upsert',
+      alias: replacedAlias,
+      canonical_agent_id: agentId,
+      new_work_allowed: false,
+      reason: 'bot profile replacement alias',
+      source: 'bot_profile_projector',
+      profile_revision: revision,
+    })
   }
   if (!homeDirectory) {
     projection.blockers.push({ code: 'missing_home_directory' })
@@ -1129,7 +1196,7 @@ async function selectProjectableProfiles(db: Client, agentId: string | null): Pr
   if (agentId) {
     const result = await db.query(
       `SELECT agent_id, org_id, display_name, agent_type, runtime, status,
-              home_directory, runtime_engine_preference, provider_token_source_ref,
+              metadata, ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref,
               expected_provider_identity, profile_enabled, profile_revision,
               profile_source, profile_updated_at
          FROM agents
@@ -1140,7 +1207,7 @@ async function selectProjectableProfiles(db: Client, agentId: string | null): Pr
   }
   const result = await db.query(
     `SELECT agent_id, org_id, display_name, agent_type, runtime, status,
-            home_directory, runtime_engine_preference, provider_token_source_ref,
+            metadata, ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref,
             expected_provider_identity, profile_enabled, profile_revision,
             profile_source, profile_updated_at
        FROM agents
@@ -1157,6 +1224,26 @@ function actionForTable(projection: BotProfileProjection, table: string): Record
 
 async function applyProfileProjection(db: Client, row: any, projection: BotProfileProjection): Promise<void> {
   if (projection.blockers.length > 0) return
+  const aliasAction = actionForTable(projection, 'agent_aliases')
+  if (aliasAction) {
+    await db.query(
+      `INSERT INTO agent_aliases
+         (alias, canonical_agent_id, new_work_allowed, reason, updated_at)
+       VALUES
+         ($1, $2, $3, $4, now())
+       ON CONFLICT (alias) DO UPDATE SET
+         canonical_agent_id = excluded.canonical_agent_id,
+         new_work_allowed = excluded.new_work_allowed,
+         reason = excluded.reason,
+         updated_at = now()`,
+      [
+        aliasAction.alias,
+        aliasAction.canonical_agent_id,
+        aliasAction.new_work_allowed,
+        aliasAction.reason,
+      ],
+    )
+  }
   const workspaceAction = actionForTable(projection, 'agent_workspaces')
   if (workspaceAction) {
     const metadata = JSON.stringify({
@@ -1332,6 +1419,8 @@ async function agentProfile(args: string[]) {
       const preview = {
         agent_id: agentId,
         changes: {
+          ui_id: input.uiId,
+          ui_handle: input.uiHandle,
           display_name: input.displayName,
           agent_type: input.agentType,
           runtime: input.runtime,
@@ -1389,7 +1478,7 @@ async function agentProfile(args: string[]) {
       const strict = flags.strict === 'true' || flags.strict === '1' || flags.strict === ''
       const rows = await db.query(
         `SELECT agent_id, display_name, agent_type, runtime, status, metadata,
-                home_directory, channel_port, runtime_engine_preference,
+                ui_id, ui_handle, home_directory, channel_port, runtime_engine_preference,
                 provider_token_source_ref, expected_provider_identity, profile_enabled
            FROM agents
           WHERE agent_type <> 'human'
@@ -1400,9 +1489,37 @@ async function agentProfile(args: string[]) {
       const homeByPath = new Map<string, string[]>()
       const portOwners = new Map<number, string[]>()
       const sessionOwners = new Map<string, string[]>()
+      const uiIdOwners = new Map<number, string[]>()
+      const uiHandleOwners = new Map<string, { ui_handle: string; agents: string[] }>()
+      const expectedAliases: Array<{ alias: string; canonical_agent_id: string }> = []
       for (const row of rows.rows) {
         const agentId = String(row.agent_id)
         const metadata = parseJsonObject(row.metadata)
+        const uiId = Number(row.ui_id)
+        if (!Number.isSafeInteger(uiId) || uiId <= 0) {
+          blockers.push({ agent_id: agentId, code: 'missing_ui_id' })
+        } else {
+          const agents = uiIdOwners.get(uiId) ?? []
+          agents.push(agentId)
+          uiIdOwners.set(uiId, agents)
+        }
+        const uiHandle = typeof row.ui_handle === 'string' && row.ui_handle.trim()
+          ? row.ui_handle.trim()
+          : ''
+        if (!uiHandle) {
+          blockers.push({ agent_id: agentId, code: 'missing_ui_handle' })
+        } else {
+          const key = uiHandle.toLowerCase()
+          const current = uiHandleOwners.get(key) ?? { ui_handle: uiHandle, agents: [] }
+          current.agents.push(agentId)
+          uiHandleOwners.set(key, current)
+        }
+        const replacedAlias = typeof metadata.replaces === 'string' && metadata.replaces.trim()
+          ? metadata.replaces.trim()
+          : ''
+        if (replacedAlias && replacedAlias !== agentId) {
+          expectedAliases.push({ alias: replacedAlias, canonical_agent_id: agentId })
+        }
         const home = typeof row.home_directory === 'string' ? row.home_directory : ''
         if (!home) blockers.push({ agent_id: agentId, code: 'missing_home_directory' })
         else {
@@ -1449,6 +1566,12 @@ async function agentProfile(args: string[]) {
       for (const [tmux_session, agents] of sessionOwners.entries()) {
         if (agents.length > 1) blockers.push({ code: 'duplicate_tmux_session', tmux_session, agents })
       }
+      for (const [ui_id, agents] of uiIdOwners.entries()) {
+        if (agents.length > 1) blockers.push({ code: 'duplicate_ui_id', ui_id, agents })
+      }
+      for (const current of uiHandleOwners.values()) {
+        if (current.agents.length > 1) blockers.push({ code: 'duplicate_ui_handle', ui_handle: current.ui_handle, agents: current.agents })
+      }
       const tokenRefs = new Map<string, string[]>()
       for (const row of rows.rows) {
         if (typeof row.provider_token_source_ref !== 'string' || !row.provider_token_source_ref.trim()) continue
@@ -1458,6 +1581,23 @@ async function agentProfile(args: string[]) {
       }
       for (const [provider_token_source_ref, agents] of tokenRefs.entries()) {
         if (agents.length > 1) blockers.push({ code: 'duplicate_provider_token_source_ref', provider_token_source_ref, agents })
+      }
+      for (const expected of expectedAliases) {
+        const aliasRows = await db.query(
+          `SELECT canonical_agent_id, new_work_allowed
+             FROM agent_aliases
+            WHERE alias = $1`,
+          [expected.alias],
+        )
+        const aliasRow = aliasRows.rows[0]
+        if (!aliasRow || aliasRow.canonical_agent_id !== expected.canonical_agent_id) {
+          blockers.push({
+            agent_id: expected.canonical_agent_id,
+            code: 'missing_replacement_alias',
+            alias: expected.alias,
+            canonical_agent_id: expected.canonical_agent_id,
+          })
+        }
       }
       if (strict) {
         const workspaceRows = await db.query(

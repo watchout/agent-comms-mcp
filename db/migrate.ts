@@ -138,6 +138,8 @@ async function migrate() {
       last_wake_attempt_at TIMESTAMPTZ
     );
 
+    CREATE SEQUENCE IF NOT EXISTS agent_ui_id_seq;
+
     -- v0.1.0: Add org_id, active_thread, observer_mode, channel_port to agents
     DO $$ BEGIN
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT 'default';
@@ -169,6 +171,8 @@ async function migrate() {
       -- NORM-021 bot profile SSOT. These are the normal operator-editable
       -- local profile fields. Workspace/runtime/connector rows are generated
       -- evidence and must not duplicate these as manual setup.
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS ui_id BIGINT;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS ui_handle TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS home_directory TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_engine_preference TEXT;
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS provider_token_source_ref TEXT;
@@ -182,6 +186,21 @@ async function migrate() {
     UPDATE agents
        SET agent_uri = 'aun://' || COALESCE(org_id, 'default') || '/agents/' || agent_id
      WHERE agent_uri IS NULL OR agent_uri = '';
+    UPDATE agents
+       SET ui_id = nextval('agent_ui_id_seq')
+     WHERE ui_id IS NULL
+       AND agent_type <> 'human'
+       AND COALESCE(profile_enabled, true) = true;
+    SELECT setval(
+      'agent_ui_id_seq',
+      GREATEST((SELECT COALESCE(MAX(ui_id), 0) FROM agents), 1),
+      (SELECT COALESCE(MAX(ui_id), 0) FROM agents) > 0
+    );
+    UPDATE agents
+       SET ui_handle = COALESCE(NULLIF(metadata->>'replaces', ''), agent_id)
+     WHERE (ui_handle IS NULL OR ui_handle = '')
+       AND agent_type <> 'human'
+       AND COALESCE(profile_enabled, true) = true;
     CREATE OR REPLACE FUNCTION set_agent_identity_defaults()
     RETURNS trigger AS $$
     BEGIN
@@ -211,6 +230,14 @@ async function migrate() {
       END IF;
       IF NEW.profile_source IS NULL OR NEW.profile_source = '' THEN
         NEW.profile_source := 'legacy';
+      END IF;
+      IF NEW.agent_type <> 'human' AND COALESCE(NEW.profile_enabled, true) = true THEN
+        IF NEW.ui_id IS NULL THEN
+          NEW.ui_id := nextval('agent_ui_id_seq');
+        END IF;
+        IF NEW.ui_handle IS NULL OR NEW.ui_handle = '' THEN
+          NEW.ui_handle := COALESCE(NULLIF(NEW.metadata->>'replaces', ''), NEW.agent_id);
+        END IF;
       END IF;
       RETURN NEW;
     END;
@@ -244,6 +271,17 @@ async function migrate() {
       ON agents(org_id, home_directory)
       WHERE home_directory IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_agents_profile_enabled ON agents(profile_enabled);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_ui_id_active
+      ON agents(ui_id)
+      WHERE ui_id IS NOT NULL
+        AND agent_type <> 'human'
+        AND COALESCE(profile_enabled, true) = true;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_ui_handle_active
+      ON agents(lower(ui_handle))
+      WHERE ui_handle IS NOT NULL
+        AND ui_handle <> ''
+        AND agent_type <> 'human'
+        AND COALESCE(profile_enabled, true) = true;
 
     CREATE TABLE IF NOT EXISTS agent_workspaces (
       workspace_id TEXT PRIMARY KEY,

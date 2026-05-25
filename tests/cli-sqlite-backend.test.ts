@@ -110,6 +110,8 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
   test('agents has NORM-021 bot profile SSOT columns', () => {
     const rows = dbRead(`PRAGMA table_info(agents)`)
     const names = rows.map((r: any) => r.name)
+    expect(names).toContain('ui_id')
+    expect(names).toContain('ui_handle')
     expect(names).toContain('home_directory')
     expect(names).toContain('channel_port')
     expect(names).toContain('runtime_engine_preference')
@@ -124,6 +126,8 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
   test('profile set is dry-run by default and execute stores one editable bot profile', () => {
     const dry = runCli([
       'agent', 'profile', 'set', 'probe-f',
+      '--ui-id', '1001',
+      '--ui-handle', 'lead-probe',
       '--home-directory', '~/Developer/probe-f',
       '--runtime-engine', 'codex',
       '--token-source-ref', 'local-env:DISCORD_BOT_TOKEN',
@@ -137,6 +141,8 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
 
     const executed = runCli([
       'agent', 'profile', 'set', 'probe-f',
+      '--ui-id', '1001',
+      '--ui-handle', 'lead-probe',
       '--home-directory', '~/Developer/probe-f',
       '--runtime-engine', 'codex',
       '--token-source-ref', 'local-env:DISCORD_BOT_TOKEN',
@@ -147,6 +153,8 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(executed.status).toBe(0)
     const payload = JSON.parse(executed.stdout)
     expect(payload.profile.agent_id).toBe('probe-f')
+    expect(payload.profile.ui_id).toBe(1001)
+    expect(payload.profile.ui_handle).toBe('lead-probe')
     expect(String(payload.profile.home_directory).endsWith('/Developer/probe-f')).toBe(true)
     expect(payload.profile.runtime_engine_preference).toBe('codex')
     expect(payload.profile.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
@@ -155,7 +163,9 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       subject_id: '123456789012345678',
     })
 
-    const stored = dbRead(`SELECT home_directory, runtime_engine_preference, provider_token_source_ref, expected_provider_identity FROM agents WHERE agent_id = 'probe-f'`)[0]
+    const stored = dbRead(`SELECT ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref, expected_provider_identity FROM agents WHERE agent_id = 'probe-f'`)[0]
+    expect(stored.ui_id).toBe(1001)
+    expect(stored.ui_handle).toBe('lead-probe')
     expect(String(stored.home_directory).endsWith('/Developer/probe-f')).toBe(true)
     expect(stored.runtime_engine_preference).toBe('codex')
     expect(stored.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
@@ -167,7 +177,9 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       '--execute',
     ])
     expect(partial.status).toBe(0)
-    const preserved = dbRead(`SELECT home_directory, runtime_engine_preference, provider_token_source_ref FROM agents WHERE agent_id = 'probe-f'`)[0]
+    const preserved = dbRead(`SELECT ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref FROM agents WHERE agent_id = 'probe-f'`)[0]
+    expect(preserved.ui_id).toBe(1001)
+    expect(preserved.ui_handle).toBe('lead-probe')
     expect(String(preserved.home_directory).endsWith('/Developer/probe-f')).toBe(true)
     expect(preserved.runtime_engine_preference).toBe('claude-code')
     expect(preserved.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
@@ -284,6 +296,51 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const strict = runCli(['agent', 'profile', 'doctor', '--strict'])
     expect(strict.status).toBe(0)
     expect(JSON.parse(strict.stdout).ok).toBe(true)
+  })
+
+  test('profile project materializes replacement aliases from profile metadata', () => {
+    const profile = runCli([
+      'agent', 'profile', 'set', 'probe-alias',
+      '--ui-handle', 'lead-probe-alias',
+      '--home-directory', '~/Developer/probe-alias',
+      '--channel-port', '19993',
+      '--tmux-session', 'probe-alias-session',
+      '--runtime-engine', 'codex',
+      '--execute',
+    ])
+    expect(profile.status).toBe(0)
+    {
+      const db = new Database(dbPath)
+      db.prepare(
+        `UPDATE agents
+            SET metadata = ?
+          WHERE agent_id = 'probe-alias'`,
+      ).run(JSON.stringify({ tmux_session: 'probe-alias-session', replaces: 'lead-probe-alias' }))
+      db.close()
+    }
+
+    const dry = runCli(['agent', 'profile', 'project', 'probe-alias'])
+    expect(dry.status).toBe(0)
+    const dryPayload = JSON.parse(dry.stdout)
+    expect(dryPayload.projections[0].actions[0]).toMatchObject({
+      table: 'agent_aliases',
+      action: 'upsert',
+      alias: 'lead-probe-alias',
+      canonical_agent_id: 'probe-alias',
+      new_work_allowed: false,
+    })
+
+    const executed = runCli(['agent', 'profile', 'project', 'probe-alias', '--execute'])
+    expect(executed.status).toBe(0)
+    const aliases = dbRead(`SELECT alias, canonical_agent_id, new_work_allowed, reason FROM agent_aliases WHERE alias = 'lead-probe-alias'`)
+    expect(aliases).toEqual([
+      {
+        alias: 'lead-probe-alias',
+        canonical_agent_id: 'probe-alias',
+        new_work_allowed: 0,
+        reason: 'bot profile replacement alias',
+      },
+    ])
   })
 
   test('profile doctor enforces one token source reference per active agent', () => {
