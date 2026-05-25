@@ -155,6 +155,12 @@ describe('T2b — bot profile projection/write invariants', () => {
     expect(CLI_SRC).toMatch(/channel_port = CASE WHEN \$22 THEN \$21::int ELSE agents\.channel_port END/)
   })
 
+  test('profile set uses the Postgres sequence for implicit ui_id allocation', () => {
+    expect(CLI_SRC).toMatch(/const implicitUiIdSql = isSqliteMode\(\)[\s\S]*?nextval\('agent_ui_id_seq'\)/)
+    expect(CLI_SRC).toMatch(/CASE WHEN \$24 THEN \$23::bigint ELSE \$\{implicitUiIdSql\} END/)
+    expect(CLI_SRC).toMatch(/COALESCE\(agents\.ui_id, \$\{implicitUiIdSql\}\)/)
+  })
+
   test('profile project links active runtime rows to the projected workspace', () => {
     expect(CLI_SRC).toMatch(/table: 'agent_runtime_instances'[\s\S]*?action: 'link_active_workspace'/)
     expect(CLI_SRC).toMatch(/UPDATE agent_runtime_instances[\s\S]*?SET workspace_id = \$2[\s\S]*?status IN \('running', 'active'\)[\s\S]*?workspace_id IS NULL/)
