@@ -3622,6 +3622,7 @@ function buildProfileCommand(agentId: string, session: string, port: number, eng
     const stateDir = join(homedir(), '.claude', 'channels', session)
     const configArgs = [
       'mcp_servers.agent-comms.enabled=false',
+      'mcp_servers.aun.enabled=true',
       `mcp_servers.aun.env.AGENT_ID="${agentId}"`,
       `mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`,
       `mcp_servers.aun.env.DATABASE_URL="${databaseUrl}"`,

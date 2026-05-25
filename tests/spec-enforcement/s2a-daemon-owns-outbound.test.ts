@@ -210,6 +210,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).toContain("metadata->>'tmux_session'")
     expect(script).toContain('runtime_engine_preference')
     expect(script).toContain('PROFILE_SOURCE="agents.profile"')
+    expect(script).toContain("mcp_servers.aun.enabled=true")
     expect(script).toContain('refusing registry fallback to avoid drift')
     expect(script).toContain('build_profile_command "$AGENT_ID" "$SESSION" "$PORT"')
     expect(script).toContain('AGENT_COMMS_RESTART_DRY_RUN')
@@ -273,6 +274,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(loader).toContain('COALESCE(profile_enabled, true)')
     expect(loader).toContain('fileByAgent')
     expect(loader).toContain('fallback?.command')
+    expect(SERVER_SRC).toContain('mcp_servers.aun.enabled=true')
     expect(SERVER_SRC).toContain('bot-registry.compat')
     expect(SERVER_SRC).toContain('process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL')
 

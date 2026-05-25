@@ -30,6 +30,7 @@ build_profile_command() {
     codex)
       CLAUDE_CMD="codex --dangerously-bypass-approvals-and-sandbox"
       CLAUDE_CMD+=" -c 'mcp_servers.agent-comms.enabled=false'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.enabled=true'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_ID=\"${agent_id}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID=\"${agent_id}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DATABASE_URL=\"${database_url}\"'"
