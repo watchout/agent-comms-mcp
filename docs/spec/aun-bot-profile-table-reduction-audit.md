@@ -20,6 +20,11 @@ Phase: MVP internal normalization
   as the agent's canonical work directory.
 - The status CLI reads `agents.home_directory` for `launch_dir` and no longer
   treats `scripts/bot-registry.txt` as the launch-directory source.
+- The MCP lifecycle tools (`restart_bot`, `bot_status`, `watchdog_check`,
+  `cleanup_ports`) now build their bot inventory from the DB bot profile first:
+  `agents.home_directory`, `agents.channel_port`, and
+  `agents.metadata.tmux_session`. `scripts/bot-registry.txt` remains only a
+  compatibility fallback for incomplete legacy profile rows.
 - Credential, provider identity, and provider channel access rows remain
   deferred evidence tables until provider discovery is implemented. They must
   not become manual setup inputs.
@@ -101,7 +106,7 @@ target product contract.
 | `cli/index.ts` | `agent register` writes `agents`; `agent-com status` reads profile `home_directory` for `launch_dir`; channel policy commands write `channel_routing_policy`; membership commands write `channels.members` | keep typed profile/policy commands, but route bot setup through one bot profile API and prevent direct derived-table authorship |
 | `core/runtime-heartbeat.ts` | heartbeat inserts `agent_workspaces`, `agent_workspace_bindings`, `agent_runtime_instances`, and `connector_instances` | keep as projector/evidence writer, but generated rows must include source/profile evidence and be rebuildable |
 | `core/channel-connector-sync.ts` | derives connector/binding rows from `channel_routing_policy.adapter_owner_agent_id` | demote to legacy projector; future resolver derives owner from credential plus provider channel access |
-| `server.ts` | registration upserts `agents`; heartbeat writes runtime/connector evidence; Discord token fingerprint is emitted into connector metadata | keep heartbeat path, but move token evidence to credential projector and keep `agents` as profile root |
+| `server.ts` | registration upserts `agents`; heartbeat writes runtime/connector evidence; MCP lifecycle tools read bot inventory from DB profiles first with registry compatibility fallback; Discord token fingerprint is emitted into connector metadata | keep heartbeat path, but move token evidence to credential projector, keep `agents` as profile root, and keep registry fallback visibly temporary |
 | `adapters/discord.ts` | self-registers `metadata.discord_id` into `agents` after Discord login | move authority to provider identity evidence; metadata can remain mixed-fleet fallback |
 | `db/seed.ts` | seeds `channels`, `channel_adapters`, `agents.metadata.discord_id` from Discord/bootstrap files | keep as discovery/import, not authoritative hand configuration |
 | `scripts/bot-registry.txt` | static session/path/agent/port inventory | replace or project into bot profile; normal users should not maintain a parallel registry |

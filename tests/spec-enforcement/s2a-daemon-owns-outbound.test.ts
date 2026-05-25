@@ -241,6 +241,21 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
+  test('13b. MCP lifecycle bot inventory reads DB bot profiles before registry compatibility fallback', () => {
+    const loader = sliceFn(SERVER_SRC, 'loadBotRegistry')
+    expect(loader).toMatch(/SELECT\s+agent_id,\s+home_directory,\s+channel_port/i)
+    expect(loader).toContain('metadata')
+    expect(loader).toContain('COALESCE(profile_enabled, true)')
+    expect(loader).toContain('fileByAgent')
+    expect(loader).toContain('fallback?.command')
+    expect(SERVER_SRC).toContain('bot-registry.compat')
+    expect(SERVER_SRC).toContain('process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL')
+
+    const handler = SERVER_SRC.slice(SERVER_SRC.indexOf("if (name === 'restart_bot')"), SERVER_SRC.indexOf("if (name === 'cleanup_ports')"))
+    expect(handler).toContain('await loadBotRegistry()')
+    expect(handler).toContain('bot profile inventory')
+  })
+
   test('14. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {
     // Regression class: the 2026-04-13 CTO wedged-consumer incident. An
     // awaited call (Discord REST or `pg` query) never settled, so the
