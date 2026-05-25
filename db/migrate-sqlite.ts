@@ -209,6 +209,8 @@ export function migrateSqlite(dbPath?: string): void {
       auth_subject TEXT,
       disabled_at TEXT,
       identity_metadata TEXT NOT NULL DEFAULT '{}',
+      ui_id INTEGER,
+      ui_handle TEXT,
       home_directory TEXT,
       runtime_engine_preference TEXT,
       provider_token_source_ref TEXT,
@@ -271,8 +273,17 @@ export function migrateSqlite(dbPath?: string): void {
   if (!agentsColNames.has('channel_port')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN channel_port INTEGER`)
   }
+  if (!agentsColNames.has('metadata')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN metadata TEXT DEFAULT '{}'`)
+  }
   if (!agentsColNames.has('identity_metadata')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN identity_metadata TEXT NOT NULL DEFAULT '{}'`)
+  }
+  if (!agentsColNames.has('ui_id')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN ui_id INTEGER`)
+  }
+  if (!agentsColNames.has('ui_handle')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN ui_handle TEXT`)
   }
   if (!agentsColNames.has('home_directory')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN home_directory TEXT`)
@@ -303,9 +314,24 @@ export function migrateSqlite(dbPath?: string): void {
   }
   gatedExec(`UPDATE agents SET agent_uri = 'aun://default/agents/' || agent_id WHERE agent_uri IS NULL OR agent_uri = ''`)
   gatedExec(`UPDATE agents SET expected_provider_identity = '{}' WHERE expected_provider_identity IS NULL`)
+  gatedExec(`UPDATE agents SET metadata = '{}' WHERE metadata IS NULL OR metadata = ''`)
   gatedExec(`UPDATE agents SET profile_enabled = 1 WHERE profile_enabled IS NULL`)
   gatedExec(`UPDATE agents SET profile_revision = 1 WHERE profile_revision IS NULL OR profile_revision < 1`)
   gatedExec(`UPDATE agents SET profile_source = 'legacy' WHERE profile_source IS NULL OR profile_source = ''`)
+  gatedExec(`
+    UPDATE agents
+       SET ui_id = rowid
+     WHERE ui_id IS NULL
+       AND agent_type <> 'human'
+       AND COALESCE(profile_enabled, 1) = 1
+  `)
+  gatedExec(`
+    UPDATE agents
+       SET ui_handle = COALESCE(NULLIF(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.replaces') ELSE NULL END, ''), agent_id)
+     WHERE (ui_handle IS NULL OR ui_handle = '')
+       AND agent_type <> 'human'
+       AND COALESCE(profile_enabled, 1) = 1
+  `)
   gatedExec(`UPDATE agents SET runtime = cli_type WHERE (runtime IS NULL OR runtime = '' OR runtime = 'unknown' OR runtime = 'TUI') AND cli_type IS NOT NULL AND cli_type <> ''`)
   gatedExec(`UPDATE agents SET runtime = 'TUI' WHERE runtime IS NULL OR runtime = '' OR runtime = 'unknown'`)
   gatedExec(`UPDATE agents SET registered_at = COALESCE(registered_at, created_at, datetime('now')) WHERE registered_at IS NULL OR registered_at = ''`)
@@ -314,6 +340,21 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_trust_status ON agents(trust_status)`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_home_directory ON agents(org_id, home_directory) WHERE home_directory IS NOT NULL`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_profile_enabled ON agents(profile_enabled)`)
+  gatedExec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_ui_id_active
+      ON agents(ui_id)
+      WHERE ui_id IS NOT NULL
+        AND agent_type <> 'human'
+        AND COALESCE(profile_enabled, 1) = 1
+  `)
+  gatedExec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_ui_handle_active
+      ON agents(lower(ui_handle))
+      WHERE ui_handle IS NOT NULL
+        AND ui_handle <> ''
+        AND agent_type <> 'human'
+        AND COALESCE(profile_enabled, 1) = 1
+  `)
   gatedExec(`
     CREATE TRIGGER IF NOT EXISTS trg_agents_agent_uri_after_insert
     AFTER INSERT ON agents
@@ -339,6 +380,40 @@ export function migrateSqlite(dbPath?: string): void {
     BEGIN
       UPDATE agents
          SET runtime = NEW.cli_type
+       WHERE agent_id = NEW.agent_id;
+    END;
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_ui_identity_after_insert
+    AFTER INSERT ON agents
+    WHEN NEW.agent_type <> 'human'
+      AND COALESCE(NEW.profile_enabled, 1) = 1
+      AND (NEW.ui_id IS NULL OR NEW.ui_handle IS NULL OR NEW.ui_handle = '')
+    BEGIN
+      UPDATE agents
+         SET ui_id = COALESCE(NEW.ui_id, (SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents WHERE agent_id <> NEW.agent_id)),
+             ui_handle = COALESCE(
+               NULLIF(NEW.ui_handle, ''),
+               NULLIF(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.replaces') ELSE NULL END, ''),
+               NEW.agent_id
+             )
+       WHERE agent_id = NEW.agent_id;
+    END;
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_ui_identity_after_update
+    AFTER UPDATE ON agents
+    WHEN NEW.agent_type <> 'human'
+      AND COALESCE(NEW.profile_enabled, 1) = 1
+      AND (NEW.ui_id IS NULL OR NEW.ui_handle IS NULL OR NEW.ui_handle = '')
+    BEGIN
+      UPDATE agents
+         SET ui_id = COALESCE(NEW.ui_id, (SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents WHERE agent_id <> NEW.agent_id)),
+             ui_handle = COALESCE(
+               NULLIF(NEW.ui_handle, ''),
+               NULLIF(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.replaces') ELSE NULL END, ''),
+               NEW.agent_id
+             )
        WHERE agent_id = NEW.agent_id;
     END;
   `)

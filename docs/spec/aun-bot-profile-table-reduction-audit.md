@@ -33,6 +33,11 @@ Phase: MVP internal normalization
   `--runtime-engine`. `agent profile doctor` treats those as the local complete
   profile criterion, so operators do not have to maintain a second registry file
   to make lifecycle tooling deterministic.
+- The bot profile also carries UI identity as `agents.ui_id` and
+  `agents.ui_handle`. `ui_id` is AUN's stable numeric UI-facing identity;
+  `ui_handle` is the mutable handle operators and LLMs can display. Both point
+  back to the canonical `agent_id`, so Discord display names and local launch
+  directories can change without changing the queue/audit identity.
 - Credential, provider identity, and provider channel access rows remain
   deferred evidence tables until provider discovery is implemented. They must
   not become manual setup inputs.
@@ -160,6 +165,8 @@ tables independently.
 Implement NORM-021 before write-mode data cleanup:
 
 1. Add a typed bot profile command/API:
+   - stable numeric UI id
+   - UI handle / legacy display handle
    - create/update `agent_id`
    - display name
    - canonical home directory
