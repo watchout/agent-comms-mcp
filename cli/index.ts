@@ -732,7 +732,7 @@ async function agentRegister(args: string[]) {
   const { positional, flags } = parseArgs(args)
   const agentId = positional[0]
   if (!agentId) {
-    console.error('Usage: agent-com agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>]')
+    console.error('Usage: agent-com agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>]')
     process.exit(1)
   }
 
@@ -750,6 +750,8 @@ async function agentRegister(args: string[]) {
       agent_type: row.agent_type,
       runtime: row.runtime,
       home_directory: row.home_directory,
+      channel_port: row.channel_port,
+      tmux_session: botProfileForOutput(row).tmux_session,
       runtime_engine_preference: row.runtime_engine_preference,
       provider_token_source_ref: row.provider_token_source_ref ? '(set)' : null,
       expected_provider_identity: parseJsonObject(row.expected_provider_identity),
@@ -769,6 +771,8 @@ type BotProfileInput = {
   agentType?: string | null
   runtime?: string | null
   homeDirectory?: string | null
+  channelPort?: number | null
+  tmuxSession?: string | null
   runtimeEnginePreference?: string | null
   providerTokenSourceRef?: string | null
   expectedProviderIdentity?: Record<string, unknown> | null
@@ -805,6 +809,17 @@ function parseOptionalBoolean(raw: string | undefined, name: string): boolean | 
   if (['false', '0', 'no', 'disabled', 'disable'].includes(value)) return false
   if (['none', 'null'].includes(value)) return null
   throw new Error(`${name} must be true or false`)
+}
+
+function parseOptionalPort(raw: string | undefined, name: string): number | null | undefined {
+  if (raw === undefined) return undefined
+  const value = raw.trim().toLowerCase()
+  if (value === '' || value === 'none' || value === 'null') return null
+  const port = Number(value)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${name} must be an integer port between 1 and 65535`)
+  }
+  return port
 }
 
 function looksLikeRawSecret(value: string): boolean {
@@ -844,6 +859,8 @@ function buildBotProfileInput(
   const agentType = normalizeNullableText(flags.type)
   const runtime = normalizeNullableText(flags.runtime)
   const homeDirectory = normalizeHomeDirectory(flags['home-directory'] ?? flags.home)
+  const channelPort = parseOptionalPort(flags['channel-port'] ?? flags.port, '--channel-port')
+  const tmuxSession = normalizeNullableText(flags['tmux-session'] ?? flags.session)
   const runtimeEnginePreference = normalizeNullableText(flags['runtime-engine'] ?? flags['runtime-engine-preference'])
   const expectedProviderIdentity = buildExpectedProviderIdentity(flags)
   const profileEnabled = parseOptionalBoolean(flags.enabled, '--enabled')
@@ -853,6 +870,8 @@ function buildBotProfileInput(
     agentType: agentType !== undefined ? agentType : defaults.agentType,
     runtime: runtime !== undefined ? runtime : defaults.runtime,
     homeDirectory: homeDirectory !== undefined ? homeDirectory : defaults.homeDirectory,
+    channelPort: channelPort !== undefined ? channelPort : defaults.channelPort,
+    tmuxSession: tmuxSession !== undefined ? tmuxSession : defaults.tmuxSession,
     runtimeEnginePreference: runtimeEnginePreference !== undefined ? runtimeEnginePreference : defaults.runtimeEnginePreference,
     providerTokenSourceRef: tokenSource !== undefined ? tokenSource : defaults.providerTokenSourceRef,
     expectedProviderIdentity: expectedProviderIdentity !== undefined ? expectedProviderIdentity : defaults.expectedProviderIdentity,
@@ -869,14 +888,27 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
   const hasAgentType = input.agentType !== undefined
   const hasRuntime = input.runtime !== undefined
   const hasHomeDirectory = input.homeDirectory !== undefined
+  const hasChannelPort = input.channelPort !== undefined
+  const hasTmuxSession = input.tmuxSession !== undefined
   const hasRuntimeEnginePreference = input.runtimeEnginePreference !== undefined
   const hasProviderTokenSourceRef = input.providerTokenSourceRef !== undefined
   const hasExpectedProviderIdentity = input.expectedProviderIdentity !== undefined
   const hasProfileEnabled = input.profileEnabled !== undefined && input.profileEnabled !== null
+  let metadataForWrite: string | null = null
+  if (hasTmuxSession) {
+    const existing = await db.query(
+      `SELECT metadata FROM agents WHERE agent_id = $1`,
+      [input.agentId],
+    ).catch(() => ({ rows: [] as any[] }))
+    const metadata = parseJsonObject(existing.rows[0]?.metadata)
+    if (input.tmuxSession === null) delete metadata.tmux_session
+    else metadata.tmux_session = input.tmuxSession
+    metadataForWrite = JSON.stringify(metadata)
+  }
   const result = await db.query(
     `INSERT INTO agents (
        agent_id, org_id, display_name, agent_type, runtime, status, registered_at,
-       home_directory, runtime_engine_preference, provider_token_source_ref,
+       metadata, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
        expected_provider_identity, profile_enabled, profile_revision,
        profile_source, profile_updated_at, disabled_at
      )
@@ -886,6 +918,8 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        CASE WHEN $12 THEN COALESCE($3, 'dev') ELSE 'dev' END,
        CASE WHEN $13 THEN COALESCE($4, 'unknown') ELSE 'unknown' END,
        CASE WHEN $18 AND $9 = false THEN 'disabled' ELSE 'offline' END, now(),
+       CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
+       CASE WHEN $22 THEN $21 ELSE NULL END,
        CASE WHEN $14 THEN $5 ELSE NULL END,
        CASE WHEN $15 THEN $6 ELSE NULL END,
        CASE WHEN $16 THEN $7 ELSE NULL END,
@@ -897,6 +931,8 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        display_name = CASE WHEN $11 THEN COALESCE($2, agents.agent_id) ELSE agents.display_name END,
        agent_type = CASE WHEN $12 THEN COALESCE($3, agents.agent_type) ELSE agents.agent_type END,
        runtime = CASE WHEN $13 THEN COALESCE($4, agents.runtime) ELSE agents.runtime END,
+       metadata = CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE agents.metadata END,
+       channel_port = CASE WHEN $22 THEN $21 ELSE agents.channel_port END,
        home_directory = CASE WHEN $14 THEN $5 ELSE agents.home_directory END,
        runtime_engine_preference = CASE WHEN $15 THEN $6 ELSE agents.runtime_engine_preference END,
        provider_token_source_ref = CASE WHEN $16 THEN $7 ELSE agents.provider_token_source_ref END,
@@ -916,7 +952,7 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        profile_source = $10,
        profile_updated_at = now()
      RETURNING agent_id, display_name, agent_type, runtime, status,
-       home_directory, runtime_engine_preference, provider_token_source_ref,
+       metadata, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
        expected_provider_identity, profile_enabled, profile_revision,
        profile_source, profile_updated_at`,
     [
@@ -938,12 +974,17 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
       hasProviderTokenSourceRef,
       hasExpectedProviderIdentity,
       hasProfileEnabled,
+      metadataForWrite,
+      hasTmuxSession,
+      input.channelPort,
+      hasChannelPort,
     ],
   )
   return result.rows[0]
 }
 
 function botProfileForOutput(row: any): Record<string, unknown> {
+  const metadata = parseJsonObject(row.metadata)
   return {
     agent_id: row.agent_id,
     display_name: row.display_name,
@@ -951,6 +992,10 @@ function botProfileForOutput(row: any): Record<string, unknown> {
     runtime: row.runtime,
     status: row.status,
     home_directory: row.home_directory ?? null,
+    channel_port: row.channel_port ?? null,
+    tmux_session: typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
+      ? metadata.tmux_session.trim()
+      : null,
     runtime_engine_preference: row.runtime_engine_preference ?? null,
     provider_token_source_ref: row.provider_token_source_ref ?? null,
     expected_provider_identity: parseJsonObject(row.expected_provider_identity),
@@ -964,7 +1009,7 @@ function botProfileForOutput(row: any): Record<string, unknown> {
 async function selectBotProfile(db: Client, agentId: string): Promise<any | null> {
   const result = await db.query(
     `SELECT agent_id, display_name, agent_type, runtime, status,
-            home_directory, runtime_engine_preference, provider_token_source_ref,
+            metadata, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
             expected_provider_identity, profile_enabled, profile_revision,
             profile_source, profile_updated_at
        FROM agents
@@ -1257,7 +1302,7 @@ async function agentProfile(args: string[]) {
     if (action === 'set') {
       const agentId = positional[0] ?? flags['agent-id']
       if (!agentId) {
-        console.error('Usage: agent-com agent profile set <agent_id> [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider <provider>] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]')
+        console.error('Usage: agent-com agent profile set <agent_id> [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider <provider>] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]')
         process.exit(2)
       }
       const input = buildBotProfileInput(agentId, flags)
@@ -1270,6 +1315,8 @@ async function agentProfile(args: string[]) {
           agent_type: input.agentType,
           runtime: input.runtime,
           home_directory: input.homeDirectory,
+          channel_port: input.channelPort,
+          tmux_session: input.tmuxSession,
           runtime_engine_preference: input.runtimeEnginePreference,
           provider_token_source_ref: input.providerTokenSourceRef ? '(set)' : input.providerTokenSourceRef,
           expected_provider_identity: input.expectedProviderIdentity,
@@ -1320,8 +1367,9 @@ async function agentProfile(args: string[]) {
     if (action === 'doctor') {
       const strict = flags.strict === 'true' || flags.strict === '1' || flags.strict === ''
       const rows = await db.query(
-        `SELECT agent_id, display_name, agent_type, status, home_directory,
-                provider_token_source_ref, profile_enabled
+        `SELECT agent_id, display_name, agent_type, runtime, status, metadata,
+                home_directory, channel_port, runtime_engine_preference,
+                provider_token_source_ref, expected_provider_identity, profile_enabled
            FROM agents
           WHERE agent_type <> 'human'
             AND COALESCE(profile_enabled, true) = true
@@ -1329,8 +1377,11 @@ async function agentProfile(args: string[]) {
       )
       const blockers: Array<Record<string, unknown>> = []
       const homeByPath = new Map<string, string[]>()
+      const portOwners = new Map<number, string[]>()
+      const sessionOwners = new Map<string, string[]>()
       for (const row of rows.rows) {
         const agentId = String(row.agent_id)
+        const metadata = parseJsonObject(row.metadata)
         const home = typeof row.home_directory === 'string' ? row.home_directory : ''
         if (!home) blockers.push({ agent_id: agentId, code: 'missing_home_directory' })
         else {
@@ -1338,12 +1389,44 @@ async function agentProfile(args: string[]) {
           agents.push(agentId)
           homeByPath.set(home, agents)
         }
+        const port = Number(row.channel_port)
+        if (!Number.isInteger(port) || port <= 0) {
+          blockers.push({ agent_id: agentId, code: 'missing_channel_port' })
+        } else {
+          const agents = portOwners.get(port) ?? []
+          agents.push(agentId)
+          portOwners.set(port, agents)
+        }
+        const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
+          ? metadata.tmux_session.trim()
+          : ''
+        if (!tmuxSession) {
+          blockers.push({ agent_id: agentId, code: 'missing_tmux_session' })
+        } else {
+          const agents = sessionOwners.get(tmuxSession) ?? []
+          agents.push(agentId)
+          sessionOwners.set(tmuxSession, agents)
+        }
+        const runtimeEngine = typeof row.runtime_engine_preference === 'string' && row.runtime_engine_preference.trim()
+          ? row.runtime_engine_preference.trim()
+          : ''
+        if (!runtimeEngine) blockers.push({ agent_id: agentId, code: 'missing_runtime_engine_preference' })
+        const hasTokenSource = typeof row.provider_token_source_ref === 'string' && row.provider_token_source_ref.trim()
+        const provider = expectedProvider(row)
+        if (hasTokenSource && !provider) blockers.push({ agent_id: agentId, code: 'missing_expected_provider_identity' })
+        if (provider && !hasTokenSource) blockers.push({ agent_id: agentId, code: 'missing_provider_token_source_ref', provider })
         if (typeof row.provider_token_source_ref === 'string' && looksLikeRawSecret(row.provider_token_source_ref)) {
           blockers.push({ agent_id: agentId, code: 'raw_secret_like_token_source_ref' })
         }
       }
       for (const [home_directory, agents] of homeByPath.entries()) {
         if (agents.length > 1) blockers.push({ code: 'duplicate_home_directory', home_directory, agents })
+      }
+      for (const [channel_port, agents] of portOwners.entries()) {
+        if (agents.length > 1) blockers.push({ code: 'duplicate_channel_port', channel_port, agents })
+      }
+      for (const [tmux_session, agents] of sessionOwners.entries()) {
+        if (agents.length > 1) blockers.push({ code: 'duplicate_tmux_session', tmux_session, agents })
       }
       const tokenRefs = new Map<string, string[]>()
       for (const row of rows.rows) {
@@ -3607,9 +3690,9 @@ Commands:
   channel policy bootstrap [--execute|--dry-run] [--extra-allowlist <a,b>] [--overwrite]
   channel policy sync-connectors [--channel <id|name>] [--provider discord] [--execute|--dry-run]
   channel policy set <channel_id> [--primary <agent|none>] [--adapter-owner <agent|none>] [--allowlist <a,b|none>] [--execute|--dry-run]
-  agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>]
+  agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>]
   agent profile get <agent_id>
-  agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
+  agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
   agent profile project <agent_id>|--all [--execute|--dry-run]
   agent profile doctor [--strict]
   status
