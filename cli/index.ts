@@ -919,7 +919,7 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        CASE WHEN $13 THEN COALESCE($4, 'unknown') ELSE 'unknown' END,
        CASE WHEN $18 AND $9 = false THEN 'disabled' ELSE 'offline' END, now(),
        CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
-       CASE WHEN $22 THEN $21 ELSE NULL END,
+       CASE WHEN $22 THEN $21::int ELSE NULL END,
        CASE WHEN $14 THEN $5 ELSE NULL END,
        CASE WHEN $15 THEN $6 ELSE NULL END,
        CASE WHEN $16 THEN $7 ELSE NULL END,
@@ -932,7 +932,7 @@ async function upsertBotProfile(db: Client, input: BotProfileInput, source: stri
        agent_type = CASE WHEN $12 THEN COALESCE($3, agents.agent_type) ELSE agents.agent_type END,
        runtime = CASE WHEN $13 THEN COALESCE($4, agents.runtime) ELSE agents.runtime END,
        metadata = CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE agents.metadata END,
-       channel_port = CASE WHEN $22 THEN $21 ELSE agents.channel_port END,
+       channel_port = CASE WHEN $22 THEN $21::int ELSE agents.channel_port END,
        home_directory = CASE WHEN $14 THEN $5 ELSE agents.home_directory END,
        runtime_engine_preference = CASE WHEN $15 THEN $6 ELSE agents.runtime_engine_preference END,
        provider_token_source_ref = CASE WHEN $16 THEN $7 ELSE agents.provider_token_source_ref END,
@@ -1075,6 +1075,14 @@ function buildProfileProjection(row: any): BotProfileProjection {
       source: 'bot_profile_projector',
       profile_revision: revision,
     })
+    projection.actions.push({
+      table: 'agent_runtime_instances',
+      action: 'link_active_workspace',
+      agent_id: agentId,
+      workspace_id: workspaceId,
+      source: 'bot_profile_projector',
+      profile_revision: revision,
+    })
   }
 
   const provider = expectedProvider(row)
@@ -1204,6 +1212,19 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
          active = true,
          updated_at = now()`,
       [projection.agent_id, workspaceId, bindingAction.binding_role],
+    )
+  }
+
+  const runtimeAction = actionForTable(projection, 'agent_runtime_instances')
+  if (runtimeAction) {
+    const workspaceId = workspaceAction?.workspace_id ?? runtimeAction.workspace_id
+    await db.query(
+      `UPDATE agent_runtime_instances
+          SET workspace_id = $2
+        WHERE agent_id = $1
+          AND status IN ('running', 'active')
+          AND workspace_id IS NULL`,
+      [projection.agent_id, workspaceId],
     )
   }
 

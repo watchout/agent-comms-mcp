@@ -12,6 +12,9 @@ Phase: MVP internal normalization
   - `agent profile project <agent_id>|--all` is dry-run by default.
   - `--execute` materializes deterministic workspace, workspace binding, and
     connector evidence from the profile.
+  - Active runtime rows with no workspace linkage are linked back to the
+    projected workspace so operators do not have to repair
+    `agent_runtime_instances` by hand after profile projection.
   - `agent profile doctor --strict` reports missing projected evidence and
     duplicate token source references.
 - The runtime heartbeat slice makes `agents.home_directory` the preferred
