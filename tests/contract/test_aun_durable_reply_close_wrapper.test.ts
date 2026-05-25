@@ -121,6 +121,35 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
       .toEqual({ status: 'replied', replied_with: body.message_id })
   })
 
+  test('next -> processing -> explicit close replies against the same queue row', () => {
+    const { queueId, messageId } = seedPending({ content: 'processing then final close' })
+    const next = runAun(['receive', '--agent-id', 'probe-dev'])
+    expect(next.status).toBe(0)
+    expect(JSON.parse(next.stdout)).toMatchObject({ queue_id: queueId, message_id: messageId })
+
+    const processing = runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)])
+    expect(processing.status).toBe(0)
+    expect(JSON.parse(processing.stdout)).toMatchObject({
+      ok: true,
+      mode: 'processing',
+      queue_id: String(queueId),
+      message_id: messageId,
+      status: 'in_progress',
+    })
+    expect(dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'in_progress', claimed_by: 'probe-dev', replied_with: null })
+
+    const final = explicitReply(queueId, ['--message-id', messageId, '--close'])
+
+    expect(final.status).toBe(0)
+    const body = JSON.parse(final.stdout)
+    expect(body.work_closed).toBe(true)
+    expect(body.close_mode).toBe('explicit')
+    expect(body.queue_id).toBe(queueId)
+    expect(dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'replied', claimed_by: null, replied_with: body.message_id })
+  })
+
   test('ACK/progress reply with --no-close leaves active claim open', () => {
     const { queueId } = seedPending({ content: 'ack progress no close' })
     expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
