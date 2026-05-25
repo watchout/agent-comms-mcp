@@ -25,6 +25,10 @@ slice's scope shifts.
 
 - Evidence: `docs/design/aun-normalization-roadmap.md` merged 2026-05-24
   (035ccfb).
+- Enterprise direction supplement:
+  `docs/design/aun-enterprise-control-plane-direction.md` fixes the durable
+  agent control plane / agent operations mesh direction that the MVP slices
+  must preserve.
 - No further PR expected unless the roadmap itself is revised.
 
 ### NORM-010 — Queue claim/send consistency 🟡 partial
