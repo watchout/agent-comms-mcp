@@ -111,6 +111,7 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
     const rows = dbRead(`PRAGMA table_info(agents)`)
     const names = rows.map((r: any) => r.name)
     expect(names).toContain('home_directory')
+    expect(names).toContain('channel_port')
     expect(names).toContain('runtime_engine_preference')
     expect(names).toContain('provider_token_source_ref')
     expect(names).toContain('expected_provider_identity')
@@ -202,6 +203,8 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const profile = runCli([
       'agent', 'profile', 'set', 'probe-f',
       '--home-directory', '~/Developer/probe-f',
+      '--channel-port', '19991',
+      '--tmux-session', 'probe-f-session',
       '--runtime-engine', 'codex',
       '--token-source-ref', 'local-env:PROBE_DISCORD_TOKEN',
       '--expected-provider', 'discord',
@@ -209,6 +212,12 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       '--execute',
     ])
     expect(profile.status).toBe(0)
+    const profilePayload = JSON.parse(profile.stdout)
+    expect(profilePayload.profile).toMatchObject({
+      channel_port: 19991,
+      tmux_session: 'probe-f-session',
+      runtime_engine_preference: 'codex',
+    })
 
     const dry = runCli(['agent', 'profile', 'project', 'probe-f'])
     expect(dry.status).toBe(0)
@@ -289,16 +298,22 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     })
   })
 
-  test('profile doctor fails missing bot profile home and passes after profile set', () => {
+  test('profile doctor fails missing complete bot profile fields and passes after profile set', () => {
     const failing = runCli(['agent', 'profile', 'doctor'])
     expect(failing.status).toBe(1)
     const failingPayload = JSON.parse(failing.stdout)
     expect(failingPayload.ok).toBe(false)
     expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_home_directory' })
+    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_channel_port' })
+    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_tmux_session' })
+    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_runtime_engine_preference' })
 
     const fixed = runCli([
       'agent', 'profile', 'set', 'probe-f',
       '--home-directory', '~/Developer/probe-f',
+      '--channel-port', '19992',
+      '--tmux-session', 'probe-f-session',
+      '--runtime-engine', 'codex',
       '--execute',
     ])
     expect(fixed.status).toBe(0)

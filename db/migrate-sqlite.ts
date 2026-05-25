@@ -197,6 +197,7 @@ export function migrateSqlite(dbPath?: string): void {
       heartbeat_interval INTEGER DEFAULT 30,
       heartbeat_at TEXT,
       observer_mode INTEGER NOT NULL DEFAULT 0,
+      channel_port INTEGER,
       -- Issue #278 (A) segment 3d — current_message_id removed; the per-row
       -- claim model on message_queue (claimed_by / claimed_at /
       -- claim_expires_at) replaces it.
@@ -266,6 +267,9 @@ export function migrateSqlite(dbPath?: string): void {
   // (server.ts uses 'TUI' as the implicit fallback when bots register).
   if (!agentsColNames.has('runtime')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'TUI'`)
+  }
+  if (!agentsColNames.has('channel_port')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN channel_port INTEGER`)
   }
   if (!agentsColNames.has('identity_metadata')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN identity_metadata TEXT NOT NULL DEFAULT '{}'`)

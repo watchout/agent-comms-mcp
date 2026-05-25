@@ -25,6 +25,11 @@ Phase: MVP internal normalization
   `agents.home_directory`, `agents.channel_port`, and
   `agents.metadata.tmux_session`. `scripts/bot-registry.txt` remains only a
   compatibility fallback for incomplete legacy profile rows.
+- The profile CLI now edits the lifecycle fields used by those tools:
+  `--home-directory`, `--channel-port`, `--tmux-session`, and
+  `--runtime-engine`. `agent profile doctor` treats those as the local complete
+  profile criterion, so operators do not have to maintain a second registry file
+  to make lifecycle tooling deterministic.
 - Credential, provider identity, and provider channel access rows remain
   deferred evidence tables until provider discovery is implemented. They must
   not become manual setup inputs.
@@ -155,6 +160,8 @@ Implement NORM-021 before write-mode data cleanup:
    - create/update `agent_id`
    - display name
    - canonical home directory
+   - channel port
+   - tmux session name
    - runtime engine preference
    - provider token source reference
    - expected provider identity
@@ -175,9 +182,15 @@ Implement NORM-021 before write-mode data cleanup:
    - `.mcp.json` sync scripts
    - migration/restart/watchdog scripts
 5. Update strict doctor:
-   - fail if an active bot lacks one profile home directory
+   - fail if an active bot lacks one complete local lifecycle profile:
+     `home_directory`, `channel_port`, `metadata.tmux_session`, and
+     `runtime_engine_preference`
+   - fail if lifecycle identifiers are duplicated across active bots:
+     `home_directory`, `channel_port`, or `metadata.tmux_session`
    - fail if active derived rows have no profile/source evidence
    - fail if a token fingerprint maps to more than one active owner
+   - fail if a provider token reference and expected provider identity are only
+     partially configured
    - fail if connector delivery depends only on a channel owner field
 6. Add contract tests:
    - normal bot setup writes one editable profile
