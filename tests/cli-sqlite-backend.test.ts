@@ -226,10 +226,16 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(dryPayload.projections[0].actions.map((a: any) => a.table)).toEqual([
       'agent_workspaces',
       'agent_workspace_bindings',
+      'agent_runtime_instances',
       'connector_instances',
     ])
     expect(dbRead(`SELECT * FROM agent_workspaces`)).toHaveLength(0)
     expect(dbRead(`SELECT * FROM connector_instances`)).toHaveLength(0)
+    {
+      const db = new Database(dbPath)
+      db.exec(`INSERT INTO agent_runtime_instances (agent_id, runtime_engine, status) VALUES ('probe-f', 'codex', 'running')`)
+      db.close()
+    }
 
     const executed = runCli(['agent', 'profile', 'project', 'probe-f', '--execute'])
     expect(executed.status).toBe(0)
@@ -251,6 +257,14 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
         workspace_id: workspaces[0].workspace_id,
         binding_role: 'primary',
         active: 1,
+      },
+    ])
+    const runtimes = dbRead(`SELECT agent_id, workspace_id, status FROM agent_runtime_instances`)
+    expect(runtimes).toEqual([
+      {
+        agent_id: 'probe-f',
+        workspace_id: workspaces[0].workspace_id,
+        status: 'running',
       },
     ])
     const connectors = dbRead(`SELECT agent_id, provider, connector_uri, status, metadata FROM connector_instances`)

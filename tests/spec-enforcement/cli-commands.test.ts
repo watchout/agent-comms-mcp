@@ -149,6 +149,18 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   })
 })
 
+describe('T2b — bot profile projection/write invariants', () => {
+  test('profile set casts channel_port parameters for Postgres writes', () => {
+    expect(CLI_SRC).toMatch(/CASE WHEN \$22 THEN \$21::int ELSE NULL END/)
+    expect(CLI_SRC).toMatch(/channel_port = CASE WHEN \$22 THEN \$21::int ELSE agents\.channel_port END/)
+  })
+
+  test('profile project links active runtime rows to the projected workspace', () => {
+    expect(CLI_SRC).toMatch(/table: 'agent_runtime_instances'[\s\S]*?action: 'link_active_workspace'/)
+    expect(CLI_SRC).toMatch(/UPDATE agent_runtime_instances[\s\S]*?SET workspace_id = \$2[\s\S]*?status IN \('running', 'active'\)[\s\S]*?workspace_id IS NULL/)
+  })
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // T3: package.json bin entry points at cli/index.ts
 // ─────────────────────────────────────────────────────────────────────────────
