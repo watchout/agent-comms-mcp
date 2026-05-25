@@ -15,6 +15,10 @@ AUN normalization is complete only when the MVP gate can be proven by
 deterministic evidence. Chat messages, tmux output, local path names, and LLM
 claims are operator hints, not completion evidence.
 
+Per-slice progress, dependencies, expected PR count, and open decisions are
+tracked in [`aun-normalization-wbs.md`](./aun-normalization-wbs.md). The WBS is
+working state; this roadmap remains the contract.
+
 This roadmap applies together with:
 
 - [`aun-development-principles.md`](./aun-development-principles.md)
