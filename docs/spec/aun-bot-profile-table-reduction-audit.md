@@ -14,6 +14,10 @@ Phase: MVP internal normalization
     connector evidence from the profile.
   - `agent profile doctor --strict` reports missing projected evidence and
     duplicate token source references.
+- The runtime heartbeat slice makes `agents.home_directory` the preferred
+  workspace source when a profile exists. Runtime `checkout_path` remains
+  runtime evidence, but workspace binding no longer treats the server checkout
+  as the agent's canonical work directory.
 - Credential, provider identity, and provider channel access rows remain
   deferred evidence tables until provider discovery is implemented. They must
   not become manual setup inputs.
