@@ -41,6 +41,13 @@ export type RuntimeHeartbeatResult = {
   connector_rows_upserted: number
 }
 
+type AgentWorkspaceProfile = {
+  org_id: string | null
+  home_directory: string | null
+  profile_revision: number | null
+  profile_source: string | null
+}
+
 function sha256Prefix(value: string, length = 16): string {
   return createHash('sha256').update(value).digest('hex').slice(0, length)
 }
@@ -60,23 +67,55 @@ export function deterministicWorkspaceId(orgId: string, checkoutPath: string): s
   return `local:${sha256Prefix(`${orgId}:${checkoutPath}`)}`
 }
 
+async function selectAgentWorkspaceProfile(
+  db: RuntimeHeartbeatDb,
+  agentId: string,
+): Promise<AgentWorkspaceProfile | null> {
+  const result = await db.query(
+    `SELECT org_id, home_directory, profile_revision, profile_source
+       FROM agents
+      WHERE agent_id = $1
+        AND COALESCE(profile_enabled, true) = true
+      LIMIT 1`,
+    [agentId],
+  ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    org_id: typeof row.org_id === 'string' ? row.org_id : null,
+    home_directory: typeof row.home_directory === 'string' ? row.home_directory : null,
+    profile_revision: row.profile_revision === null || row.profile_revision === undefined
+      ? null
+      : Number(row.profile_revision),
+    profile_source: typeof row.profile_source === 'string' ? row.profile_source : null,
+  }
+}
+
 async function ensureWorkspaceBinding(
   db: RuntimeHeartbeatDb,
   input: RuntimeHeartbeatInput,
 ): Promise<string | null> {
   const checkoutPath = normalizeCheckoutPath(input.checkoutPath)
   const explicitWorkspaceId = input.workspaceId?.trim() || null
-  if (!checkoutPath && !explicitWorkspaceId) return null
+  const profile = await selectAgentWorkspaceProfile(db, input.agentId)
+  const profileHomeDirectory = normalizeCheckoutPath(profile?.home_directory)
+  const workspacePath = profileHomeDirectory ?? checkoutPath
+  if (!workspacePath && !explicitWorkspaceId) return null
 
   const orgId = input.orgId?.trim() || 'default'
-  const workspaceId = explicitWorkspaceId ?? deterministicWorkspaceId(orgId, checkoutPath!)
-  const workspaceName = input.workspaceName?.trim() || inferWorkspaceName(checkoutPath, input.agentId)
+  const effectiveOrgId = profile?.org_id?.trim() || orgId
+  const workspaceId = explicitWorkspaceId ?? deterministicWorkspaceId(effectiveOrgId, workspacePath!)
+  const workspaceName = input.workspaceName?.trim() || inferWorkspaceName(workspacePath, input.agentId)
   const bindingRole = input.workspaceBindingRole?.trim() || 'primary'
 
-  if (checkoutPath) {
+  if (workspacePath) {
     const workspaceMetadata = JSON.stringify({
       source: 'runtime_heartbeat',
       agent_id: input.agentId,
+      workspace_path_source: profileHomeDirectory ? 'agent_profile.home_directory' : 'runtime.checkout_path',
+      profile_revision: profile?.profile_revision ?? null,
+      profile_source: profile?.profile_source ?? null,
+      runtime_checkout_path: checkoutPath,
     })
     const workspace = await db.query<{ workspace_id: string }>(
       `INSERT INTO agent_workspaces
@@ -89,7 +128,7 @@ async function ensureWorkspaceBinding(
          updated_at = now(),
          metadata = COALESCE(agent_workspaces.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
        RETURNING workspace_id`,
-      [workspaceId, orgId, workspaceName, checkoutPath, workspaceMetadata],
+      [workspaceId, effectiveOrgId, workspaceName, workspacePath, workspaceMetadata],
     )
     const resolvedWorkspaceId = String(workspace.rows[0]?.workspace_id ?? workspaceId)
     await db.query(
