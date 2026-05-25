@@ -13,8 +13,8 @@
  *
  * Recovery:
  *   `tmux send-keys` injects an Enter into the tmux session whose
- *   name matches the bot's row in scripts/bot-registry.txt — the
- *   typical bot startup line is the daemon-style restart-bot.sh
+ *   name comes from the DB bot profile (`agents.metadata.tmux_session`).
+ *   The typical bot startup line is the daemon-style restart-bot.sh
  *   already mounted on Enter, so a single newline triggers it.
  *   When that fails (no tmux server / session missing), we fall
  *   back to spawning `scripts/restart-bot.sh <session>` directly.
@@ -56,6 +56,13 @@ interface CrashedAgent {
   status: string | null
 }
 
+interface WatchdogSession {
+  session: string
+  projectDir: string
+  port: string
+  source: 'agents.profile' | 'bot-registry.compat'
+}
+
 interface RateLimitState {
   /** Per-agent restart timestamps (ms). Trimmed to last hour on each check. */
   history: Map<string, number[]>
@@ -68,8 +75,8 @@ function logLine(level: string, msg: string): void {
   process.stderr.write(`${ts} | ${level} | ${msg}\n`)
 }
 
-function loadRegistrySessions(): Map<string, { session: string; projectDir: string; port: string }> {
-  const m = new Map<string, { session: string; projectDir: string; port: string }>()
+function loadRegistrySessions(): Map<string, WatchdogSession> {
+  const m = new Map<string, WatchdogSession>()
   if (!existsSync(REGISTRY_PATH)) {
     logLine('warn', `bot-registry not found at ${REGISTRY_PATH}; tmux fallback only`)
     return m
@@ -80,7 +87,14 @@ function loadRegistrySessions(): Map<string, { session: string; projectDir: stri
       const line = raw.trim()
       if (!line || line.startsWith('#')) continue
       const [session, projectDir, agentId, port] = line.split('|')
-      if (session && agentId) m.set(agentId, { session, projectDir: projectDir ?? '', port: port ?? '' })
+      if (session && agentId) {
+        m.set(agentId, {
+          session,
+          projectDir: projectDir ?? '',
+          port: port ?? '',
+          source: 'bot-registry.compat',
+        })
+      }
     }
   } catch (err) {
     logLine('warn', `bot-registry read failed: ${err}`)
@@ -88,17 +102,62 @@ function loadRegistrySessions(): Map<string, { session: string; projectDir: stri
   return m
 }
 
+function parseMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw !== 'string') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+async function loadDbProfileSessions(client: Client): Promise<Map<string, WatchdogSession>> {
+  const result = await client.query<{
+    agent_id: string
+    home_directory: string | null
+    channel_port: number | string | null
+    metadata: unknown
+  }>(
+    `SELECT agent_id, home_directory, channel_port, metadata
+       FROM agents
+      WHERE agent_type NOT IN ('human', 'system')
+        AND COALESCE(profile_enabled, true) = true
+        AND disabled_at IS NULL
+        AND status IS DISTINCT FROM 'disabled'
+      ORDER BY agent_id`,
+  )
+  const sessions = new Map<string, WatchdogSession>()
+  for (const row of result.rows) {
+    const metadata = parseMetadata(row.metadata)
+    const session = typeof metadata.tmux_session === 'string' ? metadata.tmux_session.trim() : ''
+    if (!session) continue
+    sessions.set(row.agent_id, {
+      session,
+      projectDir: row.home_directory ?? '',
+      port: row.channel_port === null || row.channel_port === undefined ? '' : String(row.channel_port),
+      source: 'agents.profile',
+    })
+  }
+  return sessions
+}
+
 async function findCrashedAgents(client: Client): Promise<CrashedAgent[]> {
   const r = await client.query<{ agent_id: string; last_seen_at: Date | null; status: string | null }>(
     `SELECT agent_id, last_seen_at, status
        FROM agents
-      WHERE status IS DISTINCT FROM 'offline'
+      WHERE agent_type NOT IN ('human', 'system')
+        AND COALESCE(profile_enabled, true) = true
+        AND disabled_at IS NULL
+        AND status IS DISTINCT FROM 'offline'
         AND status IS DISTINCT FROM 'observer'
+        AND status IS DISTINCT FROM 'disabled'
         AND (
           last_seen_at IS NULL
           OR last_seen_at < now() - make_interval(secs => $1)
-        )
-        AND agent_type IS DISTINCT FROM 'system'`,
+        )`,
     [CRASH_THRESHOLD_SEC],
   )
   return r.rows.map(row => ({ agentId: row.agent_id, lastSeenAt: row.last_seen_at, status: row.status }))
@@ -163,7 +222,7 @@ async function recordAuditLog(client: Client, agentId: string, sessionName: stri
   }
 }
 
-async function tickOnce(client: Client, registry: Map<string, { session: string; projectDir: string; port: string }>): Promise<void> {
+async function tickOnce(client: Client, registry: Map<string, WatchdogSession>): Promise<void> {
   const crashed = await findCrashedAgents(client)
   if (crashed.length === 0) return
   for (const a of crashed) {
@@ -173,7 +232,7 @@ async function tickOnce(client: Client, registry: Map<string, { session: string;
     }
     const reg = registry.get(a.agentId) ?? null
     const sessionName = reg?.session ?? null
-    logLine('info', `crashed: ${a.agentId} last_seen_at=${a.lastSeenAt?.toISOString() ?? 'null'} status=${a.status ?? 'unknown'} session=${sessionName ?? 'no-registry'}`)
+    logLine('info', `crashed: ${a.agentId} last_seen_at=${a.lastSeenAt?.toISOString() ?? 'null'} status=${a.status ?? 'unknown'} session=${sessionName ?? 'no-profile'} source=${reg?.source ?? 'none'}`)
     const restart = attemptRestart(a.agentId, sessionName)
     logLine('info', `restart attempt for ${a.agentId}: outcome=${restart.outcome} detail=${restart.detail}`)
     if (restart.outcome !== 'dry_run' && restart.outcome !== 'rate_limited') recordRestart(a.agentId)
@@ -195,7 +254,13 @@ async function main(): Promise<void> {
   process.on('SIGTERM', stop)
   process.on('SIGINT', stop)
 
-  const registry = loadRegistrySessions()
+  let registry = await loadDbProfileSessions(client)
+  if (registry.size > 0) {
+    logLine('info', `loaded ${registry.size} watchdog sessions from agents.profile`)
+  } else {
+    registry = loadRegistrySessions()
+    logLine('warn', `loaded ${registry.size} watchdog sessions from bot-registry compatibility fallback`)
+  }
 
   while (!stopping) {
     try {
@@ -209,7 +274,7 @@ async function main(): Promise<void> {
 
 // Test-only export: allow `import { findCrashedAgents, isRateLimited,
 // recordRestart }` for unit fixtures without running the daemon loop.
-export { findCrashedAgents, isRateLimited, recordRestart, rateLimit, loadRegistrySessions }
+export { findCrashedAgents, isRateLimited, recordRestart, rateLimit, loadRegistrySessions, loadDbProfileSessions }
 
 if (import.meta.main) {
   main().catch(err => {

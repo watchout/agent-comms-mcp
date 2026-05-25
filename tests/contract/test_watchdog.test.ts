@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { findCrashedAgents, isRateLimited, recordRestart, rateLimit } from '../../bin/aun-watchdog'
+import { findCrashedAgents, isRateLimited, loadDbProfileSessions, recordRestart, rateLimit } from '../../bin/aun-watchdog'
 
 // Issue #278 (§E + §G-1) — watchdog daemon behavioral fixtures.
 //
@@ -69,6 +69,36 @@ dbDescribe('test_watchdog — Issue #278 §E + §G-1 detection + rate limit', ()
     expect(crashed.some(a => a.agentId === agentId)).toBe(false)
   })
 
+  test('status=disabled is excluded from auto-restart candidates', async () => {
+    const agentId = `${TEST_PREFIX}-disabled`
+    await seedAgent({ id: agentId, status: 'disabled', lastSeenSecondsAgo: 600 })
+    const crashed = await findCrashedAgents(client)
+    expect(crashed.some(a => a.agentId === agentId)).toBe(false)
+  })
+
+  test('agent_type=human is excluded from auto-restart candidates', async () => {
+    const agentId = `${TEST_PREFIX}-human`
+    await seedAgent({ id: agentId, status: 'online', lastSeenSecondsAgo: 600, agentType: 'human' })
+    const crashed = await findCrashedAgents(client)
+    expect(crashed.some(a => a.agentId === agentId)).toBe(false)
+  })
+
+  test('profile_enabled=false is excluded from auto-restart candidates', async () => {
+    const agentId = `${TEST_PREFIX}-profile-disabled`
+    await seedAgent({ id: agentId, status: 'idle', lastSeenSecondsAgo: 600 })
+    await client.query(`UPDATE agents SET profile_enabled = false WHERE agent_id = $1`, [agentId])
+    const crashed = await findCrashedAgents(client)
+    expect(crashed.some(a => a.agentId === agentId)).toBe(false)
+  })
+
+  test('disabled_at rows are excluded from auto-restart candidates', async () => {
+    const agentId = `${TEST_PREFIX}-disabled-at`
+    await seedAgent({ id: agentId, status: 'idle', lastSeenSecondsAgo: 600 })
+    await client.query(`UPDATE agents SET disabled_at = now() WHERE agent_id = $1`, [agentId])
+    const crashed = await findCrashedAgents(client)
+    expect(crashed.some(a => a.agentId === agentId)).toBe(false)
+  })
+
   test('agent_type=system (infra bots) is excluded', async () => {
     const agentId = `${TEST_PREFIX}-system`
     await seedAgent({ id: agentId, status: 'busy', lastSeenSecondsAgo: 600, agentType: 'system' })
@@ -92,5 +122,25 @@ dbDescribe('test_watchdog — Issue #278 §E + §G-1 detection + rate limit', ()
     expect(isRateLimited(agentId)).toBe(false)
     // The check must have purged the stale entries.
     expect(rateLimit.history.get(agentId)?.length ?? 0).toBe(0)
+  })
+
+  test('watchdog session source uses DB bot profile metadata', async () => {
+    const agentId = `${TEST_PREFIX}-profile`
+    await client.query(
+      `INSERT INTO agents
+         (agent_id, display_name, agent_type, runtime, status, last_seen_at,
+          metadata, home_directory, channel_port, profile_enabled)
+       VALUES
+         ($1, $1, 'dev', 'TUI', 'idle', now(),
+          jsonb_build_object('tmux_session', $2::text), $3, $4, true)`,
+      [agentId, `${TEST_PREFIX}-session`, `/tmp/${TEST_PREFIX}`, 19001],
+    )
+    const sessions = await loadDbProfileSessions(client)
+    expect(sessions.get(agentId)).toEqual({
+      session: `${TEST_PREFIX}-session`,
+      projectDir: `/tmp/${TEST_PREFIX}`,
+      port: '19001',
+      source: 'agents.profile',
+    })
   })
 })
