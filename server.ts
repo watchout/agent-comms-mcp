@@ -116,6 +116,7 @@ import { resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
+import { resolveTokenSourceRef } from './core/token-source-ref'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -326,6 +327,7 @@ if (WEBHOOK_PORT_EXPLICIT) {
 
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
+let resolvedDiscordBotToken = DISCORD_BOT_TOKEN
 const REPLY_CHAIN_DEPTH = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 const SERVER_ROOT = dirname(new URL(import.meta.url).pathname)
@@ -346,8 +348,38 @@ function tokenFingerprint(token: string): string | null {
   return createHash('sha256').update(trimmed).digest('hex')
 }
 
+async function ensureDiscordBotToken(client?: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<string> {
+  if (resolvedDiscordBotToken.trim()) return resolvedDiscordBotToken
+
+  const dbClient = client ?? await tryGetDb()
+  if (!dbClient) return ''
+
+  try {
+    const row = await dbClient.query(
+      `SELECT provider_token_source_ref
+         FROM agents
+        WHERE agent_id = $1
+          AND agent_type <> 'human'
+          AND COALESCE(profile_enabled, true) = true
+        LIMIT 1`,
+      [AGENT_ID],
+    )
+    const tokenRef = row.rows[0]?.provider_token_source_ref
+    const resolved = resolveTokenSourceRef(tokenRef)
+    if (resolved) {
+      resolvedDiscordBotToken = resolved.token
+      process.stderr.write(`agent-comms: Discord token loaded from provider_token_source_ref (${resolved.source})\n`)
+    }
+  } catch (err) {
+    process.stderr.write(`agent-comms: provider token source resolution failed (non-fatal): ${err}\n`)
+  }
+
+  return resolvedDiscordBotToken
+}
+
 async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
-  const discordTokenFingerprint = tokenFingerprint(DISCORD_BOT_TOKEN)
+  await ensureDiscordBotToken(client)
+  const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
   await heartbeatRuntimeInstance(client, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
@@ -4337,7 +4369,8 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
   // Phase C I5: single Discord adapter handles FULL inbound routing.
   // onMessage → handleInboundMessage → agent_messages + message_queue.
   // Dedup: processedIds (in-process) + uq_mq_agent_message UNIQUE (DB).
-  if (DISCORD_BOT_TOKEN) {
+  await ensureDiscordBotToken()
+  if (resolvedDiscordBotToken) {
     const legacyGateway = parseLegacyGatewayEnv(process.env.AGENT_COM_LEGACY_DISCORD_GATEWAY)
     if (!legacyGateway) {
       process.stderr.write('agent-comms: AGENT_COM_LEGACY_DISCORD_GATEWAY=0, legacy Discord WebSocket disabled\n')
@@ -4403,7 +4436,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
       discord.setAgentId(AGENT_ID)
 
       await discord.connect({
-        token: DISCORD_BOT_TOKEN,
+        token: resolvedDiscordBotToken,
       })
       process.stderr.write('agent-comms: Discord adapter connected (inbound + outbound)\n')
       // Register this bot's Discord adapter in the per-bot client map so
