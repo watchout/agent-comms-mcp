@@ -18,6 +18,8 @@ Phase: MVP internal normalization
   workspace source when a profile exists. Runtime `checkout_path` remains
   runtime evidence, but workspace binding no longer treats the server checkout
   as the agent's canonical work directory.
+- The status CLI reads `agents.home_directory` for `launch_dir` and no longer
+  treats `scripts/bot-registry.txt` as the launch-directory source.
 - Credential, provider identity, and provider channel access rows remain
   deferred evidence tables until provider discovery is implemented. They must
   not become manual setup inputs.
@@ -96,7 +98,7 @@ target product contract.
 
 | File | Current behavior | Required change |
 |---|---|---|
-| `cli/index.ts` | `agent register` writes `agents`; channel policy commands write `channel_routing_policy`; membership commands write `channels.members` | keep typed profile/policy commands, but route bot setup through one bot profile API and prevent direct derived-table authorship |
+| `cli/index.ts` | `agent register` writes `agents`; `agent-com status` reads profile `home_directory` for `launch_dir`; channel policy commands write `channel_routing_policy`; membership commands write `channels.members` | keep typed profile/policy commands, but route bot setup through one bot profile API and prevent direct derived-table authorship |
 | `core/runtime-heartbeat.ts` | heartbeat inserts `agent_workspaces`, `agent_workspace_bindings`, `agent_runtime_instances`, and `connector_instances` | keep as projector/evidence writer, but generated rows must include source/profile evidence and be rebuildable |
 | `core/channel-connector-sync.ts` | derives connector/binding rows from `channel_routing_policy.adapter_owner_agent_id` | demote to legacy projector; future resolver derives owner from credential plus provider channel access |
 | `server.ts` | registration upserts `agents`; heartbeat writes runtime/connector evidence; Discord token fingerprint is emitted into connector metadata | keep heartbeat path, but move token evidence to credential projector and keep `agents` as profile root |

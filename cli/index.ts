@@ -3096,6 +3096,7 @@ async function status(args: string[]) {
                 runtime,
                 status,
                 display_name,
+                home_directory,
                 last_seen_at,
                 metadata->>'discord_id' AS discord_id,
                 metadata->>'tmux_session' AS tmux_session,
@@ -3134,28 +3135,9 @@ async function status(args: string[]) {
       // fall through to metadata.discord_username (read-only consumer)
       // → display_name → placeholder.
 
-      // 起動ディレクトリ (launch directory) per CEO 2026-05-24 directive
-      // (msg `d19f1f6e`). Distinct from runtime workspace: scripts/bot-registry.txt
-      // column 2 is the operator-declared home directory used to launch the
-      // bot (e.g. ~/Developer/codex for codex-cto). Runtime checkout (above)
-      // is wherever the running process happens to be, which can be a
-      // sibling clone — they often diverge during codex-aun lane
-      // normalisation work.
-      const launchDirByAgent = new Map<string, string>()
-      const registryPath = process.env.AUN_REGISTRY_PATH ?? join(process.cwd(), 'scripts/bot-registry.txt')
-      if (existsSync(registryPath)) {
-        try {
-          for (const raw of readFileSync(registryPath, 'utf-8').split('\n')) {
-            const line = raw.trim()
-            if (!line || line.startsWith('#')) continue
-            const [, projectDir, agentId] = line.split('|')
-            if (agentId && projectDir) launchDirByAgent.set(agentId.trim(), projectDir.trim())
-          }
-        } catch {
-          // best-effort; missing/unreadable registry just leaves the
-          // column empty rather than failing the whole status call.
-        }
-      }
+      // 起動ディレクトリ (launch directory) is the bot profile SSOT
+      // (`agents.home_directory`). It is distinct from runtime workspace
+      // (= what the process is actually executing inside).
       const queueRes = await db.query(
         `SELECT agent_id,
                 status,
@@ -3219,7 +3201,7 @@ async function status(args: string[]) {
             discord_id: a.discord_id ?? null,
             discord_username_cached: a.discord_username_cached ?? null,
             tmux_session: a.tmux_session ?? null,
-            launch_dir: launchDirByAgent.get(a.agent_id) ?? null,
+            launch_dir: a.home_directory ?? null,
             workspace: workspaceByAgent.get(a.agent_id) ?? null,
             retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
             queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
@@ -3242,11 +3224,10 @@ async function status(args: string[]) {
         'launch_dir'.padEnd(36) +
         'last_seen',
       )
-      // `launch_dir` is the bot-registry.txt operator-declared launch
-      // directory, distinct from the runtime workspace (= what the
-      // process is actually executing inside). Both are exposed in
-      // --format json under `launch_dir` and `workspace` respectively
-      // so dashboards can compare them.
+      // `launch_dir` is the bot profile home directory, distinct from
+      // the runtime workspace (= what the process is actually executing
+      // inside). Both are exposed in --format json under `launch_dir`
+      // and `workspace` respectively so dashboards can compare them.
       const HOME = process.env.HOME ?? ''
       const shrinkHome = (p: string) => (HOME && p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p)
       for (const a of agentsRes.rows) {
@@ -3260,7 +3241,7 @@ async function status(args: string[]) {
         // (NORM-020). JSON still exposes display_name and
         // discord_username_cached for dashboards.
         const discordId = a.discord_id ?? '-'
-        const launchRaw = launchDirByAgent.get(a.agent_id)
+        const launchRaw = a.home_directory
         const launch = launchRaw ? shrinkHome(launchRaw) : '-'
         console.log(
           a.agent_id.padEnd(20) +

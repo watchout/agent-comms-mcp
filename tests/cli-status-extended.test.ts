@@ -154,7 +154,10 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
     expect(botA.workspace).toBe('/Users/x/Developer/bot-a')
   })
 
-  test('launch_dir is read from AUN_REGISTRY_PATH when set (bot-registry.txt column 2)', () => {
+  test('launch_dir is read from agents.home_directory even when AUN_REGISTRY_PATH is set', () => {
+    const db = new Database(dbPath)
+    db.exec(`UPDATE agents SET home_directory = '/Users/x/profile/bot-a' WHERE agent_id='bot-a'`)
+    db.close()
     const registryPath = join(tmpDir, 'bot-registry.txt')
     require('node:fs').writeFileSync(registryPath, [
       '# test fixture — SESSION|PROJECT_DIR|AGENT_ID|PORT|CMD',
@@ -168,7 +171,7 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
     expect(r.status).toBe(0)
     const payload = JSON.parse((r.stdout ?? '').trim())
     const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
-    expect(botA.launch_dir).toBe('/Users/x/launch/bot-a')
+    expect(botA.launch_dir).toBe('/Users/x/profile/bot-a')
   })
 
   test('text mode header includes discord_id and launch_dir columns', () => {
