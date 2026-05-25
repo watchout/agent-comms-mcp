@@ -1766,11 +1766,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'restart_bot',
-      description: 'Restart a bot tmux session with correct Claude Code flags. Kills orphan port processes, recreates tmux session, auto-confirms TUI prompt.',
+      description: 'Restart a bot tmux session from the DB bot profile inventory. Kills orphan port processes, recreates tmux session, auto-confirms TUI prompt.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          session: { type: 'string', description: 'tmux session name from bot-registry.txt (e.g. discord-wbs)' },
+          session: { type: 'string', description: 'tmux session name or agent_id from the bot profile inventory (e.g. discord-wbs or wbs-dev)' },
         },
         required: ['session'],
       },
@@ -3236,20 +3236,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'restart_bot') {
     const { session } = args as any
-    const registry = loadBotRegistry()
-    const entry = registry.find(e => e.session === session)
+    const registry = await loadBotRegistry()
+    const entry = registry.find(e => e.session === session || e.agentId === session)
     if (!entry) {
       const available = registry.map(e => e.session).join(', ')
-      return { content: [{ type: 'text', text: `Session "${session}" not found in bot-registry.txt. Available: ${available}` }], isError: true }
+      return { content: [{ type: 'text', text: `Session/agent "${session}" not found in bot profile inventory. Available: ${available}` }], isError: true }
+    }
+    if (entry.blockers && entry.blockers.length > 0) {
+      return { content: [{ type: 'text', text: `Session/agent "${session}" has incomplete bot profile: ${entry.blockers.join(', ')}` }], isError: true }
     }
     const log = await restartBotSession(entry)
     return { content: [{ type: 'text', text: `[restart_bot] ${session}:\n${log}` }] }
   }
 
   if (name === 'bot_status') {
-    const registry = loadBotRegistry()
+    const registry = await loadBotRegistry()
     if (registry.length === 0) {
-      return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
+      return { content: [{ type: 'text', text: 'No bots found in bot profile inventory' }], isError: true }
     }
     // Issue #277 (D) — augment process-level health (registry/tmux/port) with
     // postgres-truth queue + heartbeat metrics in a single SQL.
@@ -3274,20 +3277,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const dbSuffix = dbRow
         ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'}`
         : ' | (no db row)'
-      return `${icon} ${entry.session} (${entry.agentId}) port:${entry.port} — ${health.status}: ${health.details}${dbSuffix}`
+      const sourceSuffix = entry.source ? ` | source=${entry.source}` : ''
+      const blockerSuffix = entry.blockers && entry.blockers.length > 0 ? ` | blockers=${entry.blockers.join(',')}` : ''
+      return `${icon} ${entry.session || '(missing-session)'} (${entry.agentId}) port:${entry.port || '-'} — ${health.status}: ${health.details}${dbSuffix}${sourceSuffix}${blockerSuffix}`
     })
     return { content: [{ type: 'text', text: `${registry.length} bot(s):\n${lines.join('\n')}` }] }
   }
 
   if (name === 'watchdog_check') {
     const { dry_run } = (args ?? {}) as any
-    const registry = loadBotRegistry()
+    const registry = await loadBotRegistry()
     if (registry.length === 0) {
-      return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
+      return { content: [{ type: 'text', text: 'No bots found in bot profile inventory' }], isError: true }
     }
     const results: string[] = []
     let alive = 0, restarted = 0
     for (const entry of registry) {
+      if (entry.blockers && entry.blockers.length > 0) {
+        results.push(`⚠️ ${entry.session || entry.agentId}: incomplete profile — ${entry.blockers.join(', ')}`)
+        continue
+      }
       const health = checkBotHealth(entry)
       if (health.status === 'healthy' || health.status === 'initializing') {
         alive++
@@ -3479,13 +3488,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === 'cleanup_ports') {
-    const registry = loadBotRegistry()
+    const registry = await loadBotRegistry()
     if (registry.length === 0) {
-      return { content: [{ type: 'text', text: 'No bots found in bot-registry.txt' }], isError: true }
+      return { content: [{ type: 'text', text: 'No bots found in bot profile inventory' }], isError: true }
     }
     const results: string[] = []
     let cleaned = 0
     for (const entry of registry) {
+      if (entry.blockers?.includes('missing_channel_port') || !entry.port) {
+        results.push(`⚠️ ${entry.session || entry.agentId}: skipped cleanup — missing channel_port`)
+        continue
+      }
       const sessionExists = tmuxHasSession(entry.session)
       const pids = getProcessOnPort(entry.port)
       if (!sessionExists && pids.length > 0) {
@@ -3577,13 +3590,60 @@ interface BotEntry {
   agentId: string
   port: number
   command: string
+  source?: string
+  blockers?: string[]
 }
 
 const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
   ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
 const DEFAULT_CLAUDE_CMD = 'claude --mcp-config .mcp.json --dangerously-skip-permissions'
+const DEFAULT_AUN_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
 
-function loadBotRegistry(): BotEntry[] {
+function parseBotMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw !== 'string' || raw.trim() === '') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function buildProfileCommand(agentId: string, session: string, port: number, engine: string | null, fallbackCommand?: string): { command: string, source: string } {
+  const normalizedEngine = (engine ?? '').trim().toLowerCase()
+  if (normalizedEngine === 'codex') {
+    const databaseUrl = process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL
+    const stateDir = join(homedir(), '.claude', 'channels', session)
+    const configArgs = [
+      'mcp_servers.agent-comms.enabled=false',
+      `mcp_servers.aun.env.AGENT_ID="${agentId}"`,
+      `mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`,
+      `mcp_servers.aun.env.DATABASE_URL="${databaseUrl}"`,
+      `mcp_servers.aun.env.WEBHOOK_PORT="${port}"`,
+      `mcp_servers.aun.env.DISCORD_STATE_DIR="${stateDir}"`,
+    ]
+    return {
+      command: [
+        'codex --dangerously-bypass-approvals-and-sandbox',
+        ...configArgs.map((arg) => `-c ${shellSingleQuote(arg)}`),
+      ].join(' '),
+      source: 'agents.runtime_engine_preference',
+    }
+  }
+  if (normalizedEngine === 'claude-code' || normalizedEngine === 'claude') {
+    return { command: DEFAULT_CLAUDE_CMD, source: 'agents.runtime_engine_preference' }
+  }
+  if (fallbackCommand?.trim()) return { command: fallbackCommand.trim(), source: 'bot-registry.compat' }
+  return { command: DEFAULT_CLAUDE_CMD, source: 'default' }
+}
+
+function loadBotRegistryFile(): BotEntry[] {
   try {
     const content = readFileSync(BOT_REGISTRY_PATH, 'utf-8')
     return content.split('\n')
@@ -3592,11 +3652,76 @@ function loadBotRegistry(): BotEntry[] {
         const parts = line.split('|').map(s => s.trim())
         const [session, projectDir, agentId, portStr, ...cmdParts] = parts
         const command = cmdParts.join('|').trim() || DEFAULT_CLAUDE_CMD
-        return { session, projectDir, agentId, port: parseInt(portStr, 10), command }
+        return { session, projectDir, agentId, port: parseInt(portStr, 10), command, source: 'bot-registry.compat' }
       })
       .filter(e => e.session && !isNaN(e.port))
   } catch {
     return []
+  }
+}
+
+async function loadBotRegistry(): Promise<BotEntry[]> {
+  const fileEntries = loadBotRegistryFile()
+  const fileByAgent = new Map(fileEntries.map((entry) => [entry.agentId, entry]))
+  const fileBySession = new Map(fileEntries.map((entry) => [entry.session, entry]))
+  const client = await tryGetDb()
+  if (!client) return fileEntries
+
+  try {
+    const result = await client.query(
+      `SELECT agent_id, home_directory, channel_port, runtime, runtime_engine_preference,
+              metadata, profile_enabled
+         FROM agents
+        WHERE agent_type <> 'human'
+          AND COALESCE(profile_enabled, true) = true
+        ORDER BY agent_id`,
+    )
+    const entries: BotEntry[] = []
+    const seenFileAgents = new Set<string>()
+    for (const row of result.rows) {
+      const agentId = String(row.agent_id)
+      const metadata = parseBotMetadata(row.metadata)
+      const profileSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
+        ? metadata.tmux_session.trim()
+        : ''
+      const fallback = fileByAgent.get(agentId) ?? (profileSession ? fileBySession.get(profileSession) : undefined)
+      if (fallback) seenFileAgents.add(fallback.agentId)
+      const session = profileSession || fallback?.session || ''
+      const projectDir = (typeof row.home_directory === 'string' && row.home_directory.trim())
+        ? row.home_directory.trim()
+        : fallback?.projectDir ?? ''
+      const parsedPort = Number(row.channel_port)
+      const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : fallback?.port ?? 0
+      const commandInfo = buildProfileCommand(
+        agentId,
+        session || fallback?.session || agentId,
+        port,
+        row.runtime_engine_preference ?? row.runtime ?? null,
+        fallback?.command,
+      )
+      const blockers: string[] = []
+      if (!session) blockers.push('missing_tmux_session')
+      if (!projectDir) blockers.push('missing_home_directory')
+      if (!port) blockers.push('missing_channel_port')
+      entries.push({
+        session,
+        projectDir,
+        agentId,
+        port,
+        command: commandInfo.command,
+        source: fallback ? `agents+${commandInfo.source}` : `agents.${commandInfo.source}`,
+        blockers,
+      })
+    }
+    for (const entry of fileEntries) {
+      if (!seenFileAgents.has(entry.agentId) && !entries.some((candidate) => candidate.agentId === entry.agentId)) {
+        entries.push(entry)
+      }
+    }
+    return entries
+  } catch (err) {
+    process.stderr.write(`agent-comms: bot profile inventory DB query failed, using bot-registry fallback: ${err}\n`)
+    return fileEntries
   }
 }
 
@@ -3695,6 +3820,8 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
 // cover all six branches with injected deps. This wrapper binds the
 // real tmux / lsof / ps side-effect helpers.
 function checkBotHealth(entry: BotEntry): BotHealthResult {
+  if (!entry.session) return { status: 'misconfigured', details: 'missing tmux session in bot profile' }
+  if (!entry.port || entry.port <= 0) return { status: 'misconfigured', details: 'missing channel_port in bot profile' }
   return checkBotHealthCore(entry, {
     hasSession: tmuxHasSession,
     capture: tmuxCapture,
