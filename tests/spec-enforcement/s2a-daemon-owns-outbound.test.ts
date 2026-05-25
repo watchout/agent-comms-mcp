@@ -213,6 +213,11 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).toContain('refusing registry fallback to avoid drift')
     expect(script).toContain('build_profile_command "$AGENT_ID" "$SESSION" "$PORT"')
     expect(script).toContain('AGENT_COMMS_RESTART_DRY_RUN')
+    expect(script).toContain("-F '|'")
+    expect(script).toContain("IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT RUNTIME_ENGINE")
+    expect(script).toContain('[ -z "${RUNTIME_ENGINE:-}" ]')
+    expect(script).not.toContain("COALESCE(NULLIF(metadata->>'tmux_session', ''), agent_id)")
+    expect(script).not.toContain("COALESCE(NULLIF(runtime_engine_preference, ''), runtime, '')")
   })
 
   test('11. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {

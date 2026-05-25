@@ -36,12 +36,12 @@ build_profile_command() {
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.WEBHOOK_PORT=\"${port}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DISCORD_STATE_DIR=\"${state_dir}\"'"
       ;;
-    claude | claude-code | "")
+    claude | claude-code)
       CLAUDE_CMD="$DEFAULT_CMD"
       ;;
     *)
-      echo "[restart-bot] WARNING: unknown runtime_engine_preference '${runtime_engine}', using default Claude command" >&2
-      CLAUDE_CMD="$DEFAULT_CMD"
+      echo "[restart-bot] ERROR: unknown runtime_engine_preference '${runtime_engine}', refusing DB-profile restart" >&2
+      exit 1
       ;;
   esac
 }
@@ -53,13 +53,13 @@ load_db_profile() {
   local database_url="${AGENT_COMMS_DATABASE_URL:-${DATABASE_URL:-$DEFAULT_AUN_DATABASE_URL}}"
   local profile_line
 
-  profile_line="$(psql "$database_url" -X -q -t -A -F $'\t' -v ON_ERROR_STOP=1 -v requested="$REQUESTED_SESSION" 2>/dev/null <<'SQL' || true
+  profile_line="$(psql "$database_url" -X -q -t -A -F '|' -v ON_ERROR_STOP=1 -v requested="$REQUESTED_SESSION" 2>/dev/null <<'SQL' || true
 SELECT
-  COALESCE(NULLIF(metadata->>'tmux_session', ''), agent_id) AS session_name,
+  COALESCE(metadata->>'tmux_session', '') AS session_name,
   COALESCE(home_directory, '') AS project_dir,
   agent_id,
   COALESCE(channel_port::text, '') AS port,
-  COALESCE(NULLIF(runtime_engine_preference, ''), runtime, '') AS runtime_engine
+  COALESCE(runtime_engine_preference, '') AS runtime_engine
 FROM agents
 WHERE agent_type <> 'human'
   AND COALESCE(profile_enabled, true) = true
@@ -72,12 +72,12 @@ SQL
   profile_line="${profile_line%%$'\n'*}"
   [ -n "$profile_line" ] || return 1
 
-  IFS=$'\t' read -r SESSION PROJECT_DIR AGENT_ID PORT RUNTIME_ENGINE <<< "$profile_line"
+  IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT RUNTIME_ENGINE <<< "$profile_line"
   PROFILE_SOURCE="agents.profile"
 
-  if [ -z "${SESSION:-}" ] || [ -z "${PROJECT_DIR:-}" ] || [ -z "${AGENT_ID:-}" ] || [ -z "${PORT:-}" ]; then
+  if [ -z "${SESSION:-}" ] || [ -z "${PROJECT_DIR:-}" ] || [ -z "${AGENT_ID:-}" ] || [ -z "${PORT:-}" ] || [ -z "${RUNTIME_ENGINE:-}" ]; then
     echo "[restart-bot] ERROR: DB profile for '${REQUESTED_SESSION}' is incomplete; refusing registry fallback to avoid drift" >&2
-    echo "[restart-bot]        session='${SESSION:-}' project_dir='${PROJECT_DIR:-}' agent_id='${AGENT_ID:-}' port='${PORT:-}'" >&2
+    echo "[restart-bot]        session='${SESSION:-}' project_dir='${PROJECT_DIR:-}' agent_id='${AGENT_ID:-}' port='${PORT:-}' runtime_engine='${RUNTIME_ENGINE:-}'" >&2
     exit 1
   fi
 
