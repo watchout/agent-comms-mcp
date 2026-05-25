@@ -159,6 +159,37 @@ describe('T10 received_expired_reclaim', () => {
       await h.daemon.stop()
     }
   })
+
+  test('in_progress row with claim_expires_at in past → status=pending + sendKeys + reclaimed metric', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t10-in-progress')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'idle' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      created_at: new Date(T0.getTime() - 40_000),
+      claim_expires_at: new Date(T0.getTime() - 5_000),
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 35_000),
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.reclaimed).toBe(1)
+      expect(h.tmux.sentKeys.length).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(1)
+      const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
+      expect(row.status).toBe('pending')
+      expect(row.claimed_by).toBeNull()
+      expect(row.claimed_at).toBeNull()
+      expect(row.claim_expires_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T11 ───────────────────────────────────────────────────────────────────────
