@@ -111,7 +111,7 @@ must align with standards:
   https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - A2A-style agent interoperability where cross-agent tasks require a standard
   agent protocol surface:
-  https://google-a2a.github.io/A2A/specification/
+  https://a2a-protocol.org/v0.3.0/specification/
 - OpenTelemetry-compatible traces, metrics, and logs for operations:
   https://opentelemetry.io/docs/specs/semconv/gen-ai/
 - OpAMP-style fleet management direction for remote agents and collectors:

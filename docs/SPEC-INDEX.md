@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-05-24
+> 最終更新: 2026-05-26
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
