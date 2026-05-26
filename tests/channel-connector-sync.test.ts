@@ -14,12 +14,20 @@ async function withSyncDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> 
   try {
     migrateSqlite(dbPath)
     const seed = new Database(dbPath)
-    seed.prepare("INSERT INTO agents (agent_id, display_name, agent_type, cli_type, status) VALUES (?, ?, ?, ?, ?)").run(
+    seed.prepare(
+      `INSERT INTO agents (
+         agent_id, display_name, agent_type, cli_type, status,
+         provider_token_source_ref, expected_provider_identity, metadata
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
       'hotel-dev',
       'Hotel Dev',
       'dev',
       'TUI',
       'idle',
+      'local-env:DISCORD_TOKEN_HOTEL_DEV',
+      JSON.stringify({ provider: 'discord', subject_id: '123456789012345678' }),
+      JSON.stringify({ discord_id: '123456789012345678' }),
     )
     seed.prepare("INSERT INTO agents (agent_id, display_name, agent_type, cli_type, status) VALUES (?, ?, ?, ?, ?)").run(
       'other-dev',
@@ -169,6 +177,51 @@ describe('channel connector sync', () => {
       )
       expect(connectors).toHaveLength(1)
       expect(bindings).toHaveLength(2)
+    })
+  })
+
+  test('skips Discord adapter owners without token-backed evidence', async () => {
+    await withSyncDb(async (db) => {
+      await db.execute(
+        `INSERT INTO channels (id, name, members)
+         VALUES ('other-channel', 'other-kanri', $1)`,
+        [JSON.stringify(['other-dev'])],
+      )
+      await db.execute(
+        `INSERT INTO channel_routing_policy
+           (channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist)
+         VALUES ('other-channel', 'other-dev', 'other-dev', $1)`,
+        [JSON.stringify(['other-dev'])],
+      )
+
+      const report = await syncChannelPolicyConnectors(db, {
+        dryRun: false,
+        channel: 'other-kanri',
+      })
+      expect(report.planned).toHaveLength(0)
+      expect(report.skipped).toHaveLength(1)
+      expect(report.skipped[0]).toMatchObject({
+        channel_id: 'other-channel',
+        channel_name: 'other-kanri',
+        adapter_owner_agent_id: 'other-dev',
+        reason: 'missing_token_evidence',
+      })
+      expect(report.skipped[0].details).toMatchObject({
+        provider: 'discord',
+        required: 'token-backed Discord connector evidence',
+      })
+
+      const connectors = await db.query(
+        "SELECT * FROM connector_instances WHERE connector_uri = 'discord://agents/other-dev'",
+      )
+      const bindings = await db.query(
+        `SELECT * FROM channel_connector_bindings
+          WHERE channel_id = 'other-channel'
+            AND provider = 'discord'
+            AND binding_role = 'outbound'`,
+      )
+      expect(connectors).toHaveLength(0)
+      expect(bindings).toHaveLength(0)
     })
   })
 
