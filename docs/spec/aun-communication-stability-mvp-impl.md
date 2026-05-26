@@ -91,13 +91,119 @@ If the same editable value must be entered in two places, the design is wrong.
 If a derived row cannot be deleted and rebuilt from the single editable profile
 plus discovery evidence, it is not derived state and must be redesigned.
 
+## SSOT And Hot-Path Materialization
+
+The source of truth for a secret does not have to be the DB. It only has to be
+single, authoritative, auditable by reference, and deterministic to refresh.
+
+Allowed local MVP secret authorities include:
+
+- environment variable
+- Keychain or future secret manager reference
+- `.mcp.json` path and selector
+
+The MVP DB hot path stores only:
+
+- secret reference, such as `env:...`, `keychain:...`, or `mcp-json:...`
+- non-secret token fingerprint
+- connector owner `agent_id`
+- verified provider subject id
+- credential status and trust status
+- verification timestamps and source revision
+
+Encrypted DB secret storage is a permitted future implementation detail only if
+it behaves like a managed secret store: plaintext token input is write-only from
+UI/API, decrypted values are never displayed, and only connector/runtime secret
+resolution can access plaintext for provider verification or send operations.
+It is not required for the local MVP because Keychain/env/`.mcp.json` references
+meet the one-authoritative-secret-location requirement with less machinery.
+
+The product-facing materialized binding is `agent_ui_bindings`:
+
+```text
+agent_ui_bindings
+  id
+  agent_id
+  ui_type                # discord
+  ui_id                  # Discord bot/user/app id
+  ui_token_ref           # or managed encrypted secret reference
+  ui_token_fingerprint   # non-secret
+  connector_instance_id
+  credential_id
+  surface_role
+  status
+  trust_status
+  last_verified_at
+  evidence_revision
+```
+
+This binding is the fast UI and delivery lookup for "which provider UI/bot is
+bound to this AUN agent?". It may be maintained from lower-level identity and
+credential tables, but UI and hot-path delivery should not have to reconstruct
+the binding by reading token files or inventing precedence across many tables.
+
+Normal message routing must not read token files, decrypt secrets, or call the
+Discord API. Those operations happen at connector startup, explicit refresh, or
+dry-run-first reconcile. The hot path reads indexed materialized evidence:
+
+```text
+agent_id
+  -> active agent_ui_bindings
+  -> active provider identity
+  -> fresh provider channel access
+  -> effective delivery owner
+```
+
+This keeps enterprise-grade secret handling compatible with low-latency local
+messaging. If materialized evidence is stale or missing, routing returns a
+deterministic diagnosis instead of guessing from files or Discord display state.
+
+## `agent_id` / Discord Id Normalization
+
+`agent_id` is the AUN responsibility and queue identity. It answers "who owns
+this work?".
+
+Discord ids are provider subject ids. They answer "which Discord bot, user, app,
+or webhook is this provider account?". They are not routing authority.
+
+Canonical mapping:
+
+```text
+agents.agent_id
+  -> agent_provider_identities(provider='discord', provider_subject_id)
+  -> connector_instances(provider='discord', agent_id)
+  -> connector credential evidence
+  -> provider_channel_access(provider_channel_id)
+```
+
+`agents.metadata.discord_id` is legacy compatibility metadata only. New code
+must prefer normalized provider identity rows when they exist, and diagnostics
+must say when they fell back to legacy metadata.
+
+For Discord-specific UIs and custom UIs, "switch bot" means selecting an
+eligible Discord connector/provider identity for a channel role. It does not
+mean changing `agent_id`, copying a Discord id into channel membership, or
+editing queue ownership. A bot switch is represented as connector binding,
+priority, or delivery-owner override evidence with audit history.
+
+Channel rows may reference an `agent_ui_bindings` row for selection and priority,
+but the channel must not store token material or become the credential owner.
+
+If more than one Discord connector can write to the same channel, AUN must show
+the candidates and require an explicit priority or override. If exactly one is
+eligible, AUN may derive the effective delivery owner automatically. If none are
+eligible, AUN must report which evidence is missing.
+
 ## Non-Negotiable Boundaries
 
 - `discord_id` or future `provider_subject_id` identifies a provider subject.
   It does not prove posting capability.
 - A Discord token proves potential posting capability only through a connector
   credential record, not by being present in a local file.
-- Raw tokens must never be stored in DB or printed by diagnostics.
+- Raw tokens must never be printed by diagnostics. In the MVP they are not
+  stored in DB. If encrypted DB secret storage is introduced later, UI/API token
+  input remains overwrite-only and decrypted values are never returned for
+  display.
 - Channel-level owner fields are fallback or override state. They are not the
   primary UI model.
 - Data reconciliation must be dry-run-first and must not execute until the
