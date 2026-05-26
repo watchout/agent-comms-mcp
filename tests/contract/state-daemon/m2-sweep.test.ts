@@ -278,7 +278,7 @@ describe('T12b stale dispatch observation semantics', () => {
       expect(h.tmux.sentKeys).toEqual([
         {
           session: `${agent}-session`,
-          payload: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id, then complete the requested work. Do not call inbox or next.\n',
+          payload: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id. After completing the work, either send a reply if one is required or call the agent-comms done tool for the same queue_id if no reply is required. Do not stop after processing. Do not call inbox or next.\n',
         },
       ])
       expect(h.metrics.countInc('state_daemon_state_actions_total', {
@@ -560,7 +560,7 @@ describe('T16 pg_notify_immediate_dispatch', () => {
         { session: `${agent}-session`, payload: 'Call the agent-comms next tool now. Do not call inbox.\n' },
         {
           session: `${agent}-session`,
-          payload: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id, then complete the requested work. Do not call inbox or next.\n',
+          payload: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id. After completing the work, either send a reply if one is required or call the agent-comms done tool for the same queue_id if no reply is required. Do not stop after processing. Do not call inbox or next.\n',
         },
       ])
       expect(h.metrics.countInc('state_daemon_state_actions_total', {
