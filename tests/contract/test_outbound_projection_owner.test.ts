@@ -11,6 +11,54 @@ function setRoutingConfig(channels: Record<string, unknown>) {
   resetChannelPolicyCache()
 }
 
+function mockAgent(
+  agentId: string,
+  options: { discordId?: string | null; status?: string; tokenBacked?: boolean } = {},
+) {
+  const discordId = options.discordId === undefined ? `${agentId}-discord-id` : options.discordId
+  return {
+    agent_id: agentId,
+    status: options.status ?? 'idle',
+    provider_token_source_ref: options.tokenBacked === false ? null : `local-env:DISCORD_TOKEN_${agentId.replace(/[^a-z0-9]/gi, '_').toUpperCase()}`,
+    discord_token: null,
+    metadata: discordId ? { discord_id: discordId } : {},
+  }
+}
+
+function mockProjectionDb(options: {
+  channelAdapterMetadata?: unknown
+  channelExternalId?: string
+  agents?: Record<string, any>
+} = {}) {
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      if (sql.includes('channel_routing_policy')) {
+        return { rows: [] }
+      }
+      if (sql.includes('thread_adapters')) {
+        return { rows: [] }
+      }
+      if (sql.includes('channel_adapters')) {
+        return {
+          rows: [{
+            external_id: options.channelExternalId ?? 'discord-ch',
+            metadata: options.channelAdapterMetadata ?? null,
+          }],
+        }
+      }
+      if (sql.includes('connector_instances')) {
+        return { rows: [] }
+      }
+      if (sql.includes('agents')) {
+        const agentId = typeof params?.[0] === 'string' ? params[0] : ''
+        const row = options.agents?.[agentId]
+        return { rows: row ? [row] : [] }
+      }
+      return { rows: [] }
+    },
+  }
+}
+
 beforeEach(() => {
   setRoutingConfig({})
 })
@@ -25,14 +73,12 @@ afterEach(() => {
 
 describe('#410 outbound projection owner resolution', () => {
   test('channel adapter metadata owner wins over author identity', async () => {
-    const db = {
-      query: async (sql: string) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: { consumer_agent_id: 'agent-com-dev' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      channelAdapterMetadata: { consumer_agent_id: 'agent-com-dev' },
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
       },
-    }
+    })
     const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1' })
     expect(route.channelExternalId).toBe('discord-ch')
     expect(route.consumerAgentId).toBe('agent-com-dev')
@@ -41,13 +87,25 @@ describe('#410 outbound projection owner resolution', () => {
 
   test('bot-routing adapterOwner is the config fallback', async () => {
     setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'adapter-agent' } })
-    const db = {
-      query: async () => ({ rows: [{ external_id: 'discord-ch', metadata: null }] }),
-    }
+    const db = mockProjectionDb({ agents: { 'adapter-agent': mockAgent('adapter-agent') } })
     const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1' })
     expect(route.channelExternalId).toBe('discord-ch')
     expect(route.consumerAgentId).toBe('adapter-agent')
     expect(route.source).toBe('channel_policy_adapter_owner')
+  })
+
+  test('bot-routing adapterOwner without token evidence is not a Discord delivery consumer', async () => {
+    setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'adapter-agent' } })
+    const db = mockProjectionDb({
+      agents: {
+        'adapter-agent': mockAgent('adapter-agent', { tokenBacked: false }),
+        'primary-agent': mockAgent('primary-agent', { tokenBacked: false }),
+      },
+    })
+    const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1' })
+    expect(route.channelExternalId).toBe('discord-ch')
+    expect(route.consumerAgentId).toBeNull()
+    expect(route.source).toBe('none')
   })
 
   test('native-role owner overrides channel adapterOwner only for matching sender', async () => {
@@ -58,9 +116,12 @@ describe('#410 outbound projection owner resolution', () => {
         nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
       },
     })
-    const db = {
-      query: async () => ({ rows: [{ external_id: 'discord-ch', metadata: null }] }),
-    }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto'),
+      },
+    })
     const codexCto = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-cto' })
     expect(codexCto.consumerAgentId).toBe('codex-cto')
     expect(codexCto.source).toBe('channel_policy_native_role_owner')
@@ -77,26 +138,26 @@ describe('#410 outbound projection owner resolution', () => {
         nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
       },
     })
-    const db = {
-      query: async () => ({ rows: [{ external_id: 'discord-ch', metadata: { consumer_agent_id: 'metadata-owner' } }] }),
-    }
+    const db = mockProjectionDb({
+      channelAdapterMetadata: { consumer_agent_id: 'metadata-owner' },
+      agents: {
+        'metadata-owner': mockAgent('metadata-owner'),
+        'codex-cto': mockAgent('codex-cto'),
+      },
+    })
     const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-cto' })
     expect(route.consumerAgentId).toBe('metadata-owner')
     expect(route.source).toBe('channel_adapter_metadata')
   })
 
   test('explicit adapter metadata still wins over recipient-facing projection', async () => {
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: { consumer_agent_id: 'metadata-owner' } }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
-          return { rows: [{ agent_id: 'codex-cto', metadata: { discord_id: 'cto-discord-id' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      channelAdapterMetadata: { consumer_agent_id: 'metadata-owner' },
+      agents: {
+        'metadata-owner': mockAgent('metadata-owner'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
       },
-    }
+    })
     const route = await resolveOutboundProjectionRoute(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-aun',
@@ -108,17 +169,11 @@ describe('#410 outbound projection owner resolution', () => {
 
   test('single recipient with Discord identity gets recipient-facing projection', async () => {
     setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
-          return { rows: [{ agent_id: 'codex-cto', metadata: { discord_id: 'cto-discord-id' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
       },
-    }
+    })
     const route = await resolveOutboundProjectionRoute(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-aun',
@@ -131,17 +186,11 @@ describe('#410 outbound projection owner resolution', () => {
 
   test('multiple recipients do not use recipient-facing default projection', async () => {
     setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
-    const db = {
-      query: async (sql: string) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents')) {
-          throw new Error('agents lookup should not run for multiple recipients')
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
       },
-    }
+    })
     const route = await resolveOutboundProjectionRoute(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-aun',
@@ -153,9 +202,7 @@ describe('#410 outbound projection owner resolution', () => {
 
   test('channel primary remains a compatibility fallback', async () => {
     setRoutingConfig({ ch1: { primary: 'agent-com-dev' } })
-    const db = {
-      query: async () => ({ rows: [{ external_id: 'discord-ch', metadata: '{}' }] }),
-    }
+    const db = mockProjectionDb({ agents: { 'agent-com-dev': mockAgent('agent-com-dev') } })
     const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1' })
     expect(route.consumerAgentId).toBe('agent-com-dev')
     expect(route.source).toBe('channel_policy_primary')
@@ -164,9 +211,10 @@ describe('#410 outbound projection owner resolution', () => {
   test('production agent-com channel projects logical codex-cto through the codex CTO token owner', async () => {
     const cfg = await import('../../config/bot-routing.json')
     setRoutingConfig(cfg.default.channels)
-    const db = {
-      query: async () => ({ rows: [{ external_id: '1487368919613444156', metadata: null }] }),
-    }
+    const db = mockProjectionDb({
+      channelExternalId: '1487368919613444156',
+      agents: { 'codex-cto': mockAgent('codex-cto') },
+    })
 
     const route = await resolveOutboundProjectionRoute(db, {
       channelId: '1487368919613444156',
@@ -181,17 +229,12 @@ describe('#410 outbound projection owner resolution', () => {
 describe('ADR-060 outbound projection identity decision', () => {
   test('recipient-facing projection no longer changes the delivery consumer', async () => {
     setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
-          return { rows: [{ agent_id: 'codex-cto', status: 'idle', metadata: { discord_id: 'cto-discord-id' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
       },
-    }
+    })
     const decision = await resolveOutboundProjectionDecision(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-aun',
@@ -215,17 +258,12 @@ describe('ADR-060 outbound projection identity decision', () => {
         nativeProjectionIdentities: { 'codex-cto': 'codex-cto' },
       },
     })
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
-          return { rows: [{ agent_id: 'codex-cto', status: 'idle', metadata: { discord_id: 'cto-discord-id' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
       },
-    }
+    })
     const decision = await resolveOutboundProjectionDecision(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-cto',
@@ -247,17 +285,12 @@ describe('ADR-060 outbound projection identity decision', () => {
         nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
       },
     })
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-cto') {
-          return { rows: [{ agent_id: 'codex-cto', status: 'offline', metadata: { discord_id: 'cto-discord-id' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id', status: 'offline' }),
       },
-    }
+    })
     const decision = await resolveOutboundProjectionDecision(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-cto',
@@ -279,17 +312,11 @@ describe('ADR-060 outbound projection identity decision', () => {
         nativeProjectionIdentities: { 'codex-cto': 'codex-cto' },
       },
     })
-    const db = {
-      query: async (sql: string) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents')) {
-          return { rows: [] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
       },
-    }
+    })
     const decision = await resolveOutboundProjectionDecision(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-cto',
@@ -310,20 +337,13 @@ describe('ADR-060 outbound projection identity decision', () => {
         nativeProjectionIdentities: { 'codex-cto': 'codex-cto-native' },
       },
     })
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('channel_adapters')) {
-          return { rows: [{ external_id: 'discord-ch', metadata: null }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-aun') {
-          return { rows: [{ agent_id: 'codex-aun', status: 'offline', metadata: { discord_id: 'aun-discord-id' } }] }
-        }
-        if (sql.includes('agents') && params?.[0] === 'codex-cto-native') {
-          return { rows: [{ agent_id: 'codex-cto-native', status: 'idle', metadata: { discord_id: 'cto-discord-id' } }] }
-        }
-        return { rows: [] }
+    const db = mockProjectionDb({
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-aun': mockAgent('codex-aun', { discordId: 'aun-discord-id', status: 'offline' }),
+        'codex-cto-native': mockAgent('codex-cto-native', { discordId: 'cto-discord-id' }),
       },
-    }
+    })
     const decision = await resolveOutboundProjectionDecision(db, {
       channelId: 'ch1',
       senderAgentId: 'codex-cto',

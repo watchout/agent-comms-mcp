@@ -28,6 +28,7 @@ import {
   type Interaction,
 } from 'discord.js'
 import type { UIAdapter, Adapter, AdapterConfig, UnifiedMessage, InboundMessage, PlatformCapabilities, SendOptions } from './types'
+import { getAgentDiscordUiId, resolveAgentFromDiscordUiId } from '../core/ui-bindings'
 
 // --- Permission operators (DM / button gate for MCP permission prompts) ---
 //
@@ -132,7 +133,7 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     return this.client !== null && this.client.isReady()
   }
 
-  /** Convert core @agent_id mentions to Discord <@discord_id> */
+  /** Convert core @agent_id mentions to Discord <@discord_id> via agent_ui_bindings first. */
   async convertMentionsToDiscord(content: string): Promise<string> {
     if (!this.dbQuery) return content
     const mentions = content.match(/@([\w][\w-]*)/g)
@@ -141,19 +142,16 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     for (const mention of mentions) {
       const agentId = mention.slice(1) // remove @
       try {
-        const r = await this.dbQuery(
-          "SELECT metadata->>'discord_id' as discord_id FROM agents WHERE agent_id = $1",
-          [agentId]
-        )
-        if (r.rows.length > 0 && r.rows[0].discord_id) {
-          result = result.replace(mention, `<@${r.rows[0].discord_id}>`)
+        const discordId = await getAgentDiscordUiId({ query: this.dbQuery }, agentId)
+        if (discordId) {
+          result = result.replace(mention, `<@${discordId}>`)
         }
       } catch {}
     }
     return result
   }
 
-  /** Convert Discord <@discord_id> mentions to core @agent_id */
+  /** Convert Discord <@discord_id> mentions to core @agent_id via agent_ui_bindings first. */
   async convertMentionsFromDiscord(content: string): Promise<string> {
     if (!this.dbQuery) return content
     const mentions = content.match(/<@!?(\d+)>/g)
@@ -162,12 +160,9 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     for (const mention of mentions) {
       const discordId = mention.replace(/<@!?(\d+)>/, '$1')
       try {
-        const r = await this.dbQuery(
-          "SELECT agent_id FROM agents WHERE metadata->>'discord_id' = $1",
-          [discordId]
-        )
-        if (r.rows.length > 0) {
-          result = result.replace(mention, `@${r.rows[0].agent_id}`)
+        const agentId = await resolveAgentFromDiscordUiId({ query: this.dbQuery }, discordId)
+        if (agentId) {
+          result = result.replace(mention, `@${agentId}`)
         }
       } catch {}
     }

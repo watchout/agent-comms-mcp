@@ -337,22 +337,20 @@ describe('resolveSendDestination — channel_id resolution', () => {
 // 3c. ADR-040 D7 — mention / author_id type unification
 // ============================================================
 describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () => {
-  test('isHumanAgent SQL accepts both agent_id and discord_id', () => {
+  test('isHumanAgent accepts both agent_id and Discord UI id', () => {
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function isHumanAgent(')
     expect(fnIdx).toBeGreaterThan(-1)
     const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 800)
     expect(body).toContain('agent_id = $1')
-    expect(body).toContain("metadata->>'discord_id' = $1")
-    // Both forms in the same query — a plain OR is fine
-    expect(body).toMatch(/agent_id = \$1 OR metadata->>'discord_id' = \$1/)
+    expect(body).toContain('resolveAgentFromDiscordUiId(db, authorId)')
+    expect(body).toContain('SELECT agent_type FROM agents WHERE agent_id = $1 LIMIT 1')
   })
 
-  test('getAgentDiscordId helper exists (new in D7)', () => {
+  test('getAgentDiscordId helper uses binding-first Discord UI lookup', () => {
     expect(CORE_DB_SOURCE).toContain('export async function getAgentDiscordId(')
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function getAgentDiscordId(')
     const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 500)
-    expect(body).toContain("metadata->>'discord_id'")
-    expect(body).toContain('WHERE agent_id = $1')
+    expect(body).toContain('getAgentDiscordUiId(db, agentId)')
   })
 
   test('resolveSendDestination compares mentions against both agent_id and Discord ID', () => {
@@ -379,11 +377,11 @@ describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () =
     expect(body).not.toContain('msg.mentions.includes(agent.discordId)')
   })
 
-  test('loadAgentInfo populates discordId from metadata', () => {
+  test('loadAgentInfo populates discordId through binding-first helper', () => {
     const fnIdx = CORE_DB_SOURCE.indexOf('export async function loadAgentInfo(')
     const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1500)
-    expect(body).toContain("metadata->>'discord_id' AS discord_id")
-    expect(body).toContain('discordId: r.rows[0].discord_id ?? null')
+    expect(body).toContain('const discordId = await getAgentDiscordId(db, agentId)')
+    expect(body).toContain('discordId,')
     // Fallback (DB unavailable) must include discordId: null
     expect(body).toContain('discordId: null')
   })

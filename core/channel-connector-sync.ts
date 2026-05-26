@@ -1,4 +1,5 @@
 import type { DbAdapter } from './db'
+import { TOKEN_EVIDENCE_COLUMNS, collectTokenEvidence } from './token-evidence'
 
 export type BindingRole = 'inbound' | 'outbound' | 'bidirectional' | 'projection' | 'presence' | 'worker'
 export type OrderingScope = 'none' | 'channel' | 'thread' | 'custom'
@@ -28,7 +29,12 @@ export interface ChannelConnectorSyncSkipped {
   channel_id: string
   channel_name: string | null
   adapter_owner_agent_id: string | null
-  reason: 'no_adapter_owner' | 'unknown_adapter_owner' | 'connector_disabled' | 'active_binding_conflict'
+  reason:
+    | 'no_adapter_owner'
+    | 'unknown_adapter_owner'
+    | 'missing_token_evidence'
+    | 'connector_disabled'
+    | 'active_binding_conflict'
   details?: Record<string, unknown>
 }
 
@@ -54,10 +60,35 @@ interface PolicyRow {
   adapter_owner_agent_id: string | null
 }
 
+interface AgentRow {
+  agent_id: string
+  discord_token: string | null
+  provider_token_source_ref: string | null
+  metadata: unknown
+}
+
 interface ConnectorRow {
   connector_instance_id: string
   agent_id: string
   status: string
+  metadata?: unknown
+}
+
+interface CredentialRow {
+  credential_id: string
+  agent_id: string
+  secret_ref: string | null
+  status: string
+  metadata?: unknown
+}
+
+interface UiBindingRow {
+  binding_id: string
+  agent_id: string
+  ui_token_ref: string | null
+  status: string
+  surface_role?: string | null
+  metadata?: unknown
 }
 
 interface BindingRow {
@@ -67,6 +98,20 @@ interface BindingRow {
 
 function connectorUri(provider: string, agentId: string): string {
   return `${provider}://agents/${agentId}`
+}
+
+function missingOptionalEvidence(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /(does not exist|no such table|no such column|column .* does not exist)/i.test(message)
+}
+
+async function queryOptionalOne<T = any>(db: DbAdapter, sql: string, params?: any[]): Promise<T | null> {
+  try {
+    return await db.queryOne<T>(sql, params)
+  } catch (err) {
+    if (missingOptionalEvidence(err)) return null
+    throw err
+  }
 }
 
 async function resolveChannelId(db: DbAdapter, channel: string | null | undefined): Promise<string | null> {
@@ -125,8 +170,10 @@ async function buildSyncPlan(
       continue
     }
 
-    const agent = await db.queryOne<{ agent_id: string }>(
-      `SELECT agent_id FROM agents WHERE agent_id = $1`,
+    const agent = await db.queryOne<AgentRow>(
+      `SELECT agent_id, NULL AS discord_token, provider_token_source_ref, metadata
+         FROM agents
+        WHERE agent_id = $1`,
       [adapterOwner],
     )
     if (!agent) {
@@ -141,7 +188,7 @@ async function buildSyncPlan(
 
     const uri = connectorUri(provider, adapterOwner)
     const connector = await db.queryOne<ConnectorRow>(
-      `SELECT connector_instance_id, agent_id, status
+      `SELECT connector_instance_id, agent_id, status, metadata
          FROM connector_instances
         WHERE provider = $1
           AND connector_uri = $2`,
@@ -155,6 +202,52 @@ async function buildSyncPlan(
         adapter_owner_agent_id: adapterOwner,
         reason: 'connector_disabled',
         details: { connector_instance_id: connector.connector_instance_id },
+      })
+      continue
+    }
+    const tokenEvidence = provider === 'discord' ? collectTokenEvidence({ agent, connector }) : []
+    if (provider === 'discord') {
+      const credential = await queryOptionalOne<CredentialRow>(
+        db,
+        `SELECT credential_id, agent_id, secret_ref, status, metadata
+           FROM connector_credentials
+          WHERE provider = $1
+            AND agent_id = $2
+            AND COALESCE(status, 'registered') IN ('registered', 'active')
+          ORDER BY
+            CASE COALESCE(status, 'registered') WHEN 'active' THEN 0 WHEN 'registered' THEN 1 ELSE 2 END,
+            credential_id
+          LIMIT 1`,
+        [provider, adapterOwner],
+      )
+      const uiBinding = await queryOptionalOne<UiBindingRow>(
+        db,
+        `SELECT binding_id, agent_id, ui_token_ref, status, surface_role, metadata
+           FROM agent_ui_bindings
+          WHERE agent_id = $1
+            AND ui_type = $2
+            AND COALESCE(status, 'registered') IN ('registered', 'active')
+          ORDER BY
+            CASE COALESCE(status, 'registered') WHEN 'active' THEN 0 WHEN 'registered' THEN 1 ELSE 2 END,
+            CASE COALESCE(surface_role, 'primary') WHEN 'primary' THEN 0 WHEN 'projection' THEN 1 WHEN 'outbound' THEN 2 ELSE 3 END,
+            binding_id
+          LIMIT 1`,
+        [adapterOwner, provider],
+      )
+      tokenEvidence.splice(0, tokenEvidence.length, ...collectTokenEvidence({ agent, connector, credential, uiBinding }))
+    }
+    if (provider === 'discord' && tokenEvidence.length === 0) {
+      skipped.push({
+        channel_id: channelId,
+        channel_name: channelName,
+        adapter_owner_agent_id: adapterOwner,
+        reason: 'missing_token_evidence',
+        details: {
+          provider,
+          required: 'token-backed Discord connector evidence',
+          checked: TOKEN_EVIDENCE_COLUMNS,
+          connector_instance_id: connector?.connector_instance_id ?? null,
+        },
       })
       continue
     }
