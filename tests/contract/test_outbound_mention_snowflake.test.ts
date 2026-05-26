@@ -111,7 +111,7 @@ describe('outbound mention snowflake conversion (CTO 24a25097)', () => {
     const REPO_ROOT = resolve(import.meta.dir, '..', '..')
     const src = await Bun.file(resolve(REPO_ROOT, 'server.ts')).text()
     expect(src).toMatch(/async function mentionsToDiscordPrefix/)
-    expect(src).toMatch(/SELECT metadata->>'discord_id'/)
+    expect(src).toMatch(/getAgentDiscordId\(client, agentId\)/)
     // Both call sites must wire the prefix into the first part of the
     // outbound INSERT loop. In the single-part case (no split) this is the
     // only part; in the multi-part case `core/message-split.ts` already

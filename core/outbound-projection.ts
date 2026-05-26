@@ -1,4 +1,6 @@
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './channel-policy'
+import { collectTokenEvidence } from './token-evidence'
+import { getAgentDiscordUiId } from './ui-bindings'
 
 export type Queryable = {
   query: (sql: string, params?: any[]) => Promise<{ rows: any[] }>
@@ -63,6 +65,93 @@ function ownerFromMetadata(raw: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+async function queryRows(db: Queryable, sql: string, params?: any[]): Promise<any[]> {
+  try {
+    const result = await db.query(sql, params)
+    return Array.isArray(result.rows) ? result.rows : []
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/(does not exist|no such table|no such column|column .* does not exist)/i.test(message)) return []
+    throw err
+  }
+}
+
+function connectorUri(provider: 'discord', agentId: string): string {
+  return `${provider}://agents/${agentId}`
+}
+
+async function hasTokenBackedDiscordEvidence(db: Queryable, agentId: string): Promise<boolean> {
+  const trimmedAgentId = agentId.trim()
+  if (!trimmedAgentId) return false
+  const agentRows = await queryRows(
+    db,
+    `SELECT agent_id, provider_token_source_ref, NULL AS discord_token, metadata
+       FROM agents
+      WHERE agent_id = $1`,
+    [trimmedAgentId],
+  )
+  const connectorRows = await queryRows(
+    db,
+    `SELECT connector_instance_id, agent_id, status, metadata
+       FROM connector_instances
+      WHERE provider = $1
+        AND connector_uri = $2
+        AND COALESCE(status, 'active') <> 'disabled'
+      ORDER BY connector_instance_id
+      LIMIT 1`,
+    ['discord', connectorUri('discord', trimmedAgentId)],
+  )
+  const credentialRows = await queryRows(
+    db,
+    `SELECT credential_id, agent_id, secret_ref, status, metadata
+       FROM connector_credentials
+      WHERE provider = $1
+        AND agent_id = $2
+        AND COALESCE(status, 'registered') IN ('registered', 'active')
+      ORDER BY
+        CASE COALESCE(status, 'registered') WHEN 'active' THEN 0 WHEN 'registered' THEN 1 ELSE 2 END,
+        credential_id
+      LIMIT 1`,
+    ['discord', trimmedAgentId],
+  )
+  const uiBindingRows = await queryRows(
+    db,
+    `SELECT binding_id, agent_id, ui_token_ref, status, metadata
+       FROM agent_ui_bindings
+      WHERE agent_id = $1
+        AND ui_type = 'discord'
+        AND COALESCE(status, 'registered') IN ('registered', 'active')
+      ORDER BY
+        CASE COALESCE(status, 'registered') WHEN 'active' THEN 0 WHEN 'registered' THEN 1 ELSE 2 END,
+        CASE COALESCE(surface_role, 'primary') WHEN 'primary' THEN 0 WHEN 'projection' THEN 1 WHEN 'outbound' THEN 2 ELSE 3 END,
+        binding_id
+      LIMIT 1`,
+    [trimmedAgentId],
+  )
+  return collectTokenEvidence({
+    agent: agentRows[0] ?? null,
+    connector: connectorRows[0] ?? null,
+    credential: credentialRows[0] ?? null,
+    uiBinding: uiBindingRows[0] ?? null,
+  }).length > 0
+}
+
+async function deliveryConsumerEligible(db: Queryable, platform: 'discord', agentId: string | null): Promise<boolean> {
+  if (!agentId) return false
+  if (platform !== 'discord') return true
+  return hasTokenBackedDiscordEvidence(db, agentId)
+}
+
+async function ownerFromMetadataIfEligible(
+  db: Queryable,
+  platform: 'discord',
+  raw: unknown,
+): Promise<string | null> {
+  const owner = ownerFromMetadata(raw)
+  if (!owner) return null
+  return (await deliveryConsumerEligible(db, platform, owner)) ? owner : null
+}
+
 async function projectionHealth(
   db: Queryable,
   agentId: string,
@@ -72,9 +161,7 @@ async function projectionHealth(
     [agentId],
   ).catch(() => ({ rows: [] as any[] }))
   if (rr.rows.length === 0) return { registered: false, healthy: false }
-  const metadata = parseMetadata(rr.rows[0].metadata)
-  const discordId = metadata.discord_id
-  const registered = typeof discordId === 'string' && discordId.trim().length > 0
+  const registered = (await getAgentDiscordUiId(db, agentId)) !== null
   const status = typeof rr.rows[0].status === 'string' ? rr.rows[0].status : null
   const unhealthyStatus = status === 'offline' || status === 'disconnected' || status === 'failed'
   return { registered, healthy: registered && !unhealthyStatus }
@@ -99,7 +186,7 @@ async function resolveSurfaceAndConsumer(
     ).catch(() => ({ rows: [] as any[] }))
     if (tr.rows.length > 0) {
       channelExternalId = tr.rows[0].external_id ?? null
-      const owner = ownerFromMetadata(tr.rows[0].metadata)
+      const owner = await ownerFromMetadataIfEligible(db, platform, tr.rows[0].metadata)
       if (owner) {
         return { platform, channelExternalId, consumerAgentId: owner, consumerSource: 'thread_adapter_metadata' }
       }
@@ -112,17 +199,17 @@ async function resolveSurfaceAndConsumer(
   ).catch(() => ({ rows: [] as any[] }))
   if (cr.rows.length > 0) {
     channelExternalId = channelExternalId ?? cr.rows[0].external_id ?? null
-    const owner = ownerFromMetadata(cr.rows[0].metadata)
+    const owner = await ownerFromMetadataIfEligible(db, platform, cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, consumerSource: 'channel_adapter_metadata' }
     }
   }
 
   const policy = getChannelPolicy(input.channelId)
-  if (policy.adapterOwner) {
+  if (policy.adapterOwner && await deliveryConsumerEligible(db, platform, policy.adapterOwner)) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, consumerSource: 'channel_policy_adapter_owner' }
   }
-  if (policy.primary) {
+  if (policy.primary && await deliveryConsumerEligible(db, platform, policy.primary)) {
     return { platform, channelExternalId, consumerAgentId: policy.primary, consumerSource: 'channel_policy_primary' }
   }
   return { platform, channelExternalId, consumerAgentId: null, consumerSource: 'none' }
@@ -157,7 +244,7 @@ export async function resolveOutboundProjectionRoute(
     ).catch(() => ({ rows: [] as any[] }))
     if (tr.rows.length > 0) {
       channelExternalId = tr.rows[0].external_id ?? null
-      const owner = ownerFromMetadata(tr.rows[0].metadata)
+      const owner = await ownerFromMetadataIfEligible(db, platform, tr.rows[0].metadata)
       if (owner) {
         return { platform, channelExternalId, consumerAgentId: owner, source: 'thread_adapter_metadata' }
       }
@@ -170,7 +257,7 @@ export async function resolveOutboundProjectionRoute(
   ).catch(() => ({ rows: [] as any[] }))
   if (cr.rows.length > 0) {
     channelExternalId = channelExternalId ?? cr.rows[0].external_id ?? null
-    const owner = ownerFromMetadata(cr.rows[0].metadata)
+    const owner = await ownerFromMetadataIfEligible(db, platform, cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, source: 'channel_adapter_metadata' }
     }
@@ -184,9 +271,12 @@ export async function resolveOutboundProjectionRoute(
       [singleRecipient],
     ).catch(() => ({ rows: [] as any[] }))
     if (rr.rows.length > 0) {
-      const metadata = parseMetadata(rr.rows[0].metadata)
-      const discordId = metadata.discord_id
-      if (typeof discordId === 'string' && discordId.trim().length > 0) {
+      const discordId = await getAgentDiscordUiId(db, singleRecipient)
+      if (
+        typeof discordId === 'string'
+        && discordId.trim().length > 0
+        && await deliveryConsumerEligible(db, platform, singleRecipient)
+      ) {
         return { platform, channelExternalId, consumerAgentId: singleRecipient, source: 'recipient_default_projection' }
       }
     }
@@ -194,13 +284,13 @@ export async function resolveOutboundProjectionRoute(
 
   const policy = getChannelPolicy(input.channelId)
   const nativeRoleOwner = input.senderAgentId ? policy.nativeRoleOutboundOwners[input.senderAgentId] : null
-  if (nativeRoleOwner) {
+  if (nativeRoleOwner && await deliveryConsumerEligible(db, platform, nativeRoleOwner)) {
     return { platform, channelExternalId, consumerAgentId: nativeRoleOwner, source: 'channel_policy_native_role_owner' }
   }
-  if (policy.adapterOwner) {
+  if (policy.adapterOwner && await deliveryConsumerEligible(db, platform, policy.adapterOwner)) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, source: 'channel_policy_adapter_owner' }
   }
-  if (policy.primary) {
+  if (policy.primary && await deliveryConsumerEligible(db, platform, policy.primary)) {
     return { platform, channelExternalId, consumerAgentId: policy.primary, source: 'channel_policy_primary' }
   }
   return { platform, channelExternalId, consumerAgentId: null, source: 'none' }

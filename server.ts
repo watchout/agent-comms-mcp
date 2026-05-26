@@ -1340,8 +1340,8 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
  * trigger — the symptom CEO flagged + CTO directive `24a25097`.
  *
  * Behavior:
- *   - For each agent_id in `mentions`, look up `metadata->>'discord_id'` from
- *     the agents table (same source `convertMentionsToDiscord` uses).
+ *   - For each agent_id in `mentions`, look up the Discord UI id through
+ *     `agent_ui_bindings` first, with legacy `metadata.discord_id` fallback.
  *   - Build a space-separated `<@id1> <@id2> ` prefix.
  *   - If the content already contains the snowflake (e.g. caller pre-rendered
  *     it in content), skip duplicating it.
@@ -1365,11 +1365,7 @@ async function mentionsToDiscordPrefix(
   for (const agentId of mentions) {
     if (!agentId) continue
     try {
-      const r = await client.query(
-        "SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1",
-        [agentId],
-      )
-      const discordId = r.rows[0]?.discord_id
+      const discordId = await getAgentDiscordId(client, agentId)
       if (!discordId) {
         process.stderr.write(`agent-comms: outbound mention skip — no discord_id for agent_id="${agentId}"\n`)
         continue

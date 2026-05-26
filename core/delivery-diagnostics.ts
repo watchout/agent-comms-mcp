@@ -70,8 +70,20 @@ export function diagnoseInboundQueueRow(row: InboundQueueRow | null): Record<str
 
 export function diagnoseOutboundQueueRow(
   row: OutboundQueueRow | null,
-  consumer: { agent_id: string | null; status: string | null; has_discord_id?: boolean | null } | null,
-  projection: { agent_id: string | null; status: string | null; has_discord_id?: boolean | null } | null = null,
+  consumer: {
+    agent_id: string | null
+    status: string | null
+    has_discord_id?: boolean | null
+    discord_ui_id?: string | null
+    discord_ui_binding_status?: string | null
+  } | null,
+  projection: {
+    agent_id: string | null
+    status: string | null
+    has_discord_id?: boolean | null
+    discord_ui_id?: string | null
+    discord_ui_binding_status?: string | null
+  } | null = null,
 ): Record<string, unknown> {
   if (!row) {
     return { ok: false, kind: 'outbound', reason: 'outbound_row_not_found', deliverable: false }
@@ -131,7 +143,11 @@ export function diagnoseOutboundQueueRow(
     sent_at: row.sent_at,
     discord_message_id: row.discord_message_id,
     consumer_status: consumer?.status ?? null,
+    consumer_discord_ui_id: consumer?.discord_ui_id ?? null,
+    consumer_discord_ui_binding_status: consumer?.discord_ui_binding_status ?? null,
     projection_status: projection?.status ?? null,
+    projection_discord_ui_id: projection?.discord_ui_id ?? null,
+    projection_discord_ui_binding_status: projection?.discord_ui_binding_status ?? null,
     deliverable,
     reason,
   }
