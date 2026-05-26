@@ -1,5 +1,6 @@
 import type { DbAdapter } from '../../core/db/adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
+import { evaluateDoneTransition, formatDoneTransitionRejection } from '../../core/terminal-baton-invariant'
 import {
   buildCommandPlan,
   repoRoot,
@@ -138,6 +139,16 @@ export async function lifecycleTransition(
         }
         if (row.status !== fromStatus) {
           throw new Error(`INVALID_STATE: queue_id=${queueId} status=${row.status}; expected ${fromStatus}`)
+        }
+
+        if (mode === 'done') {
+          const decision = await evaluateDoneTransition(
+            async (sql, params) => tx.query(sql, params as any[] | undefined),
+            { queueId, agentId: plan.env.AGENT_ID },
+          )
+          if (!decision.allowed) {
+            throw new Error(formatDoneTransitionRejection(decision))
+          }
         }
 
         const setClause = mode === 'done'

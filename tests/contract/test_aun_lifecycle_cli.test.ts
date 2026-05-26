@@ -35,20 +35,43 @@ function withDb<T>(fn: (db: Database) => T): T {
   }
 }
 
-function seedQueue(status: 'pending' | 'received' | 'in_progress' | 'done', agentId = TEST_AGENT): { queueId: number; messageId: string } {
+function seedQueue(
+  status: 'pending' | 'received' | 'in_progress' | 'done',
+  agentIdOrOpts: string | { agentId?: string; authorId?: string; payload?: string } = TEST_AGENT,
+): { queueId: number; messageId: string } {
   return withDb((db) => {
+    const opts = typeof agentIdOrOpts === 'string' ? { agentId: agentIdOrOpts } : agentIdOrOpts
+    const agentId = opts.agentId ?? TEST_AGENT
+    const authorId = opts.authorId ?? 'codex-cto'
+    const payload = opts.payload ?? '{}'
     const messageId = randomUUID()
     db.prepare(
       `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type)
-       VALUES (?, 'lifecycle-ch', 'codex-cto', 'lifecycle task', 'instruction')`,
-    ).run(messageId)
+       VALUES (?, 'lifecycle-ch', ?, 'lifecycle task', 'instruction')`,
+    ).run(messageId, authorId)
     const row = db.prepare(
       `INSERT INTO message_queue
         (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
-       VALUES (?, ?, '{}', ?, ?, datetime('now'), datetime('now', '+60 seconds'))
+       VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now', '+60 seconds'))
        RETURNING id`,
-    ).get(agentId, messageId, status, status === 'pending' || status === 'done' ? null : agentId) as { id: number }
+    ).get(agentId, messageId, payload, status, status === 'pending' || status === 'done' ? null : agentId) as { id: number }
     return { queueId: row.id, messageId }
+  })
+}
+
+function seedBaton(rootMessageId: string, recipientAgentId = 'other-dev'): string {
+  return withDb((db) => {
+    const childMessageId = randomUUID()
+    db.prepare(
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, reply_to)
+       VALUES (?, 'lifecycle-ch', ?, 'baton task', 'instruction', ?)`,
+    ).run(childMessageId, TEST_AGENT, rootMessageId)
+    db.prepare(
+      `INSERT INTO message_queue
+        (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
+       VALUES (?, ?, '{}', 'pending', NULL, NULL, NULL)`,
+    ).run(recipientAgentId, childMessageId)
+    return childMessageId
   })
 }
 
@@ -82,9 +105,11 @@ beforeEach(() => {
     db.exec(`
       INSERT INTO agents (agent_id, display_name, agent_type, status)
         VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'idle'),
-               ('other-dev', 'other-dev', 'dev', 'idle');
+               ('other-dev', 'other-dev', 'dev', 'idle'),
+               ('codex-cto', 'codex-cto', 'dev', 'idle'),
+               ('ceo', 'ceo', 'human', 'online');
       INSERT INTO channels (id, name, members)
-        VALUES ('lifecycle-ch', 'lifecycle-ch', '["${TEST_AGENT}","codex-cto"]');
+        VALUES ('lifecycle-ch', 'lifecycle-ch', '["${TEST_AGENT}","codex-cto","other-dev","ceo"]');
     `)
   })
 })
@@ -114,7 +139,7 @@ describe('aun lifecycle CLI transitions', () => {
     expect(agentStatus().status).toBe('busy')
   })
 
-  test('done advances in_progress to done and stamps done_at without replying/closing', () => {
+  test('done advances bot-authored in_progress to done and stamps done_at without replying/closing', () => {
     const { queueId } = seedQueue('in_progress')
 
     const r = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
@@ -131,6 +156,29 @@ describe('aun lifecycle CLI transitions', () => {
     expect(row.status).toBe('done')
     expect(row.done_at).not.toBeNull()
     expect(agentStatus().status).toBe('idle')
+  })
+
+  test('done rejects human-authored in_progress work without final reply or bot baton', () => {
+    const { queueId } = seedQueue('in_progress', { authorId: 'ceo' })
+
+    const r = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('TERMINAL_BATON_REQUIRED')
+    expect(queueRow(queueId).status).toBe('in_progress')
+  })
+
+  test('done allows human-authored work after current agent forwards a durable bot baton', () => {
+    const { queueId, messageId } = seedQueue('in_progress', { authorId: 'ceo' })
+    const childMessageId = seedBaton(messageId)
+
+    const r = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain(`"queue_id":"${queueId}"`)
+    expect(r.stdout).toContain('"status":"done"')
+    expect(r.stdout).not.toContain(childMessageId)
+    expect(queueRow(queueId).status).toBe('done')
   })
 
   test('processing is idempotent once already in_progress', () => {

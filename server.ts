@@ -117,6 +117,7 @@ import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
 import { resolveTokenSourceRef } from './core/token-source-ref'
+import { evaluateDoneTransition, formatDoneTransitionRejection } from './core/terminal-baton-invariant'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -3482,6 +3483,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: `Error [INVALID_STATE]: ${name} requires status='${fromStatus}', got '${status}' (queue_id=${queueId}).`,
             }],
             isError: true,
+          }
+        }
+        if (name === 'done') {
+          const decision = await evaluateDoneTransition(
+            async (sql, params) => {
+              const result = await client.query(sql, params as any[] | undefined)
+              return result.rows
+            },
+            { queueId, agentId: AGENT_ID },
+          )
+          if (!decision.allowed) {
+            await client.query('ROLLBACK')
+            return {
+              content: [{ type: 'text', text: formatDoneTransitionRejection(decision) }],
+              isError: true,
+            }
           }
         }
         const setClauses = name === 'done'

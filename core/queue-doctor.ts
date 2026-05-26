@@ -199,6 +199,90 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
      LIMIT 50`,
     agentOnlyParams,
   )
+  const doneWithoutBaton = await db.query(
+    `WITH RECURSIVE ancestry AS (
+       SELECT mq.id AS queue_id,
+              src.id AS message_id,
+              src.reply_to,
+              src.author_id,
+              src.author_bot,
+              src.metadata,
+              0 AS depth
+         FROM message_queue mq
+         JOIN agent_messages src ON src.id::text = mq.message_id
+        WHERE 1=1${agentOnlyFilter}
+          AND mq.status = 'done'
+       UNION ALL
+       SELECT ancestry.queue_id,
+              parent.id,
+              parent.reply_to,
+              parent.author_id,
+              parent.author_bot,
+              parent.metadata,
+              ancestry.depth + 1
+         FROM ancestry
+         JOIN agent_messages parent ON parent.id = ancestry.reply_to
+        WHERE ancestry.reply_to IS NOT NULL
+          AND ancestry.depth < 20
+     )
+     SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.created_at, mq.claimed_by,
+            mq.claimed_at, mq.claim_expires_at, mq.done_at,
+            count(*) OVER ()::int AS total_count,
+            extract(epoch from (now() - mq.created_at))::int AS age_seconds,
+            human.author_id AS author_id,
+            left(coalesce(src.content, ''), 180) AS content
+       FROM message_queue mq
+       JOIN agent_messages src ON src.id::text = mq.message_id
+       CROSS JOIN LATERAL (
+         SELECT CASE
+           WHEN left(ltrim(mq.payload), 1) = '{' THEN mq.payload::jsonb
+           ELSE '{}'::jsonb
+         END AS payload
+       ) payload_json
+       JOIN LATERAL (
+         SELECT a.message_id, a.author_id
+           FROM ancestry a
+           LEFT JOIN agents author_direct ON author_direct.agent_id = a.author_id
+           LEFT JOIN agents author_provider ON author_provider.metadata->>'discord_id' = a.author_id
+          WHERE a.queue_id = mq.id
+            AND (
+              a.author_bot = false
+              OR author_direct.agent_type = 'human'
+              OR author_provider.agent_type = 'human'
+            )
+          ORDER BY a.depth DESC
+          LIMIT 1
+       ) human ON true
+      WHERE 1=1${agentOnlyFilter}
+        AND mq.status = 'done'
+        AND NOT (
+          payload_json.payload->>'no_reply_required' = 'true'
+          OR payload_json.payload->>'internal_no_reply_required' = 'true'
+          OR payload_json.payload->>'aun_no_reply_required' = 'true'
+          OR payload_json.payload->'aun'->>'no_reply_required' = 'true'
+          OR payload_json.payload->'terminal_baton'->>'no_reply_required' = 'true'
+          OR payload_json.payload->'terminal_baton'->>'allow_done' = 'true'
+          OR coalesce(src.metadata, '{}'::jsonb)->>'no_reply_required' = 'true'
+          OR coalesce(src.metadata, '{}'::jsonb)->>'internal_no_reply_required' = 'true'
+          OR coalesce(src.metadata, '{}'::jsonb)->>'aun_no_reply_required' = 'true'
+          OR coalesce(src.metadata, '{}'::jsonb)->'aun'->>'no_reply_required' = 'true'
+          OR coalesce(src.metadata, '{}'::jsonb)->'terminal_baton'->>'no_reply_required' = 'true'
+          OR coalesce(src.metadata, '{}'::jsonb)->'terminal_baton'->>'allow_done' = 'true'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+            FROM agent_messages child
+            JOIN message_queue child_mq ON child_mq.message_id = child.id::text
+            LEFT JOIN agents child_recipient ON child_recipient.agent_id = child_mq.agent_id
+           WHERE child.reply_to = src.id
+             AND child.author_id = mq.agent_id
+             AND child_mq.status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied')
+             AND coalesce(child_recipient.agent_type, 'dev') <> 'human'
+        )
+      ORDER BY mq.done_at DESC NULLS LAST, mq.created_at ASC
+      LIMIT 50`,
+    agentOnlyParams,
+  )
 
   const outboundFilter = agentId
     ? ' AND coalesce(oq.consumer_agent_id, oq.agent_id) = $2'
@@ -272,6 +356,13 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
       'ACK/progress rows still pending',
       ackSpam.rows,
       'ACK/progress should be side-channel evidence or auto-closed system info, not operator-blocking work.',
+    ),
+    finding(
+      'done_without_terminal_baton',
+      'blocker',
+      'human-rooted done rows without final reply, no-reply marker, or bot baton',
+      doneWithoutBaton.rows,
+      'Treat the row as locally terminal but incomplete: reply to the human/root requester, attach explicit no-reply metadata, or create a durable AUN baton to a bot.',
     ),
     finding(
       'outbound_pending_stale',
