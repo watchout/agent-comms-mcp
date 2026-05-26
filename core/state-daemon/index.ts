@@ -5,8 +5,10 @@
  *   - Subscribes to `pg_notify('queue_event')` for immediate dispatch (§6.2).
  *   - Runs a 30s cron sweep over message_queue rows for §4.3 row 2-6.
  *   - Refreshes claim TTLs every 30s for live `agents.status IN
- *     ('online','busy')` bots holding active `received` / `in_progress` rows
- *     (§5.1 / R4 / 補強 #1).
+ *     ('online','busy')` bots holding active `received` / `in_progress` rows,
+ *     but only inside a bounded active-claim age window (§5.1 / R4 /
+ *     補強 #1). A coarse agent status is not enough to keep a claim alive
+ *     forever; stale claims must expire and be reclaimable.
  *   - Polls `agents.last_seen_at` every 30s; restarts TUI bots with missing
  *     tmux sessions (§5.4 / R7 / 補強 #5), with a 1h/N rate limit (F8).
  *   - Manages a dynamic-capacity wake pool (§5.2 / 補強 #2).
@@ -411,16 +413,37 @@ export class StateDaemon {
               last_heartbeat_at = $1::timestamptz
         WHERE mq.status IN ('received', 'in_progress')
           AND mq.claim_expires_at > $1::timestamptz
+          AND mq.claimed_by = mq.agent_id
+          AND mq.claimed_at IS NOT NULL
+          AND mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
           AND EXISTS (
             SELECT 1 FROM agents a
              WHERE a.agent_id = mq.agent_id
                AND a.status IN ('online', 'busy')
           )`
-    const params: unknown[] = [this.clock.now(), this.config.claimTtlSec]
+    const now = this.clock.now()
+    const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
-    return { refreshed: rowCount, skipped: 0 }
+
+    const skippedParams: unknown[] = [now, this.config.activeClaimMaxAgeSec]
+    let skippedSql = `SELECT count(*)::int AS n
+        FROM message_queue mq
+       WHERE mq.status IN ('received', 'in_progress')
+         AND mq.claim_expires_at > $1::timestamptz
+         AND (
+           mq.claimed_by IS DISTINCT FROM mq.agent_id
+           OR mq.claimed_at IS NULL
+           OR mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
+         )`
+    skippedSql += this.agentScopeClause(skippedParams, 'mq.agent_id')
+    const skippedRows = await this.dbQuery<{ n: number }>(skippedSql, skippedParams)
+    const skipped = Number(skippedRows.rows[0]?.n ?? 0)
+    if (skipped > 0) {
+      this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'active_claim_max_age_skipped' }, skipped)
+    }
+    return { refreshed: rowCount, skipped }
   }
 
   // ── Bot liveness (§5.4 / R7 / 補強 #5) ─────────────────────────────────────
