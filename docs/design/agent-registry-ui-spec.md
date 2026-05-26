@@ -60,6 +60,44 @@ Workspace:
 - bound agents
 - active runtimes that currently use the workspace
 
+Repository development ownership:
+
+- A repository may have one development lead agent that owns triage, routing,
+  review coordination, and repo-level operational decisions.
+- A repository may have one or more development worker bots that execute scoped
+  implementation, test, or maintenance tasks.
+- The lead and worker bots are AUN `agent_id` identities bound to repository
+  workspace evidence. A local path or Git remote is search and binding evidence,
+  not the identity itself.
+- A repository bot needs a Discord token only when it is product-facing on a
+  Discord surface. Internal development workers can remain DB/TUI-only.
+- Small related repositories may share a domain lead when separate repo leads
+  would create more routing overhead than ownership clarity.
+- Cross-repository work should route through explicit dependency or handoff
+  messages between repo leads instead of mutating channel membership or
+  reassigning bot tokens.
+
+Internal worker visibility:
+
+- Internal workers may run without a Discord bot token, but they must not be
+  invisible.
+- AUN must expose what each worker is doing through DB-backed status, queue,
+  task, and artifact evidence.
+- The operator UI should show current assignment, claimed queue row, runtime
+  status, last heartbeat, last progress summary, related repository, related
+  branch/PR when known, and whether the worker is blocked.
+- The first implementation surface is `worker_activity`: workers write progress
+  with `agent-com worker report`, while operators and UI read it with
+  `agent-com worker list` or `agent-com status --format json`.
+- Long-running workers should heartbeat with `agent-com worker ping`, including
+  optional percent/phase fields. UI must show recent heartbeat as moving and
+  stale heartbeat as stale/unknown.
+- Discord does not need one bot identity per internal worker. Repo leads or
+  channel-facing bots may project worker progress as summaries, status updates,
+  or handoff messages.
+- If a worker cannot report progress or heartbeat evidence, AUN should diagnose
+  it as stalled or unknown instead of hiding it behind the lead bot.
+
 Runtime instance:
 
 - `runtime_instance_id`
@@ -93,6 +131,11 @@ Channel binding:
 - adapter owner from `channel_routing_policy.adapter_owner_agent_id` only as a
   compatibility fallback or explicit override
 - outbound allowlist from `channel_routing_policy.outbound_allowlist`
+
+Approval state is not a registry object owned by AUN. AUN UI surfaces may display
+Shirube approval references, blocked/approved labels, and related message
+evidence, but approval policy, quorum, expiry, escalation, and execution
+authorization stay in Shirube.
 
 ## Search Inputs
 
@@ -263,6 +306,8 @@ Rules:
 
 - Token-bearing connectors should automatically become eligible delivery owners
   for provider surfaces where discovered channel permissions allow them to post.
+- Discord-visible channel bots must have token-backed connector evidence before
+  channel policy can materialize or select them for outbound delivery.
 - The UI must not force users to set an adapter owner for every channel when a
   single eligible connector can be derived from provider identity and channel
   access evidence.
@@ -363,6 +408,10 @@ Rules:
   an explicit priority or override before writes.
 - If no connector is eligible, the UI must show the missing evidence: credential,
   provider identity, channel access, disabled status, or membership/policy block.
+- Explicit `agent_id` to Discord subject binding is allowed for the currently
+  operated agent, including human-operated sessions. That binding is provider
+  identity evidence and must not be treated as Discord bot posting authority
+  without credential and channel write evidence.
 - A custom UI should consume one versioned snapshot API, including profile
   revision and evidence timestamps, rather than reading several low-level tables
   and inventing its own precedence rules.

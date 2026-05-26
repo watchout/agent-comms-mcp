@@ -38,6 +38,7 @@ import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
+import { getAgentDiscordUiId, getDiscordUiBindingForAgent } from '../core/ui-bindings'
 import {
   deterministicWorkspaceId,
   heartbeatRuntimeInstance,
@@ -1081,6 +1082,12 @@ function expectedProvider(row: any): string | null {
   return typeof provider === 'string' && provider.trim() ? provider.trim() : null
 }
 
+function expectedProviderSubjectId(row: any): string | null {
+  const identity = expectedProviderIdentity(row)
+  const value = identity.subject_id ?? identity.provider_subject_id ?? identity.ui_id
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
 function buildProfileProjection(row: any): BotProfileProjection {
   const agentId = String(row.agent_id)
   const orgId = String(row.org_id ?? 'default')
@@ -1160,6 +1167,7 @@ function buildProfileProjection(row: any): BotProfileProjection {
   }
 
   const provider = expectedProvider(row)
+  const providerSubjectId = expectedProviderSubjectId(row)
   const tokenSourceRef = typeof row.provider_token_source_ref === 'string' && row.provider_token_source_ref.trim()
     ? row.provider_token_source_ref.trim()
     : null
@@ -1174,12 +1182,51 @@ function buildProfileProjection(row: any): BotProfileProjection {
       source: 'bot_profile_projector',
       profile_revision: revision,
     })
-    projection.deferred.push({
+    projection.actions.push({
       table: 'connector_credentials',
-      reason: 'credential table/projector is a later slice; token source ref is kept on the profile only',
+      action: 'upsert',
+      agent_id: agentId,
+      provider,
+      connector_uri: `${provider}://agents/${agentId}`,
+      secret_ref: tokenSourceRef,
+      status: 'registered',
+      source: 'bot_profile_projector',
+      profile_revision: revision,
     })
+    if (providerSubjectId) {
+      projection.actions.push({
+        table: 'agent_provider_identities',
+        action: 'upsert',
+        agent_id: agentId,
+        provider,
+        provider_subject_id: providerSubjectId,
+        provider_handle: typeof row.ui_handle === 'string' && row.ui_handle.trim() ? row.ui_handle.trim() : null,
+        status: 'expected',
+        source: 'bot_profile_projector',
+        profile_revision: revision,
+      })
+      projection.actions.push({
+        table: 'agent_ui_bindings',
+        action: 'upsert',
+        agent_id: agentId,
+        ui_type: provider,
+        ui_id: providerSubjectId,
+        ui_handle: typeof row.ui_handle === 'string' && row.ui_handle.trim() ? row.ui_handle.trim() : null,
+        ui_token_ref: tokenSourceRef,
+        surface_role: 'primary',
+        status: 'registered',
+        source: 'bot_profile_projector',
+        profile_revision: revision,
+      })
+    } else {
+      projection.deferred.push({
+        table: 'agent_provider_identities',
+        reason: 'expected provider identity is missing subject_id',
+        expected_provider_identity: expectedProviderIdentity(row),
+      })
+    }
     projection.deferred.push({
-      table: 'agent_provider_identities',
+      table: 'provider_identity_verification',
       reason: 'provider identity verification requires provider discovery',
       expected_provider_identity: expectedProviderIdentity(row),
     })
@@ -1323,6 +1370,7 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
   }
 
   const connectorAction = actionForTable(projection, 'connector_instances')
+  let connectorInstanceId: string | null = null
   if (connectorAction) {
     const metadata = JSON.stringify({
       source: 'bot_profile_projector',
@@ -1381,6 +1429,239 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
           `${connectorAction.provider}_gateway`,
           connectorAction.connector_uri,
           capabilities,
+          metadata,
+        ],
+      )
+    }
+    const connectorRow = await db.query(
+      `SELECT connector_instance_id
+         FROM connector_instances
+        WHERE provider = $1
+          AND connector_uri = $2
+        LIMIT 1`,
+      [connectorAction.provider, connectorAction.connector_uri],
+    )
+    connectorInstanceId = connectorRow.rows[0]?.connector_instance_id ?? null
+  }
+
+  const credentialAction = actionForTable(projection, 'connector_credentials')
+  let credentialId: string | null = null
+  if (credentialAction && connectorInstanceId) {
+    const metadata = JSON.stringify({
+      source: 'bot_profile_projector',
+      agent_id: projection.agent_id,
+      profile_revision: projection.profile_revision,
+      token_source_ref_set: true,
+    })
+    const existing = await db.query(
+      `SELECT credential_id, status
+         FROM connector_credentials
+        WHERE provider = $1
+          AND secret_ref = $2
+        LIMIT 1`,
+      [credentialAction.provider, credentialAction.secret_ref],
+    )
+    if (existing.rows[0]?.credential_id) {
+      credentialId = existing.rows[0].credential_id
+      await db.query(
+        `UPDATE connector_credentials
+            SET agent_id = $2,
+                connector_instance_id = $3,
+                credential_kind = 'bot_token',
+                status = CASE
+                  WHEN status IN ('disabled', 'revoked') THEN status
+                  ELSE 'registered'
+                END,
+                trust_status = CASE
+                  WHEN trust_status IN ('disabled', 'revoked') THEN trust_status
+                  ELSE 'local'
+                END,
+                source = 'bot_profile_projector',
+                evidence_revision = $4,
+                metadata = COALESCE($5::jsonb, '{}'::jsonb),
+                updated_at = now()
+          WHERE credential_id = $1`,
+        [
+          credentialId,
+          projection.agent_id,
+          connectorInstanceId,
+          projection.profile_revision,
+          metadata,
+        ],
+      )
+    } else {
+      await db.query(
+        `INSERT INTO connector_credentials
+           (provider, agent_id, connector_instance_id, credential_kind, secret_ref,
+            status, trust_status, source, evidence_revision, metadata, updated_at)
+         VALUES
+           ($1, $2, $3, 'bot_token', $4,
+            'registered', 'local', 'bot_profile_projector', $5, COALESCE($6::jsonb, '{}'::jsonb), now())`,
+        [
+          credentialAction.provider,
+          projection.agent_id,
+          connectorInstanceId,
+          credentialAction.secret_ref,
+          projection.profile_revision,
+          metadata,
+        ],
+      )
+    }
+    const credentialRow = await db.query(
+      `SELECT credential_id
+         FROM connector_credentials
+        WHERE provider = $1
+          AND secret_ref = $2
+        LIMIT 1`,
+      [credentialAction.provider, credentialAction.secret_ref],
+    )
+    credentialId = credentialRow.rows[0]?.credential_id ?? credentialId
+  }
+
+  const identityAction = actionForTable(projection, 'agent_provider_identities')
+  let providerIdentityId: string | null = null
+  if (identityAction) {
+    const metadata = JSON.stringify({
+      source: 'bot_profile_projector',
+      agent_id: projection.agent_id,
+      profile_revision: projection.profile_revision,
+      expected_provider_identity: expectedProviderIdentity(row),
+    })
+    const existing = await db.query(
+      `SELECT provider_identity_id, status
+         FROM agent_provider_identities
+        WHERE provider = $1
+          AND provider_subject_id = $2
+        LIMIT 1`,
+      [identityAction.provider, identityAction.provider_subject_id],
+    )
+    if (existing.rows[0]?.provider_identity_id) {
+      providerIdentityId = existing.rows[0].provider_identity_id
+      await db.query(
+        `UPDATE agent_provider_identities
+            SET agent_id = $2,
+                provider_handle = $3,
+                identity_kind = 'bot',
+                status = CASE
+                  WHEN status IN ('disabled', 'revoked') THEN status
+                  ELSE 'expected'
+                END,
+                trust_status = CASE
+                  WHEN trust_status IN ('disabled', 'revoked') THEN trust_status
+                  ELSE 'unverified'
+                END,
+                source = 'bot_profile_projector',
+                evidence_revision = $4,
+                metadata = COALESCE($5::jsonb, '{}'::jsonb),
+                updated_at = now()
+          WHERE provider_identity_id = $1`,
+        [
+          providerIdentityId,
+          projection.agent_id,
+          identityAction.provider_handle,
+          projection.profile_revision,
+          metadata,
+        ],
+      )
+    } else {
+      await db.query(
+        `INSERT INTO agent_provider_identities
+           (agent_id, provider, provider_subject_id, provider_handle, identity_kind,
+            status, trust_status, source, evidence_revision, metadata, updated_at)
+         VALUES
+           ($1, $2, $3, $4, 'bot',
+            'expected', 'unverified', 'bot_profile_projector', $5, COALESCE($6::jsonb, '{}'::jsonb), now())`,
+        [
+          projection.agent_id,
+          identityAction.provider,
+          identityAction.provider_subject_id,
+          identityAction.provider_handle,
+          projection.profile_revision,
+          metadata,
+        ],
+      )
+    }
+    const identityRow = await db.query(
+      `SELECT provider_identity_id
+         FROM agent_provider_identities
+        WHERE provider = $1
+          AND provider_subject_id = $2
+        LIMIT 1`,
+      [identityAction.provider, identityAction.provider_subject_id],
+    )
+    providerIdentityId = identityRow.rows[0]?.provider_identity_id ?? providerIdentityId
+  }
+
+  const uiBindingAction = actionForTable(projection, 'agent_ui_bindings')
+  if (uiBindingAction) {
+    const metadata = JSON.stringify({
+      source: 'bot_profile_projector',
+      agent_id: projection.agent_id,
+      profile_revision: projection.profile_revision,
+    })
+    const existing = await db.query(
+      `SELECT binding_id, status
+         FROM agent_ui_bindings
+        WHERE agent_id = $1
+          AND ui_type = $2
+          AND surface_role = $3
+        LIMIT 1`,
+      [projection.agent_id, uiBindingAction.ui_type, uiBindingAction.surface_role],
+    )
+    if (existing.rows[0]?.binding_id) {
+      await db.query(
+        `UPDATE agent_ui_bindings
+            SET ui_id = $2,
+                ui_handle = $3,
+                ui_token_ref = $4,
+                connector_instance_id = $5,
+                credential_id = $6,
+                provider_identity_id = $7,
+                status = CASE
+                  WHEN status IN ('disabled', 'revoked') THEN status
+                  ELSE 'registered'
+                END,
+                trust_status = CASE
+                  WHEN trust_status IN ('disabled', 'revoked') THEN trust_status
+                  ELSE 'unverified'
+                END,
+                evidence_revision = $8,
+                metadata = COALESCE($9::jsonb, '{}'::jsonb),
+                updated_at = now()
+          WHERE binding_id = $1`,
+        [
+          existing.rows[0].binding_id,
+          uiBindingAction.ui_id,
+          uiBindingAction.ui_handle,
+          uiBindingAction.ui_token_ref,
+          connectorInstanceId,
+          credentialId,
+          providerIdentityId,
+          projection.profile_revision,
+          metadata,
+        ],
+      )
+    } else {
+      await db.query(
+        `INSERT INTO agent_ui_bindings
+           (agent_id, ui_type, ui_id, ui_handle, ui_token_ref, connector_instance_id,
+            credential_id, provider_identity_id, surface_role, status, trust_status,
+            evidence_revision, metadata, updated_at)
+         VALUES
+           ($1, $2, $3, $4, $5, $6,
+            $7, $8, $9, 'registered', 'unverified',
+            $10, COALESCE($11::jsonb, '{}'::jsonb), now())`,
+        [
+          projection.agent_id,
+          uiBindingAction.ui_type,
+          uiBindingAction.ui_id,
+          uiBindingAction.ui_handle,
+          uiBindingAction.ui_token_ref,
+          connectorInstanceId,
+          credentialId,
+          providerIdentityId,
+          uiBindingAction.surface_role,
+          projection.profile_revision,
           metadata,
         ],
       )
@@ -2919,13 +3200,11 @@ async function diagnoseDelivery(args: string[]) {
         : { rows: [] as any[] }
       const consumerRow = consumer.rows[0]
       if (consumerRow) {
-        let metadata: Record<string, unknown> = {}
-        if (consumerRow.metadata && typeof consumerRow.metadata === 'object') {
-          metadata = consumerRow.metadata
-        } else if (typeof consumerRow.metadata === 'string') {
-          try { metadata = JSON.parse(consumerRow.metadata) } catch {}
-        }
-        consumerRow.has_discord_id = typeof metadata.discord_id === 'string' && metadata.discord_id.length > 0
+        const binding = await getDiscordUiBindingForAgent(db as any, consumerAgentId ?? '')
+        const discordUiId = await getAgentDiscordUiId(db as any, consumerAgentId ?? '')
+        consumerRow.has_discord_id = discordUiId !== null
+        consumerRow.discord_ui_id = discordUiId
+        consumerRow.discord_ui_binding_status = binding?.status ?? null
       }
       const projectionIdentityId = row?.projection_identity_id ?? null
       const projection = projectionIdentityId
@@ -2937,13 +3216,11 @@ async function diagnoseDelivery(args: string[]) {
         : { rows: [] as any[] }
       const projectionRow = projection.rows[0]
       if (projectionRow) {
-        let metadata: Record<string, unknown> = {}
-        if (projectionRow.metadata && typeof projectionRow.metadata === 'object') {
-          metadata = projectionRow.metadata
-        } else if (typeof projectionRow.metadata === 'string') {
-          try { metadata = JSON.parse(projectionRow.metadata) } catch {}
-        }
-        projectionRow.has_discord_id = typeof metadata.discord_id === 'string' && metadata.discord_id.length > 0
+        const binding = await getDiscordUiBindingForAgent(db as any, projectionIdentityId ?? '')
+        const discordUiId = await getAgentDiscordUiId(db as any, projectionIdentityId ?? '')
+        projectionRow.has_discord_id = discordUiId !== null
+        projectionRow.discord_ui_id = discordUiId
+        projectionRow.discord_ui_binding_status = binding?.status ?? null
       }
       report.outbound = diagnoseOutboundQueueRow(row, consumerRow ?? null, projectionRow ?? null)
     }
@@ -2987,12 +3264,9 @@ async function diagnoseProjection(args: string[]) {
       ).catch(() => ({ rows: [] as any[] }))
       : { rows: [] as any[] }
     const consumerRow = consumer.rows[0] ?? null
-    const metadata = (() => {
-      if (!consumerRow?.metadata) return {}
-      if (typeof consumerRow.metadata === 'object') return consumerRow.metadata
-      try { return JSON.parse(consumerRow.metadata) } catch { return {} }
-    })() as Record<string, unknown>
-    const hasDiscordIdentity = typeof metadata.discord_id === 'string' && metadata.discord_id.trim().length > 0
+    const consumerBinding = consumerAgentId ? await getDiscordUiBindingForAgent(db as any, consumerAgentId) : null
+    const consumerDiscordUiId = consumerAgentId ? await getAgentDiscordUiId(db as any, consumerAgentId) : null
+    const hasDiscordIdentity = consumerDiscordUiId !== null
     const projectionIdentityId = projection.projectionIdentityId
     const projectionAgent = projectionIdentityId
       ? await db.query(
@@ -3002,13 +3276,9 @@ async function diagnoseProjection(args: string[]) {
       ).catch(() => ({ rows: [] as any[] }))
       : { rows: [] as any[] }
     const projectionRow = projectionAgent.rows[0] ?? null
-    const projectionMetadata = (() => {
-      if (!projectionRow?.metadata) return {}
-      if (typeof projectionRow.metadata === 'object') return projectionRow.metadata
-      try { return JSON.parse(projectionRow.metadata) } catch { return {} }
-    })() as Record<string, unknown>
-    const projectionHasDiscordIdentity =
-      typeof projectionMetadata.discord_id === 'string' && projectionMetadata.discord_id.trim().length > 0
+    const projectionBinding = projectionIdentityId ? await getDiscordUiBindingForAgent(db as any, projectionIdentityId) : null
+    const projectionDiscordUiId = projectionIdentityId ? await getAgentDiscordUiId(db as any, projectionIdentityId) : null
+    const projectionHasDiscordIdentity = projectionDiscordUiId !== null
     const delegated = consumerAgentId !== null && consumerAgentId !== fromAgentId
     const report = {
       ok: true,
@@ -3031,7 +3301,11 @@ async function diagnoseProjection(args: string[]) {
         projection_fallback_reason: projection.projectionFallbackReason,
         delegated,
         consumer_discord_identity_present: hasDiscordIdentity,
+        consumer_discord_ui_id: consumerDiscordUiId,
+        consumer_discord_ui_binding_status: consumerBinding?.status ?? null,
         projection_discord_identity_present: projectionHasDiscordIdentity,
+        projection_discord_ui_id: projectionDiscordUiId,
+        projection_discord_ui_binding_status: projectionBinding?.status ?? null,
         consumer_status: consumerRow?.status ?? null,
         consumer_runtime: consumerRow?.runtime ?? null,
         projection_status: projectionRow?.status ?? null,
@@ -3064,8 +3338,8 @@ async function diagnoseProjection(args: string[]) {
       `Consumer source:   ${projection.consumerSource}`,
       `Projection source: ${projection.projectionSource}`,
       `Fallback reason:   ${projection.projectionFallbackReason ?? '(none)'}`,
-      `Consumer Discord:  ${hasDiscordIdentity ? 'token identity present' : 'no token identity detected'}`,
-      `Projection Discord: ${projectionHasDiscordIdentity ? 'token identity present' : 'no token identity detected'}`,
+      `Consumer Discord:  ${hasDiscordIdentity ? `ui_id=${consumerDiscordUiId}${consumerBinding?.status ? ` (${consumerBinding.status})` : ''}` : 'no UI identity detected'}`,
+      `Projection Discord: ${projectionHasDiscordIdentity ? `ui_id=${projectionDiscordUiId}${projectionBinding?.status ? ` (${projectionBinding.status})` : ''}` : 'no UI identity detected'}`,
       `Consumer status:   ${consumerRow?.status ?? '(unknown)'}${consumerRow?.runtime ? ` / ${consumerRow.runtime}` : ''}`,
       `Projection status: ${projectionRow?.status ?? '(unknown)'}${projectionRow?.runtime ? ` / ${projectionRow.runtime}` : ''}`,
       '',
@@ -3321,6 +3595,21 @@ async function status(args: string[]) {
             LIMIT 1`,
         [agentId],
       )
+      const workerActivity = await db.query(
+        `SELECT wa.*,
+                mq.status AS queue_status,
+                mq.message_id AS message_id,
+                ari.status AS runtime_status,
+                ari.last_seen_at AS runtime_last_seen_at
+           FROM worker_activity wa
+           LEFT JOIN message_queue mq ON mq.id = wa.queue_id
+           LEFT JOIN agent_runtime_instances ari ON ari.runtime_instance_id = wa.runtime_instance_id
+          WHERE wa.agent_id = $1
+            AND wa.status IN ('planned', 'running', 'blocked', 'stalled')
+          ORDER BY wa.updated_at DESC
+          LIMIT 1`,
+        [agentId],
+      ).catch(() => ({ rows: [] as any[] }))
       const row = agent.rows[0]
       const result = {
         agent_id: agentId,
@@ -3328,6 +3617,7 @@ async function status(args: string[]) {
         status: row?.status ?? 'unknown',
         last_seen_at: row?.last_seen_at ?? null,
         current_message_id: claim.rows[0]?.id ?? null,
+        worker_activity: workerActivity.rows[0] ? normalizeWorkerActivity(workerActivity.rows[0]) : null,
       }
       if (format === 'json') {
         process.stdout.write(JSON.stringify(result) + '\n')
@@ -3440,6 +3730,20 @@ async function status(args: string[]) {
         queueByAgent.set(r.agent_id, agg)
       }
 
+      const workerActivityRes = await db.query(
+        `SELECT wa.*
+           FROM worker_activity wa
+          WHERE wa.status IN ('planned', 'running', 'blocked', 'stalled')
+          ORDER BY wa.updated_at DESC
+          LIMIT 500`,
+      ).catch(() => ({ rows: [] as any[] }))
+      const workerActivityByAgent = new Map<string, Record<string, unknown>>()
+      for (const row of workerActivityRes.rows) {
+        if (!workerActivityByAgent.has(row.agent_id)) {
+          workerActivityByAgent.set(row.agent_id, normalizeWorkerActivity(row))
+        }
+      }
+
       // Drift warnings — pure DB findings, no shell-out. Each entry is a
       // short string the operator can paste into a follow-up issue.
       const drifts: string[] = []
@@ -3484,6 +3788,7 @@ async function status(args: string[]) {
             workspace: workspaceByAgent.get(a.agent_id) ?? null,
             retired: a.retired_raw === true || a.retired_raw === 'true' || a.retired_raw === 1,
             queue: queueByAgent.get(a.agent_id) ?? { pending: 0, received: 0, in_progress: 0, oldest: null },
+            worker_activity: workerActivityByAgent.get(a.agent_id) ?? null,
           })),
           drifts,
         }) + '\n')
@@ -3710,6 +4015,309 @@ function requireLeaseFlag(flags: Record<string, string>, name: string): string {
 
 const LEASE_SCOPE_TYPES = new Set(['connector_instance', 'channel_binding', 'queue_partition', 'runtime_instance'])
 const LEASE_PURPOSES = new Set(['inbound', 'outbound', 'worker', 'leader', 'presence', 'maintenance'])
+const WORKER_ACTIVITY_STATUSES = new Set(['planned', 'running', 'blocked', 'stalled', 'failed', 'completed', 'handoff'])
+
+function optionalWorkerText(value: string | undefined): string | null {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
+function requireWorkerFlag(flags: Record<string, string>, name: string): string {
+  const value = optionalWorkerText(flags[name])
+  if (!value) {
+    console.error(`Error: --${name} is required`)
+    process.exit(2)
+  }
+  return value
+}
+
+function parseWorkerActivityStatus(value: string | undefined): string {
+  const status = value?.trim() || 'running'
+  if (!WORKER_ACTIVITY_STATUSES.has(status)) {
+    console.error(`Error: --status must be one of ${Array.from(WORKER_ACTIVITY_STATUSES).join(', ')}`)
+    process.exit(2)
+  }
+  return status
+}
+
+function parseOptionalPositiveIntFlag(value: string | undefined, name: string): number | null {
+  if (value === undefined) return null
+  return parsePositiveIntFlag(value, 1, name)
+}
+
+function parseWorkerProgressPercent(value: string | undefined): number | null {
+  if (value === undefined) return null
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    console.error('Error: --progress must be an integer from 0 to 100')
+    process.exit(2)
+  }
+  return parsed
+}
+
+function parseWorkerTimestamp(value: unknown): Date | null {
+  if (!value) return null
+  if (value instanceof Date) return value
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)
+    ? `${trimmed.replace(' ', 'T')}Z`
+    : trimmed
+  const parsed = new Date(normalized)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function normalizeWorkerActivity(row: any): Record<string, unknown> {
+  const status = String(row.status)
+  const terminal = status === 'completed' || status === 'failed' || status === 'handoff'
+  const heartbeatAt = parseWorkerTimestamp(row.heartbeat_at)
+  const heartbeatAgeSec = heartbeatAt
+    ? Math.max(0, Math.floor((Date.now() - heartbeatAt.getTime()) / 1000))
+    : null
+  const staleAfterSec = Number(row.stale_after_sec ?? 120)
+  const visibilityState = terminal
+    ? 'closed'
+    : heartbeatAgeSec === null
+      ? 'unknown'
+      : heartbeatAgeSec > staleAfterSec
+        ? 'stale'
+        : 'moving'
+  return {
+    activity_id: row.activity_id,
+    agent_id: row.agent_id,
+    runtime_instance_id: row.runtime_instance_id ?? null,
+    lease_id: row.lease_id ?? null,
+    queue_id: row.queue_id === null || row.queue_id === undefined ? null : Number(row.queue_id),
+    queue_status: row.queue_status ?? null,
+    message_id: row.message_id ?? null,
+    activity_type: row.activity_type,
+    status: row.status,
+    summary: row.summary,
+    repository: row.repository ?? null,
+    branch: row.branch ?? null,
+    pull_request: row.pull_request ?? null,
+    artifact_uri: row.artifact_uri ?? null,
+    blocked_reason: row.blocked_reason ?? null,
+    handoff_target_agent_id: row.handoff_target_agent_id ?? null,
+    progress_percent: row.progress_percent === null || row.progress_percent === undefined ? null : Number(row.progress_percent),
+    progress_label: row.progress_label ?? null,
+    stale_after_sec: staleAfterSec,
+    heartbeat_age_sec: heartbeatAgeSec,
+    visibility_state: visibilityState,
+    runtime_status: row.runtime_status ?? null,
+    runtime_last_seen_at: row.runtime_last_seen_at ?? null,
+    started_at: row.started_at ?? null,
+    heartbeat_at: row.heartbeat_at ?? null,
+    completed_at: row.completed_at ?? null,
+    updated_at: row.updated_at ?? null,
+    metadata: parseJsonObject(row.metadata),
+  }
+}
+
+function formatWorkerActivityText(rows: Record<string, unknown>[]): string {
+  const lines = ['=== worker activity ===']
+  if (rows.length === 0) {
+    lines.push('No worker activity rows found.')
+    return `${lines.join('\n')}\n`
+  }
+  for (const row of rows) {
+    const agentId = String(row.agent_id)
+    const status = String(row.status)
+    const queue = row.queue_id === null ? '-' : `queue=${row.queue_id}`
+    const visibility = row.visibility_state ? `state=${row.visibility_state}` : null
+    const age = row.heartbeat_age_sec === null ? null : `age=${row.heartbeat_age_sec}s`
+    const progress = row.progress_percent === null ? null : `progress=${row.progress_percent}%`
+    const label = row.progress_label ? `phase=${row.progress_label}` : null
+    const repo = row.repository ? `repo=${row.repository}` : null
+    const branch = row.branch ? `branch=${row.branch}` : null
+    const pr = row.pull_request ? `pr=${row.pull_request}` : null
+    const blocked = row.blocked_reason ? `blocked=${row.blocked_reason}` : null
+    const heartbeat = row.heartbeat_at ? `hb=${new Date(String(row.heartbeat_at)).toISOString()}` : 'hb=never'
+    lines.push([agentId, status, queue, visibility, age, progress, label, heartbeat].filter(Boolean).join(' '))
+    lines.push(`  ${String(row.summary)}`)
+    const context = [repo, branch, pr, blocked].filter(Boolean)
+    if (context.length > 0) lines.push(`  ${context.join(' ')}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+async function workerCommand(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  const db = await getDb()
+  try {
+    if (subcommand === 'report') {
+      const agentId = resolveAgentId(args, 'worker report')
+      const activityId = optionalWorkerText(flags['activity-id'])
+      const status = parseWorkerActivityStatus(flags.status)
+      const summary = requireWorkerFlag(flags, 'summary')
+      const metadata = JSON.stringify(parseLeaseMetadata(flags.metadata))
+      const commonValues = [
+        agentId,
+        optionalWorkerText(flags['runtime-instance-id']),
+        optionalWorkerText(flags['lease-id']),
+        parseOptionalPositiveIntFlag(flags['queue-id'], 'queue-id'),
+        optionalWorkerText(flags['activity-type']) ?? 'worker',
+        status,
+        summary,
+        optionalWorkerText(flags.repository),
+        optionalWorkerText(flags.branch),
+        optionalWorkerText(flags['pull-request']) ?? optionalWorkerText(flags.pr),
+        optionalWorkerText(flags.artifact) ?? optionalWorkerText(flags['artifact-uri']),
+        optionalWorkerText(flags['blocked-reason']),
+        optionalWorkerText(flags['handoff-target']) ?? optionalWorkerText(flags['handoff-target-agent-id']),
+        parseWorkerProgressPercent(flags.progress ?? flags['progress-percent']),
+        optionalWorkerText(flags['progress-label']) ?? optionalWorkerText(flags.phase),
+        parseOptionalPositiveIntFlag(flags['stale-after-sec'], 'stale-after-sec'),
+        metadata,
+      ]
+      const insertColumns = activityId
+        ? `activity_id, agent_id, runtime_instance_id, lease_id, queue_id, activity_type, status, summary,
+           repository, branch, pull_request, artifact_uri, blocked_reason, handoff_target_agent_id,
+           progress_percent, progress_label, stale_after_sec, heartbeat_at, completed_at, updated_at, metadata`
+        : `agent_id, runtime_instance_id, lease_id, queue_id, activity_type, status, summary,
+           repository, branch, pull_request, artifact_uri, blocked_reason, handoff_target_agent_id,
+           progress_percent, progress_label, stale_after_sec, heartbeat_at, completed_at, updated_at, metadata`
+      const values = activityId
+        ? [
+            '$1', '$2', '$3', '$4', '$5', '$6', '$7', '$8', '$9', '$10', '$11', '$12', '$13', '$14',
+            '$15', '$16', 'COALESCE($17::int, 120)',
+            'now()', `CASE WHEN $7 IN ('completed', 'failed', 'handoff') THEN now() ELSE NULL END`, 'now()', 'COALESCE($18::jsonb, \'{}\'::jsonb)',
+          ]
+        : [
+            '$1', '$2', '$3', '$4', '$5', '$6', '$7', '$8', '$9', '$10', '$11', '$12', '$13',
+            '$14', '$15', 'COALESCE($16::int, 120)',
+            'now()', `CASE WHEN $6 IN ('completed', 'failed', 'handoff') THEN now() ELSE NULL END`, 'now()', 'COALESCE($17::jsonb, \'{}\'::jsonb)',
+          ]
+      const params = activityId ? [activityId, ...commonValues] : commonValues
+      const result = await db.query(
+        `INSERT INTO worker_activity (${insertColumns})
+         VALUES (${values.join(', ')})
+         ON CONFLICT (activity_id) DO UPDATE SET
+           agent_id = EXCLUDED.agent_id,
+           runtime_instance_id = EXCLUDED.runtime_instance_id,
+           lease_id = EXCLUDED.lease_id,
+           queue_id = EXCLUDED.queue_id,
+           activity_type = EXCLUDED.activity_type,
+           status = EXCLUDED.status,
+           summary = EXCLUDED.summary,
+           repository = EXCLUDED.repository,
+           branch = EXCLUDED.branch,
+           pull_request = EXCLUDED.pull_request,
+           artifact_uri = EXCLUDED.artifact_uri,
+           blocked_reason = EXCLUDED.blocked_reason,
+           handoff_target_agent_id = EXCLUDED.handoff_target_agent_id,
+           progress_percent = EXCLUDED.progress_percent,
+           progress_label = EXCLUDED.progress_label,
+           stale_after_sec = EXCLUDED.stale_after_sec,
+           heartbeat_at = now(),
+           completed_at = CASE
+             WHEN EXCLUDED.status IN ('completed', 'failed', 'handoff') THEN COALESCE(worker_activity.completed_at, now())
+             ELSE NULL
+           END,
+           updated_at = now(),
+           metadata = EXCLUDED.metadata
+         RETURNING *`,
+        params,
+      )
+      const row = result.rows[0]
+      await auditLog(db, 'worker.activity_report', agentId, row?.activity_id ?? activityId, {
+        activity_id: row?.activity_id ?? activityId,
+        status,
+        queue_id: commonValues[3],
+        repository: commonValues[7],
+        branch: commonValues[8],
+        pull_request: commonValues[9],
+        handoff_target_agent_id: commonValues[12],
+        progress_percent: commonValues[13],
+        progress_label: commonValues[14],
+        stale_after_sec: commonValues[15],
+      }).catch((err) => process.stderr.write(`agent-com: worker activity audit failed (non-fatal): ${err}\n`))
+      process.stdout.write(`${JSON.stringify({ ok: true, activity: normalizeWorkerActivity(row) }, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'ping') {
+      const agentId = resolveAgentId(args, 'worker ping')
+      const activityId = requireWorkerFlag(flags, 'activity-id')
+      const status = parseWorkerActivityStatus(flags.status)
+      const summary = optionalWorkerText(flags.summary)
+      const progressPercent = parseWorkerProgressPercent(flags.progress ?? flags['progress-percent'])
+      const progressLabel = optionalWorkerText(flags['progress-label']) ?? optionalWorkerText(flags.phase)
+      const staleAfterSec = parseOptionalPositiveIntFlag(flags['stale-after-sec'], 'stale-after-sec')
+      const metadata = flags.metadata ? JSON.stringify(parseLeaseMetadata(flags.metadata)) : null
+      const result = await db.query(
+        `UPDATE worker_activity
+            SET status = $3,
+                summary = COALESCE($4, summary),
+                progress_percent = COALESCE($5::int, progress_percent),
+                progress_label = COALESCE($6, progress_label),
+                stale_after_sec = COALESCE($7::int, stale_after_sec),
+                heartbeat_at = now(),
+                completed_at = CASE
+                  WHEN $3 IN ('completed', 'failed', 'handoff') THEN COALESCE(completed_at, now())
+                  ELSE NULL
+                END,
+                updated_at = now(),
+                metadata = CASE
+                  WHEN $8::text IS NULL THEN metadata
+                  ELSE COALESCE($8::jsonb, '{}'::jsonb)
+                END
+          WHERE activity_id = $1
+            AND agent_id = $2
+         RETURNING *`,
+        [activityId, agentId, status, summary, progressPercent, progressLabel, staleAfterSec, metadata],
+      )
+      if (result.rows.length === 0) {
+        console.error(`Error [WORKER_ACTIVITY_NOT_FOUND]: ${activityId}`)
+        process.exit(1)
+      }
+      const row = result.rows[0]
+      await auditLog(db, 'worker.activity_ping', agentId, activityId, {
+        activity_id: activityId,
+        status,
+        progress_percent: progressPercent,
+        progress_label: progressLabel,
+      }).catch((err) => process.stderr.write(`agent-com: worker activity audit failed (non-fatal): ${err}\n`))
+      process.stdout.write(`${JSON.stringify({ ok: true, activity: normalizeWorkerActivity(row) }, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'list') {
+      const format = flags.format ?? 'json'
+      const agentId = optionalWorkerText(flags['agent-id'])
+      const includeClosed = flagEnabled(flags['include-closed'])
+      const limit = parsePositiveIntFlag(flags.limit, 20, 'limit')
+      const result = await db.query(
+        `SELECT wa.*,
+                mq.status AS queue_status,
+                mq.message_id AS message_id,
+                ari.status AS runtime_status,
+                ari.last_seen_at AS runtime_last_seen_at
+           FROM worker_activity wa
+           LEFT JOIN message_queue mq ON mq.id = wa.queue_id
+           LEFT JOIN agent_runtime_instances ari ON ari.runtime_instance_id = wa.runtime_instance_id
+          WHERE ($1::text IS NULL OR wa.agent_id = $1)
+            AND ($2 OR wa.status IN ('planned', 'running', 'blocked', 'stalled'))
+          ORDER BY wa.updated_at DESC
+          LIMIT $3`,
+        [agentId, includeClosed, limit],
+      )
+      const activities = result.rows.map(normalizeWorkerActivity)
+      if (format === 'text') {
+        process.stdout.write(formatWorkerActivityText(activities))
+        return
+      }
+      process.stdout.write(`${JSON.stringify({ ok: true, activities }, null, 2)}\n`)
+      return
+    }
+
+    console.error('Usage: agent-com worker <report|ping|list> ...')
+    process.exit(2)
+  } finally {
+    await db.end()
+  }
+}
 
 function parseLeaseScopeType(flags: Record<string, string>): LeaseScopeType {
   const value = requireLeaseFlag(flags, 'scope-type')
@@ -3871,6 +4479,8 @@ if (command === 'channel') {
   await inboundCommand(subcommand, rest)
 } else if (command === 'fleet') {
   await fleetCommand(subcommand, rest)
+} else if (command === 'worker') {
+  await workerCommand(subcommand, rest)
 } else if (command === 'agents') {
   await listAgents()
 } else {
@@ -3922,6 +4532,12 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only Discord inbound smoke evidence by channel
   fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke]
                                                        — read-only all-agent AUN readiness gates and activation blockers
+  worker report --agent-id <agent> --summary <text> [--status running|blocked|stalled|failed|completed|handoff] [--queue-id <id>] [--repository <repo>] [--branch <branch>] [--pull-request <ref>] [--progress 0-100] [--progress-label <phase>] [--stale-after-sec 120] [--blocked-reason <text>] [--handoff-target <agent>]
+                                                       — write DB-backed current activity evidence for an internal worker
+  worker ping --agent-id <agent> --activity-id <uuid> [--summary <text>] [--progress 0-100] [--progress-label <phase>]
+                                                       — heartbeat an existing worker activity row so operators can tell it is still moving
+  worker list [--agent-id <agent>] [--include-closed] [--format json|text] [--limit 20]
+                                                       — show visible worker activity evidence without requiring Discord identity
   agents                                              — list registered agents (JSON)
   status [--format json] [--agent-id <id>]            — system or per-agent status
   heartbeat [--runtime-instance-id <uuid>]           — update last_seen_at and optional runtime heartbeat evidence

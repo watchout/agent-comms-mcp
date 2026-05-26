@@ -120,6 +120,19 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
     expect(names).toContain('profile_enabled')
     expect(names).toContain('profile_revision')
   })
+  test('token management inventory tables exist', () => {
+    const tables = dbRead(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
+    const names = tables.map((t: any) => t.name)
+    expect(names).toContain('connector_credentials')
+    expect(names).toContain('agent_provider_identities')
+    expect(names).toContain('provider_channel_access')
+    expect(names).toContain('agent_ui_bindings')
+  })
+  test('worker activity visibility table exists', () => {
+    const tables = dbRead(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
+    const names = tables.map((t: any) => t.name)
+    expect(names).toContain('worker_activity')
+  })
 })
 
 describe('F1b — agent profile SSOT CLI (SQLite)', () => {
@@ -240,6 +253,9 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       'agent_workspace_bindings',
       'agent_runtime_instances',
       'connector_instances',
+      'connector_credentials',
+      'agent_provider_identities',
+      'agent_ui_bindings',
     ])
     expect(dbRead(`SELECT * FROM agent_workspaces`)).toHaveLength(0)
     expect(dbRead(`SELECT * FROM connector_instances`)).toHaveLength(0)
@@ -279,7 +295,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
         status: 'running',
       },
     ])
-    const connectors = dbRead(`SELECT agent_id, provider, connector_uri, status, metadata FROM connector_instances`)
+    const connectors = dbRead(`SELECT connector_instance_id, agent_id, provider, connector_uri, status, metadata FROM connector_instances`)
     expect(connectors).toHaveLength(1)
     expect(connectors[0]).toMatchObject({
       agent_id: 'probe-f',
@@ -292,10 +308,137 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       agent_id: 'probe-f',
       token_source_ref_set: true,
     })
+    const credentials = dbRead(`SELECT credential_id, agent_id, provider, connector_instance_id, secret_ref, status, trust_status, source FROM connector_credentials`)
+    expect(credentials).toHaveLength(1)
+    expect(credentials[0]).toMatchObject({
+      agent_id: 'probe-f',
+      provider: 'discord',
+      connector_instance_id: connectors[0].connector_instance_id,
+      secret_ref: 'local-env:PROBE_DISCORD_TOKEN',
+      status: 'registered',
+      trust_status: 'local',
+      source: 'bot_profile_projector',
+    })
+    const identities = dbRead(`SELECT provider_identity_id, agent_id, provider, provider_subject_id, provider_handle, status, trust_status, source FROM agent_provider_identities`)
+    expect(identities).toHaveLength(1)
+    expect(identities[0]).toMatchObject({
+      agent_id: 'probe-f',
+      provider: 'discord',
+      provider_subject_id: '123456789012345678',
+      provider_handle: 'probe-f',
+      status: 'expected',
+      trust_status: 'unverified',
+      source: 'bot_profile_projector',
+    })
+    const uiBindings = dbRead(`SELECT agent_id, ui_type, ui_id, ui_handle, ui_token_ref, connector_instance_id, credential_id, provider_identity_id, surface_role, status, trust_status FROM agent_ui_bindings`)
+    expect(uiBindings).toHaveLength(1)
+    expect(uiBindings[0]).toMatchObject({
+      agent_id: 'probe-f',
+      ui_type: 'discord',
+      ui_id: '123456789012345678',
+      ui_handle: 'probe-f',
+      ui_token_ref: 'local-env:PROBE_DISCORD_TOKEN',
+      connector_instance_id: connectors[0].connector_instance_id,
+      credential_id: credentials[0].credential_id,
+      provider_identity_id: identities[0].provider_identity_id,
+      surface_role: 'primary',
+      status: 'registered',
+      trust_status: 'unverified',
+    })
+    expect(dbRead(`SELECT * FROM provider_channel_access`)).toHaveLength(0)
 
     const strict = runCli(['agent', 'profile', 'doctor', '--strict'])
     expect(strict.status).toBe(0)
     expect(JSON.parse(strict.stdout).ok).toBe(true)
+  })
+
+  test('worker activity report writes DB-backed progress evidence and status exposes it', () => {
+    const { queueId } = seedPendingMessage('worker visibility probe')
+    const reported = runCli([
+      'worker', 'report',
+      '--agent-id', 'probe-f',
+      '--queue-id', String(queueId),
+      '--summary', 'Implement worker visibility table',
+      '--status', 'running',
+      '--repository', 'codex-aun',
+      '--branch', 'codex/token-backed-discord-channel-bots',
+      '--pull-request', '#visibility',
+      '--progress', '12',
+      '--progress-label', 'schema',
+      '--stale-after-sec', '300',
+      '--metadata', '{"source":"test"}',
+    ])
+    expect(reported.status).toBe(0)
+    const payload = JSON.parse(reported.stdout)
+    expect(payload.ok).toBe(true)
+    expect(payload.activity).toMatchObject({
+      agent_id: 'probe-f',
+      queue_id: queueId,
+      status: 'running',
+      summary: 'Implement worker visibility table',
+      repository: 'codex-aun',
+      branch: 'codex/token-backed-discord-channel-bots',
+      pull_request: '#visibility',
+      progress_percent: 12,
+      progress_label: 'schema',
+      stale_after_sec: 300,
+      visibility_state: 'moving',
+      metadata: { source: 'test' },
+    })
+
+    const pinged = runCli([
+      'worker', 'ping',
+      '--agent-id', 'probe-f',
+      '--activity-id', payload.activity.activity_id,
+      '--summary', 'Running targeted worker visibility tests',
+      '--progress', '33',
+      '--progress-label', 'tests',
+    ])
+    expect(pinged.status).toBe(0)
+    const pingPayload = JSON.parse(pinged.stdout)
+    expect(pingPayload.activity).toMatchObject({
+      activity_id: payload.activity.activity_id,
+      status: 'running',
+      summary: 'Running targeted worker visibility tests',
+      progress_percent: 33,
+      progress_label: 'tests',
+      stale_after_sec: 300,
+      visibility_state: 'moving',
+    })
+
+    const rows = dbRead(`SELECT agent_id, queue_id, status, summary, repository, branch, pull_request, progress_percent, progress_label, stale_after_sec FROM worker_activity`)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      agent_id: 'probe-f',
+      queue_id: queueId,
+      status: 'running',
+      summary: 'Running targeted worker visibility tests',
+      repository: 'codex-aun',
+      branch: 'codex/token-backed-discord-channel-bots',
+      pull_request: '#visibility',
+      progress_percent: 33,
+      progress_label: 'tests',
+      stale_after_sec: 300,
+    })
+
+    const listed = runCli(['worker', 'list', '--agent-id', 'probe-f', '--format', 'json'])
+    expect(listed.status).toBe(0)
+    const listPayload = JSON.parse(listed.stdout)
+    expect(listPayload.activities).toHaveLength(1)
+    expect(listPayload.activities[0].activity_id).toBe(payload.activity.activity_id)
+
+    const status = runCli(['status', '--format', 'json'])
+    expect(status.status).toBe(0)
+    const statusPayload = JSON.parse(status.stdout)
+    expect(statusPayload.worker_activity).toMatchObject({
+      activity_id: payload.activity.activity_id,
+      status: 'running',
+      summary: 'Running targeted worker visibility tests',
+      progress_percent: 33,
+      progress_label: 'tests',
+      stale_after_sec: 300,
+      visibility_state: 'moving',
+    })
   })
 
   test('profile project materializes replacement aliases from profile metadata', () => {

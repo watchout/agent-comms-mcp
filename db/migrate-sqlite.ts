@@ -594,6 +594,105 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_connector_bindings_active_unique ON channel_connector_bindings(channel_id, provider, binding_role, connector_instance_id) WHERE status = 'active' AND connector_instance_id IS NOT NULL`)
 
   gatedExec(`
+    CREATE TABLE IF NOT EXISTS connector_credentials (
+      credential_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      provider TEXT NOT NULL DEFAULT 'discord',
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL,
+      credential_kind TEXT NOT NULL DEFAULT 'bot_token',
+      secret_ref TEXT NOT NULL,
+      token_fingerprint TEXT,
+      status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered', 'active', 'disabled', 'rotated', 'revoked')),
+      trust_status TEXT NOT NULL DEFAULT 'local' CHECK (trust_status IN ('local', 'unverified', 'verified', 'revoked', 'disabled')),
+      source TEXT NOT NULL DEFAULT 'bot_profile_projector',
+      evidence_revision INTEGER NOT NULL DEFAULT 1,
+      last_verified_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT,
+      revoked_at TEXT
+    )
+  `)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_credentials_provider_secret_ref_live ON connector_credentials(provider, secret_ref) WHERE status IN ('registered', 'active')`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_connector_credentials_agent_status ON connector_credentials(agent_id, provider, status)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_connector_credentials_connector ON connector_credentials(connector_instance_id) WHERE connector_instance_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_provider_identities (
+      provider_identity_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      provider TEXT NOT NULL DEFAULT 'discord',
+      provider_subject_id TEXT NOT NULL,
+      provider_handle TEXT,
+      identity_kind TEXT NOT NULL DEFAULT 'bot',
+      status TEXT NOT NULL DEFAULT 'expected' CHECK (status IN ('expected', 'verified', 'disabled', 'revoked')),
+      trust_status TEXT NOT NULL DEFAULT 'unverified' CHECK (trust_status IN ('local', 'unverified', 'verified', 'revoked', 'disabled')),
+      source TEXT NOT NULL DEFAULT 'bot_profile_projector',
+      evidence_revision INTEGER NOT NULL DEFAULT 1,
+      last_verified_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT,
+      revoked_at TEXT
+    )
+  `)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_provider_identities_provider_subject_live ON agent_provider_identities(provider, provider_subject_id) WHERE status IN ('expected', 'verified')`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_provider_identities_agent_provider ON agent_provider_identities(agent_id, provider, status)`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS provider_channel_access (
+      provider_channel_access_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      provider TEXT NOT NULL DEFAULT 'discord',
+      provider_channel_id TEXT NOT NULL,
+      connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agents(agent_id) ON DELETE CASCADE,
+      capabilities TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stale', 'disabled', 'revoked')),
+      trust_status TEXT NOT NULL DEFAULT 'local' CHECK (trust_status IN ('local', 'unverified', 'verified', 'revoked', 'disabled')),
+      source TEXT NOT NULL DEFAULT 'provider_discovery',
+      discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT
+    )
+  `)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_channel_access_connector_channel_live ON provider_channel_access(provider, provider_channel_id, connector_instance_id) WHERE status = 'active' AND connector_instance_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_provider_channel_access_agent ON provider_channel_access(agent_id, provider, status) WHERE agent_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_provider_channel_access_channel ON provider_channel_access(provider, provider_channel_id, status)`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS agent_ui_bindings (
+      binding_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      ui_type TEXT NOT NULL DEFAULT 'discord',
+      ui_id TEXT NOT NULL,
+      ui_handle TEXT,
+      ui_token_ref TEXT,
+      ui_token_fingerprint TEXT,
+      connector_instance_id TEXT REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL,
+      credential_id TEXT REFERENCES connector_credentials(credential_id) ON DELETE SET NULL,
+      provider_identity_id TEXT REFERENCES agent_provider_identities(provider_identity_id) ON DELETE SET NULL,
+      surface_role TEXT NOT NULL DEFAULT 'primary',
+      status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered', 'active', 'disabled', 'revoked')),
+      trust_status TEXT NOT NULL DEFAULT 'unverified' CHECK (trust_status IN ('local', 'unverified', 'verified', 'revoked', 'disabled')),
+      last_verified_at TEXT,
+      evidence_revision INTEGER NOT NULL DEFAULT 1,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disabled_at TEXT
+    )
+  `)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_ui_bindings_ui_live ON agent_ui_bindings(ui_type, ui_id) WHERE status IN ('registered', 'active')`)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_ui_bindings_agent_role_live ON agent_ui_bindings(agent_id, ui_type, surface_role) WHERE status IN ('registered', 'active')`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_ui_bindings_connector ON agent_ui_bindings(connector_instance_id) WHERE connector_instance_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_ui_bindings_credential ON agent_ui_bindings(credential_id) WHERE credential_id IS NOT NULL`)
+
+  gatedExec(`
     CREATE TABLE IF NOT EXISTS control_plane_leases (
       lease_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       lease_scope_type TEXT NOT NULL CHECK (lease_scope_type IN ('connector_instance', 'channel_binding', 'queue_partition', 'runtime_instance')),
@@ -614,6 +713,49 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_control_plane_leases_active_scope ON control_plane_leases(lease_scope_type, lease_scope_id, lease_purpose) WHERE status = 'active'`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_control_plane_leases_expiry ON control_plane_leases(status, expires_at)`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_control_plane_leases_holder_runtime ON control_plane_leases(holder_runtime_instance_id) WHERE holder_runtime_instance_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS worker_activity (
+      activity_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL,
+      lease_id TEXT REFERENCES control_plane_leases(lease_id) ON DELETE SET NULL,
+      queue_id INTEGER REFERENCES message_queue(id) ON DELETE SET NULL,
+      activity_type TEXT NOT NULL DEFAULT 'worker',
+      status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('planned', 'running', 'blocked', 'stalled', 'failed', 'completed', 'handoff')),
+      summary TEXT NOT NULL,
+      repository TEXT,
+      branch TEXT,
+      pull_request TEXT,
+      artifact_uri TEXT,
+      blocked_reason TEXT,
+      handoff_target_agent_id TEXT REFERENCES agents(agent_id) ON DELETE SET NULL,
+      progress_percent INTEGER CHECK (progress_percent IS NULL OR (progress_percent >= 0 AND progress_percent <= 100)),
+      progress_label TEXT,
+      stale_after_sec INTEGER NOT NULL DEFAULT 120 CHECK (stale_after_sec > 0),
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      heartbeat_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      metadata TEXT NOT NULL DEFAULT '{}'
+    )
+  `)
+  const workerActivityCols = db.query(`PRAGMA table_info(worker_activity)`).all() as Array<{ name: string }>
+  const workerActivityColNames = new Set(workerActivityCols.map((c) => c.name))
+  if (!workerActivityColNames.has('progress_percent')) {
+    gatedExec(`ALTER TABLE worker_activity ADD COLUMN progress_percent INTEGER CHECK (progress_percent IS NULL OR (progress_percent >= 0 AND progress_percent <= 100))`)
+  }
+  if (!workerActivityColNames.has('progress_label')) {
+    gatedExec(`ALTER TABLE worker_activity ADD COLUMN progress_label TEXT`)
+  }
+  if (!workerActivityColNames.has('stale_after_sec')) {
+    gatedExec(`ALTER TABLE worker_activity ADD COLUMN stale_after_sec INTEGER NOT NULL DEFAULT 120 CHECK (stale_after_sec > 0)`)
+  }
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_worker_activity_open ON worker_activity(agent_id, status, updated_at DESC) WHERE status IN ('planned', 'running', 'blocked', 'stalled')`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_worker_activity_queue ON worker_activity(queue_id) WHERE queue_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_worker_activity_runtime ON worker_activity(runtime_instance_id, status, updated_at DESC) WHERE runtime_instance_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_worker_activity_repo ON worker_activity(repository, branch, updated_at DESC) WHERE repository IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_worker_activity_handoff ON worker_activity(handoff_target_agent_id, status, updated_at DESC) WHERE handoff_target_agent_id IS NOT NULL`)
 
   gatedExec(`
     CREATE TABLE IF NOT EXISTS channel_routing_policy (

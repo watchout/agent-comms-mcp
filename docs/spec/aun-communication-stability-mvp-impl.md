@@ -91,6 +91,152 @@ If the same editable value must be entered in two places, the design is wrong.
 If a derived row cannot be deleted and rebuilt from the single editable profile
 plus discovery evidence, it is not derived state and must be redesigned.
 
+## AUN / Shirube Responsibility Boundary
+
+AUN is the communication MCP. It owns durable message transport, queue claim
+state, provider projection, delivery evidence, and deterministic diagnostics.
+It must not become the approval workflow engine.
+
+Approval policy belongs to Shirube or a higher-level workflow authority. That
+includes:
+
+- approval object schema and typed approval semantics
+- risk scoring and approval policy
+- quorum, delegation, expiry, and escalation rules
+- task DAG or execution-plan approval
+- deciding whether an approved action may execute
+
+AUN may carry approval-related references only as communication evidence:
+
+- message type, thread, and channel context
+- `approval_ref` or workflow correlation id from Shirube
+- sender, recipient, and delivery owner evidence
+- queued/sent/failed/retrying projection status
+- immutable audit timestamps for what AUN transported
+
+AUN must not infer approval from a Discord reaction, message mention, channel
+membership, or provider identity binding. If Shirube says execution is blocked,
+AUN transports and displays that state. If Shirube says execution is approved,
+AUN may deliver the resulting communication or projection subject to normal
+delivery-owner, credential, channel-access, idempotency, and rate-limit checks.
+
+## Router Bot Discord Surface
+
+Router or connector bots are delivery infrastructure, not normal Discord
+conversation surfaces. A human should not have to talk to a generic router bot
+from Discord to reach an AUN agent.
+
+Normal Discord conversation entry points are:
+
+- a token-backed agent bot/provider identity
+- a channel binding that resolves to an eligible delivery owner
+- a Shirube/workflow reference that AUN transports as communication evidence
+
+A router bot may still exist for migration, diagnostics, inbound capture,
+outbound delivery, or emergency operator commands, but it must not become the
+product-facing conversational identity. If a Discord message targets only the
+router with no resolvable `agent_id`, channel binding, or workflow reference,
+AUN should return a deterministic diagnosis instead of treating the router as
+the conversational participant.
+
+## Bot Token Migration Policy
+
+Discord bot cleanup should prefer deletion and new token issuance over
+reassigning existing tokens across logical agents.
+
+Rules:
+
+- Unused Discord bots should be disabled first, then deleted after audit/backout
+  retention is satisfied.
+- New product-facing agent bots should receive newly issued Discord application
+  tokens and fresh provider identity evidence.
+- Existing tokens may be rotated in place only when the logical `agent_id`,
+  Discord application/bot identity, channel role, and audit history are intended
+  to remain the same.
+- Existing tokens must not be "patched over" to represent a different
+  `agent_id`, role, or Discord-visible bot. That creates ambiguous ownership and
+  breaks provider identity evidence.
+- Token rotation must update only secret references/fingerprints and evidence
+  revisions. It must not rewrite historical message ownership, queue rows, or
+  channel membership.
+- Deletion/disable decisions must preserve enough audit evidence to explain why
+  an old token or bot no longer owns delivery.
+
+The operator flow is therefore: inventory, mark unused bots disabled, dry-run
+impact, remove unused bot bindings, delete after retention, then issue new
+tokens for new Discord-visible bots.
+
+## Plain-Language Token Management Rule
+
+For bot management to move forward, the DB must manage every Discord bot token.
+That does not always mean the DB stores the raw token text in a normal column.
+It means the DB has the management row that answers:
+
+- which `agent_id` owns this Discord bot
+- where the token is stored
+- whether the token is active, disabled, rotated, or revoked
+- which Discord bot/user id the token was verified as
+- which channels the token can write to
+- when the evidence was last checked
+
+There are two acceptable storage modes:
+
+1. Reference mode:
+   The DB stores a secret reference, fingerprint, owner, status, and verification
+   evidence. The actual token stays in env, Keychain, Vault, or `.mcp.json`.
+
+2. Encrypted DB secret mode:
+   The DB stores encrypted secret material through a managed secret table. The
+   token is write-only from UI/API, never displayed back, and decrypted only by
+   connector/runtime code that needs to verify or send.
+
+The current implementation is in reference mode. It is enough for management if
+every token has a DB row with owner, status, fingerprint, provider identity, and
+channel access evidence. If operators need central UI-based token entry later,
+add encrypted DB secret mode, not plaintext token columns.
+
+## Internal Worker Visibility
+
+Internal workers may run DB/TUI-only without Discord tokens. That does not mean
+they are hidden.
+
+AUN's value is that worker activity is visible from DB-backed evidence even when
+the worker has no Discord identity. At minimum, AUN should expose:
+
+- assigned work and owning `agent_id`
+- claimed queue row and message/thread context
+- runtime status, heartbeat, and claim age
+- current progress summary or last emitted status
+- related repository, branch, PR, or artifact when known
+- blocked/stalled/failed diagnosis
+- handoff or escalation target
+
+Discord should not require one visible bot per worker. Repo leads, channel
+bindings, or product-facing bots may project worker activity into Discord as
+summaries, status updates, or handoff messages. The source of truth remains the
+DB evidence; Discord is a human-facing projection.
+
+If an internal worker cannot provide heartbeat, progress, or queue evidence,
+AUN must show that as unknown or stalled. It must not make invisible worker
+activity look healthy just because a lead bot can still speak on Discord.
+
+Implementation baseline:
+
+- `agent_runtime_instances` remains the process/heartbeat evidence table.
+- `control_plane_leases` remains the fenced worker-claim table.
+- `message_queue` remains assigned/claimed work evidence.
+- `worker_activity` stores the operator-facing progress row: summary, status,
+  queue id, runtime id, lease id, repository, branch, PR/artifact context,
+  progress percent/phase, heartbeat freshness, blocker reason, and handoff
+  target.
+- Internal workers create/update that table through `agent-com worker report`
+  and can send lightweight liveness ticks through `agent-com worker ping`.
+- UI/operators derive "moving" from `heartbeat_at <= stale_after_sec`; stale
+  heartbeats must display as stale/unknown instead of pretending the worker is
+  healthy.
+- Operators and UI read it through `agent-com worker list` or `agent-com status
+  --format json`.
+
 ## SSOT And Hot-Path Materialization
 
 The source of truth for a secret does not have to be the DB. It only has to be
@@ -194,6 +340,12 @@ the candidates and require an explicit priority or override. If exactly one is
 eligible, AUN may derive the effective delivery owner automatically. If none are
 eligible, AUN must report which evidence is missing.
 
+A human-operated session may still bind the currently operated `agent_id` to a
+Discord provider subject id. That binding is explicit provider identity evidence
+for ownership, presence, audit, and operator UX. It does not make the agent an
+outbound channel bot unless token credential evidence and channel write evidence
+also exist.
+
 ## Non-Negotiable Boundaries
 
 - `discord_id` or future `provider_subject_id` identifies a provider subject.
@@ -206,6 +358,15 @@ eligible, AUN must report which evidence is missing.
   display.
 - Channel-level owner fields are fallback or override state. They are not the
   primary UI model.
+- Approval semantics are out of scope for AUN. They are owned by Shirube or a
+  higher-level workflow authority; AUN only carries approval references and
+  communication evidence.
+- Router/connector bots are not normal Discord conversation identities. They
+  may transport, project, and diagnose messages, but target conversation
+  identity must resolve to an AUN `agent_id` or workflow reference.
+- Existing Discord tokens must not be reused to represent different logical
+  agents. Delete or disable unused bots and issue fresh tokens for new
+  product-facing bot identities; rotate in place only for the same identity.
 - Data reconciliation must be dry-run-first and must not execute until the
   structural prerequisites are in place.
 
@@ -293,12 +454,18 @@ Outbound delivery must resolve through this order:
 1. explicit high-priority connector binding or override, if present and healthy
 2. exactly one active connector with provider write access for the channel
 3. legacy `channel_routing_policy.adapter_owner_agent_id`, only as mixed-fleet
-   fallback
+   fallback and only when that agent has token-backed Discord connector
+   evidence
 4. diagnosed terminal failure when no eligible connector exists
 
 If multiple eligible connectors exist, the resolver must not silently choose.
 It must return an ambiguity diagnosis that UI/CLI can resolve with priority or
 override.
+
+Discord-visible channel bots must be token-backed. An agent that has only
+`agent_id`, membership, display metadata, or a Discord subject id is an internal
+worker or identity-only profile until credential evidence and channel write
+access are present.
 
 ### 6. Queue And Reply Evidence
 
