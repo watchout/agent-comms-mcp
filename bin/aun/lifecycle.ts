@@ -1,6 +1,6 @@
 import type { DbAdapter } from '../../core/db/adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
-import { evaluateDoneTransition, formatDoneTransitionRejection } from '../../core/terminal-baton-invariant'
+import { lifecycleTransitionCore } from '../../core/lifecycle-transition'
 import {
   buildCommandPlan,
   repoRoot,
@@ -104,64 +104,32 @@ export async function lifecycleTransition(
     return errorResult(2, 'AUN_LIFECYCLE_INVALID', (err as Error).message, opts)
   }
 
-  const fromStatus = mode === 'processing' ? 'received' : 'in_progress'
   const toStatus = mode === 'processing' ? 'in_progress' : 'done'
 
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<LifecycleTransitionSummary>(async (tx) => {
-        const row = await tx.queryOne<{
-          id: string | number
-          agent_id: string
-          message_id: string | null
-          status: string
-        }>(
-          `SELECT id, agent_id, message_id, status
-             FROM message_queue
-            WHERE id = $1 AND agent_id = $2`,
-          [queueId, plan.env.AGENT_ID],
-        )
-        if (!row) {
-          throw new Error(`NOT_FOUND: queue_id=${queueId} is not owned by agent_id=${plan.env.AGENT_ID}`)
+        const transition = await lifecycleTransitionCore(tx, {
+          mode,
+          queueId,
+          agentId: plan.env.AGENT_ID,
+          ownerAgentId: plan.env.AGENT_ID,
+        })
+        if (!transition.ok) {
+          throw new Error(transition.message)
         }
-        if (row.status === toStatus) {
+        if (transition.already_transitioned) {
           return {
             ok: true,
             mode,
             agent_id: plan.env.AGENT_ID,
             expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
-            queue_id: String(row.id),
-            message_id: row.message_id,
+            queue_id: String(transition.queue_id),
+            message_id: transition.message_id,
             status: toStatus,
             already_transitioned: true,
             final_close_contract: 'aun reply --close --queue-id <id> --message-id <uuid>',
           }
-        }
-        if (row.status !== fromStatus) {
-          throw new Error(`INVALID_STATE: queue_id=${queueId} status=${row.status}; expected ${fromStatus}`)
-        }
-
-        if (mode === 'done') {
-          const decision = await evaluateDoneTransition(
-            async (sql, params) => tx.query(sql, params as any[] | undefined),
-            { queueId, agentId: plan.env.AGENT_ID },
-          )
-          if (!decision.allowed) {
-            throw new Error(formatDoneTransitionRejection(decision))
-          }
-        }
-
-        const setClause = mode === 'done'
-          ? `status = 'done', done_at = now()`
-          : `status = 'in_progress'`
-        const updated = await tx.execute(
-          `UPDATE message_queue
-              SET ${setClause}
-            WHERE id = $1 AND agent_id = $2 AND status = $3`,
-          [queueId, plan.env.AGENT_ID, fromStatus],
-        )
-        if (updated.rowCount !== 1) {
-          throw new Error(`RACE: queue_id=${queueId} changed before ${mode}`)
         }
         await tx.execute(
           `UPDATE agents SET
@@ -182,8 +150,8 @@ export async function lifecycleTransition(
           mode,
           agent_id: plan.env.AGENT_ID,
           expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
-          queue_id: String(row.id),
-          message_id: row.message_id,
+          queue_id: String(transition.queue_id),
+          message_id: transition.message_id,
           status: toStatus,
           final_close_contract: 'aun reply --close --queue-id <id> --message-id <uuid>',
         }

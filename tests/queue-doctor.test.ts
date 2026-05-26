@@ -90,4 +90,29 @@ describe('queue doctor', () => {
     expect(text).toContain('Scope: codex-cto / stale>15m')
     expect(text).toContain('[blocker] stale_pending: 1 (codex-cto)')
   })
+
+  test('done-without-baton SQL flags missing source and requires registered non-human baton recipients', async () => {
+    const sqlSeen: string[] = []
+    const db = {
+      async query(sql: string) {
+        sqlSeen.push(sql)
+        if (sql.includes('GROUP BY status')) return { rows: [] }
+        return { rows: [] }
+      },
+    }
+
+    await buildQueueDoctorReport(db)
+
+    const doneSql = sqlSeen.find((sql) => sql.includes('WITH RECURSIVE done_source AS')) ?? ''
+    expect(doneSql).toContain('LEFT JOIN agent_messages src')
+    expect(doneSql).toContain('LEFT JOIN LATERAL')
+    expect(doneSql).toContain('mq.message_id IS NOT NULL')
+    expect(doneSql).toContain('done_source.src_id IS NULL')
+    expect(doneSql).toContain('done_source.src_author_id IS NULL')
+    expect(doneSql).toContain('human.message_id IS NOT NULL')
+    expect(doneSql).toContain('JOIN agents child_recipient')
+    expect(doneSql).toContain('child_recipient.agent_id IS NOT NULL')
+    expect(doneSql).toContain("child_recipient.agent_type <> 'human'")
+    expect(doneSql).not.toContain("coalesce(child_recipient.agent_type, 'dev') <> 'human'")
+  })
 })

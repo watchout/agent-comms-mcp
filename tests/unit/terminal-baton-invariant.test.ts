@@ -82,6 +82,48 @@ describe('terminal baton invariant', () => {
     })
   })
 
+  test('allows internal unbacked rows with no source message id', async () => {
+    const decision = await evaluateDoneTransition(queryFor({
+      queue: queue({ message_id: null, source_message_id: null, author_id: null }),
+    }), { queueId: 42, agentId: 'codex-aun' })
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      reason: 'internal_unbacked',
+    })
+  })
+
+  test('blocks non-null queue message ids when source provenance cannot be resolved', async () => {
+    const decision = await evaluateDoneTransition(queryFor({
+      queue: queue({ source_message_id: null, author_id: null }),
+    }), { queueId: 42, agentId: 'codex-aun' })
+
+    expect(decision).toMatchObject({
+      allowed: false,
+      code: 'TERMINAL_BATON_REQUIRED',
+      reason: 'source_missing_requires_terminal_evidence',
+      details: {
+        source_message_missing: true,
+        source_author_missing: true,
+      },
+    })
+  })
+
+  test('allows source-unresolved rows only when explicit no-reply-required evidence is present', async () => {
+    const decision = await evaluateDoneTransition(queryFor({
+      queue: queue({
+        source_message_id: null,
+        author_id: null,
+        payload: JSON.stringify({ terminal_baton: { allow_done: true } }),
+      }),
+    }), { queueId: 42, agentId: 'codex-aun' })
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      reason: 'explicit_no_reply_required',
+    })
+  })
+
   test('allows human-authored work when the current agent passed a durable bot baton', async () => {
     const decision = await evaluateDoneTransition(queryFor({
       queue: queue(),
@@ -103,6 +145,46 @@ describe('terminal baton invariant', () => {
         baton_message_id: 'child-message',
         baton_recipient_agent_id: 'codex-cto',
       },
+    })
+  })
+
+  test('rejects baton evidence addressed to an unknown recipient', async () => {
+    const decision = await evaluateDoneTransition(queryFor({
+      queue: queue(),
+      agents: [
+        { agent_id: 'ceo', agent_type: 'human', metadata: { discord_id: '1227059781265653783' } },
+      ],
+      batons: [{
+        message_id: 'child-message',
+        recipient_agent_id: 'missing-bot',
+        queue_status: 'pending',
+      }],
+    }), { queueId: 42, agentId: 'codex-aun' })
+
+    expect(decision).toMatchObject({
+      allowed: false,
+      code: 'TERMINAL_BATON_REQUIRED',
+      reason: 'human_source_requires_reply_or_baton',
+    })
+  })
+
+  test('rejects baton evidence addressed to a human recipient', async () => {
+    const decision = await evaluateDoneTransition(queryFor({
+      queue: queue(),
+      agents: [
+        { agent_id: 'ceo', agent_type: 'human', metadata: { discord_id: '1227059781265653783' } },
+      ],
+      batons: [{
+        message_id: 'child-message',
+        recipient_agent_id: 'ceo',
+        queue_status: 'pending',
+      }],
+    }), { queueId: 42, agentId: 'codex-aun' })
+
+    expect(decision).toMatchObject({
+      allowed: false,
+      code: 'TERMINAL_BATON_REQUIRED',
+      reason: 'human_source_requires_reply_or_baton',
     })
   })
 

@@ -11,7 +11,6 @@ export type TerminalBatonDecision =
       reason:
         | 'queue_missing'
         | 'internal_unbacked'
-        | 'source_missing'
         | 'bot_or_internal_source'
         | 'explicit_no_reply_required'
         | 'baton_forwarded'
@@ -20,7 +19,7 @@ export type TerminalBatonDecision =
   | {
       allowed: false
       code: TerminalBatonDecisionCode
-      reason: 'human_source_requires_reply_or_baton'
+      reason: 'human_source_requires_reply_or_baton' | 'source_missing_requires_terminal_evidence'
       details: Record<string, unknown>
     }
 
@@ -164,7 +163,7 @@ async function fetchMessageAncestry(
 
 function isNonHumanRecipient(agentId: string, agents: AgentRow[]): boolean {
   const agent = agents.find((candidate) => candidate.agent_id === agentId)
-  return agent?.agent_type !== 'human'
+  return !!agent && agent.agent_type !== 'human'
 }
 
 function decisionDetails(
@@ -208,8 +207,19 @@ export async function evaluateDoneTransition(
   if (!row.message_id) {
     return { allowed: true, reason: 'internal_unbacked', details: decisionDetails(row) }
   }
+  if (hasExplicitNoReplyRequiredFlag(row.payload, row.message_metadata)) {
+    return { allowed: true, reason: 'explicit_no_reply_required', details: decisionDetails(row) }
+  }
   if (!row.source_message_id || !row.author_id) {
-    return { allowed: true, reason: 'source_missing', details: decisionDetails(row) }
+    return {
+      allowed: false,
+      code: 'TERMINAL_BATON_REQUIRED',
+      reason: 'source_missing_requires_terminal_evidence',
+      details: decisionDetails(row, {
+        source_message_missing: !row.source_message_id,
+        source_author_missing: !row.author_id,
+      }),
+    }
   }
 
   const agents = await query<AgentRow>(
@@ -219,10 +229,6 @@ export async function evaluateDoneTransition(
   const humanRoot = ancestry.find((message) => isHumanAuthoredMessage(message, agents))
   if (!humanRoot) {
     return { allowed: true, reason: 'bot_or_internal_source', details: decisionDetails(row) }
-  }
-
-  if (hasExplicitNoReplyRequiredFlag(row.payload, row.message_metadata)) {
-    return { allowed: true, reason: 'explicit_no_reply_required', details: decisionDetails(row) }
   }
 
   const batonRows = await query<BatonRow>(
@@ -266,5 +272,5 @@ export async function evaluateDoneTransition(
 
 export function formatDoneTransitionRejection(decision: TerminalBatonDecision): string {
   if (decision.allowed) return ''
-  return `Error [${decision.code}]: human-rooted queue rows cannot be closed with bare done; send a reply to the requester, forward a durable AUN baton to another bot, or mark the row with explicit no_reply_required metadata. details=${JSON.stringify(decision.details)}`
+  return `Error [${decision.code}]: human-rooted or source-unresolved queue rows cannot be closed with bare done; send a reply to the requester, forward a durable AUN baton to a registered bot, or mark the row with explicit no_reply_required metadata. details=${JSON.stringify(decision.details)}`
 }

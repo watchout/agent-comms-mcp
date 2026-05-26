@@ -117,7 +117,7 @@ import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
 import { resolveTokenSourceRef } from './core/token-source-ref'
-import { evaluateDoneTransition, formatDoneTransitionRejection } from './core/terminal-baton-invariant'
+import { lifecycleTransitionCore } from './core/lifecycle-transition'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -3447,72 +3447,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!Number.isFinite(queueId) || queueId <= 0) {
       return { content: [{ type: 'text', text: `Error: ${name} queue_id must be a positive integer, got '${queueIdRaw}'.` }], isError: true }
     }
-    const fromStatus = name === 'processing' ? 'received' : 'in_progress'
-    const toStatus = name === 'processing' ? 'in_progress' : 'done'
     try {
       await client.query('BEGIN')
       try {
-        // Inspect first so idempotence and INVALID_STATE can be reported
-        // distinctly from "row not found". One row, one UPDATE.
-        const cur = await client.query<{ status: string }>(
-          `SELECT status FROM message_queue WHERE id = $1`,
-          [queueId],
-        )
-        if (cur.rows.length === 0) {
-          await client.query('ROLLBACK')
-          return {
-            content: [{ type: 'text', text: `Error [NOT_FOUND]: no message_queue row with id=${queueId}.` }],
-            isError: true,
-          }
-        }
-        const status = cur.rows[0]!.status
-        if (status === toStatus) {
-          await client.query('ROLLBACK')
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({ ok: true, queue_id: queueId, status: toStatus, already_transitioned: true }),
-            }],
-          }
-        }
-        if (status !== fromStatus) {
-          await client.query('ROLLBACK')
-          return {
-            content: [{
-              type: 'text',
-              text: `Error [INVALID_STATE]: ${name} requires status='${fromStatus}', got '${status}' (queue_id=${queueId}).`,
-            }],
-            isError: true,
-          }
-        }
-        if (name === 'done') {
-          const decision = await evaluateDoneTransition(
-            async (sql, params) => {
+        const transition = await lifecycleTransitionCore(
+          {
+            async query(sql, params) {
               const result = await client.query(sql, params as any[] | undefined)
               return result.rows
             },
-            { queueId, agentId: AGENT_ID },
-          )
-          if (!decision.allowed) {
-            await client.query('ROLLBACK')
-            return {
-              content: [{ type: 'text', text: formatDoneTransitionRejection(decision) }],
-              isError: true,
-            }
-          }
-        }
-        const setClauses = name === 'done'
-          ? `status = 'done', done_at = now()`
-          : `status = 'in_progress'`
-        const upd = await client.query(
-          `UPDATE message_queue SET ${setClauses} WHERE id = $1 AND status = $2 RETURNING id`,
-          [queueId, fromStatus],
+            async execute(sql, params) {
+              const result = await client.query(sql, params as any[] | undefined)
+              return { rowCount: result.rowCount ?? 0 }
+            },
+          },
+          { mode: name, queueId, agentId: AGENT_ID },
         )
-        if (upd.rows.length === 0) {
-          // Lost a race; another caller already advanced the row.
+        if (!transition.ok) {
           await client.query('ROLLBACK')
           return {
-            content: [{ type: 'text', text: `Error [RACE]: ${name} lost the status='${fromStatus}' transition for queue_id=${queueId}.` }],
+            content: [{ type: 'text', text: transition.message }],
             isError: true,
           }
         }
@@ -3520,7 +3474,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: 'text',
-            text: JSON.stringify({ ok: true, queue_id: queueId, status: toStatus }),
+            text: JSON.stringify({
+              ok: true,
+              queue_id: transition.queue_id,
+              status: transition.status,
+              ...(transition.already_transitioned ? { already_transitioned: true } : {}),
+            }),
           }],
         }
       } catch (err) {
