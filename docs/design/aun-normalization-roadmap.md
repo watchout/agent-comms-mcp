@@ -51,10 +51,21 @@ The final architecture has these properties:
 - one editable bot profile per local bot, with DB-backed derived evidence for
   runtimes, connectors, provider identities, channel bindings, routing policy,
   queue state, leases, and audit
+- one product-facing `agent_ui_bindings` record per active provider UI binding,
+  linking `agent_id` to provider subject, credential evidence, connector, and
+  verification status for low-latency UI and delivery lookup
+- one authoritative secret location per connector, which may be an external
+  local source such as env, Keychain, or `.mcp.json`; DB stores only the
+  reference, non-secret fingerprint, verification status, and derived evidence
 - derived evidence is created by deterministic code from the bot profile and
   discovery, not by user or AI duplication of the same setting
+- hot-path routing and UI reads use indexed materialized evidence, not raw secret
+  reads or provider API calls
 - deterministic CLI or daemon actions for every state transition
 - provider-neutral routing with Discord as one connector
+- Discord-specific UI can switch between eligible Discord bot connectors, but
+  that switch changes the selected connector/projection owner for a surface; it
+  must not mutate `agent_id` or copy a Discord id into routing authority
 - no one-channel-one-script duplication
 - no single post-office runtime that becomes the universal bottleneck
 - local-only operation first, without blocking later enterprise auth,
@@ -82,12 +93,22 @@ MVP is complete only when all of the following are true:
      derived from the bot profile token source and linked to runtime evidence
      without storing raw tokens
 2. Token identity is unambiguous:
+   - every active Discord-capable bot has an `agent_ui_bindings` row linking
+     `agent_id`, `ui_type='discord'`, verified Discord `ui_id`, credential
+     evidence, connector instance, and trust status
    - a live Discord token fingerprint maps to only one active connector owner
    - duplicate token fingerprints are blocked or reported before routing use
    - connector credentials are represented by non-secret fingerprint and
-     secret reference records, not raw token storage
+     secret reference records, not raw token storage in the MVP hot path
+   - if encrypted DB secret storage is later used, the UI/API remains
+     write-only for plaintext token input and never returns decrypted token
+     values; connector/runtime-only secret resolution remains outside normal
+     UI reads
    - provider channel read/write access is discovered or explicitly overridden
      before a connector is treated as a delivery owner
+   - delivery resolution reads credential, provider identity, and channel access
+     evidence from DB in the hot path; slow secret resolution and provider API
+     verification happen at startup, refresh, or explicit reconcile time
    - raw token values are never stored or printed in diagnostics
 3. Queue state is mechanically safe:
    - `next -> processing -> send/done` is a valid happy path
@@ -98,6 +119,8 @@ MVP is complete only when all of the following are true:
    - every operational Discord channel has a `channels` row
    - every operational Discord channel has a `channel_adapters` row
    - every operational channel has `channel_routing_policy`
+   - channel-level bot selection references `agent_ui_bindings`; it does not
+     duplicate token material or make the channel the credential owner
    - effective delivery owner can be derived from connector credentials and
      provider access, or falls back to an explicit legacy override with evidence
    - primary agent is clear where a channel has a local project owner

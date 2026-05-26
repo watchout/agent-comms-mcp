@@ -8,6 +8,7 @@ Related design:
 
 - `docs/design/aun-normalization-roadmap.md`
 - `docs/design/agent-identity-runtime-foundation.md`
+- `docs/design/agent-registry-ui-spec.md`
 - `docs/adr/060-aun-discord-projection-identity.md`
 
 ## Purpose
@@ -71,6 +72,8 @@ Required fields:
 | `provider` | Provider namespace such as `discord`. |
 | `provider_subject_id` | Provider-native stable subject id. For Discord, this is the operator-facing bot/user id. |
 | `identity_kind` | At least `bot`, `user`, `app`, `webhook`, or `unknown`. |
+| `surface_role` | Optional role label such as `primary`, `projection`, `worker`, or `presence`; defaults to `primary` when omitted. |
+| `is_default` | Whether this identity is the default for its `(agent_id, provider, identity_kind, surface_role)` scope. |
 | `display_name` | Optional operator display label. Not authoritative. |
 | `status` | At least `active`, `disabled`, `revoked`. |
 | `trust_status` | At least `local`, `unverified`, `verified`, `revoked`, `disabled`. |
@@ -80,8 +83,9 @@ Required fields:
 
 Required constraints:
 
-- `UNIQUE(agent_id, provider, identity_kind)`
 - `UNIQUE(provider, provider_subject_id)`
+- at most one active default identity for each
+  `(agent_id, provider, identity_kind, surface_role)`
 - `provider_subject_id` must not be empty
 - `status` and `trust_status` must be checked enums or equivalent constraints
 - foreign key to `agents(agent_id)`
@@ -102,11 +106,22 @@ NORM-025 does not change the meaning of `agent_id`.
 | `runtime_instance_id` | `agent_runtime_instances` | What process/model/session is running now. |
 | `connector_instance_id` | `connector_instances` | Which connector process can speak to a provider. |
 | `provider_identity_id` | `agent_provider_identities` | Which provider subject belongs to an agent. |
+| `agent_ui_binding_id` | `agent_ui_bindings` | Product-facing binding from `agent_id` to provider UI, credential evidence, and connector. |
 | `projection_identity_id` | outbound projection model | Which identity is intended or used for human-facing projection. |
 
 `provider_identity_id` and `projection_identity_id` are related but not the
 same. Provider identity proves the Discord subject-to-agent binding. Projection
 identity decides how an outbound message appears or falls back on a surface.
+`agent_ui_bindings` is the indexed operator and delivery entry point that joins
+provider identity with credential evidence and connector status for a specific
+`agent_id`.
+
+Discord UIs may expose "switch bot" controls. That control selects an eligible
+`agent_ui_binding_id`, `provider_identity_id`, or `connector_instance_id` for a
+channel role; it must not rewrite `agent_id`, `agent_uri`, queue ownership, or
+channel membership. If the schema implementation does not yet include
+`surface_role` / `is_default`, the MVP must still preserve the same behavior
+through connector binding priority or explicit delivery-owner override rows.
 
 ## Migration Contract
 
@@ -147,6 +162,9 @@ Discord self-registration:
 
 Routing and directory reads:
 
+- Prefer `agent_ui_bindings` when the caller needs the complete
+  agent-to-provider-UI binding, credential status, connector status, or hot-path
+  delivery answer.
 - Prefer `agent_provider_identities` for Discord id lookup and mention
   rendering.
 - Fall back to `agents.metadata.discord_id` only when the normalized table is

@@ -107,7 +107,8 @@ The UI must support these search inputs:
 - runtime engine
 - endpoint URI
 - channel name or id
-- Discord user id or channel id, when adapter metadata is available
+- Discord provider subject id, bot id, user id, or channel id, when normalized
+  provider identity metadata is available
 
 An internal path and an external URI are valid entry points, but they select
 different records:
@@ -137,7 +138,8 @@ Recommended ranking:
 | 85 | exact `repo_url` |
 | 80 | exact endpoint URI |
 | 75 | exact tmux/session name with live runtime |
-| 70 | exact Discord user id in `agents.metadata.discord_id` |
+| 70 | exact Discord provider subject id in `agent_provider_identities` |
+| 65 | exact legacy Discord id in `agents.metadata.discord_id` |
 | 60 | display name or workspace name |
 | 50 | channel membership or routing owner |
 | 40 | runtime engine / tag / metadata match |
@@ -276,6 +278,94 @@ Rules:
 - The UI must show the effective route before saving.
 - If multiple token-bearing connectors can post to the same channel, the UI must
   show the candidates and require an explicit priority or override.
+
+## Agent UI Binding
+
+The registry UI and normal delivery resolver must have one indexed entry point
+for "which provider UI/bot belongs to this `agent_id`?". The MVP contract is an
+`agent_ui_bindings` table or materialized view with one row per active provider
+UI binding.
+
+Required operator-facing fields:
+
+- `id`
+- `agent_id`
+- `ui_type`, such as `discord`
+- `ui_id`, such as a Discord bot/user/app id
+- `ui_token_ref` or managed encrypted secret reference
+- `ui_token_fingerprint`
+- `connector_instance_id`
+- `credential_id`
+- `surface_role`, such as `primary`, `projection`, `worker`, or `presence`
+- `status` and `trust_status`
+- `last_verified_at`
+- `evidence_revision`
+
+Rules:
+
+- The UI may accept a new token value only through an overwrite flow. It must
+  not display or return decrypted/plaintext token values after save.
+- For local MVP, `ui_token_ref` should point at the authoritative secret source,
+  such as Keychain, env, or `.mcp.json`. If encrypted DB-backed secret storage is
+  implemented later, the UI contract remains write-only for plaintext token
+  values and display remains masked.
+- Saving or refreshing a token must verify the provider subject id, recompute the
+  fingerprint, and fail closed if `agent_id`, `ui_id`, credential owner, or
+  connector owner disagree.
+- Active `(ui_type, ui_id)` and active `(ui_type, ui_token_fingerprint)` values
+  must not map to multiple `agent_id` values.
+- UI reads and send routing should read this binding/snapshot first instead of
+  joining low-level provider identity and credential tables directly.
+- Channel records may reference `agent_ui_bindings` for selection, priority, and
+  override. They must not store token material or become credential owners.
+
+## Discord Surface Bot Switcher
+
+Discord is a provider-specific surface on top of the AUN identity model. The
+Discord UI, custom UIs, and CLI tools may expose a bot selector, but the selector
+must operate on provider/connector records instead of rewriting the logical
+agent identity.
+
+Selector input:
+
+- `provider='discord'`
+- target channel id or channel name
+- optional role, such as `outbound`, `projection`, `presence`, or `worker`
+- candidate `agent_ui_binding_id`
+- candidate `provider_identity_id` or `connector_instance_id`
+
+Selector output must show:
+
+- owning `agent_id`
+- `provider_subject_id` displayed as Discord bot/user id
+- connector status and last verified time
+- credential status without exposing the raw token
+- channel access evidence, including read/write capability and freshness
+- whether the selection is derived automatically, an explicit override, or a
+  legacy fallback
+
+Rules:
+
+- Switching the Discord bot for a channel updates channel binding, connector
+  priority, or effective delivery-owner preference. It must not mutate
+  `agent_id`, `agent_uri`, `channels.members`, message history, or queue
+  ownership.
+- Channel-specific selection stores a reference to the chosen
+  `agent_ui_bindings` row plus priority/capability evidence. It does not copy
+  the token, fingerprint authority, or provider subject authority into the
+  channel row.
+- The hot path must use indexed DB evidence. UI rendering must not read raw token
+  files or call Discord for every message. Slow provider checks run during
+  connector startup, explicit refresh, or reconcile.
+- If exactly one active connector has valid credential, provider identity, and
+  write access for the channel, the UI may show it as the derived default.
+- If multiple connectors are eligible, the UI must show the conflict and require
+  an explicit priority or override before writes.
+- If no connector is eligible, the UI must show the missing evidence: credential,
+  provider identity, channel access, disabled status, or membership/policy block.
+- A custom UI should consume one versioned snapshot API, including profile
+  revision and evidence timestamps, rather than reading several low-level tables
+  and inventing its own precedence rules.
 
 ## Conflict Rules
 

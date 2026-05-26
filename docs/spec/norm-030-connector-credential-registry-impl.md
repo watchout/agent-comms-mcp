@@ -8,7 +8,7 @@ Slice: NORM-030
 ## Purpose
 
 NORM-030 makes provider credentials first-class control-plane records without
-storing raw secrets in the database.
+requiring raw secrets to be stored in the database.
 
 `agent_provider_identities` can say which Discord bot/user/app an agent owns,
 but posting requires a credentialed connector. The current mixed local state
@@ -58,7 +58,14 @@ Required constraints:
 
 ## Secret Handling
 
-Raw token values must never be stored in DB or printed by diagnostics.
+Raw token values must never be printed by diagnostics or returned for UI
+display.
+
+The raw secret authority may live outside DB. The requirement is not "DB
+encrypted token storage"; the requirement is one authoritative secret location,
+a non-secret DB reference to that location, deterministic fingerprinting, and
+fail-closed verification when the reference no longer matches the expected
+owner/provider identity.
 
 Allowed `secret_ref` examples:
 
@@ -70,10 +77,34 @@ Allowed `secret_ref` examples:
 The `mcp-json:` form is allowed only for local MVP inventory. It is not a
 future enterprise secret backend.
 
+Encrypted DB-backed secret storage is allowed only as a managed secret-store
+implementation with a separate key-management boundary. UI/API plaintext token
+input must be overwrite-only, decrypted values must never be displayed or
+returned, and connector/runtime code may resolve plaintext only for startup,
+refresh, reconcile, or send. This is not required for the local MVP.
+
 Fingerprinting must be deterministic for duplicate detection but non-reversible.
 Implementation may use HMAC or hash with local salt. If a salt is used, the salt
 must not be logged with fingerprints in a way that enables offline token
 guessing.
+
+Runtime delivery must not resolve or verify raw tokens in the hot path. Startup,
+explicit refresh, or reconcile computes the credential evidence; send/route code
+reads the indexed credential status and fingerprint evidence.
+
+`agent_ui_bindings` is the operator-facing and hot-path binding over credential
+evidence:
+
+```text
+agent_id + ui_type + ui_id + ui_token_fingerprint
+  -> connector_instance_id
+  -> credential_id
+  -> status/trust_status/last_verified_at
+```
+
+Implementations may keep `agent_ui_bindings` as a table, materialized view, or
+rebuildable snapshot, but UI and normal routing must be able to answer the
+agent-to-provider-bot binding from that single indexed entry point.
 
 ## Runtime Contract
 
@@ -86,8 +117,9 @@ When a Discord connector starts or refreshes:
 5. Upsert or verify the matching credential row.
 6. Fail closed if the same active fingerprint belongs to another active owner.
 7. Fail closed if the credential is disabled or revoked.
-8. Do not emit the raw token in stdout, logs, DB, PR comments, audit logs, or
-   Discord messages.
+8. Do not emit the raw token in stdout, logs, PR comments, audit logs, Discord
+   messages, or UI reads. DB storage is limited to non-secret evidence unless a
+   managed encrypted secret-store implementation is explicitly in use.
 
 The command must be idempotent. Re-running it with the same bot profile and
 token source should converge to the same credential evidence, not create a
