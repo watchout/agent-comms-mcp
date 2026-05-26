@@ -30,6 +30,7 @@ export interface TmuxRuntimeDoctorBlocker {
   tmux_session?: string
   pane_pid?: number
   observed_agent_id?: string | null
+  expected_agent_id?: string | null
   observed_server_pid?: number
 }
 
@@ -123,9 +124,10 @@ export function observeTmuxRuntime(
   pane: TmuxPaneSnapshot,
   processes: ProcessSnapshot[],
 ): TmuxRuntimeObservation[] {
-  const descendants = descendantPids(pane.pane_pid, processes)
+  const inspectedPids = descendantPids(pane.pane_pid, processes)
+  inspectedPids.add(pane.pane_pid)
   return processes
-    .filter((proc) => descendants.has(proc.pid))
+    .filter((proc) => inspectedPids.has(proc.pid))
     .map((proc) => ({ proc, observedAgentId: parseObservedAgentId(proc.command) }))
     .filter(({ observedAgentId }) => observedAgentId !== null)
     .map((proc) => ({
@@ -176,6 +178,20 @@ export function buildLiveTmuxProfileDoctorBlockers(input: {
         code: 'tmux_session_multiple_aun_mcp_servers',
         tmux_session: expectation.tmux_session,
         pane_pid: pane.pane_pid,
+      })
+    }
+    const expectedMismatch = observations.find(
+      (obs) => obs.expected_agent_id !== null && obs.expected_agent_id !== obs.observed_agent_id,
+    )
+    if (expectedMismatch) {
+      blockers.push({
+        agent_id: expectation.agent_id,
+        code: 'tmux_session_expected_agent_id_mismatch',
+        tmux_session: expectation.tmux_session,
+        pane_pid: pane.pane_pid,
+        observed_agent_id: expectedMismatch.observed_agent_id,
+        expected_agent_id: expectedMismatch.expected_agent_id,
+        observed_server_pid: expectedMismatch.server_pid,
       })
     }
     const matching = observations.find((obs) => obs.observed_agent_id === expectation.agent_id)

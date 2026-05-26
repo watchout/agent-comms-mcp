@@ -53,6 +53,41 @@ describe('tmux runtime inspector', () => {
     ])
   })
 
+  test('observes an AUN binding on the tmux pane root process', () => {
+    const blockers = buildLiveTmuxProfileDoctorBlockers({
+      tmuxOutput: 'direct-agent\t300\t/Users/yuji/Developer/direct-agent\n',
+      processOutput: [
+        '  300     1 /Users/yuji/.bun/bin/bun run --cwd /Users/yuji/Developer/agent-comms-mcp server.ts AGENT_COM_EXPECTED_AGENT_ID=direct-agent AGENT_ID=direct-agent',
+      ].join('\n'),
+      expectations: [{ agent_id: 'direct-agent', tmux_session: 'direct-agent' }],
+    })
+
+    expect(blockers).toEqual([])
+  })
+
+  test('reports expected-agent mismatch inside a live AUN binding', () => {
+    const blockers = buildLiveTmuxProfileDoctorBlockers({
+      tmuxOutput: 'discord-aun\t200\t/Users/yuji/Developer/codex-aun\n',
+      processOutput: [
+        '  200     1 -zsh',
+        '  201   200 node /opt/homebrew/bin/codex -c mcp_servers.aun.env.AGENT_ID="codex-aun" -c mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="codex-cto"',
+      ].join('\n'),
+      expectations: [{ agent_id: 'codex-aun', tmux_session: 'discord-aun' }],
+    })
+
+    expect(blockers).toEqual([
+      {
+        agent_id: 'codex-aun',
+        code: 'tmux_session_expected_agent_id_mismatch',
+        tmux_session: 'discord-aun',
+        pane_pid: 200,
+        observed_agent_id: 'codex-aun',
+        expected_agent_id: 'codex-cto',
+        observed_server_pid: 201,
+      },
+    ])
+  })
+
   test('passes when the observed MCP agent matches the DB profile', () => {
     const blockers = buildLiveTmuxProfileDoctorBlockers({
       tmuxOutput: 'discord-aun\t200\t/Users/yuji/Developer/codex-aun\n',
