@@ -26,6 +26,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
 import { resolveOutboundProjectionDecision } from '../core/outbound-projection'
@@ -56,6 +57,7 @@ import {
   type LeaseScopeType,
 } from '../core/control-plane-leases'
 import { syncChannelPolicyConnectors, type BindingRole, type OrderingScope } from '../core/channel-connector-sync'
+import { buildLiveTmuxProfileDoctorBlockers } from '../core/tmux-runtime-inspector'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -1481,6 +1483,7 @@ async function agentProfile(args: string[]) {
 
     if (action === 'doctor') {
       const strict = flags.strict === 'true' || flags.strict === '1' || flags.strict === ''
+      const liveTmux = flags['live-tmux'] === 'true' || flags['live-tmux'] === '1' || flags['live-tmux'] === ''
       const rows = await db.query(
         `SELECT agent_id, display_name, agent_type, runtime, status, metadata,
                 ui_id, ui_handle, home_directory, channel_port, runtime_engine_preference,
@@ -1604,6 +1607,32 @@ async function agentProfile(args: string[]) {
           })
         }
       }
+      if (liveTmux) {
+        try {
+          const tmuxOutput = execFileSync('tmux', ['list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}\t#{pane_current_path}'], {
+            encoding: 'utf8',
+          })
+          const processOutput = execFileSync('ps', ['axww', '-o', 'pid=,ppid=,command='], {
+            encoding: 'utf8',
+          })
+          blockers.push(...buildLiveTmuxProfileDoctorBlockers({
+            tmuxOutput,
+            processOutput,
+            expectations: rows.rows.map((row: any) => {
+              const metadata = parseJsonObject(row.metadata)
+              const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
+                ? metadata.tmux_session.trim()
+                : null
+              return { agent_id: String(row.agent_id), tmux_session: tmuxSession }
+            }),
+          }))
+        } catch (err) {
+          blockers.push({
+            code: 'live_tmux_inspection_unavailable',
+            error: (err as Error).message,
+          })
+        }
+      }
       if (strict) {
         const workspaceRows = await db.query(
           `SELECT a.agent_id, a.home_directory, b.workspace_id
@@ -1665,6 +1694,7 @@ async function agentProfile(args: string[]) {
       process.stdout.write(`${JSON.stringify({
         ok: blockers.length === 0,
         strict,
+        live_tmux: liveTmux,
         checked_agents: rows.rows.length,
         blockers,
       }, null, 2)}\n`)
@@ -3860,7 +3890,7 @@ Commands:
   agent profile get <agent_id>
   agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
   agent profile project <agent_id>|--all [--execute|--dry-run]
-  agent profile doctor [--strict]
+  agent profile doctor [--strict] [--live-tmux]
   status
 
 Message I/O (requires AGENT_ID env var):
