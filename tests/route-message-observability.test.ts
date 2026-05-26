@@ -158,6 +158,43 @@ describe('T3: resolveSendDestination B1 — caller not in mentions → reject + 
     const counters = getObservabilityCounters()
     expect(counters['send_reject_total|reason=not_mentioned_in_original']).toBe(1)
   })
+
+  test('input_mentions grants reply ACL for normalized Discord mention rows', async () => {
+    const { events } = captureLogger()
+
+    const fakeDb: DbAdapter = {
+      async query(sql: string) {
+        if (sql.startsWith('SELECT author_id')) {
+          return {
+            rows: [{
+              author_id: 'auditor',
+              content: '<@1491404979477676053> post-merge audit response',
+              message_type: 'chat',
+              metadata: null,
+              thread_id: null,
+              channel_id: 'ch-audit',
+              input_mentions: ['codex-aun'],
+            }],
+          }
+        }
+        if (sql.includes("SELECT agent_type FROM agents")) {
+          return { rows: [{ agent_type: 'dev' }] }
+        }
+        if (sql.includes("SELECT metadata->>'discord_id'")) {
+          return { rows: [{ discord_id: '1491404979477676053' }] }
+        }
+        return { rows: [] }
+      },
+    }
+
+    const out = await resolveSendDestination(fakeDb, 'codex-aun', 'msg-normalized-mention')
+    expect(out).toEqual({ channelId: 'ch-audit', threadId: null })
+
+    const rejects = events.filter((e) => e.event === 'send_reject' && e.reason === 'not_mentioned_in_original')
+    expect(rejects.length).toBe(0)
+    const counters = getObservabilityCounters()
+    expect(counters['send_reject_total|reason=not_mentioned_in_original']).toBeUndefined()
+  })
 })
 
 describe('T4: parseMentions defensive — malformed input never throws', () => {

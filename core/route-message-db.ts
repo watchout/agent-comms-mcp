@@ -25,6 +25,17 @@ export interface DbAdapter {
 /** A minimal "DB unavailable" sentinel — caller decides what to do. */
 export type DbResult<T> = T | null
 
+function asStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string' && v.length > 0)
+  if (typeof value !== 'string' || value.length === 0) return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string' && v.length > 0) : []
+  } catch {
+    return []
+  }
+}
+
 /** Get a message by ID from agent_messages */
 export async function getMessageById(
   db: DbAdapter | null,
@@ -36,10 +47,11 @@ export async function getMessageById(
   metadata: Record<string, unknown> | null
   thread_id: string | null
   channel_id: string | null
+  input_mentions: string[]
 } | null> {
   if (!db) return null
   const r = await db.query(
-    'SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages WHERE id = $1',
+    'SELECT author_id, content, message_type, metadata, thread_id, channel_id, input_mentions FROM agent_messages WHERE id = $1',
     [messageId],
   )
   if (r.rows.length === 0) return null
@@ -51,6 +63,7 @@ export async function getMessageById(
     metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
     thread_id: row.thread_id ?? null,
     channel_id: row.channel_id ?? null,
+    input_mentions: asStringArray(row.input_mentions),
   }
 }
 
@@ -207,14 +220,16 @@ export async function resolveSendDestination(
   }
 
   // reply_to mention guard
-  // ADR-040 D7: `allMentions` may contain core agent_ids (from parseMentions)
-  // AND raw Discord user IDs (from metadata.mentions written by the receiver).
-  // We must compare against BOTH the caller's agent_id and its Discord user ID
-  // so a human who writes `<@1487367645933211699>` (raw Discord ID) still
-  // counts as mentioning the bot whose agent_id is `agent-com-dev`.
+  // ADR-040 D7: `allMentions` may contain core agent_ids (from parseMentions
+  // and agent_messages.input_mentions) AND raw Discord user IDs (from
+  // metadata.mentions written by the receiver). We must compare against BOTH
+  // the caller's agent_id and its Discord user ID so a human who writes
+  // `<@1487367645933211699>` (raw Discord ID) still counts as mentioning the
+  // bot whose agent_id is `agent-com-dev`.
   const contentMentions = parseMentions(original.content)
-  const metaMentions: string[] = (original.metadata as any)?.mentions ?? []
-  const allMentions = [...contentMentions, ...metaMentions]
+  const inputMentions: string[] = original.input_mentions
+  const metaMentions: string[] = asStringArray((original.metadata as any)?.mentions)
+  const allMentions = [...contentMentions, ...inputMentions, ...metaMentions]
   const myDiscordId = await getAgentDiscordId(db, agentId)
   const mentionedInOriginal =
     allMentions.includes(agentId) ||

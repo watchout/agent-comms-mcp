@@ -294,10 +294,11 @@ describe('Inbound Router — DB Integration', () => {
 // 3. resolveSendDestination — source-level regression
 // ============================================================
 describe('resolveSendDestination — channel_id resolution', () => {
-  test('getMessageById SELECTs channel_id column', () => {
+  test('getMessageById SELECTs channel_id and input_mentions columns', () => {
     // PR-A: moved to core/route-message-db.ts. Per SSOT §4.2, channel_id is read
-    // directly from the agent_messages row.
-    expect(CORE_DB_SOURCE).toContain('SELECT author_id, content, message_type, metadata, thread_id, channel_id FROM agent_messages')
+    // directly from the agent_messages row. Reply ACL also reads the normalized
+    // input_mentions trace instead of reparsing adapter display syntax.
+    expect(CORE_DB_SOURCE).toContain('SELECT author_id, content, message_type, metadata, thread_id, channel_id, input_mentions FROM agent_messages')
   })
 
   test('getMessageById returns channel_id field', () => {
@@ -305,6 +306,7 @@ describe('resolveSendDestination — channel_id resolution', () => {
     expect(fnIdx).toBeGreaterThan(-1)
     const body = CORE_DB_SOURCE.slice(fnIdx, fnIdx + 1500)
     expect(body).toContain('channel_id: row.channel_id ?? null')
+    expect(body).toContain('input_mentions: asStringArray(row.input_mentions)')
   })
 
   test('resolveSendDestination prefers row.channel_id over metadata', () => {
@@ -359,6 +361,7 @@ describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () =
     expect(body).toContain('getAgentDiscordId(db, agentId)')
     expect(body).toContain('allMentions.includes(agentId)')
     expect(body).toContain('allMentions.includes(myDiscordId)')
+    expect(body).toContain('original.input_mentions')
     // isOwnMessage must also cover both shapes
     expect(body).toContain('original.author_id === agentId')
     expect(body).toContain('original.author_id === myDiscordId')
