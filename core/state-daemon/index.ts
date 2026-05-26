@@ -65,7 +65,7 @@ import { planQueueAction, type PlannedQueueAction } from './action-planner'
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const WAKE_PENDING_PROMPT = 'Call the agent-comms next tool now. Do not call inbox.\n'
-const WAKE_RECEIVED_PROMPT = 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id, then complete the requested work. Do not call inbox or next.\n'
+const WAKE_RECEIVED_PROMPT = 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id. After completing the work, either send a reply if one is required or call the agent-comms done tool for the same queue_id if no reply is required. Do not stop after processing. Do not call inbox or next.\n'
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
