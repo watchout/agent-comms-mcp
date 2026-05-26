@@ -21,6 +21,7 @@ export interface StateDaemonConfig {
   // 補強 #1 claim refresh
   heartbeatIntervalMs: number       // default 30_000
   claimTtlSec: number               // default 60
+  activeClaimMaxAgeSec: number      // default 300; daemon must not keep a claim alive forever
 
   // 補強 #2 subprocess pool
   wakePoolMinCapacity: number       // default 5
@@ -84,6 +85,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   budgetWarnMs: 200,
   heartbeatIntervalMs: 30_000,
   claimTtlSec: 60,
+  activeClaimMaxAgeSec: 300,
   wakePoolMinCapacity: 5,
   wakePoolMaxCapacity: 20,
   wakePoolGrowStep: 2,

@@ -69,6 +69,7 @@ describe('T21 active claim heartbeat refresh', () => {
       status: 'in_progress',
       claim_expires_at: new Date(T0.getTime() + 30_000),
       claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 10_000),
     })
 
     const h = buildHarness(T0, { claimTtlSec: 60 })
@@ -85,6 +86,68 @@ describe('T21 active claim heartbeat refresh', () => {
       expect(Math.abs(new Date(row.claim_expires_at!).getTime() - (T0.getTime() + 60_000))).toBeLessThan(1500)
       expect(Math.abs(new Date(row.last_heartbeat_at!).getTime() - T0.getTime())).toBeLessThan(1500)
       expect(h.tmux.sentKeys.length).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('busy bot with aged in_progress claim is not refreshed forever', async () => {
+    const T0 = new Date('2026-05-08T00:05:00.000Z')
+    const agent = makeAgentId('t21-aged-in-progress')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const originalExpiry = new Date(T0.getTime() + 30_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: originalExpiry,
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 301_000),
+      last_heartbeat_at: new Date(T0.getTime() - 30_000),
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60, activeClaimMaxAgeSec: 300 })
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.refreshClaims()
+      expect(result.refreshed).toBe(0)
+      expect(result.skipped).toBe(1)
+      expect(h.metrics.countInc('state_daemon_heartbeat_refresh_total', { result: 'ok' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_heartbeat_refresh_total', { result: 'active_claim_max_age_skipped' })).toBe(1)
+      const r = await pg.query(
+        `SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(originalExpiry.getTime())
+      expect(Math.abs(new Date(row.last_heartbeat_at!).getTime() - (T0.getTime() - 30_000))).toBeLessThan(1500)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('claim with mismatched owner is not refreshed from agent status alone', async () => {
+    const T0 = new Date('2026-05-08T00:07:00.000Z')
+    const agent = makeAgentId('t21-owner-mismatch')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const originalExpiry = new Date(T0.getTime() + 30_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'received',
+      claim_expires_at: originalExpiry,
+      claimed_by: `${agent}-other`,
+      claimed_at: new Date(T0.getTime() - 10_000),
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60, activeClaimMaxAgeSec: 300 })
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.refreshClaims()
+      expect(result.refreshed).toBe(0)
+      expect(result.skipped).toBe(1)
+      const r = await pg.query(`SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(originalExpiry.getTime())
+      expect(row.last_heartbeat_at).toBeNull()
     } finally {
       await h.daemon.stop()
     }
