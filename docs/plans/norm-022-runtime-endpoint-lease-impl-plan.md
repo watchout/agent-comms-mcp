@@ -26,7 +26,22 @@ or channel ownership.
 - `docs/design/aun-normalization-roadmap.md`
 - `docs/design/aun-normalization-wbs.md`
 - `docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md`
+- `docs/operations/agent-role-routing-map.md`
 - `docs/SPEC-INDEX.md`
+
+## Governance Route
+
+CEO directive on 2026-05-27 sets the NORM-022 review chain:
+
+| Gate | Agent |
+|---|---|
+| L1 pre-implementation audit | `devauditor` |
+| L2 implementation audit | `l2auditor` |
+| L3 approval | `cto` |
+
+The current action is L1 pre-implementation audit. L2 and L3 are recorded here
+so the later implementation and approval gates do not drift back to the default
+role map.
 
 ## Implementation Order
 

@@ -114,6 +114,8 @@ slice is marked done.
 - Started: 2026-05-27 as the first immediate task in the current MVP phase.
 - Current lane position: spec/impl contract ready; pre-implementation audit is
   the next gate before code merge.
+- Governance route for this slice: L1 `devauditor`, L2 `l2auditor`, L3 `cto`
+  per CEO directive on 2026-05-27.
 - Reason for MVP placement: the current fleet already needs safe port,
   endpoint, and supervisor-neutral runtime handling. Waiting until v1
   `LEASE-120` would leave `tmux` and ad-hoc port cleanup as de facto
