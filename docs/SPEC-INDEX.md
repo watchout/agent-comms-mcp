@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-05-26
+> 最終更新: 2026-05-28
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
@@ -19,6 +19,7 @@
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定 | 2026-05-24 |
+| spec/aun-logical-thread-reply-contract.md | proposed | queue replyをlogical thread単位に固定し、UI/Discord projection、archive、task/PR leakage防止を定義する仕様 (#576) | 2026-05-28 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-04-27 |
 
 ---
@@ -76,6 +77,14 @@
 - Discord、tmux、local path、provider tokenをcore identityにしない設計制約を定める
 - MCP Streamable HTTP、OAuth/OIDC、A2A、OpenTelemetry、CloudEvents、Zero Trustへの将来整合を方向づける
 - 内部Discord安定化を将来のenterprise control planeの第一local deploymentとして扱う
+
+### spec/aun-logical-thread-reply-contract.md（Logical thread reply contract）
+- AUN-owned logical threadをmessage/queueより一段上の作業単位として定義する
+- `reply(queue_id, content)` を通常返信の正本APIにし、LLMが `reply_to` / `mention` / `channel` を組み合わせて選ぶ余地をなくす
+- `logical_thread -> agent_messages -> message_queue` の containment invariant を固定し、A/alpha の回答が B/beta のqueueや親messageにぶら下がる事故を防ぐ
+- Discord native thread / Web UI thread は AUN logical thread の projection として扱い、Discord thread IDを内部primary keyにしない
+- thread status、archive/reopen、archive blocker、`thread_tasks` によるPR/task漏れ検出を定義する
+- #415 reply confinement、#401 durable reply close、#572 terminal baton invariant を上位thread modelへ接続する
 
 ---
 
