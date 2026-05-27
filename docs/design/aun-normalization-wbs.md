@@ -132,8 +132,12 @@ slice is marked done.
      endpoint lease -> health`, with tmux/session/port as diagnostic details
   3. make cleanup/restart refuse destructive action without stale heartbeat,
      endpoint lease ownership, and fencing evidence
-  4. add contract tests for healthy lease, missing lease, stale lease, and
-     conflicting supervisor evidence
+  4. add the frozen NORM-022 merge-gate fixtures:
+     `healthy_endpoint_lease`, `missing_lease_refusal`, `stale_ttl_expiry`,
+     `duplicate_active_lease_fenced`, `supervisor_down_fail_closed`,
+     `restart_gated_by_lease_heartbeat_fencing`,
+     `disabled_or_revoked_fail_closed`, `multi_channel_single_runtime`, and
+     `tmux_diagnostics_only_for_tmux_supervisor`
 - Completion evidence: `bot_status` reports through
   `agent_id -> connector_instance -> runtime_instance -> endpoint lease ->
   health`, tmux is only optional supervisor evidence, and cleanup refuses to

@@ -231,6 +231,36 @@ supervisor_missing: supervisor_type=tmux, session missing, endpoint free
 7. Local TCP endpoints default to loopback bind unless explicitly configured
    otherwise.
 
+## Frozen Merge-Gate Fixtures
+
+The implementation cannot merge until these executable fixtures pass. This is
+the canonical NORM-022 fixture gate and must remain aligned with
+`docs/plans/norm-022-runtime-endpoint-lease-impl-plan.md` and
+`docs/design/aun-normalization-wbs.md`.
+
+1. `healthy_endpoint_lease`: connector active, runtime heartbeat fresh,
+   endpoint lease active, readiness probe ok.
+2. `missing_lease_refusal`: an active connector without endpoint lease evidence
+   fails strict doctor and cleanup/restart dry-run refuses action.
+3. `stale_ttl_expiry`: stale heartbeat or expired endpoint lease is detected,
+   reported with row ids, and does not become destructive without fencing proof.
+4. `duplicate_active_lease_fenced`: duplicate active endpoint holders fail
+   closed until one holder is expired, revoked, or fenced out.
+5. `supervisor_down_fail_closed`: supervisor evidence down or missing cannot be
+   treated as authority by itself; readiness/liveness fails closed.
+6. `restart_gated_by_lease_heartbeat_fencing`: restart/cleanup can proceed only
+   when endpoint lease ownership, stale heartbeat, fencing token, and process
+   mismatch evidence all agree.
+7. `disabled_or_revoked_fail_closed`: disabled agent, connector, credential,
+   binding, or revoked lease prevents delivery/restart eligibility.
+8. `multi_channel_single_runtime`: one runtime can serve multiple channel
+   bindings without creating one session per channel.
+9. `tmux_diagnostics_only_for_tmux_supervisor`: tmux diagnostics are emitted
+   only when `supervisor_type='tmux'`; missing tmux is not a blocker for
+   launchd, systemd, direct process, stdio, or remote runtimes.
+
+Changing this list requires returning to pre-implementation audit.
+
 ## Rollout
 
 Use the normal governed lane:
@@ -247,7 +277,7 @@ Implementation rollout order:
    behavior.
 3. Change `bot_status` to read runtime/endpoint evidence before tmux details.
 4. Change cleanup to dry-run by default when endpoint evidence is missing.
-5. Add strict doctor checks.
+5. Add strict doctor checks and the frozen merge-gate fixtures.
 6. Only after clean doctor, allow restart/cleanup to use endpoint lease fencing.
 7. After merge, run POST_MERGE verification: migration status if any,
    `bot_status`, strict doctor checks for the targeted fleet, cleanup dry-run

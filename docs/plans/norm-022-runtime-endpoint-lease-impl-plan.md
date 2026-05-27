@@ -61,13 +61,41 @@ role map.
 4. Add strict-doctor coverage.
    - Active connector without runtime endpoint lease fails strict doctor.
    - Stale/conflicting runtime or supervisor evidence fails with row ids.
-5. Add contract fixtures.
-   - healthy lease
-   - missing lease
-   - stale lease
-   - conflicting supervisor evidence
-   - multiple channels served by one runtime
-   - tmux diagnostics only when `supervisor_type='tmux'`
+5. Add the frozen merge-gate contract fixtures named below. These fixtures are
+   executable and must all pass before the implementation PR can merge.
+
+## Frozen Merge-Gate Fixture Contract
+
+NORM-022 uses one canonical fixture list across this implementation plan, the
+impl contract, and WBS. The list intentionally subsumes the L1 audit shorthand
+(`healthy`, TTL expiry, supervisor down, duplicate lease, restart, disable)
+plus the acceptance-critical cases already present in the original plan.
+
+Implementation must provide executable fixtures for:
+
+1. `healthy_endpoint_lease`: connector active, runtime heartbeat fresh,
+   endpoint lease active, readiness probe ok.
+2. `missing_lease_refusal`: an active connector without endpoint lease evidence
+   fails strict doctor and cleanup/restart dry-run refuses action.
+3. `stale_ttl_expiry`: stale heartbeat or expired endpoint lease is detected,
+   reported with row ids, and does not become destructive without fencing proof.
+4. `duplicate_active_lease_fenced`: duplicate active endpoint holders fail
+   closed until one holder is expired, revoked, or fenced out.
+5. `supervisor_down_fail_closed`: supervisor evidence down or missing cannot be
+   treated as authority by itself; readiness/liveness fails closed.
+6. `restart_gated_by_lease_heartbeat_fencing`: restart/cleanup can proceed only
+   when endpoint lease ownership, stale heartbeat, fencing token, and process
+   mismatch evidence all agree.
+7. `disabled_or_revoked_fail_closed`: disabled agent, connector, credential,
+   binding, or revoked lease prevents delivery/restart eligibility.
+8. `multi_channel_single_runtime`: one runtime can serve multiple channel
+   bindings without creating one session per channel.
+9. `tmux_diagnostics_only_for_tmux_supervisor`: tmux diagnostics are emitted
+   only when `supervisor_type='tmux'`; missing tmux is not a blocker for
+   launchd, systemd, direct process, stdio, or remote runtimes.
+
+Any implementation PR that changes the fixture names, drops a fixture, or moves
+coverage out of the merge gate must return to pre-implementation audit.
 
 ## Out Of Scope
 
@@ -93,7 +121,8 @@ Review questions:
    endpoint lease evidence?
 3. Are the cleanup/restart gates strict enough to prevent killing a live holder
    from `lsof`, port, or tmux evidence alone?
-4. Are the acceptance fixtures sufficient for the MVP risk?
+4. Is the frozen merge-gate fixture contract sufficient for the MVP risk, and
+   does it cover every destructive cleanup/restart path?
 5. Is any schema change required before implementation, or is metadata on
    existing tables acceptable for the first PR?
 6. Is the POST_MERGE evidence list sufficient: migration status if any,
@@ -106,6 +135,7 @@ Do not start implementation if any of these are true:
 
 - The audit rejects metadata-only endpoint lease representation.
 - The cleanup/restart gate cannot identify stale holder and fencing evidence.
+- The frozen fixture list drifts between the plan, impl contract, and WBS.
 - The plan requires raw token reads in status, doctor, or cleanup paths.
 - `git diff --check` fails on the spec/plan docs.
 - The reviewer cannot determine which DB rows prove readiness.
