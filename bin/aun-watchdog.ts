@@ -24,7 +24,7 @@
  *   AUN_WATCHDOG_CRASH_THRESHOLD_SEC    default 300 (5 min)
  *   AUN_WATCHDOG_RATE_LIMIT_PER_HOUR    default 6  (per-bot cap)
  *   AUN_WATCHDOG_DRY_RUN=1              log only, no tmux / spawn
- *   AUN_WATCHDOG_REGISTRY_PATH          default scripts/bot-registry.txt
+ *   DATABASE_URL                        required; agents table is profile SSOT
  *
  * Audit:
  *   Every restart attempt INSERTs an `audit_log` row with
@@ -39,7 +39,7 @@
 
 import { Client } from 'pg'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 const DATABASE_URL = process.env.DATABASE_URL
@@ -47,7 +47,6 @@ const POLL_SEC = parseInt(process.env.AUN_WATCHDOG_POLL_SEC ?? '30', 10)
 const CRASH_THRESHOLD_SEC = parseInt(process.env.AUN_WATCHDOG_CRASH_THRESHOLD_SEC ?? '300', 10)
 const RATE_LIMIT_PER_HOUR = parseInt(process.env.AUN_WATCHDOG_RATE_LIMIT_PER_HOUR ?? '6', 10)
 const DRY_RUN = process.env.AUN_WATCHDOG_DRY_RUN === '1'
-const REGISTRY_PATH = process.env.AUN_WATCHDOG_REGISTRY_PATH ?? join(process.cwd(), 'scripts/bot-registry.txt')
 const RESTART_SCRIPT = join(process.cwd(), 'scripts/restart-bot.sh')
 
 interface CrashedAgent {
@@ -60,7 +59,7 @@ interface WatchdogSession {
   session: string
   projectDir: string
   port: string
-  source: 'agents.profile' | 'bot-registry.compat'
+  source: 'agents.profile'
 }
 
 interface RateLimitState {
@@ -73,33 +72,6 @@ const rateLimit: RateLimitState = { history: new Map() }
 function logLine(level: string, msg: string): void {
   const ts = new Date().toISOString()
   process.stderr.write(`${ts} | ${level} | ${msg}\n`)
-}
-
-function loadRegistrySessions(): Map<string, WatchdogSession> {
-  const m = new Map<string, WatchdogSession>()
-  if (!existsSync(REGISTRY_PATH)) {
-    logLine('warn', `bot-registry not found at ${REGISTRY_PATH}; tmux fallback only`)
-    return m
-  }
-  try {
-    const lines = readFileSync(REGISTRY_PATH, 'utf-8').split('\n')
-    for (const raw of lines) {
-      const line = raw.trim()
-      if (!line || line.startsWith('#')) continue
-      const [session, projectDir, agentId, port] = line.split('|')
-      if (session && agentId) {
-        m.set(agentId, {
-          session,
-          projectDir: projectDir ?? '',
-          port: port ?? '',
-          source: 'bot-registry.compat',
-        })
-      }
-    }
-  } catch (err) {
-    logLine('warn', `bot-registry read failed: ${err}`)
-  }
-  return m
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> {
@@ -180,7 +152,7 @@ function recordRestart(agentId: string): void {
 
 function attemptRestart(agentId: string, sessionName: string | null): { outcome: string; detail: string } {
   if (DRY_RUN) return { outcome: 'dry_run', detail: `would restart ${sessionName ?? agentId}` }
-  if (!sessionName) return { outcome: 'no_session', detail: `agent ${agentId} not in bot-registry` }
+  if (!sessionName) return { outcome: 'no_session', detail: `agent ${agentId} has no tmux_session in DB profile` }
 
   // Try tmux send-keys Enter first (the cheapest, lets the bot's tmux
   // pane resume itself). Fall back to a full restart-bot.sh spawn.
@@ -254,12 +226,11 @@ async function main(): Promise<void> {
   process.on('SIGTERM', stop)
   process.on('SIGINT', stop)
 
-  let registry = await loadDbProfileSessions(client)
+  const registry = await loadDbProfileSessions(client)
   if (registry.size > 0) {
     logLine('info', `loaded ${registry.size} watchdog sessions from agents.profile`)
   } else {
-    registry = loadRegistrySessions()
-    logLine('warn', `loaded ${registry.size} watchdog sessions from bot-registry compatibility fallback`)
+    logLine('warn', 'loaded 0 watchdog sessions from agents.profile; no fallback because agents table is SSOT')
   }
 
   while (!stopping) {
@@ -274,7 +245,7 @@ async function main(): Promise<void> {
 
 // Test-only export: allow `import { findCrashedAgents, isRateLimited,
 // recordRestart }` for unit fixtures without running the daemon loop.
-export { findCrashedAgents, isRateLimited, recordRestart, rateLimit, loadRegistrySessions, loadDbProfileSessions }
+export { findCrashedAgents, isRateLimited, recordRestart, rateLimit, loadDbProfileSessions }
 
 if (import.meta.main) {
   main().catch(err => {

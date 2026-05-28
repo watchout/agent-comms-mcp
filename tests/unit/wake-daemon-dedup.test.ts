@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 
 // PR #0 §4.1 unit test: sliding-window de-dup boundary behaviour.
 // Capacity exported by the daemon module is DEDUP_WINDOW=512 (§5 choice,
@@ -11,6 +12,7 @@ import {
   shouldWake,
   wakeDedupStats,
   __resetWakeDedup,
+  dispatchPgNotificationPayload,
 } from '../../bin/wake-daemon'
 
 beforeEach(() => {
@@ -146,3 +148,46 @@ describe('wake-daemon agent_id time-window dedup (v4 §77-1, PR #233)', () => {
   })
 })
 
+describe('wake-daemon PG notification dispatch failure handling', () => {
+  async function waitForLog(match: (value: string) => boolean, read: () => string): Promise<string | null> {
+    const deadline = Date.now() + 1000
+    while (Date.now() < deadline) {
+      const current = read()
+      if (match(current)) return current
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    return null
+  }
+
+  test('profile resolver failure is logged without unhandled rejection', async () => {
+    const originalWrite = process.stderr.write
+    let stderr = ''
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderr += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8')
+      return true
+    }) as typeof process.stderr.write
+
+    try {
+      const payload = JSON.stringify({
+        agent_id: `pg-dispatch-${randomUUID()}`,
+        message_id: `msg-${randomUUID()}`,
+      })
+      dispatchPgNotificationPayload(payload, async () => {
+        throw new Error('profile query boom')
+      })
+      const logged = await waitForLog(
+        (value) => value.includes('parse/wake error') && value.includes('profile query boom'),
+        () => stderr,
+      )
+
+      expect(logged).not.toBeNull()
+      expect(unhandled).toEqual([])
+    } finally {
+      process.stderr.write = originalWrite
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+})

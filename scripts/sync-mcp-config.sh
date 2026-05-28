@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-mcp-config.sh — Sync .mcp.json agent-comms config with bot-registry.txt
+# sync-mcp-config.sh — Export the DB bot profile into .mcp.json compatibility config
 # Ensures AGENT_ID, AGENT_COM_EXPECTED_AGENT_ID, WEBHOOK_PORT,
 # DISCORD_STATE_DIR, DATABASE_URL, and the agent-comms server path in each
 # project's .mcp.json match the script-controlled runtime contract.
