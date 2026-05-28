@@ -3,13 +3,13 @@
  * PR #0 — wake-on-insert daemon (spec v3 Phase C Gap 1 fix).
  *
  * Single responsibility: detect `message_queue` INSERT (PG NOTIFY or SQLite
- * polling fallback), resolve the target bot's tmux session from
- * `scripts/bot-registry.txt`, and send Enter to wake the Claude Code REPL so
- * the bot picks up its queue via the `auto-next` hook.
+ * polling fallback), resolve the target bot's tmux session from the DB
+ * `agents` profile, and send Enter to wake the Claude Code REPL so the bot
+ * picks up its queue via the `auto-next` hook.
  *
  * Scope (frozen §1.1 / §1.2):
  *   - DB LISTEN `mq_enqueued` (PG) or `message_queue` polling (SQLite)
- *   - tmux send-keys to `discord-<agent_id>` or `discord-<agent_id>-runbot`
+ *   - tmux send-keys to `agents.metadata.tmux_session`
  *   - Sliding-window de-dup on `message_id` (N=512)
  *   - SIGINT/SIGTERM → clean exit ≤30 s (LISTEN unsubscribe + conn close)
  *
@@ -22,7 +22,7 @@
 import { Client as PgClient } from 'pg'
 import { Database as SqliteDatabase } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
 const DB_TYPE = process.env.AGENT_COM_DB || (process.env.DATABASE_URL ? 'postgres' : 'sqlite')
@@ -41,7 +41,6 @@ const SHUTDOWN_TIMEOUT_MS = 30_000
 const WAKE_PROMPT = 'check inbox'
 
 const PROJECT_ROOT = dirname(dirname(new URL(import.meta.url).pathname))
-const BOT_REGISTRY = join(PROJECT_ROOT, 'scripts', 'bot-registry.txt')
 
 // ---------- sliding-window de-dup ----------
 // Set gives O(1) membership; order array drops oldest at overflow (O(1) amortised).
@@ -87,17 +86,7 @@ export function __resetWakeDedup(): void {
 }
 
 // ---------- tmux session resolution ----------
-function resolveSessionFromRegistry(agentId: string): string | null {
-  if (!existsSync(BOT_REGISTRY)) return null
-  const lines = readFileSync(BOT_REGISTRY, 'utf-8').split('\n')
-  for (const line of lines) {
-    if (!line || line.startsWith('#')) continue
-    const cols = line.split('|')
-    if (cols.length < 3) continue
-    if (cols[2] === agentId) return cols[0]
-  }
-  return null
-}
+type SessionResolver = (agentId: string) => Promise<string | null> | string | null
 
 function sessionExists(sessionName: string): boolean {
   const result = spawnSync('tmux', ['has-session', '-t', sessionName], {
@@ -106,15 +95,41 @@ function sessionExists(sessionName: string): boolean {
   return result.status === 0
 }
 
-function resolveSession(agentId: string): string | null {
-  const registryHit = resolveSessionFromRegistry(agentId)
-  const candidates: string[] = []
-  if (registryHit) candidates.push(registryHit, `${registryHit}-runbot`)
-  candidates.push(`discord-${agentId}`, `discord-${agentId}-runbot`)
-  for (const name of candidates) {
-    if (sessionExists(name)) return name
-  }
-  return null
+async function resolveSession(agentId: string, resolveProfileSession: SessionResolver): Promise<string | null> {
+  const profileSession = await resolveProfileSession(agentId)
+  if (!profileSession) return null
+  return sessionExists(profileSession) ? profileSession : null
+}
+
+async function resolvePgProfileSession(client: PgClient, agentId: string): Promise<string | null> {
+  const result = await client.query<{ tmux_session: string | null }>(
+    `SELECT metadata->>'tmux_session' AS tmux_session
+       FROM agents
+      WHERE agent_id = $1
+        AND agent_type NOT IN ('human', 'system')
+        AND COALESCE(profile_enabled, true) = true
+        AND disabled_at IS NULL
+        AND status IS DISTINCT FROM 'disabled'
+      LIMIT 1`,
+    [agentId],
+  )
+  const value = result.rows[0]?.tmux_session
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function resolveSqliteProfileSession(db: SqliteDatabase, agentId: string): string | null {
+  const row = db.query<{ tmux_session: string | null }, [string]>(
+    `SELECT json_extract(metadata, '$.tmux_session') AS tmux_session
+       FROM agents
+      WHERE agent_id = ?
+        AND agent_type NOT IN ('human', 'system')
+        AND COALESCE(profile_enabled, 1) = 1
+        AND disabled_at IS NULL
+        AND (status IS NULL OR status <> 'disabled')
+      LIMIT 1`,
+  ).get(agentId)
+  const value = row?.tmux_session
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
 // ---------- tmux send-keys (wake trigger) ----------
@@ -128,7 +143,7 @@ function tmuxWake(sessionName: string): void {
   })
 }
 
-function wake(agentId: string, messageId: string): void {
+async function wake(agentId: string, messageId: string, resolveProfileSession: SessionResolver): Promise<void> {
   if (markSeen(messageId)) {
     log('debug', `dedup skip (message_id): ${agentId}/${messageId}`)
     return
@@ -137,13 +152,28 @@ function wake(agentId: string, messageId: string): void {
     log('debug', `dedup skip (agent_id 1s): ${agentId}/${messageId}`)
     return
   }
-  const session = resolveSession(agentId)
+  const session = await resolveSession(agentId, resolveProfileSession)
   if (!session) {
-    log('warn', `no tmux session for agent ${agentId}`)
+    log('warn', `no active DB-profile tmux session for agent ${agentId}`)
     return
   }
   tmuxWake(session)
   log('info', `wake ${session} for ${agentId}/${messageId}`)
+}
+
+export function dispatchPgNotificationPayload(payload: string, resolveProfileSession: SessionResolver): void {
+  void (async () => {
+    try {
+      const parsed = JSON.parse(payload) as { agent_id?: string; message_id?: string }
+      if (!parsed.agent_id || !parsed.message_id) {
+        log('warn', `invalid payload: ${payload}`)
+        return
+      }
+      await wake(parsed.agent_id, parsed.message_id, resolveProfileSession)
+    } catch (err) {
+      log('warn', `parse/wake error: ${err}`)
+    }
+  })()
 }
 
 // ---------- logging ----------
@@ -200,16 +230,7 @@ async function runPg(): Promise<void> {
 
       currentClient.on('notification', (msg) => {
         if (msg.channel !== PG_NOTIFY_CHANNEL || !msg.payload) return
-        try {
-          const parsed = JSON.parse(msg.payload) as { agent_id?: string; message_id?: string }
-          if (!parsed.agent_id || !parsed.message_id) {
-            log('warn', `invalid payload: ${msg.payload}`)
-            return
-          }
-          wake(parsed.agent_id, parsed.message_id)
-        } catch (err) {
-          log('warn', `parse error: ${err}`)
-        }
+        dispatchPgNotificationPayload(msg.payload, (agentId) => resolvePgProfileSession(currentClient, agentId))
       })
 
       // Hold the loop until the client signals error/end (reconnect).
@@ -260,7 +281,7 @@ async function runSqlite(): Promise<void> {
     try {
       const rows = stmt.all(lastId)
       for (const row of rows) {
-        if (row.message_id) wake(row.agent_id, row.message_id)
+        if (row.message_id) await wake(row.agent_id, row.message_id, (agentId) => resolveSqliteProfileSession(db, agentId))
         lastId = row.id
       }
     } catch (err) {

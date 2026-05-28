@@ -93,6 +93,7 @@ dbDescribe('test_0 wake_daemon PG (PR #232 cycle 2, §4.1 PG/SQLite 両 pass)', 
           `DELETE FROM agent_messages WHERE id = $1`,
           [insertedMessageId],
         )
+        await client.query(`DELETE FROM agents WHERE agent_id = $1`, [AGENT_ID])
       } catch {}
     }
     if (client) {
@@ -137,6 +138,12 @@ dbDescribe('test_0 wake_daemon PG (PR #232 cycle 2, §4.1 PG/SQLite 両 pass)', 
     await client.connect()
     const messageId = randomUUID()
     insertedMessageId = messageId
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
+       VALUES ($1, $1, 'dev', 'claude-code', 'online', jsonb_build_object('tmux_session', $2::text), true)
+       ON CONFLICT (agent_id) DO UPDATE SET metadata = EXCLUDED.metadata, profile_enabled = true`,
+      [AGENT_ID, SESSION],
+    )
     await client.query(
       `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, source, direction, role)
        VALUES ($1::uuid, 'pr232-cycle2-pg-probe', 'pg-probe-author', 'pg wake probe', 'chat', '{}'::jsonb, 'agent-comms', 'inbound', 'agent')`,

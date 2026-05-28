@@ -3611,7 +3611,7 @@ function createBotServer(botId: string): BotContext {
   return ctx
 }
 
-// --- Bot Registry (lifecycle management) ---
+// --- Bot Profile Inventory (lifecycle management; DB is SSOT) ---
 interface BotEntry {
   session: string
   projectDir: string
@@ -3622,8 +3622,6 @@ interface BotEntry {
   blockers?: string[]
 }
 
-const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
-  ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
 const DEFAULT_CLAUDE_CMD = 'claude --mcp-config .mcp.json --dangerously-skip-permissions'
 const DEFAULT_AUN_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
 
@@ -3643,7 +3641,7 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
-function buildProfileCommand(agentId: string, session: string, port: number, engine: string | null, fallbackCommand?: string): { command: string, source: string } {
+function buildProfileCommand(agentId: string, session: string, port: number, engine: string | null): { command: string, source: string, blocker?: string } {
   const normalizedEngine = (engine ?? '').trim().toLowerCase()
   if (normalizedEngine === 'codex') {
     const databaseUrl = process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL
@@ -3668,89 +3666,69 @@ function buildProfileCommand(agentId: string, session: string, port: number, eng
   if (normalizedEngine === 'claude-code' || normalizedEngine === 'claude') {
     return { command: DEFAULT_CLAUDE_CMD, source: 'agents.runtime_engine_preference' }
   }
-  if (fallbackCommand?.trim()) return { command: fallbackCommand.trim(), source: 'bot-registry.compat' }
-  return { command: DEFAULT_CLAUDE_CMD, source: 'default' }
-}
-
-function loadBotRegistryFile(): BotEntry[] {
-  try {
-    const content = readFileSync(BOT_REGISTRY_PATH, 'utf-8')
-    return content.split('\n')
-      .filter(line => line.trim() && !line.startsWith('#'))
-      .map(line => {
-        const parts = line.split('|').map(s => s.trim())
-        const [session, projectDir, agentId, portStr, ...cmdParts] = parts
-        const command = cmdParts.join('|').trim() || DEFAULT_CLAUDE_CMD
-        return { session, projectDir, agentId, port: parseInt(portStr, 10), command, source: 'bot-registry.compat' }
-      })
-      .filter(e => e.session && !isNaN(e.port))
-  } catch {
-    return []
+  return {
+    command: '',
+    source: 'agents.runtime_engine_preference',
+    blocker: normalizedEngine ? `unknown_runtime_engine_preference:${normalizedEngine}` : 'missing_runtime_engine_preference',
   }
 }
 
 async function loadBotRegistry(): Promise<BotEntry[]> {
-  const fileEntries = loadBotRegistryFile()
-  const fileByAgent = new Map(fileEntries.map((entry) => [entry.agentId, entry]))
-  const fileBySession = new Map(fileEntries.map((entry) => [entry.session, entry]))
   const client = await tryGetDb()
-  if (!client) return fileEntries
+  if (!client) {
+    process.stderr.write('agent-comms: bot profile inventory unavailable — database required because agents table is SSOT\n')
+    return []
+  }
 
   try {
     const result = await client.query(
       `SELECT agent_id, home_directory, channel_port, runtime, runtime_engine_preference,
               metadata, profile_enabled
          FROM agents
-        WHERE agent_type <> 'human'
+        WHERE agent_type NOT IN ('human', 'system')
           AND COALESCE(profile_enabled, true) = true
+          AND disabled_at IS NULL
+          AND status IS DISTINCT FROM 'disabled'
         ORDER BY agent_id`,
     )
     const entries: BotEntry[] = []
-    const seenFileAgents = new Set<string>()
     for (const row of result.rows) {
       const agentId = String(row.agent_id)
       const metadata = parseBotMetadata(row.metadata)
       const profileSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
         ? metadata.tmux_session.trim()
         : ''
-      const fallback = fileByAgent.get(agentId) ?? (profileSession ? fileBySession.get(profileSession) : undefined)
-      if (fallback) seenFileAgents.add(fallback.agentId)
-      const session = profileSession || fallback?.session || ''
+      const session = profileSession
       const projectDir = (typeof row.home_directory === 'string' && row.home_directory.trim())
         ? row.home_directory.trim()
-        : fallback?.projectDir ?? ''
+        : ''
       const parsedPort = Number(row.channel_port)
-      const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : fallback?.port ?? 0
+      const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 0
       const commandInfo = buildProfileCommand(
         agentId,
-        session || fallback?.session || agentId,
+        session || agentId,
         port,
         row.runtime_engine_preference ?? row.runtime ?? null,
-        fallback?.command,
       )
       const blockers: string[] = []
       if (!session) blockers.push('missing_tmux_session')
       if (!projectDir) blockers.push('missing_home_directory')
       if (!port) blockers.push('missing_channel_port')
+      if (commandInfo.blocker) blockers.push(commandInfo.blocker)
       entries.push({
         session,
         projectDir,
         agentId,
         port,
         command: commandInfo.command,
-        source: fallback ? `agents+${commandInfo.source}` : `agents.${commandInfo.source}`,
+        source: commandInfo.source,
         blockers,
       })
     }
-    for (const entry of fileEntries) {
-      if (!seenFileAgents.has(entry.agentId) && !entries.some((candidate) => candidate.agentId === entry.agentId)) {
-        entries.push(entry)
-      }
-    }
     return entries
   } catch (err) {
-    process.stderr.write(`agent-comms: bot profile inventory DB query failed, using bot-registry fallback: ${err}\n`)
-    return fileEntries
+    process.stderr.write(`agent-comms: bot profile inventory DB query failed; no fallback because agents table is SSOT: ${err}\n`)
+    return []
   }
 }
 

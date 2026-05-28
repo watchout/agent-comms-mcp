@@ -97,6 +97,9 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
       try { daemon.kill('SIGKILL') } catch {}
     }
     tmuxKill(SESSION)
+    tmuxKill(`${SESSION}-status-disabled`)
+    tmuxKill(`${SESSION}-system`)
+    tmuxKill(`${SESSION}-disabled-at`)
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -143,6 +146,10 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     // (c) INSERT agent_messages + message_queue row
     const db = new Database(dbPath)
     const messageId = `msg-${randomUUID()}`
+    db.prepare(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
+       VALUES (?, ?, 'dev', 'claude-code', 'online', ?, 1)`,
+    ).run(AGENT_ID, AGENT_ID, JSON.stringify({ tmux_session: SESSION }))
     db.exec(`INSERT INTO agent_messages (id, author_id, content, message_type, source) VALUES ('${messageId}', 'tester', 'hi', 'chat', 'agent-comms')`)
     db.exec(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('${AGENT_ID}', '${messageId}', '{}', 'pending')`)
     db.close()
@@ -176,5 +183,110 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     // (f) tmux cleanup
     tmuxKill(SESSION)
     expect(tmuxHas(SESSION)).toBe(false)
+  }, 60_000)
+
+  test('disabled/system DB profiles are not wake targets even when tmux sessions exist', async () => {
+    const blockedProfiles = [
+      {
+        agentId: `${AGENT_ID}-status-disabled`,
+        session: `${SESSION}-status-disabled`,
+        agentType: 'dev',
+        status: 'disabled',
+        disabledAt: null,
+      },
+      {
+        agentId: `${AGENT_ID}-system`,
+        session: `${SESSION}-system`,
+        agentType: 'system',
+        status: 'online',
+        disabledAt: null,
+      },
+      {
+        agentId: `${AGENT_ID}-disabled-at`,
+        session: `${SESSION}-disabled-at`,
+        agentType: 'dev',
+        status: 'online',
+        disabledAt: new Date().toISOString(),
+      },
+    ]
+
+    for (const profile of blockedProfiles) {
+      const created = spawnSync('tmux', ['new-session', '-d', '-s', profile.session, 'cat'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      expect(created.status).toBe(0)
+      expect(tmuxHas(profile.session)).toBe(true)
+    }
+
+    daemon = spawn('bun', [DAEMON], {
+      env: {
+        ...process.env,
+        AGENT_COM_DB: 'sqlite',
+        AGENT_COM_SQLITE_PATH: dbPath,
+        DATABASE_URL: '',
+        WAKE_DAEMON_DEBUG: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: REPO_ROOT,
+    })
+    let dStderr = ''
+    daemon.stderr!.on('data', (d: Buffer) => { dStderr += d.toString() })
+
+    const ready = await waitFor(
+      () => dStderr,
+      (s) => /sqlite polling mode/.test(s),
+      30000,
+    )
+    expect(ready).not.toBeNull()
+
+    const baselines = new Map(blockedProfiles.map((profile) => [
+      profile.session,
+      tmuxCapture(profile.session),
+    ]))
+
+    const db = new Database(dbPath)
+    for (const profile of blockedProfiles) {
+      const messageId = `msg-${randomUUID()}`
+      db.prepare(
+        `INSERT INTO agents
+           (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled, disabled_at)
+         VALUES (?, ?, ?, 'claude-code', ?, ?, 1, ?)`,
+      ).run(
+        profile.agentId,
+        profile.agentId,
+        profile.agentType,
+        profile.status,
+        JSON.stringify({ tmux_session: profile.session }),
+        profile.disabledAt,
+      )
+      db.exec(`INSERT INTO agent_messages (id, author_id, content, message_type, source) VALUES ('${messageId}', 'tester', 'blocked wake', 'chat', 'agent-comms')`)
+      db.exec(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('${profile.agentId}', '${messageId}', '{}', 'pending')`)
+    }
+    db.close()
+
+    const unexpectedWake = await waitFor(
+      () => dStderr,
+      (s) => blockedProfiles.some((profile) => s.includes(` for ${profile.agentId}/`)),
+      1500,
+      100,
+    )
+    expect(unexpectedWake).toBeNull()
+    for (const profile of blockedProfiles) {
+      expect(tmuxCapture(profile.session)).toBe(baselines.get(profile.session))
+    }
+
+    const daemonPid = daemon.pid!
+    daemon.kill('SIGTERM')
+    const exited = await new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => resolve(false), 30_000)
+      daemon!.once('exit', () => { clearTimeout(t); resolve(true) })
+    })
+    expect(exited).toBe(true)
+    expect(await pidAlive(daemonPid)).toBe(false)
+
+    for (const profile of blockedProfiles) {
+      tmuxKill(profile.session)
+      expect(tmuxHas(profile.session)).toBe(false)
+    }
   }, 60_000)
 })

@@ -36,7 +36,9 @@
  *   - tech-lead/.claude/memory/feedback_spec_as_tests_not_adrs.md
  */
 import { describe, test, expect } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
@@ -120,10 +122,10 @@ describe('watchdog Check 3b — port liveness has a 60s grace period', () => {
   })
 })
 
-describe('watchdog Check 1 / 3 / 4 — the still-active checks must remain', () => {
-  // The fixes only touch Check 2 and Check 3b. The other checks (session
-  // existence, CMD flag verification, shell-prompt detection) must still
-  // run, otherwise the watchdog loses its ability to catch genuine deaths.
+describe('watchdog DB-profile checks — the still-active checks must remain', () => {
+  // The DB-profile SSOT hotfix removes registry command inspection. The
+  // remaining checks still need to catch missing tmux sessions, shell exits,
+  // and dead MCP ports without falling back to bot-registry command evidence.
   test('Check 1 (tmux session exists) is still executable', () => {
     const lines = WATCHDOG_SOURCE.split('\n')
     const hit = lines.find(
@@ -134,15 +136,47 @@ describe('watchdog Check 1 / 3 / 4 — the still-active checks must remain', () 
     expect(hit).toBeDefined()
   })
 
-  test('Check 3 (channel plugin flag in CMD) is still executable', () => {
-    const lines = WATCHDOG_SOURCE.split('\n')
-    const hit = lines.find(
-      (l) =>
-        l.includes('dangerously-load-development-channels') &&
-        l.includes('grep') &&
-        !l.trimStart().startsWith('#')
-    )
-    expect(hit).toBeDefined()
+  test('registry command / channel plugin flag inspection is removed', () => {
+    expect(WATCHDOG_SOURCE).toContain('DB `agents` profiles are the only source of truth')
+    expect(WATCHDOG_SOURCE).toContain('FROM agents')
+    expect(WATCHDOG_SOURCE).toContain("metadata->>'tmux_session'")
+    expect(WATCHDOG_SOURCE).toContain('DB bot profile query failed')
+    expect(WATCHDOG_SOURCE).toContain('refusing to report 0/0 healthy')
+    expect(WATCHDOG_SOURCE).not.toContain('BOT_REGISTRY')
+    expect(WATCHDOG_SOURCE).not.toContain('dangerously-load-development-channels')
+    expect(WATCHDOG_SOURCE).not.toContain('DEFAULT_CMD')
+  })
+
+  test('DB profile query failure is checked before the health loop', () => {
+    expect(WATCHDOG_SOURCE).toContain('if ! PROFILE_ROWS="$("$PSQL_BIN"')
+    expect(WATCHDOG_SOURCE).toContain('done <<< "$PROFILE_ROWS"')
+    expect(WATCHDOG_SOURCE).not.toContain('done < <(')
+  })
+
+  test('DB profile query failure exits non-zero instead of reporting 0/0 healthy', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'watchdog-psql-fail-'))
+    try {
+      const fakePsql = join(tmp, 'psql-fails')
+      writeFileSync(fakePsql, '#!/usr/bin/env bash\necho "fake psql failure" >&2\nexit 17\n')
+      chmodSync(fakePsql, 0o755)
+
+      const result = spawnSync('bash', [join(REPO_ROOT, 'scripts/watchdog.sh')], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          AUN_WATCHDOG_PSQL_BIN: fakePsql,
+          DATABASE_URL: 'postgresql:///watchdog_fail_closed_test?host=/tmp',
+        },
+        encoding: 'utf-8',
+      })
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('fake psql failure')
+      expect(result.stderr).toContain('DB bot profile query failed')
+      expect(result.stderr).not.toContain('Check complete: 0/0 alive')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 
   test('Check 4 (shell prompt detection) is still executable', () => {

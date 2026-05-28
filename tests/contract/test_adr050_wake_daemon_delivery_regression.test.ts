@@ -106,11 +106,11 @@ describe('ADR-050 §6d — wake-daemon stderr regression (no UnixSignalBus / SIG
     )
     expect(ready).not.toBeNull()
 
-    // INSERT one inbound + queue row. We do NOT create a tmux session;
-    // the daemon will log "no tmux session for agent <id>" (which still
-    // proves it picked up the row from the queue without going through
-    // any in-process bus). The ADR-050 invariant assertions below are
-    // independent of tmux delivery success.
+    // INSERT one inbound + queue row. We do NOT create a DB profile/tmux
+    // session; the daemon will log a DB-profile session miss (which still
+    // proves it picked up the row from the queue without going through any
+    // in-process bus). The ADR-050 invariant assertions below are independent
+    // of tmux delivery success.
     const db = new Database(dbPath)
     const messageId = `adr050-msg-${randomUUID()}`
     db.exec(
@@ -123,14 +123,14 @@ describe('ADR-050 §6d — wake-daemon stderr regression (no UnixSignalBus / SIG
 
     // Wait until the daemon's stderr proves it observed the row. Either
     // "wake .* for <agent>/<msg>" (would-be success path) OR
-    // "no tmux session for agent <agent>" (no-tmux path used here) is
+    // "no active DB-profile tmux session for agent <agent>" (no-profile path used here) is
     // a positive proof; we accept either to keep the test independent
     // of tmux setup state.
     const observed = await waitFor(
       () => dStderr,
       (s) =>
         new RegExp(`wake .* for ${AGENT_ID}/${messageId}`).test(s)
-          || new RegExp(`no tmux session for agent ${AGENT_ID}`).test(s),
+          || new RegExp(`no active DB-profile tmux session for agent ${AGENT_ID}`).test(s),
       15000,
       100,
     )
