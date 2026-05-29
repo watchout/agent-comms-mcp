@@ -32,6 +32,8 @@ const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 
 const AGENT_ID = `test-wake-${randomUUID().slice(0, 8)}`
 const SESSION = `discord-${AGENT_ID}`
+const DAEMON_READY_TIMEOUT_MS = process.env.CI ? 60_000 : 30_000
+const DAEMON_TEST_TIMEOUT_MS = DAEMON_READY_TIMEOUT_MS + 40_000
 
 let tmpDir: string
 let dbPath: string
@@ -128,15 +130,13 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     daemon.stderr!.on('data', (d: Buffer) => { dStderr += d.toString() })
 
     // Wait for the daemon to announce "sqlite polling mode". Under full-
-    // suite parallel load the bun cold-start for the daemon child can
-    // legitimately take 10–20s (CPU contention across ~120 sibling test
-    // files all spawning bun subprocesses); the 30s budget reflects
-    // observed worst-case cold-start latency without relaxing the spec
-    // §4.1 5s wake budget that fires after this readiness gate.
+    // suite parallel CI load the bun cold-start for the daemon child can be
+    // delayed by sibling test files spawning bun subprocesses. This readiness
+    // gate is separate from the spec §4.1 5s wake budget below.
     const ready = await waitFor(
       () => dStderr,
       (s) => /sqlite polling mode/.test(s),
-      30000,
+      DAEMON_READY_TIMEOUT_MS,
     )
     expect(ready).not.toBeNull()
 
@@ -168,7 +168,14 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
       100,
     )
     expect(woke).toBe(true)
-    expect(dStderr).toMatch(new RegExp(`wake .* for ${AGENT_ID}/${messageId}`))
+    const wakeLogPattern = new RegExp(`wake .* for ${AGENT_ID}/${messageId}`)
+    const wakeLog = await waitFor(
+      () => dStderr,
+      (s) => wakeLogPattern.test(s),
+      2000,
+      50,
+    )
+    expect(wakeLog).not.toBeNull()
 
     // (e) SIGTERM → ≤30 s exit + PID gone
     const daemonPid = daemon.pid!
@@ -183,7 +190,7 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     // (f) tmux cleanup
     tmuxKill(SESSION)
     expect(tmuxHas(SESSION)).toBe(false)
-  }, 60_000)
+  }, DAEMON_TEST_TIMEOUT_MS)
 
   test('disabled/system DB profiles are not wake targets even when tmux sessions exist', async () => {
     const blockedProfiles = [
@@ -235,7 +242,7 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     const ready = await waitFor(
       () => dStderr,
       (s) => /sqlite polling mode/.test(s),
-      30000,
+      DAEMON_READY_TIMEOUT_MS,
     )
     expect(ready).not.toBeNull()
 
@@ -288,5 +295,5 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
       tmuxKill(profile.session)
       expect(tmuxHas(profile.session)).toBe(false)
     }
-  }, 60_000)
+  }, DAEMON_TEST_TIMEOUT_MS)
 })
