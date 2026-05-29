@@ -38,6 +38,7 @@ import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
+import { buildFullChannelSmokeReport, formatFullChannelSmokeText } from '../core/full-channel-smoke'
 import {
   buildChannelRegistrationReconcileReport,
   formatChannelRegistrationReconcileText,
@@ -3716,6 +3717,40 @@ async function fleetCommand(subcommand: string | undefined, args: string[]) {
   }
 }
 
+async function smokeCommand(subcommand: string | undefined, args: string[]) {
+  const { flags } = parseArgs(args)
+  if (subcommand !== 'run') {
+    console.error('Usage: agent-com smoke run [--format json|text] [--provider discord] [--window-hours 168] [--channel <external_id>] [--include-disabled] [--include-test] [--execute --confirm <plan_hash>] [--timeout-ms 30000]')
+    process.exit(2)
+  }
+  const format = flags.format ?? 'json'
+  const windowHours = parsePositiveIntFlag(flags['window-hours'], 168, 'window-hours')
+  const timeoutMs = parsePositiveIntFlag(flags['timeout-ms'], 30000, 'timeout-ms')
+  // dry-run/plan is the default and read-only; execute is opt-in and gated by --confirm.
+  const mode = hasFlag(flags, 'execute') && flagEnabled(flags['execute']) ? 'execute' : 'dry_run'
+  const db = await getDb()
+  try {
+    const report = await buildFullChannelSmokeReport((db as any).__adapter, {
+      provider: flags.provider ?? 'discord',
+      windowHours,
+      externalChannelId: flags.channel ?? flags['external-channel-id'] ?? null,
+      includeDisabled: hasFlag(flags, 'include-disabled') ? flagEnabled(flags['include-disabled']) : false,
+      includeTest: hasFlag(flags, 'include-test') ? flagEnabled(flags['include-test']) : false,
+      mode,
+      confirmPlanHash: flags.confirm ?? null,
+      timeoutMs,
+    })
+    if (format === 'text') {
+      process.stdout.write(formatFullChannelSmokeText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+    if (!report.ok || report.summary.blocked > 0 || report.summary.failure_count > 0) process.exitCode = 2
+  } finally {
+    await db.end()
+  }
+}
+
 /**
  * `agent-com status` — system or per-agent status (v1.0.2 §6.5).
  *
@@ -4665,6 +4700,8 @@ if (command === 'channel') {
   await inboundCommand(subcommand, rest)
 } else if (command === 'fleet') {
   await fleetCommand(subcommand, rest)
+} else if (command === 'smoke') {
+  await smokeCommand(subcommand, rest)
 } else if (command === 'worker') {
   await workerCommand(subcommand, rest)
 } else if (command === 'agents') {
@@ -4719,6 +4756,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only Discord inbound smoke evidence by channel
   fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke]
                                                        — read-only all-agent AUN readiness gates and activation blockers
+  smoke run [--format json|text] [--provider discord] [--window-hours 168] [--channel <external_id>] [--include-disabled] [--include-test] [--execute --confirm <plan_hash>] [--timeout-ms 30000]
+                                                       — NORM-060 full-channel smoke (dry-run/plan default, read-only)
   worker report --agent-id <agent> --summary <text> [--status running|blocked|stalled|failed|completed|handoff] [--queue-id <id>] [--repository <repo>] [--branch <branch>] [--pull-request <ref>] [--progress 0-100] [--progress-label <phase>] [--stale-after-sec 120] [--blocked-reason <text>] [--handoff-target <agent>] [--handoff-channel <id>]
                                                        — write DB-backed current activity evidence for an internal worker
   worker ping --agent-id <agent> --activity-id <uuid> [--summary <text>] [--progress 0-100] [--progress-label <phase>]
