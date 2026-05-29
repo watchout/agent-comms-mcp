@@ -6,6 +6,7 @@
  *   - oldest_pending_at: oldest pending row created_at (NULL if none)
  *   - heartbeat_ok: agents.last_seen_at within 60s
  *   - health_state: derived enum
+ *   - endpoint_lease_state: active connector runtime endpoint lease readiness
  *
  * `health_state` enum:
  *   - 'crashed'     — last_seen_at < NOW() - 5min
@@ -35,15 +36,48 @@ export interface BotStatusDbRow {
   pending_count: number
   oldest_pending_at: string | null
   health_state: BotHealthState
+  active_connector_count: number
+  runtime_linked_connector_count: number
+  active_endpoint_lease_count: number
+  endpoint_lease_state: 'not_applicable' | 'missing_runtime' | 'missing_lease' | 'ok'
+  endpoint_lease_expires_at: string | null
+  endpoint_lease_heartbeat_at: string | null
 }
 
 const QUERY = `
+  WITH queue_status AS (
+    SELECT agent_id,
+           COUNT(id) FILTER (WHERE status = 'pending') AS pending_count,
+           MIN(created_at) FILTER (WHERE status = 'pending') AS oldest_pending_at
+      FROM message_queue
+     GROUP BY agent_id
+  ),
+  endpoint_status AS (
+    SELECT ci.agent_id,
+           COUNT(DISTINCT ci.connector_instance_id) AS active_connector_count,
+           COUNT(DISTINCT ci.connector_instance_id) FILTER (
+             WHERE ci.runtime_instance_id IS NOT NULL
+           ) AS runtime_linked_connector_count,
+           COUNT(DISTINCT ci.connector_instance_id) FILTER (
+             WHERE cpl.lease_id IS NOT NULL
+           ) AS active_endpoint_lease_count,
+           MIN(cpl.expires_at) AS endpoint_lease_expires_at,
+           MAX(cpl.heartbeat_at) AS endpoint_lease_heartbeat_at
+      FROM connector_instances ci
+      LEFT JOIN control_plane_leases cpl
+        ON cpl.lease_scope_type = 'runtime_instance'
+       AND cpl.lease_scope_id = ci.runtime_instance_id::text
+       AND cpl.status = 'active'
+       AND cpl.expires_at > NOW()
+     WHERE ci.status IN ('active')
+     GROUP BY ci.agent_id
+  )
   SELECT a.agent_id,
          a.status,
          a.last_seen_at,
          (a.last_seen_at > NOW() - INTERVAL '60 seconds') AS heartbeat_ok,
-         COUNT(mq.id) FILTER (WHERE mq.status = 'pending') AS pending_count,
-         MIN(mq.created_at) FILTER (WHERE mq.status = 'pending') AS oldest_pending_at,
+         COALESCE(q.pending_count, 0) AS pending_count,
+         q.oldest_pending_at,
          CASE
            WHEN a.last_seen_at IS NULL THEN 'offline'
            -- Order matters: busy_stuck must be checked before crashed, otherwise
@@ -55,11 +89,26 @@ const QUERY = `
            WHEN a.last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'crashed'
            WHEN a.status = 'busy' AND a.last_seen_at > NOW() - INTERVAL '60 seconds' THEN 'busy_active'
            ELSE 'healthy'
-         END AS health_state
+         END AS health_state,
+         COALESCE(e.active_connector_count, 0) AS active_connector_count,
+         COALESCE(e.runtime_linked_connector_count, 0) AS runtime_linked_connector_count,
+         COALESCE(e.active_endpoint_lease_count, 0) AS active_endpoint_lease_count,
+         CASE
+           WHEN COALESCE(e.active_connector_count, 0) = 0 THEN 'not_applicable'
+           WHEN COALESCE(e.runtime_linked_connector_count, 0) < COALESCE(e.active_connector_count, 0) THEN 'missing_runtime'
+           WHEN COALESCE(e.active_endpoint_lease_count, 0) < COALESCE(e.active_connector_count, 0) THEN 'missing_lease'
+           ELSE 'ok'
+         END AS endpoint_lease_state,
+         e.endpoint_lease_expires_at,
+         e.endpoint_lease_heartbeat_at
     FROM agents a
-    LEFT JOIN message_queue mq ON mq.agent_id = a.agent_id
-   GROUP BY a.agent_id, a.status, a.last_seen_at
+    LEFT JOIN queue_status q ON q.agent_id = a.agent_id
+    LEFT JOIN endpoint_status e ON e.agent_id = a.agent_id
 `
+
+function parseCount(value: string | number): number {
+  return typeof value === 'string' ? parseInt(value, 10) : value
+}
 
 export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, BotStatusDbRow>> {
   const result = await client.query<{
@@ -70,6 +119,12 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     pending_count: string | number
     oldest_pending_at: Date | null
     health_state: BotHealthState
+    active_connector_count: string | number
+    runtime_linked_connector_count: string | number
+    active_endpoint_lease_count: string | number
+    endpoint_lease_state: BotStatusDbRow['endpoint_lease_state']
+    endpoint_lease_expires_at: Date | null
+    endpoint_lease_heartbeat_at: Date | null
   }>(QUERY)
   const map = new Map<string, BotStatusDbRow>()
   for (const row of result.rows) {
@@ -77,10 +132,16 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
       agent_id: row.agent_id,
       status: row.status,
       last_seen_at: row.last_seen_at ? row.last_seen_at.toISOString() : null,
-      heartbeat_ok: row.heartbeat_ok,
-      pending_count: typeof row.pending_count === 'string' ? parseInt(row.pending_count, 10) : row.pending_count,
+      heartbeat_ok: Boolean(row.heartbeat_ok),
+      pending_count: parseCount(row.pending_count),
       oldest_pending_at: row.oldest_pending_at ? row.oldest_pending_at.toISOString() : null,
       health_state: row.health_state,
+      active_connector_count: parseCount(row.active_connector_count),
+      runtime_linked_connector_count: parseCount(row.runtime_linked_connector_count),
+      active_endpoint_lease_count: parseCount(row.active_endpoint_lease_count),
+      endpoint_lease_state: row.endpoint_lease_state,
+      endpoint_lease_expires_at: row.endpoint_lease_expires_at ? row.endpoint_lease_expires_at.toISOString() : null,
+      endpoint_lease_heartbeat_at: row.endpoint_lease_heartbeat_at ? row.endpoint_lease_heartbeat_at.toISOString() : null,
     })
   }
   return map

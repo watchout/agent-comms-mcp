@@ -27,6 +27,23 @@ function makeDeps(overrides: Partial<BotHealthDeps> = {}): BotHealthDeps {
 }
 
 describe('checkBotHealth — six branches', () => {
+  test('NORM-022 — tmux diagnostics are skipped for non-tmux supervisors', () => {
+    let tmuxChecked = false
+    const r = checkBotHealth(
+      { supervisorType: 'stdio', session: null, port: null },
+      makeDeps({
+        hasSession: () => {
+          tmuxChecked = true
+          return false
+        },
+      }),
+    )
+    expect(r.status).toBe('healthy')
+    expect(r.details).toContain('supervisor_type=stdio')
+    expect(r.details).toContain('tmux diagnostics skipped')
+    expect(tmuxChecked).toBe(false)
+  })
+
   test('1. dead — tmux session not found', () => {
     const r = checkBotHealth(ENTRY, makeDeps({ hasSession: () => false }))
     expect(r.status).toBe('dead')

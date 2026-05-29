@@ -1,6 +1,6 @@
 # AUN Normalization MVP WBS
 
-Date: 2026-05-25
+Date: 2026-05-27
 Status: Working breakdown for the MVP slices defined in
 [`aun-normalization-roadmap.md`](./aun-normalization-roadmap.md). Not normative
 on its own; the roadmap remains the contract. This document tracks per-slice
@@ -15,9 +15,40 @@ slice's scope shifts.
 | Status | Count |
 |---|---|
 | Done | 2 |
-| In progress | 3 |
-| Spec ready, impl pending | 4 |
-| Not started | 5 |
+| In progress | 5 |
+| Spec ready, impl pending | 3 |
+| Not started | 4 |
+
+## Current Phase Commitment
+
+Approved on 2026-05-27: continue in **MVP: Internal Normalization** and use
+the enterprise control-plane model as the design standard. The phase stops at
+deterministic internal fleet normalization; it does not attempt full
+orchestration, remote auth, multi-region scheduling, tmux removal, raw token DB
+storage, or enterprise UI.
+
+Immediate execution scope:
+
+| Priority | Slice | Task | Done when |
+|---|---|---|---|
+| P0 | NORM-022 | Add runtime endpoint lease read model and supervisor-neutral status path | `bot_status` can explain delivery readiness from runtime, endpoint lease, and health evidence, with tmux only as optional supervisor evidence |
+| P0 | NORM-022 | Gate cleanup/restart on stale heartbeat plus endpoint lease/fencing evidence | cleanup refuses to kill a process from port or tmux evidence alone; restart reports the lease/fencing reason it used |
+| P0 | NORM-035 | Backfill provider channel access for operational Discord channels | each target channel has read/write access evidence or an explicit failed/unknown row that routing must respect |
+| P0 | NORM-036 | Add effective delivery owner resolver over binding, credential, and access evidence | resolver returns one owner or a deterministic ambiguity/failure reason; channel differences become policy/access differences |
+| P1 | NORM-040 | Wire new runtime/access evidence into `aun doctor --strict` | strict doctor exits nonzero for missing lease, missing access evidence, duplicate owner, or stale runtime drift |
+| P1 | NORM-050/NORM-060 | Reconcile and smoke after resolver lands | dry-run reconcile is reproducible and smoke shows DB evidence for inbound, queue close, outbound, and audit |
+
+Execution lane for every immediate task:
+
+```text
+spec -> impl contract/plan -> pre-implementation audit -> implementation
+     -> implementation audit -> merge -> POST_MERGE verification
+```
+
+Work may be prepared in parallel only when it does not bypass the audit lane.
+Implementation must not merge until the spec or impl contract has passed
+pre-implementation audit, and POST_MERGE evidence must be captured before the
+slice is marked done.
 
 ## Slice State
 
@@ -73,6 +104,44 @@ slice's scope shifts.
 - Depends on: NORM-020.
 - Completion evidence: grep shows no production read path against the legacy
   bot table; smoke test boots a fleet from one editable profile per bot.
+
+### NORM-022 — Runtime endpoint lease and supervisor adapter model 🟡 in progress
+
+- Spec:
+  `docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md`.
+- Implementation plan / audit packet:
+  `docs/plans/norm-022-runtime-endpoint-lease-impl-plan.md`.
+- Started: 2026-05-27 as the first immediate task in the current MVP phase.
+- Current lane position: spec/impl contract ready; pre-implementation audit is
+  the next gate before code merge.
+- Governance route for this slice: L1 `devauditor`, L2 `l2auditor`, L3 `cto`
+  per CEO directive on 2026-05-27.
+- Reason for MVP placement: the current fleet already needs safe port,
+  endpoint, and supervisor-neutral runtime handling. Waiting until v1
+  `LEASE-120` would leave `tmux` and ad-hoc port cleanup as de facto
+  authority during MVP stabilization.
+- Owner: agent-com-dev (implementation), ARC review on lease/fencing semantics.
+- Expected PRs: 2-3 (status/read-only endpoint evidence, cleanup/restart gate,
+  strict-doctor coverage).
+- Depends on: NORM-020; informs NORM-021 script rewrite and NORM-040 strict
+  checks.
+- Immediate tasks:
+  1. define the endpoint lease read model and DB evidence expected by
+     `bot_status`
+  2. convert status output to report `agent -> connector -> runtime ->
+     endpoint lease -> health`, with tmux/session/port as diagnostic details
+  3. make cleanup/restart refuse destructive action without stale heartbeat,
+     endpoint lease ownership, and fencing evidence
+  4. add the frozen NORM-022 merge-gate fixtures:
+     `healthy_endpoint_lease`, `missing_lease_refusal`, `stale_ttl_expiry`,
+     `duplicate_active_lease_fenced`, `supervisor_down_fail_closed`,
+     `restart_gated_by_lease_heartbeat_fencing`,
+     `disabled_or_revoked_fail_closed`, `multi_channel_single_runtime`, and
+     `tmux_diagnostics_only_for_tmux_supervisor`
+- Completion evidence: `bot_status` reports through
+  `agent_id -> connector_instance -> runtime_instance -> endpoint lease ->
+  health`, tmux is only optional supervisor evidence, and cleanup refuses to
+  kill a port without stale heartbeat plus endpoint lease/fencing evidence.
 
 ### NORM-025 — Provider identity registry 🟡 spec ready, impl in review
 
@@ -176,10 +245,10 @@ Solid edges = strict dependency. Dashed sequencing edges (NORM-010 → NORM-070)
 exist because NORM-070 reuses NORM-010 invariants but does not block on it.
 
 ```
-NORM-021 ─┬─ NORM-020 ─┬─ NORM-040 ─┬─ NORM-060
-          │            │            │
-          │            └─ NORM-080  │
-          │                         │
+NORM-021 ─┬─ NORM-020 ─┬─ NORM-022 ─┬─ NORM-040 ─┬─ NORM-060
+          │            │            │            │
+          │            │            └─ NORM-080  │
+          │            │                         │
 NORM-025 ─┴─ NORM-030 ── NORM-035 ── NORM-036 ── NORM-050
                                                   │
 NORM-010 ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ NORM-070
@@ -189,6 +258,10 @@ The critical path for MVP closure runs through NORM-025 → 030 → 035 → 036 
 050. Until NORM-036 is in code, NORM-050 reconcile cannot make safe owner
 decisions, and `aun doctor --strict` (NORM-040) cannot complete its connector
 checks.
+
+The runtime/endpoint safety path runs through NORM-020 → NORM-022 → NORM-040.
+Until NORM-022 is in code, `bot_status`, restart, and cleanup must treat tmux
+and raw port observations as diagnostic hints rather than authority.
 
 ## Open Decisions
 
