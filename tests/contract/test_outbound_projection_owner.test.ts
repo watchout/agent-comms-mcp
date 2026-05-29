@@ -756,6 +756,42 @@ describe('#604 Discord direct-delivery credential contract', () => {
     expect(decision.projectionFallbackReason).toBe('recipient_projection_human')
   })
 
+  test('runtime decision pins sender direct priority while legacy route keeps adapter-owner priority', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+      },
+    })
+    const db = mockProjectionDb({
+      bindingDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+    })
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+    })
+
+    expect(route.consumerAgentId).toBe('aun')
+    expect(route.source).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerAgentId).toBe('codex-cto')
+    expect(decision.consumerSource).toBe('sender_token_evidence')
+    expect(decision.deliveryFallbackReason).toBe('recipient_direct_unavailable')
+  })
+
   test('registered sender credential without write evidence falls back to AUN with diagnostics', async () => {
     setRoutingConfig({
       main: {
