@@ -1,4 +1,10 @@
 import type { DbAdapter } from './db'
+import {
+  normalizeText,
+  parseJsonObject as parseProfileJsonObject,
+  profileExclusionReason,
+  type ProfileExclusionReason,
+} from './profile-classification'
 
 export type AunFleetReadinessClass = 'ready' | 'activation_candidate' | 'excluded'
 
@@ -8,6 +14,8 @@ export type AunFleetReadinessOptions = {
   requireSmoke?: boolean
   operatorAgentId?: string
   activeStatuses?: string[]
+  includeDisabledProfiles?: boolean
+  includeTestProfiles?: boolean
 }
 
 export type AunFleetSmokeEvidence = {
@@ -31,6 +39,7 @@ export type AunFleetAgentReadiness = {
   live_runtime_instance_count: number
   active_queue_count: number
   denied: boolean
+  profile_excluded_reason: ProfileExclusionReason
   active_status: boolean
   runtime_evidence: boolean
   smoke: AunFleetSmokeEvidence | null
@@ -52,6 +61,8 @@ export type AunFleetReadinessReport = {
     require_smoke: boolean
     operator_agent_id: string
     active_statuses: string[]
+    include_disabled_profiles: boolean
+    include_test_profiles: boolean
   }
   summary: {
     agents: number
@@ -121,6 +132,10 @@ function actionForBlocker(blocker: string): string {
   switch (blocker) {
     case 'denied_by_state_daemon':
       return 'remove from STATE_DAEMON_AGENT_DENYLIST in a reviewed PR before activation'
+    case 'disabled_profile_excluded':
+      return 'pass --include-disabled only for an explicit reviewed disabled-profile audit'
+    case 'test_profile_excluded':
+      return 'pass --include-test only for an explicit reviewed test-profile audit'
     case 'no_channel_membership':
       return 'add explicit channel membership and routing metadata'
     case 'inactive_status':
@@ -153,11 +168,13 @@ export async function buildAunFleetReadinessReport(
   const requireSmoke = options.requireSmoke ?? smokeRunId !== null
   const operatorAgentId = options.operatorAgentId ?? 'codex-aun'
   const activeStatuses = options.activeStatuses ?? DEFAULT_ACTIVE_STATUSES
+  const includeDisabledProfiles = options.includeDisabledProfiles ?? false
+  const includeTestProfiles = options.includeTestProfiles ?? false
   const activeStatusSet = new Set(activeStatuses)
 
   const agentRows = await queryRows(
     db,
-    `SELECT agent_id, status, runtime, metadata
+    `SELECT agent_id, agent_type, status, runtime, metadata, profile_enabled, disabled_at
        FROM agents
       ORDER BY agent_id`,
   )
@@ -288,8 +305,8 @@ export async function buildAunFleetReadinessReport(
 
   const agents: AunFleetAgentReadiness[] = agentRows.map((row) => {
     const agentId = String(row.agent_id)
-    const metadata = parseJsonObject(row.metadata)
-    const tmuxSession = normalizeString(metadata.tmux_session)
+    const metadata = parseProfileJsonObject(row.metadata)
+    const tmuxSession = normalizeText(metadata.tmux_session)
     const status = String(row.status ?? '')
     const runtime = String(row.runtime ?? '')
     const channels = channelsByAgent.get(agentId) ?? []
@@ -297,6 +314,10 @@ export async function buildAunFleetReadinessReport(
     const liveRuntimeInstanceCount = liveRuntimeCountByAgent.get(agentId) ?? 0
     const activeQueueCount = activeQueueCountByAgent.get(agentId) ?? 0
     const denied = denylist.has(agentId)
+    const profileExcludedReason = profileExclusionReason(row, {
+      includeDisabledProfiles,
+      includeTestProfiles,
+    })
     const activeStatus = activeStatusSet.has(status)
     const runtimeEvidence = tmuxSession !== null || liveRuntimeInstanceCount > 0
     const smoke = smokeByAgent.get(agentId) ?? null
@@ -304,13 +325,17 @@ export async function buildAunFleetReadinessReport(
 
     if (denied) {
       blockers.push('denied_by_state_daemon')
+    } else if (profileExcludedReason === 'disabled_profile') {
+      blockers.push('disabled_profile_excluded')
+    } else if (profileExcludedReason === 'test_profile') {
+      blockers.push('test_profile_excluded')
     } else {
       if (channels.length === 0) blockers.push('no_channel_membership')
       if (!activeStatus) blockers.push('inactive_status')
       if (!runtimeEvidence) blockers.push('no_runtime_evidence')
     }
 
-    if (!denied && requireSmoke) {
+    if (!denied && !profileExcludedReason && requireSmoke) {
       if (agentId === operatorAgentId && smoke === null) {
         if (activeQueueCount > 0) blockers.push('active_queue_not_drained')
       } else if (!smoke) {
@@ -322,7 +347,7 @@ export async function buildAunFleetReadinessReport(
       }
     }
 
-    const readiness: AunFleetReadinessClass = denied
+    const readiness: AunFleetReadinessClass = denied || profileExcludedReason !== null
       ? 'excluded'
       : blockers.length === 0
         ? 'ready'
@@ -339,6 +364,7 @@ export async function buildAunFleetReadinessReport(
       live_runtime_instance_count: liveRuntimeInstanceCount,
       active_queue_count: activeQueueCount,
       denied,
+      profile_excluded_reason: profileExcludedReason,
       active_status: activeStatus,
       runtime_evidence: runtimeEvidence,
       smoke,
@@ -363,6 +389,8 @@ export async function buildAunFleetReadinessReport(
       require_smoke: requireSmoke,
       operator_agent_id: operatorAgentId,
       active_statuses: activeStatuses,
+      include_disabled_profiles: includeDisabledProfiles,
+      include_test_profiles: includeTestProfiles,
     },
     summary: {
       agents: agents.length,

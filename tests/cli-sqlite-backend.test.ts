@@ -692,6 +692,111 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(passingPayload.blockers).toEqual([])
   })
 
+  test('profile doctor excludes disabled and test profiles by default', () => {
+    const profiled = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--channel-port', '19992',
+      '--tmux-session', 'probe-f-session',
+      '--runtime-engine', 'codex',
+      '--execute',
+    ])
+    expect(profiled.status).toBe(0)
+    {
+      const db = new Database(dbPath)
+      db.exec(`
+        INSERT INTO agents (agent_id, display_name, agent_type, status, metadata, profile_enabled)
+        VALUES
+          ('test-bot', 'test-bot', 'dev', 'idle', '{"profile_class":"test"}', 1),
+          ('disabled-bot', 'disabled-bot', 'dev', 'idle', '{}', 0)
+      `)
+      db.close()
+    }
+
+    const defaultDoctor = runCli(['agent', 'profile', 'doctor'])
+    expect(defaultDoctor.status).toBe(0)
+    const defaultPayload = JSON.parse(defaultDoctor.stdout)
+    expect(defaultPayload.checked_agents).toBe(1)
+    expect(defaultPayload.excluded_agents).toBe(2)
+    expect(defaultPayload.blockers).toEqual([])
+
+    const includeTest = runCli(['agent', 'profile', 'doctor', '--include-test'])
+    expect(includeTest.status).toBe(1)
+    expect(JSON.parse(includeTest.stdout).blockers).toContainEqual({
+      agent_id: 'test-bot',
+      code: 'missing_home_directory',
+    })
+
+    const includeDisabled = runCli(['agent', 'profile', 'doctor', '--include-disabled'])
+    expect(includeDisabled.status).toBe(1)
+    expect(JSON.parse(includeDisabled.stdout).blockers).toContainEqual({
+      agent_id: 'disabled-bot',
+      code: 'missing_home_directory',
+    })
+  })
+
+  test('runtime cleanup CLI is dry-run first, hash-confirmed, audited, and idempotent', () => {
+    {
+      const db = new Database(dbPath)
+      db.exec(`
+        INSERT INTO agents
+          (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+        VALUES
+          ('cleanup-disabled', 'cleanup-disabled', 'dev', 'TUI', 'offline', '{"tmux_session":"cleanup-disabled-session","supervisor_type":"tmux"}', 29999, 0);
+
+        INSERT INTO agent_runtime_instances
+          (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+        VALUES
+          ('runtime-cleanup-disabled', 'cleanup-disabled', 'codex', 'local_process', 'cleanup-disabled-session', 29999, 29999, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z');
+      `)
+      db.close()
+    }
+
+    const dry = runCli(['runtime', 'cleanup', '--format', 'json', '--stale-minutes', '15'])
+    expect(dry.status).toBe(0)
+    const plan = JSON.parse(dry.stdout)
+    expect(plan.dry_run).toBe(true)
+    expect(plan.summary.cleanup_targets).toBe(1)
+    expect(plan.targets).toContainEqual(expect.objectContaining({
+      agent_id: 'cleanup-disabled',
+      classification: 'disabled-profile-residue',
+      runtime_instance_id: 'runtime-cleanup-disabled',
+    }))
+
+    const refused = runCli(['runtime', 'cleanup', '--execute', '--format', 'json'])
+    expect(refused.status).toBe(1)
+    expect(refused.stderr).toContain('PLAN_HASH_MISMATCH')
+
+    const executed = runCli(['runtime', 'cleanup', '--execute', '--confirm', plan.plan_hash, '--format', 'json'])
+    expect(executed.status).toBe(0)
+    const executedPayload = JSON.parse(executed.stdout)
+    expect(executedPayload.dry_run).toBe(false)
+    expect(executedPayload.plan_hash).toBe(plan.plan_hash)
+
+    const rows = dbRead(`
+      SELECT ari.status, ari.stopped_at, al.detail
+        FROM agent_runtime_instances ari
+        JOIN audit_log al
+          ON al.event_type = 'runtime.cleanup_target'
+         AND al.agent_id = ari.agent_id
+       WHERE ari.runtime_instance_id = 'runtime-cleanup-disabled'
+    `)
+    expect(rows[0].status).toBe('stopped')
+    expect(rows[0].stopped_at).not.toBeNull()
+    const detail = JSON.parse(rows[0].detail)
+    expect(detail).toMatchObject({
+      plan_hash: plan.plan_hash,
+      runtime_instance_id: 'runtime-cleanup-disabled',
+      port: 29999,
+      tmux_session: 'cleanup-disabled-session',
+    })
+    expect(detail.evidence.agent_id).toBe('cleanup-disabled')
+
+    const rerun = runCli(['runtime', 'cleanup', '--format', 'json'])
+    expect(rerun.status).toBe(0)
+    expect(JSON.parse(rerun.stdout).summary.cleanup_targets).toBe(0)
+  })
+
   test('strict profile doctor gates active connectors on runtime endpoint leases', () => {
     const runtimeId = randomUUID()
     const connectorId = randomUUID()
