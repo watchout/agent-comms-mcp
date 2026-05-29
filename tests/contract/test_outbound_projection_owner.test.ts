@@ -28,12 +28,15 @@ function mockAgent(
 function mockProjectionDb(options: {
   channelAdapterMetadata?: unknown
   channelExternalId?: string
+  threadAdapterMetadata?: unknown
+  threadExternalId?: string | null
   agents?: Record<string, any>
   eligibleDeliveryAgents?: string[]
   bindingDeliveryAgents?: string[]
   readOnlyDeliveryAgents?: string[]
   mismatchedDeliveryAgents?: string[]
   ambiguousDeliveryAgents?: string[]
+  providerAccessByExternalId?: Record<string, string[]>
 } = {}) {
   const eligibleAgents = new Set(options.eligibleDeliveryAgents ?? [])
   const bindingAgents = new Set(options.bindingDeliveryAgents ?? [])
@@ -64,6 +67,14 @@ function mockProjectionDb(options: {
         return { rows: [] }
       }
       if (sql.includes('thread_adapters')) {
+        if (options.threadExternalId !== undefined) {
+          return {
+            rows: [{
+              external_id: options.threadExternalId,
+              metadata: options.threadAdapterMetadata ?? null,
+            }],
+          }
+        }
         return { rows: [] }
       }
       if (sql.includes('channel_adapters')) {
@@ -102,16 +113,20 @@ function mockProjectionDb(options: {
         return { rows: [] }
       }
       if (sql.includes('provider_channel_access')) {
+        const providerChannelId = typeof params?.[1] === 'string' ? params[1] : ''
         const connectorInstanceId = typeof params?.[2] === 'string' ? params[2] : ''
         const agentId = agentFromConnector(connectorInstanceId)
+        const targetScopedAgents = options.providerAccessByExternalId
+          ? new Set(options.providerAccessByExternalId[providerChannelId] ?? [])
+          : null
         if (mismatchedAgents.has(agentId)) {
           return {
-            rows: connectorInstanceId.endsWith('-access')
+            rows: connectorInstanceId.endsWith('-access') && (!targetScopedAgents || targetScopedAgents.has(agentId))
               ? [{ provider_channel_access_id: `access-${agentId}`, capabilities: { message_create: true } }]
               : [],
           }
         }
-        if (eligibleAgents.has(agentId) || ambiguousAgents.has(agentId)) {
+        if ((eligibleAgents.has(agentId) || ambiguousAgents.has(agentId)) && (!targetScopedAgents || targetScopedAgents.has(agentId))) {
           return { rows: [{ provider_channel_access_id: `access-${agentId}`, capabilities: { message_create: true } }] }
         }
         if (readOnlyAgents.has(agentId)) {
@@ -282,6 +297,32 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('recipient_token_evidence')
   })
 
+  test('thread target requires provider access for the thread external id, not the parent channel', async () => {
+    setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
+    const db = mockProjectionDb({
+      channelExternalId: 'discord-parent',
+      threadExternalId: 'discord-thread',
+      eligibleDeliveryAgents: ['agent-com-dev', 'codex-cto'],
+      providerAccessByExternalId: {
+        'discord-parent': ['codex-cto'],
+        'discord-thread': ['agent-com-dev'],
+      },
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+      },
+    })
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: 'ch1',
+      threadId: 'thread1',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+    expect(route.channelExternalId).toBe('discord-thread')
+    expect(route.consumerAgentId).toBe('agent-com-dev')
+    expect(route.source).toBe('channel_policy_adapter_owner')
+  })
+
   test('multiple recipients do not use recipient-facing default projection', async () => {
     setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
     const db = mockProjectionDb({
@@ -375,6 +416,35 @@ describe('ADR-060 outbound projection identity decision', () => {
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
     expect(decision.projectionFallbackReason).toBeNull()
+  })
+
+  test('thread-targeted decision validates delivery ownership against the thread external id', async () => {
+    setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'agent-com-dev' } })
+    const db = mockProjectionDb({
+      channelExternalId: 'discord-parent',
+      threadExternalId: 'discord-thread',
+      eligibleDeliveryAgents: ['agent-com-dev', 'codex-cto'],
+      providerAccessByExternalId: {
+        'discord-parent': ['codex-cto'],
+        'discord-thread': ['agent-com-dev'],
+      },
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+      },
+    })
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      threadId: 'thread1',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+
+    expect(decision.channelExternalId).toBe('discord-thread')
+    expect(decision.consumerAgentId).toBe('agent-com-dev')
+    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.projectionIdentityId).toBe('codex-cto')
+    expect(decision.projectionSource).toBe('recipient_default_projection')
   })
 
   test('recipient delivery evidence fails closed when credential and access are not on the same connector', async () => {

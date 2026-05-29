@@ -95,7 +95,9 @@ Direct recipient delivery is selected only from connector-scoped delivery
 evidence: the active credential and write-capable channel binding/access must
 belong to the same active connector instance. Read-only access, mismatched
 connector evidence, or ambiguous connector evidence fails closed to the normal
-channel owner fallback.
+channel owner fallback. For thread-targeted outbound, provider access evidence
+must match the actual outbound target external id for the thread, not only the
+parent channel external id.
 
 `nativeRoleOutboundOwners` is deprecated compatibility input only. It may be
 read during migration to infer legacy intent, but it must not become a consumer

@@ -296,8 +296,12 @@ async function resolveSurfaceAndConsumer(
     [input.channelId, platform],
   ).catch(() => ({ rows: [] as any[] }))
   if (cr.rows.length > 0) {
-    channelExternalId = channelExternalId ?? cr.rows[0].external_id ?? null
-    providerChannelId = cr.rows[0].external_id ?? providerChannelId
+    const channelAdapterExternalId = cr.rows[0].external_id ?? null
+    const targetAlreadyResolved = channelExternalId !== null
+    channelExternalId = channelExternalId ?? channelAdapterExternalId
+    if (!targetAlreadyResolved) {
+      providerChannelId = channelAdapterExternalId ?? providerChannelId
+    }
     const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, consumerSource: 'channel_adapter_metadata' }
@@ -362,8 +366,12 @@ export async function resolveOutboundProjectionRoute(
     [input.channelId, platform],
   ).catch(() => ({ rows: [] as any[] }))
   if (cr.rows.length > 0) {
-    channelExternalId = channelExternalId ?? cr.rows[0].external_id ?? null
-    providerChannelId = cr.rows[0].external_id ?? providerChannelId
+    const channelAdapterExternalId = cr.rows[0].external_id ?? null
+    const targetAlreadyResolved = channelExternalId !== null
+    channelExternalId = channelExternalId ?? channelAdapterExternalId
+    if (!targetAlreadyResolved) {
+      providerChannelId = channelAdapterExternalId ?? providerChannelId
+    }
     const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, source: 'channel_adapter_metadata' }
