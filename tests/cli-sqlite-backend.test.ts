@@ -673,6 +673,88 @@ describe('F2 — agent-com next (SQLite)', () => {
   })
 })
 
+describe('F1c — channel reconcile CLI (SQLite)', () => {
+  test('dry-run plans missing Discord channel registration and execute requires approval hash', () => {
+    const db = new Database(dbPath)
+    for (const [agentId, discordId] of [
+      ['arc', '900000000000000002'],
+      ['codex-cto', '900000000000000003'],
+    ] as const) {
+      db.prepare(
+        `INSERT INTO agents (agent_id, display_name, agent_type, status, metadata)
+         VALUES (?, ?, 'dev', 'idle', ?)`,
+      ).run(agentId, agentId, JSON.stringify({ discord_id: discordId }))
+      db.prepare(
+        `INSERT INTO agent_ui_bindings (agent_id, ui_type, ui_id, ui_handle, status)
+         VALUES (?, 'discord', ?, ?, 'registered')`,
+      ).run(agentId, discordId, agentId)
+    }
+    db.prepare(
+      `INSERT INTO agent_messages (
+         id, channel_id, author_id, content, metadata, input_mentions,
+         source, direction, role
+       ) VALUES (?, ?, 'human-discord', ?, ?, ?, 'discord', 'inbound', 'user')`,
+    ).run(
+      randomUUID(),
+      '1509299147109306508',
+      '<@900000000000000002> <@900000000000000003> inspect',
+      JSON.stringify({
+        discord_channel_id: '1509299147109306508',
+        discord_message_id: 'discord-reconcile-cli',
+        mentions: [],
+      }),
+      JSON.stringify([]),
+    )
+    db.close()
+
+    const dry = runCli([
+      'channel', 'reconcile',
+      '--provider', 'discord',
+      '--channel', '1509299147109306508',
+      '--adapter-owner', 'probe-f',
+    ])
+    expect(dry.status).toBe(0)
+    const dryPayload = JSON.parse(dry.stdout)
+    expect(dryPayload.dry_run).toBe(true)
+    expect(dryPayload.planned[0]).toMatchObject({
+      external_channel_id: '1509299147109306508',
+      adapter_owner_agent_id: 'probe-f',
+      primary_agent_id: 'probe-f',
+    })
+    expect(dryPayload.planned[0].proposed_members).toEqual([
+      'arc',
+      'codex-cto',
+      'probe-f',
+    ])
+    expect(dbRead(`SELECT * FROM channel_adapters WHERE external_id = '1509299147109306508'`)).toHaveLength(0)
+
+    const refused = runCli([
+      'channel', 'reconcile',
+      '--provider', 'discord',
+      '--channel', '1509299147109306508',
+      '--adapter-owner', 'probe-f',
+      '--execute',
+      '--confirm', 'wrong-hash',
+    ])
+    expect(refused.status).not.toBe(0)
+    expect(JSON.parse(refused.stdout).error).toBe('OPERATOR_APPROVAL_REQUIRED')
+    expect(dbRead(`SELECT * FROM channels WHERE id = '1509299147109306508'`)).toHaveLength(0)
+
+    const executed = runCli([
+      'channel', 'reconcile',
+      '--provider', 'discord',
+      '--channel', '1509299147109306508',
+      '--adapter-owner', 'probe-f',
+      '--execute',
+      '--confirm', dryPayload.plan_hash,
+    ])
+    expect(executed.status).toBe(0)
+    expect(JSON.parse(executed.stdout).summary.executed).toBe(1)
+    expect(dbRead(`SELECT * FROM channel_adapters WHERE external_id = '1509299147109306508'`)).toHaveLength(1)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type = 'channel.registration_reconcile_execute'`)).toHaveLength(1)
+  })
+})
+
 describe('F3 — agent-com send (SQLite)', () => {
   test('replies to the in-flight row, sets replied, idles the agent', () => {
     const { queueId } = seedPendingMessage('send test')

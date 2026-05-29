@@ -40,6 +40,7 @@ const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
 const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
+const CHANNEL_REGISTRATION_RECONCILE_PATH = join(REPO_ROOT, 'core', 'channel-registration-reconcile.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
@@ -51,6 +52,7 @@ const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
 const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
+const CHANNEL_REGISTRATION_RECONCILE_SRC = readFileSync(CHANNEL_REGISTRATION_RECONCILE_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -487,6 +489,16 @@ describe('T12 — DB-backed channel policy CLI surface', () => {
     expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/connector_instances/)
     expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/channel_connector_bindings/)
     expect(CHANNEL_CONNECTOR_SYNC_SRC).toMatch(/active_binding_conflict/)
+  })
+
+  test('channel reconcile CLI is dry-run first and execute requires operator approval hash', () => {
+    expect(CLI_SRC).toMatch(/channel reconcile \[--provider discord\]/)
+    expect(CLI_SRC).toMatch(/subcommand === 'reconcile'[\s\S]*?channelReconcile\(rest\)/)
+    expect(CHANNEL_REGISTRATION_RECONCILE_SRC).toMatch(/read_only_inventory/)
+    expect(CHANNEL_REGISTRATION_RECONCILE_SRC).toMatch(/dry_run_default/)
+    expect(CHANNEL_REGISTRATION_RECONCILE_SRC).toMatch(/OPERATOR_APPROVAL_REQUIRED/)
+    expect(CHANNEL_REGISTRATION_RECONCILE_SRC).toMatch(/confirmPlanHash !== planHash/)
+    expect(CHANNEL_REGISTRATION_RECONCILE_SRC).toMatch(/inbound\.channel_unregistered/)
   })
 })
 
