@@ -61,7 +61,7 @@ afterAll(async () => {
   }
 })
 
-describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () => {
+describe('S2-A §4.5 — orphan reclaim returns claimed rows to pending', () => {
   test('reclaim flips status, records orphan_reclaim, and schedules backoff next_retry_at', async () => {
     if (!available) {
       // eslint-disable-next-line no-console
@@ -72,7 +72,7 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
     const attempts = 3 // delay(3) = 2^2 = 4s + jitter(<500ms), well inside the tolerance
     const claimedAtOffsetSec = TIMEOUT_SEC + 60 // 6 min past the 5 min threshold
 
-    // Seed: processing row older than the orphan threshold.
+    // Seed: claimed row older than the orphan threshold.
     const seed = await client!.query(
       `INSERT INTO outbound_queue
          (message_id, agent_id, channel_external_id, content,
@@ -130,10 +130,10 @@ describe('S2-A §4.5 — orphan reclaim returns processing rows to pending', () 
     expect(deltaMs).toBeLessThanOrEqual(4_500 + 1_500) // + query RTT margin
   })
 
-  test('reclaim does not touch processing rows younger than the orphan threshold', async () => {
+  test('reclaim does not touch claimed rows younger than the orphan threshold', async () => {
     if (!available) return
 
-    // Seed a "fresh" processing row (claimed_at = now() - 60s, well below
+    // Seed a fresh claimed row (claimed_at = now() - 60s, well below
     // the 600s threshold). The reclaim UPDATE must leave it untouched.
     const seed = await client!.query(
       `INSERT INTO outbound_queue

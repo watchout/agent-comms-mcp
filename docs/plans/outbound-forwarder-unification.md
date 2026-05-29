@@ -38,6 +38,12 @@ Implementation summary (PR #172):
   - CI retrofit: pr-checks.yml + detect-breaking-changes.sh + migrate
     idempotency test + `import.meta.main` guard on db/migrate.ts.
 
+Vocabulary note (#585, 2026-05-29): current target state is
+`outbound_queue.status='claimed'`. Earlier design text used `'processing'`
+before FEAT-005 CP-3; any remaining historical references are superseded by
+the implemented CP-3 vocabulary and `docs/agent-com-message-queue-spec.md`
+§3.3.
+
 ---
 
 ## 0. Summary (TL;DR)
@@ -132,7 +138,7 @@ inbound 側では「別メッセージ」として扱われ、UNIQUE 制約は�
 
 ### 1.4 なぜ 1 行 SQL patch で足りないか (再掲)
 
-`status='pending' → 'processing'` の atomic flip だけを入れても **identity 誤帰属は残る**
+`status='pending' → 'claimed'` の atomic flip だけを入れても **identity 誤帰属は残る**
 (fallback の撤廃が必要)。逆に fallback を消すだけでも **race は残る**
 (claim SQL の status 遷移が必要)。さらに現状のような 19 並走 consumer は **SSOT 違反**で、
 「daemon のみ」に絞る runtime gate が必要。
@@ -146,11 +152,11 @@ inbound 側では「別メッセージ」として扱われ、UNIQUE 制約は�
 ### Option A — daemon-owns-outbound (SSOT 準拠) ★推奨
 
 - consumer 起動を **daemon runtime に限定**する runtime gate を `startOutboundConsumer()` に追加
-- claim SQL を atomic flip に修正: `SET status='processing', attempts=attempts+1, claimed_at=now()`
+- claim SQL を atomic flip に修正: `SET status='claimed', attempts=attempts+1, claimed_at=now()`
 - filter に `agent_id=$1` を追加 (自 bot の row のみ claim)
 - `getDiscordClient` の outbound path で fallback 禁止 (agent_id に一致する client 必須)
 - transient 失敗時の **exponential backoff** (§3.4)
-- **`processing` → `pending` orphan reclaim** (死 consumer からの救出、§3.5)
+- **`claimed` → `pending` orphan reclaim** (死 consumer からの救出、§3.5)
 - spec-enforcement test `s2a-daemon-owns-outbound.test.ts` で source レベル pin
 
 | 軸 | 評価 |
@@ -234,7 +240,7 @@ Production 運用の実態は「各 bot は Claude Code TUI + MCP server (stdio)
 
 ```sql
 UPDATE outbound_queue
-   SET status = 'processing',
+   SET status = 'claimed',
        attempts = attempts + 1,
        claimed_at = now()
  WHERE id = (SELECT id FROM outbound_queue
@@ -248,7 +254,7 @@ UPDATE outbound_queue
            attachments, reply_to_discord_id, attempts, max_attempts
 ```
 
-`status='processing'` の atomic flip により、lock 解放後に同 row が再 claim 不能。
+`status='claimed'` の atomic flip により、lock 解放後に同 row が再 claim 不能。
 `agent_id=$1` で自 bot の row 以外は触らない。
 
 ### 3.4 Transient 失敗時の exponential backoff
@@ -264,14 +270,14 @@ next_retry_at = now() + delay(attempts)
 - transient 判定は **本 consumer 内に inline で保持** (`core/send-errors.ts` は送信 tool 側の入力 validation helper であり Discord transport retry classifier の住所ではない)。判定分類: network error / Discord rate-limit (429) / Discord 5xx を transient、他を permanent。実装時に共通ヘルパ `isTransientDeliveryError()` を server.ts 内に新設
 - (v3→v4 修正、codex-auditor 2026-04-12 6 axes review (A) 指摘反映)
 
-### 3.5 Orphan reclaim (`processing` stuck recovery)
+### 3.5 Orphan reclaim (`claimed` stuck recovery)
 
-daemon プロセスが crash した場合、row が `status='processing'` のまま残る。別 tick で reclaim:
+daemon プロセスが crash した場合、row が `status='claimed'` のまま残る。別 tick で reclaim:
 
 ```sql
 UPDATE outbound_queue
    SET status = 'pending', last_error = 'orphan_reclaim', claimed_at = NULL
- WHERE status = 'processing'
+ WHERE status = 'claimed'
    AND agent_id = $1
    AND claimed_at < now() - interval '5 minutes'
 ```
@@ -301,7 +307,7 @@ await clientForAgent.sendAdapterMessage({ ... })
 
 **`tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts`** (新規):
 - `startOutboundConsumer` 関数本体に `isDaemonRuntime()` ガード相当の分岐があること
-- `consumeOneOutboundRow` の claim SQL (regex) に `SET status = 'processing'` と `WHERE ... agent_id = $` が同時出現
+- `consumeOneOutboundRow` の claim SQL (regex) に `SET status = 'claimed'` と `WHERE ... agent_id = $` が同時出現
 - claim SQL に `next_retry_at <= now()` 条件が存在
 - outbound send path 付近 (L900-940 相当) に `\?\? discord` が出現しないこと
 - orphan reclaim 関数が存在し、閾値 env `OUTBOUND_ORPHAN_TIMEOUT_SEC` を参照
@@ -348,7 +354,7 @@ HAVING count(DISTINCT discord_message_id) > 1;
 
 ### 4.5 Orphan reclaim
 
-- `status='processing'` + `claimed_at=now() - 6 min` の row を人為生成
+- `status='claimed'` + `claimed_at=now() - 6 min` の row を人為生成
 - reclaim tick 後に `status='pending'` に戻ること
 - `last_error='orphan_reclaim'` が記録されていること
 
@@ -422,11 +428,11 @@ canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
 
 ### 7.1 Schema
 
-- CHECK constraint は既に `'processing'` を許容 → **status migration 不要**
+- CHECK constraint target は CP-3 後の `'claimed'` 語彙 (`pending`, `claimed`, `sent`, `failed`)
 - **追加**: `claimed_at TIMESTAMPTZ NULL` (orphan reclaim 用)
 - **追加**: `next_retry_at TIMESTAMPTZ NULL` (exponential backoff 用)
 - 追加 INDEX:
-  - `(status, claimed_at) WHERE status='processing'` (orphan reclaim 高速化)
+  - `(status, claimed_at) WHERE status='claimed'` (orphan reclaim 高速化)
   - `(agent_id, status, next_retry_at) WHERE status='pending'` (claim SQL 高速化)
 - 既存行への影響: 全列 NULL 可、backfill 不要
 
@@ -434,7 +440,7 @@ canary 中、`outbound_queue` は `agent_id` filter で排他制御される:
 
 - 既存 row に変更なし (`claimed_at=NULL`, `next_retry_at=NULL`)
 - daemon 起動時に 1 回だけ:
-  `UPDATE outbound_queue SET status='pending' WHERE status='processing' AND agent_id=$1 AND claimed_at IS NULL AND created_at < now() - interval '5 min'`
+  `UPDATE outbound_queue SET status='pending' WHERE status='claimed' AND agent_id=$1 AND claimed_at IS NULL AND created_at < now() - interval '5 min'`
   (旧 `processing` 残骸を reclaim、新設計前の行を無害化)
 
 ### 7.3 Route label

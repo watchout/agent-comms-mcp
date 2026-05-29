@@ -177,4 +177,43 @@ dbDescribe('test_0 wake_daemon PG (PR #232 cycle 2, §4.1 PG/SQLite 両 pass)', 
     tmuxKill(SESSION)
     expect(tmuxHas(SESSION)).toBe(false)
   }, 30_000)
+
+  test('PG migration leaves outbound_queue claim vocabulary at claimed', async () => {
+    const probe = new Client({ connectionString: DATABASE_URL })
+    await probe.connect()
+
+    try {
+      const constraint = await probe.query<{ constraint_def: string }>(
+        `SELECT pg_get_constraintdef(oid) AS constraint_def
+           FROM pg_constraint
+          WHERE conrelid = 'outbound_queue'::regclass
+            AND conname = 'outbound_queue_status_check'`,
+      )
+      expect(constraint.rowCount).toBe(1)
+      const constraintDef = constraint.rows[0].constraint_def
+      expect(constraintDef).toContain('claimed')
+      expect(constraintDef).not.toContain('processing')
+
+      const drift = await probe.query<{ processing_count: string }>(
+        `SELECT count(*)::text AS processing_count
+           FROM outbound_queue
+          WHERE status = 'processing'`,
+      )
+      expect(Number(drift.rows[0].processing_count)).toBe(0)
+
+      await probe.query('BEGIN')
+      try {
+        await probe.query(
+          `INSERT INTO outbound_queue
+             (message_id, agent_id, channel_external_id, content, status)
+           VALUES ($1, $2, $3, $4, 'claimed')`,
+          [randomUUID(), AGENT_ID, 'pr585-claim-vocabulary-probe', 'claim vocabulary probe'],
+        )
+      } finally {
+        await probe.query('ROLLBACK')
+      }
+    } finally {
+      await probe.end()
+    }
+  }, 30_000)
 })

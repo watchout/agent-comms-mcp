@@ -127,7 +127,7 @@ describe('outbound consumer SQL contract — PR-A cycle 2', () => {
       return
     }
 
-    // Seed a processing row that carries a pre-populated discord_message_id.
+    // Seed a claimed row that carries a pre-populated discord_message_id.
     // The consumer's claim + short-circuit path is meant to flip this to
     // 'sent' with no further Discord call. We simulate the two SQL halves
     // the consumer executes: the atomic claim UPDATE and the short-circuit
