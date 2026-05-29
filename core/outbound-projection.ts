@@ -1,5 +1,4 @@
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './channel-policy'
-import { collectTokenEvidence } from './token-evidence'
 import { getAgentDiscordUiId } from './ui-bindings'
 
 export type Queryable = {
@@ -10,12 +9,13 @@ export interface OutboundProjectionRoute {
   platform: 'discord'
   channelExternalId: string | null
   consumerAgentId: string | null
-  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'recipient_default_projection' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
+  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'recipient_token_evidence' | 'recipient_default_projection' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
 }
 
 export type ProjectionConsumerSource =
   | 'thread_adapter_metadata'
   | 'channel_adapter_metadata'
+  | 'recipient_token_evidence'
   | 'channel_policy_adapter_owner'
   | 'channel_policy_primary'
   | 'none'
@@ -44,6 +44,27 @@ export interface OutboundProjectionDecision {
   projectionFallbackReason: ProjectionFallbackReason
 }
 
+export type OutboundProjectionSkipReason =
+  | 'no discord adapter mapping for this channel'
+  | 'no eligible discord delivery consumer for this channel'
+
+export const OUTBOUND_SKIP_NO_DISCORD_ADAPTER: OutboundProjectionSkipReason = 'no discord adapter mapping for this channel'
+export const OUTBOUND_SKIP_NO_DELIVERY_CONSUMER: OutboundProjectionSkipReason = 'no eligible discord delivery consumer for this channel'
+
+export function outboundProjectionSkipReason(
+  projection: Pick<OutboundProjectionDecision, 'channelExternalId' | 'consumerAgentId'>,
+): OutboundProjectionSkipReason | null {
+  if (!projection.channelExternalId) return OUTBOUND_SKIP_NO_DISCORD_ADAPTER
+  if (!projection.consumerAgentId) return OUTBOUND_SKIP_NO_DELIVERY_CONSUMER
+  return null
+}
+
+export function outboundProjectionSkipCode(reason: OutboundProjectionSkipReason): 'NO_DISCORD_ADAPTER_MAPPING' | 'NO_ELIGIBLE_DELIVERY_CONSUMER' {
+  return reason === OUTBOUND_SKIP_NO_DELIVERY_CONSUMER
+    ? 'NO_ELIGIBLE_DELIVERY_CONSUMER'
+    : 'NO_DISCORD_ADAPTER_MAPPING'
+}
+
 function parseMetadata(raw: unknown): Record<string, unknown> {
   if (!raw) return {}
   if (typeof raw === 'object') return raw as Record<string, unknown>
@@ -65,6 +86,10 @@ function ownerFromMetadata(raw: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+function firstString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
 async function queryRows(db: Queryable, sql: string, params?: any[]): Promise<any[]> {
   try {
     const result = await db.query(sql, params)
@@ -80,76 +105,168 @@ function connectorUri(provider: 'discord', agentId: string): string {
   return `${provider}://agents/${agentId}`
 }
 
-async function hasTokenBackedDiscordEvidence(db: Queryable, agentId: string): Promise<boolean> {
-  const trimmedAgentId = agentId.trim()
-  if (!trimmedAgentId) return false
-  const agentRows = await queryRows(
+function hasWriteCapability(raw: unknown): boolean {
+  const capabilities = parseMetadata(raw)
+  return ['message_create', 'can_write', 'write', 'send_messages', 'outbound'].some((key) => {
+    const value = capabilities[key]
+    return value === true || value === 1 || value === 'true' || value === '1'
+  })
+}
+
+async function hasActiveCredentialForConnector(
+  db: Queryable,
+  platform: 'discord',
+  agentId: string,
+  connectorInstanceId: string,
+): Promise<boolean> {
+  const rows = await queryRows(
     db,
-    `SELECT agent_id, provider_token_source_ref, NULL AS discord_token, metadata
-       FROM agents
-      WHERE agent_id = $1`,
-    [trimmedAgentId],
-  )
-  const connectorRows = await queryRows(
-    db,
-    `SELECT connector_instance_id, agent_id, status, metadata
-       FROM connector_instances
-      WHERE provider = $1
-        AND connector_uri = $2
-        AND COALESCE(status, 'active') <> 'disabled'
-      ORDER BY connector_instance_id
-      LIMIT 1`,
-    ['discord', connectorUri('discord', trimmedAgentId)],
-  )
-  const credentialRows = await queryRows(
-    db,
-    `SELECT credential_id, agent_id, secret_ref, status, metadata
+    `SELECT credential_id
        FROM connector_credentials
       WHERE provider = $1
         AND agent_id = $2
-        AND COALESCE(status, 'registered') IN ('registered', 'active')
-      ORDER BY
-        CASE COALESCE(status, 'registered') WHEN 'active' THEN 0 WHEN 'registered' THEN 1 ELSE 2 END,
-        credential_id
+        AND connector_instance_id = $3
+        AND COALESCE(status, 'registered') = 'active'
+        AND COALESCE(trust_status, 'local') NOT IN ('revoked', 'disabled')
+        AND COALESCE(secret_ref, '') <> ''
+        AND revoked_at IS NULL
+        AND disabled_at IS NULL
+      ORDER BY credential_id
       LIMIT 1`,
-    ['discord', trimmedAgentId],
+    [platform, agentId, connectorInstanceId],
   )
-  const uiBindingRows = await queryRows(
-    db,
-    `SELECT binding_id, agent_id, ui_token_ref, status, metadata
-       FROM agent_ui_bindings
-      WHERE agent_id = $1
-        AND ui_type = 'discord'
-        AND COALESCE(status, 'registered') IN ('registered', 'active')
-      ORDER BY
-        CASE COALESCE(status, 'registered') WHEN 'active' THEN 0 WHEN 'registered' THEN 1 ELSE 2 END,
-        CASE COALESCE(surface_role, 'primary') WHEN 'primary' THEN 0 WHEN 'projection' THEN 1 WHEN 'outbound' THEN 2 ELSE 3 END,
-        binding_id
-      LIMIT 1`,
-    [trimmedAgentId],
-  )
-  return collectTokenEvidence({
-    agent: agentRows[0] ?? null,
-    connector: connectorRows[0] ?? null,
-    credential: credentialRows[0] ?? null,
-    uiBinding: uiBindingRows[0] ?? null,
-  }).length > 0
+  return rows.length > 0
 }
 
-async function deliveryConsumerEligible(db: Queryable, platform: 'discord', agentId: string | null): Promise<boolean> {
-  if (!agentId) return false
-  if (platform !== 'discord') return true
-  return hasTokenBackedDiscordEvidence(db, agentId)
+async function hasWriteBindingForConnector(
+  db: Queryable,
+  platform: 'discord',
+  channelId: string,
+  connectorInstanceId: string,
+): Promise<boolean> {
+  const rows = await queryRows(
+    db,
+    `SELECT channel_binding_id
+       FROM channel_connector_bindings
+      WHERE provider = $1
+        AND channel_id = $2
+        AND connector_instance_id = $3
+        AND COALESCE(status, 'active') = 'active'
+        AND binding_role IN ('outbound', 'bidirectional', 'projection')
+      ORDER BY
+        CASE binding_role WHEN 'outbound' THEN 0 WHEN 'bidirectional' THEN 1 WHEN 'projection' THEN 2 ELSE 3 END,
+        priority,
+        channel_binding_id
+      LIMIT 1`,
+    [platform, channelId, connectorInstanceId],
+  )
+  return rows.length > 0
+}
+
+async function hasProviderWriteAccessForConnector(
+  db: Queryable,
+  platform: 'discord',
+  providerChannelId: string,
+  agentId: string,
+  connectorInstanceId: string,
+): Promise<boolean> {
+  const rows = await queryRows(
+    db,
+    `SELECT provider_channel_access_id, capabilities
+       FROM provider_channel_access
+      WHERE provider = $1
+        AND provider_channel_id = $2
+        AND connector_instance_id = $3
+        AND (agent_id IS NULL OR agent_id = $4)
+        AND COALESCE(status, 'active') = 'active'
+        AND COALESCE(trust_status, 'local') NOT IN ('revoked', 'disabled')
+      ORDER BY provider_channel_access_id
+      LIMIT 5`,
+    [platform, providerChannelId, connectorInstanceId, agentId],
+  )
+  return rows.some((row) => hasWriteCapability(row.capabilities))
+}
+
+async function eligibleDeliveryConnectorIds(
+  db: Queryable,
+  input: {
+    platform: 'discord'
+    channelId: string
+    providerChannelId: string
+    agentId: string
+  },
+): Promise<string[]> {
+  const agentId = input.agentId.trim()
+  const channelId = input.channelId.trim()
+  const providerChannelId = input.providerChannelId.trim() || channelId
+  if (!agentId || !channelId) return []
+
+  const connectors = await queryRows(
+    db,
+    `SELECT connector_instance_id
+       FROM connector_instances
+      WHERE provider = $1
+        AND agent_id = $2
+        AND COALESCE(status, 'registered') = 'active'
+        AND COALESCE(trust_status, 'local') NOT IN ('revoked', 'disabled')
+      ORDER BY
+        CASE WHEN connector_uri = $3 THEN 0 ELSE 1 END,
+        connector_instance_id`,
+    [input.platform, agentId, connectorUri(input.platform, agentId)],
+  )
+
+  const eligible: string[] = []
+  for (const connector of connectors) {
+    const connectorInstanceId = firstString(connector.connector_instance_id)
+    if (!connectorInstanceId) continue
+    if (!await hasActiveCredentialForConnector(db, input.platform, agentId, connectorInstanceId)) continue
+    if (await hasWriteBindingForConnector(db, input.platform, channelId, connectorInstanceId)) {
+      eligible.push(connectorInstanceId)
+      continue
+    }
+    if (await hasProviderWriteAccessForConnector(db, input.platform, providerChannelId, agentId, connectorInstanceId)) {
+      eligible.push(connectorInstanceId)
+    }
+  }
+  return eligible
+}
+
+async function deliveryConsumerEligible(
+  db: Queryable,
+  input: {
+    platform: 'discord'
+    channelId: string
+    providerChannelId?: string | null
+    agentId: string | null
+  },
+): Promise<boolean> {
+  if (!input.agentId) return false
+  if (input.platform !== 'discord') return true
+  const providerChannelId = input.providerChannelId ?? input.channelId
+  const eligible = await eligibleDeliveryConnectorIds(db, {
+    platform: input.platform,
+    channelId: input.channelId,
+    providerChannelId,
+    agentId: input.agentId,
+  })
+  return eligible.length === 1
 }
 
 async function ownerFromMetadataIfEligible(
   db: Queryable,
   platform: 'discord',
+  channelId: string,
+  providerChannelId: string,
   raw: unknown,
 ): Promise<string | null> {
   const owner = ownerFromMetadata(raw)
   if (!owner) return null
-  return (await deliveryConsumerEligible(db, platform, owner)) ? owner : null
+  return (await deliveryConsumerEligible(db, { platform, channelId, providerChannelId, agentId: owner })) ? owner : null
+}
+
+function singleRecipientFrom(input?: string[] | null): string | null {
+  const recipients = (input ?? []).filter((id) => typeof id === 'string' && id.trim().length > 0)
+  return recipients.length === 1 ? recipients[0].trim() : null
 }
 
 async function projectionHealth(
@@ -169,7 +286,7 @@ async function projectionHealth(
 
 async function resolveSurfaceAndConsumer(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord' },
+  input: { channelId: string; threadId?: string | null; platform?: 'discord'; recipientAgentIds?: string[] | null },
 ): Promise<{
   platform: 'discord'
   channelExternalId: string | null
@@ -178,6 +295,7 @@ async function resolveSurfaceAndConsumer(
 }> {
   const platform = input.platform ?? 'discord'
   let channelExternalId: string | null = null
+  let providerChannelId = input.channelId
 
   if (input.threadId) {
     const tr = await db.query(
@@ -186,7 +304,8 @@ async function resolveSurfaceAndConsumer(
     ).catch(() => ({ rows: [] as any[] }))
     if (tr.rows.length > 0) {
       channelExternalId = tr.rows[0].external_id ?? null
-      const owner = await ownerFromMetadataIfEligible(db, platform, tr.rows[0].metadata)
+      providerChannelId = tr.rows[0].external_id ?? providerChannelId
+      const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, tr.rows[0].metadata)
       if (owner) {
         return { platform, channelExternalId, consumerAgentId: owner, consumerSource: 'thread_adapter_metadata' }
       }
@@ -198,18 +317,28 @@ async function resolveSurfaceAndConsumer(
     [input.channelId, platform],
   ).catch(() => ({ rows: [] as any[] }))
   if (cr.rows.length > 0) {
-    channelExternalId = channelExternalId ?? cr.rows[0].external_id ?? null
-    const owner = await ownerFromMetadataIfEligible(db, platform, cr.rows[0].metadata)
+    const channelAdapterExternalId = cr.rows[0].external_id ?? null
+    const targetAlreadyResolved = channelExternalId !== null
+    channelExternalId = channelExternalId ?? channelAdapterExternalId
+    if (!targetAlreadyResolved) {
+      providerChannelId = channelAdapterExternalId ?? providerChannelId
+    }
+    const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, consumerSource: 'channel_adapter_metadata' }
     }
   }
 
+  const singleRecipient = singleRecipientFrom(input.recipientAgentIds)
+  if (singleRecipient && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: singleRecipient })) {
+    return { platform, channelExternalId, consumerAgentId: singleRecipient, consumerSource: 'recipient_token_evidence' }
+  }
+
   const policy = getChannelPolicy(input.channelId)
-  if (policy.adapterOwner && await deliveryConsumerEligible(db, platform, policy.adapterOwner)) {
+  if (policy.adapterOwner && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: policy.adapterOwner })) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, consumerSource: 'channel_policy_adapter_owner' }
   }
-  if (policy.primary && await deliveryConsumerEligible(db, platform, policy.primary)) {
+  if (policy.primary && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: policy.primary })) {
     return { platform, channelExternalId, consumerAgentId: policy.primary, consumerSource: 'channel_policy_primary' }
   }
   return { platform, channelExternalId, consumerAgentId: null, consumerSource: 'none' }
@@ -236,6 +365,7 @@ export async function resolveOutboundProjectionRoute(
   await refreshChannelPolicyDbSnapshot(db)
   const platform = input.platform ?? 'discord'
   let channelExternalId: string | null = null
+  let providerChannelId = input.channelId
 
   if (input.threadId) {
     const tr = await db.query(
@@ -244,7 +374,8 @@ export async function resolveOutboundProjectionRoute(
     ).catch(() => ({ rows: [] as any[] }))
     if (tr.rows.length > 0) {
       channelExternalId = tr.rows[0].external_id ?? null
-      const owner = await ownerFromMetadataIfEligible(db, platform, tr.rows[0].metadata)
+      providerChannelId = tr.rows[0].external_id ?? providerChannelId
+      const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, tr.rows[0].metadata)
       if (owner) {
         return { platform, channelExternalId, consumerAgentId: owner, source: 'thread_adapter_metadata' }
       }
@@ -256,41 +387,32 @@ export async function resolveOutboundProjectionRoute(
     [input.channelId, platform],
   ).catch(() => ({ rows: [] as any[] }))
   if (cr.rows.length > 0) {
-    channelExternalId = channelExternalId ?? cr.rows[0].external_id ?? null
-    const owner = await ownerFromMetadataIfEligible(db, platform, cr.rows[0].metadata)
+    const channelAdapterExternalId = cr.rows[0].external_id ?? null
+    const targetAlreadyResolved = channelExternalId !== null
+    channelExternalId = channelExternalId ?? channelAdapterExternalId
+    if (!targetAlreadyResolved) {
+      providerChannelId = channelAdapterExternalId ?? providerChannelId
+    }
+    const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, cr.rows[0].metadata)
     if (owner) {
       return { platform, channelExternalId, consumerAgentId: owner, source: 'channel_adapter_metadata' }
     }
   }
 
-  const recipients = (input.recipientAgentIds ?? []).filter((id) => typeof id === 'string' && id.trim().length > 0)
-  const singleRecipient = recipients.length === 1 ? recipients[0].trim() : null
-  if (singleRecipient) {
-    const rr = await db.query(
-      `SELECT agent_id, metadata FROM agents WHERE agent_id = $1`,
-      [singleRecipient],
-    ).catch(() => ({ rows: [] as any[] }))
-    if (rr.rows.length > 0) {
-      const discordId = await getAgentDiscordUiId(db, singleRecipient)
-      if (
-        typeof discordId === 'string'
-        && discordId.trim().length > 0
-        && await deliveryConsumerEligible(db, platform, singleRecipient)
-      ) {
-        return { platform, channelExternalId, consumerAgentId: singleRecipient, source: 'recipient_default_projection' }
-      }
-    }
+  const singleRecipient = singleRecipientFrom(input.recipientAgentIds)
+  if (singleRecipient && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: singleRecipient })) {
+    return { platform, channelExternalId, consumerAgentId: singleRecipient, source: 'recipient_token_evidence' }
   }
 
   const policy = getChannelPolicy(input.channelId)
   const nativeRoleOwner = input.senderAgentId ? policy.nativeRoleOutboundOwners[input.senderAgentId] : null
-  if (nativeRoleOwner && await deliveryConsumerEligible(db, platform, nativeRoleOwner)) {
+  if (nativeRoleOwner && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: nativeRoleOwner })) {
     return { platform, channelExternalId, consumerAgentId: nativeRoleOwner, source: 'channel_policy_native_role_owner' }
   }
-  if (policy.adapterOwner && await deliveryConsumerEligible(db, platform, policy.adapterOwner)) {
+  if (policy.adapterOwner && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: policy.adapterOwner })) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, source: 'channel_policy_adapter_owner' }
   }
-  if (policy.primary && await deliveryConsumerEligible(db, platform, policy.primary)) {
+  if (policy.primary && await deliveryConsumerEligible(db, { platform, channelId: input.channelId, providerChannelId, agentId: policy.primary })) {
     return { platform, channelExternalId, consumerAgentId: policy.primary, source: 'channel_policy_primary' }
   }
   return { platform, channelExternalId, consumerAgentId: null, source: 'none' }
@@ -302,8 +424,7 @@ export async function resolveOutboundProjectionDecision(
 ): Promise<OutboundProjectionDecision> {
   await refreshChannelPolicyDbSnapshot(db)
   const base = await resolveSurfaceAndConsumer(db, input)
-  const recipients = (input.recipientAgentIds ?? []).filter((id) => typeof id === 'string' && id.trim().length > 0)
-  const singleRecipient = recipients.length === 1 ? recipients[0].trim() : null
+  const singleRecipient = singleRecipientFrom(input.recipientAgentIds)
   let recipientFallbackReason: ProjectionFallbackReason = null
 
   if (singleRecipient) {

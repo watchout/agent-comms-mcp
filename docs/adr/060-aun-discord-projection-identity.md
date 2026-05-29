@@ -81,11 +81,28 @@ being an AUN agent.
 The default projection policy is:
 
 1. Resolve the delivery consumer from channel/thread metadata, then channel
-   `adapterOwner`, then the existing primary fallback.
+   metadata, then a single-recipient direct delivery connector when exactly one
+   active recipient Discord connector has an active credential and write-capable
+   channel binding or provider access, then `adapterOwner`, then the existing
+   primary fallback.
 2. Resolve native projection only when a projection identity is both registered
    and healthy.
 3. If native projection is unavailable, preserve `consumer_agent_id` as the
    channel adapter owner and record fallback evidence.
+
+Recipient-facing projection by itself must not change `consumer_agent_id`.
+Direct recipient delivery is selected only from connector-scoped delivery
+evidence: the active credential and write-capable channel binding/access must
+belong to the same active connector instance. Read-only access, mismatched
+connector evidence, or ambiguous connector evidence fails closed to the normal
+channel owner fallback. For thread-targeted outbound, provider access evidence
+must match the actual outbound target external id for the thread, not only the
+parent channel external id.
+
+If this resolution leaves `consumer_agent_id` empty, new outbound writes must
+not enqueue a Discord delivery row. Legacy rows with a null consumer may still
+be handled by legacy cleanup/compatibility paths, but resolver-none output is a
+new fail-closed result and must not be reopened by `agent_id` fallback claiming.
 
 `nativeRoleOutboundOwners` is deprecated compatibility input only. It may be
 read during migration to infer legacy intent, but it must not become a consumer
@@ -117,8 +134,9 @@ Introduce a pure resolver that returns:
 
 Resolver contract:
 
-- `consumerAgentId` comes from thread/channel metadata owner, then
-  `adapterOwner`, then `primary` fallback.
+- `consumerAgentId` comes from thread/channel metadata owner, then eligible
+  single-recipient connector evidence, then `adapterOwner`, then `primary`
+  fallback.
 - native projection mapping controls only `projectionIdentityId`.
 - native projection is selected only when registered and healthy.
 - if native projection is configured but unavailable,
