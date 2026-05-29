@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { Client } from 'pg'
 import { applyUpMigrationFile } from '../../db/migrate'
 import { assertDestructiveMigrationTestDatabase } from '../../db/destructive-migration-gate'
+import { lifecycleTransitionCore } from '../../core/lifecycle-transition'
 import { join, dirname } from 'node:path'
 
 // PR #338 sub-PR 6 — contract tests for the `processing` + `done` MCP tools
@@ -19,6 +20,7 @@ import { join, dirname } from 'node:path'
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
 const SERVER_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+const LIFECYCLE_SRC = readFileSync(join(REPO_ROOT, 'core', 'lifecycle-transition.ts'), 'utf-8')
 
 describe('T1 — server.ts tool registration (processing / done)', () => {
   test('server.ts registers `processing` tool with queue_id required + received→in_progress', () => {
@@ -45,7 +47,17 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     expect(SERVER_SRC).toContain('INVALID_STATE')
     expect(SERVER_SRC).toContain('already_transitioned')
     // done writes done_at, processing does not.
-    expect(SERVER_SRC).toContain("status = 'done', done_at = now()")
+    expect(LIFECYCLE_SRC).toContain("status = 'done', done_at = now()")
+  })
+
+  test('server.ts processing/done branch uses exported guarded transition fixture', () => {
+    const branch = SERVER_SRC.slice(SERVER_SRC.indexOf("if (name === 'processing' || name === 'done')"))
+    const guardIndex = branch.indexOf('lifecycleTransitionCore')
+    const commitIndex = branch.indexOf("client.query('COMMIT')")
+
+    expect(guardIndex).toBeGreaterThan(-1)
+    expect(commitIndex).toBeGreaterThan(-1)
+    expect(guardIndex).toBeLessThan(commitIndex)
   })
 })
 
@@ -87,6 +99,7 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
 
   afterAll(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT]).catch(() => {})
+    await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [FIXTURE_AGENT]).catch(() => {})
     // Restore the forward-compatible status vocabulary before releasing the
     // shared DB back to the rest of the test run. Down-migrating here races
     // state-daemon fixtures that write v0.9 statuses such as `received`.
@@ -120,6 +133,7 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
 
   beforeEach(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT])
+    await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [FIXTURE_AGENT])
   })
 
   async function insertReceived(): Promise<number> {
@@ -137,27 +151,32 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
   // between this fixture and the handler will break the assertion.
   async function doTransition(id: number, tool: 'processing' | 'done'): Promise<
     | { ok: true; status: string; already_transitioned?: boolean }
-    | { ok: false; code: 'NOT_FOUND' | 'INVALID_STATE' | 'RACE'; observed?: string }
+    | { ok: false; code: 'NOT_FOUND' | 'INVALID_STATE' | 'RACE' | 'TERMINAL_BATON_REQUIRED'; observed?: string }
   > {
-    const fromStatus = tool === 'processing' ? 'received' : 'in_progress'
-    const toStatus = tool === 'processing' ? 'in_progress' : 'done'
-    const cur = await client.query<{ status: string }>(
-      `SELECT status FROM message_queue WHERE id = $1`,
-      [id],
+    const transition = await lifecycleTransitionCore(
+      {
+        async query(sql, params) {
+          const result = await client.query(sql, params as any[] | undefined)
+          return result.rows
+        },
+        async execute(sql, params) {
+          const result = await client.query(sql, params as any[] | undefined)
+          return { rowCount: result.rowCount ?? 0 }
+        },
+      },
+      { mode: tool, queueId: id, agentId: FIXTURE_AGENT },
     )
-    if (cur.rows.length === 0) return { ok: false, code: 'NOT_FOUND' }
-    const observed = cur.rows[0]!.status
-    if (observed === toStatus) return { ok: true, status: toStatus, already_transitioned: true }
-    if (observed !== fromStatus) return { ok: false, code: 'INVALID_STATE', observed }
-    const setClause = tool === 'done'
-      ? `status = 'done', done_at = now()`
-      : `status = 'in_progress'`
-    const upd = await client.query(
-      `UPDATE message_queue SET ${setClause} WHERE id = $1 AND status = $2 RETURNING id`,
-      [id, fromStatus],
-    )
-    if (upd.rows.length === 0) return { ok: false, code: 'RACE' }
-    return { ok: true, status: toStatus }
+    return transition.ok
+      ? {
+          ok: true,
+          status: transition.status,
+          ...(transition.already_transitioned ? { already_transitioned: true } : {}),
+        }
+      : {
+          ok: false,
+          code: transition.code,
+          observed: transition.observed,
+        }
   }
 
   async function statusOf(id: number): Promise<string | null> {
@@ -205,6 +224,25 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     const r = await doTransition(id, 'done')
     expect(r).toMatchObject({ ok: false, code: 'INVALID_STATE', observed: 'received' })
     expect(await statusOf(id)).toBe('received')
+  })
+
+  test('done TERMINAL_BATON_REQUIRED: rejects human-authored source rows without reply or baton evidence', async () => {
+    const messageId = '00000000-0000-4000-8000-000000000573'
+    await client.query(
+      `INSERT INTO agent_messages
+         (id, channel_id, author_id, author_bot, content, message_type, source, direction, role)
+       VALUES ($1, $2, $3, false, $4, 'chat', 'agent-comms', 'inbound', 'human')`,
+      [messageId, FIXTURE_AGENT, 'human-reviewer', 'needs a real terminal action'],
+    )
+    const r0 = await client.query<{ id: number }>(
+      `INSERT INTO message_queue (agent_id, message_id, payload, status)
+       VALUES ($1, $2, '{}', 'in_progress') RETURNING id`,
+      [FIXTURE_AGENT, messageId],
+    )
+
+    const r = await doTransition(r0.rows[0]!.id, 'done')
+    expect(r).toMatchObject({ ok: false, code: 'TERMINAL_BATON_REQUIRED' })
+    expect(await statusOf(r0.rows[0]!.id)).toBe('in_progress')
   })
 
   test('processing idempotent: second call on in_progress returns already_transitioned', async () => {

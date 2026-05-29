@@ -26,6 +26,7 @@ export function migrateSqlite(dbPath?: string): void {
       channel_id TEXT,
       thread_id TEXT,
       author_id TEXT NOT NULL,
+      author_bot INTEGER DEFAULT 1,
       content TEXT NOT NULL DEFAULT '',
       message_type TEXT NOT NULL DEFAULT 'message',
       mentions TEXT NOT NULL DEFAULT '[]',
@@ -51,6 +52,9 @@ export function migrateSqlite(dbPath?: string): void {
   const amColNames = new Set(amCols.map((c) => c.name))
   if (!amColNames.has('input_mentions')) {
     gatedExec(`ALTER TABLE agent_messages ADD COLUMN input_mentions TEXT`)
+  }
+  if (!amColNames.has('author_bot')) {
+    gatedExec(`ALTER TABLE agent_messages ADD COLUMN author_bot INTEGER DEFAULT 1`)
   }
 
   gatedExec(`
