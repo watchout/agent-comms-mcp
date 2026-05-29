@@ -51,8 +51,13 @@ import {
   parseRuntimePort,
 } from '../core/runtime-heartbeat'
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
-import { refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
+import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
+import {
+  buildOwnerHandoffDiagnostic,
+  ownerHandoffDiagnosticCode,
+  recordOwnerHandoffDiagnostic,
+} from '../core/owner-handoff-routing'
 import {
   acquireControlPlaneLease,
   heartbeatControlPlaneLease,
@@ -214,14 +219,66 @@ async function pgNotify(db: Client, channel: string, payload: Record<string, unk
   }
 }
 
+type CliOutboundPolicyResult =
+  | { ok: true; outbound_allowlist: string[] | null; policy_source: string }
+  | {
+      ok: false
+      violations: string[]
+      outbound_allowlist: string[] | null
+      policy_source: string
+      violated_policy: 'channel.outboundAllowlist'
+    }
+
+type CliOutboundPolicyViolation = Extract<CliOutboundPolicyResult, { ok: false }>
+
 async function validateCliOutboundPolicy(
   db: Client,
   sender: string,
   channelId: string,
   recipients: string[],
-): Promise<{ ok: true } | { ok: false; violations: string[] }> {
+): Promise<CliOutboundPolicyResult> {
   await refreshChannelPolicyDbSnapshot(db as any)
-  return createOutboundPolicyValidator().validate(sender, channelId, recipients)
+  const policy = getChannelPolicy(channelId)
+  const sourceRows = await db.query(
+    `SELECT policy_source FROM channel_routing_policy WHERE channel_id = $1`,
+    [channelId],
+  ).catch(() => ({ rows: [] as any[] }))
+  const policySource = sourceRows.rows[0]?.policy_source ?? (policy.outboundAllowlist === null ? 'none' : 'config/bot-routing.json')
+  const result = createOutboundPolicyValidator().validate(sender, channelId, recipients)
+  if (result.ok === true) {
+    return {
+      ok: true,
+      outbound_allowlist: policy.outboundAllowlist,
+      policy_source: policySource,
+    }
+  }
+  return {
+    ok: false,
+    violations: result.violations,
+    outbound_allowlist: policy.outboundAllowlist,
+    policy_source: policySource,
+    violated_policy: 'channel.outboundAllowlist',
+  }
+}
+
+async function auditOutboundAclViolation(
+  db: Client,
+  operation: 'send' | 'notify',
+  sender: string,
+  channelId: string,
+  recipients: string[],
+  aclResult: CliOutboundPolicyViolation,
+) {
+  await auditLog(db, 'outbound.acl_violation', sender, channelId, {
+    operation,
+    sender,
+    intended_recipients: recipients,
+    channel_id: channelId,
+    violated_policy: aclResult.violated_policy,
+    outbound_allowlist: aclResult.outbound_allowlist,
+    policy_source: aclResult.policy_source,
+    violations: aclResult.violations,
+  })
 }
 
 // --- Commands ---
@@ -2624,17 +2681,26 @@ async function sendMessage(args: string[]) {
       }
 
       const aclResult = await validateCliOutboundPolicy(db, agentId, channelId, mentions)
-      if (!aclResult.ok) {
+      if (aclResult.ok === false) {
         const detail = `sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist`
+        await db.query('ROLLBACK').catch(() => {})
+        committed = true
+        await auditOutboundAclViolation(db, 'send', agentId, channelId, mentions, aclResult)
+          .catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
         if (explicitClose) {
           writeFailureJson('OUTBOUND_ACL_VIOLATION', detail, {
             queue_id: target.queue_id,
             message_id: replyTo,
             channel_id: channelId,
             violations: aclResult.violations,
+            sender: agentId,
+            intended_recipients: mentions,
+            violated_policy: aclResult.violated_policy,
+            outbound_allowlist: aclResult.outbound_allowlist,
+            policy_source: aclResult.policy_source,
           })
         } else {
-          console.error(`Error [OUTBOUND_ACL_VIOLATION]: ${detail}`)
+          console.error(`Error [OUTBOUND_ACL_VIOLATION]: ${detail}; allowlist=${JSON.stringify(aclResult.outbound_allowlist)} policy_source=${aclResult.policy_source}`)
           throw new CliSendExit(1)
         }
       }
@@ -2947,8 +3013,10 @@ async function notifyMessage(args: string[]) {
     }
 
     const aclResult = await validateCliOutboundPolicy(db, agentId, resolvedChannelId, mentions)
-    if (!aclResult.ok) {
-      console.error(`Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist`)
+    if (aclResult.ok === false) {
+      await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, mentions, aclResult)
+        .catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
+      console.error(`Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(aclResult.outbound_allowlist)} policy_source=${aclResult.policy_source}`)
       process.exit(1)
     }
 
@@ -4241,12 +4309,39 @@ async function workerCommand(subcommand: string | undefined, args: string[]) {
       const activityId = optionalWorkerText(flags['activity-id'])
       const status = parseWorkerActivityStatus(flags.status)
       const summary = requireWorkerFlag(flags, 'summary')
-      const metadata = JSON.stringify(parseLeaseMetadata(flags.metadata))
+      const metadataObject = parseLeaseMetadata(flags.metadata)
+      const queueId = parseOptionalPositiveIntFlag(flags['queue-id'], 'queue-id')
+      const handoffTargetAgentId =
+        optionalWorkerText(flags['handoff-target']) ?? optionalWorkerText(flags['handoff-target-agent-id'])
+      if (handoffTargetAgentId) {
+        const handoffDiagnostic = await buildOwnerHandoffDiagnostic(db as any, {
+          senderAgentId: agentId,
+          intendedRecipientAgentId: handoffTargetAgentId,
+          queueId,
+          channelId: optionalWorkerText(flags['handoff-channel']) ?? optionalWorkerText(flags.channel),
+          githubHandoffUrl:
+            optionalWorkerText(flags['github-handoff-url']) ??
+            optionalWorkerText(flags['handoff-url']) ??
+            optionalWorkerText(flags['pull-request']) ??
+            optionalWorkerText(flags.pr),
+          metadata: metadataObject,
+        })
+        if (!handoffDiagnostic.ok) {
+          await recordOwnerHandoffDiagnostic(db as any, handoffDiagnostic)
+            .catch((err) => process.stderr.write(`agent-com: owner handoff diagnostic audit failed (non-fatal): ${err}\n`))
+          const code = ownerHandoffDiagnosticCode(handoffDiagnostic)
+          process.stderr.write(`Error [${code}]: ${handoffDiagnostic.reason}\n`)
+          process.stderr.write(`${JSON.stringify({ ok: false, code, owner_handoff: handoffDiagnostic }, null, 2)}\n`)
+          process.exit(1)
+        }
+        metadataObject.owner_handoff_evidence = handoffDiagnostic
+      }
+      const metadata = JSON.stringify(metadataObject)
       const commonValues = [
         agentId,
         optionalWorkerText(flags['runtime-instance-id']),
         optionalWorkerText(flags['lease-id']),
-        parseOptionalPositiveIntFlag(flags['queue-id'], 'queue-id'),
+        queueId,
         optionalWorkerText(flags['activity-type']) ?? 'worker',
         status,
         summary,
@@ -4255,7 +4350,7 @@ async function workerCommand(subcommand: string | undefined, args: string[]) {
         optionalWorkerText(flags['pull-request']) ?? optionalWorkerText(flags.pr),
         optionalWorkerText(flags.artifact) ?? optionalWorkerText(flags['artifact-uri']),
         optionalWorkerText(flags['blocked-reason']),
-        optionalWorkerText(flags['handoff-target']) ?? optionalWorkerText(flags['handoff-target-agent-id']),
+        handoffTargetAgentId,
         parseWorkerProgressPercent(flags.progress ?? flags['progress-percent']),
         optionalWorkerText(flags['progress-label']) ?? optionalWorkerText(flags.phase),
         parseOptionalPositiveIntFlag(flags['stale-after-sec'], 'stale-after-sec'),
@@ -4624,7 +4719,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only Discord inbound smoke evidence by channel
   fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke]
                                                        — read-only all-agent AUN readiness gates and activation blockers
-  worker report --agent-id <agent> --summary <text> [--status running|blocked|stalled|failed|completed|handoff] [--queue-id <id>] [--repository <repo>] [--branch <branch>] [--pull-request <ref>] [--progress 0-100] [--progress-label <phase>] [--stale-after-sec 120] [--blocked-reason <text>] [--handoff-target <agent>]
+  worker report --agent-id <agent> --summary <text> [--status running|blocked|stalled|failed|completed|handoff] [--queue-id <id>] [--repository <repo>] [--branch <branch>] [--pull-request <ref>] [--progress 0-100] [--progress-label <phase>] [--stale-after-sec 120] [--blocked-reason <text>] [--handoff-target <agent>] [--handoff-channel <id>]
                                                        — write DB-backed current activity evidence for an internal worker
   worker ping --agent-id <agent> --activity-id <uuid> [--summary <text>] [--progress 0-100] [--progress-label <phase>]
                                                        — heartbeat an existing worker activity row so operators can tell it is still moving

@@ -291,7 +291,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
   // length / order / forbidden additions are all gated by a single
   // assertion (cycle 1 `toContain` only verified inclusion, missed
   // contamination + reorder regressions).
-  test('§4.4 channel 1487368919613444156 — exact 10-bot allowlist + adapter owner', () => {
+  test('§4.4 channel 1487368919613444156 — repaired allowlist + adapter owner', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -313,10 +313,11 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
       'arc',
       'lead-sus',
       'hotel-dev',
+      'dev-001',
     ])
   })
 
-  test('§4.4 channel 1487368919613444156 — CTO direct routes + codex-aun / hotel-dev ok, unknown sender → violations contains it', () => {
+  test('§4.4 channel 1487368919613444156 — CTO direct routes + codex-aun / hotel-dev / dev-001 ok, unknown sender → violations contains it', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -340,6 +341,9 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     expect(v.validate('lead-sus', '1487368919613444156', ['codex-aun']).ok).toBe(true)
     // hotel-dev → cto: ok
     expect(v.validate('hotel-dev', '1487368919613444156', ['cto']).ok).toBe(true)
+    // #592 repaired owner handoff route: codex-cto/agent-com-dev can enqueue dev-001 directly.
+    expect(v.validate('codex-cto', '1487368919613444156', ['dev-001']).ok).toBe(true)
+    expect(v.validate('agent-com-dev', '1487368919613444156', ['dev-001']).ok).toBe(true)
     // cycle 2 rigor: unknown sender must reject AND surface the offender in
     // `violations` (the OutboundPolicyValidator's violation kind field).
     // The integration layer maps this to the `OUTBOUND_ACL_VIOLATION` error
