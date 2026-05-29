@@ -829,8 +829,8 @@ export async function sendHumanWarning(
   }
 
   const warningText =
-    '⚠️ メンションがないためbotには通知されていません。\n' +
-    '特定のbotに通知: @cto @arc 等を付けてください。\n' +
+    '⚠️ メンション先がありません。botには通知されていません。\n' +
+    '特定のbotに通知: agent_idで @arc @codex-cto 等を付けてください。\n' +
     '全員に通知: @all を使ってください。'
 
   try {

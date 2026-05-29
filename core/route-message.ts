@@ -21,6 +21,8 @@
  * after PR-B consumers migrate.
  */
 
+import { parseNativeAgentMentions } from './mention-normalization'
+
 export interface AgentInfo {
   agentId: string
   agentType: string
@@ -35,10 +37,8 @@ export interface ChannelInfo {
   threadId?: string | null
   members: string[]
   type?: string  // 'dm' etc.
-  // #527: When set, no-mention inbound messages route to this single agent
-  // instead of fanning out to every channel member. Callers populate from
-  // `bot-routing.json` channel.primary via `core/channel-policy.ts`. If
-  // omitted the legacy fanout behaviour is preserved (backward compat).
+  // Channel primary remains policy metadata, but no-mention inbound messages
+  // now alert instead of silently routing to primary or fanout.
   primary?: string | null
 }
 
@@ -62,21 +62,7 @@ export type RouteSourceType = 'inbound' | 'send-tool' | 'cli'
  * documented in buildSendMentions above).
  */
 export function parseMentions(content: unknown): string[] {
-  if (typeof content !== 'string' || content.length === 0) return []
-  const mentions: string[] = []
-  const regex = /@([a-zA-Z0-9_-]+)/g
-  let match
-  try {
-    while ((match = regex.exec(content)) !== null) {
-      const captured = match[1]
-      if (!captured) continue
-      if (/^\d+$/.test(captured)) continue
-      mentions.push(captured)
-    }
-  } catch {
-    return []
-  }
-  return [...new Set(mentions)]
+  return parseNativeAgentMentions(content)
 }
 
 // ─── Issue #351 Phase A: drop / reject observability ──────────────────────
@@ -96,6 +82,7 @@ export type RouteDropReason =
   | 'sender_not_a_member'
   | 'human_agent_no_queue'
   | 'not_primary_no_mention'
+  | 'missing_mention_target'
 
 /** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
  *
@@ -341,30 +328,20 @@ export function routeMessage(
       continue
     }
 
-    // Issue #527 — no-mention inbound primary routing. When the message has
-    // no explicit mentions and the channel declares a `primary` agent
-    // (`bot-routing.json` channel.primary), route only to that primary
-    // instead of fanning out to every member. This replaces the old "CEO
-    // bypass = push to all" behaviour (Issue #278 B) that produced
-    // multi-bot responses to a single CEO chat. `@everyone` / `@here` /
-    // `@all` are recognised below as explicit broadcast triggers, so
-    // users still have an escape hatch for genuine fleet announcements.
-    // Backward compat: when channel.primary is undefined, fall back to
-    // the legacy CEO bypass (push to every bot when sender is human).
+    // CEO directive 2026-05-27: missing mention targets must alert instead of
+    // silently falling through to channel.primary or legacy human fanout. The
+    // adapter/router layer sends the human-visible alert when this returns no
+    // pushTargets with noMentions=true.
     if (noMentions) {
       if (channel.primary != null) {
-        if (agent.agentId === channel.primary) {
-          pushTargets.push(agent.agentId)
-        } else {
-          dropTargets[agent.agentId] = 'NOT_PRIMARY_NO_MENTION'
-          emitRouteDrop('not_primary_no_mention', agent.agentId, logCtx)
-        }
+        const isPrimary = agent.agentId === channel.primary
+        dropTargets[agent.agentId] = isPrimary ? 'MISSING_MENTION_TARGET' : 'NOT_PRIMARY_NO_MENTION'
+        emitRouteDrop(isPrimary ? 'missing_mention_target' : 'not_primary_no_mention', agent.agentId, logCtx)
         continue
       }
       if (senderIsHuman) {
-        // Legacy fallback: pre-#527 behaviour (#278 B). Kept so the
-        // fix is non-breaking when channel.primary is not yet wired.
-        pushTargets.push(agent.agentId)
+        dropTargets[agent.agentId] = 'MISSING_MENTION_TARGET'
+        emitRouteDrop('missing_mention_target', agent.agentId, logCtx)
         continue
       }
     }

@@ -56,13 +56,13 @@ import {
 // contract is unchanged — see ADR-041 implementation step 1/2.
 import {
   routeInbound,
-  parseMentions,
   buildSendMentions,
   isEmergencyMessage,
   type AgentInfo,
   type ChannelInfo,
   type RouteResult,
 } from './core/route-message'
+import { parseNativeAgentMentions } from './core/mention-normalization'
 // #527 — channel.primary lookup for no-mention single-recipient routing.
 // In-process cache, populated from `config/bot-routing.json`.
 import { getChannelPolicy } from './core/channel-policy'
@@ -680,7 +680,7 @@ async function saveMessage(msg: {
   source?: string; thread_id?: string; direction?: string; role?: string
   author_bot?: boolean
   session_id?: string; project?: string
-  // Issue #266: raw args.mentions snapshot for outbound trace.
+  // Issue #266: normalized input mentions trace.
   input_mentions?: string[] | null
 }): Promise<string> {
   const id = randomUUID()
@@ -1323,7 +1323,8 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
   // #527 cycle 3: GROUP_KEYWORDS now includes 'everyone' and 'here' so
   // those broadcast escape hatches survive into core routing instead of
   // being filtered out at the receiver boundary.
-  const nativeMentions = parseMentions(content)
+  const aliasMap = inboundChannel ? getChannelPolicy(inboundChannel.channelId).nativeRoleOutboundOwners : undefined
+  const nativeMentions = parseNativeAgentMentions(content, aliasMap)
     .filter((agentId) => !memberSet || memberSet.has(agentId) || GROUP_KEYWORDS.has(agentId))
   return [...new Set([...agentIds, ...nativeMentions])]
 }
@@ -1676,17 +1677,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'send',
-      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. v0.9: \`mention\` (1 primary recipient, required); \`cc\` parameter is removed — 1 mention = 1 queue row.${agentListStr}`,
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Use either \`mention\` for one recipient or \`mentions[]\` for multi-recipient fanout. Each recipient gets one queue row.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mention: { type: 'string', description: 'Required: 1 primary recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mention: { type: 'string', description: 'One recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Optional multi-recipient agent_id list. Use this instead of repeated send calls when the same content targets several agents.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['content', 'reply_to', 'mention'],
+        required: ['content', 'reply_to'],
       },
     },
     {
@@ -1694,18 +1696,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // reply_to is intentionally absent: notify does not mark any
       // message_queue row 'replied' and does not touch agents.current_message_id.
       name: 'notify',
-      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. v0.9: \`mention\` (required); \`cc\` parameter is removed.${agentListStr}`,
+      description: `Post a self-originated message to a channel without replying to anything. Use \`mention\` or \`mentions[]\`; each recipient gets one queue row.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           channel: { type: 'string', description: 'Channel id (or name) to post into. Required.' },
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mention: { type: 'string', description: 'Required: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mention: { type: 'string', description: 'One recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Optional multi-recipient agent_id list.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['channel', 'content', 'mention'],
+        required: ['channel', 'content'],
       },
     },
     // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
@@ -2087,14 +2090,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'send') {
     let { content, reply_to, message_type, metadata } = args as any
-    // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
-    // argument is removed. Callers MUST use `mention` (1 primary, required) +
-    // `cc[]` (reference, queue 非投入). A caller still passing `mentions` is
-    // surfaced as INVALID_MENTION with a migration hint instead of silent
-    // auto-conversion. See ADR-041 amendment 2026-05-05.
-    if (args.mentions !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary' } instead" }], isError: true }
-    }
     // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. CC fanout was the
     // sole caller of the (now-removed) skip tool, and v0.9 enforces
     // 1 mention = 1 queue row. Reject any caller still passing cc[] with a
@@ -2105,12 +2100,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Phase 5 wiring runs AFTER the per-row claim acquisition so the channel
     // is resolved; see resolvePhase5(...) call site below.
     // mentions[] is the resolved enqueue list produced by resolvePhase5(); it
-    // starts empty and is populated from { mention } via the routing port.
+    // starts empty and is populated from { mention } / { mentions[] } via the routing port.
     let mentions: string[] = []
-    // Issue #266: snapshot the raw mention(s) for outbound trace. After the
-    // mentions[] removal this is just [args.mention] (or [] when missing —
-    // the INVALID_MENTION reject below catches that case).
-    const rawInputMentions: string[] = typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
+    // Issue #266: snapshot the normalized input mentions for outbound trace.
+    let rawInputMentions: string[] = []
 
     // Validate content
     if (!content || content.length === 0) {
@@ -2199,11 +2192,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         claimedMqId = decision.claimedMqId
       }
 
-    // Phase 5 cleanup — mention/cc validation + outbound ACL + cc[] body
-    // decoration (Issues #305/#306/#308/#250 + ADR-041 amendment 2026-05-05).
+    // Phase 5 cleanup — mention/mentions validation + outbound ACL.
     // Resolves channel from claim, applies validation, decorates content.
-    // mention is now schema-required (CEO directive 5e2d9235); resolvePhase5
-    // always runs and the legacy mentions[] auto-convert path is gone.
+    // mention and mentions[] normalize through one canonical port.
     {
       const claimChannelRow = await txClient.query(
         `SELECT channel_id FROM agent_messages WHERE id = $1 LIMIT 1`,
@@ -2217,6 +2208,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         sender: agentId,
         channel_id: phase5Channel,
         mention: (args as any).mention,
+        mentions: (args as any).mentions,
         cc: (args as any).cc,
         content,
         isKnownAgent: (id: string) => knownAgents.includes(id),
@@ -2224,7 +2216,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && !phase5.ok) {
         if (phase5.error === 'INVALID_MENTION') {
           await txClient.query('ROLLBACK'); txCommitted = true
-          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention/mentions must contain at least one non-empty agent_id' }], isError: true }
         }
         if (phase5.error === 'UNKNOWN_AGENT') {
           await txClient.query('ROLLBACK'); txCommitted = true
@@ -2238,15 +2230,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && phase5.ok) {
         content = phase5.content
         mentions = phase5.mentions
+        rawInputMentions = phase5.mentions
         for (const w of phase5.warnings) {
           process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
         }
       }
     }
 
-    // mention is schema-required, but the runtime guard catches the case
-    // where the MCP runtime somehow bypassed schema (defensive). Use
-    // the suggestive error (buildNotMentionedErrorMsg) so callers still get
+    // The runtime guard catches the case where neither mention nor mentions[]
+    // produced a queue recipient. Use the suggestive error so callers still get
     // a usable agent list for migration.
     if (mentions.length === 0) {
       let authorId: string | null = null
@@ -2260,7 +2252,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Self-send prevention
-    if (mentions.length === 1 && mentions[0] === agentId) {
+    if (mentions.includes(agentId)) {
       return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
@@ -2717,22 +2709,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
     let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
-    // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
-    // argument is removed. Callers MUST use `mention` (1 primary). See ADR-041
-    // amendment 2026-05-05.
-    if (args.mentions !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary' } instead" }], isError: true }
-    }
     // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. Reject upfront.
     if ((args as any).cc !== undefined) {
       return { content: [{ type: 'text', text: "Error [INVALID_PARAMETER]: cc parameter is removed in v0.9 — 1 mention = 1 queue row." }], isError: true }
     }
     // mentions[] is the resolved enqueue list; populated by resolvePhase5().
     let mentions: string[] = []
-    // Issue #266: snapshot raw mention for outbound trace.
-    const rawInputMentions: string[] = typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
+    // Issue #266: snapshot normalized input mentions for outbound trace.
+    let rawInputMentions: string[] = []
 
-    // spec §4.3 step 1 — channel / mention / content required.
+    // spec §4.3 step 1 — channel / content required.
     if (!channel || typeof channel !== 'string') {
       return { content: [{ type: 'text', text: 'Error [CHANNEL_REQUIRED]: channel is required for notify' }], isError: true }
     }
@@ -2741,13 +2727,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
-    }
-    // mention is schema-required, but defensive check (matches send).
-    if (typeof args.mention !== 'string' || args.mention.length === 0) {
-      return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
-    }
-    if (args.mention === agentId) {
-      return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
     const client = await tryGetDb()
@@ -2813,17 +2792,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
     }
 
-    // spec §4.3 step 3 — single-mention validation (legacy mentions[] path
-    // removed in Phase 5 cleanup). resolvePhase5(...) below handles the
-    // canonical UNKNOWN_AGENT / INVALID_MENTION / OUTBOUND_ACL_VIOLATION
-    // rejects, so this guard is just a defense-in-depth check that the
-    // mention agent_id passes the validateMentionOrError shape filter.
-    const validAgentIds = await refreshAgentCache()
-    const mentionErr = validateMentionOrError(args.mention, validAgentIds)
-    if (mentionErr) {
-      return { content: [{ type: 'text', text: mentionErr }], isError: true }
-    }
-
     // Rate limit + duplicate guards (same posture as send; notify is
     // caller-driven so still bounded).
     const rate = await checkRateLimit(agentId)
@@ -2842,8 +2810,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Phase 5 cleanup — notify wiring (resolvePhase5 + 4 ports). Runs after
     // channel resolution + permission/rate/dup gates, before content
     // sanitisation so cc[] body suffix is included in the saved message.
-    // mention is schema-required so resolvePhase5 always runs (legacy
-    // mentions[]-only branch is gone). ADR-041 amendment 2026-05-05.
+    // mention and mentions[] normalize through one canonical port.
     {
       const knownAgentsN = await refreshAgentCache()
       await refreshChannelPolicyDbSnapshot(client)
@@ -2851,13 +2818,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         sender: agentId,
         channel_id: dest.channelId,
         mention: (args as any).mention,
+        mentions: (args as any).mentions,
         cc: (args as any).cc,
         content,
         isKnownAgent: (id: string) => knownAgentsN.includes(id),
       })
       if (phase5 && !phase5.ok) {
         if (phase5.error === 'INVALID_MENTION') {
-          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention/mentions must contain at least one non-empty agent_id' }], isError: true }
         }
         if (phase5.error === 'UNKNOWN_AGENT') {
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
@@ -2869,10 +2837,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && phase5.ok) {
         content = phase5.content
         mentions = phase5.mentions
+        rawInputMentions = phase5.mentions
         for (const w of phase5.warnings) {
           process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
         }
       }
+    }
+
+    if (mentions.length === 0) {
+      return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention/mentions must contain at least one non-empty agent_id' }], isError: true }
+    }
+    if (mentions.includes(agentId)) {
+      return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
     const safeContent = sanitizeContent(content)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Phase 5 cleanup contract tests — `mentions[]` argument removal.
+ * Phase 5 contract tests — canonical mention/mentions normalization.
  *
  * CEO directive: msg `c40b8dc9` / `5e2d9235` (2026-05-05 進めて)
  * ARC Option (b): msg `f411e1da` (1 PR 1 concern 例外 msg `0abf16e9`)
@@ -8,9 +8,9 @@
  * lead-ama dispatch: msg `1ee8983e` (3-split: `fb9fd718` / `d3025da7` / `5f1de02f`)
  * CTO L3 alignment: msg `4ea436e4`
  *
- * After this PR the legacy `mentions: string[]` argument is removed from
- * the `mcp__agent-comms__send` AND `mcp__agent-comms__notify` MCP tools.
- * Callers MUST use `mention` (1 primary, required) + optional `cc[]`.
+ * CEO directive 2026-05-27 restored `mentions: string[]` as a first-class
+ * multi-recipient argument for send/notify. Both `mention` and `mentions[]`
+ * normalize through one library path into canonical agent_id[].
  *
  * The 6 fixtures below (a)-(f) are the merge gate per the 5-section
  * instruction §4 (frozen). They run against the real `server.ts` source
@@ -29,35 +29,52 @@ const readRepo = (rel: string): string => readFileSync(join(repoRoot, rel), 'utf
 const SERVER_SRC = readRepo('server.ts')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test (a) — `mentions: [a,b,c]` for send AND notify → reject with the canonical
-// "mentions[] is removed" error. Adapter symmetry: both tools must surface the
-// same INVALID_MENTION reject + the literal phrase per §4 (a).
+// Test (a) — `mentions: [a,b,c]` for send AND notify is accepted by schema and
+// resolved through the shared Phase 5 normalization port.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('(a) mentions[] reject — adapter symmetry (send AND notify)', () => {
-  test('server.ts send handler rejects args.mentions with the removed-error message', () => {
-    // The send handler must contain a guard that rejects when args.mentions is
-    // supplied, matching /mentions\[\] is removed/.
+describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () => {
+  test('server.ts send handler exposes mentions[] and does not reject it as removed', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")
     expect(sendIdx).toBeGreaterThan(0)
     expect(notifyIdx).toBeGreaterThan(sendIdx)
     const sendBody = SERVER_SRC.slice(sendIdx, notifyIdx)
-    expect(sendBody).toMatch(/args\.mentions\s*!==\s*undefined/)
-    expect(sendBody).toMatch(/mentions\[\]\s+is\s+removed/)
-    // No legacy auto-fill / parsing remains in the send handler.
-    expect(sendBody).not.toMatch(/Array\.isArray\(args\.mentions\)/)
+    const schemaIdx = SERVER_SRC.indexOf("name: 'send'")
+    const sendSchema = SERVER_SRC.slice(schemaIdx, SERVER_SRC.indexOf("name: 'notify'", schemaIdx))
+    expect(sendSchema).toMatch(/mentions:\s*\{\s*type:\s*'array'/)
+    expect(sendBody).toMatch(/mentions:\s*\(args as any\)\.mentions/)
+    expect(sendBody).not.toMatch(/mentions\[\]\s+is\s+removed/)
   })
 
-  test('server.ts notify handler rejects args.mentions with the removed-error message', () => {
+  test('server.ts notify handler exposes mentions[] and does not reject it as removed', () => {
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")
     expect(notifyIdx).toBeGreaterThan(0)
     // Slice up to the next top-level handler (or end of file) to scope the body.
     const tail = SERVER_SRC.slice(notifyIdx)
     const nextHandlerRel = tail.slice(1).search(/if \(name === '[a-z_]+'\)/)
     const notifyBody = nextHandlerRel < 0 ? tail : tail.slice(0, nextHandlerRel + 1)
-    expect(notifyBody).toMatch(/args\.mentions\s*!==\s*undefined/)
-    expect(notifyBody).toMatch(/mentions\[\]\s+is\s+removed/)
-    expect(notifyBody).not.toMatch(/Array\.isArray\(args\.mentions\)/)
+    const schemaIdx = SERVER_SRC.indexOf("name: 'notify'")
+    const notifySchema = SERVER_SRC.slice(schemaIdx, SERVER_SRC.indexOf("name: 'unfocus'", schemaIdx))
+    expect(notifySchema).toMatch(/mentions:\s*\{\s*type:\s*'array'/)
+    expect(notifyBody).toMatch(/mentions:\s*\(args as any\)\.mentions/)
+    expect(notifyBody).not.toMatch(/mentions\[\]\s+is\s+removed/)
+  })
+
+  test('resolvePhase5 normalizes mentions[] into one deduped enqueue list', async () => {
+    const { resolvePhase5 } = await import('../../core/routing/server-integration')
+    const known = new Set(['ceo', 'codex-cto', 'agent-com-dev', 'sender-bot'])
+    const out = resolvePhase5({
+      sender: 'sender-bot',
+      channel_id: 'test-channel-a',
+      mentions: ['ceo', 'cto', 'agent-com-dev', 'ceo'],
+      content: 'hello',
+      isKnownAgent: (id: string) => known.has(id),
+    })
+    expect(out).not.toBeNull()
+    expect(out!.ok).toBe(true)
+    if (out && out.ok) {
+      expect(out.mentions).toEqual(['ceo', 'codex-cto', 'agent-com-dev'])
+    }
   })
 })
 
@@ -66,12 +83,11 @@ describe('(a) mentions[] reject — adapter symmetry (send AND notify)', () => {
 // level required + the runtime defensive guard both produce the same class.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('(b) empty mention → INVALID_MENTION (adapter symmetry)', () => {
-  test('send handler emits INVALID_MENTION when mention is empty / missing', () => {
+  test('send handler emits INVALID_MENTION when an explicit mention is empty or no recipient can be inferred', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")
     const sendBody = SERVER_SRC.slice(sendIdx, notifyIdx)
-    // resolvePhase5 INVALID_MENTION arm: `mention must be a non-empty agent_id`.
-    expect(sendBody).toMatch(/INVALID_MENTION.*mention must be a non-empty agent_id/)
+    expect(sendBody).toMatch(/INVALID_MENTION.*mention\/mentions must contain at least one non-empty agent_id/)
   })
 
   test('notify handler emits INVALID_MENTION for empty / missing mention', () => {
@@ -79,9 +95,7 @@ describe('(b) empty mention → INVALID_MENTION (adapter symmetry)', () => {
     const tail = SERVER_SRC.slice(notifyIdx)
     const nextHandlerRel = tail.slice(1).search(/if \(name === '[a-z_]+'\)/)
     const notifyBody = nextHandlerRel < 0 ? tail : tail.slice(0, nextHandlerRel + 1)
-    expect(notifyBody).toMatch(/INVALID_MENTION.*mention must be a non-empty agent_id/)
-    // Defensive runtime check on args.mention type/length (matches send symmetry).
-    expect(notifyBody).toMatch(/typeof\s+args\.mention\s*!==\s*'string'\s*\|\|\s*args\.mention\.length\s*===\s*0/)
+    expect(notifyBody).toMatch(/INVALID_MENTION.*mention\/mentions must contain at least one non-empty agent_id/)
   })
 })
 
@@ -108,10 +122,8 @@ describe('(c) unknown mention → UNKNOWN_AGENT (adapter symmetry)', () => {
   test('core/routing/ports/inbound-resolver.ts retains the UNKNOWN_AGENT class', () => {
     const src = readRepo('core/routing/ports/inbound-resolver.ts')
     expect(src).toMatch(/'UNKNOWN_AGENT'/)
-    // Auto-convert path is gone (the docstring may still mention it for
-    // historical context, but the runtime branch must be removed).
-    expect(src).not.toMatch(/auto-convert legacy `mentions\[\]`/)
-    expect(src).not.toMatch(/input\.mentions\s*&&\s*input\.mentions\.length\s*>\s*0/)
+    expect(src).toMatch(/normalizeAgentMentions/)
+    expect(src).toMatch(/mentions:\s*input\.mentions/)
   })
 })
 
@@ -154,19 +166,15 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
       expect(out).not.toBeNull()
       expect(out!.ok).toBe(true)
       if (out && out.ok) {
-        // mention is enqueue (1 primary recipient).
-        expect(out.mentions).toContain('ceo')
+        // mention is enqueue; cc[] recipients are reference-only.
+        expect(out.mentions).toEqual(['ceo'])
         // cc[] body suffix invariant: the cc agents MUST appear as
         // `[CC: <@id>, ...]` in the decorated body so the reader sees them.
         expect(out.content).toContain('[CC:')
         expect(out.content).toContain('<@cto>')
         expect(out.content).toContain('<@agent-com-dev>')
-        // Note: the resolver's `enqueue` field includes cc-resolved IDs for
-        // dedup purposes; the actual `message_queue` 非投入 invariant is
-        // enforced by the downstream `routeInbound` filter
-        // (server.ts → delivery.pushTargets), not by the resolver. The SQL
-        // assertion below documents what an operator runs against a real
-        // production INSERT to verify the end-to-end invariant.
+        expect(out.mentions).not.toContain('cto')
+        expect(out.mentions).not.toContain('agent-com-dev')
       }
 
       // SQL fixture invariant: zero queue rows for cc[] recipients written
@@ -285,7 +293,7 @@ describe.skip('(e) repo-wide CI grep — no `mentions: [` MCP-shape remnant (TOD
 // language so reviewers/auditors can trace the spec change.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('(f) ADR-041 amendment note exists', () => {
-  test('docs/adr/041-routing-phase5.md amendment 2026-05-05 present', () => {
+  test('docs/adr/041-routing-phase5.md amendments are traceable', () => {
     const adrPath = join(repoRoot, 'docs/adr/041-routing-phase5.md')
     let exists = true
     try {
@@ -299,5 +307,8 @@ describe('(f) ADR-041 amendment note exists', () => {
     expect(src).toMatch(/5e2d9235/)
     expect(src).toMatch(/mentions\[\]/)
     expect(src).toMatch(/mention.*cc\[\]/)
+    expect(src).toMatch(/Amendment\s+2026-05-27/)
+    expect(src).toMatch(/66e18dc3/)
+    expect(src).toMatch(/core\/mention-normalization\.ts/)
   })
 })

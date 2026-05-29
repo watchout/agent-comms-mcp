@@ -1,7 +1,7 @@
 /**
  * Phase 5 §4 — port unit tests + behavioral fixtures (merge gate).
  *
- * Covers §4.1 dedup / §4.2 sender + auto-convert / §4.3 primary routing /
+ * Covers §4.1 dedup / §4.2 sender + multi-mention normalization / §4.3 missing target /
  * §4.4 outbound ACL reject / §4.5 failure modes / §4.6 cc[] body injection.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
@@ -17,7 +17,7 @@ import {
   resetChannelPolicyCache,
 } from '../../core/routing'
 
-const KNOWN_AGENTS = new Set(['alice', 'bob', 'carol', 'dan', 'agent-com-dev', 'cto', 'lead-ama'])
+const KNOWN_AGENTS = new Set(['alice', 'bob', 'carol', 'dan', 'agent-com-dev', 'cto', 'codex-cto', 'lead-ama'])
 const isKnown = (id: string) => KNOWN_AGENTS.has(id)
 
 const TMP_CONFIG = `/tmp/phase5-routing-${process.pid}-${Date.now()}.json`
@@ -141,7 +141,7 @@ describe('channel-policy (§1.8)', () => {
 })
 
 // ============================================================
-// §1.7 Port A — InboundResolver + §2.1 dedup + §2.2 auto-convert + §1.6 validation
+// §1.7 Port A — InboundResolver + §2.1 dedup + §2.2 normalization + §1.6 validation
 // ============================================================
 describe('InboundResolver (§1.7 Port A) — §2.1 dedup', () => {
   const primaryFallback = createPrimaryFallback()
@@ -167,38 +167,45 @@ describe('InboundResolver (§1.7 Port A) — §2.1 dedup', () => {
       expect(r.cc).toEqual(['bob'])
     }
   })
+
+  test('§2.2 mentions[] is normalized, deduped, and enqueued without cc[] fanout', () => {
+    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['alice', 'bob', 'alice'], cc: ['carol'] })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.enqueue).toEqual(['alice', 'bob'])
+      expect(r.cc).toEqual(['carol'])
+    }
+  })
+
+  test('§2.2 native role alias cto normalizes to canonical codex-cto', () => {
+    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['cto', 'lead-ama'] })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.enqueue).toEqual(['codex-cto', 'lead-ama'])
+  })
 })
 
-// ADR-041 amendment 2026-05-05 — legacy mentions[] auto-convert is removed.
-// The InboundResolveInput interface no longer accepts a `mentions` field at
-// the type level; callers MUST use `mention` (required) + `cc[]`. The
-// behavioral contract for the removed cases is now covered in
-// tests/contract/test_no_mentions_array_remnant.test.ts at the MCP-server
-// layer (where the schema-level reject lives).
-
-describe('InboundResolver — §2.3 primary routing fallback', () => {
-  test('§4.3 no mention + channel.primary → primary enqueue', () => {
+// CEO directive 2026-05-27 — missing mention target rejects instead of
+// falling back to channel.primary. The adapter/router sends the human alert.
+describe('InboundResolver — §2.3 missing mention target', () => {
+  test('§4.3 no mention + channel.primary → INVALID_MENTION', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice' } })
     const resolver = createInboundResolver({
       isKnownAgent: isKnown,
       primaryFallback: createPrimaryFallback(),
     })
     const r = resolver.resolve({ channel_id: 'ch1' })
-    expect(r.ok).toBe(true)
-    if (r.ok) expect(r.enqueue).toEqual(['alice'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('INVALID_MENTION')
   })
 
-  test('§4.3 no mention + no primary → skip + warning (no enqueue)', () => {
+  test('§4.3 no mention + no primary → INVALID_MENTION', () => {
     const resolver = createInboundResolver({
       isKnownAgent: isKnown,
       primaryFallback: createPrimaryFallback(),
     })
     const r = resolver.resolve({ channel_id: 'unknown-ch' })
-    expect(r.ok).toBe(true)
-    if (r.ok) {
-      expect(r.enqueue).toEqual([])
-      expect(r.warnings.some((w) => w.includes('no mention and no channel.primary'))).toBe(true)
-    }
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('INVALID_MENTION')
   })
 
   test('§4.3 mention 指定時は primary を ignore (mention 優先)', () => {
@@ -389,13 +396,11 @@ describe('Phase 5 §3 anti-pattern source-pin', () => {
     expect(text).not.toMatch(/@arc-team|virtual.*group|expandGroup/)
   })
 
-  test('§3.2 ADR-041 amendment 2026-05-05 — auto-convert path is removed (no silent conversion)', async () => {
+  test('§3.2 mention/mentions normalization is centralized', async () => {
     const text = await readRepo('core/routing/ports/inbound-resolver.ts')
-    // Auto-convert runtime branch must be gone (the resolver no longer
-    // accepts a `mentions` field at the input type level).
-    expect(text).not.toMatch(/input\.mentions\s*&&\s*input\.mentions\.length/)
-    expect(text).not.toMatch(/auto-converted/)
-    // The amendment marker should be present so future readers see why.
-    expect(text).toMatch(/ADR-041 amendment 2026-05-05/)
+    expect(text).toMatch(/normalizeAgentMentions/)
+    expect(text).toMatch(/mentions:\s*input\.mentions/)
+    expect(text).not.toMatch(/channel\.primary/)
+    expect(text).not.toMatch(/primaryFallback\.resolve/)
   })
 })

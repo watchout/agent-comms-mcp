@@ -152,11 +152,14 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
 })
 
 describe('Behavioral FAIL B3 — notify tool implemented', () => {
-  test('MCP notify tool is listed with channel + content + mention required (ADR-041 amendment 2026-05-05 — mentions[] removed, mention required)', () => {
+  test('MCP notify tool is listed with channel + content required and mention/mentions supported (ADR-041 amendment 2026-05-27)', () => {
     expect(SERVER_SRC).toMatch(/name:\s*'notify'/)
-    // ADR-041 amendment 2026-05-05 (CEO directive 5e2d9235) — legacy
-    // `mentions[]` removed; `mention` (1 primary) is now schema-required.
-    expect(SERVER_SRC).toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"],\s*['"]mention['"]\]/)
+    const schemaIdx = SERVER_SRC.indexOf("name: 'notify'")
+    const schema = SERVER_SRC.slice(schemaIdx, SERVER_SRC.indexOf("name: 'unfocus'", schemaIdx))
+    expect(schema).toMatch(/mention:\s*\{\s*type:\s*'string'/)
+    expect(schema).toMatch(/mentions:\s*\{\s*type:\s*'array'/)
+    expect(schema).toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"]\]/)
+    expect(schema).not.toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"],\s*['"]mention['"]\]/)
   })
   test('MCP notify handler exists and does NOT touch reply_to / current_message_id', () => {
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")

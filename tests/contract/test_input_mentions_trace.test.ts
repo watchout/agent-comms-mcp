@@ -8,17 +8,15 @@ import { resolve } from 'node:path'
 //
 // PR #275 adds:
 //   1. agent_messages.input_mentions TEXT[] column
-//   2. send / notify MCP handlers snapshot args.mentions BEFORE any
-//      auto-fill / normalization, then pass it through saveMessage.
+//   2. send / notify MCP handlers persist the normalized recipient list, then
+//      pass it through saveMessage.
 //
-// The value being pinned is "raw args.mentions, frozen before mutation".
+// The value being pinned is "canonical agent_id mentions after normalization".
 // Two angles are covered:
 //
-// (a) **Snapshot semantics** — replicates the production snapshot pattern
-//     (`const rawInputMentions = mentions.slice()`) and proves that
-//     subsequent mutation of `mentions` (the same auto-fill the send
-//     handler does for reply_to flows) does NOT leak into the snapshot.
-//     This is the regression check for the snapshot-before-autofill rule.
+// (a) **Normalization semantics** — replicates the production pattern:
+//     resolvePhase5(...) returns normalized/deduped mentions, then the handler
+//     assigns that list to `rawInputMentions` for trace persistence.
 //
 // (b) **DB round-trip** (postgres only, gated on DATABASE_URL) — INSERTs
 //     into agent_messages with input_mentions = NULL / [] / ['ceo'] and
@@ -28,35 +26,30 @@ import { resolve } from 'node:path'
 // (c) **Source-shape grep** — fails fast if server.ts loses the
 //     `rawInputMentions` snapshot or its propagation into saveMessage.
 
-describe('input_mentions snapshot semantics (Issue #266 (A); ADR-041 amendment 2026-05-05)', () => {
-  // After the Phase 5 cleanup the MCP handlers no longer accept `mentions[]`.
-  // The handler snapshot pattern is now:
-  //   const rawInputMentions = typeof args.mention === 'string' && args.mention.length > 0
-  //     ? [args.mention] : []
-  // Then `mentions: string[]` is populated by resolvePhase5(...) (which may
-  // expand cc[] entries into the enqueue list). The snapshot is taken from
-  // the raw `args.mention` BEFORE resolvePhase5 mutates the working list.
-  function snapshotInputMentions(args: { mention?: unknown }): string[] {
-    return typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
+describe('input_mentions normalization semantics (Issue #266 (A); ADR-041 amendment 2026-05-27)', () => {
+  function normalizedInputMentions(args: { mention?: string; mentions?: string[] }): string[] {
+    const aliases: Record<string, string> = { cto: 'codex-cto' }
+    const out: string[] = []
+    for (const raw of [args.mention, ...(args.mentions ?? [])]) {
+      if (!raw || raw.trim().length === 0) continue
+      const normalized = aliases[raw.trim()] ?? raw.trim()
+      if (!out.includes(normalized)) out.push(normalized)
+    }
+    return out
   }
 
-  test('case A — explicit mention="ceo" survives subsequent enqueue expansion', () => {
-    const args = { mention: 'ceo' }
-    const rawInputMentions = snapshotInputMentions(args)
-    let mentions: string[] = []  // populated below by resolvePhase5
-    mentions = ['ceo', 'cc-target-1', 'cc-target-2']  // simulate enqueue expansion
+  test('case A — explicit mention="ceo" persists as normalized recipient trace', () => {
+    const rawInputMentions = normalizedInputMentions({ mention: 'ceo' })
     expect(rawInputMentions).toEqual(['ceo'])
-    expect(mentions).toEqual(['ceo', 'cc-target-1', 'cc-target-2'])
   })
 
-  test('case B — missing mention (defensive) snapshot stays empty', () => {
-    const args = { mention: undefined }  // schema-required but defensive
-    const rawInputMentions = snapshotInputMentions(args)
-    expect(rawInputMentions).toEqual([])
+  test('case B — mentions[] dedupes and normalizes aliases', () => {
+    const rawInputMentions = normalizedInputMentions({ mentions: ['ceo', 'cto', 'ceo'] })
+    expect(rawInputMentions).toEqual(['ceo', 'codex-cto'])
   })
 
-  test('case C — empty-string mention snapshot stays empty (matches INVALID_MENTION reject)', () => {
-    const rawInputMentions = snapshotInputMentions({ mention: '' })
+  test('case C — empty recipient inputs stay empty (matches INVALID_MENTION reject)', () => {
+    const rawInputMentions = normalizedInputMentions({ mention: '', mentions: [] })
     expect(rawInputMentions).toEqual([])
   })
 })
@@ -117,16 +110,11 @@ dbDescribe('input_mentions DB round-trip (Issue #266 (A) migration)', () => {
 })
 
 describe('source-shape regression — server.ts retains the snapshot pattern', () => {
-  // Production handlers are required to snapshot args.mentions BEFORE
-  // any auto-fill mutates the working `mentions` array, then pass it to
-  // saveMessage as input_mentions. Deleting either half silently breaks
-  // the trace; this grep catches that.
+  // Production handlers persist the normalized phase5.mentions list as
+  // input_mentions. Deleting either half silently breaks the trace.
   test('server.ts contains rawInputMentions snapshot + propagation', () => {
     const src = readFileSync(resolve(import.meta.dir, '../../server.ts'), 'utf8')
-    // ADR-041 amendment 2026-05-05 — snapshot is now built from the singular
-    // `args.mention` arg (legacy `args.mentions` array removed). At least 2
-    // call sites (send + notify) should construct `[args.mention]`.
-    const snapshotHits = src.match(/rawInputMentions[^\n]*=\s*typeof\s+args\.mention\s*===/g) ?? []
+    const snapshotHits = src.match(/rawInputMentions\s*=\s*phase5\.mentions/g) ?? []
     expect(snapshotHits.length).toBeGreaterThanOrEqual(2)
     // Propagation: passed into saveMessage as input_mentions (send + notify)
     const propagationHits = src.match(/input_mentions:\s*rawInputMentions/g) ?? []

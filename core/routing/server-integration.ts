@@ -5,9 +5,9 @@
  * Both server.ts (canonical enforcement) and cli/index.ts (best-effort warning)
  * route through here so the contract has exactly one expression (§1.8).
  *
- * ADR-041 amendment 2026-05-05 (CEO directive 5e2d9235): the legacy
- * `mentions[]` field is removed. Callers MUST supply `mention` (required) +
- * optional `cc[]`. The MCP server schema rejects missing `mention` upstream.
+ * CEO directive 2026-05-27: `mention` and `mentions[]` are normalized through
+ * one port into canonical agent_id[]; missing targets reject instead of falling
+ * back to a primary route.
  */
 import {
   createInboundResolver,
@@ -22,8 +22,10 @@ export interface Phase5ResolveInput {
   sender: AgentId
   /** Channel id of the destination (server-side: derived from reply_to lookup or `channel` arg). */
   channel_id: string
-  /** §1.2 — 1 主 recipient (required at MCP layer). */
+  /** Single recipient. */
   mention?: AgentId
+  /** Multi-recipient fanout. Each resolved recipient gets one queue row. */
+  mentions?: AgentId[]
   /** §1.2 — 参照 recipients (queue 投入なし、body 注入対象). */
   cc?: AgentId[]
   /** Original message content (will be decorated with cc[] suffix when applicable). */
@@ -34,7 +36,7 @@ export interface Phase5ResolveInput {
 
 export interface Phase5ResolveOk {
   ok: true
-  /** Final enqueue list (resolved from `mention` + `cc[]`; consumed by downstream fanout). */
+  /** Final enqueue list (resolved from `mention` / `mentions[]`; consumed by downstream fanout). */
   mentions: AgentId[]
   /** Decorated content (cc[] suffix appended when applicable). */
   content: string
@@ -60,7 +62,7 @@ export type Phase5ResolveResult = Phase5ResolveOk | Phase5ResolveErr
  * fields are present, returns `{ ok: true, ... }` or `{ ok: false, error }`.
  */
 export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | null {
-  const usesPhase5Fields = input.mention !== undefined || (input.cc && input.cc.length > 0)
+  const usesPhase5Fields = input.mention !== undefined || input.mentions !== undefined || (input.cc && input.cc.length > 0)
   if (!usesPhase5Fields) {
     return null
   }
@@ -75,6 +77,7 @@ export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | 
   const resolved = inboundResolver.resolve({
     channel_id: input.channel_id,
     mention: input.mention,
+    mentions: input.mentions,
     cc: input.cc,
   })
 

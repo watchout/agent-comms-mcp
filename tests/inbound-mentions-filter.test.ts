@@ -52,7 +52,7 @@ describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   test('also parses @agent_id native mentions', () => {
     const fnIdx = SERVER_SOURCE.indexOf('async function extractDiscordMentions')
     const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 3000)
-    expect(fnBody).toContain('parseMentions(content)')
+    expect(fnBody).toContain('parseNativeAgentMentions(content, aliasMap)')
   })
 
   test('deduplicates mentions', () => {
@@ -128,22 +128,19 @@ describe('routeInbound — Pure function (§5.1)', () => {
     expect(fnBody).toContain('isDm')
   })
 
-  test('emergency bypass + Issue #527 no-mention primary routing (supersedes #278 §B fanout)', () => {
+  test('emergency bypass + no-mention missing-target alert routing', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
     const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
     expect(fnBody).toContain('isEmergency')
     expect(fnBody).not.toContain('isCeo')
-    // Issue #527 — when channel.primary is set, no-mention messages route
-    // only to that primary instead of fanning out (#278 §B supersede).
-    // When channel.primary is unset, the legacy #278 §B fanback is kept
-    // for backward compat (only when sender is human). Source-pin both
-    // shapes so a regression to either old or new path is caught.
+    // CEO directive 2026-05-27 — missing mention targets alert instead of
+    // falling back to channel.primary or legacy human fanout.
     expect(fnBody).toContain('if (noMentions)')
     expect(fnBody).toContain('channel.primary')
+    expect(fnBody).toContain('MISSING_MENTION_TARGET')
     expect(fnBody).toContain('NOT_PRIMARY_NO_MENTION')
-    expect(fnBody).toContain('if (senderIsHuman)')
     // Behavioural cover: T7.a-e in tests/route-message-observability.test.ts
-    // and case 4 below for the fanback path.
+    // and case 4 below for the missing-target path.
   })
 
   test('observer mode agents are dropped', () => {
@@ -162,10 +159,7 @@ describe('routeInbound — Pure function (§5.1)', () => {
   })
 })
 
-// Issue #278 (B) — CEO bypass routing behavioral fixture (case 4 in §4).
-// A human poster (authorIsBot=false) with zero mentions must fan out to
-// every (non-self, non-observer) bot member of the channel. This is the
-// behavioral counterpart to the source-level pin above.
+// CEO directive 2026-05-27 — no-mention human posts alert instead of routing.
 describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
   const channel = {
     channelId: 'agent-com',
@@ -179,7 +173,7 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
     { agentId: 'lead-ama', agentType: 'org', observerMode: false, discordId: null },
   ] as const
 
-  test('case 4 — CEO posts with no mentions → fanout to every non-self bot member', () => {
+  test('case 4 — CEO posts with no mentions → no enqueue, explicit missing-target drops', () => {
     const result = routeMessage(
       {
         authorAgentId: 'ceo',
@@ -192,14 +186,15 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
       agents as any,
       'inbound',
     )
-    // Every channel member except the human author must be in pushTargets.
-    expect(result.pushTargets.sort()).toEqual(['agent-com-dev', 'cto', 'lead-ama'])
-    expect(result.dropTargets).toEqual({})
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['agent-com-dev']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets['cto']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets['lead-ama']).toBe('MISSING_MENTION_TARGET')
     expect(result.noMentions).toBe(true)
     expect(result.senderIsHuman).toBe(true)
   })
 
-  test('observer-mode bots are dropped from CEO bypass fanout', () => {
+  test('observer-mode bots keep observer drop when no mention is present', () => {
     const agentsWithObserver = [
       ...agents.slice(0, 3),
       { ...agents[3], observerMode: true },
@@ -216,14 +211,15 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
       agentsWithObserver as any,
       'inbound',
     )
-    expect(result.pushTargets.sort()).toEqual(['agent-com-dev', 'cto'])
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['agent-com-dev']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets['cto']).toBe('MISSING_MENTION_TARGET')
     expect(result.dropTargets['lead-ama']).toBe('OBSERVER_MODE')
   })
 
-  test('bot author + no mentions still drops (CEO bypass is human-only)', () => {
-    // The bypass only fires for senderIsHuman = !authorIsBot. A bot
-    // posting without mentions stays on the legacy NOT_MENTIONED path,
-    // so noisy bot chatter does not silently fan out.
+  test('bot author + no mentions still drops as not mentioned without a primary', () => {
+    // Bot chatter without explicit mentions does not fan out and does not
+    // trigger the human warning path.
     const result = routeMessage(
       {
         authorAgentId: 'lead-ama',
@@ -310,7 +306,7 @@ describe('§2.2 Pattern A — Human warning', () => {
   })
 
   test('warning includes mentions guidance', () => {
-    expect(SERVER_SOURCE).toContain('メンションがないためbotには通知されていません')
+    expect(SERVER_SOURCE).toContain('メンション先がありません')
     expect(SERVER_SOURCE).toContain('@all')
   })
 

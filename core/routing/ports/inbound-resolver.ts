@@ -5,13 +5,9 @@
  * recipient list (queue-bound `enqueue` + body-bound `cc` + warnings).
  *
  * Contract:
- *   - `mention?: AgentId` (1 主 recipient、§1.1)
- *   - `cc?: AgentId[]` (queue 投入なし、body 注入対象、§1.5)
- *
- * Note (ADR-041 amendment 2026-05-05, CEO directive 5e2d9235):
- *   The legacy `mentions?: AgentId[]` field with auto-convert
- *   (`mentions[0]` → mention, rest → cc) was removed. Callers must supply
- *   `mention` (1 primary, required at MCP schema layer) + optional `cc[]`.
+ *   - `mention?: AgentId` for one recipient
+ *   - `mentions?: AgentId[]` for multi-recipient fanout
+ *   - `cc?: AgentId[]` is reference-only and never enqueued
  *
  * Validation (§1.6):
  *   - mention: empty string → INVALID_MENTION; unknown agent_id → UNKNOWN_AGENT
@@ -28,6 +24,7 @@
  * (ARC Option b), `ea7bc5cf` (CTO ratify).
  */
 import type { AgentId } from '../../channel-policy'
+import { normalizeAgentMentions } from '../../mention-normalization'
 import type { PrimaryFallback } from './primary-fallback'
 
 export type InboundResolveError = 'INVALID_MENTION' | 'UNKNOWN_AGENT'
@@ -35,6 +32,7 @@ export type InboundResolveError = 'INVALID_MENTION' | 'UNKNOWN_AGENT'
 export interface InboundResolveInput {
   channel_id: string
   mention?: AgentId
+  mentions?: AgentId[]
   cc?: AgentId[]
 }
 
@@ -68,20 +66,18 @@ export function createInboundResolver(deps: InboundResolverDeps): InboundResolve
   return {
     resolve(input: InboundResolveInput): InboundResolveResult {
       const warnings: string[] = []
-      let mention = input.mention?.trim()
       const cc = (input.cc ?? []).map((id) => id.trim()).filter((id) => id.length > 0)
 
-      // ADR-041 amendment 2026-05-05 — legacy `mentions[]` auto-convert removed.
-      // Callers must use `mention` (required) + `cc[]`.
-
-      // §1.6 — mention validation
-      if (mention !== undefined) {
-        if (mention.length === 0) {
-          return { ok: false, error: 'INVALID_MENTION' }
-        }
-        if (!deps.isKnownAgent(mention)) {
-          return { ok: false, error: 'UNKNOWN_AGENT', agent_id: mention }
-        }
+      const normalized = normalizeAgentMentions(
+        { mention: input.mention, mentions: input.mentions },
+        {
+          isKnownAgent: deps.isKnownAgent,
+          requireKnown: true,
+          allowGroupKeywords: true,
+        },
+      )
+      if (!normalized.ok) {
+        return { ok: false, error: normalized.error, agent_id: normalized.detail }
       }
 
       // §1.6 NEW — cc validation: unknown agents are stripped + warning
@@ -95,27 +91,13 @@ export function createInboundResolver(deps: InboundResolverDeps): InboundResolve
         ccValid.push(id)
       }
 
-      // §2.3 — primary fallback when no mention
-      if (!mention) {
-        const primary = deps.primaryFallback.lookup(input.channel_id)
-        if (primary) {
-          mention = primary
-        } else {
-          warnings.push(`no mention and no channel.primary; recipient skipped`)
-          // §1.5 — cc[] non-enqueue invariant: empty enqueue (cc never enqueued).
-          // cc[] still surfaces via body suffix.
-          return {
-            ok: true,
-            enqueue: [],
-            cc: ccValid,
-            warnings,
-          }
-        }
+      if (normalized.mentions.length === 0) {
+        return { ok: false, error: 'INVALID_MENTION' }
       }
 
-      // §1.5 — cc[] non-enqueue invariant: enqueue = [mention] only.
+      // §1.5 — cc[] non-enqueue invariant: enqueue = normalized primary/multi mentions only.
       // cc[] are surfaced via MessageBodyDecorator suffix, not via queue rows.
-      const enqueue: AgentId[] = mention ? [mention] : []
+      const enqueue: AgentId[] = normalized.mentions
 
       return { ok: true, enqueue, cc: ccValid, warnings }
     },

@@ -213,7 +213,7 @@ describe('T4: parseMentions defensive — malformed input never throws', () => {
     expect(parseMentions('hello @1486351481871794207 world')).toEqual([])
   })
   test('mixed valid and invalid mentions only keeps valid', () => {
-    expect(parseMentions('@cto @1234567890 @lead-ama')).toEqual(['cto', 'lead-ama'])
+    expect(parseMentions('@cto @1234567890 @lead-ama')).toEqual(['codex-cto', 'lead-ama'])
   })
 })
 
@@ -274,7 +274,7 @@ describe('T6: human agents are dropped from pushTargets (no message_queue insert
     expect(counters['route_message_drops_total|reason=human_agent_no_queue']).toBe(1)
   })
 
-  test('CEO bypass (senderIsHuman + noMentions) still does not push to humans', () => {
+  test('senderIsHuman + noMentions does not enqueue bots or humans', () => {
     captureLogger()
 
     const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'ceo'], type: 'channel' }
@@ -292,13 +292,13 @@ describe('T6: human agents are dropped from pushTargets (no message_queue insert
 
     const result = routeMessage(msg, channel, agents, 'inbound')
 
-    // self-send skip removes ceo; only agent-a remains.
-    expect(result.pushTargets).toEqual(['agent-a'])
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['agent-a']).toBe('MISSING_MENTION_TARGET')
   })
 })
 
-describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
-  test('no-mention with channel.primary → route only to primary, drop others as NOT_PRIMARY_NO_MENTION', () => {
+describe('T7: missing-mention alert routing + @everyone broadcast', () => {
+  test('no-mention with channel.primary → no enqueue, primary marked missing target', () => {
     const { events } = captureLogger()
 
     const channel: ChannelInfo = {
@@ -322,15 +322,18 @@ describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
 
     const result = routeMessage(msg, channel, agents, 'inbound')
 
-    expect(result.pushTargets).toEqual(['agent-a'])
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['agent-a']).toBe('MISSING_MENTION_TARGET')
     expect(result.dropTargets['agent-b']).toBe('NOT_PRIMARY_NO_MENTION')
     expect(result.dropTargets['agent-c']).toBe('NOT_PRIMARY_NO_MENTION')
 
     const drops = events.filter((e) => e.event === 'route_drop' && e.reason === 'not_primary_no_mention')
     expect(drops.length).toBe(2)
+    const missingDrops = events.filter((e) => e.event === 'route_drop' && e.reason === 'missing_mention_target')
+    expect(missingDrops.length).toBe(1)
   })
 
-  test('no-mention WITHOUT channel.primary → legacy fanout preserved (backward compat)', () => {
+  test('no-mention WITHOUT channel.primary → no enqueue, all bot members marked missing target', () => {
     captureLogger()
 
     const channel: ChannelInfo = {
@@ -352,7 +355,9 @@ describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
     }
 
     const result = routeMessage(msg, channel, agents, 'inbound')
-    expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['agent-a']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets['agent-b']).toBe('MISSING_MENTION_TARGET')
   })
 
   test('@everyone fanout even when channel.primary is set', () => {
@@ -392,7 +397,7 @@ describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
     expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
   })
 
-  test('bot sender with no mentions and primary set → primary-only (no legacy fanout for bots)', () => {
+  test('bot sender with no mentions and primary set → no enqueue', () => {
     const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
     const agents: AgentInfo[] = [
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
@@ -400,8 +405,8 @@ describe('T7: #527 no-mention primary routing + @everyone broadcast', () => {
     ]
     const msg = { authorAgentId: 'other-bot', authorIsBot: true, content: 'silent bot post', mentions: [], messageType: 'chat' }
     const result = routeMessage(msg, channel, agents, 'inbound')
-    // bot + no mention + primary set → route only to primary
-    expect(result.pushTargets).toEqual(['agent-a'])
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets['agent-a']).toBe('MISSING_MENTION_TARGET')
     expect(result.dropTargets['agent-b']).toBe('NOT_PRIMARY_NO_MENTION')
   })
 })
