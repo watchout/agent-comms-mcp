@@ -86,6 +86,21 @@ function seedPendingMessage(content = 'probe-content'): { messageId: string; que
   return { messageId, queueId: row.id }
 }
 
+function seedOwnerQueue(agentId = 'probe-owner', content = 'owner handoff', channelId = 'probe-f-ch'): { messageId: string; queueId: number } {
+  const db = new Database(dbPath)
+  const messageId = randomUUID()
+  db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content) VALUES (?, ?, 'probe-f', ?)`).run(messageId, channelId, content)
+  const payload = JSON.stringify({
+    content,
+    channel_id: channelId,
+    author_id: 'probe-f',
+    message_id: messageId,
+  })
+  const row = db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES (?, ?, ?, 'pending') RETURNING id`).get(agentId, messageId, payload) as { id: number }
+  db.close()
+  return { messageId, queueId: row.id }
+}
+
 function dbRead(sql: string, params: unknown[] = []): any[] {
   const db = new Database(dbPath)
   try {
@@ -438,6 +453,144 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       progress_label: 'tests',
       stale_after_sec: 300,
       visibility_state: 'moving',
+    })
+  })
+
+  test('worker report accepts handoff only when target owner queue row exists', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('probe-f-ch', '["probe-f","probe-owner"]', 'cli-test')`)
+    db.close()
+    const { queueId } = seedOwnerQueue()
+
+    const reported = runCli([
+      'worker', 'report',
+      '--agent-id', 'probe-f',
+      '--queue-id', String(queueId),
+      '--summary', 'Owner queue row created',
+      '--status', 'running',
+      '--handoff-target', 'probe-owner',
+      '--pull-request', '#592',
+      '--metadata', '{"source":"test"}',
+    ])
+
+    expect(reported.status).toBe(0)
+    const payload = JSON.parse(reported.stdout)
+    expect(payload.activity).toMatchObject({
+      agent_id: 'probe-f',
+      queue_id: queueId,
+      status: 'running',
+      handoff_target_agent_id: 'probe-owner',
+    })
+    expect(payload.activity.metadata.owner_handoff_evidence).toMatchObject({
+      ok: true,
+      status: 'queued_owner',
+      intended_recipient_agent_id: 'probe-owner',
+      queue: { queue_id: queueId, agent_id: 'probe-owner' },
+    })
+  })
+
+  test('worker report rejects handoff-only comments without false started state', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('probe-f-ch', '["probe-f","probe-owner"]', 'cli-test')`)
+    db.close()
+
+    const blocked = runCli([
+      'worker', 'report',
+      '--agent-id', 'probe-f',
+      '--summary', 'Implementation owner started',
+      '--status', 'running',
+      '--handoff-target', 'probe-owner',
+      '--handoff-channel', 'probe-f-ch',
+      '--pull-request', '#592',
+    ])
+
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('OWNER_HANDOFF_QUEUE_EVIDENCE_REQUIRED')
+    expect(dbRead(`SELECT * FROM worker_activity`)).toHaveLength(0)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'owner_handoff.route_diagnostic'`)
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ agent_id: 'probe-f', target: 'probe-owner' })
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      status: 'handoff_only',
+      sender_agent_id: 'probe-f',
+      intended_recipient_agent_id: 'probe-owner',
+      channel_id: 'probe-f-ch',
+    })
+  })
+
+  test('worker report rejects owner queue evidence from a different handoff channel', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channels (id, name, members) VALUES ('other-ch', 'other-ch', '["probe-f","probe-owner"]')`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('other-ch', '["probe-f","probe-owner"]', 'cli-test')`)
+    db.close()
+    const { queueId } = seedOwnerQueue('probe-owner', 'old owner queue', 'probe-f-ch')
+
+    const blocked = runCli([
+      'worker', 'report',
+      '--agent-id', 'probe-f',
+      '--queue-id', String(queueId),
+      '--summary', 'Implementation owner started',
+      '--status', 'running',
+      '--handoff-target', 'probe-owner',
+      '--handoff-channel', 'other-ch',
+      '--pull-request', '#592',
+    ])
+
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('OWNER_HANDOFF_QUEUE_EVIDENCE_MISMATCH')
+    expect(blocked.stderr).toContain(`queue_id ${queueId} belongs to channel probe-f-ch, not other-ch`)
+    expect(dbRead(`SELECT * FROM worker_activity`)).toHaveLength(0)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'owner_handoff.route_diagnostic'`)
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ agent_id: 'probe-f', target: 'probe-owner' })
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      status: 'queue_evidence_mismatch',
+      sender_agent_id: 'probe-f',
+      intended_recipient_agent_id: 'probe-owner',
+      channel_id: 'other-ch',
+      queue: {
+        queue_id: queueId,
+        agent_id: 'probe-owner',
+        channel_id: 'probe-f-ch',
+      },
+    })
+  })
+
+  test('worker report accepts explicit relay policy handoff evidence', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.close()
+
+    const reported = runCli([
+      'worker', 'report',
+      '--agent-id', 'probe-f',
+      '--summary', 'Relay policy owns handoff',
+      '--status', 'running',
+      '--handoff-target', 'probe-owner',
+      '--metadata', '{"owner_handoff":{"evidence_type":"relay_policy","policy_ref":"ops-routing#592","relay_agent_id":"codex-cto"}}',
+    ])
+
+    expect(reported.status).toBe(0)
+    const payload = JSON.parse(reported.stdout)
+    expect(payload.activity).toMatchObject({
+      agent_id: 'probe-f',
+      status: 'running',
+      handoff_target_agent_id: 'probe-owner',
+    })
+    expect(payload.activity.metadata.owner_handoff_evidence).toMatchObject({
+      ok: true,
+      status: 'relay_policy',
+      relay_policy: {
+        evidence_type: 'relay_policy',
+        policy_ref: 'ops-routing#592',
+        relay_agent_id: 'codex-cto',
+      },
     })
   })
 
@@ -796,11 +949,25 @@ describe('F3 — agent-com send (SQLite)', () => {
     const blocked = runCli(['send', '--content', 'blocked send', '--mentions', 'cto'])
     expect(blocked.status).not.toBe(0)
     expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
+    expect(blocked.stderr).toContain('allowlist=["cto"]')
     const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('received')
     expect(q[0].replied_with).toBeNull()
     const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked send'`)
     expect(written.length).toBe(0)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'outbound.acl_violation'`)
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ agent_id: 'probe-f', target: 'probe-f-ch' })
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      operation: 'send',
+      sender: 'probe-f',
+      intended_recipients: ['cto'],
+      channel_id: 'probe-f-ch',
+      violated_policy: 'channel.outboundAllowlist',
+      outbound_allowlist: ['cto'],
+      policy_source: 'db',
+      violations: ['probe-f'],
+    })
   })
 })
 
@@ -931,9 +1098,22 @@ describe('F5 — agent-com notify (SQLite)', () => {
     const blocked = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'blocked notify'])
     expect(blocked.status).not.toBe(0)
     expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
+    expect(blocked.stderr).toContain('allowlist=["cto"]')
     const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked notify'`)
     expect(written.length).toBe(0)
     const queued = dbRead(`SELECT id FROM message_queue WHERE payload LIKE '%blocked notify%'`)
     expect(queued.length).toBe(0)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'outbound.acl_violation'`)
+    expect(audits).toHaveLength(1)
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      operation: 'notify',
+      sender: 'probe-f',
+      intended_recipients: ['cto'],
+      channel_id: 'probe-f-ch',
+      violated_policy: 'channel.outboundAllowlist',
+      outbound_allowlist: ['cto'],
+      policy_source: 'db',
+      violations: ['probe-f'],
+    })
   })
 })
