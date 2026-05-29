@@ -99,6 +99,8 @@ beforeEach(() => {
       VALUES ('codex-aun', 'codex-aun', 'dev', 'idle');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-ch', 'runner-ch', '["codex-aun","codex-cto"]');
+    INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
+      VALUES ('runner-ch', '["codex-aun","codex-cto"]', 'aun-codex-runner-test');
   `)
 })
 

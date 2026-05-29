@@ -74,10 +74,11 @@
  *
  * Skipped automatically when DATABASE_URL is unset.
  */
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test'
 import { Client } from 'pg'
 import { randomUUID } from 'crypto'
 import { resolvePhase5 } from '../../core/routing/server-integration'
+import { resetChannelPolicyCache } from '../../core/channel-policy'
 import { enqueueWithDedup } from '../../core/queue-dedup'
 import {
   buildSendMentions,
@@ -90,6 +91,23 @@ const SKIP = !process.env.DATABASE_URL
 
 const known = new Set(['ceo', 'cto', 'agent-com-dev', 'sender-bot'])
 const isKnown = (id: string) => known.has(id)
+
+let previousFileFallback: string | undefined
+
+beforeEach(() => {
+  previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+  process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+  resetChannelPolicyCache()
+})
+
+afterEach(() => {
+  if (previousFileFallback === undefined) {
+    delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+  } else {
+    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
+  }
+  resetChannelPolicyCache()
+})
 
 // ─────────────────────────────────────────────────────────────────────
 // Fixture (a)/(b)/(c) — resolver-level pins.

@@ -72,6 +72,8 @@ beforeEach(() => {
       VALUES ('probe-dev', 'probe-dev', 'dev', 'idle');
     INSERT INTO channels (id, name, members)
       VALUES ('probe-ch', 'probe-ch', '["probe-dev","codex-cto"]');
+    INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
+      VALUES ('probe-ch', '["probe-dev","codex-cto"]', 'aun-reply-notify-test');
   `)
 })
 
