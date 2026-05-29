@@ -10,7 +10,8 @@
  *   - allowlist 不在 channel (entry 自体無し) → 全 sender 許可 (legacy compat).
  *
  * §1.4: server-side enforcement is canonical; client-side warning is
- * best-effort (UX only, not a gate).
+ * best-effort (UX only, not a gate). In production, missing DB policy becomes
+ * an empty allowlist so routing fails closed instead of reading static config.
  */
 import { getChannelPolicy, type AgentId } from '../../channel-policy'
 
@@ -30,7 +31,8 @@ export function createOutboundPolicyValidator(): OutboundPolicyValidator {
   return {
     validate(sender, channel_id, recipients) {
       const policy = getChannelPolicy(channel_id)
-      // §2.4 — allowlist 不在 = legacy compat、全 sender 許可
+      // §2.4 — explicit compatibility entries with no allowlist allow all.
+      // Missing production DB policy resolves to [] and rejects all.
       if (policy.outboundAllowlist === null) return { ok: true }
       const allow = new Set(policy.outboundAllowlist)
       const violations: AgentId[] = []

@@ -2,10 +2,10 @@
  * Phase 5 §1.8 — common channel-policy source.
  *
  * Single source of truth for both server (`routeInbound`, `send/notify` validate)
- * and client (`send/notify` tool input validation, best-effort warning). The
- * file `<repo>/config/bot-routing.json` is cached and revalidated on access
- * using file metadata. This keeps long-lived MCP processes from holding stale
- * ACLs after an operator updates the routing file.
+ * and client (`send/notify` tool input validation, best-effort warning).
+ *
+ * Production reads the DB policy snapshot only. `config/bot-routing.json` is a
+ * compatibility seed/test source and is read only when explicitly enabled.
  */
 import { readFileSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -27,6 +27,8 @@ export interface ChannelPolicyEntry {
   nativeProjectionIdentities: Record<AgentId, AgentId>
   /** §1.3 / §2.4 — outbound ACL allowlist. `null` = entry absent (legacy: all senders permitted). */
   outboundAllowlist: AgentId[] | null
+  /** Evidence source for operator/audit diagnostics. */
+  policySource: string
 }
 
 interface RoutingConfig {
@@ -37,6 +39,7 @@ interface RoutingConfig {
     nativeRoleOutboundOwners?: Record<AgentId, AgentId>
     nativeProjectionIdentities?: Record<AgentId, AgentId>
     outboundAllowlist?: AgentId[]
+    policySource?: string
   }>
 }
 
@@ -77,14 +80,28 @@ function parseStringMap(raw: unknown): Record<string, string> | undefined {
   }
 }
 
-function normalizePolicyEntry(entry: RoutingConfig['channels'][string] | undefined): ChannelPolicyEntry {
+function truthyEnv(value: string | undefined): boolean {
+  if (value === undefined) return false
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+function channelPolicyFileFallbackEnabled(): boolean {
+  return Boolean(process.env.AGENT_COM_BOT_ROUTING_PATH) ||
+    truthyEnv(process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK)
+}
+
+function normalizePolicyEntry(
+  entry: RoutingConfig['channels'][string] | undefined,
+  fallbackPolicySource: string,
+): ChannelPolicyEntry {
   if (!entry) {
     return {
       primary: null,
       adapterOwner: null,
       nativeRoleOutboundOwners: {},
       nativeProjectionIdentities: {},
-      outboundAllowlist: null,
+      outboundAllowlist: fallbackPolicySource === 'none' ? [] : null,
+      policySource: fallbackPolicySource,
     }
   }
   const nativeRoleOutboundOwners =
@@ -109,6 +126,7 @@ function normalizePolicyEntry(entry: RoutingConfig['channels'][string] | undefin
     nativeRoleOutboundOwners,
     nativeProjectionIdentities,
     outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
+    policySource: entry.policySource ?? fallbackPolicySource,
   }
 }
 
@@ -125,17 +143,14 @@ function locateRoutingConfig(): string {
 }
 
 /**
- * Load + cache routing config. Long-lived MCP processes revalidate file
- * metadata on each policy lookup so operator ACL updates are picked up without
- * a process restart. Tests that need to reset the cache should call
- * {@link resetChannelPolicyCache}.
+ * Load + cache routing config for explicit compatibility/seed/test callers.
+ * Long-lived compatibility callers revalidate file metadata on each policy
+ * lookup; file fallback is still revalidated on access so ACL fixture updates
+ * are picked up without a process restart.
+ * Tests that need to reset the cache should call {@link resetChannelPolicyCache}.
  *
- * §4.5 / §3.4 ARC: file absent / parse error / schema invalid all
- * fall through to a permissive empty config (`channels: {}`). This is
- * "fail-closed for outbound ACL" because an unknown channel returns
- * `outboundAllowlist: null` = legacy "all permitted" — the only gate is
- * the explicit allowlist entry. The conservative trade-off is not adding
- * surprise rejections when ops have not yet authored a routing entry.
+ * Production DB-SSOT callers do not reach this function unless file fallback
+ * has been explicitly enabled.
  */
 function loadConfig(): RoutingConfig {
   const path = locateRoutingConfig()
@@ -214,11 +229,15 @@ function loadConfig(): RoutingConfig {
 
 export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
   const dbEntry = dbPolicySnapshot?.channels[channel_id]
-  if (dbEntry) return normalizePolicyEntry(dbEntry)
+  if (dbEntry) return normalizePolicyEntry(dbEntry, 'db')
 
-  const config = loadConfig()
-  const entry = config.channels[channel_id]
-  return normalizePolicyEntry(entry)
+  if (channelPolicyFileFallbackEnabled()) {
+    const config = loadConfig()
+    const entry = config.channels[channel_id]
+    return normalizePolicyEntry(entry, 'config/bot-routing.json')
+  }
+
+  return normalizePolicyEntry(undefined, 'none')
 }
 
 export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ loaded: boolean; count: number }> {
@@ -229,7 +248,8 @@ export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ l
               adapter_owner_agent_id,
               outbound_allowlist,
               native_role_outbound_owners,
-              native_projection_identities
+              native_projection_identities,
+              policy_source
          FROM channel_routing_policy
         ORDER BY channel_id`,
     )
@@ -243,6 +263,7 @@ export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ l
         outboundAllowlist: parseStringArray(row.outbound_allowlist),
         nativeRoleOutboundOwners: parseStringMap(row.native_role_outbound_owners),
         nativeProjectionIdentities: parseStringMap(row.native_projection_identities),
+        policySource: typeof row.policy_source === 'string' && row.policy_source.trim() ? row.policy_source.trim() : 'db',
       }
     }
     dbPolicySnapshot = { version: 1, channels }

@@ -46,6 +46,11 @@ const SERVER_SRC =
   + '\n'
   + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
+const OUTBOUND_INSERT_COLUMNS_PATTERN = String.raw`INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*delivery_connector_instance_id,\s*channel_binding_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)`
+const OUTBOUND_INSERT_COLUMNS_RE = new RegExp(OUTBOUND_INSERT_COLUMNS_PATTERN)
+const OUTBOUND_INSERT_COLUMNS_GLOBAL_RE = new RegExp(OUTBOUND_INSERT_COLUMNS_PATTERN, 'g')
+const SERVER_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*externalId/g
+const CLI_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId/g
 
 function serverToolBody(toolName: string): string {
   const start = SERVER_ONLY_SRC.indexOf(`if (name === '${toolName}')`)
@@ -199,12 +204,12 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
     // Anchor on the send-tool send loop. We can't extract the loop body
     // perfectly without parsing TS, so check that the send handler contains
     // ADR-060 PR3: write both delivery consumer and projection identity.
-    expect(SERVER_SRC).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/)
+    expect(SERVER_SRC).toMatch(OUTBOUND_INSERT_COLUMNS_RE)
   })
   test('server send + notify write projection_identity_id from the ADR-060 resolver', () => {
-    const inserts = [...SERVER_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/g)]
+    const inserts = [...SERVER_SRC.matchAll(OUTBOUND_INSERT_COLUMNS_GLOBAL_RE)]
     expect(inserts.length).toBeGreaterThanOrEqual(2)
-    const bindings = [...SERVER_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*externalId/g)]
+    const bindings = [...SERVER_SRC.matchAll(SERVER_OUTBOUND_BINDINGS_RE)]
     expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
   test('server send + notify skip enqueue when the resolver has no delivery consumer', () => {
@@ -282,12 +287,12 @@ function notifyMessageBody(): string {
 describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('sendMessage INSERTs into outbound_queue', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/)
+    expect(body).toMatch(OUTBOUND_INSERT_COLUMNS_RE)
   })
   test('CLI send + notify write projection_identity_id from the ADR-060 resolver', () => {
-    const inserts = [...CLI_SRC.matchAll(/INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)/g)]
+    const inserts = [...CLI_SRC.matchAll(OUTBOUND_INSERT_COLUMNS_GLOBAL_RE)]
     expect(inserts.length).toBeGreaterThanOrEqual(2)
-    const bindings = [...CLI_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId/g)]
+    const bindings = [...CLI_SRC.matchAll(CLI_OUTBOUND_BINDINGS_RE)]
     expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
   test('CLI send + notify skip enqueue when the resolver has no delivery consumer', () => {

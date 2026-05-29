@@ -25,13 +25,31 @@
  *   - server.ts send handler        (DB wiring call-site)
  *   - github.com/watchout/agent-comms-mcp/issues/118
  */
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
 } from '../../core/send-errors'
 import { resolvePhase5 } from '../../core/routing/server-integration'
+import { resetChannelPolicyCache } from '../../core/channel-policy'
+
+let previousFileFallback: string | undefined
+
+beforeEach(() => {
+  previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+  process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+  resetChannelPolicyCache()
+})
+
+afterEach(() => {
+  if (previousFileFallback === undefined) {
+    delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+  } else {
+    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
+  }
+  resetChannelPolicyCache()
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // T1: mentions 空 + reply_to あり → エラーに author_id が含まれる

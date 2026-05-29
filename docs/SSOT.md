@@ -273,7 +273,7 @@ interface AccessConfig {
 ### 4.2 メッセージルーティング
 
 > 詳細仕様: docs/agent-com-message-queue-spec.md §4 / §8 / §10-12 (旧 channel-thread-control-spec から統合、SPEC-INDEX.md:70 参照)
-> Phase 5 (Issues #305 / #306 / #308 / #250、PR-Phase5): mention/cc 分離 + primary fallback + outbound ACL = `config/bot-routing.json` を共通 source とする 4 port 抽象 (`InboundResolver` / `PrimaryFallback` / `OutboundPolicyValidator` / `MessageBodyDecorator`、`core/routing/ports/`)。reload は restart-only。
+> Phase 5 (Issues #305 / #306 / #308 / #250、PR-Phase5): mention/cc 分離 + primary fallback + outbound ACL = DB `channel_routing_policy` snapshot を production source とする 4 port 抽象 (`InboundResolver` / `PrimaryFallback` / `OutboundPolicyValidator` / `MessageBodyDecorator`、`core/routing/ports/`)。`config/bot-routing.json` は明示 opt-in の seed/test fallback。
 
 #### Phase 5 routing contract (Issues #305/#306/#308/#250; ADR-041 amendment 2026-05-05)
 - **mention** (1 主 recipient、queue 投入、**required**): 空文字 → `INVALID_MENTION` reject、unknown agent → `UNKNOWN_AGENT` reject

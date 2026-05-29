@@ -20,7 +20,7 @@ function rowsOf<T>(result: QueryResult<T>): T[] {
   return Array.isArray(result) ? result : result.rows
 }
 
-async function readPolicySource(db: Queryable, channelId: string, outboundAllowlist: string[] | null): Promise<string> {
+async function readPolicySource(db: Queryable, channelId: string, fallbackPolicySource: string): Promise<string> {
   try {
     const rows = rowsOf<any>(await db.query(
       `SELECT policy_source FROM channel_routing_policy WHERE channel_id = $1`,
@@ -29,7 +29,7 @@ async function readPolicySource(db: Queryable, channelId: string, outboundAllowl
     const source = rows[0]?.policy_source
     if (typeof source === 'string' && source.trim().length > 0) return source.trim()
   } catch {}
-  return outboundAllowlist === null ? 'none' : 'config/bot-routing.json'
+  return fallbackPolicySource
 }
 
 export async function buildOutboundAclViolationDetail(
@@ -48,7 +48,7 @@ export async function buildOutboundAclViolationDetail(
     channel_id: channelId,
     violated_policy: 'channel.outboundAllowlist',
     outbound_allowlist: policy.outboundAllowlist,
-    policy_source: await readPolicySource(db, channelId, policy.outboundAllowlist),
+    policy_source: await readPolicySource(db, channelId, policy.policySource),
     violations,
   }
 }

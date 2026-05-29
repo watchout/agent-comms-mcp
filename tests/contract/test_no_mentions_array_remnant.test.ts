@@ -62,18 +62,31 @@ describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () =>
 
   test('resolvePhase5 normalizes mentions[] into one deduped enqueue list', async () => {
     const { resolvePhase5 } = await import('../../core/routing/server-integration')
+    const { resetChannelPolicyCache } = await import('../../core/channel-policy')
+    const previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+    resetChannelPolicyCache()
     const known = new Set(['ceo', 'codex-cto', 'agent-com-dev', 'sender-bot'])
-    const out = resolvePhase5({
-      sender: 'sender-bot',
-      channel_id: 'test-channel-a',
-      mentions: ['ceo', 'cto', 'agent-com-dev', 'ceo'],
-      content: 'hello',
-      isKnownAgent: (id: string) => known.has(id),
-    })
-    expect(out).not.toBeNull()
-    expect(out!.ok).toBe(true)
-    if (out && out.ok) {
-      expect(out.mentions).toEqual(['ceo', 'codex-cto', 'agent-com-dev'])
+    try {
+      const out = resolvePhase5({
+        sender: 'sender-bot',
+        channel_id: 'test-channel-a',
+        mentions: ['ceo', 'cto', 'agent-com-dev', 'ceo'],
+        content: 'hello',
+        isKnownAgent: (id: string) => known.has(id),
+      })
+      expect(out).not.toBeNull()
+      expect(out!.ok).toBe(true)
+      if (out && out.ok) {
+        expect(out.mentions).toEqual(['ceo', 'codex-cto', 'agent-com-dev'])
+      }
+    } finally {
+      if (previousFileFallback === undefined) {
+        delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+      } else {
+        process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
+      }
+      resetChannelPolicyCache()
     }
   })
 })
@@ -147,6 +160,10 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
   dbDescribe('SELECT count(*) FROM message_queue WHERE recipient_id IN cc[] AND created_at >= test_start → 0', async () => {
     const client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    const { resetChannelPolicyCache } = await import('../../core/channel-policy')
+    const previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+    resetChannelPolicyCache()
     try {
       // Capture wall-clock floor for the SQL assertion.
       const testStartIso = new Date().toISOString()
@@ -192,6 +209,12 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
       // production verification.
       expect(r.rows[0].c).toBe(0)
     } finally {
+      if (previousFileFallback === undefined) {
+        delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+      } else {
+        process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
+      }
+      resetChannelPolicyCache()
       await client.end()
     }
   })
