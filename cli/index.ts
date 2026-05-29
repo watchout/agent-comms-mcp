@@ -29,7 +29,7 @@ import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
-import { resolveOutboundProjectionDecision } from '../core/outbound-projection'
+import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutboundProjectionDecision } from '../core/outbound-projection'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
@@ -2690,11 +2690,20 @@ async function sendMessage(args: string[]) {
         senderAgentId: agentId,
         recipientAgentIds: mentions,
       })
-      const discordExternalId = projection.channelExternalId
 
       let outboundQueued = false
-      let outboundSkipReason: string | null = null
-      if (discordExternalId) {
+      const outboundSkipReason = outboundProjectionSkipReason(projection)
+      if (outboundSkipReason) {
+        await auditLog(db, 'outbound.enqueue_skipped', agentId, channelId, {
+          code: outboundProjectionSkipCode(outboundSkipReason),
+          message_id: id,
+          channel_external_id: projection.channelExternalId,
+          consumer_source: projection.consumerSource,
+          projection_source: projection.projectionSource,
+          reason: outboundSkipReason,
+        })
+      } else {
+        const discordExternalId = projection.channelExternalId!
         try {
           // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars before
           // enqueue so an over-long LLM reply is truncated once, deterministically,
@@ -2728,8 +2737,6 @@ async function sendMessage(args: string[]) {
           // (which exits non-zero).
           throw err
         }
-      } else {
-        outboundSkipReason = 'no discord adapter mapping for this channel'
       }
 
       const workClosed = !noClose
@@ -2963,11 +2970,20 @@ async function notifyMessage(args: string[]) {
       senderAgentId: agentId,
       recipientAgentIds: mentions,
     })
-    const discordExternalId = projection.channelExternalId
 
     let outboundQueued = false
-    let outboundSkipReason: string | null = null
-    if (discordExternalId) {
+    const outboundSkipReason = outboundProjectionSkipReason(projection)
+    if (outboundSkipReason) {
+      await auditLog(db, 'outbound.enqueue_skipped', agentId, resolvedChannelId, {
+        code: outboundProjectionSkipCode(outboundSkipReason),
+        message_id: id,
+        channel_external_id: projection.channelExternalId,
+        consumer_source: projection.consumerSource,
+        projection_source: projection.projectionSource,
+        reason: outboundSkipReason,
+      })
+    } else {
+      const discordExternalId = projection.channelExternalId!
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
@@ -2995,8 +3011,6 @@ async function notifyMessage(args: string[]) {
         console.error(`Error [OUTBOUND_ENQUEUE_FAILED]: ${String(err).slice(0, 200)}`)
         process.exit(1)
       }
-    } else {
-      outboundSkipReason = 'no discord adapter mapping for this channel'
     }
 
     process.stdout.write(JSON.stringify({

@@ -44,6 +44,27 @@ export interface OutboundProjectionDecision {
   projectionFallbackReason: ProjectionFallbackReason
 }
 
+export type OutboundProjectionSkipReason =
+  | 'no discord adapter mapping for this channel'
+  | 'no eligible discord delivery consumer for this channel'
+
+export const OUTBOUND_SKIP_NO_DISCORD_ADAPTER: OutboundProjectionSkipReason = 'no discord adapter mapping for this channel'
+export const OUTBOUND_SKIP_NO_DELIVERY_CONSUMER: OutboundProjectionSkipReason = 'no eligible discord delivery consumer for this channel'
+
+export function outboundProjectionSkipReason(
+  projection: Pick<OutboundProjectionDecision, 'channelExternalId' | 'consumerAgentId'>,
+): OutboundProjectionSkipReason | null {
+  if (!projection.channelExternalId) return OUTBOUND_SKIP_NO_DISCORD_ADAPTER
+  if (!projection.consumerAgentId) return OUTBOUND_SKIP_NO_DELIVERY_CONSUMER
+  return null
+}
+
+export function outboundProjectionSkipCode(reason: OutboundProjectionSkipReason): 'NO_DISCORD_ADAPTER_MAPPING' | 'NO_ELIGIBLE_DELIVERY_CONSUMER' {
+  return reason === OUTBOUND_SKIP_NO_DELIVERY_CONSUMER
+    ? 'NO_ELIGIBLE_DELIVERY_CONSUMER'
+    : 'NO_DISCORD_ADAPTER_MAPPING'
+}
+
 function parseMetadata(raw: unknown): Record<string, unknown> {
   if (!raw) return {}
   if (typeof raw === 'object') return raw as Record<string, unknown>

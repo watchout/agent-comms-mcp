@@ -33,18 +33,26 @@ import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
+const SERVER_ONLY_SRC = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
 // FEAT-005 (adapter rewrite 2026-04-14): the outbound consumer +
 // PollingDriver + per-bot Discord lookup moved out of server.ts into
 // adapters/outbound-consumer.ts and adapters/discord-client.ts. The
 // T2/T5 substring pins below continue to enforce the same invariants
 // at their new home via a concatenated SERVER_SRC.
 const SERVER_SRC =
-  readFileSync(join(REPO_ROOT, 'server.ts'), 'utf-8')
+  SERVER_ONLY_SRC
   + '\n'
   + readFileSync(join(REPO_ROOT, 'adapters', 'outbound-consumer.ts'), 'utf-8')
   + '\n'
   + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
+
+function serverToolBody(toolName: string): string {
+  const start = SERVER_ONLY_SRC.indexOf(`if (name === '${toolName}')`)
+  expect(start).toBeGreaterThan(-1)
+  const end = SERVER_ONLY_SRC.indexOf("if (name === '", start + 1)
+  return SERVER_ONLY_SRC.slice(start, end === -1 ? undefined : end)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // T1: db/migrate.ts ships the outbound_queue DDL + index
@@ -196,6 +204,18 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
     const bindings = [...SERVER_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*externalId/g)]
     expect(bindings.length).toBeGreaterThanOrEqual(2)
   })
+  test('server send + notify skip enqueue when the resolver has no delivery consumer', () => {
+    for (const body of [serverToolBody('send'), serverToolBody('notify')]) {
+      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection)')
+      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped")
+      const insertIdx = body.indexOf('INSERT INTO outbound_queue')
+      expect(skipIdx).toBeGreaterThan(-1)
+      expect(skipAuditIdx).toBeGreaterThan(skipIdx)
+      expect(insertIdx).toBeGreaterThan(skipAuditIdx)
+      expect(body).toMatch(/if\s*\(\s*outboundSkipReason\s*\)\s*\{[\s\S]*?outbound\.enqueue_skipped[\s\S]*?\}\s*else\s*\{[\s\S]*?INSERT INTO outbound_queue/)
+      expect(body).toMatch(/NO_ELIGIBLE_DELIVERY_CONSUMER|outboundProjectionSkipCode/)
+    }
+  })
   test('send-tool resolves channel_external_id via thread_adapters then channel_adapters', () => {
     // Both lookups live in the #410 projection helper so threads land in the
     // right place while also resolving the adapter owner.
@@ -250,6 +270,12 @@ function sendMessageBody(): string {
   return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 }
 
+function notifyMessageBody(): string {
+  const fnStart = CLI_SRC.indexOf('async function notifyMessage')
+  const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
+  return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
+}
+
 describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('sendMessage INSERTs into outbound_queue', () => {
     const body = sendMessageBody()
@@ -260,6 +286,18 @@ describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
     expect(inserts.length).toBeGreaterThanOrEqual(2)
     const bindings = [...CLI_SRC.matchAll(/projection\.consumerAgentId,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId/g)]
     expect(bindings.length).toBeGreaterThanOrEqual(2)
+  })
+  test('CLI send + notify skip enqueue when the resolver has no delivery consumer', () => {
+    for (const body of [sendMessageBody(), notifyMessageBody()]) {
+      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection)')
+      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped")
+      const insertIdx = body.indexOf('INSERT INTO outbound_queue')
+      expect(skipIdx).toBeGreaterThan(-1)
+      expect(skipAuditIdx).toBeGreaterThan(skipIdx)
+      expect(insertIdx).toBeGreaterThan(skipAuditIdx)
+      expect(body).toMatch(/if\s*\(\s*outboundSkipReason\s*\)\s*\{[\s\S]*?outbound\.enqueue_skipped[\s\S]*?\}\s*else\s*\{[\s\S]*?INSERT INTO outbound_queue/)
+      expect(body).toMatch(/NO_ELIGIBLE_DELIVERY_CONSUMER|outboundProjectionSkipCode/)
+    }
   })
   test('sendMessage resolves channel_external_id via thread_adapters then channel_adapters', () => {
     const body = sendMessageBody()
@@ -287,7 +325,10 @@ describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   })
   test('outbound_queued is false (with skip reason) when no Discord adapter exists', () => {
     const body = sendMessageBody()
-    expect(body).toMatch(/outboundSkipReason\s*=\s*'no discord adapter mapping/)
+    const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
+    expect(body).toMatch(/outboundProjectionSkipReason\(projection\)/)
+    expect(body).toMatch(/outbound_skip_reason/)
+    expect(projection).toMatch(/OUTBOUND_SKIP_NO_DISCORD_ADAPTER/)
   })
 })
 

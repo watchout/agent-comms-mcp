@@ -116,7 +116,7 @@ import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-d
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
-import { resolveOutboundProjectionDecision } from './core/outbound-projection'
+import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
@@ -2153,6 +2153,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     let claimedMqId: number | string | null = null
     let outboundQueued = false
+    let outboundSkipReason: string | null = null
     let txCommitted = false
     await txClient.query('BEGIN')
     try {
@@ -2590,8 +2591,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         senderAgentId: agentId,
         recipientAgentIds: mentions,
       })
-      const externalId = projection.channelExternalId
-      if (externalId) {
+      outboundSkipReason = outboundProjectionSkipReason(projection)
+      if (outboundSkipReason) {
+        await writeAuditLog('outbound.enqueue_skipped', agentId, dest.channelId, {
+          code: outboundProjectionSkipCode(outboundSkipReason),
+          message_ids: partIds,
+          channel_external_id: projection.channelExternalId,
+          consumer_source: projection.consumerSource,
+          projection_source: projection.projectionSource,
+          reason: outboundSkipReason,
+        })
+      } else {
+        const externalId = projection.channelExternalId!
         // Issue #248 follow-up — render `mentions` (agent_id list) as Discord
         // snowflake mentions prepended to the first part. Without this, Discord
         // never fires its native push notification because the literal
@@ -2677,7 +2688,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       reply_to ? await getMessageById(sendCoreDb, reply_to) : null,
       dest.channelId,
     )
-    const outboundQueuedSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}`
+    const outboundSkipSuffix = outboundSkipReason ? ` | outbound_skip_reason=${outboundSkipReason}` : ''
+    const outboundQueuedSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}${outboundSkipSuffix}`
     if (delivery.pushTargets.length > 0) {
       return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${outboundQueuedSuffix}` }] }
     }
@@ -2973,8 +2985,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       senderAgentId: agentId,
       recipientAgentIds: mentions,
     })
-    const externalId = projection.channelExternalId
-    if (externalId) {
+    let outboundQueued = false
+    const outboundSkipReason = outboundProjectionSkipReason(projection)
+    if (outboundSkipReason) {
+      await writeAuditLog('outbound.enqueue_skipped', agentId, dest.channelId, {
+        code: outboundProjectionSkipCode(outboundSkipReason),
+        message_ids: partIds,
+        channel_external_id: projection.channelExternalId,
+        consumer_source: projection.consumerSource,
+        projection_source: projection.projectionSource,
+        reason: outboundSkipReason,
+      })
+    } else {
+      const externalId = projection.channelExternalId!
       // Issue #248 follow-up — same Discord snowflake prefix as the send tool.
       // notify path uses `client` (no explicit transaction wrapper).
       const mentionPrefix = await mentionsToDiscordPrefix(mentions, client, parts.join('\n'))
@@ -3008,6 +3031,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               truncateForDiscord(partContent),
             ],
           )
+          outboundQueued = true
         } catch (err) {
           process.stderr.write(`agent-comms: notify outbound_queue INSERT failed: ${err}\n`)
           await writeAuditLog('outbound.enqueue_failed', agentId, dest.channelId, {
@@ -3033,11 +3057,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     await writeAuditLog('message.notify', agentId, dest.channelId, {
       message_id: partIds[0],
       recipients: lastDelivery?.pushTargets.length ?? 0,
+      outbound_queued: outboundQueued,
+      outbound_skip_reason: outboundSkipReason,
     })
 
     const id = partIds[0]
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
-    return { content: [{ type: 'text', text: `notified (id: ${id}) to channel ${dest.channelId}${partSuffix}` }] }
+    const outboundSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}${outboundSkipReason ? ` | outbound_skip_reason=${outboundSkipReason}` : ''}`
+    return { content: [{ type: 'text', text: `notified (id: ${id}) to channel ${dest.channelId}${partSuffix}${outboundSuffix}` }] }
   }
 
   if (name === 'quote') {

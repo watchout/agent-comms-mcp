@@ -99,6 +99,11 @@ channel owner fallback. For thread-targeted outbound, provider access evidence
 must match the actual outbound target external id for the thread, not only the
 parent channel external id.
 
+If this resolution leaves `consumer_agent_id` empty, new outbound writes must
+not enqueue a Discord delivery row. Legacy rows with a null consumer may still
+be handled by legacy cleanup/compatibility paths, but resolver-none output is a
+new fail-closed result and must not be reopened by `agent_id` fallback claiming.
+
 `nativeRoleOutboundOwners` is deprecated compatibility input only. It may be
 read during migration to infer legacy intent, but it must not become a consumer
 owner override in the new design. The new model separates:

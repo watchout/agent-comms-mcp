@@ -1,6 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
-import { resolveOutboundProjectionDecision, resolveOutboundProjectionRoute } from '../../core/outbound-projection'
+import {
+  OUTBOUND_SKIP_NO_DELIVERY_CONSUMER,
+  outboundProjectionSkipReason,
+  resolveOutboundProjectionDecision,
+  resolveOutboundProjectionRoute,
+} from '../../core/outbound-projection'
 import { resetChannelPolicyCache } from '../../core/channel-policy'
 
 const TMP_CONFIG = `/tmp/outbound-projection-${process.pid}-${Date.now()}.json`
@@ -445,6 +450,35 @@ describe('ADR-060 outbound projection identity decision', () => {
     expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
+  })
+
+  test('resolver-none delivery decisions produce an explicit no-consumer enqueue skip', async () => {
+    const cases: Array<[string, Parameters<typeof mockProjectionDb>[0]]> = [
+      ['no connector evidence', {}],
+      ['read-only provider access', { readOnlyDeliveryAgents: ['codex-cto'] }],
+      ['mismatched credential and access connectors', { mismatchedDeliveryAgents: ['codex-cto'] }],
+      ['multiple eligible connectors', { ambiguousDeliveryAgents: ['codex-cto'] }],
+    ]
+
+    for (const [name, dbOptions] of cases) {
+      setRoutingConfig({ ch1: {} })
+      const db = mockProjectionDb({
+        ...dbOptions,
+        agents: {
+          'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        },
+      })
+      const decision = await resolveOutboundProjectionDecision(db, {
+        channelId: 'ch1',
+        senderAgentId: 'codex-aun',
+        recipientAgentIds: ['codex-cto'],
+      })
+
+      expect(decision.channelExternalId, name).toBe('discord-ch')
+      expect(decision.consumerAgentId, name).toBeNull()
+      expect(decision.consumerSource, name).toBe('none')
+      expect(outboundProjectionSkipReason(decision), name).toBe(OUTBOUND_SKIP_NO_DELIVERY_CONSUMER)
+    }
   })
 
   test('recipient delivery evidence fails closed when credential and access are not on the same connector', async () => {
