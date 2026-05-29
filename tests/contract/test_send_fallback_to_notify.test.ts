@@ -1,36 +1,22 @@
 #!/usr/bin/env bun
 /**
- * CEO P1 — `mcp__agent-comms__send` silent fallback to notify
- * (claim missing / claim expired). Spec ↔ instruction §1〜§5 see
- * lead-ama dispatch notify ids `44ea6292`+`5efee23a`+`3940f28a`+
- * `4dc97a03` (cycle 1) and `cd81233d`+`d4d23407` (cycle 2 latency
- * assertion + smoke separation).
+ * Issue #580 — `mcp__agent-comms__send` claim terminal evidence.
  *
  * The decision logic lives in `core/send-fallback-decision.ts`; this
  * file exercises every branch of `decideSendFallback` against a real
  * Postgres so the merge gate observes the SQL invariants the server
- * relies on:
+ * relies on before it writes `agent_messages` or `outbound_queue`:
  *
  *   T-1 existing reply path → kind: 'claim_present'
- *   T-2 claim expired       → kind: 'fallback', reason: claim_expired
- *                              + p95 latency < 100 ms
- *   T-3 claim missing       → kind: 'fallback', reason: claim_missing
- *                              + p95 latency < 100 ms
+ *       only while claim_expires_at is non-null and in the future
+ *   T-2 claim closed        → kind: 'claim_unavailable', reason: claim_closed
+ *   T-2b expired claim      → kind: 'claim_unavailable', reason: claim_expired
+ *   T-3 claim missing       → kind: 'claim_unavailable', reason: claim_missing
  *   T-4 invalid reply_to    → kind: 'invalid_reply_to' (UUID absent)
  *                              and (UUID present but channel_id NULL)
  *   T-5 cc + mention        → fallback decision identical regardless
  *                              of optional args (B-6: cc/mention are
  *                              not part of the routing decision)
- *
- * The latency budget in T-2/T-3 is a merge gate per cycle 2 §2:
- * a single sample over 100 ms fails the test.
- *
- * The Phase 5 cc/mention/ACL/queue-insert layers downstream of the
- * decision are exercised end-to-end in the existing send-tool contract
- * tests (NOT_MENTIONED_IN_ORIGINAL, OUTBOUND_ACL_VIOLATION,
- * UNKNOWN_AGENT). Those layers do not consume the decision result, so
- * fallback semantics on top of them are independent — keeping this
- * file scoped to the decision tree is honest about the merge gate.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { Client } from 'pg'
@@ -49,6 +35,7 @@ beforeAll(async () => {
   try {
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    await client.query(`DELETE FROM outbound_queue WHERE agent_id = $1`, [TEST_AGENT])
     await client.query(`DELETE FROM message_queue WHERE agent_id = ANY($1)`, [[TEST_AGENT, OTHER_AGENT]])
     await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [TEST_CHANNEL])
     dbReachable = true
@@ -60,6 +47,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!dbReachable) return
   try {
+    await client.query(`DELETE FROM outbound_queue WHERE agent_id = $1`, [TEST_AGENT])
     await client.query(`DELETE FROM message_queue WHERE agent_id = ANY($1)`, [[TEST_AGENT, OTHER_AGENT]])
     await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [TEST_CHANNEL])
     await client.end()
@@ -85,6 +73,7 @@ async function seedOriginal(opts: {
   channelId?: string | null
   withClaim?: 'received' | 'in_progress' | 'replied' | null
   claimedBy?: string
+  claimExpiresAt?: Date | null
 }): Promise<string> {
   const msgId = randomUUID()
   await client.query(
@@ -93,13 +82,36 @@ async function seedOriginal(opts: {
     [msgId, opts.channelId ?? TEST_CHANNEL, OTHER_AGENT],
   )
   if (opts.withClaim) {
+    const claimExpiresAt = opts.claimExpiresAt === undefined
+      ? new Date(Date.now() + 300_000)
+      : opts.claimExpiresAt
     await client.query(
       `INSERT INTO message_queue (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
-       VALUES ($1, $2, '{}'::jsonb, $3, $4, now(), now() + interval '30 seconds')`,
-      [opts.claimedBy ?? TEST_AGENT, msgId, opts.withClaim, opts.claimedBy ?? TEST_AGENT],
+       VALUES ($1, $2, '{}'::jsonb, $3, $4, now(), $5)`,
+      [opts.claimedBy ?? TEST_AGENT, msgId, opts.withClaim, opts.claimedBy ?? TEST_AGENT, claimExpiresAt],
     )
   }
   return msgId
+}
+
+async function countProjectionWrites(replyTo: string): Promise<{ messages: number; outbound: number }> {
+  const messages = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM agent_messages
+      WHERE reply_to::text = $1 AND author_id = $2`,
+    [replyTo, TEST_AGENT],
+  )
+  const outbound = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM outbound_queue oq
+       JOIN agent_messages am ON am.id::text = oq.message_id::text
+      WHERE am.reply_to::text = $1 AND oq.agent_id = $2`,
+    [replyTo, TEST_AGENT],
+  )
+  return {
+    messages: Number(messages.rows[0]?.count ?? '0'),
+    outbound: Number(outbound.rows[0]?.count ?? '0'),
+  }
 }
 
 async function inTx<T>(fn: (txClient: Client) => Promise<T>): Promise<T> {
@@ -114,7 +126,7 @@ async function inTx<T>(fn: (txClient: Client) => Promise<T>): Promise<T> {
   }
 }
 
-describe('test_send_fallback_to_notify — decideSendFallback decision tree', () => {
+describe('test_send_claim_terminal_evidence — decideSendFallback decision tree', () => {
   test('T-1 (existing reply path): active claim with status=received → claim_present', async () => {
     requireDb()
     const replyTo = await seedOriginal({ withClaim: 'received' })
@@ -135,38 +147,68 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
     }
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema T-2 (claim expired): claim flipped to status=replied → fallback claim_expired + latency<100ms', async () => {
+  test('T-2 (claim closed): claim flipped to status=replied → claim_unavailable/claim_closed', async () => {
     requireDb()
-    // Seed a 'received' claim, then flip to 'replied' to simulate an
-    // already-consumed (expired) claim. The agent has interacted with
-    // this msg before, so reason must be `claim_expired`.
     const replyTo = await seedOriginal({ withClaim: 'received' })
     await client.query(
       `UPDATE message_queue SET status = 'replied', replied_at = now() WHERE message_id = $1`,
       [replyTo],
     )
-    const t0 = Date.now()
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
-    const elapsed = Date.now() - t0
-    expect(decision.kind).toBe('fallback')
-    if (decision.kind === 'fallback') {
-      expect(decision.reason).toBe('claim_expired')
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
+      expect(decision.reason).toBe('claim_closed')
+      expect(decision.status).toBe('replied')
+      expect(decision.queueId).toBeDefined()
     }
-    // p95 < 100 ms merge gate (cycle 2 §2 latency assertion).
-    expect(elapsed).toBeLessThan(100)
   })
 
-  test('T-3 (claim missing): no claim ever existed → fallback claim_missing + latency<100ms', async () => {
+  test('T-2b (expired received claim): fail-closed before projection writes', async () => {
+    requireDb()
+    const replyTo = await seedOriginal({
+      withClaim: 'received',
+      claimExpiresAt: new Date(Date.now() - 30_000),
+    })
+    const before = await countProjectionWrites(replyTo)
+    const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
+    const after = await countProjectionWrites(replyTo)
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
+      expect(decision.reason).toBe('claim_expired')
+      expect(decision.status).toBe('received')
+      expect(decision.queueId).toBeDefined()
+    }
+    expect(after).toEqual(before)
+  })
+
+  test('T-2c (expired in_progress claim): fail-closed before projection writes', async () => {
+    requireDb()
+    const replyTo = await seedOriginal({
+      withClaim: 'in_progress',
+      claimExpiresAt: new Date(Date.now() - 30_000),
+    })
+    const before = await countProjectionWrites(replyTo)
+    const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
+    const after = await countProjectionWrites(replyTo)
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
+      expect(decision.reason).toBe('claim_expired')
+      expect(decision.status).toBe('in_progress')
+      expect(decision.queueId).toBeDefined()
+    }
+    expect(after).toEqual(before)
+  })
+
+  test('T-3 (claim missing): no claim ever existed → claim_unavailable/claim_missing', async () => {
     requireDb()
     const replyTo = await seedOriginal({ withClaim: null })
-    const t0 = Date.now()
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
-    const elapsed = Date.now() - t0
-    expect(decision.kind).toBe('fallback')
-    if (decision.kind === 'fallback') {
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
       expect(decision.reason).toBe('claim_missing')
+      expect(decision.queueId).toBeUndefined()
+      expect(decision.status).toBeUndefined()
     }
-    expect(elapsed).toBeLessThan(100)
   })
 
   test('T-4 (invalid reply_to, UUID absent): → invalid_reply_to', async () => {
@@ -192,7 +234,7 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
     await client.query(`DELETE FROM agent_messages WHERE id = $1`, [msgId])
   })
 
-  test('T-5 (cc + mention immaterial to decision): same fallback regardless of optional args', async () => {
+  test('T-5 (cc + mention immaterial to decision): same claim-missing result regardless of optional args', async () => {
     requireDb()
     // The decision helper takes only (txClient, reply_to, agentId).
     // cc[] / mention / message_type / metadata are §2 B-6 concerns
@@ -202,22 +244,22 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
     const decision1 = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
     const decision2 = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
     expect(decision1).toEqual(decision2)
-    if (decision1.kind === 'fallback') {
+    if (decision1.kind === 'claim_unavailable') {
       expect(decision1.reason).toBe('claim_missing')
     }
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema — claim owned by a different agent → fallback claim_missing for the calling agent', async () => {
+  test.skip('TODO #338 sub-PR 9 v0.9 schema — claim owned by a different agent → claim_missing for the calling agent', async () => {
     requireDb()
     // Subtle invariant: a `'received'` row claimed by OTHER_AGENT does
     // NOT count as a claim for TEST_AGENT. The helper's first SELECT
     // filters on `claimed_by = $2`, so TEST_AGENT sees this case as
-    // claim_missing (no row ever owned by them) — this matches the
-    // CEO P1 intent that fallback is per-(agent, msg) scoped.
+    // claim_missing (no row ever owned by them) — this keeps send
+    // ownership per-(agent, msg) scoped.
     const replyTo = await seedOriginal({ withClaim: 'received', claimedBy: OTHER_AGENT })
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
-    expect(decision.kind).toBe('fallback')
-    if (decision.kind === 'fallback') {
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
       expect(decision.reason).toBe('claim_missing')
     }
   })

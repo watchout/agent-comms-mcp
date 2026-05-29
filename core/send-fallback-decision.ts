@@ -1,22 +1,24 @@
 /**
- * CEO P1 — server-side send → notify silent fallback decision.
+ * Server-side send claim decision.
  *
- * `mcp__agent-comms__send` requires a `reply_to` UUID. The original
- * spec rejected calls when no in-flight claim was held for that UUID,
- * which forced LLMs to alternate between `send` and `notify` based on
- * claim TTL state. The CEO P1 directive eliminates that judgment by
- * letting the server promote a claim-less call to a notify-equivalent
- * dispatch automatically.
+ * `mcp__agent-comms__send` requires a `reply_to` UUID and must only
+ * project Discord output while it owns an active queue claim for that
+ * UUID. Issue #580 retired the previous claim-less notify fallback
+ * because it let stale/closed claims post duplicate Discord output and
+ * then report `claim_missing` after projection evidence already existed.
  *
  * The decision shape used by `server.ts`:
  *
  *   - `claim_present` → use the existing reply path; `claimedMqId`
  *     identifies the row to mark `'replied'` after the outbound INSERT.
- *     Both `received` and `in_progress` are active claims: `processing`
- *     advances a claimed row to `in_progress` before the LLM replies.
- *   - `fallback` (claim_expired | claim_missing) → skip the
- *     `message_queue` UPDATE and emit
- *     `| fallback: notify (reason: ...)` on the success return.
+ *     Both `received` and `in_progress` are active claims only while
+ *     their `claim_expires_at` TTL is present and still in the future:
+ *     `processing` advances a claimed row to `in_progress` before the
+ *     LLM replies, and the heartbeat path extends live TTLs.
+ *   - `claim_unavailable` → refuse before projection. The caller can
+ *     surface an already-closed no-op, an expired-claim error, or a
+ *     missing-claim error, but it must not write `agent_messages`,
+ *     `message_queue`, or `outbound_queue`.
  *   - `invalid_reply_to` → the §B-5 invariant fires; reject so we
  *     never broadcast on a UUID with no resolvable channel.
  *
@@ -29,7 +31,8 @@
  * Spec correspondence:
  *   - §1 Error taxonomy → `invalid_reply_to`
  *   - §2 B-2 (claim 有効 → reply path) → `claim_present`
- *   - §2 B-3 (claim missing/expired → fallback) → `fallback`
+ *   - #580 (claim missing/closed → pre-projection refusal/no-op) →
+ *     `claim_unavailable`
  *   - §2 B-4 (channel lookup) → enforced via the `channel_id` filter
  *     in the §B-5 check below
  *   - §2 B-5 (UUID DB 不存在 → reject) → `invalid_reply_to`
@@ -40,7 +43,12 @@
 
 export type SendFallbackDecision =
   | { kind: 'claim_present'; claimedMqId: number | string }
-  | { kind: 'fallback'; reason: 'claim_expired' | 'claim_missing' }
+  | {
+      kind: 'claim_unavailable'
+      reason: 'claim_closed' | 'claim_expired' | 'claim_missing'
+      queueId?: number | string
+      status?: string
+    }
   | { kind: 'invalid_reply_to' }
 
 /** Minimal pg-style client interface used by the decision helper. */
@@ -69,11 +77,15 @@ export async function decideSendFallback(
   //
   // `processing` changes a claimed row from received -> in_progress.
   // A subsequent `send` must still close the same claim as replied;
-  // otherwise the normal next -> processing -> send path falls back to
-  // notify and leaves the queue row open.
+  // otherwise the normal next -> processing -> send path would be refused
+  // as missing and leave the queue row open.
   const claimRow = await txClient.query<{ id: number | string }>(
     `SELECT id FROM message_queue
-        WHERE message_id = $1 AND claimed_by = $2 AND status IN ('received', 'in_progress')
+        WHERE message_id = $1
+          AND claimed_by = $2
+          AND status IN ('received', 'in_progress')
+          AND claim_expires_at IS NOT NULL
+          AND claim_expires_at > now()
         FOR UPDATE`,
     [reply_to, agentId],
   )
@@ -92,16 +104,38 @@ export async function decideSendFallback(
     return { kind: 'invalid_reply_to' }
   }
 
-  // 3. Differentiate `claim_expired` (a claim once existed for this
-  //    (msg, agent) pair, just no longer 'read') from `claim_missing`
-  //    (no claim ever existed — typically a self-originated dispatch
-  //    or replying to a message the bot never claimed).
-  const everClaimed = await txClient.query<{ exists: number }>(
-    `SELECT 1 AS exists FROM message_queue WHERE message_id = $1 AND claimed_by = $2 LIMIT 1`,
+  // 3. Missing or closed claims must stop before projection. Probe by
+  //    (message_id, agent_id) rather than claimed_by: terminal sends
+  //    clear claimed_by, and #580 needs that closed evidence surfaced as
+  //    an explicit no-op instead of a duplicate notify-style post.
+  const queueRow = await txClient.query<{
+    id: number | string
+    status: string
+    claimed_by: string | null
+  }>(
+    `SELECT id, status, claimed_by
+       FROM message_queue
+      WHERE message_id = $1 AND agent_id = $2
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1`,
     [reply_to, agentId],
   )
+  if (queueRow.rows.length > 0) {
+    const row = queueRow.rows[0]
+    const reason = ['replied', 'done', 'skipped', 'failed'].includes(row.status)
+      ? 'claim_closed'
+      : row.claimed_by === agentId && ['received', 'in_progress'].includes(row.status)
+        ? 'claim_expired'
+        : 'claim_missing'
+    return {
+      kind: 'claim_unavailable',
+      reason,
+      queueId: row.id,
+      status: row.status,
+    }
+  }
   return {
-    kind: 'fallback',
-    reason: everClaimed.rows.length > 0 ? 'claim_expired' : 'claim_missing',
+    kind: 'claim_unavailable',
+    reason: 'claim_missing',
   }
 }

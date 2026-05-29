@@ -2152,8 +2152,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for send' }], isError: true }
     }
     let claimedMqId: number | string | null = null
-    let fallbackReason: 'claim_expired' | 'claim_missing' | null = null
-    let fallbackSourceQueueId: string | null = null
+    let outboundQueued = false
     let txCommitted = false
     await txClient.query('BEGIN')
     try {
@@ -2166,32 +2165,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         txCommitted = true
         return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: reply_to is required for send — call \`next\` first to obtain a claim` }], isError: true }
       }
-      // CEO P1 — server-side silent fallback to notify when the reply_to
-      // claim is missing or expired. Decision tree extracted to
-      // core/send-fallback-decision.ts so the cases (claim_present /
-      // fallback / invalid_reply_to) can be unit-tested directly.
+      // Issue #580 — stale or missing claims must stop before projection.
+      // The decision helper locks active claims and returns terminal evidence
+      // for closed/missing rows so this handler cannot duplicate Discord output
+      // through a notify-style fallback.
       const decision = await decideSendFallback(txClient, reply_to, agentId)
       if (decision.kind === 'invalid_reply_to') {
         await txClient.query('ROLLBACK')
         txCommitted = true
         return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: reply_to=${reply_to} not found in agent_messages or has no channel` }], isError: true }
       }
-      if (decision.kind === 'fallback') {
-        fallbackReason = decision.reason
-        const fallbackSource = await txClient.query<{ id: number | string }>(
-          `SELECT id FROM message_queue
-             WHERE message_id = $1 AND agent_id = $2
-             ORDER BY created_at ASC, id ASC
-             LIMIT 1`,
-          [reply_to, agentId],
-        )
-        fallbackSourceQueueId = fallbackSource.rows[0]?.id !== undefined
-          ? String(fallbackSource.rows[0].id)
-          : null
-        process.stderr.write(`agent-comms: send fallback to notify — ${agentId} reply_to=${reply_to} reason=${fallbackReason}\n`)
-        // claimedMqId stays null → the downstream message_queue UPDATE
-        // (status='replied') is gated on it and skipped in the
-        // fallback path.
+      if (decision.kind === 'claim_unavailable') {
+        await txClient.query('ROLLBACK')
+        txCommitted = true
+        if (decision.reason === 'claim_closed') {
+          const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
+          const statusSuffix = decision.status ? ` status=${decision.status}` : ''
+          return {
+            content: [{
+              type: 'text',
+              text: `send no-op [CLAIM_ALREADY_CLOSED]: reply_to=${reply_to}${queueSuffix}${statusSuffix}; no outbound projection queued`,
+            }],
+          }
+        }
+        if (decision.reason === 'claim_expired') {
+          const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
+          const statusSuffix = decision.status ? ` status=${decision.status}` : ''
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [CLAIM_EXPIRED]: active claim expired for reply_to=${reply_to}${queueSuffix}${statusSuffix}; reclaim or call next before send. No outbound projection queued.`,
+            }],
+            isError: true,
+          }
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: `Error [CLAIM_MISSING]: no active claim for reply_to=${reply_to}; call next/processing before send. No outbound projection queued.`,
+          }],
+          isError: true,
+        }
       } else {
         claimedMqId = decision.claimedMqId
       }
@@ -2383,16 +2397,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const partMeta = parts.length > 1
         ? { split_part: partIdx + 1, split_total: parts.length }
         : {}
-      const fallbackMeta = fallbackReason
-        ? {
-            fallback_notify: {
-              reason: fallbackReason,
-              source_message_id: reply_to,
-              source_queue_id: fallbackSourceQueueId,
-            },
-          }
-        : {}
-      const fullMetadata = { ...metadata, ...authMeta, ...partMeta, ...fallbackMeta }
+      const fullMetadata = { ...metadata, ...authMeta, ...partMeta }
 
       // Save to DB
       const id = await saveMessage({
@@ -2545,24 +2550,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // We use `claimedMqId` captured under the SELECT FOR UPDATE lock at the
     // top of the handler, so there is no second read here and no chance of
     // a concurrent writer slipping in between read and update.
-    // CEO P1 fallback: when claimedMqId is null (claim_expired or
-    // claim_missing), no message_queue row consumed this send call,
-    // so there is nothing to mark 'replied'. The new outbound row was
-    // already inserted via the regular path; only the claim
-    // bookkeeping is skipped.
-    if (claimedMqId !== null) {
-      await txClient.query(
-        `UPDATE message_queue
-            SET status = 'replied',
-                replied_at = now(),
-                replied_with = $1,
-                claimed_by = NULL,
-                claimed_at = NULL,
-                claim_expires_at = NULL
-          WHERE id = $2`,
-        [id, claimedMqId],
-      )
-    }
+    await txClient.query(
+      `UPDATE message_queue
+          SET status = 'replied',
+              replied_at = now(),
+              replied_with = $1,
+              claimed_by = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL
+        WHERE id = $2`,
+      [id, claimedMqId],
+    )
     // spec §4.2 step 10-11 — flip the agent based on remaining open
     // claims (§8.1 busy ↔ idle). Issue #278 cycle 1 (auditor BLOCK 1):
     // with multi in-flight, this send only closes ONE claim — other
@@ -2632,6 +2630,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 truncateForDiscord(partContent),
               ],
             )
+            outboundQueued = true
           } catch (err) {
             // ARC codex audit (PR#135): do NOT silently swallow. The
             // outbound_queue is the sole delivery path; a failed INSERT =
@@ -2670,25 +2669,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     txCommitted = true
 
     // Response with delivery feedback
-    // Issue #118 ③: include reply_context (original author + channel + content snippet)
-    // CEO P1: when fallback fired, surface `fallback: notify (reason: ...)`
-    // alongside reply_context so callers observe that their `send` was
-    // promoted to a notify-equivalent dispatch (silent reject is forbidden).
+    // Issue #118 ③: include reply_context (original author + channel + content snippet).
+    // Issue #580: include outbound projection terminal evidence so a
+    // successful Discord projection queue is never reported as a missing
+    // delivery target.
     const replyCtxSuffix = buildReplyContextSuffix(
       reply_to ? await getMessageById(sendCoreDb, reply_to) : null,
       dest.channelId,
     )
-    const fallbackSuffix = fallbackReason ? ` | fallback: notify (reason: ${fallbackReason})` : ''
+    const outboundQueuedSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}`
     if (delivery.pushTargets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${fallbackSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${outboundQueuedSuffix}` }] }
     }
-    if (deliveryWarning === 'NOT_MENTIONED') {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}${fallbackSuffix}` }] }
+    if (deliveryWarning === 'NOT_MENTIONED' && !outboundQueued) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}${outboundQueuedSuffix}` }] }
     }
-    if (deliveryWarning === 'THREAD_MISMATCH') {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}${fallbackSuffix}` }] }
+    if (deliveryWarning === 'THREAD_MISMATCH' && !outboundQueued) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}${outboundQueuedSuffix}` }] }
     }
-    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}${fallbackSuffix}` }] }
+    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}${outboundQueuedSuffix}` }] }
     } finally {
       // ROLLBACK any in-flight transaction if we didn't reach COMMIT. Catches
       // every early return inside the try block (content / mentions / rate /
