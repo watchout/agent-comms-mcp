@@ -110,6 +110,21 @@ function dbRead(sql: string, params: unknown[] = []): any[] {
   }
 }
 
+function allowOutboundAgents(...agentIds: string[]): void {
+  const db = new Database(dbPath)
+  try {
+    db.prepare(`
+      INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
+      VALUES ('probe-f-ch', ?, 'cli-test')
+      ON CONFLICT(channel_id) DO UPDATE SET
+        outbound_allowlist = excluded.outbound_allowlist,
+        policy_source = excluded.policy_source
+    `).run(JSON.stringify(agentIds))
+  } finally {
+    db.close()
+  }
+}
+
 describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
   test('message_queue has failed_reason/done_at + v0.9-compatible CHECK', () => {
     const rows = dbRead(`PRAGMA table_info(message_queue)`)
@@ -1015,6 +1030,7 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
 
 describe('F3 — agent-com send (SQLite)', () => {
   test('replies to the in-flight row, sets replied, idles the agent', () => {
+    allowOutboundAgents('probe-f', 'cto')
     const { queueId } = seedPendingMessage('send test')
     runCli(['next'])
     const r = runCli(['send', '--content', 'F3 reply', '--mentions', 'cto'])
@@ -1035,6 +1051,7 @@ describe('F3 — agent-com send (SQLite)', () => {
     // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE retired in
     // favour of INVALID_REPLY_TO. The CLI hits the same branch when
     // the agent has no active claim (post-reply, post-TTL, or pre-next).
+    allowOutboundAgents('probe-f', 'cto')
     seedPendingMessage('dbl-send')
     runCli(['next'])
     const ok = runCli(['send', '--content', 'first', '--mentions', 'cto'])
@@ -1086,6 +1103,7 @@ describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #2
     db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-f2', 'probe-f2', 'dev', 'idle') ON CONFLICT DO NOTHING`)
     db.exec(`UPDATE channels SET members = '["probe-f","probe-f2"]' WHERE id = 'probe-f-ch'`)
     db.close()
+    allowOutboundAgents('probe-f', 'probe-f2')
 
     // probe-f receives + replies to probe-f2
     seedPendingMessage('fanout test')
@@ -1121,6 +1139,7 @@ describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #2
     db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content) VALUES (?, 'probe-f-ch', 'probe-f', 'first')`).run(existingMsgId)
     db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('probe-f2', ?, '{"content":"first"}', 'pending')`).run(existingMsgId)
     db.close()
+    allowOutboundAgents('probe-f', 'probe-f2')
 
     // Now perform a normal send — the fanout's ON CONFLICT should skip the
     // existing probe-f2 row, not throw, and the CLI should still report ok.
@@ -1184,6 +1203,7 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
 
 describe('F5 — agent-com notify (SQLite)', () => {
   test('notify posts a self-originated message without touching agents state', () => {
+    allowOutboundAgents('probe-f', 'cto')
     const r = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'notify body'])
     expect(r.status).toBe(0)
     const payload = JSON.parse(r.stdout.trim()) as any

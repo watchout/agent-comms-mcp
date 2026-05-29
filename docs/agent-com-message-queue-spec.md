@@ -1584,7 +1584,8 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | `AGENT_COM_PG_NOTIFY` | `true` | pg_notify 加速 on/off (false で polling only、SQLite mode 用) |
 | `AGENT_COM_REPLY_CHAIN_DEPTH` | `5` | Reply Chain Context の最大遡り深度（§18.1） |
 | `AGENT_COM_REPLY_CHAIN_MODE` | `light` | CLI `agent-com next` 用 reply_chain 形 — `full` で legacy 復旧（MCP は `next({full: true})` arg、非対称） |
-| `AGENT_COM_BOT_ROUTING_PATH` | `<repo>/config/bot-routing.json` | Phase 5 channel routing source — `getChannelPolicy()` が読む共通 source、restart-only reload (§Phase5 §1.8) |
+| `AGENT_COM_BOT_ROUTING_PATH` | — | Explicit legacy seed/test routing file path. Production routing uses `channel_routing_policy`; setting this re-enables JSON compatibility fallback. |
+| `AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK` | `false` | Allows the default `<repo>/config/bot-routing.json` compatibility fallback when no DB policy row exists. |
 | `AGENT_COM_ATTACHMENT_TTL_HOURS` | `24` | 添付ファイル保持時間 |
 | `AGENT_COM_ATTACHMENT_MAX_SIZE` | `52428800` | 添付1ファイル上限(bytes) |
 | `AGENT_COM_ATTACHMENT_DISK_LIMIT_MB` | `1024` | temp領域ディスク上限 |

@@ -3,13 +3,17 @@
 > agent-comms-mcp の運用手順書。
 
 MCP 登録名と tool namespace の正本は [AUN MCP Registration And Namespace Runbook](./aun-mcp-registration.md) を参照。新規セッションは `aun` / `mcp__aun__*`、移行中のみ `agent-comms` / `mcp__agent_comms__*` / `mcp__agent-comms__*` を legacy alias として扱う。
-> Phase 5 (PR #309) で `config/bot-routing.json` 編集手順を追加。
+> Phase 5 (PR #309) で `config/bot-routing.json` 編集手順を追加。NORM-080 以降、production runtime は `channel_routing_policy` DB snapshot を読む。JSON は seed/bootstrap/test fallback 専用。
 
 ---
 
-## 1. `config/bot-routing.json` 編集 (Phase 5 routing)
+## 1. Channel routing policy (DB SSOT)
 
-### 何が入っているか
+Production routing policy is stored in `channel_routing_policy`. Use the channel policy/reconcile CLI paths for production changes; `config/bot-routing.json` is retained only for seed/bootstrap/test compatibility when file fallback is explicitly enabled.
+
+### Legacy seed file shape
+
+`config/bot-routing.json` uses the same logical fields as the DB policy:
 
 ```jsonc
 {
@@ -28,17 +32,15 @@ MCP 登録名と tool namespace の正本は [AUN MCP Registration And Namespace
 - **`adapterOwner`**: #410 以降、`outbound_queue.agent_id` は canonical author として保持し、Discord 等の chat projection は `consumer_agent_id` が示す adapter owner process が claim する。`adapterOwner` 不在時は互換 fallback として `primary` を使う。
 - **`outboundAllowlist`**: `send` / `notify` で sender or recipients が含まれていなければ `OUTBOUND_ACL_VIOLATION` reject。**allowlist 不在 channel (entry 自体無し) は legacy compat、全 sender 許可**。
 
-### 編集手順
+### Production editing
 
-1. `config/bot-routing.json` を直接編集 (jsonc コメント可)
+1. Use `agent-com channel policy ...` / `agent-com channel reconcile ...` to plan and execute DB policy changes.
 2. `agent_id` は `agents` table 登録済の literal value (`cto` / `lead-ama` 等)
 3. `channel_id` は Discord channel id (snowflake) または internal id
 
-### Reload は **restart-only** (§3.7 file watch reload anti-pattern)
+### Reload behavior
 
-JSON 変更は **プロセス再起動でのみ反映** する。理由:
-- file watch reload は stale window / partial reload race を生む (§3.7 過去 incident)
-- restart-only なら "現在の policy = process 起動時の file の snapshot" が常に成立
+DB policy is refreshed from `channel_routing_policy` by the routing/projection call sites. Legacy JSON fallback is read only when `AGENT_COM_BOT_ROUTING_PATH` is set or `AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK=true`.
 
 ### Post-merge fleet restart (Phase 5 PR merge 後)
 
@@ -70,9 +72,9 @@ mcp__agent-comms__bot_status
 
 | 状況 | 挙動 |
 |---|---|
-| `config/bot-routing.json` 不在 | 全 channel が legacy compat (primary なし、allowlist なし) |
-| parse error (invalid JSON) | 同上 (fail-closed semantics — 起動継続、警告 log) |
-| schema invalid (channels が object でない等) | 同上 |
+| `channel_routing_policy` に channel policy が無い | production は file fallback せず fail-closed (primary なし、empty allowlist) |
+| explicit legacy file fallback の `config/bot-routing.json` 不在 | legacy compat (primary なし、allowlist なし) |
+| explicit legacy file fallback の parse/schema error | last-known valid config を維持、初回は empty legacy compat |
 | `primary` の agent_id が agents table に不在 | inbound 時 enqueue 失敗 + alert log |
 | `adapterOwner` の bot process / Discord token が無い | outbound 診断で `consumer_agent_not_registered` または `consumer_agent_not_available` |
 | `cc[]` allowlist 外 agent | `OUTBOUND_ACL_VIOLATION` reject (cc[] strip は v2 で廃止) |

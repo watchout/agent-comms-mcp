@@ -211,7 +211,7 @@ async function buildAclDiagnostic(
       channel_id: channelId,
       violated_policy: 'channel.outboundAllowlist',
       outbound_allowlist: outboundAllowlist,
-      policy_source: policySource ?? (outboundAllowlist === null ? 'none' : 'config/bot-routing.json'),
+      policy_source: policySource ?? policy.policySource,
       violations,
     },
   }

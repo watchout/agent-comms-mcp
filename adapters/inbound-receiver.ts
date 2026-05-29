@@ -49,9 +49,8 @@ import {
 import { persistInboundDelivery } from '../core/inbound-delivery'
 // #527 — channel.primary lookup for routeInbound no-mention single-recipient
 // routing on the Discord inbound path. resolveInboundChannel intentionally
-// stays a DB-only function; the policy snapshot lives in channel-policy
-// (config/bot-routing.json cached in-process).
-import { getChannelPolicy } from '../core/channel-policy'
+// stays a DB-only function; the policy snapshot lives in channel-policy.
+import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { applyMentionsAutoFill } from '../core/agent-cache'
 import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
 import { notifySenderAndObserve } from '../core/sender-feedback-emit'
@@ -623,6 +622,13 @@ export async function handleInboundMessage(params: {
       `agent-comms: inbound drop — ${receiverAgentId} not in channel ${resolved.channelId} members\n`,
     )
     return { delivered: false, messageId, reason: 'NOT_A_MEMBER' }
+  }
+
+  try {
+    const policyDb = await d.tryGetDb()
+    if (policyDb) await refreshChannelPolicyDbSnapshot(policyDb)
+  } catch (err) {
+    writeStderr(`agent-comms: inbound policy snapshot refresh failed (non-fatal): ${err}\n`)
   }
 
   // Step 6: Resolve sender agent_id.

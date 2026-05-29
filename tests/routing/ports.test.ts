@@ -49,6 +49,32 @@ describe('channel-policy (§1.8)', () => {
     const p = getChannelPolicy('unknown-channel')
     expect(p.primary).toBeNull()
     expect(p.outboundAllowlist).toBeNull()
+    expect(p.policySource).toBe('config/bot-routing.json')
+  })
+
+  test('production without DB policy does not read bot-routing and fails closed', async () => {
+    delete process.env.AGENT_COM_BOT_ROUTING_PATH
+    delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+    resetChannelPolicyCache()
+
+    const loaded = await refreshChannelPolicyDbSnapshot({
+      async query() {
+        return { rows: [] }
+      },
+    })
+
+    expect(loaded).toEqual({ loaded: true, count: 0 })
+    const p = getChannelPolicy('1487368919613444156')
+    expect(p.primary).toBeNull()
+    expect(p.adapterOwner).toBeNull()
+    expect(p.outboundAllowlist).toEqual([])
+    expect(p.policySource).toBe('none')
+
+    const validator = createOutboundPolicyValidator()
+    expect(validator.validate('agent-com-dev', '1487368919613444156', ['codex-cto'])).toEqual({
+      ok: false,
+      violations: ['agent-com-dev', 'codex-cto'],
+    })
   })
 
   test('present channel returns configured primary + allowlist', () => {
@@ -123,6 +149,7 @@ describe('channel-policy (§1.8)', () => {
     expect(getChannelPolicy('ch1').primary).toBe('db-primary')
     expect(getChannelPolicy('ch1').adapterOwner).toBe('db-owner')
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['db-primary', 'db-owner'])
+    expect(getChannelPolicy('ch1').policySource).toBe('db')
     expect(getChannelPolicy('ch1').nativeRoleOutboundOwners['codex-cto']).toBe('codex-cto')
     expect(getChannelPolicy('ch2').primary).toBe('json-only')
   })

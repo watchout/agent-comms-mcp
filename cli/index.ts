@@ -251,7 +251,7 @@ async function validateCliOutboundPolicy(
     `SELECT policy_source FROM channel_routing_policy WHERE channel_id = $1`,
     [channelId],
   ).catch(() => ({ rows: [] as any[] }))
-  const policySource = sourceRows.rows[0]?.policy_source ?? (policy.outboundAllowlist === null ? 'none' : 'config/bot-routing.json')
+  const policySource = sourceRows.rows[0]?.policy_source ?? policy.policySource
   const result = createOutboundPolicyValidator().validate(sender, channelId, recipients)
   if (result.ok === true) {
     return {
@@ -2820,6 +2820,7 @@ async function sendMessage(args: string[]) {
           message_id: id,
           channel_external_id: projection.channelExternalId,
           consumer_source: projection.consumerSource,
+          consumer_evidence: projection.consumerEvidence,
           projection_source: projection.projectionSource,
           reason: outboundSkipReason,
         })
@@ -2830,12 +2831,14 @@ async function sendMessage(args: string[]) {
           // enqueue so an over-long LLM reply is truncated once, deterministically,
           // instead of being split across retries inside the Discord adapter.
           await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
             [
               id,
               agentId,
               projection.consumerAgentId,
+              projection.consumerEvidence?.connector_instance_id ?? null,
+              projection.consumerEvidence?.channel_binding_id ?? null,
               projection.projectionIdentityId,
               projection.intendedProjectionIdentityId,
               projection.projectionSource,
@@ -3102,6 +3105,7 @@ async function notifyMessage(args: string[]) {
         message_id: id,
         channel_external_id: projection.channelExternalId,
         consumer_source: projection.consumerSource,
+        consumer_evidence: projection.consumerEvidence,
         projection_source: projection.projectionSource,
         reason: outboundSkipReason,
       })
@@ -3110,12 +3114,14 @@ async function notifyMessage(args: string[]) {
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [
             id,
             agentId,
             projection.consumerAgentId,
+            projection.consumerEvidence?.connector_instance_id ?? null,
+            projection.consumerEvidence?.channel_binding_id ?? null,
             projection.projectionIdentityId,
             projection.intendedProjectionIdentityId,
             projection.projectionSource,
@@ -3475,6 +3481,7 @@ async function diagnoseProjection(args: string[]) {
       resolved: {
         consumer_agent_id: consumerAgentId,
         consumer_source: projection.consumerSource,
+        consumer_evidence: projection.consumerEvidence,
         projection_identity_id: projection.projectionIdentityId,
         intended_projection_identity_id: projection.intendedProjectionIdentityId,
         projection_source: projection.projectionSource,
@@ -3516,6 +3523,7 @@ async function diagnoseProjection(args: string[]) {
       `Identity: ${projection.projectionIdentityId ?? '(none)'}`,
       `Intended: ${projection.intendedProjectionIdentityId ?? '(none)'}`,
       `Consumer source:   ${projection.consumerSource}`,
+      `Consumer evidence: ${projection.consumerEvidence ? `${projection.consumerEvidence.source_table} connector=${projection.consumerEvidence.connector_instance_id}${projection.consumerEvidence.channel_binding_id ? ` binding=${projection.consumerEvidence.channel_binding_id}` : ''}${projection.consumerEvidence.provider_channel_access_id ? ` access=${projection.consumerEvidence.provider_channel_access_id}` : ''}` : '(none)'}`,
       `Projection source: ${projection.projectionSource}`,
       `Fallback reason:   ${projection.projectionFallbackReason ?? '(none)'}`,
       `Consumer Discord:  ${hasDiscordIdentity ? `ui_id=${consumerDiscordUiId}${consumerBinding?.status ? ` (${consumerBinding.status})` : ''}` : 'no UI identity detected'}`,

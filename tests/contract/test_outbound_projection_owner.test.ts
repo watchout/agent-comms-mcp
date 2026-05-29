@@ -205,6 +205,30 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('none')
   })
 
+  test('production routing ignores bot-routing file fallback when DB policy is missing', async () => {
+    delete process.env.AGENT_COM_BOT_ROUTING_PATH
+    delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+    resetChannelPolicyCache()
+    const db = mockProjectionDb({
+      channelExternalId: '1487368919613444156',
+      eligibleDeliveryAgents: ['agent-com-dev', 'codex-cto'],
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto'),
+      },
+    })
+
+    const route = await resolveOutboundProjectionRoute(db, {
+      channelId: '1487368919613444156',
+      senderAgentId: 'codex-cto',
+    })
+
+    expect(route.channelExternalId).toBe('1487368919613444156')
+    expect(route.consumerAgentId).toBeNull()
+    expect(route.source).toBe('none')
+    expect(route.consumerEvidence).toBeNull()
+  })
+
   test('native-role owner overrides channel adapterOwner only for matching sender', async () => {
     setRoutingConfig({
       ch1: {
@@ -283,6 +307,14 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.channelExternalId).toBe('discord-ch')
     expect(route.consumerAgentId).toBe('codex-cto')
     expect(route.source).toBe('recipient_token_evidence')
+    expect(route.consumerEvidence).toMatchObject({
+      source_table: 'provider_channel_access',
+      agent_id: 'codex-cto',
+      connector_instance_id: 'connector-codex-cto',
+      credential_id: 'credential-codex-cto',
+      provider_channel_access_id: 'access-codex-cto',
+      channel_binding_id: null,
+    })
   })
 
   test('single recipient with active write binding becomes direct delivery owner', async () => {
@@ -300,6 +332,14 @@ describe('#410 outbound projection owner resolution', () => {
     })
     expect(route.consumerAgentId).toBe('codex-cto')
     expect(route.source).toBe('recipient_token_evidence')
+    expect(route.consumerEvidence).toMatchObject({
+      source_table: 'channel_connector_bindings',
+      agent_id: 'codex-cto',
+      connector_instance_id: 'connector-codex-cto',
+      credential_id: 'credential-codex-cto',
+      channel_binding_id: 'binding-codex-cto',
+      provider_channel_access_id: null,
+    })
   })
 
   test('thread target requires provider access for the thread external id, not the parent channel', async () => {
