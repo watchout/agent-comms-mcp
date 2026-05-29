@@ -194,7 +194,7 @@ function pushMapValue<K extends number | string>(map: Map<K, string[]>, key: K |
 
 function activeOwnersForListener(
   listener: PortListenerSnapshot,
-  agentId: string,
+  agentId: string | null,
   activeAgentByPort: Map<number, string[]>,
   activeRuntimeOwnerByPort: Map<number, string[]>,
   activeRuntimeOwnerByPid: Map<number, string[]>,
@@ -203,7 +203,7 @@ function activeOwnersForListener(
   for (const owner of activeAgentByPort.get(listener.port) ?? []) owners.add(owner)
   for (const owner of activeRuntimeOwnerByPort.get(listener.port) ?? []) owners.add(owner)
   for (const owner of activeRuntimeOwnerByPid.get(listener.pid) ?? []) owners.add(owner)
-  owners.delete(agentId)
+  if (agentId) owners.delete(agentId)
   return [...owners].sort()
 }
 
@@ -537,8 +537,20 @@ export async function buildRuntimeCleanupReport(
     if (!candidatePorts.has(listener.port)) continue
     const key = `${listener.port}:${listener.pid}`
     if (coveredListenerKeys.has(key)) continue
-    const activeOwners = activeAgentByPort.get(listener.port) ?? []
-    const allOwners = allAgentByPort.get(listener.port) ?? []
+    const activeRuntimePortOwners = activeRuntimeOwnerByPort.get(listener.port) ?? []
+    const activeRuntimePidOwners = activeRuntimeOwnerByPid.get(listener.pid) ?? []
+    const activeOwners = activeOwnersForListener(
+      listener,
+      null,
+      activeAgentByPort,
+      activeRuntimeOwnerByPort,
+      activeRuntimeOwnerByPid,
+    )
+    const allOwners = [...new Set([
+      ...(allAgentByPort.get(listener.port) ?? []),
+      ...activeRuntimePortOwners,
+      ...activeRuntimePidOwners,
+    ])].sort()
     if (activeOwners.length > 0) {
       targets.push(cleanupTarget({
         target_id: `listener:${listener.port}:${listener.pid}:unknown-risk`,
@@ -555,8 +567,10 @@ export async function buildRuntimeCleanupReport(
           listener_command: listener.command ?? null,
           active_port_owners: activeOwners,
           all_port_owners: allOwners,
+          active_runtime_port_owners: activeRuntimePortOwners,
+          active_runtime_pid_owners: activeRuntimePidOwners,
         },
-        actions: [{ kind: 'noop', reason: 'listener_port_has_active_owner' }],
+        actions: [{ kind: 'noop', reason: 'listener_has_active_owner_or_runtime' }],
       }))
     } else if (allOwners.length === 0) {
       targets.push(cleanupTarget({

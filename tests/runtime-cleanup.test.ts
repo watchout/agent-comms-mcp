@@ -225,6 +225,120 @@ describe('runtime cleanup lifecycle', () => {
     })
   })
 
+  test('orphan listener pass treats active runtime port and pid ownership as unknown-risk', async () => {
+    const now = new Date('2026-05-29T07:40:00Z')
+    await withCleanupDb(`
+      INSERT INTO agents
+        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+      VALUES
+        ('active-owner', 'Active Owner', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-active-owner","supervisor_type":"tmux"}', 1111, 1);
+
+      INSERT INTO agent_runtime_instances
+        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+      VALUES
+        ('runtime-active-owner', 'active-owner', 'codex', 'local_process', 'discord-active-owner', 7777, 2222, 'active', '2026-05-29T07:30:00Z', '2026-05-29T07:39:30Z');
+    `, async (db) => {
+      const observations = {
+        now,
+        staleMinutes: 15,
+        portListeners: [{ pid: 7777, port: 2222, command: 'bun' }],
+      }
+      const report = await buildRuntimeCleanupReport(db, observations)
+      const listener = report.targets.find((target) => target.target_id === 'listener:2222:7777:unknown-risk')
+
+      expect(listener?.classification).toBe('unknown-risk')
+      expect(listener?.risk).toBe('unknown-risk')
+      expect(listener?.agent_id).toBe('active-owner')
+      expect(listener?.actions).toEqual([{ kind: 'noop', reason: 'listener_has_active_owner_or_runtime' }])
+      expect(listener?.evidence).toMatchObject({
+        active_port_owners: ['active-owner'],
+        active_runtime_port_owners: ['active-owner'],
+        active_runtime_pid_owners: ['active-owner'],
+      })
+      expect(report.targets.some((target) => target.target_id === 'listener:2222:7777:orphan-listener')).toBe(false)
+      expect(report.summary.cleanup_targets).toBe(0)
+      expect(report.summary.unknown_risk_targets).toBe(1)
+
+      const killedPids: number[] = []
+      await expect(executeRuntimeCleanup(db, {
+        ...observations,
+        confirmHash: report.plan_hash,
+        killProcess: (pid) => killedPids.push(pid),
+      })).rejects.toThrow('UNKNOWN_RISK_REFUSED')
+      expect(killedPids).toEqual([])
+
+      const override = await executeRuntimeCleanup(db, {
+        ...observations,
+        allowUnknownRisk: true,
+        confirmHash: report.plan_hash,
+        killProcess: (pid) => killedPids.push(pid),
+      })
+      expect(override.summary.executable_actions).toBe(0)
+      expect(killedPids).toEqual([])
+    })
+  })
+
+  test('orphan listener pass protects active runtime listener while disabled residue cleanup remains scoped', async () => {
+    const now = new Date('2026-05-29T07:40:00Z')
+    await withCleanupDb(`
+      INSERT INTO agents
+        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+      VALUES
+        ('active-owner', 'Active Owner', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-active-owner","supervisor_type":"tmux"}', 1111, 1),
+        ('disabled-old', 'Disabled Old', 'dev', 'TUI', 'offline', '{}', 3333, 0);
+
+      INSERT INTO agent_runtime_instances
+        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+      VALUES
+        ('runtime-active-owner', 'active-owner', 'codex', 'local_process', 'discord-active-owner', 7777, 2222, 'active', '2026-05-29T07:30:00Z', '2026-05-29T07:39:30Z'),
+        ('runtime-disabled-old', 'disabled-old', 'codex', 'local_process', 'discord-disabled-old', 8888, 3333, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z');
+    `, async (db) => {
+      const observations = {
+        now,
+        staleMinutes: 15,
+        portListeners: [
+          { pid: 7777, port: 2222, command: 'bun' },
+          { pid: 8888, port: 3333, command: 'bun' },
+        ],
+      }
+      const report = await buildRuntimeCleanupReport(db, observations)
+      const listener = report.targets.find((target) => target.target_id === 'listener:2222:7777:unknown-risk')
+      const disabled = report.targets.find((target) => target.agent_id === 'disabled-old')
+
+      expect(listener?.classification).toBe('unknown-risk')
+      expect(listener?.actions).not.toContainEqual(expect.objectContaining({
+        kind: 'kill_process',
+        pid: 7777,
+      }))
+      expect(disabled?.classification).toBe('disabled-profile-residue')
+      expect(disabled?.actions).toContainEqual({
+        kind: 'kill_process',
+        pid: 8888,
+        port: 3333,
+        reason: 'disabled_profile_port_listener',
+      })
+      expect(report.summary.cleanup_targets).toBe(1)
+      expect(report.summary.unknown_risk_targets).toBe(1)
+
+      const killedPids: number[] = []
+      await expect(executeRuntimeCleanup(db, {
+        ...observations,
+        confirmHash: report.plan_hash,
+        killProcess: (pid) => killedPids.push(pid),
+      })).rejects.toThrow('UNKNOWN_RISK_REFUSED')
+      expect(killedPids).toEqual([])
+
+      const override = await executeRuntimeCleanup(db, {
+        ...observations,
+        allowUnknownRisk: true,
+        confirmHash: report.plan_hash,
+        killProcess: (pid) => killedPids.push(pid),
+      })
+      expect(override.summary.executable_actions).toBe(2)
+      expect(killedPids).toEqual([8888])
+    })
+  })
+
   test('parses lsof listener evidence used by cleanup plans', () => {
     expect(parseLsofTcpListeners([
       'COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME',
