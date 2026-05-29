@@ -1,6 +1,6 @@
 # AUN Normalization Roadmap
 
-Date: 2026-05-24
+Date: 2026-05-27
 Status: Normative for AUN normalization planning
 
 ## Purpose
@@ -29,6 +29,7 @@ This roadmap applies together with:
 - [`agent-registry-ui-spec.md`](./agent-registry-ui-spec.md)
 - [`../spec/aun-bot-profile-table-reduction-audit.md`](../spec/aun-bot-profile-table-reduction-audit.md)
 - [`../spec/aun-communication-stability-mvp-impl.md`](../spec/aun-communication-stability-mvp-impl.md)
+- [`../spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md`](../spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md)
 - [`../spec/norm-030-connector-credential-registry-impl.md`](../spec/norm-030-connector-credential-registry-impl.md)
 - [`../spec/norm-035-provider-channel-access-impl.md`](../spec/norm-035-provider-channel-access-impl.md)
 - [`../spec/norm-036-effective-delivery-owner-resolver-impl.md`](../spec/norm-036-effective-delivery-owner-resolver-impl.md)
@@ -129,6 +130,14 @@ MVP is complete only when all of the following are true:
 5. Runtime liveness is observable:
    - active runtimes heartbeat with `runtime_instance_id`, `agent_id`,
      `workspace_id`, process evidence, runtime engine, and last seen time
+   - active local runtimes have endpoint lease evidence for TCP port, Unix
+     socket, stdio, or remote URL reachability before being treated as
+     delivery-ready
+   - supervisor evidence such as tmux session, launchd label, systemd unit,
+     container id, or remote allocation is optional runtime evidence, not
+     identity or channel ownership
+   - local cleanup/restart requires stale heartbeat plus endpoint lease/fencing
+     evidence; a port number alone is not enough authority to kill a process
    - offline hard-block policy is not enabled until heartbeat coverage exists
    - duplicate active runtimes for the same effective connector role are
      reported
@@ -161,6 +170,22 @@ MVP non-goals:
 - no full UI
 - no Streamable HTTP transport requirement
 - no tenant/RBAC enforcement beyond schema-compatible design
+
+Current MVP execution boundary, approved 2026-05-27:
+
+- This phase is **MVP: Internal Normalization**. It uses the enterprise control
+  plane model as the design standard, but it only implements the parts needed
+  to make the current internal fleet deterministic and auditable.
+- Implement now: DB evidence for connector credentials, provider channel
+  access, effective delivery owners, runtime instances, endpoint leases,
+  supervisor evidence, safe cleanup/restart, strict doctor checks, and
+  full-channel smoke evidence.
+- Do not implement now: full orchestration, complete tmux removal, raw token
+  storage in DB, public OAuth/OIDC, remote agent delivery, multi-region/HA
+  scheduling, Vault migration, or enterprise UI.
+- The current implementation priority is to remove tmux and port observations
+  from authority by landing NORM-022, then use NORM-035/NORM-036/NORM-040 to
+  collapse channel differences to policy/access differences only.
 
 ### v1: Local Control Plane
 
@@ -221,6 +246,7 @@ Every implementation PR must declare which slice and phase gate it advances.
 | NORM-010 | MVP | Queue claim/send consistency | tests proving `processing` claims can close via `send` |
 | NORM-020 | MVP | Bot profile and runtime heartbeat registration | one editable bot profile exists; runtime/connector evidence is generated from discovery |
 | NORM-021 | MVP | Bot table reduction and script rewrite | normal setup edits one profile; workspace/runtime/connector/credential/provider evidence is generated or migration-only |
+| NORM-022 | MVP | Runtime endpoint lease and supervisor adapter model | endpoint leases, supervisor-neutral status, and safe cleanup gates prove tmux is not the runtime authority |
 | NORM-025 | MVP | Provider identity registry for Discord bot/user/app ids | provider subject rows are DB authority, duplicates fail closed, metadata fallback remains mixed-fleet safe |
 | NORM-030 | MVP | Connector credential registry and token uniqueness | non-secret credential records exist, duplicate active token fingerprint is blocked or strict-doctor failed |
 | NORM-035 | MVP | Provider channel access discovery | connector read/write access per provider channel is recorded without raw token output |
@@ -250,6 +276,18 @@ state-daemon behavior must include:
 4. rollout and rollback notes for mixed old/new fleet operation
 5. audit evidence or an explicit reason audit is not applicable
 6. confirmation that raw secrets are neither stored nor printed
+
+The required delivery lane for each MVP slice is:
+
+```text
+spec -> impl contract/plan -> pre-implementation audit -> implementation
+     -> implementation audit -> merge -> POST_MERGE verification
+```
+
+`POST_MERGE` means the merged change has been applied or verified in the target
+runtime environment and the evidence is recorded: migration status if any,
+doctor/smoke output, relevant DB rows, outbound/runtime health, rollback note,
+and the PR or audit reference that proves the post-merge state.
 
 For identity, routing, runtime, connector, queue, or state-daemon behavior that
 bridges abstract design to code, create a doc-only impl contract PR first and

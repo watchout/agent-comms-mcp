@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-05-26
+> 最終更新: 2026-05-27
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
@@ -18,7 +18,9 @@
 | wave-rollout-rules.md | provisional | Phase C aun deployment の operational contract — wave 1-3 entry/exit/rollback、`回帰なし` metric set、completion judgment (PR #254) | 2026-04-27 |
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
-| design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定 | 2026-05-24 |
+| design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
+| spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
+| plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-04-27 |
 
 ---
@@ -70,12 +72,26 @@
 - DB正本、runtime/workspace/connector、token一意性、queue安全性、channel assignment、state-daemon、smoke/auditのMVP完了条件を固定する
 - 実装PRをNORM/REG/CONN/LEASE/AUTH/TRAN/EXT/OBS sliceに分解する
 - 「見つかった不整合を都度直す」進め方を禁止し、phase/slice分類後に実装する
+- 2026-05-27時点の現在phaseはMVP内部正常化とし、enterprise control plane基準のうち内部fleet正常化に必要な範囲だけを実装対象にする
+- 各sliceは `spec -> impl contract/plan -> pre-implementation audit -> implementation -> implementation audit -> merge -> POST_MERGE verification` の順で進める
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
 - Discord、tmux、local path、provider tokenをcore identityにしない設計制約を定める
 - MCP Streamable HTTP、OAuth/OIDC、A2A、OpenTelemetry、CloudEvents、Zero Trustへの将来整合を方向づける
 - 内部Discord安定化を将来のenterprise control planeの第一local deploymentとして扱う
+
+### spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md（Runtime endpoint lease）
+- MVP内部正常化でruntime endpoint leaseを正本にする
+- tmux、launchd、systemd、container、remote workerをsupervisor adapterとして扱う
+- port/Unix socket/stdio/remote URLを同じendpoint modelに載せる
+- cleanup/restartはstale heartbeat、endpoint lease、fencing evidenceなしにport killしない
+- channel数とsession数を分離し、channelごとのsession必須化を禁止する
+- 次のgateはpre-implementation auditで、実装merge後はPOST_MERGE evidenceを記録する
+
+### plans/norm-022-runtime-endpoint-lease-impl-plan.md（NORM-022実装計画）
+- NORM-022の実装順序、監査質問、stop condition、POST_MERGE evidenceを固定する
+- pre-implementation auditの依頼packetとして使う
 
 ---
 

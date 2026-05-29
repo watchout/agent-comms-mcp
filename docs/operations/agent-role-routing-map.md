@@ -17,6 +17,21 @@ Current PR governance routing:
 | L2 PR audit | `codex-audit` | Independent L2 audit recipient. Runtime dispatch is determined by the live `agents.runtime` row. |
 | L3 / CTO approval | `codex-cto` | CTO approval recipient. Legacy `cto` is history-only and must not receive new governance work. |
 
+## Per-Slice Overrides
+
+CEO may override the default route for a specific slice. The override must be
+recorded in the slice plan so later gates do not silently fall back to the
+default table.
+
+| Slice | L1 | L2 | L3 | Source |
+|---|---|---|---|---|
+| NORM-022 runtime endpoint lease | `devauditor` | `l2auditor` | `cto` | CEO directive 2026-05-27 |
+
+At the time of the NORM-022 route update, live DB rows existed for
+`devauditor`, `l2auditor`, and `cto`; `cto` was disabled. If L3 delivery is
+required through `cto`, repair or enable that route before sending the L3
+approval request.
+
 ## Failure Mode This Prevents
 
 If an AUN lead session tries to notify L3 and receives `SELF_SEND` for
@@ -97,7 +112,8 @@ Pass criteria:
 - `codex-aun`, `auditor`, `codex-audit`, and `codex-cto` exist.
 - `cto` may exist only as a disabled or history-only legacy alias.
 - Channel `1487368919613444156` includes the canonical role recipients.
-- No new PR governance request targets `cto`.
+- No new PR governance request targets `cto` unless a per-slice CEO override
+  records that legacy target and its live route has been repaired.
 - AUN lead MCP registration uses `AGENT_ID=codex-aun`; if it sends as
   `codex-cto`, restart or re-register that MCP session before continuing.
 

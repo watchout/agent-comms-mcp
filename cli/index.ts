@@ -1827,9 +1827,12 @@ async function agentProfile(args: string[]) {
         const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
           ? metadata.tmux_session.trim()
           : ''
-        if (!tmuxSession) {
+        const supervisorType = typeof metadata.supervisor_type === 'string' && metadata.supervisor_type.trim()
+          ? metadata.supervisor_type.trim().toLowerCase()
+          : 'tmux'
+        if (supervisorType === 'tmux' && !tmuxSession) {
           blockers.push({ agent_id: agentId, code: 'missing_tmux_session' })
-        } else {
+        } else if (tmuxSession) {
           const agents = sessionOwners.get(tmuxSession) ?? []
           agents.push(agentId)
           sessionOwners.set(tmuxSession, agents)
@@ -1968,6 +1971,46 @@ async function agentProfile(args: string[]) {
               provider: row.provider,
               connector_uri: row.connector_uri,
               code: 'connector_missing_profile_source_evidence',
+            })
+          }
+        }
+        const activeConnectorEndpointRows = await db.query(
+          `SELECT ci.connector_instance_id,
+                  ci.agent_id,
+                  ci.provider,
+                  ci.connector_uri,
+                  ci.runtime_instance_id,
+                  cpl.lease_id,
+                  cpl.expires_at
+             FROM connector_instances ci
+             JOIN agents a ON a.agent_id = ci.agent_id
+             LEFT JOIN control_plane_leases cpl
+               ON cpl.lease_scope_type = 'runtime_instance'
+              AND cpl.lease_scope_id = ci.runtime_instance_id::text
+              AND cpl.status = 'active'
+              AND cpl.expires_at > now()
+            WHERE ci.status = 'active'
+              AND a.agent_type <> 'human'
+              AND COALESCE(a.profile_enabled, true) = true
+            ORDER BY ci.agent_id, ci.provider, ci.connector_uri`,
+        ).catch(() => ({ rows: [] as any[] }))
+        for (const row of activeConnectorEndpointRows.rows) {
+          if (!row.runtime_instance_id) {
+            blockers.push({
+              agent_id: row.agent_id,
+              connector_instance_id: row.connector_instance_id,
+              provider: row.provider,
+              connector_uri: row.connector_uri,
+              code: 'active_connector_missing_runtime_instance',
+            })
+          } else if (!row.lease_id) {
+            blockers.push({
+              agent_id: row.agent_id,
+              connector_instance_id: row.connector_instance_id,
+              provider: row.provider,
+              connector_uri: row.connector_uri,
+              runtime_instance_id: row.runtime_instance_id,
+              code: 'active_connector_missing_endpoint_lease',
             })
           }
         }

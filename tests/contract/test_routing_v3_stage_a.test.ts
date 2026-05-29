@@ -152,6 +152,20 @@ const dbDescribe = DATABASE_URL ? describe : describe.skip
 dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
   let client: Client
   const TEST_AGENT = `test-hb-${randomUUID().slice(0, 8)}`
+  const cleanupRuntimeEvidence = async (agentId: string) => {
+    await client.query(
+      `DELETE FROM control_plane_leases
+        WHERE holder_agent_id = $1
+           OR lease_scope_id IN (
+             SELECT runtime_instance_id::text
+               FROM agent_runtime_instances
+              WHERE agent_id = $1
+           )`,
+      [agentId],
+    )
+    await client.query(`DELETE FROM connector_instances WHERE agent_id = $1`, [agentId])
+    await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
+  }
 
   beforeAll(async () => {
     client = new Client({ connectionString: DATABASE_URL })
@@ -166,10 +180,12 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
 
   beforeEach(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    await cleanupRuntimeEvidence(TEST_AGENT)
   })
 
   afterAll(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    await cleanupRuntimeEvidence(TEST_AGENT)
     await client.query(`DELETE FROM agents WHERE agent_id = $1`, [TEST_AGENT])
     await client.end()
   })
@@ -181,6 +197,145 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row!.pending_count).toBe(0)
     expect(row!.oldest_pending_at).toBeNull()
     expect(['healthy', 'busy_active', 'busy_stuck', 'crashed', 'offline'] as BotHealthState[]).toContain(row!.health_state)
+    expect(row!.endpoint_lease_state).toBe('not_applicable')
+    expect(row!.active_endpoint_lease_count).toBe(0)
+  })
+
+  test('NORM-022 — bot_status exposes runtime endpoint lease state', async () => {
+    await client.query(
+      `INSERT INTO connector_instances
+         (agent_id, provider, connector_uri, status, metadata)
+       VALUES
+         ($1, 'discord', $2, 'active', '{}'::jsonb)`,
+      [TEST_AGENT, `discord://agents/${TEST_AGENT}/missing-runtime`],
+    )
+    let row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
+    expect(row.endpoint_lease_state).toBe('missing_runtime')
+    expect(row.active_connector_count).toBe(1)
+    expect(row.runtime_linked_connector_count).toBe(0)
+    expect(row.active_endpoint_lease_count).toBe(0)
+
+    await cleanupRuntimeEvidence(TEST_AGENT)
+    const runtimeId = randomUUID()
+    const connectorId = randomUUID()
+    await client.query(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, status)
+       VALUES
+         ($1, $2, 'codex', 'active')`,
+      [runtimeId, TEST_AGENT],
+    )
+    await client.query(
+      `INSERT INTO connector_instances
+         (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, metadata)
+       VALUES
+         ($1, $2, $3, 'discord', $4, 'active', '{}'::jsonb)`,
+      [connectorId, TEST_AGENT, runtimeId, `discord://agents/${TEST_AGENT}/with-runtime`],
+    )
+    row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
+    expect(row.endpoint_lease_state).toBe('missing_lease')
+    expect(row.active_connector_count).toBe(1)
+    expect(row.runtime_linked_connector_count).toBe(1)
+    expect(row.active_endpoint_lease_count).toBe(0)
+
+    await client.query(
+      `INSERT INTO control_plane_leases
+         (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
+          holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at)
+       VALUES
+         ('runtime_instance', $1, 'worker', $2, $3, $4, 1, now() + INTERVAL '5 minutes')`,
+      [runtimeId, TEST_AGENT, runtimeId, connectorId],
+    )
+    row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
+    expect(row.endpoint_lease_state).toBe('ok')
+    expect(row.active_endpoint_lease_count).toBe(1)
+    expect(row.endpoint_lease_expires_at).not.toBeNull()
+    expect(row.endpoint_lease_heartbeat_at).not.toBeNull()
+  })
+
+  test('NORM-022 — bot_status blocks partial runtime endpoint lease coverage', async () => {
+    const runtimeA = randomUUID()
+    const runtimeB = randomUUID()
+    const connectorA = randomUUID()
+    const connectorB = randomUUID()
+
+    await client.query(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, status)
+       VALUES
+         ($1, $2, 'codex', 'active'),
+         ($3, $2, 'codex', 'active')`,
+      [runtimeA, TEST_AGENT, runtimeB],
+    )
+    await client.query(
+      `INSERT INTO connector_instances
+         (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, metadata)
+       VALUES
+         ($1, $2, $3, 'discord', $4, 'active', '{}'::jsonb),
+         ($5, $2, NULL, 'discord', $6, 'active', '{}'::jsonb)`,
+      [
+        connectorA,
+        TEST_AGENT,
+        runtimeA,
+        `discord://agents/${TEST_AGENT}/leased`,
+        connectorB,
+        `discord://agents/${TEST_AGENT}/missing-runtime`,
+      ],
+    )
+    await client.query(
+      `INSERT INTO control_plane_leases
+         (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
+          holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at)
+       VALUES
+         ('runtime_instance', $1, 'worker', $2, $3, $4, 1, now() + INTERVAL '5 minutes')`,
+      [runtimeA, TEST_AGENT, runtimeA, connectorA],
+    )
+
+    let row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
+    expect(row.active_connector_count).toBe(2)
+    expect(row.runtime_linked_connector_count).toBe(1)
+    expect(row.active_endpoint_lease_count).toBe(1)
+    expect(row.endpoint_lease_state).toBe('missing_runtime')
+
+    await cleanupRuntimeEvidence(TEST_AGENT)
+    await client.query(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, status)
+       VALUES
+         ($1, $2, 'codex', 'active'),
+         ($3, $2, 'codex', 'active')`,
+      [runtimeA, TEST_AGENT, runtimeB],
+    )
+    await client.query(
+      `INSERT INTO connector_instances
+         (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, metadata)
+       VALUES
+         ($1, $2, $3, 'discord', $4, 'active', '{}'::jsonb),
+         ($5, $2, $6, 'discord', $7, 'active', '{}'::jsonb)`,
+      [
+        connectorA,
+        TEST_AGENT,
+        runtimeA,
+        `discord://agents/${TEST_AGENT}/leased`,
+        connectorB,
+        runtimeB,
+        `discord://agents/${TEST_AGENT}/missing-lease`,
+      ],
+    )
+    await client.query(
+      `INSERT INTO control_plane_leases
+         (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
+          holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at)
+       VALUES
+         ('runtime_instance', $1, 'worker', $2, $3, $4, 1, now() + INTERVAL '5 minutes')`,
+      [runtimeA, TEST_AGENT, runtimeA, connectorA],
+    )
+
+    row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
+    expect(row.active_connector_count).toBe(2)
+    expect(row.runtime_linked_connector_count).toBe(2)
+    expect(row.active_endpoint_lease_count).toBe(1)
+    expect(row.endpoint_lease_state).toBe('missing_lease')
   })
 
   test('pending rows are counted, oldest_pending_at picks the earliest created_at', async () => {

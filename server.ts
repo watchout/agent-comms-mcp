@@ -76,6 +76,10 @@ import {
   type BotStatusDbRow,
 } from './core/bot-status-db'
 import {
+  destructiveLifecycleGateFailure,
+  evaluateCleanupPort,
+} from './core/bot-lifecycle'
+import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
@@ -3273,6 +3277,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (entry.blockers && entry.blockers.length > 0) {
       return { content: [{ type: 'text', text: `Session/agent "${session}" has incomplete bot profile: ${entry.blockers.join(', ')}` }], isError: true }
     }
+    const endpointStatus = await loadEndpointLeaseStatus()
+    const gateFailure = destructiveLifecycleGateFailure(entry, endpointStatus.get(entry.agentId))
+    if (gateFailure) {
+      return { content: [{ type: 'text', text: `Session/agent "${session}" restart blocked — ${gateFailure}` }], isError: true }
+    }
     const log = await restartBotSession(entry)
     return { content: [{ type: 'text', text: `[restart_bot] ${session}:\n${log}` }] }
   }
@@ -3303,7 +3312,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    health.status === 'misconfigured' ? '⚠️' : '❓'
       const dbRow = dbStatus.get(entry.agentId)
       const dbSuffix = dbRow
-        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'}`
+        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count}`
         : ' | (no db row)'
       const sourceSuffix = entry.source ? ` | source=${entry.source}` : ''
       const blockerSuffix = entry.blockers && entry.blockers.length > 0 ? ` | blockers=${entry.blockers.join(',')}` : ''
@@ -3320,6 +3329,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const results: string[] = []
     let alive = 0, restarted = 0
+    const endpointStatus = await loadEndpointLeaseStatus()
     for (const entry of registry) {
       if (entry.blockers && entry.blockers.length > 0) {
         results.push(`⚠️ ${entry.session || entry.agentId}: incomplete profile — ${entry.blockers.join(', ')}`)
@@ -3330,6 +3340,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         alive++
         results.push(`✅ ${entry.session}: ${health.status} — ${health.details}`)
       } else {
+        const gateFailure = destructiveLifecycleGateFailure(entry, endpointStatus.get(entry.agentId))
+        if (gateFailure) {
+          results.push(`⛔ ${entry.session || entry.agentId}: restart blocked — ${gateFailure}`)
+          continue
+        }
         if (dry_run) {
           results.push(`⚠️ ${entry.session}: ${health.status} — ${health.details} (would restart)`)
         } else {
@@ -3522,20 +3537,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const results: string[] = []
     let cleaned = 0
+    const endpointStatus = await loadEndpointLeaseStatus()
     for (const entry of registry) {
-      if (entry.blockers?.includes('missing_channel_port') || !entry.port) {
-        results.push(`⚠️ ${entry.session || entry.agentId}: skipped cleanup — missing channel_port`)
+      const evaluation = evaluateCleanupPort(entry, endpointStatus.get(entry.agentId), {
+        hasTmuxSession: tmuxHasSession,
+        getProcessOnPort,
+      })
+      if (evaluation.action === 'skip') {
+        results.push(`⛔ port ${entry.port || '-'} (${entry.session || entry.agentId}): skipped cleanup — ${evaluation.reason}`)
         continue
       }
-      const sessionExists = tmuxHasSession(entry.session)
-      const pids = getProcessOnPort(entry.port)
-      if (!sessionExists && pids.length > 0) {
+      if (evaluation.action === 'kill') {
         const killed = killPidsOnPort(entry.port, false)
         cleaned += killed
-        results.push(`🧹 port ${entry.port} (${entry.session}): killed ${killed} orphan process(es) — PID: ${pids.join(',')}`)
-      } else if (sessionExists && pids.length > 0) {
+        results.push(`🧹 port ${entry.port} (${entry.session}): killed ${killed} orphan process(es) — PID: ${evaluation.pids.join(',')}`)
+      } else if (evaluation.action === 'active') {
         results.push(`✅ port ${entry.port} (${entry.session}): in use by active session`)
-      } else if (!sessionExists && pids.length === 0) {
+      } else if (evaluation.action === 'free') {
         results.push(`⬚ port ${entry.port} (${entry.session}): free (session not running)`)
       } else {
         results.push(`✅ port ${entry.port} (${entry.session}): clean`)
@@ -3618,8 +3636,20 @@ interface BotEntry {
   agentId: string
   port: number
   command: string
+  supervisorType?: string
   source?: string
   blockers?: string[]
+}
+
+async function loadEndpointLeaseStatus(): Promise<Map<string, BotStatusDbRow>> {
+  const client = await tryGetDb()
+  if (!client) return new Map()
+  try {
+    return await fetchBotStatusFromDb(client)
+  } catch (err) {
+    process.stderr.write(`agent-comms: endpoint lease gate DB query failed (fail-closed): ${err}\n`)
+    return new Map()
+  }
 }
 
 const DEFAULT_CLAUDE_CMD = 'claude --mcp-config .mcp.json --dangerously-skip-permissions'
@@ -3635,6 +3665,14 @@ function parseBotMetadata(raw: unknown): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function botSupervisorType(metadata: Record<string, unknown>, session: string): string {
+  const explicit = typeof metadata.supervisor_type === 'string' && metadata.supervisor_type.trim()
+    ? metadata.supervisor_type.trim().toLowerCase()
+    : ''
+  if (explicit) return explicit
+  return session ? 'tmux' : 'unknown'
 }
 
 function shellSingleQuote(value: string): string {
@@ -3699,6 +3737,7 @@ async function loadBotRegistry(): Promise<BotEntry[]> {
         ? metadata.tmux_session.trim()
         : ''
       const session = profileSession
+      const supervisorType = botSupervisorType(metadata, session)
       const projectDir = (typeof row.home_directory === 'string' && row.home_directory.trim())
         ? row.home_directory.trim()
         : ''
@@ -3711,7 +3750,7 @@ async function loadBotRegistry(): Promise<BotEntry[]> {
         row.runtime_engine_preference ?? row.runtime ?? null,
       )
       const blockers: string[] = []
-      if (!session) blockers.push('missing_tmux_session')
+      if (supervisorType === 'tmux' && !session) blockers.push('missing_tmux_session')
       if (!projectDir) blockers.push('missing_home_directory')
       if (!port) blockers.push('missing_channel_port')
       if (commandInfo.blocker) blockers.push(commandInfo.blocker)
@@ -3721,6 +3760,7 @@ async function loadBotRegistry(): Promise<BotEntry[]> {
         agentId,
         port,
         command: commandInfo.command,
+        supervisorType,
         source: commandInfo.source,
         blockers,
       })
@@ -3827,8 +3867,6 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
 // cover all six branches with injected deps. This wrapper binds the
 // real tmux / lsof / ps side-effect helpers.
 function checkBotHealth(entry: BotEntry): BotHealthResult {
-  if (!entry.session) return { status: 'misconfigured', details: 'missing tmux session in bot profile' }
-  if (!entry.port || entry.port <= 0) return { status: 'misconfigured', details: 'missing channel_port in bot profile' }
   return checkBotHealthCore(entry, {
     hasSession: tmuxHasSession,
     capture: tmuxCapture,
