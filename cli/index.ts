@@ -38,6 +38,10 @@ import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
+import {
+  buildChannelRegistrationReconcileReport,
+  formatChannelRegistrationReconcileText,
+} from '../core/channel-registration-reconcile'
 import { getAgentDiscordUiId, getDiscordUiBindingForAgent } from '../core/ui-bindings'
 import {
   deterministicWorkspaceId,
@@ -292,6 +296,35 @@ async function channelMembers(args: string[]) {
   console.log(`Members (${members.length}):`)
   for (const m of members) console.log(`  - ${m}`)
   await db.end()
+}
+
+async function channelReconcile(args: string[]) {
+  const { flags } = parseArgs(args)
+  const dryRun = parseRepairDryRun(flags)
+  const format = flags.format ?? 'json'
+  const windowHours = parsePositiveIntFlag(flags['window-hours'], 168, 'window-hours')
+  const db = await getDb()
+  try {
+    const report = await buildChannelRegistrationReconcileReport((db as any).__adapter, {
+      provider: flags.provider ?? 'discord',
+      windowHours,
+      externalChannelId: flags.channel ?? flags['external-channel-id'] ?? null,
+      adapterOwnerAgentId: flags['adapter-owner'] ?? null,
+      primaryAgentId: flags.primary === 'none' ? null : (flags.primary ?? null),
+      members: parseCsvFlag(flags.members) ?? [],
+      dryRun,
+      confirmPlanHash: flags.confirm ?? null,
+      sqlDialect: isSqliteMode() ? 'sqlite' : 'postgres',
+    })
+    if (format === 'text') {
+      process.stdout.write(formatChannelRegistrationReconcileText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+    if (!report.ok) process.exitCode = 2
+  } finally {
+    await db.end()
+  }
 }
 
 function botRoutingConfigPath(): string {
@@ -4480,9 +4513,10 @@ if (command === 'channel') {
   else if (subcommand === 'add-member') await channelAddMember(rest)
   else if (subcommand === 'remove-member') await channelRemoveMember(rest)
   else if (subcommand === 'members') await channelMembers(rest)
+  else if (subcommand === 'reconcile') await channelReconcile(rest)
   else if (subcommand === 'policy') await channelPolicy(rest)
   else {
-    console.error('Usage: agent-com channel <create|add-member|remove-member|members|policy> ...')
+    console.error('Usage: agent-com channel <create|add-member|remove-member|members|reconcile|policy> ...')
     process.exit(1)
   }
 } else if (command === 'agent') {
@@ -4548,6 +4582,7 @@ Commands:
   channel add-member <channel_id> <agent_id>
   channel remove-member <channel_id> <agent_id>
   channel members <channel_id>
+  channel reconcile [--provider discord] [--channel <external_id>] [--adapter-owner <agent>] [--members a,b] [--execute --confirm <plan_hash>|--dry-run]
   channel policy list [--format json|text]
   channel policy import-json [--execute|--dry-run] [--path <file>]
   channel policy bootstrap [--execute|--dry-run] [--extra-allowlist <a,b>] [--overwrite]

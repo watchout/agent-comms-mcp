@@ -55,6 +55,7 @@ import { getChannelPolicy } from '../core/channel-policy'
 import { applyMentionsAutoFill } from '../core/agent-cache'
 import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
 import { notifySenderAndObserve } from '../core/sender-feedback-emit'
+import { recordUnregisteredInboundDiagnostic } from '../core/channel-registration-reconcile'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -570,6 +571,24 @@ export async function handleInboundMessage(params: {
 
   // Step 4: Channel not registered → drop.
   if (!resolved) {
+    try {
+      const diagnosticDb = await d.tryGetDb()
+      await recordUnregisteredInboundDiagnostic(diagnosticDb, {
+        provider: platform,
+        externalChannelId,
+        externalMessageId,
+        receiverAgentId,
+        authorExternalId,
+        authorName,
+        authorIsBot,
+        content,
+        messageId,
+        mentions: resolvedMentions,
+        timestamp,
+      })
+    } catch (err) {
+      writeStderr(`agent-comms: inbound channel diagnostic failed (non-fatal): ${err}\n`)
+    }
     writeStderr(
       `agent-comms: inbound drop — channel ${externalChannelId} not registered in core DB\n`,
     )
