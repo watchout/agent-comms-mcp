@@ -222,7 +222,8 @@ export async function buildOwnerHandoffDiagnostic(
   input: OwnerHandoffDiagnosticInput,
 ): Promise<OwnerHandoffDiagnostic> {
   const queue = input.queueId ? await readQueueEvidence(db, input.queueId) : null
-  const channelId = input.channelId ?? queue?.channel_id ?? null
+  const explicitChannelId = input.channelId ?? null
+  const channelId = explicitChannelId ?? queue?.channel_id ?? null
   const handoffEvidence = input.githubHandoffUrl
     ? { github_url: input.githubHandoffUrl, source: 'metadata_or_flag' as const }
     : null
@@ -254,6 +255,16 @@ export async function buildOwnerHandoffDiagnostic(
       ...base,
       acl: null,
       reason: `queue_id ${queue.queue_id} belongs to ${queue.agent_id}, not ${input.intendedRecipientAgentId}`,
+    }
+  }
+
+  if (queue && explicitChannelId && queue.channel_id !== explicitChannelId) {
+    return {
+      ok: false,
+      status: 'queue_evidence_mismatch',
+      ...base,
+      acl: null,
+      reason: `queue_id ${queue.queue_id} belongs to channel ${queue.channel_id ?? 'unknown'}, not ${explicitChannelId}`,
     }
   }
 

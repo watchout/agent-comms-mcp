@@ -86,13 +86,13 @@ function seedPendingMessage(content = 'probe-content'): { messageId: string; que
   return { messageId, queueId: row.id }
 }
 
-function seedOwnerQueue(agentId = 'probe-owner', content = 'owner handoff'): { messageId: string; queueId: number } {
+function seedOwnerQueue(agentId = 'probe-owner', content = 'owner handoff', channelId = 'probe-f-ch'): { messageId: string; queueId: number } {
   const db = new Database(dbPath)
   const messageId = randomUUID()
-  db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content) VALUES (?, 'probe-f-ch', 'probe-f', ?)`).run(messageId, content)
+  db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content) VALUES (?, ?, 'probe-f', ?)`).run(messageId, channelId, content)
   const payload = JSON.stringify({
     content,
-    channel_id: 'probe-f-ch',
+    channel_id: channelId,
     author_id: 'probe-f',
     message_id: messageId,
   })
@@ -519,6 +519,46 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       sender_agent_id: 'probe-f',
       intended_recipient_agent_id: 'probe-owner',
       channel_id: 'probe-f-ch',
+    })
+  })
+
+  test('worker report rejects owner queue evidence from a different handoff channel', () => {
+    const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channels (id, name, members) VALUES ('other-ch', 'other-ch', '["probe-f","probe-owner"]')`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('other-ch', '["probe-f","probe-owner"]', 'cli-test')`)
+    db.close()
+    const { queueId } = seedOwnerQueue('probe-owner', 'old owner queue', 'probe-f-ch')
+
+    const blocked = runCli([
+      'worker', 'report',
+      '--agent-id', 'probe-f',
+      '--queue-id', String(queueId),
+      '--summary', 'Implementation owner started',
+      '--status', 'running',
+      '--handoff-target', 'probe-owner',
+      '--handoff-channel', 'other-ch',
+      '--pull-request', '#592',
+    ])
+
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('OWNER_HANDOFF_QUEUE_EVIDENCE_MISMATCH')
+    expect(blocked.stderr).toContain(`queue_id ${queueId} belongs to channel probe-f-ch, not other-ch`)
+    expect(dbRead(`SELECT * FROM worker_activity`)).toHaveLength(0)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'owner_handoff.route_diagnostic'`)
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ agent_id: 'probe-f', target: 'probe-owner' })
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      status: 'queue_evidence_mismatch',
+      sender_agent_id: 'probe-f',
+      intended_recipient_agent_id: 'probe-owner',
+      channel_id: 'other-ch',
+      queue: {
+        queue_id: queueId,
+        agent_id: 'probe-owner',
+        channel_id: 'probe-f-ch',
+      },
     })
   })
 

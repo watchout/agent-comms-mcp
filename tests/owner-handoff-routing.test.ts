@@ -80,6 +80,49 @@ describe('owner handoff routing diagnostics', () => {
     })
   })
 
+  test('rejects owner queue evidence when explicit handoff channel differs', async () => {
+    await withOwnerHandoffDb(async (db) => {
+      const queueId = await seedOwnerQueue(db)
+
+      const diagnostic = await buildOwnerHandoffDiagnostic(db, {
+        senderAgentId: 'codex-cto',
+        intendedRecipientAgentId: 'dev-001',
+        queueId,
+        channelId: 'other-ch',
+        githubHandoffUrl: 'https://github.com/watchout/agent-comms-mcp/issues/592#issuecomment-owner',
+      })
+
+      expect(diagnostic.ok).toBe(false)
+      expect(diagnostic.status).toBe('queue_evidence_mismatch')
+      expect(diagnostic.channel_id).toBe('other-ch')
+      expect(diagnostic.queue).toMatchObject({
+        queue_id: queueId,
+        agent_id: 'dev-001',
+        channel_id: 'ops-ch',
+      })
+      expect(diagnostic.reason).toContain('belongs to channel ops-ch, not other-ch')
+
+      await recordOwnerHandoffDiagnostic(db, diagnostic)
+      const audits = await db.query<any>(
+        `SELECT event_type, agent_id, target, detail
+           FROM audit_log
+          WHERE event_type = 'owner_handoff.route_diagnostic'`,
+      )
+      expect(audits).toHaveLength(1)
+      expect(JSON.parse(audits[0].detail)).toMatchObject({
+        status: 'queue_evidence_mismatch',
+        sender_agent_id: 'codex-cto',
+        intended_recipient_agent_id: 'dev-001',
+        channel_id: 'other-ch',
+        queue: {
+          queue_id: queueId,
+          agent_id: 'dev-001',
+          channel_id: 'ops-ch',
+        },
+      })
+    })
+  })
+
   test('records blocked owner diagnostics with outbound ACL evidence', async () => {
     await withOwnerHandoffDb(async (db) => {
       await db.execute(
