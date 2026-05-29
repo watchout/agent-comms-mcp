@@ -334,6 +334,46 @@ describe('NORM-060 full-channel smoke runner', () => {
     expect(incl.channels[0].excluded_agents).toHaveLength(0)
   })
 
+  test('human channel members are excluded from queue smoke targets', async () => {
+    const s = healthy()
+    s.agents = [
+      { agent_id: 'hotel-dev', status: 'idle', agent_type: 'dev', profile_enabled: true, disabled_at: null, metadata: {} },
+      { agent_id: 'ceo', status: 'idle', agent_type: 'human', profile_enabled: true, disabled_at: null, metadata: {} },
+    ]
+    s.targetChannels = [
+      {
+        channel_id: 'hotel-kanri',
+        name: 'hotel-kanri',
+        members: ['hotel-dev', 'ceo'],
+        external_id: 'EID1',
+        adapter_owner_agent_id: 'hotel-dev',
+        primary_agent_id: 'hotel-dev',
+        outbound_allowlist: ['hotel-dev'],
+      },
+    ]
+    s.latestInbound = { ...s.latestInbound, input_mentions: ['hotel-dev', 'ceo'] }
+    s.executePollRows = () => [{ agent_id: 'hotel-dev', status: 'done' }]
+
+    const plan = await run(s)
+    const channel = plan.channels[0]
+    expect(channel.expected_target_agents).toEqual(['hotel-dev'])
+    expect(channel.excluded_agents).toEqual(['ceo'])
+    expect(channel.targets.find((target) => target.agent_id === 'ceo')?.excluded_reason).toBe('human_agent_no_queue')
+    expect(channel.targets.some((target) => target.agent_id === 'ceo' && target.failures.some((failure) => failure.failure_class === 'offline_runtime'))).toBe(false)
+
+    const db = makeDb(s)
+    await buildFullChannelSmokeReport(db as any, {
+      nowMs: () => Date.parse('2026-05-29T01:00:00.000Z'),
+      sleepMs: async () => {},
+      mode: 'execute',
+      confirmPlanHash: plan.plan_hash,
+      timeoutMs: 0,
+      sqlDialect: 'postgres',
+    })
+    const queueWrites = (db as any).__executed.filter((e: any) => e.sql.includes('INSERT INTO message_queue'))
+    expect(queueWrites.map((write: any) => write.params[0])).toEqual(['hotel-dev'])
+  })
+
   test('bounded execute requires confirm plan hash (operator approval)', async () => {
     const report = await run(healthy(), { mode: 'execute', confirmPlanHash: 'wrong-hash', timeoutMs: 0 })
     expect(report.ok).toBe(false)

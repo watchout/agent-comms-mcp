@@ -92,7 +92,7 @@ export interface FullChannelSmokeTarget {
   agent_id: string
   is_member: boolean
   excluded: boolean
-  excluded_reason: 'disabled_profile' | 'test_profile' | null
+  excluded_reason: 'disabled_profile' | 'test_profile' | 'human_agent_no_queue' | null
   lifecycle: FullChannelSmokeLifecycle
   failures: FullChannelSmokeFailure[]
   status: FullChannelSmokeStatus
@@ -279,6 +279,7 @@ interface AgentEvidence {
   active_endpoint: boolean
   disabled: boolean
   test: boolean
+  human: boolean
 }
 
 async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvidence>> {
@@ -304,6 +305,7 @@ async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvide
       String(row.agent_type ?? '') === 'test' ||
       metadata.test === true ||
       metadata.is_test === true
+    const human = String(row.agent_type ?? '') === 'human'
     map.set(agentId, {
       registered: true,
       live_runtime: false,
@@ -312,6 +314,7 @@ async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvide
       active_endpoint: false,
       disabled,
       test,
+      human,
     })
   }
 
@@ -326,6 +329,7 @@ async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvide
         active_endpoint: false,
         disabled: false,
         test: isTestAgentId(agentId),
+        human: false,
       }
       map.set(agentId, entry)
     }
@@ -526,11 +530,15 @@ function selectExpectedTargets(
   agentEvidence: Map<string, AgentEvidence>,
   includeDisabled: boolean,
   includeTest: boolean,
-): { expected: string[]; excluded: Array<{ agent_id: string; reason: 'disabled_profile' | 'test_profile' }> } {
+): { expected: string[]; excluded: Array<{ agent_id: string; reason: NonNullable<FullChannelSmokeTarget['excluded_reason']> }> } {
   const expected: string[] = []
-  const excluded: Array<{ agent_id: string; reason: 'disabled_profile' | 'test_profile' }> = []
+  const excluded: Array<{ agent_id: string; reason: NonNullable<FullChannelSmokeTarget['excluded_reason']> }> = []
   for (const member of members) {
     const ev = agentEvidence.get(member)
+    if (ev?.human) {
+      excluded.push({ agent_id: member, reason: 'human_agent_no_queue' })
+      continue
+    }
     if (ev?.disabled && !includeDisabled) {
       excluded.push({ agent_id: member, reason: 'disabled_profile' })
       continue
