@@ -8,7 +8,9 @@
  * relies on before it writes `agent_messages` or `outbound_queue`:
  *
  *   T-1 existing reply path → kind: 'claim_present'
+ *       only while claim_expires_at is non-null and in the future
  *   T-2 claim closed        → kind: 'claim_unavailable', reason: claim_closed
+ *   T-2b expired claim      → kind: 'claim_unavailable', reason: claim_expired
  *   T-3 claim missing       → kind: 'claim_unavailable', reason: claim_missing
  *   T-4 invalid reply_to    → kind: 'invalid_reply_to' (UUID absent)
  *                              and (UUID present but channel_id NULL)
@@ -33,6 +35,7 @@ beforeAll(async () => {
   try {
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    await client.query(`DELETE FROM outbound_queue WHERE agent_id = $1`, [TEST_AGENT])
     await client.query(`DELETE FROM message_queue WHERE agent_id = ANY($1)`, [[TEST_AGENT, OTHER_AGENT]])
     await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [TEST_CHANNEL])
     dbReachable = true
@@ -44,6 +47,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!dbReachable) return
   try {
+    await client.query(`DELETE FROM outbound_queue WHERE agent_id = $1`, [TEST_AGENT])
     await client.query(`DELETE FROM message_queue WHERE agent_id = ANY($1)`, [[TEST_AGENT, OTHER_AGENT]])
     await client.query(`DELETE FROM agent_messages WHERE channel_id = $1`, [TEST_CHANNEL])
     await client.end()
@@ -69,6 +73,7 @@ async function seedOriginal(opts: {
   channelId?: string | null
   withClaim?: 'received' | 'in_progress' | 'replied' | null
   claimedBy?: string
+  claimExpiresAt?: Date | null
 }): Promise<string> {
   const msgId = randomUUID()
   await client.query(
@@ -77,13 +82,36 @@ async function seedOriginal(opts: {
     [msgId, opts.channelId ?? TEST_CHANNEL, OTHER_AGENT],
   )
   if (opts.withClaim) {
+    const claimExpiresAt = opts.claimExpiresAt === undefined
+      ? new Date(Date.now() + 300_000)
+      : opts.claimExpiresAt
     await client.query(
       `INSERT INTO message_queue (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
-       VALUES ($1, $2, '{}'::jsonb, $3, $4, now(), now() + interval '30 seconds')`,
-      [opts.claimedBy ?? TEST_AGENT, msgId, opts.withClaim, opts.claimedBy ?? TEST_AGENT],
+       VALUES ($1, $2, '{}'::jsonb, $3, $4, now(), $5)`,
+      [opts.claimedBy ?? TEST_AGENT, msgId, opts.withClaim, opts.claimedBy ?? TEST_AGENT, claimExpiresAt],
     )
   }
   return msgId
+}
+
+async function countProjectionWrites(replyTo: string): Promise<{ messages: number; outbound: number }> {
+  const messages = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM agent_messages
+      WHERE reply_to::text = $1 AND author_id = $2`,
+    [replyTo, TEST_AGENT],
+  )
+  const outbound = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM outbound_queue oq
+       JOIN agent_messages am ON am.id::text = oq.message_id::text
+      WHERE am.reply_to::text = $1 AND oq.agent_id = $2`,
+    [replyTo, TEST_AGENT],
+  )
+  return {
+    messages: Number(messages.rows[0]?.count ?? '0'),
+    outbound: Number(outbound.rows[0]?.count ?? '0'),
+  }
 }
 
 async function inTx<T>(fn: (txClient: Client) => Promise<T>): Promise<T> {
@@ -133,6 +161,42 @@ describe('test_send_claim_terminal_evidence — decideSendFallback decision tree
       expect(decision.status).toBe('replied')
       expect(decision.queueId).toBeDefined()
     }
+  })
+
+  test('T-2b (expired received claim): fail-closed before projection writes', async () => {
+    requireDb()
+    const replyTo = await seedOriginal({
+      withClaim: 'received',
+      claimExpiresAt: new Date(Date.now() - 30_000),
+    })
+    const before = await countProjectionWrites(replyTo)
+    const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
+    const after = await countProjectionWrites(replyTo)
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
+      expect(decision.reason).toBe('claim_expired')
+      expect(decision.status).toBe('received')
+      expect(decision.queueId).toBeDefined()
+    }
+    expect(after).toEqual(before)
+  })
+
+  test('T-2c (expired in_progress claim): fail-closed before projection writes', async () => {
+    requireDb()
+    const replyTo = await seedOriginal({
+      withClaim: 'in_progress',
+      claimExpiresAt: new Date(Date.now() - 30_000),
+    })
+    const before = await countProjectionWrites(replyTo)
+    const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
+    const after = await countProjectionWrites(replyTo)
+    expect(decision.kind).toBe('claim_unavailable')
+    if (decision.kind === 'claim_unavailable') {
+      expect(decision.reason).toBe('claim_expired')
+      expect(decision.status).toBe('in_progress')
+      expect(decision.queueId).toBeDefined()
+    }
+    expect(after).toEqual(before)
   })
 
   test('T-3 (claim missing): no claim ever existed → claim_unavailable/claim_missing', async () => {

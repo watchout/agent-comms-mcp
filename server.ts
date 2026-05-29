@@ -2195,6 +2195,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }],
           }
         }
+        if (decision.reason === 'claim_expired') {
+          const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
+          const statusSuffix = decision.status ? ` status=${decision.status}` : ''
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [CLAIM_EXPIRED]: active claim expired for reply_to=${reply_to}${queueSuffix}${statusSuffix}; reclaim or call next before send. No outbound projection queued.`,
+            }],
+            isError: true,
+          }
+        }
         return {
           content: [{
             type: 'text',

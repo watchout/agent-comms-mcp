@@ -11,11 +11,14 @@
  *
  *   - `claim_present` → use the existing reply path; `claimedMqId`
  *     identifies the row to mark `'replied'` after the outbound INSERT.
- *     Both `received` and `in_progress` are active claims: `processing`
- *     advances a claimed row to `in_progress` before the LLM replies.
+ *     Both `received` and `in_progress` are active claims only while
+ *     their `claim_expires_at` TTL is present and still in the future:
+ *     `processing` advances a claimed row to `in_progress` before the
+ *     LLM replies, and the heartbeat path extends live TTLs.
  *   - `claim_unavailable` → refuse before projection. The caller can
- *     surface an already-closed no-op or a missing-claim error, but it
- *     must not write `agent_messages`, `message_queue`, or `outbound_queue`.
+ *     surface an already-closed no-op, an expired-claim error, or a
+ *     missing-claim error, but it must not write `agent_messages`,
+ *     `message_queue`, or `outbound_queue`.
  *   - `invalid_reply_to` → the §B-5 invariant fires; reject so we
  *     never broadcast on a UUID with no resolvable channel.
  *
@@ -42,7 +45,7 @@ export type SendFallbackDecision =
   | { kind: 'claim_present'; claimedMqId: number | string }
   | {
       kind: 'claim_unavailable'
-      reason: 'claim_closed' | 'claim_missing'
+      reason: 'claim_closed' | 'claim_expired' | 'claim_missing'
       queueId?: number | string
       status?: string
     }
@@ -78,7 +81,11 @@ export async function decideSendFallback(
   // as missing and leave the queue row open.
   const claimRow = await txClient.query<{ id: number | string }>(
     `SELECT id FROM message_queue
-        WHERE message_id = $1 AND claimed_by = $2 AND status IN ('received', 'in_progress')
+        WHERE message_id = $1
+          AND claimed_by = $2
+          AND status IN ('received', 'in_progress')
+          AND claim_expires_at IS NOT NULL
+          AND claim_expires_at > now()
         FOR UPDATE`,
     [reply_to, agentId],
   )
@@ -101,8 +108,12 @@ export async function decideSendFallback(
   //    (message_id, agent_id) rather than claimed_by: terminal sends
   //    clear claimed_by, and #580 needs that closed evidence surfaced as
   //    an explicit no-op instead of a duplicate notify-style post.
-  const queueRow = await txClient.query<{ id: number | string; status: string }>(
-    `SELECT id, status
+  const queueRow = await txClient.query<{
+    id: number | string
+    status: string
+    claimed_by: string | null
+  }>(
+    `SELECT id, status, claimed_by
        FROM message_queue
       WHERE message_id = $1 AND agent_id = $2
       ORDER BY created_at ASC, id ASC
@@ -111,9 +122,14 @@ export async function decideSendFallback(
   )
   if (queueRow.rows.length > 0) {
     const row = queueRow.rows[0]
+    const reason = ['replied', 'done', 'skipped', 'failed'].includes(row.status)
+      ? 'claim_closed'
+      : row.claimed_by === agentId && ['received', 'in_progress'].includes(row.status)
+        ? 'claim_expired'
+        : 'claim_missing'
     return {
       kind: 'claim_unavailable',
-      reason: ['replied', 'done', 'skipped', 'failed'].includes(row.status) ? 'claim_closed' : 'claim_missing',
+      reason,
       queueId: row.id,
       status: row.status,
     }
