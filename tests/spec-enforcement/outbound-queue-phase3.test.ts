@@ -93,10 +93,12 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     expect(ddl).toMatch(/created_at\s+TIMESTAMPTZ\s+NOT NULL\s+DEFAULT now\(\)/)
     expect(ddl).toMatch(/sent_at\s+TIMESTAMPTZ/)
   })
-  test('transitional status CHECK accepts legacy processing before CP-3', () => {
+  test('transitional status CHECK accepts legacy processing and canonical claimed before CP-3', () => {
     // S2-A pre-CP-3 accepted 'processing' so the later CP-3 block can
     // rename old in-flight rows to the canonical 'claimed' vocabulary.
-    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'processing'\s*,\s*'sent'\s*,\s*'failed'\s*\)\s*\)/)
+    // Migration reruns must also tolerate already-canonical 'claimed'
+    // rows until the final CP-3 CHECK is reinstated.
+    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'processing'\s*,\s*'claimed'\s*,\s*'sent'\s*,\s*'failed'\s*\)\s*\)/)
   })
   test('idx_oq_pending partial index is created', () => {
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_oq_pending/)

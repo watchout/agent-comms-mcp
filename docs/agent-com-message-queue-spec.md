@@ -176,9 +176,11 @@ CREATE INDEX idx_outbound_queue_agent_pending_next_retry
 **Migration/test vocabulary note (#585, 2026-05-29)**:
 `outbound_queue.status='claimed'` is the canonical claim state for both
 PostgreSQL and SQLite. Postgres `db/migrate.ts` still contains a transitional
-pre-CP-3 block that temporarily accepts legacy `'processing'` so old rows can
-be renamed in the immediately following CP-3 transaction; that is not target
-state. `db/rollback-claim-vocabulary.sql` is the only supported path that
+pre-CP-3 block that temporarily accepts legacy `'processing'` and
+already-canonical `'claimed'` rows so old rows can be renamed in the
+immediately following CP-3 transaction and reruns remain idempotent; that
+temporary broader CHECK is not target state. `db/rollback-claim-vocabulary.sql`
+is the only supported path that
 reintroduces `'processing'`, and only for explicit down migration. Contract
 tests must assert the final post-migration CHECK vocabulary
 (`pending`, `claimed`, `sent`, `failed`) and must not require live DBs to carry
