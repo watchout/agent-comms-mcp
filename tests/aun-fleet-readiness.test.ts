@@ -9,17 +9,18 @@ function fakeDb(): DbAdapter {
   const query = async (sql: string) => {
     if (sql.includes('FROM agents')) {
       return [
-        { agent_id: 'codex-aun', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-aun' } },
-        { agent_id: 'ready-dev', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-ready' } },
-        { agent_id: 'offline-dev', status: 'offline', runtime: 'TUI', metadata: { tmux_session: 'discord-offline' } },
-        { agent_id: 'missing-runtime', status: 'idle', runtime: 'TUI', metadata: {} },
-        { agent_id: 'test-bot', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-test' } },
+        { agent_id: 'codex-aun', agent_type: 'dev', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-aun' }, profile_enabled: true, disabled_at: null },
+        { agent_id: 'ready-dev', agent_type: 'dev', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-ready' }, profile_enabled: true, disabled_at: null },
+        { agent_id: 'offline-dev', agent_type: 'dev', status: 'offline', runtime: 'TUI', metadata: { tmux_session: 'discord-offline' }, profile_enabled: true, disabled_at: null },
+        { agent_id: 'missing-runtime', agent_type: 'dev', status: 'idle', runtime: 'TUI', metadata: {}, profile_enabled: true, disabled_at: null },
+        { agent_id: 'test-bot', agent_type: 'dev', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-test', profile_class: 'test' }, profile_enabled: true, disabled_at: null },
+        { agent_id: 'disabled-bot', agent_type: 'dev', status: 'idle', runtime: 'TUI', metadata: { tmux_session: 'discord-disabled' }, profile_enabled: false, disabled_at: null },
       ]
     }
     if (sql.includes('FROM channels')) {
       return [
         { id: 'agent-com', name: 'agent-com', members: ['codex-aun', 'ready-dev', 'offline-dev', 'missing-runtime'] },
-        { id: 'test', name: 'test', members: ['test-bot'] },
+        { id: 'test', name: 'test', members: ['test-bot', 'disabled-bot'] },
       ]
     }
     if (sql.includes('FROM agent_runtime_instances')) return []
@@ -74,7 +75,6 @@ function fakeDb(): DbAdapter {
 describe('AUN fleet readiness', () => {
   test('classifies ready, activation candidate, and excluded agents from DB evidence', async () => {
     const report = await buildAunFleetReadinessReport(fakeDb(), {
-      denylist: ['test-bot'],
       smokeRunId: 'RUN1',
       requireSmoke: true,
     })
@@ -88,13 +88,25 @@ describe('AUN fleet readiness', () => {
     expect(byAgent['missing-runtime'].blockers).toContain('no_runtime_evidence')
     expect(byAgent['missing-runtime'].blockers).toContain('smoke_missing')
     expect(byAgent['test-bot'].readiness).toBe('excluded')
-    expect(byAgent['test-bot'].actions).toContain('remove from STATE_DAEMON_AGENT_DENYLIST in a reviewed PR before activation')
-    expect(report.summary).toMatchObject({ agents: 5, ready: 2, excluded: 1 })
+    expect(byAgent['test-bot'].blockers).toContain('test_profile_excluded')
+    expect(byAgent['disabled-bot'].readiness).toBe('excluded')
+    expect(byAgent['disabled-bot'].blockers).toContain('disabled_profile_excluded')
+    expect(report.summary).toMatchObject({ agents: 6, ready: 2, excluded: 2 })
+  })
+
+  test('can explicitly include test profiles in readiness', async () => {
+    const report = await buildAunFleetReadinessReport(fakeDb(), {
+      smokeRunId: 'RUN1',
+      requireSmoke: true,
+      includeTestProfiles: true,
+    })
+    const testBot = report.agents.find((agent) => agent.agent_id === 'test-bot')
+    expect(testBot?.readiness).toBe('activation_candidate')
+    expect(testBot?.blockers).toContain('smoke_missing')
   })
 
   test('formats a compact operator report', async () => {
     const report = await buildAunFleetReadinessReport(fakeDb(), {
-      denylist: ['test-bot'],
       smokeRunId: 'RUN1',
     })
     const text = formatAunFleetReadinessText(report)

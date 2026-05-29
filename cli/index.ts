@@ -36,6 +36,12 @@ import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doc
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
+import {
+  buildRuntimeCleanupReport,
+  executeRuntimeCleanup,
+  formatRuntimeCleanupText,
+  parseLsofTcpListeners,
+} from '../core/runtime-cleanup'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
 import {
@@ -67,7 +73,8 @@ import {
   type LeaseScopeType,
 } from '../core/control-plane-leases'
 import { syncChannelPolicyConnectors, type BindingRole, type OrderingScope } from '../core/channel-connector-sync'
-import { buildLiveTmuxProfileDoctorBlockers } from '../core/tmux-runtime-inspector'
+import { buildLiveTmuxProfileDoctorBlockers, parseTmuxListPanes } from '../core/tmux-runtime-inspector'
+import { profileExclusionReason } from '../core/profile-classification'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -1855,15 +1862,20 @@ async function agentProfile(args: string[]) {
     if (action === 'doctor') {
       const strict = flags.strict === 'true' || flags.strict === '1' || flags.strict === ''
       const liveTmux = flags['live-tmux'] === 'true' || flags['live-tmux'] === '1' || flags['live-tmux'] === ''
+      const includeDisabledProfiles = hasFlag(flags, 'include-disabled') && flagEnabled(flags['include-disabled'])
+      const includeTestProfiles = hasFlag(flags, 'include-test') && flagEnabled(flags['include-test'])
       const rows = await db.query(
         `SELECT agent_id, display_name, agent_type, runtime, status, metadata,
                 ui_id, ui_handle, home_directory, channel_port, runtime_engine_preference,
-                provider_token_source_ref, expected_provider_identity, profile_enabled
+                provider_token_source_ref, expected_provider_identity, profile_enabled, disabled_at
            FROM agents
           WHERE agent_type <> 'human'
-            AND COALESCE(profile_enabled, true) = true
           ORDER BY agent_id`,
       )
+      const activeRows = rows.rows.filter((row: any) => profileExclusionReason(row, {
+        includeDisabledProfiles,
+        includeTestProfiles,
+      }) === null)
       const blockers: Array<Record<string, unknown>> = []
       const homeByPath = new Map<string, string[]>()
       const portOwners = new Map<number, string[]>()
@@ -1871,7 +1883,7 @@ async function agentProfile(args: string[]) {
       const uiIdOwners = new Map<number, string[]>()
       const uiHandleOwners = new Map<string, { ui_handle: string; agents: string[] }>()
       const expectedAliases: Array<{ alias: string; canonical_agent_id: string }> = []
-      for (const row of rows.rows) {
+      for (const row of activeRows) {
         const agentId = String(row.agent_id)
         const metadata = parseJsonObject(row.metadata)
         const uiId = Number(row.ui_id)
@@ -1955,7 +1967,7 @@ async function agentProfile(args: string[]) {
         if (current.agents.length > 1) blockers.push({ code: 'duplicate_ui_handle', ui_handle: current.ui_handle, agents: current.agents })
       }
       const tokenRefs = new Map<string, string[]>()
-      for (const row of rows.rows) {
+      for (const row of activeRows) {
         if (typeof row.provider_token_source_ref !== 'string' || !row.provider_token_source_ref.trim()) continue
         const agents = tokenRefs.get(row.provider_token_source_ref) ?? []
         agents.push(String(row.agent_id))
@@ -1992,7 +2004,7 @@ async function agentProfile(args: string[]) {
           blockers.push(...buildLiveTmuxProfileDoctorBlockers({
             tmuxOutput,
             processOutput,
-            expectations: rows.rows.map((row: any) => {
+            expectations: activeRows.map((row: any) => {
               const metadata = parseJsonObject(row.metadata)
               const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
                 ? metadata.tmux_session.trim()
@@ -2008,6 +2020,7 @@ async function agentProfile(args: string[]) {
         }
       }
       if (strict) {
+        const activeAgentIds = new Set(activeRows.map((row: any) => String(row.agent_id)))
         const workspaceRows = await db.query(
           `SELECT a.agent_id, a.home_directory, b.workspace_id
              FROM agents a
@@ -2020,10 +2033,11 @@ async function agentProfile(args: string[]) {
               AND b.binding_role = 'primary'
               AND b.active = true
             WHERE a.agent_type <> 'human'
-              AND COALESCE(a.profile_enabled, true) = true
+              ${includeDisabledProfiles ? '' : 'AND COALESCE(a.profile_enabled, true) = true AND a.disabled_at IS NULL'}
               AND a.home_directory IS NOT NULL`,
         )
         for (const row of workspaceRows.rows) {
+          if (!activeAgentIds.has(String(row.agent_id))) continue
           if (!row.workspace_id) {
             blockers.push({
               agent_id: row.agent_id,
@@ -2040,6 +2054,7 @@ async function agentProfile(args: string[]) {
             ORDER BY agent_id, started_at DESC`,
         ).catch(() => ({ rows: [] as any[] }))
         for (const row of runtimeRows.rows) {
+          if (!activeAgentIds.has(String(row.agent_id))) continue
           blockers.push({
             agent_id: row.agent_id,
             runtime_instance_id: row.runtime_instance_id,
@@ -2053,6 +2068,7 @@ async function agentProfile(args: string[]) {
             ORDER BY agent_id, provider, connector_uri`,
         ).catch(() => ({ rows: [] as any[] }))
         for (const row of connectorRows.rows) {
+          if (!activeAgentIds.has(String(row.agent_id))) continue
           const metadata = parseJsonObject(row.metadata)
           if (metadata.source !== 'bot_profile_projector' && metadata.source !== 'runtime_heartbeat') {
             blockers.push({
@@ -2081,10 +2097,12 @@ async function agentProfile(args: string[]) {
               AND cpl.expires_at > now()
             WHERE ci.status = 'active'
               AND a.agent_type <> 'human'
-              AND COALESCE(a.profile_enabled, true) = true
+              ${includeDisabledProfiles ? '' : 'AND COALESCE(a.profile_enabled, true) = true AND a.disabled_at IS NULL'}
             ORDER BY ci.agent_id, ci.provider, ci.connector_uri`,
         ).catch(() => ({ rows: [] as any[] }))
         for (const row of activeConnectorEndpointRows.rows) {
+          const agent = activeRows.find((candidate: any) => String(candidate.agent_id) === String(row.agent_id))
+          if (!agent) continue
           if (!row.runtime_instance_id) {
             blockers.push({
               agent_id: row.agent_id,
@@ -2109,7 +2127,10 @@ async function agentProfile(args: string[]) {
         ok: blockers.length === 0,
         strict,
         live_tmux: liveTmux,
-        checked_agents: rows.rows.length,
+        include_disabled_profiles: includeDisabledProfiles,
+        include_test_profiles: includeTestProfiles,
+        checked_agents: activeRows.length,
+        excluded_agents: rows.rows.length - activeRows.length,
         blockers,
       }, null, 2)}\n`)
       if (blockers.length > 0) process.exitCode = 1
@@ -3641,28 +3662,82 @@ async function directory(args: string[]) {
 
 async function runtimeCommand(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
-  if (subcommand !== 'inventory') {
-    console.error('Usage: agent-com runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--provider discord] [--binding-role outbound]')
+  if (subcommand !== 'inventory' && subcommand !== 'cleanup') {
+    console.error('Usage: agent-com runtime <inventory|cleanup> ...')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
   const staleMinutes = parsePositiveIntFlag(flags['stale-minutes'], 15, 'stale-minutes')
   const db = await getDb()
   try {
-    const report = await buildRuntimeInventoryReport((db as any).__adapter, {
+    if (subcommand === 'inventory') {
+      const report = await buildRuntimeInventoryReport((db as any).__adapter, {
+        staleMinutes,
+        expectedCommit: flags['expected-commit'] ?? null,
+        provider: flags.provider ?? 'discord',
+        bindingRole: flags['binding-role'] ?? 'outbound',
+      })
+      if (format === 'text') {
+        process.stdout.write(formatRuntimeInventoryText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      return
+    }
+
+    const dryRun = parseRepairDryRun(flags)
+    const snapshots = collectRuntimeCleanupSnapshots()
+    const includeDisabledProfiles = hasFlag(flags, 'include-disabled') && flagEnabled(flags['include-disabled'])
+    const includeTestProfiles = hasFlag(flags, 'include-test') && flagEnabled(flags['include-test'])
+    const commonOptions = {
       staleMinutes,
-      expectedCommit: flags['expected-commit'] ?? null,
-      provider: flags.provider ?? 'discord',
-      bindingRole: flags['binding-role'] ?? 'outbound',
-    })
+      includeDisabledProfiles,
+      includeTestProfiles,
+      tmuxPanes: snapshots.tmuxPanes,
+      portListeners: snapshots.portListeners,
+    }
+    const report = dryRun
+      ? await buildRuntimeCleanupReport((db as any).__adapter, commonOptions, true)
+      : await executeRuntimeCleanup((db as any).__adapter, {
+        ...commonOptions,
+        confirmHash: flags.confirm ?? '',
+        allowUnknownRisk: hasFlag(flags, 'allow-unknown-risk') && flagEnabled(flags['allow-unknown-risk']),
+        killProcess: async (pid) => {
+          process.kill(pid, 'SIGTERM')
+        },
+        killTmuxSession: async (session) => {
+          execFileSync('tmux', ['kill-session', '-t', session], { stdio: 'ignore' })
+        },
+      })
     if (format === 'text') {
-      process.stdout.write(formatRuntimeInventoryText(report))
+      process.stdout.write(formatRuntimeCleanupText(report))
     } else {
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
     }
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`)
+    process.exitCode = 1
   } finally {
     await db.end()
   }
+}
+
+function collectRuntimeCleanupSnapshots() {
+  let tmuxPanes: ReturnType<typeof parseTmuxListPanes> = []
+  let portListeners: ReturnType<typeof parseLsofTcpListeners> = []
+  try {
+    const tmuxOutput = execFileSync('tmux', ['list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}\t#{pane_current_path}'], {
+      encoding: 'utf8',
+    })
+    tmuxPanes = parseTmuxListPanes(tmuxOutput)
+  } catch {}
+  try {
+    const lsofOutput = execFileSync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN'], {
+      encoding: 'utf8',
+    })
+    portListeners = parseLsofTcpListeners(lsofOutput)
+  } catch {}
+  return { tmuxPanes, portListeners }
 }
 
 async function inboundCommand(subcommand: string | undefined, args: string[]) {
@@ -3694,7 +3769,7 @@ async function inboundCommand(subcommand: string | undefined, args: string[]) {
 async function fleetCommand(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand !== 'readiness') {
-    console.error('Usage: agent-com fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke]')
+    console.error('Usage: agent-com fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke] [--include-disabled] [--include-test]')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
@@ -3705,6 +3780,8 @@ async function fleetCommand(subcommand: string | undefined, args: string[]) {
       smokeRunId: flags['smoke-run-id'] ?? null,
       requireSmoke: hasFlag(flags, 'require-smoke') ? flagEnabled(flags['require-smoke']) : undefined,
       operatorAgentId: flags['operator-agent-id'] ?? 'codex-aun',
+      includeDisabledProfiles: hasFlag(flags, 'include-disabled') && flagEnabled(flags['include-disabled']),
+      includeTestProfiles: hasFlag(flags, 'include-test') && flagEnabled(flags['include-test']),
     })
     if (format === 'text') {
       process.stdout.write(formatAunFleetReadinessText(report))
@@ -4687,7 +4764,7 @@ Commands:
   agent profile get <agent_id>
   agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
   agent profile project <agent_id>|--all [--execute|--dry-run]
-  agent profile doctor [--strict] [--live-tmux]
+  agent profile doctor [--strict] [--live-tmux] [--include-disabled] [--include-test]
   status
 
 Message I/O (requires AGENT_ID env var):
@@ -4715,9 +4792,11 @@ Message I/O (requires AGENT_ID env var):
   directory [--format json|text]                       — bot/channel directory and sendability report
   runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--binding-role outbound]
                                                        — read-only runtime/connector/binding freshness report
+  runtime cleanup [--format json|text] [--stale-minutes 15] [--execute --confirm <plan_hash>] [--allow-unknown-risk] [--include-disabled] [--include-test]
+                                                       — dry-run stale runtime/listener/tmux cleanup plan; execute requires a matching plan hash
   inbound smoke [--format json|text] [--window-hours 168]
                                                        — read-only Discord inbound smoke evidence by channel
-  fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke]
+  fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke] [--include-disabled] [--include-test]
                                                        — read-only all-agent AUN readiness gates and activation blockers
   worker report --agent-id <agent> --summary <text> [--status running|blocked|stalled|failed|completed|handoff] [--queue-id <id>] [--repository <repo>] [--branch <branch>] [--pull-request <ref>] [--progress 0-100] [--progress-label <phase>] [--stale-after-sec 120] [--blocked-reason <text>] [--handoff-target <agent>] [--handoff-channel <id>]
                                                        — write DB-backed current activity evidence for an internal worker

@@ -36,6 +36,7 @@ const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const RUNTIME_INVENTORY_PATH = join(REPO_ROOT, 'core', 'runtime-inventory.ts')
+const RUNTIME_CLEANUP_PATH = join(REPO_ROOT, 'core', 'runtime-cleanup.ts')
 const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
 const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
@@ -48,6 +49,7 @@ const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const RUNTIME_INVENTORY_SRC = readFileSync(RUNTIME_INVENTORY_PATH, 'utf-8')
+const RUNTIME_CLEANUP_SRC = readFileSync(RUNTIME_CLEANUP_PATH, 'utf-8')
 const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
 const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
@@ -435,6 +437,28 @@ describe('T11b — runtime inventory CLI surface', () => {
   })
 })
 
+describe('T11b2 — runtime cleanup lifecycle CLI surface', () => {
+  test('help documents the runtime cleanup plan and approval flags', () => {
+    expect(CLI_SRC).toMatch(/runtime cleanup \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/\[--execute --confirm <plan_hash>\]/)
+    expect(CLI_SRC).toMatch(/\[--allow-unknown-risk\]/)
+    expect(CLI_SRC).toMatch(/dry-run stale runtime\/listener\/tmux cleanup plan/)
+  })
+
+  test('runtime cleanup has stable dry-run plan hash, approval gate, and audit evidence', () => {
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/plan_hash/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/default_mode: 'dry-run'/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/execute_requires_plan_hash: true/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/unknown_risk_requires_override: true/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/UNKNOWN_RISK_REFUSED/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/runtime\.cleanup_target/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/runtime_instance_id/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/tmux_session/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/kill_process/)
+    expect(RUNTIME_CLEANUP_SRC).toMatch(/kill_tmux_session/)
+  })
+})
+
 describe('T11c — inbound smoke evidence CLI surface', () => {
   test('help documents the inbound smoke report', () => {
     expect(CLI_SRC).toMatch(/inbound smoke \[--format json\|text\] \[--window-hours 168\]/)
@@ -454,12 +478,15 @@ describe('T11c — inbound smoke evidence CLI surface', () => {
 describe('T11d — AUN fleet readiness CLI surface', () => {
   test('help documents the fleet readiness report', () => {
     expect(CLI_SRC).toMatch(/fleet readiness \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/\[--include-disabled\] \[--include-test\]/)
     expect(CLI_SRC).toMatch(/read-only all-agent AUN readiness gates and activation blockers/)
   })
 
   test('fleet readiness is DB-evidence based and read-only', () => {
     expect(AUN_FLEET_READINESS_SRC).toMatch(/db_is_source_of_truth/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/STATE_DAEMON_AGENT_DENYLIST/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/disabled_profile_excluded/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/test_profile_excluded/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/smoke_request_not_terminal/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/smoke_ack_missing/)
     expect(AUN_FLEET_READINESS_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
