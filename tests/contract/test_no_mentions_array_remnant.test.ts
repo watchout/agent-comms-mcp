@@ -160,6 +160,10 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
   dbDescribe('SELECT count(*) FROM message_queue WHERE recipient_id IN cc[] AND created_at >= test_start → 0', async () => {
     const client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    const { resetChannelPolicyCache } = await import('../../core/channel-policy')
+    const previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+    resetChannelPolicyCache()
     try {
       // Capture wall-clock floor for the SQL assertion.
       const testStartIso = new Date().toISOString()
@@ -205,6 +209,12 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
       // production verification.
       expect(r.rows[0].c).toBe(0)
     } finally {
+      if (previousFileFallback === undefined) {
+        delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
+      } else {
+        process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
+      }
+      resetChannelPolicyCache()
       await client.end()
     }
   })
