@@ -93,9 +93,12 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     expect(ddl).toMatch(/created_at\s+TIMESTAMPTZ\s+NOT NULL\s+DEFAULT now\(\)/)
     expect(ddl).toMatch(/sent_at\s+TIMESTAMPTZ/)
   })
-  test('status CHECK constraint covers pending/processing/sent/failed', () => {
-    // S2-A (FEAT-005): 'processing' added to allow atomic claim flip.
-    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'processing'\s*,\s*'sent'\s*,\s*'failed'\s*\)\s*\)/)
+  test('transitional status CHECK accepts legacy processing and canonical claimed before CP-3', () => {
+    // S2-A pre-CP-3 accepted 'processing' so the later CP-3 block can
+    // rename old in-flight rows to the canonical 'claimed' vocabulary.
+    // Migration reruns must also tolerate already-canonical 'claimed'
+    // rows until the final CP-3 CHECK is reinstated.
+    expect(MIGRATE_SRC).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'pending'\s*,\s*'processing'\s*,\s*'claimed'\s*,\s*'sent'\s*,\s*'failed'\s*\)\s*\)/)
   })
   test('idx_oq_pending partial index is created', () => {
     expect(MIGRATE_SRC).toMatch(/CREATE INDEX IF NOT EXISTS idx_oq_pending/)
@@ -123,7 +126,7 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
     expect(SERVER_SRC).toMatch(/OUTBOUND_POLL_INTERVAL_MS\s*=\s*1000/)
   })
   test('consumer claims rows with FOR UPDATE SKIP LOCKED inside an UPDATE … RETURNING', () => {
-    // S2-A (FEAT-005): atomic claim flips status → 'processing' + sets claimed_at
+    // S2-A / FEAT-005 CP-3: atomic claim flips status → 'claimed' + sets claimed_at
     // + bumps attempts in a single UPDATE, and filters WHERE agent_id so each
     // bot only consumes its own rows. See s2a-daemon-owns-outbound.test.ts for
     // the atomic-claim invariants.

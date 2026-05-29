@@ -1162,9 +1162,13 @@ async function migrate() {
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS discord_message_id TEXT;
 
     -- S2-A (FEAT-005 pre-CP-3) CHECK: drop + re-add so pre-S2-A DBs
-    -- accept the atomic claim flip. Postgres has no in-place CHECK
-    -- mutation; DO $$ for idempotency. CP-3 block below then renames
-    -- 'processing' → 'claimed' in a single transaction.
+    -- accept the atomic claim flip. Keep this transitional CHECK
+    -- permissive for both legacy 'processing' and already-migrated
+    -- 'claimed' rows; migration reruns on post-CP-3 databases must not
+    -- reject canonical rows before the CP-3 block reinstalls the final
+    -- vocabulary. Postgres has no in-place CHECK mutation; DO $$ for
+    -- idempotency. CP-3 block below then renames 'processing' → 'claimed'
+    -- in a single transaction.
     DO $$
     BEGIN
       IF EXISTS (
@@ -1176,7 +1180,7 @@ async function migrate() {
       END IF;
       ALTER TABLE outbound_queue
         ADD CONSTRAINT outbound_queue_status_check
-        CHECK (status IN ('pending', 'processing', 'sent', 'failed'));
+        CHECK (status IN ('pending', 'processing', 'claimed', 'sent', 'failed'));
     END $$;
 
     CREATE INDEX IF NOT EXISTS idx_outbound_queue_agent_pending_next_retry
