@@ -2634,6 +2634,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           consumer_source: projection.consumerSource,
           consumer_evidence: projection.consumerEvidence,
           projection_source: projection.projectionSource,
+          delivery_fallback_reason: projection.deliveryFallbackReason,
+          delivery_diagnostics: projection.deliveryDiagnostics,
           reason: outboundSkipReason,
         })
       } else {
@@ -2657,8 +2659,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             : decoratedPartContent
           try {
             await txClient.query(
-              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
               // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars to
               // match spec §5.3 エラーハンドリング. truncateForPlatform's 2000-char
               // limit is the raw Discord hard cap; truncateForDiscord bakes in
@@ -2668,12 +2670,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 partMessageId,
                 agentId,
                 projection.consumerAgentId,
+                projection.consumerSource,
                 projection.consumerEvidence?.connector_instance_id ?? null,
                 projection.consumerEvidence?.channel_binding_id ?? null,
+                projection.consumerEvidence?.provider_channel_access_id ?? null,
                 projection.projectionIdentityId,
                 projection.intendedProjectionIdentityId,
                 projection.projectionSource,
                 projection.projectionFallbackReason,
+                projection.deliveryFallbackReason,
+                JSON.stringify(projection.deliveryDiagnostics),
                 externalId,
                 truncateForDiscord(partContent),
               ],
@@ -3037,11 +3043,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         code: outboundProjectionSkipCode(outboundSkipReason),
         message_ids: partIds,
         channel_external_id: projection.channelExternalId,
-        consumer_source: projection.consumerSource,
-        consumer_evidence: projection.consumerEvidence,
-        projection_source: projection.projectionSource,
-        reason: outboundSkipReason,
-      })
+          consumer_source: projection.consumerSource,
+          consumer_evidence: projection.consumerEvidence,
+          projection_source: projection.projectionSource,
+          delivery_fallback_reason: projection.deliveryFallbackReason,
+          delivery_diagnostics: projection.deliveryDiagnostics,
+          reason: outboundSkipReason,
+        })
     } else {
       const externalId = projection.channelExternalId!
       // Issue #248 follow-up — same Discord snowflake prefix as the send tool.
@@ -3061,20 +3069,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : decoratedPartContent
         try {
           await client.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
             // v2.1.0: clamp at DISCORD_MAX (1900) before enqueue — see send-tool
             // call site above for rationale.
             [
               partMessageId,
               agentId,
               projection.consumerAgentId,
+              projection.consumerSource,
               projection.consumerEvidence?.connector_instance_id ?? null,
               projection.consumerEvidence?.channel_binding_id ?? null,
+              projection.consumerEvidence?.provider_channel_access_id ?? null,
               projection.projectionIdentityId,
               projection.intendedProjectionIdentityId,
               projection.projectionSource,
               projection.projectionFallbackReason,
+              projection.deliveryFallbackReason,
+              JSON.stringify(projection.deliveryDiagnostics),
               externalId,
               truncateForDiscord(partContent),
             ],

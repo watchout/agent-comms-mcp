@@ -1102,13 +1102,17 @@ async function migrate() {
       message_id TEXT NOT NULL,            -- agent_messages.id of the row to deliver
       agent_id TEXT NOT NULL,              -- canonical author agent_id
       consumer_agent_id TEXT,              -- adapter owner that claims/posts this row (#410)
+      consumer_source TEXT,                -- resolver source for delivery consumer (#604)
       delivery_connector_instance_id UUID REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL,
       channel_binding_id UUID REFERENCES channel_connector_bindings(channel_binding_id) ON DELETE SET NULL,
+      provider_channel_access_id UUID REFERENCES provider_channel_access(provider_channel_access_id) ON DELETE SET NULL,
       claimed_runtime_instance_id UUID REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL,
       projection_identity_id TEXT,         -- resolved Discord-facing projection identity after fallback (ADR-060)
       intended_projection_identity_id TEXT,-- configured/native projection intent before fallback (ADR-060)
       projection_source TEXT,              -- resolver source for projection identity (ADR-060)
       projection_fallback_reason TEXT,     -- fallback/unavailable reason, if any (ADR-060)
+      delivery_fallback_reason TEXT,       -- direct delivery fallback reason (#604)
+      delivery_diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb,
       channel_external_id TEXT NOT NULL,   -- Discord channel or thread snowflake
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',  -- pre-rendered Discord mentions (JSON)
@@ -1135,13 +1139,17 @@ async function migrate() {
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS consumer_agent_id TEXT;
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS consumer_source TEXT;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS delivery_connector_instance_id UUID REFERENCES connector_instances(connector_instance_id) ON DELETE SET NULL;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS channel_binding_id UUID REFERENCES channel_connector_bindings(channel_binding_id) ON DELETE SET NULL;
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS provider_channel_access_id UUID REFERENCES provider_channel_access(provider_channel_access_id) ON DELETE SET NULL;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS claimed_runtime_instance_id UUID REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_identity_id TEXT;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS intended_projection_identity_id TEXT;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_source TEXT;
     ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_fallback_reason TEXT;
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS delivery_fallback_reason TEXT;
+    ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS delivery_diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
     CREATE INDEX IF NOT EXISTS idx_outbound_queue_delivery_connector_pending
       ON outbound_queue(delivery_connector_instance_id, status, next_retry_at)
       WHERE delivery_connector_instance_id IS NOT NULL AND status = 'pending';

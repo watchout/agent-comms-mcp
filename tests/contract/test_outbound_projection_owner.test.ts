@@ -7,6 +7,12 @@ import {
   resolveOutboundProjectionRoute,
 } from '../../core/outbound-projection'
 import { resetChannelPolicyCache } from '../../core/channel-policy'
+import {
+  DISCORD_DELIVERY_CREDENTIAL_STATUSES,
+  DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES,
+  isDiscordDeliveryCredentialStatus,
+  isDiscordRuntimeLoginCredentialStatus,
+} from '../../core/discord-token-resolution'
 
 const TMP_CONFIG = `/tmp/outbound-projection-${process.pid}-${Date.now()}.json`
 
@@ -18,11 +24,12 @@ function setRoutingConfig(channels: Record<string, unknown>) {
 
 function mockAgent(
   agentId: string,
-  options: { discordId?: string | null; status?: string; tokenBacked?: boolean } = {},
+  options: { discordId?: string | null; status?: string; tokenBacked?: boolean; agentType?: string } = {},
 ) {
   const discordId = options.discordId === undefined ? `${agentId}-discord-id` : options.discordId
   return {
     agent_id: agentId,
+    agent_type: options.agentType ?? 'dev',
     status: options.status ?? 'idle',
     provider_token_source_ref: options.tokenBacked === false ? null : `local-env:DISCORD_TOKEN_${agentId.replace(/[^a-z0-9]/gi, '_').toUpperCase()}`,
     discord_token: null,
@@ -41,6 +48,7 @@ function mockProjectionDb(options: {
   readOnlyDeliveryAgents?: string[]
   mismatchedDeliveryAgents?: string[]
   ambiguousDeliveryAgents?: string[]
+  credentialStatusByAgent?: Record<string, string>
   providerAccessByExternalId?: Record<string, string[]>
 } = {}) {
   const eligibleAgents = new Set(options.eligibleDeliveryAgents ?? [])
@@ -92,20 +100,21 @@ function mockProjectionDb(options: {
       }
       if (sql.includes('connector_instances')) {
         const agentId = typeof params?.[1] === 'string' ? params[1] : ''
-        return { rows: connectorIdsFor(agentId).map((connector_instance_id) => ({ connector_instance_id })) }
+        return { rows: connectorIdsFor(agentId).map((connector_instance_id) => ({ connector_instance_id, status: 'active' })) }
       }
       if (sql.includes('connector_credentials')) {
         const agentId = typeof params?.[1] === 'string' ? params[1] : ''
         const connectorInstanceId = typeof params?.[2] === 'string' ? params[2] : ''
+        const credential_status = options.credentialStatusByAgent?.[agentId] ?? 'active'
         if (mismatchedAgents.has(agentId)) {
           return {
             rows: connectorInstanceId.endsWith('-credential')
-              ? [{ credential_id: `credential-${agentId}` }]
+              ? [{ credential_id: `credential-${agentId}`, credential_status }]
               : [],
           }
         }
         if (connectorIdsFor(agentId).includes(connectorInstanceId)) {
-          return { rows: [{ credential_id: `credential-${agentId}` }] }
+          return { rows: [{ credential_id: `credential-${agentId}`, credential_status }] }
         }
         return { rows: [] }
       }
@@ -696,5 +705,98 @@ describe('ADR-060 outbound projection identity decision', () => {
     expect(decision.intendedProjectionIdentityId).toBe('codex-cto-native')
     expect(decision.projectionSource).toBe('sender_native_projection')
     expect(decision.projectionFallbackReason).toBeNull()
+  })
+})
+
+describe('#604 Discord direct-delivery credential contract', () => {
+  test('runtime login and delivery eligibility share registered credential status', () => {
+    expect(DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES).toContain('registered')
+    expect(DISCORD_DELIVERY_CREDENTIAL_STATUSES).toContain('registered')
+    expect(isDiscordRuntimeLoginCredentialStatus('registered')).toBe(true)
+    expect(isDiscordDeliveryCredentialStatus('registered')).toBe(true)
+    expect(isDiscordDeliveryCredentialStatus('revoked')).toBe(false)
+  })
+
+  test('codex-cto registered credential with outbound binding posts directly instead of falling back to AUN', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+      },
+    })
+    const db = mockProjectionDb({
+      bindingDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+    })
+
+    expect(decision.consumerAgentId).toBe('codex-cto')
+    expect(decision.consumerSource).toBe('sender_token_evidence')
+    expect(decision.consumerEvidence).toMatchObject({
+      source_table: 'channel_connector_bindings',
+      agent_id: 'codex-cto',
+      credential_status: 'registered',
+      channel_binding_id: 'binding-codex-cto',
+    })
+    expect(decision.deliveryFallbackReason).toBe('recipient_direct_unavailable')
+    expect(decision.projectionIdentityId).toBe('codex-cto')
+    expect(decision.intendedProjectionIdentityId).toBe('ceo')
+    expect(decision.projectionSource).toBe('fallback_adapter_owner')
+    expect(decision.projectionFallbackReason).toBe('recipient_projection_human')
+  })
+
+  test('registered sender credential without write evidence falls back to AUN with diagnostics', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+      },
+    })
+    const db = mockProjectionDb({
+      readOnlyDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+    })
+
+    expect(decision.consumerAgentId).toBe('aun')
+    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.deliveryFallbackReason).toBe('sender_direct_unavailable')
+    expect(decision.deliveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agent_id: 'codex-cto',
+        source: 'sender_token_evidence',
+        code: 'provider_write_access_read_only',
+      }),
+      expect.objectContaining({
+        agent_id: 'aun',
+        source: 'channel_policy_adapter_owner',
+        code: 'eligible',
+      }),
+    ]))
+    expect(decision.projectionIdentityId).toBe('aun')
+    expect(decision.intendedProjectionIdentityId).toBe('ceo')
+    expect(decision.projectionFallbackReason).toBe('recipient_projection_human')
   })
 })
