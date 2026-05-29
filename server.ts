@@ -121,6 +121,11 @@ import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
 import { resolveTokenSourceRef } from './core/token-source-ref'
+import {
+  buildOutboundAclViolationDetail,
+  formatOutboundAclViolation,
+  recordOutboundAclViolation,
+} from './core/outbound-acl-diagnostic'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -1464,6 +1469,27 @@ async function writeAuditLog(eventType: string, agentId: string | null, target: 
   ).catch(err => process.stderr.write(`agent-comms: audit_log write failed: ${err}\n`))
 }
 
+async function writeMcpOutboundAclViolationAudit(
+  client: Client,
+  operation: 'send' | 'notify',
+  sender: string,
+  channelId: string,
+  intendedRecipients: string[],
+  violations: string[],
+) {
+  const detail = await buildOutboundAclViolationDetail(
+    client as any,
+    operation,
+    sender,
+    channelId,
+    intendedRecipients,
+    violations,
+  )
+  await recordOutboundAclViolation(client as any, detail)
+    .catch(err => process.stderr.write(`agent-comms: outbound ACL audit failed (non-fatal): ${err}\n`))
+  return detail
+}
+
 // --- Access Control (§4.1 - Communication Bus Layer) ---
 // Issue #130 Phase 4: sendInboxSignal (filesystem .signal files) was removed.
 // Delivery to recipient bots is now fully queue-based (message_queue table,
@@ -2243,7 +2269,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
           await txClient.query('ROLLBACK'); txCommitted = true
-          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
+          const detail = await writeMcpOutboundAclViolationAudit(
+            txClient,
+            'send',
+            agentId,
+            phase5Channel,
+            phase5.intended_recipients ?? [],
+            phase5.violations ?? [],
+          )
+          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: ${formatOutboundAclViolation(detail)}` }], isError: true }
         }
       }
       if (phase5 && phase5.ok) {
@@ -2846,7 +2880,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
         }
         if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
-          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${(phase5.violations ?? []).join(',')} violate channel.outboundAllowlist` }], isError: true }
+          const detail = await writeMcpOutboundAclViolationAudit(
+            client,
+            'notify',
+            agentId,
+            dest.channelId,
+            phase5.intended_recipients ?? [],
+            phase5.violations ?? [],
+          )
+          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: ${formatOutboundAclViolation(detail)}` }], isError: true }
         }
       }
       if (phase5 && phase5.ok) {

@@ -50,6 +50,8 @@ export interface Phase5ResolveErr {
   error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'OUTBOUND_ACL_VIOLATION'
   /** Identifier surfaced in error message (agent_id or channel_id). */
   detail?: AgentId
+  /** For OUTBOUND_ACL_VIOLATION: the canonical attempted recipients. */
+  intended_recipients?: AgentId[]
   /** For OUTBOUND_ACL_VIOLATION: the offenders. */
   violations?: AgentId[]
 }
@@ -88,7 +90,12 @@ export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | 
   // §2.4 — outbound ACL: server-side reject 一本化 (cc[] strip 削除).
   const aclResult = outboundValidator.validate(input.sender, input.channel_id, resolved.enqueue)
   if (!aclResult.ok) {
-    return { ok: false, error: 'OUTBOUND_ACL_VIOLATION', violations: aclResult.violations }
+    return {
+      ok: false,
+      error: 'OUTBOUND_ACL_VIOLATION',
+      intended_recipients: resolved.enqueue,
+      violations: aclResult.violations,
+    }
   }
 
   // §1.5 — cc[] body 注入. cc は queue 非投入だが body suffix で reader に露出.
