@@ -185,6 +185,28 @@ function listenersForPort(port: number | null, listeners: PortListenerSnapshot[]
   return listeners.filter((listener) => listener.port === port)
 }
 
+function pushMapValue<K extends number | string>(map: Map<K, string[]>, key: K | null, value: string): void {
+  if (key === null) return
+  const values = map.get(key) ?? []
+  values.push(value)
+  map.set(key, values)
+}
+
+function activeOwnersForListener(
+  listener: PortListenerSnapshot,
+  agentId: string,
+  activeAgentByPort: Map<number, string[]>,
+  activeRuntimeOwnerByPort: Map<number, string[]>,
+  activeRuntimeOwnerByPid: Map<number, string[]>,
+): string[] {
+  const owners = new Set<string>()
+  for (const owner of activeAgentByPort.get(listener.port) ?? []) owners.add(owner)
+  for (const owner of activeRuntimeOwnerByPort.get(listener.port) ?? []) owners.add(owner)
+  for (const owner of activeRuntimeOwnerByPid.get(listener.pid) ?? []) owners.add(owner)
+  owners.delete(agentId)
+  return [...owners].sort()
+}
+
 function uniqueActions(actions: RuntimeCleanupAction[]): RuntimeCleanupAction[] {
   const seen = new Set<string>()
   const out: RuntimeCleanupAction[] = []
@@ -286,6 +308,8 @@ export async function buildRuntimeCleanupReport(
   const allAgentByPort = new Map<number, string[]>()
   const activeOwnersByTmux = new Map<string, string[]>()
   const allOwnersByTmux = new Map<string, string[]>()
+  const activeRuntimeOwnerByPort = new Map<number, string[]>()
+  const activeRuntimeOwnerByPid = new Map<number, string[]>()
   const candidatePorts = new Set<number>()
 
   for (const runtime of runtimes) {
@@ -319,6 +343,12 @@ export async function buildRuntimeCleanupReport(
         activeOwnersByTmux.set(tmuxSession, active)
       }
     }
+    if (!exclusionReason) {
+      for (const runtime of agentRuntimes.filter(isLiveRuntime)) {
+        pushMapValue(activeRuntimeOwnerByPort, numberOrNull(runtime.port), agent.agent_id)
+        pushMapValue(activeRuntimeOwnerByPid, numberOrNull(runtime.process_id), agent.agent_id)
+      }
+    }
   }
 
   const targets: RuntimeCleanupTarget[] = []
@@ -346,7 +376,35 @@ export async function buildRuntimeCleanupReport(
         runtime_instance_id: runtime.runtime_instance_id,
         reason: `${exclusionReason}_live_runtime`,
       }))
+      const sharedActiveListeners: Array<{
+        pid: number
+        port: number
+        owners: string[]
+        command: string | null
+      }> = []
       for (const listener of matchingListeners) {
+        const activeOwners = activeOwnersForListener(
+          listener,
+          agent.agent_id,
+          activeAgentByPort,
+          activeRuntimeOwnerByPort,
+          activeRuntimeOwnerByPid,
+        )
+        if (activeOwners.length > 0) {
+          sharedActiveListeners.push({
+            pid: listener.pid,
+            port: listener.port,
+            owners: activeOwners,
+            command: listener.command ?? null,
+          })
+          actions.push({
+            kind: 'noop',
+            pid: listener.pid,
+            port: listener.port,
+            reason: `${exclusionReason}_port_listener_has_active_owner`,
+          })
+          continue
+        }
         actions.push({
           kind: 'kill_process',
           pid: listener.pid,
@@ -354,17 +412,29 @@ export async function buildRuntimeCleanupReport(
           reason: `${exclusionReason}_port_listener`,
         })
       }
+      const sharedActiveTmuxOwners = tmuxSession
+        ? (activeOwnersByTmux.get(tmuxSession) ?? []).filter((owner) => owner !== agent.agent_id).sort()
+        : []
       if (tmuxSession && matchingTmuxPanes.length > 0 && supervisorTypeFor(agent, tmuxSession) === 'tmux') {
-        actions.push({
-          kind: 'kill_tmux_session',
-          tmux_session: tmuxSession,
-          reason: `${exclusionReason}_tmux_session`,
-        })
+        if (sharedActiveTmuxOwners.length > 0) {
+          actions.push({
+            kind: 'noop',
+            tmux_session: tmuxSession,
+            reason: `${exclusionReason}_tmux_session_has_active_owner`,
+          })
+        } else {
+          actions.push({
+            kind: 'kill_tmux_session',
+            tmux_session: tmuxSession,
+            reason: `${exclusionReason}_tmux_session`,
+          })
+        }
       }
+      const sharedActiveResource = sharedActiveListeners.length > 0 || sharedActiveTmuxOwners.length > 0
       targets.push(cleanupTarget({
         target_id: `agent:${agent.agent_id}:disabled-profile-residue`,
-        classification: 'disabled-profile-residue',
-        risk: 'low',
+        classification: sharedActiveResource ? 'unknown-risk' : 'disabled-profile-residue',
+        risk: sharedActiveResource ? 'unknown-risk' : 'low',
         agent_id: agent.agent_id,
         runtime_instance_id: latestLive?.runtime_instance_id ?? null,
         pid: numberOrNull(latestLive?.process_id) ?? matchingListeners[0]?.pid ?? null,
@@ -381,6 +451,8 @@ export async function buildRuntimeCleanupReport(
           runtime_statuses: liveRuntimes.map((runtime) => runtime.status),
           runtime_process_ids: liveRuntimes.map((runtime) => runtime.process_id).filter((pid) => pid !== null),
           listener_pids: matchingListeners.map((listener) => listener.pid),
+          shared_active_listeners: sharedActiveListeners,
+          shared_active_tmux_owners: sharedActiveTmuxOwners,
           tmux_pane_pids: matchingTmuxPanes.map((pane) => pane.pane_pid),
         },
         actions,

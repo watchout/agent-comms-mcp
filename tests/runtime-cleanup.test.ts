@@ -160,6 +160,71 @@ describe('runtime cleanup lifecycle', () => {
     })
   })
 
+  test('disabled/test residue cannot kill a listener owned by an active profile', async () => {
+    const now = new Date('2026-05-29T07:40:00Z')
+    await withCleanupDb(`
+      INSERT INTO agents
+        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+      VALUES
+        ('active-owner', 'Active Owner', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-active-owner","supervisor_type":"tmux"}', 41234, 1),
+        ('disabled-old', 'Disabled Old', 'dev', 'TUI', 'offline', '{"profile_class":"disabled-test","tmux_session":"discord-disabled-old","supervisor_type":"tmux"}', 41234, 0);
+
+      INSERT INTO agent_runtime_instances
+        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+      VALUES
+        ('runtime-active-owner', 'active-owner', 'codex', 'local_process', 'discord-active-owner', 7777, 41234, 'active', '2026-05-29T07:30:00Z', '2026-05-29T07:39:30Z');
+    `, async (db) => {
+      const observations = {
+        now,
+        staleMinutes: 15,
+        portListeners: [{ pid: 7777, port: 41234, command: 'bun' }],
+      }
+      const report = await buildRuntimeCleanupReport(db, observations)
+      const active = report.targets.find((target) => target.agent_id === 'active-owner')
+      const disabled = report.targets.find((target) => target.agent_id === 'disabled-old')
+
+      expect(active?.classification).toBe('active')
+      expect(disabled?.classification).toBe('unknown-risk')
+      expect(disabled?.risk).toBe('unknown-risk')
+      expect(disabled?.actions).toContainEqual({
+        kind: 'noop',
+        pid: 7777,
+        port: 41234,
+        reason: 'disabled_profile_port_listener_has_active_owner',
+      })
+      expect(disabled?.actions).not.toContainEqual(expect.objectContaining({
+        kind: 'kill_process',
+        pid: 7777,
+      }))
+      expect(disabled?.evidence.shared_active_listeners).toEqual([{
+        pid: 7777,
+        port: 41234,
+        owners: ['active-owner'],
+        command: 'bun',
+      }])
+      expect(report.summary.cleanup_targets).toBe(0)
+      expect(report.summary.unknown_risk_targets).toBe(1)
+      expect(report.blockers).toContain('agent:disabled-old:disabled-profile-residue:unknown-risk')
+
+      const killedPids: number[] = []
+      await expect(executeRuntimeCleanup(db, {
+        ...observations,
+        confirmHash: report.plan_hash,
+        killProcess: (pid) => killedPids.push(pid),
+      })).rejects.toThrow('UNKNOWN_RISK_REFUSED')
+      expect(killedPids).toEqual([])
+
+      const override = await executeRuntimeCleanup(db, {
+        ...observations,
+        allowUnknownRisk: true,
+        confirmHash: report.plan_hash,
+        killProcess: (pid) => killedPids.push(pid),
+      })
+      expect(override.summary.executable_actions).toBe(0)
+      expect(killedPids).toEqual([])
+    })
+  })
+
   test('parses lsof listener evidence used by cleanup plans', () => {
     expect(parseLsofTcpListeners([
       'COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME',
