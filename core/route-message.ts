@@ -100,10 +100,9 @@ export type RouteDropReason =
 /** Reject taxonomy emitted by send / reply guards (route-message-db.ts).
  *
  * Phase A scope intentionally limited to the one reject path
- * `resolveSendDestination` actually owns. Claim-related rejects
- * (`claim_expired` / `claim_missing`) live in the send fallback layer
- * (`core/send-fallback-decision.ts`) and will get their own taxonomy
- * entries in a follow-up PR — they are not wired here so we don't
+ * `resolveSendDestination` actually owns. Claim-related send decisions
+ * (`claim_missing` / already-closed no-op) live in
+ * `core/send-fallback-decision.ts`; they are not wired here so we don't
  * define a label without a producer.
  */
 export type SendRejectReason =

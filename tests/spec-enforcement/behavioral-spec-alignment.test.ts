@@ -30,30 +30,45 @@ const INBOUND_SRC = readFileSync(join(REPO_ROOT, 'adapters/inbound-receiver.ts')
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segment 3a)', () => {
-  test('send handler rejects with INVALID_REPLY_TO only when reply_to is missing or unresolvable (CEO P1)', () => {
-    // CEO P1 (2026-05-07): the strict "no in-flight claim → reject"
-    // path was retired. The handler now silently falls back to a
-    // notify-equivalent dispatch when the claim is missing/expired
-    // and only rejects with INVALID_REPLY_TO when the reply_to UUID
-    // itself cannot be resolved (absent or no channel_id).
+  test('send handler refuses missing/closed claims before projection (Issue #580)', () => {
+    // Issue #580: the previous silent "no in-flight claim → notify fallback"
+    // path caused duplicate Discord output and misleading claim_missing
+    // returns after projection evidence existed. Missing or closed claims now
+    // stop before saveMessage/outbound_queue.
     expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*reply_to is required for send/)
     expect(SERVER_SRC).toMatch(/Error \[INVALID_REPLY_TO\]:\s*reply_to=\$\{reply_to\} not found in agent_messages or has no channel/)
-    // The legacy "no in-flight claim for reply_to=" reject string must
-    // be gone — its presence would mean we're still rejecting calls
-    // that the P1 spec wants to fall back instead.
-    expect(SERVER_SRC).not.toMatch(/Error \[INVALID_REPLY_TO\]:\s*no in-flight claim for reply_to=/)
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
     const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
     expect(handler).not.toMatch(/Error \[NO_CURRENT_MESSAGE\]/)
-    // CEO P1: the handler must surface the fallback in the return
-    // value — silent reject is forbidden.
-    expect(handler).toMatch(/fallback: notify \(reason: \$\{fallbackReason\}\)/)
-    // #453: fallback-result rows must carry deterministic source markers
-    // in metadata so reconcile can link the result without parsing prose.
-    expect(handler).toMatch(/fallback_notify:\s*\{/)
-    expect(handler).toMatch(/source_message_id:\s*reply_to/)
-    expect(handler).toMatch(/source_queue_id:\s*fallbackSourceQueueId/)
+    expect(handler).toMatch(/Error \[CLAIM_MISSING\]/)
+    expect(handler).toMatch(/send no-op \[CLAIM_ALREADY_CLOSED\]/)
+    expect(handler).toMatch(/No outbound projection queued/)
+    expect(handler).not.toMatch(/fallback: notify/)
+    expect(handler).not.toMatch(/fallback_notify:\s*\{/)
+
+    const missingIdx = handler.indexOf('Error [CLAIM_MISSING]')
+    const closedIdx = handler.indexOf('CLAIM_ALREADY_CLOSED')
+    const saveIdx = handler.indexOf('saveMessage({')
+    const outboundIdx = handler.indexOf('INSERT INTO outbound_queue')
+    expect(missingIdx).toBeGreaterThan(-1)
+    expect(closedIdx).toBeGreaterThan(-1)
+    expect(saveIdx).toBeGreaterThan(-1)
+    expect(outboundIdx).toBeGreaterThan(-1)
+    expect(missingIdx).toBeLessThan(saveIdx)
+    expect(closedIdx).toBeLessThan(saveIdx)
+    expect(missingIdx).toBeLessThan(outboundIdx)
+    expect(closedIdx).toBeLessThan(outboundIdx)
+  })
+
+  test('projection success response carries outbound_queued terminal evidence (Issue #580)', () => {
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).toMatch(/let outboundQueued = false/)
+    expect(handler).toMatch(/INSERT INTO outbound_queue[\s\S]*?outboundQueued = true/)
+    expect(handler).toMatch(/outbound_queued=\$\{outboundQueued \? 'true' : 'false'\}/)
+    expect(handler).toMatch(/deliveryWarning === 'NOT_MENTIONED' && !outboundQueued/)
   })
   // Pre-existing latent fail: previously pinned the legacy claim status in
   // send-fallback-decision helper, but v0.9 (sub-PR 1 #347 + sub-PR 3 #350)
