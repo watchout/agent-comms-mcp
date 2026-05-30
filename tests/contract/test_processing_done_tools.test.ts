@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
+  existingNoReplyBaton,
   parseQueuePayload,
   withTerminalBaton,
 } from '../../core/no-reply-policy'
@@ -52,9 +53,19 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     expect(SERVER_SRC).toContain('INVALID_STATE')
     expect(SERVER_SRC).toContain('already_transitioned')
     expect(SERVER_SRC).toContain('detectNoReplyIntent')
+    expect(SERVER_SRC).toContain('existingNoReplyBaton')
     expect(SERVER_SRC).toContain('terminal_baton.no_reply_required')
     // done writes done_at, processing does not.
     expect(SERVER_SRC).toContain("status = 'done', done_at = now()")
+  })
+
+  test('server.ts preserves an existing terminal_baton on already-done idempotent calls', () => {
+    const handlerBlock = SERVER_SRC.split("if (name === 'processing' || name === 'done')")[1] ?? ''
+    const idempotentBlock = handlerBlock.split('if (status === toStatus)')[1]?.split("if (name === 'processing'")[0] ?? ''
+
+    expect(handlerBlock).toContain('const existingBaton = existingNoReplyBaton(payload)')
+    expect(handlerBlock).toContain('terminalBaton && !existingBaton')
+    expect(idempotentBlock).not.toContain('UPDATE message_queue SET payload')
   })
 })
 
@@ -158,16 +169,17 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     const row = cur.rows[0]!
     const observed = row.status
     const payload = parseQueuePayload(row.payload)
+    const existingBaton = existingNoReplyBaton(payload)
     const decision = detectNoReplyIntent({ payload })
-    const baton = decision.no_reply_required
+    const baton = existingBaton ?? (decision.no_reply_required
       ? buildTerminalBaton({
           reason: decision.reason ?? 'deterministic_no_reply_policy',
           setBy: FIXTURE_AGENT,
           source: 'deterministic_no_reply_policy',
           now: () => new Date('2026-05-30T00:00:00.000Z'),
         })
-      : null
-    const stampedPayload = baton ? JSON.stringify(withTerminalBaton(payload, baton)) : null
+      : null)
+    const stampedPayload = baton && !existingBaton ? JSON.stringify(withTerminalBaton(payload, baton)) : null
     if (observed === toStatus) return { ok: true, status: toStatus, already_transitioned: true }
     if (tool === 'processing' && observed !== fromStatus) return { ok: false, code: 'INVALID_STATE', observed }
     if (tool === 'done' && observed !== 'in_progress' && !(observed === 'received' && decision.no_reply_required)) {

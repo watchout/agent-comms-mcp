@@ -128,6 +128,12 @@ export function withTerminalBaton(
   baton: TerminalBaton,
 ): Record<string, unknown> {
   const current = payload.terminal_baton
+  if (current && typeof current === 'object' && !Array.isArray(current)) {
+    const currentObject = current as Record<string, unknown>
+    if (currentObject.no_reply_required === true) {
+      return { ...payload, terminal_baton: currentObject }
+    }
+  }
   const currentObject = current && typeof current === 'object' && !Array.isArray(current)
     ? current as Record<string, unknown>
     : {}
