@@ -76,6 +76,13 @@ import {
   type BotStatusDbRow,
 } from './core/bot-status-db'
 import {
+  fetchLatestQueueWakeSmoke,
+  formatStateDaemonReadinessLine,
+  inspectStateDaemonRuntime,
+  summarizeQueueWakeStates,
+  type LatestQueueWakeSmoke,
+} from './core/state-daemon-readiness'
+import {
   destructiveLifecycleGateFailure,
   evaluateCleanupPort,
 } from './core/bot-lifecycle'
@@ -3356,6 +3363,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         process.stderr.write(`agent-comms: bot_status DB query failed (non-fatal): ${err}\n`)
       }
     }
+    const stateDaemonReadiness = inspectStateDaemonRuntime()
+    const latestQueueSmoke = await loadLatestQueueWakeSmoke()
+    const queueWakeSummary = summarizeQueueWakeStates(dbStatus.values())
     const lines = registry.map(entry => {
       const health = checkBotHealth(entry)
       const icon = health.status === 'healthy' ? '✅' :
@@ -3366,13 +3376,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    health.status === 'misconfigured' ? '⚠️' : '❓'
       const dbRow = dbStatus.get(entry.agentId)
       const dbSuffix = dbRow
-        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count}`
+        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} active_claims=${dbRow.active_claim_count} wake=${dbRow.queue_wake_state} wake_at=${dbRow.latest_wake_progress_at ?? '-'} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count}`
         : ' | (no db row)'
       const sourceSuffix = entry.source ? ` | source=${entry.source}` : ''
       const blockerSuffix = entry.blockers && entry.blockers.length > 0 ? ` | blockers=${entry.blockers.join(',')}` : ''
       return `${icon} ${entry.session || '(missing-session)'} (${entry.agentId}) port:${entry.port || '-'} — ${health.status}: ${health.details}${dbSuffix}${sourceSuffix}${blockerSuffix}`
     })
-    return { content: [{ type: 'text', text: `${registry.length} bot(s):\n${lines.join('\n')}` }] }
+    const stuck = queueWakeSummary.stuck_agents
+      .map(a => `${a.agent_id}:${a.queue_wake_state}(pending=${a.pending_count},active=${a.active_claim_count},oldest=${formatPendingAge(a.oldest_pending_at)})`)
+      .join(', ') || 'none'
+    const header = [
+      formatStateDaemonReadinessLine(stateDaemonReadiness, latestQueueSmoke),
+      `queue-wake-stuck=${stuck}`,
+    ].join('\n')
+    return { content: [{ type: 'text', text: `${header}\n\n${registry.length} bot(s):\n${lines.join('\n')}` }] }
   }
 
   if (name === 'watchdog_check') {
@@ -3384,6 +3401,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const results: string[] = []
     let alive = 0, restarted = 0
     const endpointStatus = await loadEndpointLeaseStatus()
+    const stateDaemonReadiness = inspectStateDaemonRuntime()
+    const latestQueueSmoke = await loadLatestQueueWakeSmoke()
+    const queueWakeSummary = summarizeQueueWakeStates(endpointStatus.values())
     for (const entry of registry) {
       if (entry.blockers && entry.blockers.length > 0) {
         results.push(`⚠️ ${entry.session || entry.agentId}: incomplete profile — ${entry.blockers.join(', ')}`)
@@ -3411,7 +3431,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const summary = dry_run
       ? `[watchdog dry-run] ${alive}/${registry.length} healthy`
       : `[watchdog] ${alive}/${registry.length} alive, ${restarted} restarted`
-    return { content: [{ type: 'text', text: `${summary}\n\n${results.join('\n')}` }] }
+    const stuck = queueWakeSummary.stuck_agents
+      .map(a => `${a.agent_id}:${a.queue_wake_state}(pending=${a.pending_count},active=${a.active_claim_count},oldest=${formatPendingAge(a.oldest_pending_at)})`)
+      .join(', ') || 'none'
+    return {
+      content: [{
+        type: 'text',
+        text: `${summary}\n${formatStateDaemonReadinessLine(stateDaemonReadiness, latestQueueSmoke)}\nqueue-wake-stuck=${stuck}\n\n${results.join('\n')}`,
+      }],
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -3703,6 +3731,15 @@ async function loadEndpointLeaseStatus(): Promise<Map<string, BotStatusDbRow>> {
   } catch (err) {
     process.stderr.write(`agent-comms: endpoint lease gate DB query failed (fail-closed): ${err}\n`)
     return new Map()
+  }
+}
+
+async function loadLatestQueueWakeSmoke(): Promise<LatestQueueWakeSmoke | null> {
+  try {
+    return await fetchLatestQueueWakeSmoke(getDbAdapter())
+  } catch (err) {
+    process.stderr.write(`agent-comms: queue wake smoke audit query failed (non-fatal): ${err}\n`)
+    return null
   }
 }
 
