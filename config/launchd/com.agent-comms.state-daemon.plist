@@ -5,12 +5,14 @@
   state-daemon launchd manifest (Issue #323 spec v0.6 §5.3, 補強 #3).
 
   Install:
-    cp config/launchd/com.agent-comms.state-daemon.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
+    Prefer the durable restore helper so launchd only points at a verified,
+    persistent checkout:
+      bun scripts/state-daemon-launchagent.ts restore --commit <approved-main-sha> --execute
 
   Operator notes:
-    - WorkingDirectory must point at the repo checkout the daemon should run
-      against. Adjust before installing if your path differs.
+    - WorkingDirectory must point at the persistent repo checkout or build
+      artifact the daemon should run against. Do not use an unowned `/tmp` or
+      `/private/tmp` detached checkout as a durable LaunchAgent target.
     - DATABASE_URL is required; it is left blank here so the operator must
       set it explicitly before loading. Loading without it makes the daemon
       crash-loop into the KeepAlive throttle until the env is fixed.
