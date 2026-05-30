@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import {
   buildStateDaemonRestorePlan,
   parseStateDaemonLaunchAgentPlist,
@@ -11,6 +12,16 @@ import {
 } from '../../../core/state-daemon/launchagent'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
+
+function git(args: string[], cwd: string): string {
+  const proc = Bun.spawnSync(['git', ...args], {
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  expect(proc.exitCode, proc.stderr.toString()).toBe(0)
+  return proc.stdout.toString().trim()
+}
 
 function probe(existingFiles: string[], existingDirs: string[]) {
   const files = new Set(existingFiles)
@@ -114,6 +125,31 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     )
 
     expect(result.ok).toBe(true)
+  })
+
+  test('restore verification build artifact does not dirty an existing checkout for repeat restore', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'state-daemon-restore-repeat-'))
+    try {
+      const commit = '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9'
+      const plan = buildStateDaemonRestorePlan({
+        commit,
+        restoreRoot: join(tmp, 'checkouts'),
+        launchAgentsDir: join(tmp, 'LaunchAgents'),
+      })
+      mkdirSync(plan.checkoutPath, { recursive: true })
+      git(['init'], plan.checkoutPath)
+      writeFileSync(join(plan.checkoutPath, 'README.md'), 'clean checkout\n')
+      git(['add', 'README.md'], plan.checkoutPath)
+      git(['-c', 'user.name=agent-comms-test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'seed'], plan.checkoutPath)
+
+      mkdirSync(dirname(plan.buildOutfile), { recursive: true })
+      writeFileSync(plan.buildOutfile, 'helper-owned build output\n')
+
+      expect(plan.buildOutfile.startsWith(`${plan.checkoutPath}/`)).toBe(false)
+      expect(git(['status', '--short'], plan.checkoutPath)).toBe('')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 
   test('prune protects paths referenced by the active state-daemon LaunchAgent', () => {

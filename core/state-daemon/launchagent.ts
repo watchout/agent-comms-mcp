@@ -146,6 +146,7 @@ export function buildStateDaemonRestorePlan(options: {
   }
   const restoreRoot = resolve(options.restoreRoot ?? defaultStateDaemonRestoreRoot())
   const checkoutPath = join(restoreRoot, commit)
+  const buildArtifactsRoot = join(dirname(restoreRoot), 'build-artifacts', commit)
   const logsDir = join(checkoutPath, 'logs')
   const launchAgentsDir = resolve(options.launchAgentsDir ?? join(homedir(), 'Library', 'LaunchAgents'))
   const plistPath = join(launchAgentsDir, STATE_DAEMON_PLIST_NAME)
@@ -156,7 +157,7 @@ export function buildStateDaemonRestorePlan(options: {
     checkoutPath,
     entryPath: join(checkoutPath, 'bin', 'state-daemon.ts'),
     logsDir,
-    buildOutfile: join(checkoutPath, '.agent-comms-restore', 'state-daemon-build.js'),
+    buildOutfile: join(buildArtifactsRoot, 'state-daemon-build.js'),
     plistPath,
     tempPlistPath: join(launchAgentsDir, `.${STATE_DAEMON_PLIST_NAME}.${pid}.tmp`),
     bunPath: options.bunPath ?? DEFAULT_STATE_DAEMON_BUN_PATH,

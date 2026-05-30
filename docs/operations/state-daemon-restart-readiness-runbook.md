@@ -206,9 +206,10 @@ trap 'dropdb --if-exists "$STATE_DAEMON_TEST_DB"' EXIT
       tests/contract/state-daemon/test_per_bot_suppression.test.ts \
       tests/contract/state-daemon/m4-entry-smoke.test.ts \
       tests/contract/state-daemon/test_launchagent_restore.test.ts
-  mkdir -p .agent-comms-restore
+  STATE_DAEMON_BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-comms-state-daemon-build.XXXXXX")"
+  trap 'rm -rf "$STATE_DAEMON_BUILD_DIR"' EXIT
   bun build --target bun bin/state-daemon.ts \
-    --outfile .agent-comms-restore/state-daemon-build.js
+    --outfile "$STATE_DAEMON_BUILD_DIR/state-daemon-build.js"
 )
 
 bun scripts/state-daemon-launchagent.ts preflight \
