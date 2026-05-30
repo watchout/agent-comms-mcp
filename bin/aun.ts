@@ -13,7 +13,7 @@
  *   - aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
  *   - aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
- *   - aun processing|done --agent-id <id> --queue-id <id>
+ *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -44,7 +44,7 @@ function printHelp(): void {
     '  aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
     '  aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
-    '  aun processing|done --agent-id <id> --queue-id <id>',
+    '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -278,13 +278,15 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'receive-actionable' &&
     subcommand !== 'next-actionable' &&
     subcommand !== 'processing' &&
-    subcommand !== 'done'
+    subcommand !== 'done' &&
+    subcommand !== 'record-no-reply'
   ) return run(argv)
 
-  if (subcommand === 'processing' || subcommand === 'done') {
+  if (subcommand === 'processing' || subcommand === 'done' || subcommand === 'record-no-reply') {
     const res = await lifecycleTransition(subcommand, {
       agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
       queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+      reason: typeof flags.reason === 'string' ? (flags.reason as string) : undefined,
     })
     if (res.stdout) process.stdout.write(res.stdout)
     if (res.stderr) process.stderr.write(res.stderr)

@@ -35,27 +35,37 @@ function withDb<T>(fn: (db: Database) => T): T {
   }
 }
 
-function seedQueue(status: 'pending' | 'received' | 'in_progress' | 'done', agentId = TEST_AGENT): { queueId: number; messageId: string } {
+function seedQueue(
+  status: 'pending' | 'received' | 'in_progress' | 'done',
+  agentId = TEST_AGENT,
+  opts: { content?: string; payload?: Record<string, unknown> } = {},
+): { queueId: number; messageId: string } {
   return withDb((db) => {
     const messageId = randomUUID()
+    const content = opts.content ?? 'lifecycle task'
     db.prepare(
       `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type)
-       VALUES (?, 'lifecycle-ch', 'codex-cto', 'lifecycle task', 'instruction')`,
-    ).run(messageId)
+       VALUES (?, 'lifecycle-ch', 'codex-cto', ?, 'instruction')`,
+    ).run(messageId, content)
+    const payload = JSON.stringify(opts.payload ?? { content, message_type: 'instruction' })
     const row = db.prepare(
       `INSERT INTO message_queue
         (agent_id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at)
-       VALUES (?, ?, '{}', ?, ?, datetime('now'), datetime('now', '+60 seconds'))
+       VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now', '+60 seconds'))
        RETURNING id`,
-    ).get(agentId, messageId, status, status === 'pending' || status === 'done' ? null : agentId) as { id: number }
+    ).get(agentId, messageId, payload, status, status === 'pending' || status === 'done' ? null : agentId) as { id: number }
     return { queueId: row.id, messageId }
   })
 }
 
-function queueRow(queueId: number): { status: string; done_at: string | null } {
+function queueRow(queueId: number): { status: string; done_at: string | null; payload: string } {
   return withDb((db) => db.prepare(
-    `SELECT status, done_at FROM message_queue WHERE id = ?`,
-  ).get(queueId) as { status: string; done_at: string | null })
+    `SELECT status, done_at, payload FROM message_queue WHERE id = ?`,
+  ).get(queueId) as { status: string; done_at: string | null; payload: string })
+}
+
+function queuePayload(queueId: number): Record<string, any> {
+  return JSON.parse(queueRow(queueId).payload)
 }
 
 function agentStatus(): { status: string; status_detail: string | null } {
@@ -131,6 +141,51 @@ describe('aun lifecycle CLI transitions', () => {
     expect(row.status).toBe('done')
     expect(row.done_at).not.toBeNull()
     expect(agentStatus().status).toBe('idle')
+  })
+
+  test('done stamps terminal_baton when explicit no-reply content includes PASS', () => {
+    const content = 'ACK: audit PASS received and recorded. No reply required.'
+    const { queueId } = seedQueue('in_progress', TEST_AGENT, { content })
+
+    const r = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: true,
+      mode: 'done',
+      status: 'done',
+      no_reply_required: true,
+    })
+    expect(body.final_close_contract).toContain('no reply required')
+    const payload = queuePayload(queueId)
+    expect(payload.terminal_baton).toMatchObject({
+      no_reply_required: true,
+      source: 'deterministic_no_reply_policy',
+    })
+  })
+
+  test('record-no-reply directly closes a received acknowledgement row', () => {
+    const content = 'Recorded. No further action on this acknowledgement.\n\nNo reply required.'
+    const { queueId } = seedQueue('received', TEST_AGENT, { content })
+
+    const r = runAun(['record-no-reply', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: true,
+      mode: 'record-no-reply',
+      status: 'done',
+      no_reply_required: true,
+    })
+    const row = queueRow(queueId)
+    expect(row.status).toBe('done')
+    expect(row.done_at).not.toBeNull()
+    expect(queuePayload(queueId).terminal_baton).toMatchObject({
+      no_reply_required: true,
+      source: 'record_no_reply_command',
+    })
   })
 
   test('processing is idempotent once already in_progress', () => {
