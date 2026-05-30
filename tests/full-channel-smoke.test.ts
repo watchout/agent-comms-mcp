@@ -73,6 +73,26 @@ function healthy(): Scenario {
 
 function makeDb(s: Scenario) {
   const executed: Array<{ sql: string; params?: any[] }> = []
+  const insertedMessages: any[] = []
+  const insertedQueues: any[] = []
+  const queueRowsFromExecutePoll = (messageId: string, agentId: string): any[] | null => {
+    if (!insertedQueues.some((row) => row.message_id === messageId && row.agent_id === agentId)) return null
+    const rows = s.executePollRows ? s.executePollRows(messageId).filter((row) => String(row.agent_id) === agentId) : []
+    const byStatus = new Map<string, { status: string; count: number; any_claimed: string; queue_row_id: string; replied_with: string | null }>()
+    for (const row of rows) {
+      const status = String(row.status)
+      const existing = byStatus.get(status) ?? {
+        status,
+        count: 0,
+        any_claimed: ['received', 'in_progress', 'read', 'done', 'replied'].includes(status) ? '1' : '0',
+        queue_row_id: `${messageId}-${agentId}-${status}`,
+        replied_with: row.replied_with ?? null,
+      }
+      existing.count++
+      byStatus.set(status, existing)
+    }
+    return [...byStatus.values()].map((row) => ({ ...row, count: String(row.count) }))
+  }
   const route = (sql: string, params?: any[]): any[] => {
     // --- buildAgentEvidence ---
     if (sql.includes('COALESCE(profile_enabled, true) AS profile_enabled')) return s.agents ?? []
@@ -115,6 +135,8 @@ function makeDb(s: Scenario) {
     }
     // --- queue rows for agent ---
     if (sql.includes('FROM message_queue') && sql.includes('AND agent_id = $2') && sql.includes('GROUP BY status')) {
+      const executeRows = queueRowsFromExecutePoll(String(params?.[0]), String(params?.[1]))
+      if (executeRows) return executeRows
       return s.queueRows ?? []
     }
     // --- outbound ---
@@ -127,6 +149,8 @@ function makeDb(s: Scenario) {
     }
     // --- latest inbound ---
     if (sql.includes('FROM agent_messages') && sql.includes('discord_message_id, input_mentions') && sql.includes('LIMIT 1')) {
+      const inserted = [...insertedMessages].reverse().find((row) => row.channel_id === params?.[0] && row.source === params?.[1])
+      if (inserted) return [inserted]
       return s.latestInbound ? [s.latestInbound] : []
     }
     return []
@@ -141,6 +165,26 @@ function makeDb(s: Scenario) {
     },
     async execute(sql: string, params?: any[]) {
       executed.push({ sql, params })
+      if (sql.includes('INSERT INTO agent_messages')) {
+        insertedMessages.push({
+          id: params?.[0],
+          channel_id: params?.[1],
+          source: params?.[2],
+          author_id: params?.[3],
+          content: params?.[4],
+          input_mentions: params?.[5],
+          metadata: params?.[6],
+          created_at: params?.[7],
+          discord_message_id: null,
+        })
+      }
+      if (sql.includes('INSERT INTO message_queue')) {
+        insertedQueues.push({
+          agent_id: params?.[0],
+          message_id: params?.[1],
+          payload: params?.[2],
+        })
+      }
       return { rowCount: 1 }
     },
     async transaction(fn: (tx: any) => Promise<any>) {
@@ -406,6 +450,41 @@ describe('NORM-060 full-channel smoke runner', () => {
     expect(report.summary.failures_by_class.timeout).toBe(0)
   })
 
+  test('execute reports post-run evidence while retaining initial plan failures separately', async () => {
+    const s = healthy()
+    s.latestInbound = { ...s.latestInbound, input_mentions: ['hotel-dev', 'stranger'] }
+    s.executePollRows = () => [{ agent_id: 'hotel-dev', status: 'done' }]
+
+    const plan = await run(s)
+    expect(plan.summary.failures_by_class.missing_member).toBe(1)
+
+    const report = await run(s, { mode: 'execute', confirmPlanHash: plan.plan_hash, timeoutMs: 0 })
+    expect(report.channels[0].status).toBe('pass')
+    expect(report.summary.failure_count).toBe(0)
+    expect(report.failures.some((x) => x.failure_class === 'missing_member')).toBe(false)
+    expect(report.execute!.initial_plan_failures.some((x) => x.failure_class === 'missing_member')).toBe(true)
+    expect(report.execute!.post_run_failures.some((x) => x.failure_class === 'missing_member')).toBe(false)
+    expect(report.execute!.post_run_summary.failure_count).toBe(0)
+  })
+
+  test('execute timeout is not a post-run failure when final evidence is terminal', async () => {
+    const s = healthy()
+    let pollCalls = 0
+    s.executePollRows = () => {
+      pollCalls++
+      return [{ agent_id: 'hotel-dev', status: pollCalls === 1 ? 'pending' : 'done' }]
+    }
+
+    const plan = await run(s)
+    const report = await run(s, { mode: 'execute', confirmPlanHash: plan.plan_hash, timeoutMs: 0 })
+    const target = report.channels[0].targets.find((t) => t.agent_id === 'hotel-dev')!
+    expect(report.execute!.timed_out_targets).toHaveLength(1)
+    expect(target.lifecycle.terminal_state).toBe('done')
+    expect(target.failures.some((x) => x.failure_class === 'timeout')).toBe(false)
+    expect(report.execute!.post_run_failures.some((x) => x.failure_class === 'timeout')).toBe(false)
+    expect(report.summary.failures_by_class.timeout).toBe(0)
+  })
+
   test('execute injects synthetic inbound + queue + audit rows (probe writes)', async () => {
     const s = healthy()
     s.executePollRows = () => [{ agent_id: 'hotel-dev', status: 'done' }]
@@ -425,6 +504,23 @@ describe('NORM-060 full-channel smoke runner', () => {
     expect(writes.some((sql: string) => sql.includes("'smoke.full_channel_execute'"))).toBe(true)
     const inboundWrite = (db as any).__executed.find((e: any) => e.sql.includes('INSERT INTO agent_messages'))
     expect(inboundWrite.params[0]).toMatch(/^[0-9a-f-]{36}$/)
+    expect(inboundWrite.params[4]).toContain('no reply is required')
+    expect(inboundWrite.params[4]).toContain('processing tool')
+    expect(inboundWrite.params[4]).toContain('done tool')
+    expect(inboundWrite.params[4]).toContain('Do not send a reply')
     expect(inboundWrite.params[5]).toEqual(['hotel-dev'])
+    expect(JSON.parse(inboundWrite.params[6])).toMatchObject({
+      synthetic: true,
+      no_reply_required: true,
+      expected_terminal_state: 'done',
+    })
+    const queueWrite = (db as any).__executed.find((e: any) => e.sql.includes('INSERT INTO message_queue'))
+    const queuePayload = JSON.parse(queueWrite.params[2])
+    expect(queuePayload).toMatchObject({
+      author_id: 'codex-aun',
+      no_reply_required: true,
+      expected_terminal_state: 'done',
+    })
+    expect(queuePayload.content).toBe(inboundWrite.params[4])
   })
 })

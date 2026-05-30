@@ -169,14 +169,32 @@ describe('NORM-060 full-channel smoke CLI (SQLite)', () => {
       const db = new Database(dbPath)
       try {
         const probe = db.prepare(
-          `SELECT id, role, input_mentions, metadata
+          `SELECT id, role, content, input_mentions, metadata
              FROM agent_messages
             WHERE json_extract(metadata, '$.smoke_run_id') = ?`,
         ).get(report.run_id) as any
         expect(probe.id).toMatch(/^[0-9a-f-]{36}$/)
         expect(probe.role).toBe('user')
+        expect(probe.content).toContain('no reply is required')
+        expect(probe.content).toContain('processing tool')
+        expect(probe.content).toContain('done tool')
+        expect(probe.content).toContain('Do not send a reply')
         expect(JSON.parse(probe.input_mentions)).toEqual(['hotel-dev'])
-        expect(JSON.parse(probe.metadata).synthetic).toBe(true)
+        expect(JSON.parse(probe.metadata)).toMatchObject({
+          synthetic: true,
+          no_reply_required: true,
+          expected_terminal_state: 'done',
+        })
+        const queue = db.prepare(
+          `SELECT payload FROM message_queue WHERE message_id = ?`,
+        ).get(probe.id) as any
+        const queuePayload = JSON.parse(queue.payload)
+        expect(queuePayload).toMatchObject({
+          author_id: 'codex-aun',
+          no_reply_required: true,
+          expected_terminal_state: 'done',
+        })
+        expect(queuePayload.content).toBe(probe.content)
         const audit = db.prepare(
           `SELECT COUNT(*) AS n FROM audit_log WHERE event_type = 'smoke.full_channel_execute' AND target = 'hotel-kanri'`,
         ).get() as any

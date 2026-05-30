@@ -20,8 +20,9 @@ type SqlDialect = 'postgres' | 'sqlite'
  *    plan (mirrors the reconcile `--execute --confirm <plan_hash>` operator gate).
  *    Injects a controlled probe (normalized inbound `agent_messages` row + one
  *    `message_queue` row per expected target + a `smoke.full_channel_execute`
- *    audit row), then bounded-polls for terminal evidence within `timeoutMs`,
- *    classifying `timeout` for any target that does not reach terminal state.
+ *    audit row), then bounded-polls for terminal evidence within `timeoutMs`.
+ *    Execute reports top-level channel/failure summary from a post-run evidence
+ *    snapshot; the confirmed dry-run plan evidence is retained separately.
  *
  * The eight failure classes are pinned to the #591 contract:
  *  unregistered_channel | missing_member | offline_runtime | no_endpoint_lease |
@@ -120,6 +121,17 @@ export interface FullChannelSmokeUnregisteredChannel {
   recommended_action: string
 }
 
+export interface FullChannelSmokeSummary {
+  target_channels: number
+  passed: number
+  incomplete: number
+  blocked: number
+  excluded_agents: number
+  failure_count: number
+  failures_by_class: Record<FullChannelSmokeFailureClass, number>
+  unregistered_channels: number
+}
+
 export interface FullChannelSmokeReport {
   ok: boolean
   mode: FullChannelSmokeMode
@@ -144,16 +156,7 @@ export interface FullChannelSmokeReport {
     include_test: boolean
     external_channel_id: string | null
   }
-  summary: {
-    target_channels: number
-    passed: number
-    incomplete: number
-    blocked: number
-    excluded_agents: number
-    failure_count: number
-    failures_by_class: Record<FullChannelSmokeFailureClass, number>
-    unregistered_channels: number
-  }
+  summary: FullChannelSmokeSummary
   channels: FullChannelSmokeChannel[]
   unregistered_channels: FullChannelSmokeUnregisteredChannel[]
   failures: FullChannelSmokeFailure[]
@@ -162,6 +165,10 @@ export interface FullChannelSmokeReport {
     injected_targets: Array<{ channel_id: string; agent_id: string; message_id: string; queue_row_id: string | null }>
     timed_out_targets: Array<{ channel_id: string; agent_id: string }>
     polls: number
+    initial_plan_summary: FullChannelSmokeSummary
+    initial_plan_failures: FullChannelSmokeFailure[]
+    post_run_summary: FullChannelSmokeSummary
+    post_run_failures: FullChannelSmokeFailure[]
   }
 }
 
@@ -246,6 +253,15 @@ function defaultSqlDialect(): SqlDialect {
 
 function stringArrayParam(values: string[], dialect: SqlDialect): unknown {
   return dialect === 'sqlite' ? JSON.stringify(values) : values
+}
+
+function buildSyntheticProbeContent(runId: string, channelId: string): string {
+  return [
+    `NORM-060 full-channel smoke ${runId} for ${channelId}.`,
+    'Synthetic probe: no reply is required.',
+    'For this claimed queue row, call the agent-comms processing tool for the queue_id, then call the agent-comms done tool for the same queue_id.',
+    'Do not send a reply.',
+  ].join(' ')
 }
 
 function classify(failures: FullChannelSmokeFailure[], incomplete: boolean): FullChannelSmokeStatus {
@@ -726,69 +742,27 @@ async function evaluateTarget(
   }
 }
 
-export async function buildFullChannelSmokeReport(
+async function buildChannelReports(
   db: DbAdapter,
-  options: FullChannelSmokeOptions = {},
-): Promise<FullChannelSmokeReport> {
-  const provider = (options.provider ?? 'discord').trim().toLowerCase()
-  const windowHours = options.windowHours ?? 168
-  const externalChannelId = options.externalChannelId?.trim() || null
-  const includeDisabled = options.includeDisabled === true
-  const includeTest = options.includeTest === true
-  const mode: FullChannelSmokeMode = options.mode === 'execute' ? 'execute' : 'dry_run'
-  const timeoutMs = Math.max(0, options.timeoutMs ?? 30_000)
-  const nowMs = options.nowMs ?? (() => Date.now())
-  const sleepMs = options.sleepMs ?? defaultSleep
-  const operatorAgentId = options.operatorAgentId ?? 'codex-aun'
-  const sqlDialect = options.sqlDialect ?? defaultSqlDialect()
-  const cutoff = new Date(nowMs() - windowHours * 60 * 60 * 1000).toISOString()
-
-  const agentEvidence = await buildAgentEvidence(db)
-  const channelsWithDeliveryOwner = await buildChannelsWithDeliveryOwner(db, provider)
-  const targets = await queryTargetChannels(db, provider, externalChannelId)
-
-  // --- unregistered channels: consume the #581/NORM-050 reconcile model directly ---
-  const unregistered: FullChannelSmokeUnregisteredChannel[] = []
-  const reconcile = await buildChannelRegistrationReconcileReport(db, {
-    provider,
-    windowHours,
-    externalChannelId,
-    dryRun: true,
-  })
-  const observedUnregistered = [
-    ...reconcile.planned.map((p) => ({ id: p.external_channel_id, count: p.observations.message_count, latest: p.observations.latest_created_at })),
-    ...reconcile.skipped
-      .filter((s) => s.reason !== 'already_registered')
-      .map((s) => ({ id: s.external_channel_id, count: 0, latest: null })),
-  ]
-  for (const obs of observedUnregistered) {
-    const auditRows = await queryOptional<any>(
-      db,
-      `SELECT COUNT(*) AS count FROM audit_log WHERE event_type = 'inbound.channel_unregistered' AND target = $1`,
-      [obs.id],
-    )
-    unregistered.push({
-      external_channel_id: obs.id,
-      message_count: obs.count,
-      latest_created_at: obs.latest,
-      audit_evidence_rows: asCount(auditRows[0]?.count),
-      recommended_action: RECONCILE_ACTION,
-    })
-  }
-
-  // --- evaluate each registered target channel ---
+  targets: any[],
+  agentEvidence: Map<string, AgentEvidence>,
+  channelsWithDeliveryOwner: Set<string>,
+  options: {
+    provider: string
+    cutoff: string
+    includeDisabled: boolean
+    includeTest: boolean
+  },
+): Promise<FullChannelSmokeChannel[]> {
   const channels: FullChannelSmokeChannel[] = []
-  const injectedTargets: NonNullable<FullChannelSmokeReport['execute']>['injected_targets'] = []
-  const timedOutTargets: NonNullable<FullChannelSmokeReport['execute']>['timed_out_targets'] = []
-
   for (const target of targets) {
     const channelId = String(target.channel_id)
     const externalId = asString(target.external_id)
     const members = toStringArray(target.members)
-    const { expected, excluded } = selectExpectedTargets(members, agentEvidence, includeDisabled, includeTest)
+    const { expected, excluded } = selectExpectedTargets(members, agentEvidence, options.includeDisabled, options.includeTest)
     const channelFailures: FullChannelSmokeFailure[] = []
 
-    const latest = await queryLatestInbound(db, channelId, provider, cutoff)
+    const latest = await queryLatestInbound(db, channelId, options.provider, options.cutoff)
     const inputMentions = toStringArray(latest?.input_mentions)
 
     // missing_member: a mention or routing policy principal that is not a channel member
@@ -817,8 +791,8 @@ export async function buildFullChannelSmokeReport(
         latest,
         agentEvidence,
         channelsWithDeliveryOwner,
-        provider,
-        cutoff,
+        options.provider,
+        options.cutoff,
       )
       targetRecords.push(record)
     }
@@ -870,6 +844,108 @@ export async function buildFullChannelSmokeReport(
       status: channelStatus,
     })
   }
+  return channels
+}
+
+function unregisteredChannelFailure(u: FullChannelSmokeUnregisteredChannel): FullChannelSmokeFailure {
+  return failure('unregistered_channel', u.external_channel_id, null, 'channel observed inbound but absent from channels/channel_adapters', {
+    source_table: 'channels / channel_adapters',
+    matched_rows: 0,
+    cite: { external_channel_id: u.external_channel_id, inbound_channel_unregistered_audit_rows: u.audit_evidence_rows },
+    recommended_action: RECONCILE_ACTION,
+  })
+}
+
+function summarizeReportState(
+  channels: FullChannelSmokeChannel[],
+  unregistered: FullChannelSmokeUnregisteredChannel[],
+): { summary: FullChannelSmokeSummary; failures: FullChannelSmokeFailure[] } {
+  const channelFailures = [
+    ...channels.flatMap((c) => c.failures),
+    ...channels.flatMap((c) => c.targets.flatMap((t) => (t.excluded ? [] : t.failures))),
+  ]
+  const unregisteredFailures = unregistered.map(unregisteredChannelFailure)
+  const failuresByClass = emptyFailureCounts()
+  for (const f of channelFailures) failuresByClass[f.failure_class]++
+  failuresByClass.unregistered_channel += unregistered.length
+
+  const excludedAgents = channels.reduce((sum, c) => sum + c.excluded_agents.length, 0)
+
+  return {
+    summary: {
+      target_channels: channels.length,
+      passed: channels.filter((c) => c.status === 'pass').length,
+      incomplete: channels.filter((c) => c.status === 'incomplete').length,
+      blocked: channels.filter((c) => c.status === 'blocked').length,
+      excluded_agents: excludedAgents,
+      failure_count: channelFailures.length + unregistered.length,
+      failures_by_class: failuresByClass,
+      unregistered_channels: unregistered.length,
+    },
+    failures: [...unregisteredFailures, ...channelFailures],
+  }
+}
+
+export async function buildFullChannelSmokeReport(
+  db: DbAdapter,
+  options: FullChannelSmokeOptions = {},
+): Promise<FullChannelSmokeReport> {
+  const provider = (options.provider ?? 'discord').trim().toLowerCase()
+  const windowHours = options.windowHours ?? 168
+  const externalChannelId = options.externalChannelId?.trim() || null
+  const includeDisabled = options.includeDisabled === true
+  const includeTest = options.includeTest === true
+  const mode: FullChannelSmokeMode = options.mode === 'execute' ? 'execute' : 'dry_run'
+  const timeoutMs = Math.max(0, options.timeoutMs ?? 30_000)
+  const nowMs = options.nowMs ?? (() => Date.now())
+  const sleepMs = options.sleepMs ?? defaultSleep
+  const operatorAgentId = options.operatorAgentId ?? 'codex-aun'
+  const sqlDialect = options.sqlDialect ?? defaultSqlDialect()
+  const cutoff = new Date(nowMs() - windowHours * 60 * 60 * 1000).toISOString()
+
+  const agentEvidence = await buildAgentEvidence(db)
+  const channelsWithDeliveryOwner = await buildChannelsWithDeliveryOwner(db, provider)
+  const targets = await queryTargetChannels(db, provider, externalChannelId)
+
+  // --- unregistered channels: consume the #581/NORM-050 reconcile model directly ---
+  const unregistered: FullChannelSmokeUnregisteredChannel[] = []
+  const reconcile = await buildChannelRegistrationReconcileReport(db, {
+    provider,
+    windowHours,
+    externalChannelId,
+    dryRun: true,
+  })
+  const observedUnregistered = [
+    ...reconcile.planned.map((p) => ({ id: p.external_channel_id, count: p.observations.message_count, latest: p.observations.latest_created_at })),
+    ...reconcile.skipped
+      .filter((s) => s.reason !== 'already_registered')
+      .map((s) => ({ id: s.external_channel_id, count: 0, latest: null })),
+  ]
+  for (const obs of observedUnregistered) {
+    const auditRows = await queryOptional<any>(
+      db,
+      `SELECT COUNT(*) AS count FROM audit_log WHERE event_type = 'inbound.channel_unregistered' AND target = $1`,
+      [obs.id],
+    )
+    unregistered.push({
+      external_channel_id: obs.id,
+      message_count: obs.count,
+      latest_created_at: obs.latest,
+      audit_evidence_rows: asCount(auditRows[0]?.count),
+      recommended_action: RECONCILE_ACTION,
+    })
+  }
+
+  // --- evaluate each registered target channel ---
+  let channels = await buildChannelReports(db, targets, agentEvidence, channelsWithDeliveryOwner, {
+    provider,
+    cutoff,
+    includeDisabled,
+    includeTest,
+  })
+  const initialPlanState = summarizeReportState(channels, unregistered)
+  const injectedTargets: NonNullable<FullChannelSmokeReport['execute']>['injected_targets'] = []
+  const timedOutTargets: NonNullable<FullChannelSmokeReport['execute']>['timed_out_targets'] = []
 
   // --- plan hash over the observed plan (channels + expected targets) ---
   const planHash = createHash('sha256')
@@ -889,7 +965,7 @@ export async function buildFullChannelSmokeReport(
   let ok = true
   let error: FullChannelSmokeReport['error']
   let runId: string | null = null
-  let executeBlock: FullChannelSmokeReport['execute']
+  let executePolls: number | null = null
 
   if (mode === 'execute') {
     if (options.confirmPlanHash !== planHash) {
@@ -909,11 +985,23 @@ export async function buildFullChannelSmokeReport(
         injectedTargets,
         timedOutTargets,
       })
-      executeBlock = { run_id: runId, injected_targets: injectedTargets, timed_out_targets: timedOutTargets, polls }
-      // attach timeout failures
+      executePolls = polls
+
+      // Re-read after injection/polling so execute reports the final observed
+      // lifecycle, not the dry-run snapshot that was only used for approval.
+      channels = await buildChannelReports(db, targets, agentEvidence, channelsWithDeliveryOwner, {
+        provider,
+        cutoff,
+        includeDisabled,
+        includeTest,
+      })
+
+      // Bounded-poll timeouts are post-run failures only when the final
+      // evidence snapshot still has not reached terminal state.
       for (const t of timedOutTargets) {
         const channel = channels.find((c) => c.channel_id === t.channel_id)
         const record = channel?.targets.find((r) => r.agent_id === t.agent_id)
+        if (record?.lifecycle.terminal_reached) continue
         const fail = failure('timeout', t.channel_id, t.agent_id, `bounded execute probe did not reach terminal evidence within ${timeoutMs}ms`, {
           source_table: 'message_queue',
           matched_rows: 0,
@@ -922,21 +1010,32 @@ export async function buildFullChannelSmokeReport(
         if (record) {
           record.failures.push(fail)
           record.status = 'blocked'
+        } else if (channel) {
+          channel.failures.push(fail)
         }
-        if (channel) channel.status = classify([...channel.failures, ...channel.targets.flatMap((r) => (r.excluded ? [] : r.failures))], true)
+        if (channel) {
+          channel.status = classify(
+            [...channel.failures, ...channel.targets.flatMap((r) => (r.excluded ? [] : r.failures))],
+            channel.targets.some((r) => !r.excluded && r.status === 'incomplete'),
+          )
+        }
       }
     }
   }
 
-  const allFailures = [
-    ...channels.flatMap((c) => c.failures),
-    ...channels.flatMap((c) => c.targets.flatMap((t) => (t.excluded ? [] : t.failures))),
-  ]
-  const failuresByClass = emptyFailureCounts()
-  for (const f of allFailures) failuresByClass[f.failure_class]++
-  failuresByClass.unregistered_channel += unregistered.length
-
-  const excludedAgents = channels.reduce((sum, c) => sum + c.excluded_agents.length, 0)
+  const finalState = summarizeReportState(channels, unregistered)
+  const executeBlock = runId && executePolls != null
+    ? {
+        run_id: runId,
+        injected_targets: injectedTargets,
+        timed_out_targets: timedOutTargets,
+        polls: executePolls,
+        initial_plan_summary: initialPlanState.summary,
+        initial_plan_failures: initialPlanState.failures,
+        post_run_summary: finalState.summary,
+        post_run_failures: finalState.failures,
+      }
+    : undefined
 
   return {
     ok,
@@ -970,29 +1069,10 @@ export async function buildFullChannelSmokeReport(
       include_test: includeTest,
       external_channel_id: externalChannelId,
     },
-    summary: {
-      target_channels: channels.length,
-      passed: channels.filter((c) => c.status === 'pass').length,
-      incomplete: channels.filter((c) => c.status === 'incomplete').length,
-      blocked: channels.filter((c) => c.status === 'blocked').length,
-      excluded_agents: excludedAgents,
-      failure_count: allFailures.length + unregistered.length,
-      failures_by_class: failuresByClass,
-      unregistered_channels: unregistered.length,
-    },
+    summary: finalState.summary,
     channels,
     unregistered_channels: unregistered,
-    failures: [
-      ...unregistered.map((u) =>
-        failure('unregistered_channel', u.external_channel_id, null, 'channel observed inbound but absent from channels/channel_adapters', {
-          source_table: 'channels / channel_adapters',
-          matched_rows: 0,
-          cite: { external_channel_id: u.external_channel_id, inbound_channel_unregistered_audit_rows: u.audit_evidence_rows },
-          recommended_action: RECONCILE_ACTION,
-        }),
-      ),
-      ...allFailures,
-    ],
+    failures: finalState.failures,
     ...(executeBlock ? { execute: executeBlock } : {}),
   }
 }
@@ -1026,7 +1106,21 @@ async function runBoundedExecute(db: DbAdapter, ctx: BoundedExecuteContext): Pro
       const expected = channel.targets.filter((t) => !t.excluded).map((t) => t.agent_id)
       if (expected.length === 0) continue
       const messageId = randomUUID()
-      const content = `NORM-060 full-channel smoke ${ctx.runId} for ${channel.channel_id}.`
+      const content = buildSyntheticProbeContent(ctx.runId, channel.channel_id)
+      const metadata = {
+        smoke_run_id: ctx.runId,
+        norm: 'NORM-060',
+        synthetic: true,
+        no_reply_required: true,
+        expected_terminal_state: 'done',
+      }
+      const payload = {
+        smoke_run_id: ctx.runId,
+        content,
+        author_id: ctx.operatorAgentId,
+        no_reply_required: true,
+        expected_terminal_state: 'done',
+      }
       await tx.execute(
         `INSERT INTO agent_messages (id, channel_id, source, direction, role, author_id, content, input_mentions, metadata, created_at)
          VALUES ($1, $2, $3, 'inbound', 'user', $4, $5, $6, $7, $8)`,
@@ -1037,7 +1131,7 @@ async function runBoundedExecute(db: DbAdapter, ctx: BoundedExecuteContext): Pro
           ctx.operatorAgentId,
           content,
           stringArrayParam(expected, ctx.sqlDialect),
-          JSON.stringify({ smoke_run_id: ctx.runId, norm: 'NORM-060', synthetic: true }),
+          JSON.stringify(metadata),
           new Date(ctx.nowMs()).toISOString(),
         ],
       )
@@ -1045,7 +1139,7 @@ async function runBoundedExecute(db: DbAdapter, ctx: BoundedExecuteContext): Pro
         await tx.execute(
           `INSERT INTO message_queue (agent_id, message_id, payload, status)
            VALUES ($1, $2, $3, 'pending')`,
-          [agentId, messageId, JSON.stringify({ smoke_run_id: ctx.runId, content, author_id: ctx.operatorAgentId })],
+          [agentId, messageId, JSON.stringify(payload)],
         )
         ctx.injectedTargets.push({ channel_id: channel.channel_id, agent_id: agentId, message_id: messageId, queue_row_id: null })
       }
