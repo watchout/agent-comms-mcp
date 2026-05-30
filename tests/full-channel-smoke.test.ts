@@ -64,7 +64,18 @@ function healthy(): Scenario {
       created_at: '2026-05-29T00:00:00.000Z',
     },
     queueRows: [{ status: 'done', count: '1', any_claimed: '1' }],
-    outbound: [{ consumer_agent_id: 'hotel-dev', channel_external_id: 'EID1', status: 'sent', last_error: null, count: '1' }],
+    outbound: [{
+      consumer_agent_id: 'hotel-dev',
+      consumer_source: 'recipient_token_evidence',
+      channel_external_id: 'EID1',
+      status: 'sent',
+      last_error: null,
+      projection_source: 'recipient_default_projection',
+      projection_fallback_reason: null,
+      delivery_fallback_reason: null,
+      delivery_diagnostics: [{ source: 'recipient_token_evidence', agent_id: 'hotel-dev' }],
+      count: '1',
+    }],
     auditEventTypes: [],
     unregisteredAuditRows: 0,
     observedMissing: [],
@@ -295,7 +306,18 @@ describe('NORM-060 full-channel smoke runner', () => {
     s.outbound = []
     s.outboundByMessage = {
       M1: [],
-      R1: [{ consumer_agent_id: 'hotel-dev', channel_external_id: 'EID1', status: 'sent', last_error: null, count: '1' }],
+      R1: [{
+        consumer_agent_id: 'hotel-dev',
+        consumer_source: 'recipient_token_evidence',
+        channel_external_id: 'EID1',
+        status: 'sent',
+        last_error: null,
+        projection_source: 'recipient_default_projection',
+        projection_fallback_reason: null,
+        delivery_fallback_reason: null,
+        delivery_diagnostics: [{ source: 'recipient_token_evidence', agent_id: 'hotel-dev' }],
+        count: '1',
+      }],
     }
     const report = await run(s)
     const target = report.channels[0].targets[0]
@@ -318,12 +340,102 @@ describe('NORM-060 full-channel smoke runner', () => {
 
   test('failure class: send_feedback_mismatch when outbound terminal channel != target channel', async () => {
     const s = healthy()
-    s.outbound = [{ consumer_agent_id: 'hotel-dev', channel_external_id: 'WRONG', status: 'sent', last_error: null, count: '1' }]
+    s.outbound = [{ ...s.outbound![0], channel_external_id: 'WRONG' }]
     const report = await run(s)
     const target = report.channels[0].targets[0]
     const f = target.failures.find((x) => x.failure_class === 'send_feedback_mismatch')!
     expect(f).toBeDefined()
     expect((f.evidence.cite as any).observed_channel_external_id).toBe('WRONG')
+  })
+
+  test('outbound terminal evidence must be explicit direct consumer evidence', async () => {
+    const s = healthy()
+    s.outbound = [{
+      consumer_agent_id: null,
+      consumer_source: null,
+      channel_external_id: 'EID1',
+      status: 'sent',
+      last_error: null,
+      projection_source: 'recipient_default_projection',
+      projection_fallback_reason: null,
+      delivery_fallback_reason: null,
+      delivery_diagnostics: [{ source: 'recipient_token_evidence', agent_id: 'hotel-dev' }],
+      count: '1',
+    }]
+    const report = await run(s)
+    const target = report.channels[0].targets[0]
+    expect(target.lifecycle.outbound_terminal).toBe(false)
+    expect(target.status).toBe('blocked')
+    expect(target.failures.some((x) => x.failure_class === 'send_feedback_mismatch')).toBe(true)
+  })
+
+  test('wrong-consumer relay sent rows are explicit non-clearing blockers', async () => {
+    const s = healthy()
+    s.outbound = [{
+      consumer_agent_id: 'codex-cto',
+      consumer_source: 'recipient_token_evidence',
+      channel_external_id: 'EID1',
+      status: 'sent',
+      last_error: null,
+      projection_source: 'recipient_default_projection',
+      projection_fallback_reason: null,
+      delivery_fallback_reason: null,
+      delivery_diagnostics: [{ source: 'recipient_token_evidence', agent_id: 'codex-cto' }],
+      count: '1',
+    }]
+    const report = await run(s)
+    const target = report.channels[0].targets[0]
+    expect(target.lifecycle.outbound_terminal).toBe(false)
+    expect(target.lifecycle.outbound_consumer_agent_id).toBe('codex-cto')
+    expect(target.status).toBe('blocked')
+    const f = target.failures.find((x) => x.failure_class === 'send_feedback_mismatch')!
+    expect(f.detail).toContain('different consumer_agent_id')
+    expect((f.evidence.cite as any).expected_consumer_agent_id).toBe('hotel-dev')
+    expect((f.evidence.cite as any).observed_consumer_agent_ids).toEqual(['codex-cto'])
+  })
+
+  test('direct outbound evidence rejects projection and delivery fallback masking', async () => {
+    const s = healthy()
+    s.outbound = [{
+      consumer_agent_id: 'hotel-dev',
+      consumer_source: 'recipient_token_evidence',
+      channel_external_id: 'EID1',
+      status: 'sent',
+      last_error: null,
+      projection_source: 'fallback_adapter_owner',
+      projection_fallback_reason: 'native_projection_unhealthy',
+      delivery_fallback_reason: 'recipient_direct_unavailable',
+      delivery_diagnostics: [{ source: 'recipient_token_evidence', agent_id: 'hotel-dev' }],
+      count: '1',
+    }]
+    const report = await run(s)
+    const target = report.channels[0].targets[0]
+    expect(target.lifecycle.outbound_terminal).toBe(false)
+    const f = target.failures.find((x) => x.failure_class === 'send_feedback_mismatch')!
+    expect(f.detail).toContain('projection_source_not_direct')
+    expect(f.detail).toContain('projection_fallback_reason_present')
+    expect(f.detail).toContain('delivery_fallback_reason_present')
+  })
+
+  test('direct outbound evidence requires recipient token evidence for the intended consumer', async () => {
+    const s = healthy()
+    s.outbound = [{
+      consumer_agent_id: 'hotel-dev',
+      consumer_source: 'sender_token_evidence',
+      channel_external_id: 'EID1',
+      status: 'sent',
+      last_error: null,
+      projection_source: 'recipient_default_projection',
+      projection_fallback_reason: null,
+      delivery_fallback_reason: null,
+      delivery_diagnostics: [{ source: 'sender_token_evidence', agent_id: 'hotel-dev' }],
+      count: '1',
+    }]
+    const report = await run(s)
+    const target = report.channels[0].targets[0]
+    expect(target.lifecycle.outbound_terminal).toBe(false)
+    const f = target.failures.find((x) => x.failure_class === 'send_feedback_mismatch')!
+    expect(f.detail).toContain('recipient_token_evidence_missing')
   })
 
   test('failure class: send_feedback_mismatch from send_reject audit evidence', async () => {

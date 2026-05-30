@@ -98,9 +98,16 @@ function seedHealthyEvidence(dbPath: string): { inboundId: string; replyId: stri
        VALUES ('hotel-dev', ?, ?, 'replied', 'hotel-dev', datetime('now'), datetime('now'), ?)`,
     ).run(inboundId, JSON.stringify({ channel_id: 'hotel-kanri', content: 'please inspect' }), replyId)
     db.prepare(
-      `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, channel_external_id, content, status, sent_at)
-       VALUES (?, 'hotel-dev', 'hotel-dev', 'EID1', 'done', 'sent', datetime('now'))`,
-    ).run(replyId)
+      `INSERT INTO outbound_queue (
+         message_id, agent_id, consumer_agent_id, consumer_source,
+         projection_source, projection_fallback_reason,
+         delivery_fallback_reason, delivery_diagnostics,
+         channel_external_id, content, status, sent_at
+       )
+       VALUES (?, 'hotel-dev', 'hotel-dev', 'recipient_token_evidence',
+               'recipient_default_projection', NULL,
+               NULL, ?, 'EID1', 'done', 'sent', datetime('now'))`,
+    ).run(replyId, JSON.stringify([{ source: 'recipient_token_evidence', agent_id: 'hotel-dev' }]))
     db.prepare(
       `INSERT INTO audit_log (event_type, agent_id, target, detail)
        VALUES ('smoke.fixture_terminal', 'hotel-dev', 'EID1', '{}')`,
