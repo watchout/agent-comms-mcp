@@ -136,7 +136,7 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     const repliedMatch = /UPDATE message_queue\s+SET\s+status\s*=\s*'replied'[\s\S]*?replied_at\s*=\s*now\(\)[\s\S]*?replied_with\s*=\s*\$1[\s\S]*?claim_expires_at\s*=\s*NULL[\s\S]*?WHERE id = \$2/.exec(SERVER_SRC)
     const repliedIdx = repliedMatch?.index ?? -1
     const outboundIdx = SERVER_SRC.indexOf(
-      `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)`,
+      `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)`,
     )
     expect(repliedIdx).toBeGreaterThan(-1)
     expect(outboundIdx).toBeGreaterThan(-1)

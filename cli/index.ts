@@ -2822,6 +2822,8 @@ async function sendMessage(args: string[]) {
           consumer_source: projection.consumerSource,
           consumer_evidence: projection.consumerEvidence,
           projection_source: projection.projectionSource,
+          delivery_fallback_reason: projection.deliveryFallbackReason,
+          delivery_diagnostics: projection.deliveryDiagnostics,
           reason: outboundSkipReason,
         })
       } else {
@@ -2831,18 +2833,22 @@ async function sendMessage(args: string[]) {
           // enqueue so an over-long LLM reply is truncated once, deterministically,
           // instead of being split across retries inside the Discord adapter.
           await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
             [
               id,
               agentId,
               projection.consumerAgentId,
+              projection.consumerSource,
               projection.consumerEvidence?.connector_instance_id ?? null,
               projection.consumerEvidence?.channel_binding_id ?? null,
+              projection.consumerEvidence?.provider_channel_access_id ?? null,
               projection.projectionIdentityId,
               projection.intendedProjectionIdentityId,
               projection.projectionSource,
               projection.projectionFallbackReason,
+              projection.deliveryFallbackReason,
+              JSON.stringify(projection.deliveryDiagnostics),
               discordExternalId,
               truncateForDiscord(decorateProjectedContent({
                 content,
@@ -3107,6 +3113,8 @@ async function notifyMessage(args: string[]) {
         consumer_source: projection.consumerSource,
         consumer_evidence: projection.consumerEvidence,
         projection_source: projection.projectionSource,
+        delivery_fallback_reason: projection.deliveryFallbackReason,
+        delivery_diagnostics: projection.deliveryDiagnostics,
         reason: outboundSkipReason,
       })
     } else {
@@ -3114,18 +3122,22 @@ async function notifyMessage(args: string[]) {
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, delivery_connector_instance_id, channel_binding_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
           [
             id,
             agentId,
             projection.consumerAgentId,
+            projection.consumerSource,
             projection.consumerEvidence?.connector_instance_id ?? null,
             projection.consumerEvidence?.channel_binding_id ?? null,
+            projection.consumerEvidence?.provider_channel_access_id ?? null,
             projection.projectionIdentityId,
             projection.intendedProjectionIdentityId,
             projection.projectionSource,
             projection.projectionFallbackReason,
+            projection.deliveryFallbackReason,
+            JSON.stringify(projection.deliveryDiagnostics),
             discordExternalId,
             truncateForDiscord(decorateProjectedContent({
               content,
@@ -3365,9 +3377,11 @@ async function diagnoseDelivery(args: string[]) {
 
     if (outboundMessageId) {
       const outbound = await db.query(
-        `SELECT id, message_id, agent_id, consumer_agent_id,
+        `SELECT id, message_id, agent_id, consumer_agent_id, consumer_source,
+                delivery_connector_instance_id, channel_binding_id, provider_channel_access_id,
                 projection_identity_id, intended_projection_identity_id,
-                projection_source, projection_fallback_reason, channel_external_id,
+                projection_source, projection_fallback_reason,
+                delivery_fallback_reason, delivery_diagnostics, channel_external_id,
                 status, attempts, max_attempts, last_error, sent_at, discord_message_id
            FROM outbound_queue
           WHERE message_id = $1
@@ -3486,6 +3500,8 @@ async function diagnoseProjection(args: string[]) {
         intended_projection_identity_id: projection.intendedProjectionIdentityId,
         projection_source: projection.projectionSource,
         projection_fallback_reason: projection.projectionFallbackReason,
+        delivery_fallback_reason: projection.deliveryFallbackReason,
+        delivery_diagnostics: projection.deliveryDiagnostics,
         delegated,
         consumer_discord_identity_present: hasDiscordIdentity,
         consumer_discord_ui_id: consumerDiscordUiId,
@@ -3526,6 +3542,8 @@ async function diagnoseProjection(args: string[]) {
       `Consumer evidence: ${projection.consumerEvidence ? `${projection.consumerEvidence.source_table} connector=${projection.consumerEvidence.connector_instance_id}${projection.consumerEvidence.channel_binding_id ? ` binding=${projection.consumerEvidence.channel_binding_id}` : ''}${projection.consumerEvidence.provider_channel_access_id ? ` access=${projection.consumerEvidence.provider_channel_access_id}` : ''}` : '(none)'}`,
       `Projection source: ${projection.projectionSource}`,
       `Fallback reason:   ${projection.projectionFallbackReason ?? '(none)'}`,
+      `Delivery fallback: ${projection.deliveryFallbackReason ?? '(none)'}`,
+      `Delivery diagnostics: ${projection.deliveryDiagnostics.length > 0 ? JSON.stringify(projection.deliveryDiagnostics) : '(none)'}`,
       `Consumer Discord:  ${hasDiscordIdentity ? `ui_id=${consumerDiscordUiId}${consumerBinding?.status ? ` (${consumerBinding.status})` : ''}` : 'no UI identity detected'}`,
       `Projection Discord: ${projectionHasDiscordIdentity ? `ui_id=${projectionDiscordUiId}${projectionBinding?.status ? ` (${projectionBinding.status})` : ''}` : 'no UI identity detected'}`,
       `Consumer status:   ${consumerRow?.status ?? '(unknown)'}${consumerRow?.runtime ? ` / ${consumerRow.runtime}` : ''}`,

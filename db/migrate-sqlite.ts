@@ -130,10 +130,16 @@ export function migrateSqlite(dbPath?: string): void {
       message_id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       consumer_agent_id TEXT,
+      consumer_source TEXT,
+      delivery_connector_instance_id TEXT,
+      channel_binding_id TEXT,
+      provider_channel_access_id TEXT,
       projection_identity_id TEXT,
       intended_projection_identity_id TEXT,
       projection_source TEXT,
       projection_fallback_reason TEXT,
+      delivery_fallback_reason TEXT,
+      delivery_diagnostics TEXT DEFAULT '[]',
       channel_external_id TEXT NOT NULL,
       content TEXT NOT NULL,
       mentions_display TEXT DEFAULT '[]',
@@ -865,6 +871,18 @@ export function migrateSqlite(dbPath?: string): void {
   }
   if (!oqControlColNames.has('channel_binding_id')) {
     gatedExec(`ALTER TABLE outbound_queue ADD COLUMN channel_binding_id TEXT REFERENCES channel_connector_bindings(channel_binding_id) ON DELETE SET NULL`)
+  }
+  if (!oqControlColNames.has('provider_channel_access_id')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN provider_channel_access_id TEXT REFERENCES provider_channel_access(provider_channel_access_id) ON DELETE SET NULL`)
+  }
+  if (!oqControlColNames.has('consumer_source')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN consumer_source TEXT`)
+  }
+  if (!oqControlColNames.has('delivery_fallback_reason')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN delivery_fallback_reason TEXT`)
+  }
+  if (!oqControlColNames.has('delivery_diagnostics')) {
+    gatedExec(`ALTER TABLE outbound_queue ADD COLUMN delivery_diagnostics TEXT DEFAULT '[]'`)
   }
   if (!oqControlColNames.has('claimed_runtime_instance_id')) {
     gatedExec(`ALTER TABLE outbound_queue ADD COLUMN claimed_runtime_instance_id TEXT REFERENCES agent_runtime_instances(runtime_instance_id) ON DELETE SET NULL`)

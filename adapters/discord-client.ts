@@ -27,6 +27,7 @@ import {
   refreshAgentCacheWith,
   type AgentCacheEntry,
 } from '../core/agent-cache'
+import { resolveDbDiscordBotToken } from '../core/discord-token-resolution'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -87,7 +88,23 @@ export async function refreshAgentCache(): Promise<string[]> {
 
 /** Resolve Discord Bot Token for a specific bot (Phase 3c). */
 export async function resolveDiscordToken(botId: string): Promise<{ token: string; source: 'per-bot' | 'fallback' } | null> {
-  // 1. Check per-bot env var: DISCORD_TOKEN_{AGENT_ID} (uppercase, hyphens → underscores)
+  // 1. Runtime login follows the same registered/active credential contract as
+  // delivery eligibility. Legacy agent provider_token_source_ref remains a DB
+  // fallback inside resolveDbDiscordBotToken.
+  const db = getDb ? await getDb() : null
+  if (db) {
+    try {
+      const dbToken = await resolveDbDiscordBotToken(db, botId)
+      if (dbToken) {
+        process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — DB ${dbToken.source} accepted (${dbToken.tokenSource})\n`)
+        return { token: dbToken.token, source: 'per-bot' }
+      }
+    } catch (err) {
+      process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — DB token resolution failed: ${err}\n`)
+    }
+  }
+
+  // 2. Check per-bot env var: DISCORD_TOKEN_{AGENT_ID} (uppercase, hyphens → underscores)
   const envKey = `DISCORD_TOKEN_${botId.toUpperCase().replace(/-/g, '_')}`
   const perBotToken = process.env[envKey]
   if (perBotToken) {
@@ -107,7 +124,7 @@ export async function resolveDiscordToken(botId: string): Promise<{ token: strin
     }
   }
 
-  // 2. Fallback to shared DISCORD_BOT_TOKEN
+  // 3. Fallback to shared DISCORD_BOT_TOKEN
   if (DISCORD_BOT_TOKEN) {
     process.stderr.write(`agent-comms: resolveDiscordToken(${botId}) — fallback to shared DISCORD_BOT_TOKEN\n`)
     return { token: DISCORD_BOT_TOKEN, source: 'fallback' }

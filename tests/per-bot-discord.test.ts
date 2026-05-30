@@ -55,6 +55,11 @@ describe('Phase 3c — resolveDiscordToken()', () => {
   test('returns null when no token available', () => {
     expect(SERVER_SOURCE).toContain('no token available')
   })
+
+  test('uses DB connector credential contract before env/shared fallback', () => {
+    expect(SERVER_SOURCE).toContain('resolveDbDiscordBotToken')
+    expect(SERVER_SOURCE).toContain('DB ${dbToken.source} accepted')
+  })
 })
 
 // ============================================================

@@ -46,11 +46,11 @@ const SERVER_SRC =
   + '\n'
   + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
-const OUTBOUND_INSERT_COLUMNS_PATTERN = String.raw`INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*delivery_connector_instance_id,\s*channel_binding_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*channel_external_id,\s*content\)`
+const OUTBOUND_INSERT_COLUMNS_PATTERN = String.raw`INSERT INTO outbound_queue\s*\(message_id,\s*agent_id,\s*consumer_agent_id,\s*consumer_source,\s*delivery_connector_instance_id,\s*channel_binding_id,\s*provider_channel_access_id,\s*projection_identity_id,\s*intended_projection_identity_id,\s*projection_source,\s*projection_fallback_reason,\s*delivery_fallback_reason,\s*delivery_diagnostics,\s*channel_external_id,\s*content\)`
 const OUTBOUND_INSERT_COLUMNS_RE = new RegExp(OUTBOUND_INSERT_COLUMNS_PATTERN)
 const OUTBOUND_INSERT_COLUMNS_GLOBAL_RE = new RegExp(OUTBOUND_INSERT_COLUMNS_PATTERN, 'g')
-const SERVER_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*externalId/g
-const CLI_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId/g
+const SERVER_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*externalId/g
+const CLI_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*discordExternalId/g
 
 function serverToolBody(toolName: string): string {
   const start = SERVER_ONLY_SRC.indexOf(`if (name === '${toolName}')`)
@@ -83,10 +83,16 @@ describe('T1 — db/migrate.ts ships the outbound_queue table', () => {
     expect(ddl).toMatch(/message_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/agent_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/consumer_agent_id\s+TEXT/)
+    expect(ddl).toMatch(/consumer_source\s+TEXT/)
+    expect(ddl).toMatch(/delivery_connector_instance_id\s+UUID/)
+    expect(ddl).toMatch(/channel_binding_id\s+UUID/)
+    expect(ddl).toMatch(/provider_channel_access_id\s+UUID/)
     expect(ddl).toMatch(/projection_identity_id\s+TEXT/)
     expect(ddl).toMatch(/intended_projection_identity_id\s+TEXT/)
     expect(ddl).toMatch(/projection_source\s+TEXT/)
     expect(ddl).toMatch(/projection_fallback_reason\s+TEXT/)
+    expect(ddl).toMatch(/delivery_fallback_reason\s+TEXT/)
+    expect(ddl).toMatch(/delivery_diagnostics\s+JSONB/)
     expect(ddl).toMatch(/channel_external_id\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/content\s+TEXT\s+NOT NULL/)
     expect(ddl).toMatch(/mentions_display\s+TEXT/)
@@ -370,6 +376,18 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
     )
     expect(MIGRATE_SRC).toMatch(
       /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS projection_fallback_reason TEXT/,
+    )
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS consumer_source TEXT/,
+    )
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS provider_channel_access_id UUID/,
+    )
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS delivery_fallback_reason TEXT/,
+    )
+    expect(MIGRATE_SRC).toMatch(
+      /ALTER TABLE outbound_queue ADD COLUMN IF NOT EXISTS delivery_diagnostics JSONB/,
     )
   })
 

@@ -15,10 +15,16 @@ export type OutboundQueueRow = {
   message_id: string
   agent_id: string
   consumer_agent_id?: string | null
+  consumer_source?: string | null
+  delivery_connector_instance_id?: string | null
+  channel_binding_id?: string | null
+  provider_channel_access_id?: string | null
   projection_identity_id?: string | null
   intended_projection_identity_id?: string | null
   projection_source?: string | null
   projection_fallback_reason?: string | null
+  delivery_fallback_reason?: string | null
+  delivery_diagnostics?: unknown
   channel_external_id: string
   status: string
   attempts: number
@@ -130,10 +136,16 @@ export function diagnoseOutboundQueueRow(
     message_id: row.message_id,
     author_id: row.agent_id,
     consumer_agent_id: consumerAgentId,
+    consumer_source: row.consumer_source ?? null,
+    delivery_connector_instance_id: row.delivery_connector_instance_id ?? null,
+    channel_binding_id: row.channel_binding_id ?? null,
+    provider_channel_access_id: row.provider_channel_access_id ?? null,
     projection_identity_id: projectionIdentityId,
     intended_projection_identity_id: row.intended_projection_identity_id ?? null,
     projection_source: row.projection_source ?? null,
     projection_fallback_reason: row.projection_fallback_reason ?? null,
+    delivery_fallback_reason: row.delivery_fallback_reason ?? null,
+    delivery_diagnostics: row.delivery_diagnostics ?? null,
     projection_health: projectionHealth,
     channel_external_id: row.channel_external_id,
     status: row.status,

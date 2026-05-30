@@ -231,7 +231,7 @@ describe('T5b — CLI + server outbound_queue INSERTs route through truncateForD
     // display-only projection decorator may wrap content before truncation.
     expect(CLI_SRC).toContain('decorateProjectedContent')
     expect(CLI_SRC).toMatch(
-      /\[\s*id,\s*agentId,\s*projection\.consumerAgentId,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*discordExternalId,\s*truncateForDiscord\(decorateProjectedContent\(/,
+      /\[\s*id,\s*agentId,\s*projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*discordExternalId,\s*truncateForDiscord\(decorateProjectedContent\(/,
     )
   })
 
