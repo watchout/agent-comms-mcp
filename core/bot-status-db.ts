@@ -7,6 +7,7 @@
  *   - heartbeat_ok: agents.last_seen_at within 60s
  *   - health_state: derived enum
  *   - endpoint_lease_state: active connector runtime endpoint lease readiness
+ *   - discord_gateway_state: runtime heartbeat evidence for Discord client readiness
  *
  * `health_state` enum:
  *   - 'crashed'     — last_seen_at < NOW() - 5min
@@ -56,6 +57,9 @@ export interface BotStatusDbRow {
   endpoint_lease_state: 'not_applicable' | 'missing_runtime' | 'missing_lease' | 'ok'
   endpoint_lease_expires_at: string | null
   endpoint_lease_heartbeat_at: string | null
+  discord_gateway_reported_count: number
+  discord_gateway_ready_count: number
+  discord_gateway_state: 'not_applicable' | 'missing_runtime' | 'not_reported' | 'not_ready' | 'ready'
 }
 
 const QUERY = `
@@ -85,9 +89,17 @@ const QUERY = `
            COUNT(DISTINCT ci.connector_instance_id) FILTER (
              WHERE cpl.lease_id IS NOT NULL
            ) AS active_endpoint_lease_count,
+           COUNT(DISTINCT ci.connector_instance_id) FILTER (
+             WHERE ari.metadata ? 'discord_gateway_ready'
+           ) AS discord_gateway_reported_count,
+           COUNT(DISTINCT ci.connector_instance_id) FILTER (
+             WHERE ari.metadata->>'discord_gateway_ready' = 'true'
+           ) AS discord_gateway_ready_count,
            MIN(cpl.expires_at) AS endpoint_lease_expires_at,
            MAX(cpl.heartbeat_at) AS endpoint_lease_heartbeat_at
       FROM connector_instances ci
+      LEFT JOIN agent_runtime_instances ari
+        ON ari.runtime_instance_id = ci.runtime_instance_id
       LEFT JOIN control_plane_leases cpl
         ON cpl.lease_scope_type = 'runtime_instance'
        AND cpl.lease_scope_id = ci.runtime_instance_id::text
@@ -138,7 +150,16 @@ const QUERY = `
            ELSE 'ok'
          END AS endpoint_lease_state,
          e.endpoint_lease_expires_at,
-         e.endpoint_lease_heartbeat_at
+         e.endpoint_lease_heartbeat_at,
+         COALESCE(e.discord_gateway_reported_count, 0) AS discord_gateway_reported_count,
+         COALESCE(e.discord_gateway_ready_count, 0) AS discord_gateway_ready_count,
+         CASE
+           WHEN COALESCE(e.active_connector_count, 0) = 0 THEN 'not_applicable'
+           WHEN COALESCE(e.runtime_linked_connector_count, 0) < COALESCE(e.active_connector_count, 0) THEN 'missing_runtime'
+           WHEN COALESCE(e.discord_gateway_reported_count, 0) = 0 THEN 'not_reported'
+           WHEN COALESCE(e.discord_gateway_ready_count, 0) < COALESCE(e.runtime_linked_connector_count, 0) THEN 'not_ready'
+           ELSE 'ready'
+         END AS discord_gateway_state
     FROM agent_base a
     LEFT JOIN queue_status q ON q.agent_id = a.agent_id
     LEFT JOIN endpoint_status e ON e.agent_id = a.agent_id
@@ -168,6 +189,9 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     endpoint_lease_state: BotStatusDbRow['endpoint_lease_state']
     endpoint_lease_expires_at: Date | null
     endpoint_lease_heartbeat_at: Date | null
+    discord_gateway_reported_count: string | number
+    discord_gateway_ready_count: string | number
+    discord_gateway_state: BotStatusDbRow['discord_gateway_state']
   }>(QUERY)
   const map = new Map<string, BotStatusDbRow>()
   for (const row of result.rows) {
@@ -193,6 +217,9 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
       endpoint_lease_state: row.endpoint_lease_state,
       endpoint_lease_expires_at: row.endpoint_lease_expires_at ? row.endpoint_lease_expires_at.toISOString() : null,
       endpoint_lease_heartbeat_at: row.endpoint_lease_heartbeat_at ? row.endpoint_lease_heartbeat_at.toISOString() : null,
+      discord_gateway_reported_count: parseCount(row.discord_gateway_reported_count),
+      discord_gateway_ready_count: parseCount(row.discord_gateway_ready_count),
+      discord_gateway_state: row.discord_gateway_state,
     }
     mapped.queue_wake_state = classifyQueueWakeState(mapped)
     map.set(row.agent_id, mapped)

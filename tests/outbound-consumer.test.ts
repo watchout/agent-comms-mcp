@@ -182,12 +182,19 @@ describe('S2-A §4.5 — orphan reclaim returns claimed rows to pending', () => 
 //      return it to 'pending' — closes the adversarial loop where an
 //      exhausted row could be reclaimed indefinitely.
 
-import { setDbGetter, consumeOneOutboundRow, reclaimOrphanOutboundRows } from '../adapters/outbound-consumer'
+import { setDbGetter, consumeOneOutboundRow, reclaimOrphanOutboundRows, isTransientDeliveryError } from '../adapters/outbound-consumer'
 import { discordClients } from '../adapters/discord-client'
 import { randomUUID } from 'node:crypto'
 
 const HARD_AGENT_T1 = `test-2stage-t1-${process.pid}`
 const HARD_AGENT_T2 = `test-2stage-t2-${process.pid}`
+
+describe('B2 — disconnected Discord adapter classifier', () => {
+  test('Discord client readiness failures are transient retryable delivery errors', () => {
+    expect(isTransientDeliveryError('Error: Discord client not connected')).toBe(true)
+    expect(isTransientDeliveryError('discord_client_not_ready')).toBe(true)
+  })
+})
 
 async function cleanupHardFixtures(c: Client): Promise<void> {
   await c.query(`DELETE FROM outbound_queue WHERE agent_id IN ($1, $2)`, [HARD_AGENT_T1, HARD_AGENT_T2]).catch(() => {})
@@ -256,6 +263,7 @@ describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row se
     // The fake send returns the conflicting id so stage 2 will UNIQUE-violate.
     setDbGetter(async () => client! as any, HARD_AGENT_T1)
     discordClients.set(HARD_AGENT_T1, {
+      isConnected: () => true,
       // Minimal surface — outbound-consumer.ts uses sendAdapterMessage
       // and expects an `external_message_id` field on the result.
       sendAdapterMessage: async () => ({ external_message_id: conflictDiscordId }),
@@ -298,6 +306,60 @@ describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row se
     expect(log).toContain('discord_message_id=')
     expect(log).toContain('code=')
     expect(log).toContain('err.message=')
+
+    await cleanupHardFixtures(client!)
+  })
+
+  test('registered but disconnected adapter is transient and never sends', async () => {
+    requireHardDb()
+
+    await cleanupHardFixtures(client!)
+    await client!.query(
+      `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
+         VALUES ($1, $1, 'online', 'agent', 'bun')
+         ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
+      [HARD_AGENT_T1],
+    )
+
+    const outboundSeed = await client!.query(
+      `INSERT INTO outbound_queue
+         (message_id, agent_id, consumer_agent_id, channel_external_id, content,
+          status, attempts, max_attempts, claimed_at)
+       VALUES ($1, $2, $2, 'test-channel', 'disconnected adapter fixture',
+               'pending', 0, 5, NULL)
+       RETURNING id`,
+      [randomUUID(), HARD_AGENT_T1],
+    )
+    const outboundRowId = outboundSeed.rows[0].id
+    let sendCalls = 0
+
+    setDbGetter(async () => client! as any, HARD_AGENT_T1)
+    discordClients.set(HARD_AGENT_T1, {
+      isConnected: () => false,
+      sendAdapterMessage: async () => {
+        sendCalls++
+        return { external_message_id: `should-not-send-${randomUUID()}` }
+      },
+    } as any)
+
+    try {
+      await consumeOneOutboundRow()
+    } finally {
+      discordClients.delete(HARD_AGENT_T1)
+    }
+
+    expect(sendCalls).toBe(0)
+    const { rows } = await client!.query(
+      `SELECT status, attempts, last_error, claimed_at, next_retry_at
+         FROM outbound_queue WHERE id = $1`,
+      [outboundRowId],
+    )
+    expect(rows.length).toBe(1)
+    expect(rows[0].status).toBe('pending')
+    expect(Number(rows[0].attempts)).toBe(1)
+    expect(rows[0].last_error).toBe('discord_client_not_ready')
+    expect(rows[0].claimed_at).toBeNull()
+    expect(rows[0].next_retry_at).not.toBeNull()
 
     await cleanupHardFixtures(client!)
   })

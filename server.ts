@@ -395,6 +395,7 @@ async function ensureDiscordBotToken(client?: { query: (sql: string, params?: an
 async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
   await ensureDiscordBotToken(client)
   const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
+  const registeredDiscordClient = discordClients.get(AGENT_ID) ?? null
   await heartbeatRuntimeInstance(client, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
@@ -413,6 +414,8 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     metadata: {
       source: 'server.ts',
       server_root: SERVER_ROOT,
+      discord_gateway_ready: registeredDiscordClient?.isConnected() ?? false,
+      discord_client_registered: registeredDiscordClient != null,
     },
     connectorMetadata: discordTokenFingerprint
       ? {
@@ -3383,7 +3386,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    health.status === 'misconfigured' ? '⚠️' : '❓'
       const dbRow = dbStatus.get(entry.agentId)
       const dbSuffix = dbRow
-        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} active_claims=${dbRow.active_claim_count} wake=${dbRow.queue_wake_state} wake_at=${dbRow.latest_wake_progress_at ?? '-'} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count}`
+        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} active_claims=${dbRow.active_claim_count} wake=${dbRow.queue_wake_state} wake_at=${dbRow.latest_wake_progress_at ?? '-'} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count} discord_gateway=${dbRow.discord_gateway_state}`
         : ' | (no db row)'
       const sourceSuffix = entry.source ? ` | source=${entry.source}` : ''
       const blockerSuffix = entry.blockers && entry.blockers.length > 0 ? ` | blockers=${entry.blockers.join(',')}` : ''
@@ -4609,6 +4612,8 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
       // Register this bot's Discord adapter in the per-bot client map so
       // outbound delivery can resolve it via discordClients.get(AGENT_ID).
       discordClients.set(AGENT_ID, discord)
+      const heartbeatClient = await tryGetDb()
+      if (heartbeatClient) await heartbeatRuntimeEvidence(heartbeatClient)
 
       // Start the outbound consumer AFTER discordClients.set so the first
       // consumer tick can resolve the client for this agent.

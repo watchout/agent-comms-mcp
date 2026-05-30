@@ -65,6 +65,9 @@ let mockError: unknown = null
 let mockCallCount = 0
 
 const mockAdapter: any = {
+  isConnected() {
+    return true
+  },
   async sendAdapterMessage(_params: any) {
     mockCallCount++
     if (mockError) throw mockError
