@@ -1,11 +1,54 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import type { Client } from 'pg'
 import type { DbAdapter } from '../core/db'
-import { classifyQueueWakeState } from '../core/bot-status-db'
+import { classifyQueueWakeState, fetchBotStatusFromDb } from '../core/bot-status-db'
+import { StateDaemon } from '../core/state-daemon'
 import {
   buildQueueWakeSmokeReport,
   fingerprintFatalStderr,
   inspectStateDaemonRuntime,
 } from '../core/state-daemon-readiness'
+import {
+  FakeAlertSink,
+  FakeClock,
+  FakeMetrics,
+  FakePgListen,
+  FakeTmux,
+  PgDBClient,
+} from './contract/state-daemon/fakes'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './contract/state-daemon/seed'
+
+class PgClientAdapter implements DbAdapter {
+  constructor(private readonly client: Client) {}
+
+  async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+    const result = await this.client.query(sql, params)
+    return result.rows as T[]
+  }
+
+  async queryOne<T = any>(sql: string, params?: any[]): Promise<T | null> {
+    return (await this.query<T>(sql, params))[0] ?? null
+  }
+
+  async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+    const result = await this.client.query(sql, params)
+    return { rowCount: result.rowCount ?? 0 }
+  }
+
+  async transaction<T>(fn: (tx: DbAdapter) => Promise<T>): Promise<T> {
+    await this.client.query('BEGIN')
+    try {
+      const result = await fn(this)
+      await this.client.query('COMMIT')
+      return result
+    } catch (err) {
+      await this.client.query('ROLLBACK')
+      throw err
+    }
+  }
+
+  async close(): Promise<void> {}
+}
 
 class FakeSmokeDb implements DbAdapter {
   agents = new Map<string, any>()
@@ -202,5 +245,162 @@ describe('queue wake smoke', () => {
       health_state: 'busy_active',
       latest_wake_progress_at: new Date().toISOString(),
     })).toBe('busy_active_pending_growth')
+  })
+})
+
+describe('queue wake smoke integration evidence', () => {
+  let pg: Client
+
+  beforeAll(async () => {
+    pg = await openClient()
+  })
+
+  afterAll(async () => {
+    if (pg) {
+      await cleanAll(pg)
+      await pg.end()
+    }
+  })
+
+  beforeEach(async () => {
+    await cleanAll(pg)
+  })
+
+  test('execute observes a real state-daemon wake after inserting its diagnostic row', async () => {
+    const agent = makeAgentId('queue-smoke')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      status: 'idle',
+      last_seen_at: new Date(),
+      tmux_session: `${agent}-session`,
+    })
+
+    let now = Date.parse('2026-05-30T00:00:00Z')
+    const clock = new FakeClock(new Date(now))
+    const tmux = new FakeTmux()
+    const metrics = new FakeMetrics()
+    const alert = new FakeAlertSink()
+    const daemon = new StateDaemon({
+      db: new PgDBClient(pg),
+      pgListen: new FakePgListen(),
+      tmux,
+      clock,
+      metrics,
+      alert,
+      config: { agentIdPrefix: 'sd-test-' },
+    })
+    const adapter = new PgClientAdapter(pg)
+    const dryRun = await buildQueueWakeSmokeReport(adapter, {
+      agentId: agent,
+      mode: 'dry_run',
+      timeoutMs: 2_000,
+      pollMs: 500,
+      nowMs: () => now,
+    })
+
+    await daemon.start()
+    try {
+      let handled = false
+      const report = await buildQueueWakeSmokeReport(adapter, {
+        agentId: agent,
+        mode: 'execute',
+        confirmPlanHash: dryRun.plan_hash,
+        timeoutMs: 2_000,
+        pollMs: 500,
+        nowMs: () => now,
+        sleepMs: async (ms) => {
+          now += ms
+          clock.advance(ms)
+          if (handled) return
+
+          const rows = await pg.query<{ id: number; status: string; claim_expires_at: Date | null }>(
+            `SELECT id, status, claim_expires_at
+               FROM message_queue
+              WHERE agent_id = $1
+              ORDER BY id DESC
+              LIMIT 1`,
+            [agent],
+          )
+          const row = rows.rows[0]
+          if (!row) return
+          handled = true
+          await daemon.__testHandleEvent({
+            op: 'INSERT',
+            id: row.id,
+            agent_id: agent,
+            status: row.status,
+            claim_expires_at: row.claim_expires_at,
+          })
+        },
+      })
+
+      expect(report.ok).toBe(true)
+      expect(report.result).toBe('pass')
+      expect(report.smoke.evidence).toContain('message_queue.last_wake_attempt_at advanced')
+      expect(report.smoke.evidence).toContain('agents.last_wake_attempt_at advanced')
+      expect(tmux.sentKeys).toEqual([{
+        session: `${agent}-session`,
+        payload: 'Call the agent-comms next tool now. Do not call inbox.\n',
+      }])
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'ok' })).toBe(1)
+
+      const queue = await pg.query<{
+        status: string
+        last_wake_attempt_at: Date | null
+        done_at: Date | null
+        replied_at: Date | null
+      }>(
+        `SELECT status, last_wake_attempt_at, done_at, replied_at
+           FROM message_queue
+          WHERE id = $1`,
+        [report.smoke.queue_id],
+      )
+      expect(queue.rows[0].status).toBe('pending')
+      expect(queue.rows[0].last_wake_attempt_at).not.toBeNull()
+      expect(queue.rows[0].done_at).toBeNull()
+      expect(queue.rows[0].replied_at).toBeNull()
+
+      const status = await fetchBotStatusFromDb(pg)
+      const row = status.get(agent)!
+      expect(row.pending_count).toBe(1)
+      expect(row.active_claim_count).toBe(0)
+      expect(row.queue_wake_state).toBe('wake_attempt_recorded')
+      expect(row.latest_wake_progress_at).not.toBeNull()
+    } finally {
+      await daemon.stop()
+    }
+  })
+
+  test('bot-status DB truth exposes busy active claims suppressing pending wake growth', async () => {
+    const agent = makeAgentId('busy-growth')
+    const now = new Date()
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      status: 'busy',
+      last_seen_at: now,
+      tmux_session: `${agent}-session`,
+    })
+    await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claimed_by: agent,
+      claimed_at: now,
+      claim_expires_at: new Date(now.getTime() + 60_000),
+      created_at: now,
+    })
+    await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      created_at: now,
+    })
+
+    const status = await fetchBotStatusFromDb(pg)
+    const row = status.get(agent)!
+    expect(row.health_state).toBe('busy_active')
+    expect(row.pending_count).toBe(1)
+    expect(row.active_claim_count).toBe(1)
+    expect(row.queue_wake_state).toBe('busy_active_pending_growth')
   })
 })
