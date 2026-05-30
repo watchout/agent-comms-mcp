@@ -118,6 +118,12 @@ import {
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth, REPLY_CHAIN_PREVIEW_CHARS } from './core/reply-chain'
 import { resolvePhase5 } from './core/routing/server-integration'
+import {
+  buildTerminalBaton,
+  detectNoReplyIntent,
+  parseQueuePayload,
+  withTerminalBaton,
+} from './core/no-reply-policy'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
@@ -1900,7 +1906,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'done',
-      description: 'Mark an in-progress message as done (internal complete, no reply sent). Pre: status=\'in_progress\'. Post: status=\'done\', done_at=now(). Idempotent — a second call on an already-done row returns ALREADY_TRANSITIONED + ok:true. Spec §1.2.',
+      description: 'Mark a message as done. Pre: status=\'in_progress\', or status=\'received\' when payload/content deterministically says no reply is required. Post: status=\'done\', done_at=now(), with terminal_baton.no_reply_required stamped for explicit no-reply rows. Idempotent — a second call on an already-done row returns ALREADY_TRANSITIONED + ok:true. Spec §1.2.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -3543,15 +3549,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!Number.isFinite(queueId) || queueId <= 0) {
       return { content: [{ type: 'text', text: `Error: ${name} queue_id must be a positive integer, got '${queueIdRaw}'.` }], isError: true }
     }
-    const fromStatus = name === 'processing' ? 'received' : 'in_progress'
     const toStatus = name === 'processing' ? 'in_progress' : 'done'
     try {
       await client.query('BEGIN')
       try {
         // Inspect first so idempotence and INVALID_STATE can be reported
         // distinctly from "row not found". One row, one UPDATE.
-        const cur = await client.query<{ status: string }>(
-          `SELECT status FROM message_queue WHERE id = $1`,
+        const cur = await client.query<{
+          status: string
+          payload: string | null
+          message_id: string | null
+          agent_id: string
+          stored_content: string | null
+        }>(
+          `SELECT mq.status, mq.payload, mq.message_id, mq.agent_id,
+                  am.content AS stored_content
+             FROM message_queue mq
+             LEFT JOIN agent_messages am ON am.id = mq.message_id
+            WHERE mq.id = $1`,
           [queueId],
         )
         if (cur.rows.length === 0) {
@@ -3561,38 +3576,83 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           }
         }
-        const status = cur.rows[0]!.status
+        const row = cur.rows[0]!
+        const status = row.status
+        const payload = parseQueuePayload(row.payload)
+        const decision = detectNoReplyIntent({ payload, storedContent: row.stored_content })
+        const terminalBaton = decision.no_reply_required
+          ? buildTerminalBaton({
+              reason: decision.reason ?? 'deterministic_no_reply_policy',
+              setBy: process.env.AGENT_ID || 'mcp.done',
+              source: 'deterministic_no_reply_policy',
+            })
+          : null
+        const stampedPayload = terminalBaton
+          ? JSON.stringify(withTerminalBaton(payload, terminalBaton))
+          : null
         if (status === toStatus) {
-          await client.query('ROLLBACK')
+          if (name === 'done' && stampedPayload) {
+            await client.query(
+              `UPDATE message_queue SET payload = $2 WHERE id = $1`,
+              [queueId, stampedPayload],
+            )
+            await client.query('COMMIT')
+          } else {
+            await client.query('ROLLBACK')
+          }
           return {
             content: [{
               type: 'text',
-              text: JSON.stringify({ ok: true, queue_id: queueId, status: toStatus, already_transitioned: true }),
+              text: JSON.stringify({
+                ok: true,
+                queue_id: queueId,
+                status: toStatus,
+                already_transitioned: true,
+                no_reply_required: name === 'done' && decision.no_reply_required ? true : undefined,
+                terminal_baton: name === 'done' ? terminalBaton ?? undefined : undefined,
+              }),
             }],
           }
         }
-        if (status !== fromStatus) {
+        if (name === 'processing' && status !== 'received') {
           await client.query('ROLLBACK')
           return {
             content: [{
               type: 'text',
-              text: `Error [INVALID_STATE]: ${name} requires status='${fromStatus}', got '${status}' (queue_id=${queueId}).`,
+              text: `Error [INVALID_STATE]: processing requires status='received', got '${status}' (queue_id=${queueId}).`,
             }],
             isError: true,
           }
         }
-        const setClauses = name === 'done'
-          ? `status = 'done', done_at = now()`
-          : `status = 'in_progress'`
-        const upd = await client.query(
-          `UPDATE message_queue SET ${setClauses} WHERE id = $1 AND status = $2 RETURNING id`,
-          [queueId, fromStatus],
-        )
+        if (name === 'done' && status !== 'in_progress' && !(status === 'received' && decision.no_reply_required)) {
+          await client.query('ROLLBACK')
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [INVALID_STATE]: done requires status='in_progress' or status='received' with terminal_baton.no_reply_required, got '${status}' (queue_id=${queueId}).`,
+            }],
+            isError: true,
+          }
+        }
+        const upd = name === 'processing'
+          ? await client.query(
+              `UPDATE message_queue SET status = 'in_progress' WHERE id = $1 AND status = $2 RETURNING id`,
+              [queueId, 'received'],
+            )
+          : stampedPayload
+            ? await client.query(
+                `UPDATE message_queue SET status = 'done', done_at = now(), payload = $3 WHERE id = $1 AND status = $2 RETURNING id`,
+                [queueId, status, stampedPayload],
+              )
+            : await client.query(
+                `UPDATE message_queue SET status = 'done', done_at = now() WHERE id = $1 AND status = $2 RETURNING id`,
+                [queueId, status],
+              )
         if (upd.rows.length === 0) {
           // Lost a race; another caller already advanced the row.
           await client.query('ROLLBACK')
           return {
-            content: [{ type: 'text', text: `Error [RACE]: ${name} lost the status='${fromStatus}' transition for queue_id=${queueId}.` }],
+            content: [{ type: 'text', text: `Error [RACE]: ${name} lost the status='${status}' transition for queue_id=${queueId}.` }],
             isError: true,
           }
         }
@@ -3600,7 +3660,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: 'text',
-            text: JSON.stringify({ ok: true, queue_id: queueId, status: toStatus }),
+            text: JSON.stringify({
+              ok: true,
+              queue_id: queueId,
+              status: toStatus,
+              no_reply_required: name === 'done' && decision.no_reply_required ? true : undefined,
+              terminal_baton: name === 'done' ? terminalBaton ?? undefined : undefined,
+            }),
           }],
         }
       } catch (err) {

@@ -4,6 +4,12 @@ import { Client } from 'pg'
 import { applyUpMigrationFile } from '../../db/migrate'
 import { assertDestructiveMigrationTestDatabase } from '../../db/destructive-migration-gate'
 import { join, dirname } from 'node:path'
+import {
+  buildTerminalBaton,
+  detectNoReplyIntent,
+  parseQueuePayload,
+  withTerminalBaton,
+} from '../../core/no-reply-policy'
 
 // PR #338 sub-PR 6 — contract tests for the `processing` + `done` MCP tools
 // per spec §1.2. Two layers:
@@ -36,6 +42,7 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     const doneBlock = SERVER_SRC.split("name: 'done'")[1] ?? ''
     expect(doneBlock).toContain("required: ['queue_id']")
     expect(doneBlock.toLowerCase()).toContain('in_progress')
+    expect(doneBlock).toContain('terminal_baton.no_reply_required')
     expect(doneBlock.toLowerCase()).toContain('done_at')
   })
 
@@ -44,6 +51,8 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     // Spec §1.2 invariants surface as named error codes.
     expect(SERVER_SRC).toContain('INVALID_STATE')
     expect(SERVER_SRC).toContain('already_transitioned')
+    expect(SERVER_SRC).toContain('detectNoReplyIntent')
+    expect(SERVER_SRC).toContain('terminal_baton.no_reply_required')
     // done writes done_at, processing does not.
     expect(SERVER_SRC).toContain("status = 'done', done_at = now()")
   })
@@ -122,12 +131,12 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [FIXTURE_AGENT])
   })
 
-  async function insertReceived(): Promise<number> {
+  async function insertReceived(payload: Record<string, unknown> = {}): Promise<number> {
     const r = await client.query<{ id: number }>(
       `INSERT INTO message_queue (agent_id, payload, status, claim_expires_at)
-       VALUES ($1, '{}', 'received', now() + interval '30 seconds')
+       VALUES ($1, $2, 'received', now() + interval '30 seconds')
        RETURNING id`,
-      [FIXTURE_AGENT],
+      [FIXTURE_AGENT, JSON.stringify(payload)],
     )
     return r.rows[0]!.id
   }
@@ -141,21 +150,43 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
   > {
     const fromStatus = tool === 'processing' ? 'received' : 'in_progress'
     const toStatus = tool === 'processing' ? 'in_progress' : 'done'
-    const cur = await client.query<{ status: string }>(
-      `SELECT status FROM message_queue WHERE id = $1`,
+    const cur = await client.query<{ status: string; payload: string | null }>(
+      `SELECT status, payload FROM message_queue WHERE id = $1`,
       [id],
     )
     if (cur.rows.length === 0) return { ok: false, code: 'NOT_FOUND' }
-    const observed = cur.rows[0]!.status
+    const row = cur.rows[0]!
+    const observed = row.status
+    const payload = parseQueuePayload(row.payload)
+    const decision = detectNoReplyIntent({ payload })
+    const baton = decision.no_reply_required
+      ? buildTerminalBaton({
+          reason: decision.reason ?? 'deterministic_no_reply_policy',
+          setBy: FIXTURE_AGENT,
+          source: 'deterministic_no_reply_policy',
+          now: () => new Date('2026-05-30T00:00:00.000Z'),
+        })
+      : null
+    const stampedPayload = baton ? JSON.stringify(withTerminalBaton(payload, baton)) : null
     if (observed === toStatus) return { ok: true, status: toStatus, already_transitioned: true }
-    if (observed !== fromStatus) return { ok: false, code: 'INVALID_STATE', observed }
-    const setClause = tool === 'done'
-      ? `status = 'done', done_at = now()`
-      : `status = 'in_progress'`
-    const upd = await client.query(
-      `UPDATE message_queue SET ${setClause} WHERE id = $1 AND status = $2 RETURNING id`,
-      [id, fromStatus],
-    )
+    if (tool === 'processing' && observed !== fromStatus) return { ok: false, code: 'INVALID_STATE', observed }
+    if (tool === 'done' && observed !== 'in_progress' && !(observed === 'received' && decision.no_reply_required)) {
+      return { ok: false, code: 'INVALID_STATE', observed }
+    }
+    const upd = tool === 'processing'
+      ? await client.query(
+          `UPDATE message_queue SET status = 'in_progress' WHERE id = $1 AND status = $2 RETURNING id`,
+          [id, fromStatus],
+        )
+      : stampedPayload
+        ? await client.query(
+            `UPDATE message_queue SET status = 'done', done_at = now(), payload = $3 WHERE id = $1 AND status = $2 RETURNING id`,
+            [id, observed, stampedPayload],
+          )
+        : await client.query(
+            `UPDATE message_queue SET status = 'done', done_at = now() WHERE id = $1 AND status = $2 RETURNING id`,
+            [id, observed],
+          )
     if (upd.rows.length === 0) return { ok: false, code: 'RACE' }
     return { ok: true, status: toStatus }
   }
@@ -205,6 +236,18 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     const r = await doTransition(id, 'done')
     expect(r).toMatchObject({ ok: false, code: 'INVALID_STATE', observed: 'received' })
     expect(await statusOf(id)).toBe('received')
+  })
+
+  test('done: received no-reply acknowledgement → done + terminal_baton stamped', async () => {
+    const id = await insertReceived({ content: 'ACK: audit PASS received and recorded. No reply required.' })
+    const r = await doTransition(id, 'done')
+    expect(r).toMatchObject({ ok: true, status: 'done' })
+    expect(await statusOf(id)).toBe('done')
+    const payload = await client.query<{ payload: string }>(
+      `SELECT payload FROM message_queue WHERE id = $1`,
+      [id],
+    )
+    expect(JSON.parse(payload.rows[0]!.payload).terminal_baton.no_reply_required).toBe(true)
   })
 
   test('processing idempotent: second call on in_progress returns already_transitioned', async () => {
