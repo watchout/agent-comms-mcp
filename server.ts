@@ -120,7 +120,7 @@ import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutbou
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
-import { resolveTokenSourceRef } from './core/token-source-ref'
+import { resolveDbDiscordBotToken } from './core/discord-token-resolution'
 import {
   buildOutboundAclViolationDetail,
   formatOutboundAclViolation,
@@ -337,6 +337,7 @@ if (WEBHOOK_PORT_EXPLICIT) {
 const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
 let resolvedDiscordBotToken = DISCORD_BOT_TOKEN
+let resolvedDiscordBotTokenSource = process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : process.env.DISCORD_BOT_TOKEN ? 'DISCORD_BOT_TOKEN' : null
 const REPLY_CHAIN_DEPTH = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
 const SERVER_ROOT = dirname(new URL(import.meta.url).pathname)
@@ -364,23 +365,14 @@ async function ensureDiscordBotToken(client?: { query: (sql: string, params?: an
   if (!dbClient) return ''
 
   try {
-    const row = await dbClient.query(
-      `SELECT provider_token_source_ref
-         FROM agents
-        WHERE agent_id = $1
-          AND agent_type <> 'human'
-          AND COALESCE(profile_enabled, true) = true
-        LIMIT 1`,
-      [AGENT_ID],
-    )
-    const tokenRef = row.rows[0]?.provider_token_source_ref
-    const resolved = resolveTokenSourceRef(tokenRef)
+    const resolved = await resolveDbDiscordBotToken(dbClient, AGENT_ID)
     if (resolved) {
       resolvedDiscordBotToken = resolved.token
-      process.stderr.write(`agent-comms: Discord token loaded from provider_token_source_ref (${resolved.source})\n`)
+      resolvedDiscordBotTokenSource = `${resolved.source}:${resolved.tokenSource}`
+      process.stderr.write(`agent-comms: Discord token loaded from ${resolved.source} (${resolved.tokenSource})\n`)
     }
   } catch (err) {
-    process.stderr.write(`agent-comms: provider token source resolution failed (non-fatal): ${err}\n`)
+    process.stderr.write(`agent-comms: Discord DB token resolution failed (non-fatal): ${err}\n`)
   }
 
   return resolvedDiscordBotToken
@@ -411,7 +403,7 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     connectorMetadata: discordTokenFingerprint
       ? {
           token_fingerprint: discordTokenFingerprint,
-          token_source: process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : 'DISCORD_BOT_TOKEN',
+          token_source: resolvedDiscordBotTokenSource,
         }
       : undefined,
   }).catch((err) => {
