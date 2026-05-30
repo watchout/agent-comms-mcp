@@ -271,6 +271,9 @@ export class DiscordAdapter implements UIAdapter, Adapter {
                FROM agents
               WHERE metadata->>'discord_id' = $1
                 AND agent_id <> $2
+                AND COALESCE(profile_enabled, true) = true
+                AND disabled_at IS NULL
+                AND COALESCE(status, '') <> 'disabled'
               ORDER BY agent_id`,
             [c.user.id, this.agentId],
           )

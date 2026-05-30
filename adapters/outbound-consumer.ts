@@ -101,7 +101,51 @@ export function computeOutboundRetryDelayMs(attempt: number): number {
 // retryable; everything else (4xx auth, validation, unknown channel)
 // is permanent.
 export function isTransientDeliveryError(err: string): boolean {
-  return /timeout|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network|rate limit|\b429\b|\b5\d\d\b|HTTP 5/i.test(err)
+  return /timeout|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network|rate limit|\b429\b|\b5\d\d\b|HTTP 5|discord client not connected|discord_client_not_ready/i.test(err)
+}
+
+type ClaimedOutboundRow = {
+  id: string | number
+  attempts: number
+  max_attempts: number
+}
+
+async function recordOutboundDeliveryFailure(
+  client: DbLike,
+  row: ClaimedOutboundRow,
+  deliveryError: string,
+): Promise<void> {
+  const transient = isTransientDeliveryError(deliveryError)
+  const exhausted = row.attempts >= row.max_attempts
+
+  if (!transient || exhausted) {
+    await client.query(
+      `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
+      [deliveryError, row.id],
+    ).catch(err => {
+      process.stderr.write(
+        `agent-comms: outbound consumer mark-failed failed for id=${row.id}: ${err}\n`,
+      )
+    })
+    process.stderr.write(
+      `agent-comms: outbound delivery permanently failed (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, transient=${transient}): ${deliveryError}\n`,
+    )
+    return
+  }
+
+  // §3.4 Exponential backoff: return row to 'pending' with next_retry_at.
+  const delayMs = computeOutboundRetryDelayMs(row.attempts)
+  await client.query(
+    `UPDATE outbound_queue
+        SET status = 'pending', last_error = $1,
+            next_retry_at = now() + ($2::int || ' ms')::interval,
+            claimed_at = NULL
+      WHERE id = $3`,
+    [deliveryError, delayMs, row.id],
+  ).catch(() => {})
+  process.stderr.write(
+    `agent-comms: outbound transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, retry in ${delayMs}ms): ${deliveryError}\n`,
+  )
 }
 
 // ---- PollingDriver (message_queue preview, daemon only) -------------------
@@ -287,6 +331,10 @@ export async function consumeOneOutboundRow(): Promise<void> {
       )
       return
     }
+    if (!clientForAgent.isConnected()) {
+      await recordOutboundDeliveryFailure(client, row, 'discord_client_not_ready')
+      return
+    }
 
     let deliveryError: string | null = null
     let discordMessageId: string | null = null
@@ -397,37 +445,7 @@ export async function consumeOneOutboundRow(): Promise<void> {
       return
     }
 
-    const transient = isTransientDeliveryError(deliveryError)
-    const exhausted = row.attempts >= row.max_attempts
-
-    if (!transient || exhausted) {
-      await client.query(
-        `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
-        [deliveryError, row.id],
-      ).catch(err => {
-        process.stderr.write(
-          `agent-comms: outbound consumer mark-failed failed for id=${row.id}: ${err}\n`,
-        )
-      })
-      process.stderr.write(
-        `agent-comms: outbound delivery permanently failed (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, transient=${transient}): ${deliveryError}\n`,
-      )
-      return
-    }
-
-    // §3.4 Exponential backoff: return row to 'pending' with next_retry_at.
-    const delayMs = computeOutboundRetryDelayMs(row.attempts)
-    await client.query(
-      `UPDATE outbound_queue
-          SET status = 'pending', last_error = $1,
-              next_retry_at = now() + ($2::int || ' ms')::interval,
-              claimed_at = NULL
-        WHERE id = $3`,
-      [deliveryError, delayMs, row.id],
-    ).catch(() => {})
-    process.stderr.write(
-      `agent-comms: outbound transient failure (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}, retry in ${delayMs}ms): ${deliveryError}\n`,
-    )
+    await recordOutboundDeliveryFailure(client, row, deliveryError)
   } finally {
     clearTimeout(guardTimeout)
     outboundConsumerInFlight = false

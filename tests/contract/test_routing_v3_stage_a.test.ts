@@ -203,6 +203,7 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(['healthy', 'busy_active', 'busy_stuck', 'crashed', 'offline'] as BotHealthState[]).toContain(row!.health_state)
     expect(row!.endpoint_lease_state).toBe('not_applicable')
     expect(row!.active_endpoint_lease_count).toBe(0)
+    expect(row!.discord_gateway_state).toBe('not_applicable')
   })
 
   test('NORM-022 — bot_status exposes runtime endpoint lease state', async () => {
@@ -218,6 +219,7 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row.active_connector_count).toBe(1)
     expect(row.runtime_linked_connector_count).toBe(0)
     expect(row.active_endpoint_lease_count).toBe(0)
+    expect(row.discord_gateway_state).toBe('missing_runtime')
 
     await cleanupRuntimeEvidence(TEST_AGENT)
     const runtimeId = randomUUID()
@@ -241,6 +243,7 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row.active_connector_count).toBe(1)
     expect(row.runtime_linked_connector_count).toBe(1)
     expect(row.active_endpoint_lease_count).toBe(0)
+    expect(row.discord_gateway_state).toBe('not_reported')
 
     await client.query(
       `INSERT INTO control_plane_leases
@@ -255,6 +258,17 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row.active_endpoint_lease_count).toBe(1)
     expect(row.endpoint_lease_expires_at).not.toBeNull()
     expect(row.endpoint_lease_heartbeat_at).not.toBeNull()
+    expect(row.discord_gateway_state).toBe('not_reported')
+
+    await client.query(
+      `UPDATE agent_runtime_instances
+          SET metadata = jsonb_build_object('discord_gateway_ready', true)
+        WHERE runtime_instance_id = $1`,
+      [runtimeId],
+    )
+    row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
+    expect(row.discord_gateway_state).toBe('ready')
+    expect(row.discord_gateway_ready_count).toBe(1)
   })
 
   test('NORM-022 — bot_status blocks partial runtime endpoint lease coverage', async () => {
