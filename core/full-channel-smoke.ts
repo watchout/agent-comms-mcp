@@ -85,6 +85,13 @@ export interface FullChannelSmokeLifecycle {
   terminal_reached: boolean
   outbound_message_id: string | null
   outbound_status: string | null
+  outbound_consumer_agent_id: string | null
+  outbound_consumer_source: string | null
+  outbound_projection_source: string | null
+  outbound_projection_fallback_reason: string | null
+  outbound_delivery_fallback_reason: string | null
+  outbound_recipient_token_evidence: boolean
+  outbound_direct_consumer_evidence: boolean
   outbound_terminal: boolean
   audit_event_types: string[]
 }
@@ -490,10 +497,14 @@ async function queryQueueRowsForAgent(
 async function queryOutboundForMessage(db: DbAdapter, messageId: string): Promise<any[]> {
   return await queryOptional<any>(
     db,
-    `SELECT consumer_agent_id, channel_external_id, status, last_error, COUNT(*) AS count
+    `SELECT consumer_agent_id, consumer_source, channel_external_id, status, last_error,
+            projection_source, projection_fallback_reason, delivery_fallback_reason,
+            delivery_diagnostics, COUNT(*) AS count
        FROM outbound_queue
       WHERE message_id = $1
-      GROUP BY consumer_agent_id, channel_external_id, status, last_error
+      GROUP BY consumer_agent_id, consumer_source, channel_external_id, status, last_error,
+               projection_source, projection_fallback_reason, delivery_fallback_reason,
+               delivery_diagnostics
       ORDER BY status`,
     [messageId],
   )
@@ -539,6 +550,36 @@ function emptyFailureCounts(): Record<FullChannelSmokeFailureClass, number> {
     timeout: 0,
     duplicate_routing: 0,
   }
+}
+
+function hasRecipientTokenEvidence(row: any): boolean {
+  if (String(row.consumer_source ?? '') === 'recipient_token_evidence') return true
+  const raw = row.delivery_diagnostics
+  if (raw === null || raw === undefined) return false
+  if (typeof raw === 'string') return raw.includes('recipient_token_evidence')
+  try {
+    return JSON.stringify(raw).includes('recipient_token_evidence')
+  } catch {
+    return false
+  }
+}
+
+function isDirectProjectionSource(row: any): boolean {
+  const source = asString(row.projection_source)
+  return source !== null && !source.startsWith('fallback_')
+}
+
+function noFallback(value: unknown): boolean {
+  return asString(value) === null
+}
+
+function directOutboundGaps(row: any): string[] {
+  const gaps: string[] = []
+  if (!isDirectProjectionSource(row)) gaps.push('projection_source_not_direct')
+  if (!noFallback(row.projection_fallback_reason)) gaps.push('projection_fallback_reason_present')
+  if (!noFallback(row.delivery_fallback_reason)) gaps.push('delivery_fallback_reason_present')
+  if (!hasRecipientTokenEvidence(row)) gaps.push('recipient_token_evidence_missing')
+  return gaps
 }
 
 function selectExpectedTargets(
@@ -595,6 +636,13 @@ async function evaluateTarget(
     terminal_reached: false,
     outbound_message_id: null,
     outbound_status: null,
+    outbound_consumer_agent_id: null,
+    outbound_consumer_source: null,
+    outbound_projection_source: null,
+    outbound_projection_fallback_reason: null,
+    outbound_delivery_fallback_reason: null,
+    outbound_recipient_token_evidence: false,
+    outbound_direct_consumer_evidence: false,
     outbound_terminal: false,
     audit_event_types: [],
   }
@@ -669,17 +717,83 @@ async function evaluateTarget(
     // outbound + send feedback
     const outboundMessageId = lifecycle.reply_message_id ?? messageId
     lifecycle.outbound_message_id = outboundMessageId
-    const outbound = (await queryOutboundForMessage(db, outboundMessageId)).filter(
-      (row) => asString(row.consumer_agent_id) === agentId || row.consumer_agent_id == null,
-    )
+    const outbound = await queryOutboundForMessage(db, outboundMessageId)
     const outboundForAgent = outbound.filter((row) => asString(row.consumer_agent_id) === agentId)
-    const relevantOutbound = outboundForAgent.length > 0 ? outboundForAgent : outbound
-    if (relevantOutbound.length > 0) {
-      const sent = relevantOutbound.find((row) => String(row.status) === 'sent')
-      lifecycle.outbound_status = sent ? 'sent' : String(relevantOutbound[0].status)
-      lifecycle.outbound_terminal = sent != null
+    const legacyNullConsumerOutbound = outbound.filter((row) => row.consumer_agent_id == null)
+    const wrongConsumerSentOutbound = outbound.filter((row) => {
+      const consumerAgentId = asString(row.consumer_agent_id)
+      return String(row.status) === 'sent' && consumerAgentId !== null && consumerAgentId !== agentId
+    })
+    const relevantOutbound = outboundForAgent.length > 0 ? outboundForAgent : legacyNullConsumerOutbound
+    if (relevantOutbound.length > 0 || wrongConsumerSentOutbound.length > 0) {
+      const observedSent = relevantOutbound.find((row) => String(row.status) === 'sent')
+      const directSent = outboundForAgent.find((row) => String(row.status) === 'sent')
+      const wrongConsumerSent = wrongConsumerSentOutbound[0]
+      const sent = directSent ?? observedSent ?? wrongConsumerSent
+      lifecycle.outbound_status = sent ? 'sent' : String(relevantOutbound[0]?.status ?? wrongConsumerSent?.status)
+      if (sent) {
+        lifecycle.outbound_consumer_agent_id = asString(sent.consumer_agent_id)
+        lifecycle.outbound_consumer_source = asString(sent.consumer_source)
+        lifecycle.outbound_projection_source = asString(sent.projection_source)
+        lifecycle.outbound_projection_fallback_reason = asString(sent.projection_fallback_reason)
+        lifecycle.outbound_delivery_fallback_reason = asString(sent.delivery_fallback_reason)
+        lifecycle.outbound_recipient_token_evidence = hasRecipientTokenEvidence(sent)
+      }
+      const directGaps = directSent ? directOutboundGaps(directSent) : []
+      lifecycle.outbound_direct_consumer_evidence = directSent != null && directGaps.length === 0
+      lifecycle.outbound_terminal = lifecycle.outbound_direct_consumer_evidence
+      if (observedSent && !directSent) {
+        failures.push(
+          failure('send_feedback_mismatch', channel.channel_id, agentId, 'outbound terminal row lacks explicit direct consumer_agent_id for target agent', {
+            source_table: 'outbound_queue',
+            matched_rows: asCount(observedSent.count) || 1,
+            cite: {
+              message_id: outboundMessageId,
+              inbound_message_id: messageId,
+              reply_message_id: lifecycle.reply_message_id,
+              expected_consumer_agent_id: agentId,
+              observed_consumer_agent_id: asString(observedSent.consumer_agent_id),
+            },
+          }),
+        )
+      }
+      if (wrongConsumerSentOutbound.length > 0) {
+        const observedConsumers = [...new Set(wrongConsumerSentOutbound.map((row) => asString(row.consumer_agent_id)).filter((v): v is string => v != null))]
+        failures.push(
+          failure('send_feedback_mismatch', channel.channel_id, agentId, 'outbound sent row targets a different consumer_agent_id; relay/substitute rows are not direct consumer evidence', {
+            source_table: 'outbound_queue',
+            matched_rows: wrongConsumerSentOutbound.reduce((sum, row) => sum + (asCount(row.count) || 1), 0),
+            cite: {
+              message_id: outboundMessageId,
+              inbound_message_id: messageId,
+              reply_message_id: lifecycle.reply_message_id,
+              expected_consumer_agent_id: agentId,
+              observed_consumer_agent_ids: observedConsumers,
+            },
+          }),
+        )
+      }
+      if (directSent && directGaps.length > 0) {
+        failures.push(
+          failure('send_feedback_mismatch', channel.channel_id, agentId, `direct outbound row missing no-relay evidence: ${directGaps.join(',')}`, {
+            source_table: 'outbound_queue',
+            matched_rows: asCount(directSent.count) || 1,
+            cite: {
+              message_id: outboundMessageId,
+              inbound_message_id: messageId,
+              reply_message_id: lifecycle.reply_message_id,
+              consumer_agent_id: agentId,
+              consumer_source: asString(directSent.consumer_source),
+              projection_source: asString(directSent.projection_source),
+              projection_fallback_reason: asString(directSent.projection_fallback_reason),
+              delivery_fallback_reason: asString(directSent.delivery_fallback_reason),
+              recipient_token_evidence: hasRecipientTokenEvidence(directSent),
+            },
+          }),
+        )
+      }
       // send_feedback_mismatch: terminal outbound but channel mismatch vs expected external id
-      if (sent && channel.external_id && asString(sent.channel_external_id) && asString(sent.channel_external_id) !== channel.external_id) {
+      if (directSent && channel.external_id && asString(directSent.channel_external_id) && asString(directSent.channel_external_id) !== channel.external_id) {
         failures.push(
           failure('send_feedback_mismatch', channel.channel_id, agentId, 'outbound row reached terminal state but channel_external_id does not match the target channel', {
             source_table: 'outbound_queue',
@@ -689,7 +803,7 @@ async function evaluateTarget(
               inbound_message_id: messageId,
               reply_message_id: lifecycle.reply_message_id,
               expected_channel_external_id: channel.external_id,
-              observed_channel_external_id: asString(sent.channel_external_id),
+              observed_channel_external_id: asString(directSent.channel_external_id),
             },
           }),
         )
@@ -817,6 +931,13 @@ async function buildChannelReports(
           terminal_reached: false,
           outbound_message_id: null,
           outbound_status: null,
+          outbound_consumer_agent_id: null,
+          outbound_consumer_source: null,
+          outbound_projection_source: null,
+          outbound_projection_fallback_reason: null,
+          outbound_delivery_fallback_reason: null,
+          outbound_recipient_token_evidence: false,
+          outbound_direct_consumer_evidence: false,
           outbound_terminal: false,
           audit_event_types: [],
         },
@@ -1058,6 +1179,9 @@ export async function buildFullChannelSmokeReport(
         'claim/received + processing transition evidence',
         'terminal reply/done state evidence',
         'outbound terminal evidence when reply path exercised',
+        'explicit consumer_agent_id for intended consumer; consumer_agent_id IS NULL is not direct evidence',
+        'wrong-consumer/relay sent rows are explicit send_feedback_mismatch evidence, not direct success',
+        'no projection/delivery fallback masking and recipient_token_evidence for the intended consumer',
         'audit evidence for reconcile/registration failures and terminal exceptions',
       ],
     },
@@ -1209,7 +1333,7 @@ export function formatFullChannelSmokeText(report: FullChannelSmokeReport): stri
     for (const t of channel.targets) {
       if (t.excluded) continue
       const lc = t.lifecycle
-      const chain = `inbound=${lc.inbound_observed ? 'y' : 'n'} queue=${lc.queue_row_count} claim=${lc.claim_observed ? 'y' : 'n'} proc=${lc.processing_observed ? 'y' : 'n'} term=${lc.terminal_state ?? 'n'} out=${lc.outbound_status ?? 'n'}`
+      const chain = `inbound=${lc.inbound_observed ? 'y' : 'n'} queue=${lc.queue_row_count} claim=${lc.claim_observed ? 'y' : 'n'} proc=${lc.processing_observed ? 'y' : 'n'} term=${lc.terminal_state ?? 'n'} out=${lc.outbound_status ?? 'n'} direct=${lc.outbound_direct_consumer_evidence ? 'y' : 'n'}`
       const fails = t.failures.map((f) => f.failure_class).join(',') || 'ok'
       lines.push(`    ${t.agent_id}: ${t.status} [${chain}] ${fails}`)
     }
