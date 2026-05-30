@@ -160,6 +160,82 @@ describe('runtime heartbeat evidence', () => {
     expect(calls.some((call) => call.sql.includes('INSERT INTO control_plane_leases'))).toBe(false)
   })
 
+  test('expires stale runtime endpoint lease before takeover with next fencing token', async () => {
+    const calls: Array<{ sql: string; params: any[] }> = []
+    const runtimeInstanceId = '00000000-0000-4000-8000-000000000004'
+    const db = {
+      async query(sql: string, params: any[] = []) {
+        calls.push({ sql, params })
+        if (sql.includes('FROM agents')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (sql.includes('INSERT INTO agent_runtime_instances')) {
+          return {
+            rows: [{
+              runtime_instance_id: runtimeInstanceId,
+              agent_id: 'agent-com-dev',
+              status: 'running',
+              last_seen_at: '2026-05-23T00:00:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('INSERT INTO connector_instances')) {
+          return { rows: [{ connector_instance_id: 'connector-3' }], rowCount: 1 }
+        }
+        if (sql.includes('UPDATE connector_instances')) {
+          return { rows: [{ connector_instance_id: 'connector-3' }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT lease_id, fencing_token, expires_at')) {
+          return {
+            rows: [{
+              lease_id: 'lease-stale',
+              fencing_token: 7,
+              expires_at: new Date(Date.now() - 60_000).toISOString(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes("SET status = 'expired'")) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT COALESCE(MAX(fencing_token), 0)')) {
+          return { rows: [{ max_token: 7 }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO control_plane_leases')) {
+          return {
+            rows: [{
+              lease_id: 'lease-takeover',
+              heartbeat_at: '2026-05-23T00:00:00.000Z',
+              expires_at: '2026-05-23T00:10:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+
+    const result = await heartbeatRuntimeInstance(db, {
+      runtimeInstanceId,
+      agentId: 'agent-com-dev',
+      runtimeEngine: 'claude-code',
+      processId: 789,
+      port: 8795,
+      endpointUri: 'http://127.0.0.1:8795',
+      connectorProvider: 'discord',
+      connectorUri: 'discord://agents/agent-com-dev',
+    })
+
+    expect(result.endpoint_lease_id).toBe('lease-takeover')
+    const expireIndex = calls.findIndex((call) => call.sql.includes("SET status = 'expired'"))
+    const insertIndex = calls.findIndex((call) => call.sql.includes('INSERT INTO control_plane_leases'))
+    expect(expireIndex).toBeGreaterThan(-1)
+    expect(insertIndex).toBeGreaterThan(expireIndex)
+    expect(calls[expireIndex].params.slice(0, 2)).toEqual([runtimeInstanceId, 'worker'])
+    expect(calls[insertIndex].params[5]).toBe(8)
+  })
+
   test('uses agent profile home_directory as the canonical workspace when present', async () => {
     const profileHome = '/Users/yuji/Developer/agent-memory'
     const runtimeCheckout = '/Users/yuji/Developer/codex-aun/agent-comms-mcp-main'
