@@ -40,9 +40,18 @@ export function discordCredentialStatusSqlList(statuses: readonly string[]): str
 }
 
 const RUNTIME_LOGIN_CREDENTIAL_STATUS_SQL = discordCredentialStatusSqlList(DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES)
+const BLOCKED_TRUST_STATUSES = new Set(['revoked', 'disabled'])
 
 function firstString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function normalizedTrustStatus(status: unknown): string {
+  return typeof status === 'string' && status.trim() ? status.trim() : 'local'
+}
+
+function isBlockedTrustStatus(status: unknown): boolean {
+  return BLOCKED_TRUST_STATUSES.has(normalizedTrustStatus(status))
 }
 
 export async function resolveDbDiscordBotToken(
@@ -56,7 +65,15 @@ export async function resolveDbDiscordBotToken(
   const credentialRows = await db.query(
     `SELECT cc.credential_id,
             cc.secret_ref,
-            COALESCE(cc.status, 'registered') AS credential_status
+            COALESCE(cc.status, 'registered') AS credential_status,
+            COALESCE(cc.trust_status, 'local') AS credential_trust_status,
+            cc.revoked_at AS credential_revoked_at,
+            cc.disabled_at AS credential_disabled_at,
+            cc.connector_instance_id,
+            ci.connector_instance_id AS linked_connector_instance_id,
+            COALESCE(ci.status, 'registered') AS connector_status,
+            COALESCE(ci.trust_status, 'local') AS connector_trust_status,
+            ci.disabled_at AS connector_disabled_at
        FROM connector_credentials cc
        JOIN agents a
          ON a.agent_id = cc.agent_id
@@ -67,11 +84,19 @@ export async function resolveDbDiscordBotToken(
         AND cc.credential_kind = 'bot_token'
         AND COALESCE(cc.secret_ref, '') <> ''
         AND COALESCE(cc.status, 'registered') IN (${RUNTIME_LOGIN_CREDENTIAL_STATUS_SQL})
+        AND COALESCE(cc.trust_status, 'local') NOT IN ('revoked', 'disabled')
+        AND cc.revoked_at IS NULL
+        AND cc.disabled_at IS NULL
         AND a.agent_type <> 'human'
         AND COALESCE(a.profile_enabled, true) = true
         AND (
           cc.connector_instance_id IS NULL
-          OR COALESCE(ci.status, 'active') = 'active'
+          OR (
+            ci.connector_instance_id IS NOT NULL
+            AND COALESCE(ci.status, 'registered') = 'active'
+            AND COALESCE(ci.trust_status, 'local') NOT IN ('revoked', 'disabled')
+            AND ci.disabled_at IS NULL
+          )
         )
       ORDER BY
         CASE COALESCE(cc.status, 'registered')
@@ -89,6 +114,17 @@ export async function resolveDbDiscordBotToken(
     const secretRef = firstString(row.secret_ref)
     const credentialStatus = firstString(row.credential_status) ?? 'registered'
     if (!secretRef || !isDiscordRuntimeLoginCredentialStatus(credentialStatus)) continue
+    if (isBlockedTrustStatus(row.credential_trust_status)) continue
+    if (row.credential_revoked_at != null || row.credential_disabled_at != null) continue
+    const credentialConnectorInstanceId = firstString(row.connector_instance_id)
+    if (credentialConnectorInstanceId) {
+      const linkedConnectorInstanceId = firstString(row.linked_connector_instance_id)
+      const connectorStatus = firstString(row.connector_status) ?? 'registered'
+      if (!linkedConnectorInstanceId) continue
+      if (connectorStatus !== 'active') continue
+      if (isBlockedTrustStatus(row.connector_trust_status)) continue
+      if (row.connector_disabled_at != null) continue
+    }
     const resolved = resolveTokenSourceRef(secretRef, env)
     if (!resolved) continue
     return {
