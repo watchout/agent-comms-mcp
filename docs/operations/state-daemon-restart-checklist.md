@@ -20,8 +20,12 @@ blocker-resolution commands, approved restart commands, smoke, and rollback.
 - Confirm `origin/main` includes the latest #421 merge commit.
 - Confirm the installed launchd `DATABASE_URL` matches the CTO-approved
   production DB URL.
-- Confirm launchd points at a clean approved checkout, not a dirty developer
-  working tree.
+- Confirm launchd points at a clean approved durable checkout or artifact, not a
+  dirty developer working tree and not an unowned `/tmp` / `/private/tmp`
+  detached checkout.
+- Run `bun scripts/state-daemon-launchagent.ts preflight --plist ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist`
+  and confirm `ProgramArguments[1]` plus `WorkingDirectory` exist before any
+  load/kickstart.
 - Confirm `STATE_DAEMON_AGENT_ALLOWLIST` is absent/empty. Production rollout is
   DB-driven; allowlist is only an emergency narrowing override.
 - Confirm `STATE_DAEMON_AGENT_DENYLIST` excludes disabled/test/human identities
@@ -52,7 +56,9 @@ Do not run this section without explicit CTO approval.
 
 1. Record current running daemon process, working directory, and commit.
 2. Stop the old daemon through the approved supervisor path.
-3. Start the daemon from the approved checkout at the approved `main` commit.
+3. Start the daemon from the approved checkout at the approved `main` commit
+   using `bun scripts/state-daemon-launchagent.ts restore --execute ...` so the
+   checkout/build verification and LaunchAgent update happen atomically.
 4. Confirm the daemon logs `started` and remains alive past one sweep interval.
 5. Run an AUN smoke:
    - create a DB-primary queue item

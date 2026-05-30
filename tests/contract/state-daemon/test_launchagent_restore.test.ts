@@ -1,0 +1,140 @@
+import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  buildStateDaemonRestorePlan,
+  parseStateDaemonLaunchAgentPlist,
+  planStateDaemonRestorePrune,
+  protectedPathsFromLaunchAgentPlists,
+  renderStateDaemonLaunchAgentPlist,
+  validateStateDaemonLaunchAgentConfig,
+} from '../../../core/state-daemon/launchagent'
+
+const REPO = join(import.meta.dir, '..', '..', '..')
+
+function probe(existingFiles: string[], existingDirs: string[]) {
+  const files = new Set(existingFiles)
+  const dirs = new Set(existingDirs)
+  return {
+    exists: (path: string) => files.has(path) || dirs.has(path),
+    isDirectory: (path: string) => dirs.has(path),
+  }
+}
+
+describe('#603 state-daemon LaunchAgent durable restore contract', () => {
+  test('restore plan defaults to a durable operator-owned checkout, not /private/tmp', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const plist = renderStateDaemonLaunchAgentPlist(plan)
+    const config = parseStateDaemonLaunchAgentPlist(plist)
+
+    expect(plan.checkoutPath).toBe('/Users/yuji/.agent-comms/state-daemon/checkouts/316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9')
+    expect(config.programArguments[1]).toBe(join(plan.checkoutPath, 'bin', 'state-daemon.ts'))
+    expect(config.workingDirectory).toBe(plan.checkoutPath)
+    expect(plist).not.toContain('/private/tmp/agent-comms-state-daemon')
+    expect(plist).not.toContain('<key>STATE_DAEMON_AGENT_ALLOWLIST</key>')
+  })
+
+  test('preflight refuses missing ProgramArguments[1] and WorkingDirectory before launchd load', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath], []) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors.map((err) => err.code)).toEqual(expect.arrayContaining([
+      'state_daemon_entry_missing',
+      'working_directory_missing',
+    ]))
+    expect(result.errors.find((err) => err.code === 'state_daemon_entry_missing')?.message).toContain('Module not found')
+  })
+
+  test('preflight rejects unowned /private/tmp detached checkout targets', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/private/tmp/agent-comms-state-daemon-316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'ephemeral_launchagent_path',
+        path: plan.entryPath,
+      }),
+      expect.objectContaining({
+        code: 'ephemeral_launchagent_path',
+        path: plan.checkoutPath,
+      }),
+    ]))
+  })
+
+  test('preflight passes only after checkout, entrypoint, and WorkingDirectory exist', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('prune protects paths referenced by the active state-daemon LaunchAgent', () => {
+    const root = '/Users/yuji/.agent-comms/state-daemon/checkouts'
+    const activePlan = buildStateDaemonRestorePlan({
+      commit: 'bbbbbbb',
+      restoreRoot: root,
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const activePlist = renderStateDaemonLaunchAgentPlist(activePlan)
+    const protectedPaths = protectedPathsFromLaunchAgentPlists([activePlist])
+    const targets = planStateDaemonRestorePrune({
+      restoreRoot: root,
+      checkoutDirs: [
+        `${root}/aaaaaaa`,
+        activePlan.checkoutPath,
+        `${root}/ccccccc`,
+      ],
+      activeLaunchAgentPlists: [activePlist],
+      keep: 1,
+    })
+
+    expect(protectedPaths).toContain(activePlan.checkoutPath)
+    expect(targets).toEqual([
+      { path: `${root}/aaaaaaa`, action: 'delete', reason: 'older_than_keep_window' },
+      { path: activePlan.checkoutPath, action: 'protect', reason: 'referenced_by_active_launchagent' },
+      { path: `${root}/ccccccc`, action: 'keep', reason: 'within_keep_last_1' },
+    ])
+  })
+
+  test('restore helper verifies checkout/build and preflight before atomic plist replace and launchd bootstrap', () => {
+    const src = readFileSync(join(REPO, 'scripts', 'state-daemon-launchagent.ts'), 'utf8')
+    const ensureCheckout = src.indexOf('ensureCheckout(plan)')
+    const verifyCheckout = src.indexOf('verifyCheckout(plan)')
+    const stagedPreflight = src.indexOf('const installedPreflight = validateStateDaemonLaunchAgentConfig')
+    const rename = src.indexOf('renameSync(plan.tempPlistPath, plan.plistPath)')
+    const bootstrap = src.indexOf('bootstrap(plan.plistPath)')
+
+    expect(ensureCheckout).toBeGreaterThan(-1)
+    expect(verifyCheckout).toBeGreaterThan(ensureCheckout)
+    expect(stagedPreflight).toBeGreaterThan(verifyCheckout)
+    expect(rename).toBeGreaterThan(stagedPreflight)
+    expect(bootstrap).toBeGreaterThan(rename)
+  })
+})

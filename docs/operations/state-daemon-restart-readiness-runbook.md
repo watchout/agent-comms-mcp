@@ -33,10 +33,13 @@ ProcessType: Background
 ```
 
 `<APPROVED_REPO>` must be a clean checkout/worktree at the CTO-approved
-post-fix `main` commit. That commit must include the `scripts/restart-bot.sh`
-adapter fix, the Codex restart prompt-skip fix, and the DB-driven denylist
-state_daemon profile. Do not use the dirty/behind developer checkout at
-`/Users/yuji/Developer/agent-comms-mcp` for restart.
+post-fix `main` commit and must live under the durable restore root
+`~/.agent-comms/state-daemon/checkouts/<commit>` unless CTO explicitly approves
+another persistent package/artifact path. Do not use the dirty/behind developer
+checkout at `/Users/yuji/Developer/agent-comms-mcp`, and do not point launchd at
+an unowned `/tmp` or `/private/tmp` worktree. That commit must include the
+`scripts/restart-bot.sh` adapter fix, the Codex restart prompt-skip fix, and the
+DB-driven denylist state_daemon profile.
 
 ### DB URL
 
@@ -110,6 +113,12 @@ DB-driven denylist state_daemon profile. #431 commit
 `0b6efae21c49e85619394194a466f7120f79d964` is not sufficient for restart
 because it still references the missing `scripts/start-runbot.sh` path.
 
+The durable restore helper owns checkout creation, dependency/build
+verification, plist staging, and preflight. It refuses to load/kickstart when
+`ProgramArguments[1]` or `WorkingDirectory` is missing, and it rejects unowned
+`/tmp` / `/private/tmp` launchd targets before launchd can crash-loop with
+`Module not found`.
+
 ```text
 CTO_APPROVED_STATE_DAEMON_COMMIT=<approved main merge commit containing the restart-bot adapter, Codex prompt-skip, and denylist profile>
 ```
@@ -118,18 +127,21 @@ Preflight command:
 
 ```bash
 CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-main-merge-commit>'
-APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}
+APPROVED_RESTORE_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
+APPROVED_REPO="${APPROVED_RESTORE_ROOT}/${CTO_APPROVED_STATE_DAEMON_COMMIT}"
 
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
-git worktree add --detach "$APPROVED_REPO" "$CTO_APPROVED_STATE_DAEMON_COMMIT"
-git -C "$APPROVED_REPO" status --short
-(cd "$APPROVED_REPO" && bun install --frozen-lockfile)
+
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit "$CTO_APPROVED_STATE_DAEMON_COMMIT" \
+  --restore-root "$APPROVED_RESTORE_ROOT" \
+  --dry-run
 ```
 
 The installed launchd `WorkingDirectory`, `ProgramArguments`, and log paths must
-all point to the approved checkout selected by CTO. Do not reuse a dirty working
-tree for the restart.
+all point to the approved durable checkout selected by CTO. Do not reuse a dirty
+working tree for the restart.
 
 ### Bot Restart Launcher
 
@@ -165,13 +177,15 @@ Run these before asking CTO for restart approval:
 
 ```bash
 CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-main-merge-commit>'
-APPROVED_REPO=/private/tmp/agent-comms-state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}
+APPROVED_RESTORE_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
+APPROVED_REPO="${APPROVED_RESTORE_ROOT}/${CTO_APPROVED_STATE_DAEMON_COMMIT}"
 DATABASE_URL='postgresql:///agent_comms?host=/tmp'
 APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
 
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
-git -C "$APPROVED_REPO" diff --check
+	test -d "$APPROVED_REPO"
+	git -C "$APPROVED_REPO" diff --check
 
 # Run state_daemon contract tests against an isolated PostgreSQL database.
 # Do not point these tests at the live `agent_comms` DB: the currently
@@ -181,8 +195,8 @@ STATE_DAEMON_TEST_SHA="$(printf '%s' "$CTO_APPROVED_STATE_DAEMON_COMMIT" | cut -
 STATE_DAEMON_TEST_DB="agent_comms_sd_${STATE_DAEMON_TEST_SHA}_$(date +%Y%m%d%H%M%S)"
 createdb "$STATE_DAEMON_TEST_DB"
 trap 'dropdb --if-exists "$STATE_DAEMON_TEST_DB"' EXIT
-(
-  cd "$APPROVED_REPO"
+	(
+	  cd "$APPROVED_REPO"
   DATABASE_URL="postgresql:///${STATE_DAEMON_TEST_DB}?host=/tmp" \
     bun run db/migrate.ts
   DATABASE_URL="postgresql:///${STATE_DAEMON_TEST_DB}?host=/tmp" \
@@ -191,9 +205,13 @@ trap 'dropdb --if-exists "$STATE_DAEMON_TEST_DB"' EXIT
       tests/contract/state-daemon/m2-sweep.test.ts \
       tests/contract/state-daemon/test_per_bot_suppression.test.ts \
       tests/contract/state-daemon/m4-entry-smoke.test.ts
-  bun build --target bun bin/state-daemon.ts \
-    --outfile /private/tmp/state-daemon-${CTO_APPROVED_STATE_DAEMON_COMMIT}.js
-)
+	  mkdir -p .agent-comms-restore
+	  bun build --target bun bin/state-daemon.ts \
+	    --outfile .agent-comms-restore/state-daemon-build.js
+	)
+
+bun scripts/state-daemon-launchagent.ts preflight \
+  --plist ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
 
 ps aux | rg 'state-daemon|bin/state-daemon|state_daemon' | rg -v rg || true
 launchctl print "gui/$(id -u)/com.agent-comms.state-daemon" || true
@@ -248,6 +266,8 @@ Pass criteria:
   `agent_id` is denied or marked inactive
 - focused tests and build pass
 - installed service status is recorded before restart
+- installed plist preflight passes, including existing `ProgramArguments[1]`,
+  existing `WorkingDirectory`, and no unowned `/tmp` / `/private/tmp` target
 - `STALE_DISPATCH:%` count since #431 merge is zero or explicitly explained
 - active `received` / `in_progress` rows are not terminal-closed by age
 - `state_daemon_state_actions_total`, `state_daemon_pg_notify_errors_total`, and
@@ -256,30 +276,28 @@ Pass criteria:
 ## CTO-Approved Restart Commands
 
 Run this section only after CTO explicitly approves the restart and names the
-approved `DATABASE_URL` and approved checkout path.
+approved `DATABASE_URL`, restore root, and checkout path.
 
 ```bash
-APPROVED_REPO=/path/approved-clean-checkout
+CTO_APPROVED_STATE_DAEMON_COMMIT='<approved-main-merge-commit>'
+APPROVED_RESTORE_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
 APPROVED_DATABASE_URL='postgresql:///agent_comms?host=/tmp'
-APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
-PLIST=~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
 
-plutil -replace ProgramArguments.1 -string "$APPROVED_REPO/bin/state-daemon.ts" "$PLIST"
-plutil -replace WorkingDirectory -string "$APPROVED_REPO" "$PLIST"
-plutil -replace StandardOutPath -string "$APPROVED_REPO/logs/state-daemon.out.log" "$PLIST"
-plutil -replace StandardErrorPath -string "$APPROVED_REPO/logs/state-daemon.err.log" "$PLIST"
-plutil -replace EnvironmentVariables.DATABASE_URL -string "$APPROVED_DATABASE_URL" "$PLIST"
-plutil -remove EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST "$PLIST" 2>/dev/null || true
-plutil -replace EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST -string "$APPROVED_AGENT_DENYLIST" "$PLIST"
-
-launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-launchctl kickstart -k "gui/$(id -u)/com.agent-comms.state-daemon"
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit "$CTO_APPROVED_STATE_DAEMON_COMMIT" \
+  --restore-root "$APPROVED_RESTORE_ROOT" \
+  --database-url "$APPROVED_DATABASE_URL" \
+  --execute
 
 launchctl print "gui/$(id -u)/com.agent-comms.state-daemon"
-tail -n 80 "$APPROVED_REPO/logs/state-daemon.out.log"
-tail -n 80 "$APPROVED_REPO/logs/state-daemon.err.log"
+tail -n 80 "$APPROVED_RESTORE_ROOT/$CTO_APPROVED_STATE_DAEMON_COMMIT/logs/state-daemon.out.log"
+tail -n 80 "$APPROVED_RESTORE_ROOT/$CTO_APPROVED_STATE_DAEMON_COMMIT/logs/state-daemon.err.log"
 ```
+
+The helper stages the plist to a temporary file in the LaunchAgents directory and
+renames it only after checkout creation, dependency install, build verification,
+and plist preflight pass. If any step fails, launchd is not loaded or
+kickstarted.
 
 ## Smoke
 
@@ -303,22 +321,38 @@ After approved restart:
 Rollback is supervisor-only unless CTO separately approves DB repair.
 
 ```bash
-PLIST=~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
-PREVIOUS_REPO=/path/previous-known-good-checkout
+PREVIOUS_STATE_DAEMON_COMMIT='<previous-known-good-main-commit>'
+APPROVED_RESTORE_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
 PREVIOUS_DATABASE_URL='postgresql:///agent_comms?host=/tmp'
 
-launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
-plutil -replace ProgramArguments.1 -string "$PREVIOUS_REPO/bin/state-daemon.ts" "$PLIST"
-plutil -replace WorkingDirectory -string "$PREVIOUS_REPO" "$PLIST"
-plutil -replace StandardOutPath -string "$PREVIOUS_REPO/logs/state-daemon.out.log" "$PLIST"
-plutil -replace StandardErrorPath -string "$PREVIOUS_REPO/logs/state-daemon.err.log" "$PLIST"
-plutil -replace EnvironmentVariables.DATABASE_URL -string "$PREVIOUS_DATABASE_URL" "$PLIST"
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-launchctl kickstart -k "gui/$(id -u)/com.agent-comms.state-daemon"
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit "$PREVIOUS_STATE_DAEMON_COMMIT" \
+  --restore-root "$APPROVED_RESTORE_ROOT" \
+  --database-url "$PREVIOUS_DATABASE_URL" \
+  --execute
 ```
 
 Do not manually update `message_queue` rows during rollback unless CTO provides
 exact row IDs and SQL.
+
+## Restore Checkout Prune
+
+Prune is dry-run by default and protects any checkout referenced by the active
+`com.agent-comms.state-daemon` LaunchAgent. Do not use generic `git worktree
+prune` or `rm -rf ~/.agent-comms/state-daemon/checkouts/*` for this restore
+root.
+
+```bash
+bun scripts/state-daemon-launchagent.ts prune \
+  --restore-root "$HOME/.agent-comms/state-daemon/checkouts" \
+  --keep 3 \
+  --dry-run
+
+bun scripts/state-daemon-launchagent.ts prune \
+  --restore-root "$HOME/.agent-comms/state-daemon/checkouts" \
+  --keep 3 \
+  --execute
+```
 
 ## Residual Risks
 
