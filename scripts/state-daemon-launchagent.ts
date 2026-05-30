@@ -61,7 +61,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--plist') args.plist = next()
     else if (arg === '--bun') args.bunPath = next()
     else if (arg === '--database-url') args.databaseUrl = next()
-    else if (arg === '--keep') args.keep = Number.parseInt(next(), 10)
+    else if (arg === '--keep') {
+      const value = next()
+      if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
+      args.keep = Number.parseInt(value, 10)
+    }
     else if (arg === '--help' || arg === '-h') args.command = 'help'
     else throw new Error(`unknown argument: ${arg}`)
   }

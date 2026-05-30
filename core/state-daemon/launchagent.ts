@@ -264,11 +264,12 @@ export function validateStateDaemonLaunchAgentConfig(
       message: 'ProgramArguments[1] must point to bin/state-daemon.ts or a verified state-daemon artifact',
     })
   }
-  if (config.programArguments[0] && !probe.exists(config.programArguments[0])) {
-    warnings.push({
+  const executable = config.programArguments[0] ?? null
+  if (!executable || !probe.exists(executable)) {
+    errors.push({
       code: 'bun_path_missing',
-      message: 'ProgramArguments[0] does not exist; launchd will not be able to exec bun',
-      path: config.programArguments[0],
+      message: 'ProgramArguments[0] does not exist; refusing launchd load/kickstart because launchd cannot exec bun',
+      path: executable ?? undefined,
     })
   }
   if (!entry || !probe.exists(entry)) {
@@ -342,7 +343,9 @@ export function planStateDaemonRestorePrune(input: {
   keep?: number
 }): StateDaemonPruneTarget[] {
   const restoreRoot = resolve(input.restoreRoot)
-  const keep = input.keep ?? 3
+  const keep = Number.isFinite(input.keep) && input.keep !== undefined && input.keep >= 0
+    ? Math.floor(input.keep)
+    : 3
   const protectedPaths = protectedPathsFromLaunchAgentPlists(input.activeLaunchAgentPlists ?? [])
   const dirs = [...input.checkoutDirs]
     .map((path) => resolve(path))

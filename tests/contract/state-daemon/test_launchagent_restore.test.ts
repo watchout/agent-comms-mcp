@@ -57,6 +57,27 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(result.errors.find((err) => err.code === 'state_daemon_entry_missing')?.message).toContain('Module not found')
   })
 
+  test('preflight refuses a missing bun executable before launchd load', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.entryPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'bun_path_missing',
+        path: plan.bunPath,
+      }),
+    ]))
+    expect(result.errors.find((err) => err.code === 'bun_path_missing')?.message).toContain('cannot exec bun')
+  })
+
   test('preflight rejects unowned /private/tmp detached checkout targets', () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
@@ -121,6 +142,46 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       { path: activePlan.checkoutPath, action: 'protect', reason: 'referenced_by_active_launchagent' },
       { path: `${root}/ccccccc`, action: 'keep', reason: 'within_keep_last_1' },
     ])
+  })
+
+  test('prune defaults to a safe keep window when called with an invalid keep value', () => {
+    const root = '/Users/yuji/.agent-comms/state-daemon/checkouts'
+    const targets = planStateDaemonRestorePrune({
+      restoreRoot: root,
+      checkoutDirs: [
+        `${root}/aaaaaaa`,
+        `${root}/bbbbbbb`,
+        `${root}/ccccccc`,
+        `${root}/ddddddd`,
+      ],
+      keep: Number.NaN,
+    })
+
+    expect(targets).toEqual([
+      { path: `${root}/aaaaaaa`, action: 'delete', reason: 'older_than_keep_window' },
+      { path: `${root}/bbbbbbb`, action: 'keep', reason: 'within_keep_last_3' },
+      { path: `${root}/ccccccc`, action: 'keep', reason: 'within_keep_last_3' },
+      { path: `${root}/ddddddd`, action: 'keep', reason: 'within_keep_last_3' },
+    ])
+  })
+
+  test('restore helper rejects invalid prune --keep values before planning deletes', () => {
+    const proc = Bun.spawnSync([
+      'bun',
+      'scripts/state-daemon-launchagent.ts',
+      'prune',
+      '--restore-root',
+      '/tmp/agent-comms-state-daemon-checkouts',
+      '--keep',
+      'not-a-number',
+    ], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(proc.exitCode).not.toBe(0)
+    expect(proc.stderr.toString()).toContain('--keep requires a non-negative integer')
   })
 
   test('restore helper verifies checkout/build and preflight before atomic plist replace and launchd bootstrap', () => {

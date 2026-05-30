@@ -184,8 +184,8 @@ APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-te
 
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
-	test -d "$APPROVED_REPO"
-	git -C "$APPROVED_REPO" diff --check
+test -d "$APPROVED_REPO"
+git -C "$APPROVED_REPO" diff --check
 
 # Run state_daemon contract tests against an isolated PostgreSQL database.
 # Do not point these tests at the live `agent_comms` DB: the currently
@@ -195,8 +195,8 @@ STATE_DAEMON_TEST_SHA="$(printf '%s' "$CTO_APPROVED_STATE_DAEMON_COMMIT" | cut -
 STATE_DAEMON_TEST_DB="agent_comms_sd_${STATE_DAEMON_TEST_SHA}_$(date +%Y%m%d%H%M%S)"
 createdb "$STATE_DAEMON_TEST_DB"
 trap 'dropdb --if-exists "$STATE_DAEMON_TEST_DB"' EXIT
-	(
-	  cd "$APPROVED_REPO"
+(
+  cd "$APPROVED_REPO"
   DATABASE_URL="postgresql:///${STATE_DAEMON_TEST_DB}?host=/tmp" \
     bun run db/migrate.ts
   DATABASE_URL="postgresql:///${STATE_DAEMON_TEST_DB}?host=/tmp" \
@@ -204,11 +204,12 @@ trap 'dropdb --if-exists "$STATE_DAEMON_TEST_DB"' EXIT
       tests/contract/state-daemon/test_state_action_matrix.test.ts \
       tests/contract/state-daemon/m2-sweep.test.ts \
       tests/contract/state-daemon/test_per_bot_suppression.test.ts \
-      tests/contract/state-daemon/m4-entry-smoke.test.ts
-	  mkdir -p .agent-comms-restore
-	  bun build --target bun bin/state-daemon.ts \
-	    --outfile .agent-comms-restore/state-daemon-build.js
-	)
+      tests/contract/state-daemon/m4-entry-smoke.test.ts \
+      tests/contract/state-daemon/test_launchagent_restore.test.ts
+  mkdir -p .agent-comms-restore
+  bun build --target bun bin/state-daemon.ts \
+    --outfile .agent-comms-restore/state-daemon-build.js
+)
 
 bun scripts/state-daemon-launchagent.ts preflight \
   --plist ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist
