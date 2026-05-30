@@ -10,6 +10,7 @@ import {
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
+  existingNoReplyBaton,
   parseQueuePayload,
   withTerminalBaton,
   type TerminalBaton,
@@ -150,24 +151,19 @@ export async function lifecycleTransition(
           payload,
           storedContent: row.stored_content,
         })
+        const existingBaton = existingNoReplyBaton(payload)
         const noReplyRequired = mode === 'record-no-reply' || decision.no_reply_required
-        const terminalBaton = noReplyRequired
+        const terminalBaton = existingBaton ?? (noReplyRequired
           ? buildTerminalBaton({
               reason: opts.reason?.trim() || decision.reason || 'record_no_reply_command',
               setBy: plan.env.AGENT_ID,
               source: mode === 'record-no-reply' ? 'record_no_reply_command' : 'deterministic_no_reply_policy',
             })
-          : undefined
-        const stampedPayload = terminalBaton
+          : undefined)
+        const stampedPayload = terminalBaton && !existingBaton
           ? JSON.stringify(withTerminalBaton(payload, terminalBaton))
           : null
         if (row.status === toStatus) {
-          if (stampedPayload) {
-            await tx.execute(
-              `UPDATE message_queue SET payload = $3 WHERE id = $1 AND agent_id = $2`,
-              [queueId, plan.env.AGENT_ID, stampedPayload],
-            )
-          }
           return {
             ok: true,
             mode,

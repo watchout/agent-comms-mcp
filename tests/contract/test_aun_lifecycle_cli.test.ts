@@ -188,6 +188,64 @@ describe('aun lifecycle CLI transitions', () => {
     })
   })
 
+  test('done after record-no-reply preserves the existing terminal_baton', () => {
+    const content = 'Recorded. No further action on this acknowledgement.\n\nNo reply required.'
+    const { queueId } = seedQueue('received', TEST_AGENT, { content })
+
+    const recorded = runAun(['record-no-reply', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+    expect(recorded.status).toBe(0)
+    const firstRow = queueRow(queueId)
+    const firstBaton = { ...queuePayload(queueId).terminal_baton }
+    expect(firstBaton).toMatchObject({
+      source: 'record_no_reply_command',
+      set_by: TEST_AGENT,
+    })
+
+    const done = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+
+    expect(done.status).toBe(0)
+    const body = JSON.parse(done.stdout)
+    expect(body).toMatchObject({
+      ok: true,
+      mode: 'done',
+      status: 'done',
+      already_transitioned: true,
+      no_reply_required: true,
+    })
+    const secondRow = queueRow(queueId)
+    expect(secondRow.done_at).toBe(firstRow.done_at)
+    expect(queuePayload(queueId).terminal_baton).toEqual(firstBaton)
+  })
+
+  test('repeated done on a no-reply row preserves terminal_baton source timestamp and setter', () => {
+    const content = 'ACK: audit PASS received and recorded. No reply required.'
+    const { queueId } = seedQueue('in_progress', TEST_AGENT, { content })
+
+    const firstDone = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+    expect(firstDone.status).toBe(0)
+    const firstRow = queueRow(queueId)
+    const firstBaton = { ...queuePayload(queueId).terminal_baton }
+    expect(firstBaton).toMatchObject({
+      source: 'deterministic_no_reply_policy',
+      set_by: TEST_AGENT,
+    })
+
+    const secondDone = runAun(['done', '--agent-id', TEST_AGENT, '--queue-id', String(queueId)])
+
+    expect(secondDone.status).toBe(0)
+    const body = JSON.parse(secondDone.stdout)
+    expect(body).toMatchObject({
+      ok: true,
+      mode: 'done',
+      status: 'done',
+      already_transitioned: true,
+      no_reply_required: true,
+    })
+    const secondRow = queueRow(queueId)
+    expect(secondRow.done_at).toBe(firstRow.done_at)
+    expect(queuePayload(queueId).terminal_baton).toEqual(firstBaton)
+  })
+
   test('processing is idempotent once already in_progress', () => {
     const { queueId } = seedQueue('in_progress')
 

@@ -121,6 +121,7 @@ import { resolvePhase5 } from './core/routing/server-integration'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
+  existingNoReplyBaton,
   parseQueuePayload,
   withTerminalBaton,
 } from './core/no-reply-policy'
@@ -3580,23 +3581,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const status = row.status
         const payload = parseQueuePayload(row.payload)
         const decision = detectNoReplyIntent({ payload, storedContent: row.stored_content })
-        const terminalBaton = decision.no_reply_required
+        const existingBaton = existingNoReplyBaton(payload)
+        const terminalBaton = existingBaton ?? (decision.no_reply_required
           ? buildTerminalBaton({
               reason: decision.reason ?? 'deterministic_no_reply_policy',
               setBy: process.env.AGENT_ID || 'mcp.done',
               source: 'deterministic_no_reply_policy',
             })
-          : null
-        const stampedPayload = terminalBaton
+          : null)
+        const stampedPayload = terminalBaton && !existingBaton
           ? JSON.stringify(withTerminalBaton(payload, terminalBaton))
           : null
         if (status === toStatus) {
           if (name === 'done' && stampedPayload) {
-            await client.query(
-              `UPDATE message_queue SET payload = $2 WHERE id = $1`,
-              [queueId, stampedPayload],
-            )
-            await client.query('COMMIT')
+            await client.query('ROLLBACK')
           } else {
             await client.query('ROLLBACK')
           }

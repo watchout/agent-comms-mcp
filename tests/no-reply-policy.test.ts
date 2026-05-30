@@ -50,4 +50,25 @@ describe('deterministic no-reply policy', () => {
       source: 'record_no_reply_command',
     })
   })
+
+  test('withTerminalBaton preserves an existing no-reply baton exactly', () => {
+    const existing = {
+      no_reply_required: true,
+      reason: 'operator_recorded',
+      set_by: 'aun',
+      set_at: '2026-05-30T03:00:00.000Z',
+      source: 'record_no_reply_command',
+      audit_note: 'keep-me',
+    }
+    const replacement = buildTerminalBaton({
+      reason: 'deterministic_no_reply_policy',
+      setBy: 'codex-aun',
+      source: 'deterministic_no_reply_policy',
+      now: () => new Date('2026-05-30T04:00:00.000Z'),
+    })
+
+    const payload = withTerminalBaton({ content: 'ack', terminal_baton: existing }, replacement)
+
+    expect(payload.terminal_baton).toEqual(existing)
+  })
 })
