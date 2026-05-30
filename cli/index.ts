@@ -45,6 +45,7 @@ import {
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
 import { buildFullChannelSmokeReport, formatFullChannelSmokeText } from '../core/full-channel-smoke'
+import { buildQueueWakeSmokeReport, formatQueueWakeSmokeText } from '../core/state-daemon-readiness'
 import {
   buildChannelRegistrationReconcileReport,
   formatChannelRegistrationReconcileText,
@@ -3822,11 +3823,37 @@ async function fleetCommand(subcommand: string | undefined, args: string[]) {
 
 async function smokeCommand(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
-  if (subcommand !== 'run') {
-    console.error('Usage: agent-com smoke run [--format json|text] [--provider discord] [--window-hours 168] [--channel <external_id>] [--include-disabled] [--include-test] [--execute --confirm <plan_hash>] [--timeout-ms 30000]')
+  if (subcommand !== 'run' && subcommand !== 'queue-wake') {
+    console.error('Usage: agent-com smoke <run|queue-wake> ...')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
+  if (subcommand === 'queue-wake') {
+    const timeoutMs = parsePositiveIntFlag(flags['timeout-ms'], 15000, 'timeout-ms')
+    const pollMs = parsePositiveIntFlag(flags['poll-ms'], 500, 'poll-ms')
+    const mode = hasFlag(flags, 'execute') && flagEnabled(flags['execute']) ? 'execute' : 'dry_run'
+    const db = await getDb()
+    try {
+      const report = await buildQueueWakeSmokeReport((db as any).__adapter, {
+        agentId: flags['agent-id'] ?? null,
+        mode,
+        confirmPlanHash: flags.confirm ?? null,
+        timeoutMs,
+        pollMs,
+        denylist: parseCsvFlag(flags.denylist ?? process.env.STATE_DAEMON_AGENT_DENYLIST ?? undefined) ?? [],
+      })
+      if (format === 'text') {
+        process.stdout.write(formatQueueWakeSmokeText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = report.error === 'OPERATOR_APPROVAL_REQUIRED' ? 2 : 1
+    } finally {
+      await db.end()
+    }
+    return
+  }
+
   const windowHours = parsePositiveIntFlag(flags['window-hours'], 168, 'window-hours')
   const timeoutMs = parsePositiveIntFlag(flags['timeout-ms'], 30000, 'timeout-ms')
   // dry-run/plan is the default and read-only; execute is opt-in and gated by --confirm.
@@ -4863,6 +4890,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only all-agent AUN readiness gates and activation blockers
   smoke run [--format json|text] [--provider discord] [--window-hours 168] [--channel <external_id>] [--include-disabled] [--include-test] [--execute --confirm <plan_hash>] [--timeout-ms 30000]
                                                        — NORM-060 full-channel smoke (dry-run/plan default, read-only)
+  smoke queue-wake [--format json|text] [--agent-id <agent>] [--execute --confirm <plan_hash>] [--timeout-ms 15000] [--poll-ms 500]
+                                                       — bounded state-daemon queue wake smoke; no manual next and no terminal close
   worker report --agent-id <agent> --summary <text> [--status running|blocked|stalled|failed|completed|handoff] [--queue-id <id>] [--repository <repo>] [--branch <branch>] [--pull-request <ref>] [--progress 0-100] [--progress-label <phase>] [--stale-after-sec 120] [--blocked-reason <text>] [--handoff-target <agent>] [--handoff-channel <id>]
                                                        — write DB-backed current activity evidence for an internal worker
   worker ping --agent-id <agent> --activity-id <uuid> [--summary <text>] [--progress 0-100] [--progress-label <phase>]
