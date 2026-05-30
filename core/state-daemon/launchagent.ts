@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 
@@ -46,6 +46,8 @@ export type StateDaemonPreflightResult = {
 export type PathProbe = {
   exists(path: string): boolean
   isDirectory(path: string): boolean
+  isFile(path: string): boolean
+  isExecutable(path: string): boolean
 }
 
 export type StateDaemonPruneTarget = {
@@ -245,6 +247,17 @@ export function validateStateDaemonLaunchAgentConfig(
     isDirectory: (path: string) => {
       try { return statSync(path).isDirectory() } catch { return false }
     },
+    isFile: (path: string) => {
+      try { return statSync(path).isFile() } catch { return false }
+    },
+    isExecutable: (path: string) => {
+      try {
+        accessSync(path, constants.X_OK)
+        return true
+      } catch {
+        return false
+      }
+    },
   }
   const errors: StateDaemonPreflightIssue[] = []
   const warnings: StateDaemonPreflightIssue[] = []
@@ -271,6 +284,18 @@ export function validateStateDaemonLaunchAgentConfig(
       code: 'bun_path_missing',
       message: 'ProgramArguments[0] does not exist; refusing launchd load/kickstart because launchd cannot exec bun',
       path: executable ?? undefined,
+    })
+  } else if (!probe.isFile(executable)) {
+    errors.push({
+      code: 'bun_path_not_file',
+      message: 'ProgramArguments[0] must be a regular executable file; refusing launchd load/kickstart because launchd cannot exec bun',
+      path: executable,
+    })
+  } else if (!probe.isExecutable(executable)) {
+    errors.push({
+      code: 'bun_path_not_executable',
+      message: 'ProgramArguments[0] is not executable; refusing launchd load/kickstart because launchd cannot exec bun',
+      path: executable,
     })
   }
   if (!entry || !probe.exists(entry)) {

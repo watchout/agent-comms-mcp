@@ -23,12 +23,15 @@ function git(args: string[], cwd: string): string {
   return proc.stdout.toString().trim()
 }
 
-function probe(existingFiles: string[], existingDirs: string[]) {
+function probe(existingFiles: string[], existingDirs: string[], executableFiles: string[] = existingFiles) {
   const files = new Set(existingFiles)
   const dirs = new Set(existingDirs)
+  const executable = new Set(executableFiles)
   return {
     exists: (path: string) => files.has(path) || dirs.has(path),
     isDirectory: (path: string) => dirs.has(path),
+    isFile: (path: string) => files.has(path),
+    isExecutable: (path: string) => executable.has(path),
   }
 }
 
@@ -87,6 +90,48 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       }),
     ]))
     expect(result.errors.find((err) => err.code === 'bun_path_missing')?.message).toContain('cannot exec bun')
+  })
+
+  test('preflight refuses a bun path that is a directory before launchd load', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.entryPath], [plan.bunPath, plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'bun_path_not_file',
+        path: plan.bunPath,
+      }),
+    ]))
+    expect(result.errors.find((err) => err.code === 'bun_path_not_file')?.message).toContain('regular executable file')
+  })
+
+  test('preflight refuses a non-executable bun file before launchd load', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath], [plan.checkoutPath], [plan.entryPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'bun_path_not_executable',
+        path: plan.bunPath,
+      }),
+    ]))
+    expect(result.errors.find((err) => err.code === 'bun_path_not_executable')?.message).toContain('not executable')
   })
 
   test('preflight rejects unowned /private/tmp detached checkout targets', () => {
