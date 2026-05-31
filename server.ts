@@ -2449,7 +2449,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const partMeta = parts.length > 1
         ? { split_part: partIdx + 1, split_total: parts.length }
         : {}
-      const observerMeta = {
+      const fullMetadata = {
+        ...metadata,
+        routing_scope: {
+          mode: 'anchored_reply_to',
+          surface: 'mcp.send',
+          channel_id: dest.channelId,
+          thread_id: dest.threadId ?? null,
+          reply_to,
+          queue_id: claimedMqId,
+          alias_resolution: false,
+        },
+        ...authMeta,
+        ...partMeta,
         aun_control_plane: {
           active_owner: mentions[0] ?? null,
           cc: ccObservers,
@@ -2457,7 +2469,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           observers: [...new Set([...ccObservers, ...fyiObservers])],
         },
       }
-      const fullMetadata = { ...metadata, ...authMeta, ...partMeta, ...observerMeta }
 
       // Save to DB
       const id = await saveMessage({
@@ -2572,6 +2583,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     await writeAuditLog('message.send', agentId, dest.channelId, {
       message_id: id, to, message_type: message_type ?? 'chat',
       recipients: delivery.pushTargets.length, warning: deliveryWarning,
+      reply_to,
+      queue_id: claimedMqId,
+      channel_id: dest.channelId,
+      thread_id: dest.threadId ?? null,
+      sender: agentId,
+      active_owner: agentId,
+      surface: 'mcp.send',
+      alias_resolution: false,
     })
 
     // Part suffix appended to every success response when a split occurred,
