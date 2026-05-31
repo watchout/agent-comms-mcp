@@ -8,14 +8,14 @@
  *   - aun start [-- <extra args passed to claude>]
  *   - aun receive --agent-id <id> [--dry-run]
  *   - aun next --agent-id <id> [--dry-run]
- *   - aun receive-actionable|next-actionable --agent-id <id> [--max-inspect <n>] [--dry-run]
+ *   - aun receive-actionable|next-actionable --agent-id <id> [--queue-id <id>] [--max-inspect <n>] [--dry-run]
  *   - aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]
  *   - aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
- *   - aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
+ *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
- *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
- *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <ids>
+ *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
+ *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
  *   - aun status
  *   - aun --help / -h
@@ -39,14 +39,14 @@ function printHelp(): void {
     '  aun start [-- <args...>]',
     '  aun receive --agent-id <id> [--dry-run]',
     '  aun next --agent-id <id> [--dry-run]',
-    '  aun receive-actionable|next-actionable --agent-id <id> [--max-inspect <n>] [--dry-run]',
+    '  aun receive-actionable|next-actionable --agent-id <id> [--queue-id <id>] [--max-inspect <n>] [--dry-run]',
     '  aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]',
     '  aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
-    '  aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
+    '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
-    '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
-    '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <ids> [--dry-run]',
+    '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
+    '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
     '  aun --help | -h',
@@ -196,6 +196,7 @@ export function run(argv: string[] = process.argv): number {
       const res = codexRunnerTick({
         agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
         limit,
+        queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
         ackMentions: typeof flags['ack-mentions'] === 'string' ? (flags['ack-mentions'] as string) : undefined,
         ackContent: typeof flags['ack-content'] === 'string' ? (flags['ack-content'] as string) : undefined,
         dryRun: !!flags['dry-run'],
@@ -334,6 +335,7 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
       agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
       dryRun: !!flags['dry-run'],
       maxInspect,
+      queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
     })
     if (res.stdout) process.stdout.write(res.stdout)
     if (res.stderr) process.stderr.write(res.stderr)

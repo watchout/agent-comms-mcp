@@ -1350,16 +1350,17 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
 /**
  * Issue #248 follow-up — outbound mention transformer.
  *
- * The MCP `send` / `notify` tools accept `mentions: [agent_id, ...]` so callers
- * never type Discord snowflake IDs. The DB recipient routing (message_queue
- * fanout, push) already uses agent_ids directly, but **the Discord-side post**
- * needs the literal `<@DISCORD_ID>` markers in the message content for Discord's
- * native push notifications to fire. Without this transform the recipient bot
- * sees the message in queue but Discord's mobile / desktop notification doesn't
- * trigger — the symptom CEO flagged + CTO directive `24a25097`.
+ * The MCP `send` / `notify` tools resolve one active-owner agent_id plus
+ * optional observer ids so callers never type Discord snowflake IDs. The DB
+ * recipient routing already uses agent_ids directly, but **the Discord-side
+ * post** needs the literal `<@DISCORD_ID>` markers in the message content for
+ * Discord's native push notifications to fire. Without this transform the
+ * recipient bot sees the message in queue but Discord's mobile / desktop
+ * notification doesn't trigger — the symptom CEO flagged + CTO directive
+ * `24a25097`.
  *
  * Behavior:
- *   - For each agent_id in `mentions`, look up the Discord UI id through
+ *   - For each resolved active owner / observer agent_id, look up the Discord UI id through
  *     `agent_ui_bindings` first, with legacy `metadata.discord_id` fallback.
  *   - Build a space-separated `<@id1> <@id2> ` prefix.
  *   - If the content already contains the snowflake (e.g. caller pre-rendered
@@ -1716,13 +1717,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'send',
-      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Use either \`mention\` for one recipient or \`mentions[]\` for multi-recipient fanout. Each recipient gets one queue row.${agentListStr}`,
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Use \`mention\` for one active owner. Legacy \`mentions[]\` may contain one active owner only. Use \`cc[]\`/\`fyi[]\` for non-claimable observers.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'One recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Optional multi-recipient agent_id list. Use this instead of repeated send calls when the same content targets several agents.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Legacy single-owner alias. Zero items → INVALID_MENTION; two or more → MULTI_ACTIVE_RECIPIENT_UNSUPPORTED.' },
+          cc: { type: 'array', items: { type: 'string' }, description: 'Observer agent_ids. No queue row, baton, or wake is created for observers.' },
+          fyi: { type: 'array', items: { type: 'string' }, description: 'FYI observer agent_ids. No queue row, baton, or wake is created for observers.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
@@ -1735,7 +1738,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // reply_to is intentionally absent: notify does not mark any
       // message_queue row 'replied' and does not touch agents.current_message_id.
       name: 'notify',
-      description: `Post a self-originated message to a channel without replying to anything. Use \`mention\` or \`mentions[]\`; each recipient gets one queue row.${agentListStr}`,
+      description: `Post a self-originated message to a channel without replying to anything. Use \`mention\` for one active owner. Legacy \`mentions[]\` may contain one active owner only. Use \`cc[]\`/\`fyi[]\` for non-claimable observers.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -1744,7 +1747,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'One recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
-          mentions: { type: 'array', items: { type: 'string' }, description: 'Optional multi-recipient agent_id list.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Legacy single-owner alias. Zero items → INVALID_MENTION; two or more → MULTI_ACTIVE_RECIPIENT_UNSUPPORTED.' },
+          cc: { type: 'array', items: { type: 'string' }, description: 'Observer agent_ids. No queue row, baton, or wake is created for observers.' },
+          fyi: { type: 'array', items: { type: 'string' }, description: 'FYI observer agent_ids. No queue row, baton, or wake is created for observers.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
@@ -2130,18 +2135,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'send') {
     let { content, reply_to, message_type, metadata } = args as any
-    // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. CC fanout was the
-    // sole caller of the (now-removed) skip tool, and v0.9 enforces
-    // 1 mention = 1 queue row. Reject any caller still passing cc[] with a
-    // schema validation error rather than silent strip.
-    if ((args as any).cc !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_PARAMETER]: cc parameter is removed in v0.9 — 1 mention = 1 queue row. Send a separate message for additional recipients." }], isError: true }
-    }
     // Phase 5 wiring runs AFTER the per-row claim acquisition so the channel
     // is resolved; see resolvePhase5(...) call site below.
-    // mentions[] is the resolved enqueue list produced by resolvePhase5(); it
-    // starts empty and is populated from { mention } / { mentions[] } via the routing port.
+    // mentions[] is the resolved active-owner list produced by resolvePhase5().
+    // Slice 2 requires cardinality <= 1; observers are kept separate.
     let mentions: string[] = []
+    let ccObservers: string[] = []
+    let fyiObservers: string[] = []
     // Issue #266: snapshot the normalized input mentions for outbound trace.
     let rawInputMentions: string[] = []
 
@@ -2265,6 +2265,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         mention: (args as any).mention,
         mentions: (args as any).mentions,
         cc: (args as any).cc,
+        fyi: (args as any).fyi,
         content,
         isKnownAgent: (id: string) => knownAgents.includes(id),
       })
@@ -2276,6 +2277,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (phase5.error === 'UNKNOWN_AGENT') {
           await txClient.query('ROLLBACK'); txCommitted = true
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+        }
+        if (phase5.error === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED') {
+          await txClient.query('ROLLBACK'); txCommitted = true
+          return { content: [{ type: 'text', text: 'Error [MULTI_ACTIVE_RECIPIENT_UNSUPPORTED]: send/notify supports exactly one active owner. Use mention for the owner and cc[]/fyi[] for observers.' }], isError: true }
         }
         if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
           await txClient.query('ROLLBACK'); txCommitted = true
@@ -2293,6 +2298,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && phase5.ok) {
         content = phase5.content
         mentions = phase5.mentions
+        ccObservers = phase5.cc
+        fyiObservers = phase5.fyi
         rawInputMentions = phase5.mentions
         for (const w of phase5.warnings) {
           process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
@@ -2442,7 +2449,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const partMeta = parts.length > 1
         ? { split_part: partIdx + 1, split_total: parts.length }
         : {}
-      const fullMetadata = { ...metadata, ...authMeta, ...partMeta }
+      const observerMeta = {
+        aun_control_plane: {
+          active_owner: mentions[0] ?? null,
+          cc: ccObservers,
+          fyi: fyiObservers,
+          observers: [...new Set([...ccObservers, ...fyiObservers])],
+        },
+      }
+      const fullMetadata = { ...metadata, ...authMeta, ...partMeta, ...observerMeta }
 
       // Save to DB
       const id = await saveMessage({
@@ -2777,12 +2792,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
     let { channel_id: channelIdArg, channel, thread_id: threadArg, content, message_type, metadata } = args as any
-    // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. Reject upfront.
-    if ((args as any).cc !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_PARAMETER]: cc parameter is removed in v0.9 — 1 mention = 1 queue row." }], isError: true }
-    }
-    // mentions[] is the resolved enqueue list; populated by resolvePhase5().
+    // mentions[] is the resolved active-owner list; populated by resolvePhase5().
+    // Slice 2 requires cardinality <= 1; observers are kept separate.
     let mentions: string[] = []
+    let ccObservers: string[] = []
+    let fyiObservers: string[] = []
     // Issue #266: snapshot normalized input mentions for outbound trace.
     let rawInputMentions: string[] = []
 
@@ -2877,6 +2891,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         mention: (args as any).mention,
         mentions: (args as any).mentions,
         cc: (args as any).cc,
+        fyi: (args as any).fyi,
         content,
         isKnownAgent: (id: string) => knownAgentsN.includes(id),
       })
@@ -2886,6 +2901,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (phase5.error === 'UNKNOWN_AGENT') {
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+        }
+        if (phase5.error === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED') {
+          return { content: [{ type: 'text', text: 'Error [MULTI_ACTIVE_RECIPIENT_UNSUPPORTED]: send/notify supports exactly one active owner. Use mention for the owner and cc[]/fyi[] for observers.' }], isError: true }
         }
         if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
           const detail = await writeMcpOutboundAclViolationAudit(
@@ -2902,6 +2920,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && phase5.ok) {
         content = phase5.content
         mentions = phase5.mentions
+        ccObservers = phase5.cc
+        fyiObservers = phase5.fyi
         rawInputMentions = phase5.mentions
         for (const w of phase5.warnings) {
           process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
@@ -2956,6 +2976,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
         ...authMeta,
         ...partMeta,
+        aun_control_plane: {
+          active_owner: mentions[0] ?? null,
+          cc: ccObservers,
+          fyi: fyiObservers,
+          observers: [...new Set([...ccObservers, ...fyiObservers])],
+        },
       }
 
       const id = await saveMessage({

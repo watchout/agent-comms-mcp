@@ -1,6 +1,6 @@
 # ADR-041: Phase 5 Routing — `mention` / `mentions[]` + `cc[]` (4-port abstraction)
 
-> **Status**: Accepted (initial Phase 5 landing) → **Amended 2026-05-05** (mentions[] removed) → **Amended 2026-05-27** (mentions[] restored with canonical normalization)
+> **Status**: Accepted (initial Phase 5 landing) → **Amended 2026-05-05** (mentions[] removed) → **Amended 2026-05-27** (mentions[] restored with canonical normalization) → **Amended 2026-05-31** (single active owner + observers)
 > **Issues**: #305 / #306 / #308 / #250
 > **PRs**: PR-Phase5 series (4-port abstraction), PR #309 (ACL via 4-port), PR-mention-required-mentions-array-removed (this amendment)
 
@@ -12,12 +12,41 @@ Phase 5 introduced the 4-port routing abstraction (`InboundResolver` /
 canonical send/notify shape is:
 
 - `mention?: AgentId` — **1 primary recipient** (queue 投入)
-- `mentions?: AgentId[]` — explicit multi-recipient fanout (deduped, queue 投入 per recipient)
+- `mentions?: AgentId[]` — legacy single-owner alias only
 - `cc?: AgentId[]` — reference recipients (queue **非投入**, body 末尾に `[CC: <@id>]` 注入)
+- `fyi?: AgentId[]` — reference recipients (queue **非投入**, body 末尾に `[FYI: <@id>]` 注入)
 
 Initially, the legacy `mentions: AgentId[]` argument was retained with
 auto-convert (`mentions[0]` → `mention`, rest → `cc`) and a deprecation
 warning so existing callers could migrate without breakage.
+
+## Amendment 2026-05-31 (AUN control-plane slice 2)
+
+The 2026-05-27 true multi-recipient fanout contract is superseded for
+send/notify. AUN now treats these calls as active-owner selection, not fanout.
+One call may create at most one active `message_queue` row.
+
+### Current contract
+
+- `mention` is the canonical active owner field.
+- `mentions[]` is retained only as a legacy single-owner alias:
+  - absent: use `mention`
+  - one item: normalize to the single active owner and emit a compatibility warning where possible
+  - zero items: `INVALID_MENTION`
+  - two or more items: `MULTI_ACTIVE_RECIPIENT_UNSUPPORTED`
+- `cc[]` and `fyi[]` are observer-only and never create `message_queue` rows.
+- Observer ids are surfaced in message body/projection and audit metadata.
+- Unknown active owners fail closed with `UNKNOWN_AGENT`.
+- Unknown observers may be stripped with warnings.
+- Sender, active owner, and observers are all checked against channel outbound policy.
+
+### Rationale
+
+Multi-active fanout lets one logical message create several simultaneous
+response responsibilities. That directly conflicts with the control-plane
+invariant that one open conversation has one active baton and one responsible
+agent. Fanout remains a future typed child-request workflow, not a send/notify
+primitive.
 
 ## Decision (initial)
 

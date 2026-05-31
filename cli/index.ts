@@ -12,7 +12,7 @@
  *
  * Issue #132 — message-queue-spec §4-6 CLI commands (MVP):
  *   agent-com next                                          — fetch one unread message (oldest first)
- *   agent-com send --content "..." --mentions cto,ceo       — reply to last next-fetched message
+ *   agent-com send --content "..." --mention cto            — reply to last next-fetched message
  *   agent-com agents                                        — list registered agents (JSON)
  *
  * `next` and `send` track the in-flight reply target via a per-agent state file
@@ -580,6 +580,11 @@ async function assertPolicyAgentsExist(db: Client, agentIds: string[]) {
   if (missing.length > 0) {
     throw new Error(`unknown policy agent_id(s): ${missing.join(', ')}`)
   }
+}
+
+async function loadKnownAgentIds(db: Client): Promise<string[]> {
+  const rows = await db.query(`SELECT agent_id FROM agents ORDER BY agent_id`)
+  return rows.rows.map((row: any) => String(row.agent_id))
 }
 
 async function assertPolicyChannelsExist(db: Client, channelIds: string[]) {
@@ -2421,7 +2426,9 @@ async function nextMessage() {
  *
  * Flags:
  *   --content "<text>"        required
- *   --mentions a,b,c          required (comma-separated agent IDs)
+ *   --mention <agent>         canonical active owner
+ *   --mentions <agent>        legacy single-owner alias
+ *   --cc a,b / --fyi c        observer-only; no queue rows
  *   --message-type chat|...   default: chat
  *   --queue-id <id>           optional durable close target
  *   --message-id <uuid>       optional cross-check for --queue-id
@@ -2437,8 +2444,12 @@ async function nextMessage() {
 async function sendMessage(args: string[]) {
   const agentId = requireAgentId('send')
   const { flags } = parseArgs(args)
-  const content = flags.content
+  let content = flags.content
+  const mentionRaw = flags.mention
   const mentionsRaw = flags.mentions
+  const mentionsInput = mentionsRaw !== undefined ? (parseCsvFlag(mentionsRaw) ?? []) : undefined
+  const ccInput = parseCsvFlag(flags.cc) ?? []
+  const fyiInput = parseCsvFlag(flags.fyi) ?? []
   const messageType = flags['message-type'] ?? 'chat'
   const queueIdRaw = flags['queue-id']
   const messageIdRaw = flags['message-id']
@@ -2453,23 +2464,21 @@ async function sendMessage(args: string[]) {
     console.error('Error: --no-close and --close are mutually exclusive')
     process.exit(2)
   }
-  if (!mentionsRaw) {
-    console.error('Error: --mentions is required (comma-separated agent IDs)')
-    process.exit(2)
-  }
-  const mentions = mentionsRaw.split(',').map(m => m.trim()).filter(Boolean)
-  if (mentions.length === 0) {
-    console.error('Error: --mentions must contain at least one agent ID')
-    process.exit(2)
-  }
+  let mentions: string[] = []
+  let ccObservers: string[] = []
+  let fyiObservers: string[] = []
 
-  // Phase 5 — best-effort client-side warning (server is canonical, §1.4).
+  // Phase 5 — best-effort client-side warning (server/DB path is canonical).
+  // The authoritative resolver below runs after reply_to resolves a channel.
   try {
     const { resolvePhase5 } = await import('../core/routing/server-integration')
     const phase5Warn = resolvePhase5({
       sender: agentId,
       channel_id: '',
-      mentions,
+      mention: mentionRaw,
+      mentions: mentionsInput,
+      cc: ccInput,
+      fyi: fyiInput,
       content,
       isKnownAgent: () => true,
     })
@@ -2703,6 +2712,61 @@ async function sendMessage(args: string[]) {
         }
       }
 
+      {
+        const { resolvePhase5 } = await import('../core/routing/server-integration')
+        const knownAgents = await loadKnownAgentIds(db)
+        await refreshChannelPolicyDbSnapshot(db)
+        const phase5 = resolvePhase5({
+          sender: agentId,
+          channel_id: channelId,
+          mention: mentionRaw,
+          mentions: mentionsInput,
+          cc: ccInput,
+          fyi: fyiInput,
+          content,
+          isKnownAgent: (id: string) => knownAgents.includes(id),
+        })
+        if (!phase5 || !phase5.ok) {
+          const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
+          const detail = code === 'UNKNOWN_AGENT'
+            ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" not found in agents registry`
+            : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
+              ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
+              : code === 'OUTBOUND_ACL_VIOLATION'
+                ? `sender ${agentId} or recipients ${(phase5 && !phase5.ok ? phase5.violations ?? [] : []).join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(getChannelPolicy(channelId).outboundAllowlist)} policy_source=${getChannelPolicy(channelId).policySource}`
+                : 'mention/mentions must contain exactly one non-empty agent_id'
+          if (code === 'OUTBOUND_ACL_VIOLATION' && phase5 && !phase5.ok) {
+            await db.query('ROLLBACK').catch(() => {})
+            committed = true
+            await auditOutboundAclViolation(db, 'send', agentId, channelId, phase5.intended_recipients ?? [], {
+              ok: false,
+              violations: phase5.violations ?? [],
+              violated_policy: 'channel.outboundAllowlist',
+              outbound_allowlist: getChannelPolicy(channelId).outboundAllowlist,
+              policy_source: getChannelPolicy(channelId).policySource,
+            }).catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
+          }
+          if (explicitClose) {
+            writeFailureJson(code, detail, {
+              queue_id: target.queue_id,
+              message_id: replyTo,
+              channel_id: channelId,
+              intended_recipients: phase5 && !phase5.ok ? phase5.intended_recipients ?? undefined : undefined,
+              violations: phase5 && !phase5.ok ? phase5.violations ?? undefined : undefined,
+            }, code === 'INVALID_MENTION' || code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
+          }
+          console.error(`Error [${code}]: ${detail}`)
+          throw new CliSendExit(code === 'INVALID_MENTION' || code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
+        }
+        content = phase5.content
+        mentions = phase5.mentions
+        ccObservers = phase5.cc
+        fyiObservers = phase5.fyi
+        for (const w of phase5.warnings) {
+          process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
+        }
+      }
+
       const aclResult = await validateCliOutboundPolicy(db, agentId, channelId, mentions)
       if (aclResult.ok === false) {
         const detail = `sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist`
@@ -2737,6 +2801,12 @@ async function sendMessage(args: string[]) {
       const metadata: Record<string, unknown> = {
         mentions,
         cli: 'agent-com next/send (MVP)',
+        aun_control_plane: {
+          active_owner: mentions[0] ?? null,
+          cc: ccObservers,
+          fyi: fyiObservers,
+          observers: [...new Set([...ccObservers, ...fyiObservers])],
+        },
         ...(authMeta ?? {}),
       }
       await db.query(
@@ -2913,6 +2983,9 @@ async function sendMessage(args: string[]) {
         thread_id: threadId,
         reply_to: replyTo,
         mentions,
+        active_owner: mentions[0] ?? null,
+        cc: ccObservers,
+        fyi: fyiObservers,
         auth_signed: authMeta !== undefined,
         outbound_queued: outboundQueued,
         work_closed: workClosed,
@@ -2952,7 +3025,9 @@ async function sendMessage(args: string[]) {
  *   --channel-name <name> --resolve-channel-name
  *                             human alias path only; resolves uniquely or fails closed
  *   --thread-id <id>          optional — post into a thread instead
- *   --mentions a,b,c          required — comma-separated agent_ids
+ *   --mention <agent>         canonical active owner
+ *   --mentions <agent>        legacy single-owner alias
+ *   --cc a,b / --fyi c        observer-only; no queue rows
  *   --content "<text>"        required
  *   --message-type chat|...   default: chat
  */
@@ -2964,8 +3039,12 @@ async function notifyMessage(args: string[]) {
   const channelNameArg = typeof flags['channel-name'] === 'string' ? flags['channel-name'] : undefined
   const resolveChannelName = !!flags['resolve-channel-name']
   const threadArg = flags['thread-id'] ?? null
-  const content = flags.content
+  let content = flags.content
+  const mentionRaw = flags.mention
   const mentionsRaw = flags.mentions
+  const mentionsInput = mentionsRaw !== undefined ? (parseCsvFlag(mentionsRaw) ?? []) : undefined
+  const ccInput = parseCsvFlag(flags.cc) ?? []
+  const fyiInput = parseCsvFlag(flags.fyi) ?? []
   const messageType = flags['message-type'] ?? 'chat'
 
   if (legacyChannelProvided) {
@@ -2988,23 +3067,21 @@ async function notifyMessage(args: string[]) {
     console.error('Error: --content is required')
     process.exit(2)
   }
-  if (!mentionsRaw) {
-    console.error('Error: --mentions is required (comma-separated agent IDs)')
-    process.exit(2)
-  }
-  const mentions = mentionsRaw.split(',').map(m => m.trim()).filter(Boolean)
-  if (mentions.length === 0) {
-    console.error('Error: --mentions must contain at least one agent ID')
-    process.exit(2)
-  }
+  let mentions: string[] = []
+  let ccObservers: string[] = []
+  let fyiObservers: string[] = []
 
-  // Phase 5 — best-effort client-side warning (server is canonical, §1.4).
+  // Phase 5 — best-effort client-side warning (server/DB path is canonical).
+  // The authoritative resolver below runs after channel name/id resolution.
   try {
     const { resolvePhase5 } = await import('../core/routing/server-integration')
     const phase5Warn = resolvePhase5({
       sender: agentId,
       channel_id: '',
-      mentions,
+      mention: mentionRaw,
+      mentions: mentionsInput,
+      cc: ccInput,
+      fyi: fyiInput,
       content,
       isKnownAgent: () => true,
     })
@@ -3093,6 +3170,50 @@ async function notifyMessage(args: string[]) {
       process.exit(1)
     }
 
+    {
+      const { resolvePhase5 } = await import('../core/routing/server-integration')
+      const knownAgents = await loadKnownAgentIds(db)
+      await refreshChannelPolicyDbSnapshot(db)
+      const phase5 = resolvePhase5({
+        sender: agentId,
+        channel_id: resolvedChannelId,
+        mention: mentionRaw,
+        mentions: mentionsInput,
+        cc: ccInput,
+        fyi: fyiInput,
+        content,
+        isKnownAgent: (id: string) => knownAgents.includes(id),
+      })
+      if (!phase5 || !phase5.ok) {
+        const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
+        const detail = code === 'UNKNOWN_AGENT'
+          ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" not found in agents registry`
+          : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
+            ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
+            : code === 'OUTBOUND_ACL_VIOLATION'
+              ? `sender ${agentId} or recipients ${(phase5 && !phase5.ok ? phase5.violations ?? [] : []).join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(getChannelPolicy(resolvedChannelId).outboundAllowlist)} policy_source=${getChannelPolicy(resolvedChannelId).policySource}`
+              : 'mention/mentions must contain exactly one non-empty agent_id'
+        if (code === 'OUTBOUND_ACL_VIOLATION' && phase5 && !phase5.ok) {
+          await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, phase5.intended_recipients ?? [], {
+            ok: false,
+            violations: phase5.violations ?? [],
+            violated_policy: 'channel.outboundAllowlist',
+            outbound_allowlist: getChannelPolicy(resolvedChannelId).outboundAllowlist,
+            policy_source: getChannelPolicy(resolvedChannelId).policySource,
+          }).catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
+        }
+        console.error(`Error [${code}]: ${detail}`)
+        process.exit(code === 'INVALID_MENTION' || code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
+      }
+      content = phase5.content
+      mentions = phase5.mentions
+      ccObservers = phase5.cc
+      fyiObservers = phase5.fyi
+      for (const w of phase5.warnings) {
+        process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
+      }
+    }
+
     const aclResult = await validateCliOutboundPolicy(db, agentId, resolvedChannelId, mentions)
     if (aclResult.ok === false) {
       await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, mentions, aclResult)
@@ -3107,6 +3228,12 @@ async function notifyMessage(args: string[]) {
       mentions,
       cli: 'agent-com notify',
       channel_resolution: channelResolution,
+      aun_control_plane: {
+        active_owner: mentions[0] ?? null,
+        cc: ccObservers,
+        fyi: fyiObservers,
+        observers: [...new Set([...ccObservers, ...fyiObservers])],
+      },
       ...(authMeta ?? {}),
     }
     await db.query(
@@ -3211,6 +3338,9 @@ async function notifyMessage(args: string[]) {
       channel_id: resolvedChannelId,
       thread_id: resolvedThreadId,
       mentions,
+      active_owner: mentions[0] ?? null,
+      cc: ccObservers,
+      fyi: fyiObservers,
       auth_signed: authMeta !== undefined,
       outbound_queued: outboundQueued,
       ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
@@ -4963,9 +5093,9 @@ Commands:
 
 Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
-  send --content "..." --mentions cto,ceo [--message-type chat] [--no-close|--close]
-  notify --channel-id <id> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
-  notify --channel-name <name> --resolve-channel-name --mentions cto --content "..." [--message-type chat]
+  send --content "..." --mention cto [--cc observer-a,observer-b] [--fyi observer-c] [--message-type chat] [--no-close|--close]
+  notify --channel-id <id> [--thread-id <id>] --mention cto --content "..." [--cc observer-a] [--fyi observer-b] [--message-type chat]
+  notify --channel-name <name> --resolve-channel-name --mention cto --content "..." [--cc observer-a] [--fyi observer-b] [--message-type chat]
   fail --message-id <uuid> --reason <text>            — mark in-flight message failed (v2.1.0, §4.1)
   skip --message-id <uuid> --reason <text>            — operator-initiated skip (v2.1.0, §4.1)
   reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)

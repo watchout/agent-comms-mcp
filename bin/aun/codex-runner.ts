@@ -20,6 +20,7 @@ import { reply } from './reply'
 export interface CodexRunnerOptions extends ReceiveOptions {
   limit?: number
   maxInspect?: number
+  queueId?: string
   ackMentions?: string
   ackContent?: string
 }
@@ -111,13 +112,17 @@ export function resolveNestedBunExecutable(): string {
 }
 
 function receiveOneActionable(opts: CodexRunnerOptions, maxInspect: number) {
-  const plan = buildCommandPlan(opts, [
+  const argv = [
     resolveNestedBunExecutable(),
     'bin/aun.ts',
     'receive-actionable',
     '--max-inspect',
     String(maxInspect),
-  ])
+  ]
+  if (opts.queueId?.trim()) {
+    argv.push('--queue-id', opts.queueId.trim())
+  }
+  const plan = buildCommandPlan(opts, argv)
   if (opts.dryRun) {
     return {
       ok: true,
@@ -165,7 +170,10 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
   let limit: number
   let maxInspect: number
   try {
-    limit = parseDrainLimit(opts.limit)
+    if (opts.queueId?.trim() && opts.limit !== undefined && opts.limit !== 1) {
+      throw new Error('--queue-id requires --limit 1')
+    }
+    limit = opts.queueId?.trim() ? 1 : parseDrainLimit(opts.limit)
     maxInspect = parseMaxInspect(opts.maxInspect)
   } catch (err) {
     return {
