@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-05-27
+> 最終更新: 2026-05-31
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
@@ -17,11 +17,12 @@
 | phase-c-redef-approval.md | — | Phase C 完了条件の再定義 (CEO 承認 2026-04-17) | 2026-04-17 |
 | wave-rollout-rules.md | provisional | Phase C aun deployment の operational contract — wave 1-3 entry/exit/rollback、`回帰なし` metric set、completion judgment (PR #254) | 2026-04-27 |
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
+| design/aun-agent-communication-control-plane-charter.md | normative | AUN送受信系をagent communication control planeとして再設計するためのmessage/delivery/baton/turn/handoff不変条件 | 2026-05-31 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
-| SPEC-INDEX.md | — | 本ファイル | 2026-04-27 |
+| SPEC-INDEX.md | — | 本ファイル | 2026-05-31 |
 
 ---
 
@@ -74,6 +75,14 @@
 - 「見つかった不整合を都度直す」進め方を禁止し、phase/slice分類後に実装する
 - 2026-05-27時点の現在phaseはMVP内部正常化とし、enterprise control plane基準のうち内部fleet正常化に必要な範囲だけを実装対象にする
 - 各sliceは `spec -> impl contract/plan -> pre-implementation audit -> implementation -> implementation audit -> merge -> POST_MERGE verification` の順で進める
+
+### design/aun-agent-communication-control-plane-charter.md（Agent Communication Control Plane Charter）
+- AUNをjob queueやchat bridgeではなくagent communication control planeとして固定する
+- `message -> delivery -> baton -> agent turn -> reply | handoff | close` を送受信系の正本モデルにする
+- `1 open conversation = 1 active baton`、`1 active baton = 1 responsible agent` をproduct invariantにする
+- LLMにqueue claim、baton ownership、close、retry、recovery状態を決めさせず、deterministic codeとDB audit eventで進める
+- send/notifyはactive ownerとobserverを分離し、`mention`は1 active owner、`cc`/`fyi`はqueue/baton非投入にする
+- core communication semanticsは `spec PR -> L1 -> L2 -> L3`、`implementation PR -> L1 -> L2 -> L3 -> merge` の監査ゲートを必須にする
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
