@@ -3711,6 +3711,58 @@ async function diagnoseQueue(args: string[]) {
   }
 }
 
+async function preflightQueue(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? null
+  const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+  const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+  const format = flags.format ?? 'json'
+  const gate = flags.gate ?? 'all'
+  if (!['all', 'runtime', 'projection'].includes(gate)) {
+    console.error('Usage: agent-com queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]')
+    process.exit(2)
+  }
+  const db = await getDb()
+
+  try {
+    const report = await buildQueueDoctorReport(db as any, { agentId, staleSeconds })
+    const gateBlockerCodes = gate === 'runtime'
+      ? new Set([
+        'stale_pending',
+        'active_claim_missing_owner',
+        'expired_active_claim',
+        'retired_or_offline_recipient',
+        'tui_without_tmux_session',
+        'loop_prompt_backlog',
+      ])
+      : gate === 'projection'
+        ? new Set(['outbound_pending_stale'])
+        : null
+    const failedBlockers = gateBlockerCodes
+      ? report.blockers.filter((item) => item.severity === 'blocker' && gateBlockerCodes.has(item.code) && item.count > 0)
+      : report.blockers.filter((item) => item.severity === 'blocker' && item.count > 0)
+    const preflight = {
+      ok: failedBlockers.length === 0,
+      gate,
+      failed_blocker_count: failedBlockers.length,
+      failed_blocker_codes: failedBlockers.map((item) => item.code),
+    }
+
+    if (format === 'text') {
+      process.stdout.write(formatQueueDoctorText(report))
+      process.stdout.write(`Preflight(${gate}): ${preflight.ok ? 'ok' : `blocked (${preflight.failed_blocker_count}: ${preflight.failed_blocker_codes.join(', ')})`}\n`)
+    } else {
+      process.stdout.write(`${JSON.stringify({ ...report, preflight }, null, 2)}\n`)
+    }
+
+    if (!preflight.ok) {
+      process.exitCode = 1
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand === 'normalize' && hasFlag(flags, 'execute')) {
@@ -3771,7 +3823,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com queue <doctor|normalize|reassign|close-obsolete|reclaim-expired> ...')
+    console.error('Usage: agent-com queue <doctor|preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -4950,6 +5002,8 @@ if (command === 'channel') {
   await diagnoseQueue([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'queue' && subcommand === 'doctor') {
   await diagnoseQueue(rest)
+} else if (command === 'queue' && subcommand === 'preflight') {
+  await preflightQueue(rest)
 } else if (command === 'queue') {
   await repairQueue(subcommand, rest)
 } else if (command === 'directory') {
@@ -5001,6 +5055,8 @@ Message I/O (requires AGENT_ID env var):
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
+  queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — restart gate; exits non-zero while selected queue blockers remain
   queue normalize [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — dry-run normalization plan with scoped repair commands
   queue reassign --from <agent> --to <agent> [--execute|--dry-run]
