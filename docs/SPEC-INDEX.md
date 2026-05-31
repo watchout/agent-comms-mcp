@@ -18,6 +18,7 @@
 | wave-rollout-rules.md | provisional | Phase C aun deployment の operational contract — wave 1-3 entry/exit/rollback、`回帰なし` metric set、completion judgment (PR #254) | 2026-04-27 |
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
 | design/aun-agent-communication-control-plane-charter.md | normative | AUN送受信系をagent communication control planeとして再設計するためのmessage/delivery/baton/turn/handoff不変条件 | 2026-05-31 |
+| spec/aun-conversation-identity-baton-contract.md | pre-implementation contract | `1 open conversation = 1 active baton` を実装可能にするconversation key、observer visibility、fanout/escalation/baton close前提 | 2026-05-31 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
 | spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
@@ -84,6 +85,13 @@
 - LLMにqueue claim、baton ownership、close、retry、recovery状態を決めさせず、deterministic codeとDB audit eventで進める
 - send/notifyはactive ownerとobserverを分離し、`mention`は1 active owner、`cc`/`fyi`はqueue/baton非投入にする
 - core communication semanticsは `spec PR -> L1 -> L2 -> L3`、`implementation PR -> L1 -> L2 -> L3 -> merge` の監査ゲートを必須にする
+
+### spec/aun-conversation-identity-baton-contract.md（Conversation identity / baton contract）
+- `conversation` をAUN-owned logical work threadとして定義し、Discord channel/threadやqueue rowをprimary identityにしない
+- conversation keyの構成要素、root/reply/observer/fanout/escalationの決定規則を固定する
+- observer visibilityはread-only projection/audit/non-claimable deliveryに限定し、`next`/receive-runner/baton countに入れない
+- explicit fanoutはparent conversationからchild conversationを作り、各childに独立batonとparent audit linkを持たせる
+- baton schema sliceがunique active baton guard、handoff transfer、`done`非terminal扱いを実装できる前提を固定する
 
 ### spec/aun-send-notify-owner-observer-contract.md（Send/Notify Owner-Observer Contract）
 - AUN Control Plane Slice 2としてsend/notifyのactive ownerとobserverを分離する
