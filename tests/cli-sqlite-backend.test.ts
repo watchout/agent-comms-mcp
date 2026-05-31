@@ -1043,6 +1043,30 @@ describe('F3 — agent-com send (SQLite)', () => {
     const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('replied')
     expect(q[0].replied_with).toBe(payload.message_id)
+    const written = dbRead(`SELECT metadata FROM agent_messages WHERE id = ?`, [payload.message_id])
+    expect(JSON.parse(written[0].metadata).routing_scope).toMatchObject({
+      mode: 'anchored_queue_claim',
+      surface: 'cli.send',
+      channel_id: 'probe-f-ch',
+      thread_id: null,
+      reply_to: payload.reply_to,
+      queue_id: queueId,
+      alias_resolution: false,
+    })
+    const audits = dbRead(`SELECT event_type, target, detail FROM audit_log WHERE event_type = 'message.send'`)
+    expect(audits).toHaveLength(1)
+    expect(audits[0].target).toBe('probe-f-ch')
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      message_id: payload.message_id,
+      reply_to: payload.reply_to,
+      queue_id: queueId,
+      channel_id: 'probe-f-ch',
+      thread_id: null,
+      sender: 'probe-f',
+      active_owner: 'probe-f',
+      surface: 'cli.send',
+      alias_resolution: false,
+    })
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     expect(a[0].status).toBe('idle')
   })

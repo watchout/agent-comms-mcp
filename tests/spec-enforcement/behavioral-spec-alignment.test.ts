@@ -151,6 +151,17 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     // escape the transaction.
     expect(handler).toMatch(/txClient\.query\([\s\S]*?INSERT INTO outbound_queue/)
   })
+  test('send stamps canonical routing scope into metadata and audit evidence', () => {
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).toMatch(/routing_scope:\s*\{[\s\S]{0,500}mode:\s*'anchored_reply_to'/)
+    expect(handler).toMatch(/surface:\s*'mcp\.send'/)
+    expect(handler).toMatch(/channel_id:\s*dest\.channelId/)
+    expect(handler).toMatch(/thread_id:\s*dest\.threadId \?\? null/)
+    expect(handler).toMatch(/queue_id:\s*claimedMqId/)
+    expect(handler).toMatch(/writeAuditLog\('message\.send'[\s\S]{0,700}alias_resolution:\s*false/)
+  })
 })
 
 describe('Behavioral FAIL B1 — next derives agents.status from open-claim EXISTS (Issue #278 cycle 1)', () => {

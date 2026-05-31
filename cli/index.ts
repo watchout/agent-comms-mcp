@@ -2734,9 +2734,19 @@ async function sendMessage(args: string[]) {
       // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
       // secret, matching server.ts:createAuthMetadata behavior.
       const authMeta = buildAuthMetadata(agentId, channelId, content)
+      const routingScope = {
+        mode: 'anchored_queue_claim',
+        surface: 'cli.send',
+        channel_id: channelId,
+        thread_id: threadId,
+        reply_to: replyTo,
+        queue_id: target.queue_id,
+        alias_resolution: false,
+      }
       const metadata: Record<string, unknown> = {
         mentions,
         cli: 'agent-com next/send (MVP)',
+        routing_scope: routingScope,
         ...(authMeta ?? {}),
       }
       await db.query(
@@ -2903,6 +2913,18 @@ async function sendMessage(args: string[]) {
           [agentId],
         )
       }
+      await auditLog(db, 'message.send', agentId, channelId, {
+        message_id: id,
+        reply_to: replyTo,
+        queue_id: target.queue_id,
+        channel_id: channelId,
+        thread_id: threadId,
+        sender: agentId,
+        active_owner: agentId,
+        recipients: mentions,
+        surface: 'cli.send',
+        alias_resolution: false,
+      })
       await db.query('COMMIT')
       committed = true
 
