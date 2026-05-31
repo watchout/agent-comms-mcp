@@ -61,6 +61,40 @@ describe('queue doctor', () => {
     expect(byCode.retired_or_offline_recipient.sample_by_agent).toEqual({ 'lead-ama': 1 })
   })
 
+  test('flags natural-language next/process loop prompt backlog as a restart blocker', async () => {
+    const sqlSeen: string[] = []
+    const db = {
+      async query(sql: string) {
+        sqlSeen.push(sql)
+        if (sql.includes('GROUP BY status')) return { rows: [] }
+        if (sql.includes('Call the agent-comms next tool now. Do not call inbox.')) {
+          return {
+            rows: [
+              row({
+                id: 91,
+                agent_id: 'codex-aun',
+                content: 'Call the agent-comms next tool now. Do not call inbox.',
+              }),
+            ],
+          }
+        }
+        return { rows: [] }
+      },
+    }
+
+    const report = await buildQueueDoctorReport(db)
+    const loop = report.blockers.find((b) => b.code === 'loop_prompt_backlog')
+
+    expect(loop?.severity).toBe('blocker')
+    expect(loop?.count).toBe(1)
+    expect(loop?.action).toContain('Do not drain with next')
+    expect(report.summary.blocker_count).toBe(1)
+
+    const loopSql = sqlSeen.find((sql) => sql.includes('Call the agent-comms next tool now')) ?? ''
+    expect(loopSql).toContain("mq.status IN ('pending', 'received', 'in_progress')")
+    expect(loopSql).toContain('Start processing the agent-comms message you just received')
+  })
+
   test('formats compact text for terminal operators', () => {
     const text = formatQueueDoctorText({
       ok: true,

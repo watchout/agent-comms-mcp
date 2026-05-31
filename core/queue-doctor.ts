@@ -46,6 +46,9 @@ type Queryable = {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[] }>
 }
 
+const LOOP_NEXT_PROMPT_SQL = "payload_json.payload->>'content' LIKE 'Call the agent-comms next tool now. Do not call inbox.%'"
+const LOOP_PROCESS_PROMPT_SQL = "payload_json.payload->>'content' LIKE 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id.%Do not call inbox or next.%'"
+
 function groupSamples(rows: any[]): Pick<QueueDoctorFinding, 'count' | 'sample_count' | 'sample_by_agent' | 'samples'> {
   const sampleByAgent: Record<string, number> = {}
   const samples: QueueDoctorSample[] = []
@@ -199,6 +202,18 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
      LIMIT 50`,
     agentOnlyParams,
   )
+  const loopPromptBacklog = await db.query(
+    `${baseSelect}
+       ${agentOnlyFilter}
+       AND mq.status IN ('pending', 'received', 'in_progress')
+       AND (
+         ${LOOP_NEXT_PROMPT_SQL}
+         OR ${LOOP_PROCESS_PROMPT_SQL}
+       )
+     ORDER BY mq.created_at ASC
+     LIMIT 50`,
+    agentOnlyParams,
+  )
 
   const outboundFilter = agentId
     ? ' AND coalesce(oq.consumer_agent_id, oq.agent_id) = $2'
@@ -272,6 +287,13 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
       'ACK/progress rows still pending',
       ackSpam.rows,
       'ACK/progress should be side-channel evidence or auto-closed system info, not operator-blocking work.',
+    ),
+    finding(
+      'loop_prompt_backlog',
+      'blocker',
+      'natural-language next/process loop prompts still queued or active',
+      loopPromptBacklog.rows,
+      'Do not drain with next. Close each obsolete loop prompt by explicit queue_id; use --include-active only for the single active row being intentionally closed.',
     ),
     finding(
       'outbound_pending_stale',

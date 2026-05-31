@@ -3581,6 +3581,36 @@ async function diagnoseQueue(args: string[]) {
   }
 }
 
+async function preflightQueue(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? null
+  const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+  const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+
+  try {
+    const report = await buildQueueDoctorReport(db as any, { agentId, staleSeconds })
+    const preflight = {
+      ok: report.summary.blocker_count === 0,
+      failed_blocker_count: report.summary.blocker_count,
+    }
+
+    if (format === 'text') {
+      process.stdout.write(formatQueueDoctorText(report))
+      process.stdout.write(`Preflight: ${preflight.ok ? 'ok' : `blocked (${preflight.failed_blocker_count})`}\n`)
+    } else {
+      process.stdout.write(`${JSON.stringify({ ...report, preflight }, null, 2)}\n`)
+    }
+
+    if (!preflight.ok) {
+      process.exitCode = 1
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand === 'normalize' && hasFlag(flags, 'execute')) {
@@ -3641,7 +3671,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com queue <doctor|normalize|reassign|close-obsolete|reclaim-expired> ...')
+    console.error('Usage: agent-com queue <doctor|preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -4820,6 +4850,8 @@ if (command === 'channel') {
   await diagnoseQueue([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'queue' && subcommand === 'doctor') {
   await diagnoseQueue(rest)
+} else if (command === 'queue' && subcommand === 'preflight') {
+  await preflightQueue(rest)
 } else if (command === 'queue') {
   await repairQueue(subcommand, rest)
 } else if (command === 'directory') {
@@ -4871,6 +4903,8 @@ Message I/O (requires AGENT_ID env var):
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
+  queue preflight [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — restart gate; exits non-zero while queue blockers remain
   queue normalize [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — dry-run normalization plan with scoped repair commands
   queue reassign --from <agent> --to <agent> [--execute|--dry-run]
