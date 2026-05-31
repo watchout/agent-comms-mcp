@@ -18,6 +18,7 @@ describe('state_daemon Codex runner adapter command contract', () => {
       'bin/aun.ts',
       'codex-runner',
       '--agent-id', 'codex-aun',
+      '--queue-id', '123',
       '--limit', '1',
       '--ack-mentions', 'codex-cto',
       '--ack-content', 'ACK: received by codex-aun; queue_id=123; message_id=msg-123; final close requires explicit --close.',
@@ -63,6 +64,7 @@ describe('state_daemon Codex runner adapter command contract', () => {
       'bin/aun.ts',
       'codex-runner',
       '--agent-id', 'codex-aun',
+      '--queue-id', '123',
       '--limit', '1',
     ])
   })

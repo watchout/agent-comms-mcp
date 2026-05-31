@@ -42,7 +42,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | CP-10 single active owner + observers | merged | send/notify owner-observer contract and canonical channel-id contract landed |
 | CP-20 conversation identity and baton schema/store | merged | conversation identity, persistence, baton store, and one-active-baton guard landed |
 | CP-30 send-side control-plane allocation | in audit / stacked | CLI send/notify merged through #633; MCP send/notify #634 remains draft/DIRTY and needs rebase/L1 refresh |
-| CP-40 script-controlled receive runner | not started | next implementation family; must target queue_id and runtime-neutral adapters |
+| CP-40 script-controlled receive runner | in progress / stacked | CP-40A targeted receive and CP-40B runtime-neutral adapter contract are stacked for audit |
 | CP-50 process/completion runner | not started | depends on CP-40 and typed lifecycle outcome contract |
 | CP-60 typed outcomes and lifecycle view | not started | close/no-reply/handoff/escalate/retry/quarantine result model |
 | CP-70 doctor/preflight/repair | partial | must detect stuck baton, stale turn, duplicate owner, split request, and loop-prompt rows |
