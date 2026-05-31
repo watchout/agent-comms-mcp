@@ -366,6 +366,8 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/diagnose-queue \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/queue doctor \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/queue health blockers and stale-work diagnostics/)
+    expect(CLI_SRC).toMatch(/queue preflight \[--gate all\|runtime\|projection\] \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/restart gate; exits non-zero while selected queue blockers remain/)
     expect(CLI_SRC).toMatch(/queue normalize \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/dry-run normalization plan with scoped repair commands/)
   })
@@ -376,7 +378,16 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(QUEUE_DOCTOR_SRC).toMatch(/active_claim_missing_owner/)
     expect(QUEUE_DOCTOR_SRC).toMatch(/expired_active_claim/)
     expect(QUEUE_DOCTOR_SRC).toMatch(/retired_or_offline_recipient/)
+    expect(QUEUE_DOCTOR_SRC).toMatch(/loop_prompt_backlog/)
     expect(QUEUE_DOCTOR_SRC).toMatch(/outbound_pending_stale/)
+  })
+
+  test('queue preflight supports subsystem gates for daemon restart safety', () => {
+    expect(CLI_SRC).toMatch(/flags\.gate \?\? 'all'/)
+    expect(CLI_SRC).toMatch(/'runtime'[\s\S]*?'loop_prompt_backlog'/)
+    expect(CLI_SRC).toMatch(/'projection'[\s\S]*?'outbound_pending_stale'/)
+    expect(CLI_SRC).toMatch(/failed_blocker_codes/)
+    expect(CLI_SRC).toMatch(/Preflight\(\$\{gate\}\)/)
   })
 
   test('queue repair commands are documented and audit logged', () => {

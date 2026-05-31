@@ -141,6 +141,35 @@ the compatibility fallback for TUI agents. The implementation PR must define the
 cutover gate before making runner invocation primary. After cutover, `check
 inbox` injection must not be the primary receive mechanism.
 
+## Restart Preflight Gate
+
+`state_daemon` must not be restarted only because pending rows exist. Restart is
+allowed only after the script-level queue preflight is clean:
+
+```bash
+agent-com queue preflight --agent-id <agent_id> --format text
+```
+
+The preflight uses the same deterministic `queue doctor` checks and exits
+non-zero while blocker findings remain. Natural-language loop prompts such as
+operator-injected `next` / `processing` instructions are a blocker class. They
+must be closed or repaired by explicit `queue_id` before daemon activation; do
+not drain them by calling `next` from an LLM prompt.
+
+For obsolete loop prompts, the safe repair path is:
+
+```bash
+agent-com queue close-obsolete \
+  --agent-id <agent_id> \
+  --queue-id <queue_id> \
+  --reason LOOP_PROMPT_BACKLOG \
+  --execute
+```
+
+If the single obsolete row is already `received` or `in_progress`, the operator
+must add `--include-active` and still provide the exact `--queue-id`. Bulk
+active-row closure remains disallowed.
+
 ## Durable Message vs Chat Projection
 
 AUN must store one canonical logical message in the database. Discord, Slack,
