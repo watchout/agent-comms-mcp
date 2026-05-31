@@ -107,7 +107,7 @@ describe('test_aun_reply_notify_wrapper — claim close semantics', () => {
       })
       const notifyPlan = buildNotifyPlan({
         agentId: 'probe-dev',
-        channel: 'probe-ch',
+        channelId: 'probe-ch',
         content: 'notice',
         mentions: 'codex-cto',
         env,
@@ -170,7 +170,7 @@ describe('test_aun_reply_notify_wrapper — claim close semantics', () => {
     const notify = runAun([
       'notify',
       '--agent-id', 'probe-dev',
-      '--channel', 'probe-ch',
+      '--channel-id', 'probe-ch',
       '--content', 'fallback text',
       '--mentions', 'codex-cto',
       '--reply-to', randomUUID(),

@@ -22,7 +22,10 @@ export interface ReplyOptions extends ReceiveOptions {
 }
 
 export interface NotifyOptions extends ReplyOptions {
+  channelId?: string
+  channelName?: string
   channel?: string
+  resolveChannelName?: boolean
   threadId?: string
   replyTo?: string
   queueId?: string
@@ -66,10 +69,24 @@ export function buildNotifyPlan(opts: NotifyOptions = {}): CommandPlan {
       'notify cannot close or masquerade as a reply; omit --reply-to/--queue-id or use aun reply',
     )
   }
-  const channel = requireText(opts.channel, '--channel')
   const content = requireText(opts.content, '--content')
   const mentions = requireText(opts.mentions, '--mentions')
-  const argv = [resolveWrapperBunExecutable(), 'cli/index.ts', 'notify', '--channel', channel, '--content', content, '--mentions', mentions]
+  if (opts.channel?.trim()) {
+    throw new Error('--channel is no longer accepted; use --channel-id')
+  }
+  const channelId = opts.channelId?.trim()
+  const channelName = opts.channelName?.trim()
+  if (channelId && channelName) {
+    throw new Error('pass either --channel-id or --channel-name, not both')
+  }
+  const argv = [resolveWrapperBunExecutable(), 'cli/index.ts', 'notify', '--content', content, '--mentions', mentions]
+  if (channelId) {
+    argv.push('--channel-id', channelId)
+  } else if (channelName && opts.resolveChannelName) {
+    argv.push('--channel-name', channelName, '--resolve-channel-name')
+  } else {
+    throw new Error('--channel-id is required')
+  }
   if (opts.threadId?.trim()) argv.push('--thread-id', opts.threadId.trim())
   if (opts.messageType?.trim()) argv.push('--message-type', opts.messageType.trim())
   return buildCommandPlan(opts, argv)

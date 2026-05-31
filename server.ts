@@ -1742,7 +1742,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: 'object' as const,
         properties: {
-          channel: { type: 'string', description: 'Channel id (or name) to post into. Required.' },
+          channel_id: { type: 'string', description: 'Canonical AUN channel_id to post into. Required for scripted/control-plane notify.' },
+          channel: { type: 'string', description: 'DEPRECATED: rejected for scripted notify; use channel_id.' },
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
           mention: { type: 'string', description: 'One recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
@@ -1752,7 +1753,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['channel', 'content'],
+        required: ['channel_id', 'content'],
       },
     },
     // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
@@ -2790,7 +2791,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // conceptually with send; we replicate the minimum necessary to satisfy
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
-    let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
+    let { channel_id: channelIdArg, channel, thread_id: threadArg, content, message_type, metadata } = args as any
     // mentions[] is the resolved active-owner list; populated by resolvePhase5().
     // Slice 2 requires cardinality <= 1; observers are kept separate.
     let mentions: string[] = []
@@ -2799,10 +2800,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Issue #266: snapshot normalized input mentions for outbound trace.
     let rawInputMentions: string[] = []
 
-    // spec §4.3 step 1 — channel / content required.
-    if (!channel || typeof channel !== 'string') {
-      return { content: [{ type: 'text', text: 'Error [CHANNEL_REQUIRED]: channel is required for notify' }], isError: true }
+    // Control-plane contract: scripted notify accepts canonical channel_id
+    // only. Channel names/aliases are human CLI concerns, not MCP routing.
+    if (channel !== undefined) {
+      return { content: [{ type: 'text', text: 'Error [CHANNEL_ALIAS_NOT_ALLOWED]: notify requires channel_id; channel names/aliases are not accepted in scripted paths' }], isError: true }
     }
+    if (!channelIdArg || typeof channelIdArg !== 'string' || channelIdArg.trim().length === 0) {
+      return { content: [{ type: 'text', text: 'Error [CHANNEL_ID_REQUIRED]: channel_id is required for notify' }], isError: true }
+    }
+    const channelId = channelIdArg.trim()
     if (!content || content.length === 0) {
       return { content: [{ type: 'text', text: 'Error [CONTENT_EMPTY]: content must not be empty' }], isError: true }
     }
@@ -2815,13 +2821,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for notify' }], isError: true }
     }
 
-    // spec §4.3 step 2 — resolve channel by id OR name. threadArg short-
-    // circuits channel resolution because thread id uniquely identifies the
-    // destination. Falls back to channels.name only if channels.id didn't
-    // match. The `channels.name` column is unique per org so a name lookup
-    // is deterministic when the caller opts into it.
-    let resolvedChannelId: string | null = null
+    // spec §4.3 step 2 — validate canonical channel_id, then validate any
+    // thread belongs to that channel. Do not fall back to channels.name.
+    let resolvedChannelId: string | null = channelId
     let resolvedThreadId: string | null = threadArg ?? null
+    const byId = await client.query(`SELECT id FROM channels WHERE id = $1`, [channelId])
+    if (byId.rows.length === 0) {
+      return { content: [{ type: 'text', text: `Error [CHANNEL_ID_NOT_FOUND]: channel_id '${channelId}' not found` }], isError: true }
+    }
     if (resolvedThreadId) {
       const tr = await client.query(
         `SELECT channel_id FROM threads WHERE id = $1`,
@@ -2830,33 +2837,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (tr.rows.length === 0) {
         return { content: [{ type: 'text', text: `Error [THREAD_NOT_FOUND]: thread '${resolvedThreadId}' not found` }], isError: true }
       }
-      resolvedChannelId = tr.rows[0].channel_id
-    } else {
-      const byId = await client.query(`SELECT id FROM channels WHERE id = $1`, [channel])
-      if (byId.rows.length > 0) {
-        resolvedChannelId = channel
-      } else {
-        // codex-auditor PR #214 Layer 2 finding 2 — `channels.name` has no
-        // UNIQUE constraint (db/migrate.ts), so blind `LIMIT 1` would silently
-        // pick among duplicates on misrouted posts. Be explicit instead: read
-        // up to 2 rows and fail-closed when more than one match.
-        const byName = await client.query(`SELECT id FROM channels WHERE name = $1 ORDER BY id LIMIT 2`, [channel])
-        if (byName.rows.length === 1) {
-          resolvedChannelId = byName.rows[0].id
-        } else if (byName.rows.length > 1) {
-          const ids = byName.rows.map((r: { id: string }) => r.id).join(', ')
-          return {
-            content: [{
-              type: 'text',
-              text: `Error [CHANNEL_NAME_AMBIGUOUS]: channel name '${channel}' matches multiple channels (${ids}…). Pass the channel id instead of the name.`,
-            }],
-            isError: true,
-          }
+      const threadChannelId = tr.rows[0].channel_id
+      if (threadChannelId !== channelId) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Error [THREAD_CHANNEL_MISMATCH]: thread '${resolvedThreadId}' belongs to channel '${threadChannelId}', not '${channelId}'`,
+          }],
+          isError: true,
         }
       }
-    }
-    if (!resolvedChannelId) {
-      return { content: [{ type: 'text', text: `Error [CHANNEL_NOT_FOUND]: channel '${channel}' not found` }], isError: true }
     }
 
     // spec §4.3 step 4 — permission + mentions validation (same as send).
@@ -2976,7 +2966,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const sequence = await getNextSequence(dest.channelId)
       const authMeta = createAuthMetadata(dest.channelId, partContent)
       const partMeta = parts.length > 1 ? { split_part: partIdx + 1, split_total: parts.length } : {}
-      const observerMeta = {
+      const fullMetadata = {
+        ...metadata,
+        channel_resolution: {
+          mode: 'canonical_channel_id',
+          channel_id: dest.channelId,
+          alias_resolution: false,
+          surface: 'mcp.notify',
+        },
+        ...authMeta,
+        ...partMeta,
         aun_control_plane: {
           active_owner: mentions[0] ?? null,
           cc: ccObservers,
@@ -2984,7 +2983,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           observers: [...new Set([...ccObservers, ...fyiObservers])],
         },
       }
-      const fullMetadata = { ...metadata, ...authMeta, ...partMeta, ...observerMeta }
 
       const id = await saveMessage({
         channel_id: dest.channelId, author_id: agentId, content: partContent,

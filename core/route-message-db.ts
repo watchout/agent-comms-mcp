@@ -206,7 +206,7 @@ export async function resolveSendDestination(
   replyTo: string | undefined,
 ): Promise<{ channelId: string; threadId: string | null } | { error: string; code: string }> {
   if (!replyTo) {
-    return { error: 'reply_toは必須です。返信先メッセージIDを指定してください。定期タスクの場合は agent-com notify --channel <id> を使用してください', code: 'NO_REPLY_TO' }
+    return { error: 'reply_toは必須です。返信先メッセージIDを指定してください。定期タスクの場合は agent-com notify --channel-id <id> を使用してください', code: 'NO_REPLY_TO' }
   }
 
   const original = await getMessageById(db, replyTo)
