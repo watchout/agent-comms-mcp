@@ -169,26 +169,31 @@ export async function persistConversationResolution(
     return { ok: true, action: 'continued', conversation_id: resolution.conversation_id }
   }
 
-  return db.transaction(async (tx) => {
-    const inserted = await insertConversation(tx, resolution)
-    if (inserted) {
-      return {
-        ok: true,
-        action: 'created',
-        conversation_id: inserted.conversation_id,
-        conversation: inserted,
-      }
-    }
+  return db.transaction((tx) => persistConversationResolutionInTransaction(tx, resolution))
+}
 
-    const existing = await findConversationByKeyHash(tx, resolution.key_hash)
-    if (!existing) return err('CONVERSATION_INSERT_CONFLICT_UNRESOLVED', resolution.key_hash)
+export async function persistConversationResolutionInTransaction(
+  db: DbAdapter,
+  resolution: ConversationCreateResolution | ConversationKeyOk,
+): Promise<ConversationPersistResult> {
+  const inserted = await insertConversation(db, resolution)
+  if (inserted) {
     return {
       ok: true,
-      action: 'reused',
-      conversation_id: existing.conversation_id,
-      conversation: existing,
+      action: 'created',
+      conversation_id: inserted.conversation_id,
+      conversation: inserted,
     }
-  })
+  }
+
+  const existing = await findConversationByKeyHash(db, resolution.key_hash)
+  if (!existing) return err('CONVERSATION_INSERT_CONFLICT_UNRESOLVED', resolution.key_hash)
+  return {
+    ok: true,
+    action: 'reused',
+    conversation_id: existing.conversation_id,
+    conversation: existing,
+  }
 }
 
 export async function stampAgentMessageConversation(

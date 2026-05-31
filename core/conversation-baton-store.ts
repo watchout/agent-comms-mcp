@@ -149,12 +149,24 @@ export async function createConversationBaton(
     claim_id?: string | null
   },
 ): Promise<BatonStoreResult> {
-  return db.transaction(async (tx) => {
-    const existing = await findActiveConversationBaton(tx, input.conversation_id)
-    if (existing) return err('ACTIVE_BATON_EXISTS', existing.baton_id)
-    const baton = await insertBaton(tx, input)
-    return baton ? { ok: true, baton } : err('BATON_INSERT_FAILED', input.conversation_id)
-  })
+  return db.transaction((tx) => createConversationBatonInTransaction(tx, input))
+}
+
+export async function createConversationBatonInTransaction(
+  db: DbAdapter,
+  input: {
+    conversation_id: string
+    owner_agent_id: string
+    state?: ActiveBatonState
+    source_queue_id?: number | string | null
+    lease_id?: string | null
+    claim_id?: string | null
+  },
+): Promise<BatonStoreResult> {
+  const existing = await findActiveConversationBaton(db, input.conversation_id)
+  if (existing) return err('ACTIVE_BATON_EXISTS', existing.baton_id)
+  const baton = await insertBaton(db, input)
+  return baton ? { ok: true, baton } : err('BATON_INSERT_FAILED', input.conversation_id)
 }
 
 export async function transferConversationBaton(
