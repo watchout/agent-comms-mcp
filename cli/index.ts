@@ -3587,18 +3587,40 @@ async function preflightQueue(args: string[]) {
   const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
   const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
   const format = flags.format ?? 'json'
+  const gate = flags.gate ?? 'all'
+  if (!['all', 'runtime', 'projection'].includes(gate)) {
+    console.error('Usage: agent-com queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]')
+    process.exit(2)
+  }
   const db = await getDb()
 
   try {
     const report = await buildQueueDoctorReport(db as any, { agentId, staleSeconds })
+    const gateBlockerCodes = gate === 'runtime'
+      ? new Set([
+        'stale_pending',
+        'active_claim_missing_owner',
+        'expired_active_claim',
+        'retired_or_offline_recipient',
+        'tui_without_tmux_session',
+        'loop_prompt_backlog',
+      ])
+      : gate === 'projection'
+        ? new Set(['outbound_pending_stale'])
+        : null
+    const failedBlockers = gateBlockerCodes
+      ? report.blockers.filter((item) => item.severity === 'blocker' && gateBlockerCodes.has(item.code) && item.count > 0)
+      : report.blockers.filter((item) => item.severity === 'blocker' && item.count > 0)
     const preflight = {
-      ok: report.summary.blocker_count === 0,
-      failed_blocker_count: report.summary.blocker_count,
+      ok: failedBlockers.length === 0,
+      gate,
+      failed_blocker_count: failedBlockers.length,
+      failed_blocker_codes: failedBlockers.map((item) => item.code),
     }
 
     if (format === 'text') {
       process.stdout.write(formatQueueDoctorText(report))
-      process.stdout.write(`Preflight: ${preflight.ok ? 'ok' : `blocked (${preflight.failed_blocker_count})`}\n`)
+      process.stdout.write(`Preflight(${gate}): ${preflight.ok ? 'ok' : `blocked (${preflight.failed_blocker_count}: ${preflight.failed_blocker_codes.join(', ')})`}\n`)
     } else {
       process.stdout.write(`${JSON.stringify({ ...report, preflight }, null, 2)}\n`)
     }
@@ -4903,8 +4925,8 @@ Message I/O (requires AGENT_ID env var):
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
-  queue preflight [--agent-id <id>] [--stale-minutes 15] [--format json|text]
-                                                       — restart gate; exits non-zero while queue blockers remain
+  queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — restart gate; exits non-zero while selected queue blockers remain
   queue normalize [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — dry-run normalization plan with scoped repair commands
   queue reassign --from <agent> --to <agent> [--execute|--dry-run]
