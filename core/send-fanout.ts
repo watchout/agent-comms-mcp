@@ -41,6 +41,10 @@ export interface FanoutParams {
 export interface FanoutResult {
   /** Recipients that successfully got a new `message_queue` row. */
   inserted: string[]
+  /** Newly-created queue rows keyed by recipient. Empty for deduped/failed recipients. */
+  inserted_rows: Array<{ recipient: string; queue_id: string }>
+  /** Newly-created `message_queue.id` values, in recipient iteration order. */
+  inserted_queue_ids: string[]
   /** Recipients whose INSERT was a no-op via the partial UNIQUE idempotency guard. */
   deduped: string[]
   /** Recipients whose INSERT threw (logged to stderr, non-fatal). */
@@ -70,6 +74,7 @@ export async function fanoutToRecipients(
   })
 
   const inserted: string[] = []
+  const insertedRows: FanoutResult['inserted_rows'] = []
   const deduped: string[] = []
   const failed: string[] = []
 
@@ -87,7 +92,9 @@ export async function fanoutToRecipients(
         [recipient, params.messageId, mqPayload],
       )
       if (r.rows.length > 0) {
+        const queueId = String(r.rows[0].id)
         inserted.push(recipient)
+        insertedRows.push({ recipient, queue_id: queueId })
       } else {
         deduped.push(recipient)
       }
@@ -99,5 +106,11 @@ export async function fanoutToRecipients(
     }
   }
 
-  return { inserted, deduped, failed }
+  return {
+    inserted,
+    inserted_rows: insertedRows,
+    inserted_queue_ids: insertedRows.map((row) => row.queue_id),
+    deduped,
+    failed,
+  }
 }

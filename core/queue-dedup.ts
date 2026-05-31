@@ -119,6 +119,8 @@ export interface EnqueueWithDedupParams {
 export interface EnqueueWithDedupResult {
   /** True iff INSERT actually wrote a row. */
   inserted: boolean
+  /** `message_queue.id` returned by the caller's INSERT, when INSERT wrote and returned one. */
+  queueId?: string
   /** True iff dedup short-circuited the INSERT. */
   dedupSkipped: boolean
   /** Hash of the content (for log lines). */
@@ -188,6 +190,7 @@ export async function enqueueWithDedup(
       const inserted = (r.rowCount ?? 0) > 0
       return {
         inserted,
+        queueId: inserted && r.rows[0]?.id != null ? String(r.rows[0].id) : undefined,
         dedupSkipped: !inserted,
         contentHash: hash,
         attempts,

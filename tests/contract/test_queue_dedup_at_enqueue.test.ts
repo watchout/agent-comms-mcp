@@ -202,6 +202,7 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
       const skippedCount = (a.dedupSkipped ? 1 : 0) + (b.dedupSkipped ? 1 : 0)
       expect(insertedCount).toBe(1)
       expect(skippedCount).toBe(1)
+      expect([a.queueId, b.queueId].filter((id) => id !== undefined)).toHaveLength(1)
 
       // DB row count: exactly 1 row matching this content.
       const rows = await client.query<{ n: string }>(
@@ -249,6 +250,8 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
       expect(b.inserted).toBe(true)
       expect(a.dedupSkipped).toBe(false)
       expect(b.dedupSkipped).toBe(false)
+      expect(a.queueId).toMatch(/^\d+$/)
+      expect(b.queueId).toMatch(/^\d+$/)
 
       const rows = await client.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM message_queue WHERE agent_id = $1`,
@@ -284,6 +287,7 @@ dbDescribe('test_queue_dedup_at_enqueue — content-level dedup catches dual-pat
         })],
       })
       expect(result.inserted).toBe(true)
+      expect(result.queueId).toMatch(/^\d+$/)
       expect(result.attempts).toBe(1)
       expect(result.contentHash).toBe(contentHash(content))
     } finally {
