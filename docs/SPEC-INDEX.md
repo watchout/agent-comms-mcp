@@ -20,6 +20,7 @@
 | design/aun-agent-communication-control-plane-charter.md | normative | AUN送受信系をagent communication control planeとして再設計するためのmessage/delivery/baton/turn/handoff不変条件 | 2026-05-31 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
+| spec/aun-canonical-channel-id-control-plane-contract.md | proposed | scripted/control-plane送信でchannel_idを正本にし、channel name aliasを人間向け明示解決に限定する契約 | 2026-05-31 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-05-31 |
@@ -83,6 +84,13 @@
 - LLMにqueue claim、baton ownership、close、retry、recovery状態を決めさせず、deterministic codeとDB audit eventで進める
 - send/notifyはactive ownerとobserverを分離し、`mention`は1 active owner、`cc`/`fyi`はqueue/baton非投入にする
 - core communication semanticsは `spec PR -> L1 -> L2 -> L3`、`implementation PR -> L1 -> L2 -> L3 -> merge` の監査ゲートを必須にする
+
+### spec/aun-canonical-channel-id-control-plane-contract.md（Canonical Channel ID Control-Plane Contract）
+- scripted/control-plane送信は `channel_id` を正本にし、channel nameを暗黙解決しない
+- channel name aliasは人間向けCLIの明示解決に限定し、解決結果の `channel_id` とcandidate countを監査ログに残す
+- `thread_id` / `message_id` / `queue_id` は同じchannel/thread scopeに属することをDBで検証してから書き込む
+- provider channel idはconnector evidence経由でcanonical `channel_id` に解決し、文字列形状から推測しない
+- `CHANNEL_ID_REQUIRED`、`CHANNEL_ALIAS_NOT_ALLOWED`、`THREAD_CHANNEL_MISMATCH` などの安定failure codeと必須テストを定義する
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
