@@ -243,6 +243,29 @@ describe('T5 — `agent-com send` fans out message_queue rows per recipient', ()
   })
 })
 
+describe('T5b — `agent-com send` wires conversation control-plane allocation after queue fanout', () => {
+  test('sendMessage uses the inserted active-owner queue row for control-plane stamping', () => {
+    const body = sendMessageBody()
+
+    expect(CLI_SRC).toMatch(/applyConversationControlPlaneAllocation/)
+    expect(CLI_SRC).toMatch(/allocateConversationRootInTransaction/)
+    expect(body).toMatch(/resolveConversationControlPlaneGate\('cli\.send'\)/)
+    expect(body).toMatch(/fanoutRes\.inserted_rows\.find/)
+    expect(body).toMatch(/source_queue_id:\s*queueRow\.queue_id/)
+    expect(body).toMatch(/message_id:\s*id/)
+    expect(body).toMatch(/allocator:\s*allocateConversationRootInTransaction/)
+  })
+
+  test('sendMessage records audit evidence and returns a summary only when the gate runs', () => {
+    const body = sendMessageBody()
+
+    expect(body).toMatch(/conversation\.control_plane\.apply/)
+    expect(body).toMatch(/conversationControlPlaneSummary/)
+    expect(body).toMatch(/conversation_control_plane:\s*conversationControlPlaneSummary/)
+    expect(body).toMatch(/CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED/)
+  })
+})
+
 // Helper: extract the body of sendMessage so T6/T7/T8 don't match unrelated text.
 function sendMessageBody(): string {
   const fnStart = CLI_SRC.indexOf('async function sendMessage')

@@ -61,6 +61,12 @@ import {
 import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
+import { allocateConversationRootInTransaction } from '../core/conversation-control-plane'
+import {
+  applyConversationControlPlaneAllocation,
+  type ConversationControlPlaneApplyResult,
+} from '../core/conversation-control-plane-apply'
+import { resolveConversationControlPlaneGate } from '../core/conversation-control-plane-rollout'
 import {
   buildOwnerHandoffDiagnostic,
   ownerHandoffDiagnosticCode,
@@ -216,6 +222,44 @@ async function auditLog(db: Client, eventType: string, agentId: string | null, t
     'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
     [eventType, agentId, target, JSON.stringify(detail), 'default']
   )
+}
+
+function getRawDbAdapter(db: Client): DbAdapter | null {
+  return (db as Client & { __adapter?: DbAdapter }).__adapter ?? null
+}
+
+async function loadMessageConversationId(db: Client, messageId: string): Promise<string | null> {
+  try {
+    const row = await db.query<{ conversation_id: string | null }>(
+      `SELECT conversation_id FROM agent_messages WHERE id = $1 LIMIT 1`,
+      [messageId],
+    )
+    return row.rows[0]?.conversation_id ?? null
+  } catch {
+    return null
+  }
+}
+
+function summarizeConversationControlPlaneResult(result: ConversationControlPlaneApplyResult): Record<string, unknown> {
+  if (result.ok === false) return { ok: false, error: result.error }
+  const summary: Record<string, unknown> = {
+    ok: true,
+    action: result.action,
+    mode: result.gate.mode,
+    audit_only: result.gate.audit_only,
+    block_on_error: result.gate.block_on_error,
+  }
+  if (result.allocation) {
+    summary.conversation_id = result.allocation.conversation_id
+    summary.baton_id = result.allocation.baton_id
+    summary.conversation_action = result.allocation.conversation_action
+    summary.baton_action = result.allocation.baton_action
+  }
+  if (result.allocation_error) {
+    summary.allocation_error = result.allocation_error.error
+    summary.allocation_error_detail = result.allocation_error.detail ?? null
+  }
+  return summary
 }
 
 async function pgNotify(db: Client, channel: string, payload: Record<string, unknown>) {
@@ -2792,6 +2836,25 @@ async function sendMessage(args: string[]) {
         }
       }
 
+      const activeOwner = mentions[0]
+      if (!activeOwner) {
+        writeFailureJson('INVALID_MENTION', 'mention/mentions must contain exactly one non-empty agent_id', {
+          queue_id: target.queue_id,
+          message_id: replyTo,
+          channel_id: channelId,
+        }, 2)
+      }
+      const conversationGate = resolveConversationControlPlaneGate('cli.send')
+      if (!conversationGate.ok) {
+        writeFailureJson(conversationGate.error, `invalid AGENT_COM_CONVERSATION_CONTROL_PLANE mode: ${conversationGate.value}`, {
+          queue_id: target.queue_id,
+          message_id: replyTo,
+          channel_id: channelId,
+          value: conversationGate.value,
+        }, 2)
+      }
+      let conversationControlPlaneSummary: Record<string, unknown> | null = null
+
       const id = randomUUID()
       // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
       // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
@@ -2827,29 +2890,93 @@ async function sendMessage(args: string[]) {
       // ADR-050 (2026-05-05): wake-daemon (bin/wake-daemon.ts) handles
       // recipient wake-up by polling message_queue + tmux send-keys; the
       // CLI no longer needs an in-process signal bus.
-      {
-        const fanoutRes = await fanoutToRecipients(
-          {
-            query: async <T = any>(sql: string, params?: any[]) => {
-              const r = await db.query(sql, params)
-              return { rows: r.rows as T[] }
-            },
+      const fanoutRes = await fanoutToRecipients(
+        {
+          query: async <T = any>(sql: string, params?: any[]) => {
+            const r = await db.query(sql, params)
+            return { rows: r.rows as T[] }
           },
-          {
-            messageId: id,
-            channelId,
-            threadId,
-            authorId: agentId,
-            content,
-            recipients: mentions,
-            messageType,
-            source: 'cli-send',
-          },
+        },
+        {
+          messageId: id,
+          channelId,
+          threadId,
+          authorId: agentId,
+          content,
+          recipients: mentions,
+          messageType,
+          source: 'cli-send',
+        },
+      )
+      if (fanoutRes.failed.length > 0) {
+        process.stderr.write(
+          `agent-com: fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
         )
-        if (fanoutRes.failed.length > 0) {
-          process.stderr.write(
-            `agent-com: fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
-          )
+      }
+
+      if (conversationGate.allocate) {
+        const queueRow = fanoutRes.inserted_rows.find((row) => row.recipient === activeOwner)
+        const rawAdapter = getRawDbAdapter(db)
+        if (!queueRow || !rawAdapter) {
+          conversationControlPlaneSummary = {
+            ok: false,
+            action: 'skipped',
+            mode: conversationGate.mode,
+            audit_only: conversationGate.audit_only,
+            block_on_error: conversationGate.block_on_error,
+            error: queueRow ? 'DB_ADAPTER_UNAVAILABLE' : 'CONVERSATION_QUEUE_ROW_NOT_INSERTED',
+          }
+          await auditLog(db, 'conversation.control_plane.apply', agentId, channelId, {
+            surface: 'cli.send',
+            message_id: id,
+            reply_to: replyTo,
+            active_owner: activeOwner,
+            source_queue_id: queueRow?.queue_id ?? null,
+            ...conversationControlPlaneSummary,
+          })
+          if (conversationGate.block_on_error) {
+            writeFailureJson(String(conversationControlPlaneSummary.error), 'conversation control-plane could not link the active owner queue row', {
+              queue_id: target.queue_id,
+              message_id: replyTo,
+              outbound_message_id: id,
+              active_owner: activeOwner,
+            })
+          }
+        } else {
+          const replyToConversationId = await loadMessageConversationId(db, replyTo)
+          const applied = await applyConversationControlPlaneAllocation(rawAdapter, 'cli.send', {
+            surface: 'cli.send',
+            channel_id: channelId,
+            thread_id: threadId,
+            root_message_id: id,
+            reply_to_conversation_id: replyToConversationId,
+            provider_parent_reference: replyTo,
+            orphan_policy: 'isolate',
+            owner_agent_id: activeOwner,
+            source_queue_id: queueRow.queue_id,
+            message_id: id,
+          }, {
+            allocator: allocateConversationRootInTransaction,
+          })
+          conversationControlPlaneSummary = summarizeConversationControlPlaneResult(applied)
+          await auditLog(db, 'conversation.control_plane.apply', agentId, channelId, {
+            surface: 'cli.send',
+            message_id: id,
+            reply_to: replyTo,
+            active_owner: activeOwner,
+            source_queue_id: queueRow.queue_id,
+            reply_to_conversation_id: replyToConversationId,
+            ...conversationControlPlaneSummary,
+          })
+          if (!applied.ok) {
+            writeFailureJson('CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED', `conversation control-plane enforce failed: ${applied.error}`, {
+              queue_id: target.queue_id,
+              message_id: replyTo,
+              outbound_message_id: id,
+              active_owner: activeOwner,
+              error: applied.error,
+            })
+          }
         }
       }
 
@@ -2991,6 +3118,7 @@ async function sendMessage(args: string[]) {
         work_closed: workClosed,
         close_mode: workClosed ? (explicitClose || closeRequested ? 'explicit' : 'active_claim') : 'none',
         queue_id: target.queue_id,
+        ...(conversationControlPlaneSummary ? { conversation_control_plane: conversationControlPlaneSummary } : {}),
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
     } finally {
