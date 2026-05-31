@@ -27,7 +27,8 @@ import type { AgentId } from '../../channel-policy'
 import { GROUP_KEYWORDS, normalizeAgentMentions } from '../../mention-normalization'
 import type { PrimaryFallback } from './primary-fallback'
 
-export type InboundResolveError = 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
+export type InboundResolveError = 'INVALID_MENTION' | 'UNKNOWN_AGENT'
+export type InboundResolveControlPlaneError = InboundResolveError | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
 
 export interface InboundResolveInput {
   channel_id: string
@@ -47,7 +48,7 @@ export interface InboundResolveOk {
 
 export interface InboundResolveErr {
   ok: false
-  error: InboundResolveError
+  error: InboundResolveControlPlaneError
   agent_id?: AgentId
 }
 

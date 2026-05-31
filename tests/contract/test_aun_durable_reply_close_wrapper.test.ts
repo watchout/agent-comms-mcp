@@ -89,7 +89,8 @@ beforeEach(() => {
   dbExec(`
     INSERT INTO agents (agent_id, display_name, agent_type, status)
       VALUES ('probe-dev', 'probe-dev', 'dev', 'idle'),
-             ('other-dev', 'other-dev', 'dev', 'idle');
+             ('other-dev', 'other-dev', 'dev', 'idle'),
+             ('codex-cto', 'codex-cto', 'cto', 'idle');
     INSERT INTO channels (id, name, members)
       VALUES ('probe-ch', 'probe-ch', '["probe-dev","other-dev","codex-cto"]'),
              ('no-probe-ch', 'no-probe-ch', '["codex-cto"]');

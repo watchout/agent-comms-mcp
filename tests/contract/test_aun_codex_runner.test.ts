@@ -96,7 +96,8 @@ beforeEach(() => {
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   dbExec(`
     INSERT INTO agents (agent_id, display_name, agent_type, status)
-      VALUES ('codex-aun', 'codex-aun', 'dev', 'idle');
+      VALUES ('codex-aun', 'codex-aun', 'dev', 'idle'),
+             ('codex-cto', 'codex-cto', 'cto', 'idle');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-ch', 'runner-ch', '["codex-aun","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)

@@ -1350,16 +1350,17 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
 /**
  * Issue #248 follow-up — outbound mention transformer.
  *
- * The MCP `send` / `notify` tools accept `mentions: [agent_id, ...]` so callers
- * never type Discord snowflake IDs. The DB recipient routing (message_queue
- * fanout, push) already uses agent_ids directly, but **the Discord-side post**
- * needs the literal `<@DISCORD_ID>` markers in the message content for Discord's
- * native push notifications to fire. Without this transform the recipient bot
- * sees the message in queue but Discord's mobile / desktop notification doesn't
- * trigger — the symptom CEO flagged + CTO directive `24a25097`.
+ * The MCP `send` / `notify` tools resolve one active-owner agent_id plus
+ * optional observer ids so callers never type Discord snowflake IDs. The DB
+ * recipient routing already uses agent_ids directly, but **the Discord-side
+ * post** needs the literal `<@DISCORD_ID>` markers in the message content for
+ * Discord's native push notifications to fire. Without this transform the
+ * recipient bot sees the message in queue but Discord's mobile / desktop
+ * notification doesn't trigger — the symptom CEO flagged + CTO directive
+ * `24a25097`.
  *
  * Behavior:
- *   - For each agent_id in `mentions`, look up the Discord UI id through
+ *   - For each resolved active owner / observer agent_id, look up the Discord UI id through
  *     `agent_ui_bindings` first, with legacy `metadata.discord_id` fallback.
  *   - Build a space-separated `<@id1> <@id2> ` prefix.
  *   - If the content already contains the snowflake (e.g. caller pre-rendered
