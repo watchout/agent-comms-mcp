@@ -1,9 +1,9 @@
 /**
  * Stable receive wrapper for AUN operators and bot runners.
  *
- * This intentionally delegates the actual claim semantics to `agent-com next`.
- * The wrapper only stabilizes cwd/env/socket handling so sessions do not
- * hand-type fragile raw CLI invocations.
+ * Untargeted receive delegates claim semantics to `agent-com next`. Targeted
+ * `--queue-id` receive claims the exact row through the same DB state model so
+ * audit and recovery workflows do not drain unrelated FIFO work.
  */
 import { spawnSync } from 'node:child_process'
 import { Buffer } from 'node:buffer'
@@ -17,6 +17,7 @@ export interface ReceiveOptions {
   env?: NodeJS.ProcessEnv
   cwd?: string
   dryRun?: boolean
+  queueId?: string
 }
 
 export interface DrainOptions extends ReceiveOptions {
@@ -68,6 +69,24 @@ export interface ReceiveResult {
   stdout: string
   stderr: string
   plan: ReceivePlan
+}
+
+export interface TargetedReceiveSummary {
+  ok: boolean
+  dry_run: boolean
+  mode: 'targeted-receive'
+  agent_id: string
+  expected_agent_id: string
+  queue_id: string
+  selected: DiagnosedQueueRow | null
+  claimed: ClaimedMessage | null
+  waiting: number
+  blocked_reason: 'target_queue_not_found' | 'target_queue_not_pending' | null
+  observed_status: string | null
+}
+
+export interface TargetedReceiveResult extends ReceiveResult {
+  summary?: TargetedReceiveSummary
 }
 
 export interface DrainResult extends ReceiveResult {
@@ -380,6 +399,136 @@ export function receive(opts: ReceiveOptions = {}): ReceiveResult {
 
   const result = runCommandPlan(plan)
   return { ...result, plan }
+}
+
+export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<TargetedReceiveResult> {
+  const targetQueueId = opts.queueId?.trim()
+  let plan: ReceivePlan
+  if (!targetQueueId || !/^\d+$/.test(targetQueueId)) {
+    return {
+      ok: false,
+      code: 2,
+      stdout: '',
+      stderr: `Error [TARGETED_RECEIVE_INVALID_QUEUE_ID]: --queue-id must be a positive integer\n`,
+      plan: {
+        repoRoot: opts.cwd ?? repoRoot(),
+        argv: ['bun', 'bin/aun.ts', 'receive', '--queue-id', targetQueueId ?? ''],
+        env: cleanEnv(opts.env ?? process.env),
+        databaseUrlCandidates: [],
+      },
+    }
+  }
+
+  try {
+    plan = buildCommandPlan(opts, ['bun', 'bin/aun.ts', 'receive', '--queue-id', targetQueueId])
+  } catch (err) {
+    return {
+      ok: false,
+      code: 2,
+      stdout: '',
+      stderr: `Error [TARGETED_RECEIVE_FAILED]: ${(err as Error).message}\n`,
+      plan: {
+        repoRoot: opts.cwd ?? repoRoot(),
+        argv: ['bun', 'bin/aun.ts', 'receive', '--queue-id', targetQueueId],
+        env: cleanEnv(opts.env ?? process.env),
+        databaseUrlCandidates: [],
+      },
+    }
+  }
+
+  try {
+    const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      return db.transaction<TargetedReceiveSummary>(async (tx) => {
+        const row = await tx.queryOne<Record<string, unknown>>(
+          `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+                  mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.message_type AS stored_message_type,
+                  am.author_id AS stored_author_id
+             FROM message_queue mq
+             LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+            WHERE mq.id::text = $1 AND mq.agent_id = $2
+            LIMIT 1
+            FOR UPDATE`,
+          [targetQueueId, plan.env.AGENT_ID],
+        )
+
+        const selected = row ? normalizeQueueRow(row) : null
+        const observedStatus = selected?.status ?? null
+        const blockedReason = !selected
+          ? 'target_queue_not_found'
+          : selected.status !== 'pending' ? 'target_queue_not_pending' : null
+        let claimed: ClaimedMessage | null = null
+
+        if (selected && !blockedReason && !opts.dryRun) {
+          const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+          const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
+          const update = await tx.execute(
+            `UPDATE message_queue
+                SET status = 'received',
+                    read_at = now(),
+                    claimed_by = $1,
+                    claimed_at = now(),
+                    claim_expires_at = $2
+              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
+            [plan.env.AGENT_ID, claimExpiresAt, selected.queue_id, plan.env.AGENT_ID],
+          )
+          if (update.rowCount !== 1) {
+            throw new Error(`target queue row changed before claim: queue_id=${selected.queue_id}`)
+          }
+          await tx.execute(
+            `UPDATE agents SET
+               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
+               status_updated_at = now()
+             WHERE agent_id = $1`,
+            [plan.env.AGENT_ID],
+          )
+        }
+
+        const waitingRow = await tx.queryOne<{ n: number | string }>(
+          `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+          [plan.env.AGENT_ID],
+        )
+        const waiting = Number(waitingRow?.n ?? 0)
+        if (selected && !blockedReason) {
+          claimed = opts.dryRun ? null : claimedMessageFromRow(selected, parsePayload(row?.payload), waiting)
+        }
+
+        return {
+          ok: !blockedReason,
+          dry_run: !!opts.dryRun,
+          mode: 'targeted-receive',
+          agent_id: plan.env.AGENT_ID,
+          expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+          queue_id: targetQueueId,
+          selected,
+          claimed,
+          waiting,
+          blocked_reason: blockedReason,
+          observed_status: observedStatus,
+        }
+      })
+    })
+    const blocked = !!summary.blocked_reason && !opts.dryRun
+    return {
+      ok: !blocked,
+      code: blocked ? 1 : 0,
+      stdout: JSON.stringify(opts.dryRun || blocked ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
+      stderr: blocked
+        ? `Error [TARGETED_RECEIVE_BLOCKED]: queue_id=${targetQueueId} is not claimable for ${plan.env.AGENT_ID}; reason=${summary.blocked_reason}; status=${summary.observed_status ?? 'missing'}\n`
+        : '',
+      plan,
+      summary,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: `Error [TARGETED_RECEIVE_FAILED]: ${(err as Error).message}\n`,
+      plan,
+    }
+  }
 }
 
 export function parseDrainLimit(limit: number | undefined): number {

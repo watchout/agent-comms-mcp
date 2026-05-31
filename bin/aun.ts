@@ -6,8 +6,8 @@
  *   - aun                    → init if missing, else start
  *   - aun init [--dry-run] [--force]
  *   - aun start [-- <extra args passed to claude>]
- *   - aun receive --agent-id <id> [--dry-run]
- *   - aun next --agent-id <id> [--dry-run]
+ *   - aun receive --agent-id <id> [--queue-id <id>] [--dry-run]
+ *   - aun next --agent-id <id> [--queue-id <id>] [--dry-run]
  *   - aun receive-actionable|next-actionable --agent-id <id> [--queue-id <id>] [--max-inspect <n>] [--dry-run]
  *   - aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]
  *   - aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]
@@ -24,7 +24,7 @@ import { init } from './aun/init'
 import { uninstall } from './aun/uninstall'
 import { status } from './aun/status'
 import { start } from './aun/start'
-import { diagnoseReceive, drain, receive, receiveActionable, reconcile } from './aun/receive'
+import { diagnoseReceive, drain, receive, receiveActionable, receiveTargeted, reconcile } from './aun/receive'
 import { notify, reply } from './aun/reply'
 import { codexRunnerTick } from './aun/codex-runner'
 import { lifecycleTransition } from './aun/lifecycle'
@@ -37,8 +37,8 @@ function printHelp(): void {
     '  aun                       run init if missing, else start',
     '  aun init [--dry-run] [--force]',
     '  aun start [-- <args...>]',
-    '  aun receive --agent-id <id> [--dry-run]',
-    '  aun next --agent-id <id> [--dry-run]',
+    '  aun receive --agent-id <id> [--queue-id <id>] [--dry-run]',
+    '  aun next --agent-id <id> [--queue-id <id>] [--dry-run]',
     '  aun receive-actionable|next-actionable --agent-id <id> [--queue-id <id>] [--max-inspect <n>] [--dry-run]',
     '  aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]',
     '  aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]',
@@ -276,6 +276,7 @@ export function run(argv: string[] = process.argv): number {
 export async function runAsync(argv: string[] = process.argv): Promise<number> {
   const { subcommand, flags } = parseArgs(argv)
   if (
+    !((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') &&
     subcommand !== 'diagnose-receive' &&
     subcommand !== 'reconcile' &&
     subcommand !== 'receive-actionable' &&
@@ -284,6 +285,17 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'done' &&
     subcommand !== 'record-no-reply'
   ) return run(argv)
+
+  if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
+    const res = await receiveTargeted({
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      queueId: flags['queue-id'] as string,
+      dryRun: !!flags['dry-run'],
+    })
+    if (res.stdout) process.stdout.write(res.stdout)
+    if (res.stderr) process.stderr.write(res.stderr)
+    return res.code
+  }
 
   if (subcommand === 'processing' || subcommand === 'done' || subcommand === 'record-no-reply') {
     const res = await lifecycleTransition(subcommand, {
