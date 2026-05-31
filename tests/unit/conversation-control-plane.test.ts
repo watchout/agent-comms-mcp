@@ -4,7 +4,10 @@ import { existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
-import { allocateConversationRoot } from '../../core/conversation-control-plane'
+import {
+  allocateConversationRoot,
+  allocateConversationRootInTransaction,
+} from '../../core/conversation-control-plane'
 import { migrateSqlite } from '../../db/migrate-sqlite'
 
 let dbPath: string
@@ -185,5 +188,59 @@ describe('conversation control-plane allocation', () => {
     })
     expect(await db.query(`SELECT conversation_id FROM conversations`)).toHaveLength(0)
     expect(await db.query(`SELECT baton_id FROM conversation_batons`)).toHaveLength(0)
+  })
+
+  test('in-transaction allocation can stamp rows without opening a nested transaction', async () => {
+    await seedChannelAndAgents()
+    const { messageId, queueId } = await seedMessageAndQueue()
+
+    const allocated = await db.transaction((tx) => allocateConversationRootInTransaction(tx, {
+      surface: 'cli.send',
+      channel_id: 'audit-channel',
+      root_message_id: messageId,
+      owner_agent_id: 'owner-a',
+      message_id: messageId,
+      source_queue_id: queueId,
+    }))
+
+    expect(allocated.ok).toBe(true)
+    if (!allocated.ok) return
+    const message = await db.queryOne<{ conversation_id: string; baton_id: string }>(
+      `SELECT conversation_id, baton_id FROM agent_messages WHERE id = $1`,
+      [messageId],
+    )
+    const queue = await db.queryOne<{ conversation_id: string; baton_id: string }>(
+      `SELECT conversation_id, baton_id FROM message_queue WHERE id = $1`,
+      [queueId],
+    )
+    expect(message).toEqual({ conversation_id: allocated.conversation_id, baton_id: allocated.baton_id })
+    expect(queue).toEqual({ conversation_id: allocated.conversation_id, baton_id: allocated.baton_id })
+  })
+
+  test('in-transaction allocation rolls back only its savepoint on typed failure', async () => {
+    await seedChannelAndAgents()
+
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(
+        `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+         VALUES ('test.before_allocation', 'tester', 'audit-channel', '{}', 'default')`,
+      )
+      return allocateConversationRootInTransaction(tx, {
+        surface: 'cli.send',
+        channel_id: 'audit-channel',
+        root_request_id: 'missing-stamp-root',
+        owner_agent_id: 'owner-a',
+        message_id: 'missing-message',
+      })
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'MESSAGE_CONVERSATION_STAMP_NOT_FOUND',
+      detail: 'missing-message',
+    })
+    expect(await db.query(`SELECT conversation_id FROM conversations`)).toHaveLength(0)
+    expect(await db.query(`SELECT baton_id FROM conversation_batons`)).toHaveLength(0)
+    expect(await db.query(`SELECT id FROM audit_log WHERE event_type = 'test.before_allocation'`)).toHaveLength(1)
   })
 })

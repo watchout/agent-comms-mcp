@@ -88,66 +88,103 @@ async function stampAllocationRows(
   return null
 }
 
-export async function allocateConversationRoot(
+async function allocateConversationRootCore(
   db: DbAdapter,
   input: ConversationRootAllocationInput,
 ): Promise<ConversationRootAllocationResult> {
   const resolution = resolveConversationIdentity(input)
   if (!resolution.ok) return err('CONVERSATION_RESOLUTION_FAILED', resolution.error)
 
+  let conversationId: string
+  let conversationAction: ConversationRootAllocationOk['conversation_action']
+  if (resolution.action === 'continue') {
+    conversationId = resolution.conversation_id
+    conversationAction = 'continued'
+  } else if (resolution.action === 'create') {
+    const persisted = await persistConversationResolutionInTransaction(db, resolution)
+    if (!persisted.ok) return persisted
+    conversationId = persisted.conversation_id
+    conversationAction = persisted.action
+  } else {
+    return err('CONVERSATION_RESOLUTION_ACTION_UNSUPPORTED')
+  }
+
+  const active = await findActiveConversationBaton(db, conversationId)
+  if (active) {
+    if (active.owner_agent_id !== input.owner_agent_id) {
+      return err('ACTIVE_BATON_OWNER_MISMATCH', active.baton_id)
+    }
+    const stampError = await stampAllocationRows(db, input, conversationId, active.baton_id)
+    if (stampError) return stampError
+    return {
+      ok: true,
+      conversation_id: conversationId,
+      baton_id: active.baton_id,
+      conversation_action: conversationAction,
+      baton_action: 'reused',
+      baton: active,
+    }
+  }
+
+  const createdBaton = await createConversationBatonInTransaction(db, {
+    conversation_id: conversationId,
+    owner_agent_id: input.owner_agent_id,
+    state: input.baton_state ?? 'active',
+    source_queue_id: input.source_queue_id ?? null,
+    lease_id: input.lease_id ?? null,
+    claim_id: input.claim_id ?? null,
+  })
+  if (!createdBaton.ok) return createdBaton
+
+  const stampError = await stampAllocationRows(db, input, conversationId, createdBaton.baton.baton_id)
+  if (stampError) return stampError
+  return {
+    ok: true,
+    conversation_id: conversationId,
+    baton_id: createdBaton.baton.baton_id,
+    conversation_action: conversationAction,
+    baton_action: 'created',
+    baton: createdBaton.baton,
+  }
+}
+
+async function releaseAllocationSavepoint(db: DbAdapter): Promise<void> {
+  await db.execute('RELEASE SAVEPOINT conversation_allocation')
+}
+
+async function rollbackAllocationSavepoint(db: DbAdapter): Promise<void> {
+  await db.execute('ROLLBACK TO SAVEPOINT conversation_allocation')
+  await releaseAllocationSavepoint(db).catch(() => {})
+}
+
+export async function allocateConversationRootInTransaction(
+  tx: DbAdapter,
+  input: ConversationRootAllocationInput,
+): Promise<ConversationRootAllocationResult> {
+  await tx.execute('SAVEPOINT conversation_allocation')
+  try {
+    const result = await allocateConversationRootCore(tx, input)
+    if (!result.ok) {
+      await rollbackAllocationSavepoint(tx)
+      return result
+    }
+    await releaseAllocationSavepoint(tx)
+    return result
+  } catch (e) {
+    await rollbackAllocationSavepoint(tx).catch(() => {})
+    throw e
+  }
+}
+
+export async function allocateConversationRoot(
+  db: DbAdapter,
+  input: ConversationRootAllocationInput,
+): Promise<ConversationRootAllocationResult> {
   try {
     return await db.transaction(async (tx) => {
-      let conversationId: string
-      let conversationAction: ConversationRootAllocationOk['conversation_action']
-      if (resolution.action === 'continue') {
-        conversationId = resolution.conversation_id
-        conversationAction = 'continued'
-      } else if (resolution.action === 'create') {
-        const persisted = await persistConversationResolutionInTransaction(tx, resolution)
-        if (!persisted.ok) rollback(persisted)
-        conversationId = persisted.conversation_id
-        conversationAction = persisted.action
-      } else {
-        rollback(err('CONVERSATION_RESOLUTION_ACTION_UNSUPPORTED'))
-      }
-
-      const active = await findActiveConversationBaton(tx, conversationId)
-      if (active) {
-        if (active.owner_agent_id !== input.owner_agent_id) {
-          rollback(err('ACTIVE_BATON_OWNER_MISMATCH', active.baton_id))
-        }
-        const stampError = await stampAllocationRows(tx, input, conversationId, active.baton_id)
-        if (stampError) rollback(stampError)
-        return {
-          ok: true,
-          conversation_id: conversationId,
-          baton_id: active.baton_id,
-          conversation_action: conversationAction,
-          baton_action: 'reused',
-          baton: active,
-        }
-      }
-
-      const createdBaton = await createConversationBatonInTransaction(tx, {
-        conversation_id: conversationId,
-        owner_agent_id: input.owner_agent_id,
-        state: input.baton_state ?? 'active',
-        source_queue_id: input.source_queue_id ?? null,
-        lease_id: input.lease_id ?? null,
-        claim_id: input.claim_id ?? null,
-      })
-      if (!createdBaton.ok) rollback(createdBaton)
-
-      const stampError = await stampAllocationRows(tx, input, conversationId, createdBaton.baton.baton_id)
-      if (stampError) rollback(stampError)
-      return {
-        ok: true,
-        conversation_id: conversationId,
-        baton_id: createdBaton.baton.baton_id,
-        conversation_action: conversationAction,
-        baton_action: 'created',
-        baton: createdBaton.baton,
-      }
+      const result = await allocateConversationRootCore(tx, input)
+      if (!result.ok) rollback(result)
+      return result
     })
   } catch (e) {
     if (e instanceof ConversationAllocationRollback) return e.result
