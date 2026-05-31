@@ -15,7 +15,7 @@
  *   - aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
- *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
+ *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <ids>
  *   - aun uninstall [--backup <path>] [--surgical]
  *   - aun status
  *   - aun --help / -h
@@ -46,7 +46,7 @@ function printHelp(): void {
     '  aun codex-runner --agent-id <id> [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
-    '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
+    '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <ids> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
     '  aun --help | -h',
@@ -223,7 +223,9 @@ export function run(argv: string[] = process.argv): number {
     case 'notify': {
       const res = notify({
         agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
-        channel: typeof flags.channel === 'string' ? (flags.channel as string) : undefined,
+        channelId: typeof flags['channel-id'] === 'string' ? (flags['channel-id'] as string) : undefined,
+        channelName: typeof flags['channel-name'] === 'string' ? (flags['channel-name'] as string) : undefined,
+        resolveChannelName: !!flags['resolve-channel-name'],
         threadId: typeof flags['thread-id'] === 'string' ? (flags['thread-id'] as string) : undefined,
         content: typeof flags.content === 'string' ? (flags.content as string) : undefined,
         mentions: typeof flags.mentions === 'string' ? (flags.mentions as string) : undefined,

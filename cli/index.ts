@@ -2948,7 +2948,9 @@ async function sendMessage(args: string[]) {
  * destination explicitly.
  *
  * Flags:
- *   --channel <id|name>       required — destination channel (id or name)
+ *   --channel-id <id>         required for scripted use — canonical destination channel_id
+ *   --channel-name <name> --resolve-channel-name
+ *                             human alias path only; resolves uniquely or fails closed
  *   --thread-id <id>          optional — post into a thread instead
  *   --mentions a,b,c          required — comma-separated agent_ids
  *   --content "<text>"        required
@@ -2957,14 +2959,29 @@ async function sendMessage(args: string[]) {
 async function notifyMessage(args: string[]) {
   const agentId = requireAgentId('notify')
   const { flags } = parseArgs(args)
-  const channelArg = flags.channel
+  const legacyChannelProvided = flags.channel !== undefined
+  const channelIdArg = typeof flags['channel-id'] === 'string' ? flags['channel-id'] : undefined
+  const channelNameArg = typeof flags['channel-name'] === 'string' ? flags['channel-name'] : undefined
+  const resolveChannelName = !!flags['resolve-channel-name']
   const threadArg = flags['thread-id'] ?? null
   const content = flags.content
   const mentionsRaw = flags.mentions
   const messageType = flags['message-type'] ?? 'chat'
 
-  if (!channelArg) {
-    console.error('Error: --channel is required')
+  if (legacyChannelProvided) {
+    console.error('Error [CHANNEL_ALIAS_NOT_ALLOWED]: --channel is ambiguous and no longer accepted for notify; use --channel-id, or --channel-name with --resolve-channel-name for human alias resolution')
+    process.exit(2)
+  }
+  if (channelIdArg && channelNameArg) {
+    console.error('Error [INVALID_PARAMETER]: pass either --channel-id or --channel-name, not both')
+    process.exit(2)
+  }
+  if (channelNameArg && !resolveChannelName) {
+    console.error('Error [CHANNEL_ALIAS_NOT_ALLOWED]: --channel-name requires --resolve-channel-name')
+    process.exit(2)
+  }
+  if (!channelIdArg && !channelNameArg) {
+    console.error('Error [CHANNEL_ID_REQUIRED]: --channel-id is required for notify')
     process.exit(2)
   }
   if (!content) {
@@ -3000,36 +3017,68 @@ async function notifyMessage(args: string[]) {
 
   const db = await getDb()
   try {
-    // Resolve channel: thread_id short-circuits; otherwise id-first, name-fallback.
+    // Resolve channel: canonical channel_id for scripted use, or explicit
+    // human alias path when --channel-name --resolve-channel-name is passed.
     let resolvedChannelId: string | null = null
     let resolvedThreadId: string | null = threadArg
+    let channelResolution: Record<string, unknown> = {
+      mode: 'canonical_channel_id',
+      alias_resolution: false,
+      surface: 'cli.notify',
+    }
+
+    if (channelIdArg) {
+      const byId = await db.query(`SELECT id FROM channels WHERE id = $1`, [channelIdArg])
+      if (byId.rows.length === 0) {
+        console.error(`Error [CHANNEL_ID_NOT_FOUND]: channel_id '${channelIdArg}' not found`)
+        process.exit(1)
+      }
+      resolvedChannelId = channelIdArg
+      channelResolution = {
+        ...channelResolution,
+        channel_id: resolvedChannelId,
+      }
+    } else if (channelNameArg) {
+      const byName = await db.query(`SELECT id FROM channels WHERE name = $1 ORDER BY id LIMIT 2`, [channelNameArg])
+      if (byName.rows.length === 0) {
+        console.error(`Error [CHANNEL_NAME_NOT_FOUND]: channel name '${channelNameArg}' not found`)
+        process.exit(1)
+      }
+      if (byName.rows.length > 1) {
+        const ids = byName.rows.map((r: { id: string }) => r.id).join(', ')
+        console.error(`Error [CHANNEL_NAME_AMBIGUOUS]: channel name '${channelNameArg}' matches multiple channels (${ids}…). Pass --channel-id instead.`)
+        process.exit(1)
+      }
+      resolvedChannelId = byName.rows[0].id
+      channelResolution = {
+        mode: 'human_channel_name',
+        alias_resolution: true,
+        input_alias: channelNameArg,
+        channel_id: resolvedChannelId,
+        resolved_channel_id: resolvedChannelId,
+        candidate_count: 1,
+        surface: 'cli.notify',
+      }
+      await auditLog(db, 'channel.alias_resolved', agentId, resolvedChannelId, channelResolution)
+        .catch((err) => process.stderr.write(`agent-com: channel alias audit failed (non-fatal): ${err}\n`))
+    }
+
+    if (!resolvedChannelId) {
+      console.error('Error [CHANNEL_ID_REQUIRED]: --channel-id is required for notify')
+      process.exit(2)
+    }
+
     if (resolvedThreadId) {
       const tr = await db.query(`SELECT channel_id FROM threads WHERE id = $1`, [resolvedThreadId])
       if (tr.rows.length === 0) {
         console.error(`Error [THREAD_NOT_FOUND]: thread '${resolvedThreadId}' not found`)
         process.exit(1)
       }
-      resolvedChannelId = tr.rows[0].channel_id
-    } else {
-      const byId = await db.query(`SELECT id FROM channels WHERE id = $1`, [channelArg])
-      if (byId.rows.length > 0) {
-        resolvedChannelId = channelArg
-      } else {
-        // codex-auditor PR #214 Layer 2 finding 2 — fail-closed on ambiguous
-        // channel name lookups (no UNIQUE constraint on channels.name).
-        const byName = await db.query(`SELECT id FROM channels WHERE name = $1 ORDER BY id LIMIT 2`, [channelArg])
-        if (byName.rows.length === 1) {
-          resolvedChannelId = byName.rows[0].id
-        } else if (byName.rows.length > 1) {
-          const ids = byName.rows.map((r: { id: string }) => r.id).join(', ')
-          console.error(`Error [CHANNEL_NAME_AMBIGUOUS]: channel name '${channelArg}' matches multiple channels (${ids}…). Pass the channel id instead of the name.`)
-          process.exit(1)
-        }
+      const threadChannelId = tr.rows[0].channel_id
+      if (threadChannelId !== resolvedChannelId) {
+        console.error(`Error [THREAD_CHANNEL_MISMATCH]: thread '${resolvedThreadId}' belongs to channel '${threadChannelId}', not '${resolvedChannelId}'`)
+        process.exit(1)
       }
-    }
-    if (!resolvedChannelId) {
-      console.error(`Error [CHANNEL_NOT_FOUND]: channel '${channelArg}' not found`)
-      process.exit(1)
     }
 
     // Membership check.
@@ -3057,6 +3106,7 @@ async function notifyMessage(args: string[]) {
     const metadata: Record<string, unknown> = {
       mentions,
       cli: 'agent-com notify',
+      channel_resolution: channelResolution,
       ...(authMeta ?? {}),
     }
     await db.query(
@@ -4914,7 +4964,8 @@ Commands:
 Message I/O (requires AGENT_ID env var):
   next                                                — fetch one unread message (oldest first)
   send --content "..." --mentions cto,ceo [--message-type chat] [--no-close|--close]
-  notify --channel <id|name> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
+  notify --channel-id <id> [--thread-id <id>] --mentions cto --content "..." [--message-type chat]
+  notify --channel-name <name> --resolve-channel-name --mentions cto --content "..." [--message-type chat]
   fail --message-id <uuid> --reason <text>            — mark in-flight message failed (v2.1.0, §4.1)
   skip --message-id <uuid> --reason <text>            — operator-initiated skip (v2.1.0, §4.1)
   reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)

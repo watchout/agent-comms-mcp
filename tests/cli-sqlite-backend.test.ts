@@ -1204,15 +1204,54 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
 describe('F5 — agent-com notify (SQLite)', () => {
   test('notify posts a self-originated message without touching agents state', () => {
     allowOutboundAgents('probe-f', 'cto')
-    const r = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'notify body'])
+    const r = runCli(['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'notify body'])
     expect(r.status).toBe(0)
     const payload = JSON.parse(r.stdout.trim()) as any
     expect(payload.ok).toBe(true)
     expect(payload.channel_id).toBe('probe-f-ch')
+    const written = dbRead(`SELECT metadata FROM agent_messages WHERE id = ?`, [payload.message_id])
+    expect(JSON.parse(written[0].metadata).channel_resolution).toMatchObject({
+      mode: 'canonical_channel_id',
+      alias_resolution: false,
+      surface: 'cli.notify',
+    })
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     // notify should NOT flip the agent's busy/idle state — it stays whatever
     // it was (we seeded 'idle' in beforeEach).
     expect(a[0].status).toBe('idle')
+  })
+
+  test('notify rejects legacy --channel before writing', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const r = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'legacy notify'])
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('CHANNEL_ALIAS_NOT_ALLOWED')
+    expect(dbRead(`SELECT id FROM agent_messages WHERE content = 'legacy notify'`)).toHaveLength(0)
+  })
+
+  test('notify resolves channel name only through explicit human alias flags', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const r = runCli([
+      'notify',
+      '--channel-name', 'probe-f-ch',
+      '--resolve-channel-name',
+      '--mentions', 'cto',
+      '--content', 'alias notify',
+    ])
+    expect(r.status).toBe(0)
+    const payload = JSON.parse(r.stdout.trim()) as any
+    expect(payload.channel_id).toBe('probe-f-ch')
+    const written = dbRead(`SELECT metadata FROM agent_messages WHERE id = ?`, [payload.message_id])
+    expect(JSON.parse(written[0].metadata).channel_resolution).toMatchObject({
+      mode: 'human_channel_name',
+      alias_resolution: true,
+      input_alias: 'probe-f-ch',
+      resolved_channel_id: 'probe-f-ch',
+      candidate_count: 1,
+    })
+    const audits = dbRead(`SELECT event_type, target, detail FROM audit_log WHERE event_type = 'channel.alias_resolved'`)
+    expect(audits).toHaveLength(1)
+    expect(audits[0].target).toBe('probe-f-ch')
   })
 
   test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
@@ -1220,7 +1259,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
     db.close()
 
-    const blocked = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'blocked notify'])
+    const blocked = runCli(['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'blocked notify'])
     expect(blocked.status).not.toBe(0)
     expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
     expect(blocked.stderr).toContain('allowlist=["cto"]')

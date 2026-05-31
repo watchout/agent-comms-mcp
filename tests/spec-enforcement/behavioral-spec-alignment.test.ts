@@ -191,14 +191,16 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
 })
 
 describe('Behavioral FAIL B3 — notify tool implemented', () => {
-  test('MCP notify tool is listed with channel + content required and mention/mentions supported (ADR-041 amendment 2026-05-27)', () => {
+  test('MCP notify tool is listed with channel_id + content required and mention/mentions supported', () => {
     expect(SERVER_SRC).toMatch(/name:\s*'notify'/)
     const schemaIdx = SERVER_SRC.indexOf("name: 'notify'")
     const schema = SERVER_SRC.slice(schemaIdx, SERVER_SRC.indexOf("name: 'unfocus'", schemaIdx))
+    expect(schema).toMatch(/channel_id:\s*\{\s*type:\s*'string'/)
+    expect(schema).toMatch(/channel:\s*\{\s*type:\s*'string'[^}]*DEPRECATED/s)
     expect(schema).toMatch(/mention:\s*\{\s*type:\s*'string'/)
     expect(schema).toMatch(/mentions:\s*\{\s*type:\s*'array'/)
-    expect(schema).toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"]\]/)
-    expect(schema).not.toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"],\s*['"]mention['"]\]/)
+    expect(schema).toMatch(/required:\s*\[['"]channel_id['"],\s*['"]content['"]\]/)
+    expect(schema).not.toMatch(/required:\s*\[['"]channel['"],\s*['"]content['"]\]/)
   })
   test('MCP notify handler exists and does NOT touch reply_to / current_message_id', () => {
     const notifyIdx = SERVER_SRC.indexOf("if (name === 'notify')")
@@ -215,13 +217,17 @@ describe('Behavioral FAIL B3 — notify tool implemented', () => {
     expect(CLI_SRC).toMatch(/command === 'notify'/)
     expect(CLI_SRC).toMatch(/async function notifyMessage/)
   })
-  // codex-auditor Layer 2 finding 2 — honest handling when channels.name has
-  // no UNIQUE constraint and multiple rows match.
-  test('MCP notify fails closed on ambiguous channel name (CHANNEL_NAME_AMBIGUOUS)', () => {
-    expect(SERVER_SRC).toMatch(/CHANNEL_NAME_AMBIGUOUS/)
-    expect(SERVER_SRC).toMatch(/SELECT id FROM channels WHERE name = \$1 ORDER BY id LIMIT 2/)
+  test('MCP notify rejects channel aliases and validates thread scope', () => {
+    expect(SERVER_SRC).toMatch(/CHANNEL_ALIAS_NOT_ALLOWED/)
+    expect(SERVER_SRC).toMatch(/CHANNEL_ID_REQUIRED/)
+    expect(SERVER_SRC).toMatch(/CHANNEL_ID_NOT_FOUND/)
+    expect(SERVER_SRC).toMatch(/THREAD_CHANNEL_MISMATCH/)
+    expect(SERVER_SRC).not.toMatch(/const byName = await client\.query\(`SELECT id FROM channels WHERE name = \$1 ORDER BY id LIMIT 2`/)
   })
-  test('CLI notify fails closed on ambiguous channel name (CHANNEL_NAME_AMBIGUOUS)', () => {
+  test('CLI notify requires channel_id unless explicit human alias resolution is requested', () => {
+    expect(CLI_SRC).toMatch(/CHANNEL_ALIAS_NOT_ALLOWED/)
+    expect(CLI_SRC).toMatch(/CHANNEL_ID_REQUIRED/)
+    expect(CLI_SRC).toMatch(/--channel-name <name> --resolve-channel-name/)
     expect(CLI_SRC).toMatch(/CHANNEL_NAME_AMBIGUOUS/)
     expect(CLI_SRC).toMatch(/SELECT id FROM channels WHERE name = \$1 ORDER BY id LIMIT 2/)
   })
