@@ -46,6 +46,8 @@ one atomic change.
 5. Runtime differences live behind adapters.
 6. Natural-language wake injection is a fallback, not the primary mechanism.
 7. Transport limits must not change durable message identity.
+8. Targeted audit, recovery, and bridge work uses exact `queue_id` claim, not
+   FIFO drain-to-target behavior.
 
 ## State Ownership
 
@@ -69,16 +71,39 @@ and auditable in the runtime result; it must not silently strand rows in `done`.
 
 ### Receive Runner
 
-Input: `agent_id`
+Input: `agent_id`, optionally `queue_id`
 
 Behavior:
 
 - call the same deterministic claim path as `agent-com next`
 - claim at most one `pending` row per invocation
+- when `queue_id` is provided, claim only that row
+- fail closed if the provided `queue_id` is not pending for the expected
+  `agent_id`
 - fail closed if runtime identity does not match expected `agent_id`
 - emit structured logs with `agent_id`, `queue_id`, `message_id`, and result
 
 This runner is safe to invoke repeatedly. If no work exists, it exits cleanly.
+If a targeted row is not claimable, the runner returns the stable failure
+reason and leaves other pending rows untouched.
+
+### Targeted Receive Runner
+
+Input: `agent_id`, `queue_id`
+
+Behavior:
+
+- load the exact `message_queue` row by id inside the receive transaction
+- verify agent ownership, channel/thread scope, current state, and claim
+  eligibility before changing state
+- transition only that row from `pending -> received`
+- return the canonical logical message body, baton/conversation context, and
+  claim evidence for that row
+- never loop through `next` or any FIFO primitive to reach the target row
+
+This path is required for audit, L3 merge, bridge, and recovery workflows. A
+human or scheduler may know the row that must be handled; the system must not
+ask a runtime to consume unrelated work just to reach it.
 
 ### Batch Receive Runner
 
@@ -201,8 +226,8 @@ LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.
 
 | Runtime | Primary receive mechanism |
 |---|---|
-| Codex | script invocation of `next` plus a Codex runner adapter |
-| Claude Code | hook or script invocation first; TUI text injection only as fallback |
+| Codex | receive runner plus a Codex runner adapter |
+| Claude Code | receive runner plus a Claude runner adapter; TUI text injection only as fallback |
 | OpenClaw / other orchestrators | adapter invokes AUN runner API and maps task results back to AUN states |
 
 Runner configuration must be addressable by `agent_id` and use the existing
@@ -215,9 +240,15 @@ out of scope and remain forbidden by the state-daemon SSOT.
 The same `agents`/channel registry should later feed the UI that manages
 channel members and agent routing.
 
+Runtime adapters may differ in launch, IO transport, timeout enforcement, and
+result parsing. They must not implement their own queue claim policy, baton
+ownership policy, retry policy, or completion state transitions.
+
 ## Acceptance Criteria
 
 - A pending row can be claimed without any LLM tool-choice decision.
+- A specific audit or recovery row can be claimed by exact `queue_id` without
+  draining older pending rows.
 - `pending -> next -> received` from `next-only-receive-flow.md` remains the
   receive claim contract.
 - `inbox` cannot advance queue state and cannot be required for receive.

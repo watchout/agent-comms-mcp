@@ -10,7 +10,8 @@ tmux automation layer. The send/receive redesign must preserve the product
 meaning of communication:
 
 ```text
-message -> delivery -> baton -> agent turn -> reply | handoff | close
+message -> delivery -> conversation -> baton -> agent turn
+        -> reply | handoff | close | no-reply | retry | quarantine
 ```
 
 The control plane must answer, from durable evidence:
@@ -28,6 +29,7 @@ The control plane must answer, from durable evidence:
 |---|---|
 | message | A logical utterance from a human, agent, system, or connector. |
 | delivery | A durable attempt to present a message to an intended agent. |
+| conversation | An AUN-owned logical work thread that groups related messages, deliveries, and baton transitions. Provider channel, thread, and UI state are evidence, not the primary identity. |
 | baton | The active response responsibility for a conversation or request. |
 | agent turn | One bounded execution by the agent that owns the baton. |
 | handoff | A typed transfer of the baton to another responsible agent. |
@@ -104,6 +106,11 @@ pending delivery
   -> completion runner records reply, handoff, close, no-reply, retry, or escalation
 ```
 
+Audit, recovery, and bridge workflows that already know the intended work item
+must use an exact `queue_id` claim. A runner must fail closed if that row is not
+pending for the expected agent. It must not drain unrelated FIFO rows to reach a
+target row.
+
 Forbidden flow:
 
 ```text
@@ -115,6 +122,8 @@ pending delivery
 
 The runtime receives only the claimed message, baton context, and bounded
 supporting evidence. It must not receive an unrelated pending queue preview.
+This requirement is runtime-neutral: Codex, Claude Code, OpenClaw, and future
+adapters use the same queue, baton, turn, and completion state machine.
 
 ## Baton Transition Model
 
@@ -165,8 +174,10 @@ Receive runner:
 
 - claims at most one row per invocation unless a batch mode explicitly sets a
   bounded limit
+- supports an exact `queue_id` claim for audit, recovery, and bridge workflows
 - writes claim owner, claim time, expiry, and trace metadata
 - refuses identity mismatch
+- refuses drain-to-target behavior; unrelated pending rows remain untouched
 
 Process runner:
 
@@ -221,12 +232,14 @@ The charter should be implemented through these audited slices:
 2. Single-active-owner send/notify contract with `cc` and `fyi` observers.
 3. Baton schema or compatibility layer that exposes one active baton per open
    conversation.
-4. Script-controlled receive runner.
-5. Script-controlled process and completion runner.
+4. Script-controlled receive runner, including exact `queue_id` claim,
+   canonical message presentation, and runtime-neutral adapter contract.
+5. Script-controlled process and completion runner with durable agent turn
+   ledger.
 6. Typed reply, handoff, no-reply, close, retry, and quarantine outcomes.
 7. Outbox projection consistency for Discord, GitHub, and future connectors.
 8. Doctor/preflight/repair coverage for stuck baton, expired lease, duplicate
-   owner, loop prompt, and unclosed turn.
+   owner, loop prompt, split request, drain-to-target loop, and unclosed turn.
 9. State-daemon scheduler activation after preflight is clean.
 
 ## Non-Goals
@@ -244,9 +257,13 @@ This charter does not require immediate implementation of:
 The redesign is on track when:
 
 - a pending message can be processed without an LLM calling `next`
+- an audit or bridge request can be processed by exact `queue_id` without
+  draining unrelated FIFO work
 - sending to observers cannot create extra active batons
 - an operator can inspect the current baton owner for an open conversation
 - an agent turn can be reclaimed or retried after runtime failure
+- Codex, Claude Code, and future adapters use the same queue/baton/turn state
+  machine, differing only at launch, IO, timeout, and result parsing
 - every reply, handoff, close, and no-reply outcome has audit evidence
 - state-daemon can be restarted as a scheduler without natural-language wake
   prompt injection

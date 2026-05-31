@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-05-31
+> 最終更新: 2026-06-01
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
@@ -18,6 +18,7 @@
 | wave-rollout-rules.md | provisional | Phase C aun deployment の operational contract — wave 1-3 entry/exit/rollback、`回帰なし` metric set、completion judgment (PR #254) | 2026-04-27 |
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
 | design/aun-agent-communication-control-plane-charter.md | normative | AUN送受信系をagent communication control planeとして再設計するためのmessage/delivery/baton/turn/handoff不変条件 | 2026-05-31 |
+| design/aun-agent-communication-control-plane-wbs.md | working breakdown | runtime非依存control-plane、targeted receive runner、turn ledger、typed completion、doctor/preflightの実装WBS | 2026-06-01 |
 | spec/aun-conversation-identity-baton-contract.md | pre-implementation contract | `1 open conversation = 1 active baton` を実装可能にするconversation key、observer visibility、fanout/escalation/baton close前提 | 2026-05-31 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
@@ -25,7 +26,7 @@
 | spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
-| SPEC-INDEX.md | — | 本ファイル | 2026-05-31 |
+| SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
 
 ---
 
@@ -86,6 +87,13 @@
 - LLMにqueue claim、baton ownership、close、retry、recovery状態を決めさせず、deterministic codeとDB audit eventで進める
 - send/notifyはactive ownerとobserverを分離し、`mention`は1 active owner、`cc`/`fyi`はqueue/baton非投入にする
 - core communication semanticsは `spec PR -> L1 -> L2 -> L3`、`implementation PR -> L1 -> L2 -> L3 -> merge` の監査ゲートを必須にする
+
+### design/aun-agent-communication-control-plane-wbs.md（Control Plane WBS）
+- charter/各slice specを実装順に落とし込み、PR/audit中に最終地点がぶれないようにする作業台帳
+- Codex/Claude/OpenClawなどruntime差分をadapter境界へ閉じ込め、queue/baton/turn/completionの状態機械を共通化する
+- CP-40Aとして exact `queue_id` claim を必須化し、監査や復旧のためにFIFOを引き続ける運用を禁止する
+- CP-40Cとしてtransport chunkや長文分割が複数の独立runtime taskにならないcanonical message presentationを要求する
+- CP-50/CP-70としてagent turn ledger、typed completion、loop/drain defect doctor、state-daemon activation gateを実装対象に固定する
 
 ### spec/aun-canonical-channel-id-control-plane-contract.md（Canonical Channel ID Control-Plane Contract）
 - scripted/control-plane送信は `channel_id` を正本にし、channel nameを暗黙解決しない
