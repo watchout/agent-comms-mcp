@@ -8,9 +8,8 @@
  * lead-ama dispatch: msg `1ee8983e` (3-split: `fb9fd718` / `d3025da7` / `5f1de02f`)
  * CTO L3 alignment: msg `4ea436e4`
  *
- * CEO directive 2026-05-27 restored `mentions: string[]` as a first-class
- * multi-recipient argument for send/notify. Both `mention` and `mentions[]`
- * normalize through one library path into canonical agent_id[].
+ * Slice 2 control-plane contract narrows `mentions[]` to a legacy
+ * single-owner alias for send/notify. Multi-active fanout is rejected.
  *
  * The 6 fixtures below (a)-(f) are the merge gate per the 5-section
  * instruction §4 (frozen). They run against the real `server.ts` source
@@ -29,8 +28,8 @@ const readRepo = (rel: string): string => readFileSync(join(repoRoot, rel), 'utf
 const SERVER_SRC = readRepo('server.ts')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test (a) — `mentions: [a,b,c]` for send AND notify is accepted by schema and
-// resolved through the shared Phase 5 normalization port.
+// Test (a) — `mentions: [a]` for send AND notify is accepted by schema as a
+// legacy single-owner alias, but `mentions: [a,b]` is rejected.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () => {
   test('server.ts send handler exposes mentions[] and does not reject it as removed', () => {
@@ -60,7 +59,7 @@ describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () =>
     expect(notifyBody).not.toMatch(/mentions\[\]\s+is\s+removed/)
   })
 
-  test('resolvePhase5 normalizes mentions[] into one deduped enqueue list', async () => {
+  test('resolvePhase5 accepts one-item mentions[] as a single-owner alias', async () => {
     const { resolvePhase5 } = await import('../../core/routing/server-integration')
     const { resetChannelPolicyCache } = await import('../../core/channel-policy')
     const previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
@@ -71,14 +70,15 @@ describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () =>
       const out = resolvePhase5({
         sender: 'sender-bot',
         channel_id: 'test-channel-a',
-        mentions: ['ceo', 'cto', 'agent-com-dev', 'ceo'],
+        mentions: ['cto'],
         content: 'hello',
         isKnownAgent: (id: string) => known.has(id),
       })
       expect(out).not.toBeNull()
       expect(out!.ok).toBe(true)
       if (out && out.ok) {
-        expect(out.mentions).toEqual(['ceo', 'codex-cto', 'agent-com-dev'])
+        expect(out.mentions).toEqual(['codex-cto'])
+        expect(out.warnings.some((w) => w.includes('legacy single-owner alias'))).toBe(true)
       }
     } finally {
       if (previousFileFallback === undefined) {
@@ -87,6 +87,23 @@ describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () =>
         process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
       }
       resetChannelPolicyCache()
+    }
+  })
+
+  test('resolvePhase5 rejects multi-active mentions[] fanout', async () => {
+    const { resolvePhase5 } = await import('../../core/routing/server-integration')
+    const known = new Set(['ceo', 'codex-cto', 'agent-com-dev', 'sender-bot'])
+    const out = resolvePhase5({
+      sender: 'sender-bot',
+      channel_id: 'test-channel-a',
+      mentions: ['ceo', 'codex-cto'],
+      content: 'hello',
+      isKnownAgent: (id: string) => known.has(id),
+    })
+    expect(out).not.toBeNull()
+    expect(out!.ok).toBe(false)
+    if (out && !out.ok) {
+      expect(out.error).toBe('MULTI_ACTIVE_RECIPIENT_UNSUPPORTED')
     }
   })
 })
