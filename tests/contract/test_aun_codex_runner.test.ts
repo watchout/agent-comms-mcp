@@ -179,6 +179,70 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
       .toEqual({ status: 'received', claimed_by: 'codex-aun' })
   })
 
+  test('queue-id mode claims only the requested pending row', () => {
+    const first = seedPending('first requested instruction')
+    const second = seedPending('second instruction must remain pending')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(first.queueId),
+    ])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.limit).toBe(1)
+    expect(body.retained_count).toBe(1)
+    expect(body.retained[0]).toMatchObject({
+      queue_id: String(first.queueId),
+      message_id: first.messageId,
+      content: 'first requested instruction',
+    })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [first.queueId])[0])
+      .toEqual({ status: 'received', claimed_by: 'codex-aun' })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [second.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('queue-id mode fails closed instead of falling back to another actionable row', () => {
+    const stale = seedTypedPending({ messageType: 'chat', ageSeconds: 300, content: 'old chat backlog' })
+    const current = seedTypedPending({ messageType: 'instruction', ageSeconds: 30, content: 'current instruction' })
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(stale.queueId),
+      '--max-inspect', '10',
+    ])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
+    expect(r.stderr).toContain('target_queue_not_actionable')
+    const body = JSON.parse(r.stdout)
+    expect(body.retained).toEqual([])
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [stale.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [current.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('queue-id mode rejects batch limits above one before claiming', () => {
+    const { queueId } = seedPending('bad queue limit')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(queueId),
+      '--limit', '2',
+    ])
+
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('CODEX_RUNNER_INVALID_LIMIT')
+    expect(r.stderr).toContain('--queue-id requires --limit 1')
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
   test('optional ACK uses no-close and leaves the claimed queue open', () => {
     const { queueId } = seedPending('ack me')
 

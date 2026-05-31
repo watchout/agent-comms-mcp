@@ -29,6 +29,7 @@ export interface DiagnoseReceiveOptions extends ReceiveOptions {
 
 export interface ActionableReceiveOptions extends ReceiveOptions {
   maxInspect?: number
+  queueId?: string
 }
 
 export interface ReconcileOptions extends ReceiveOptions {
@@ -140,7 +141,7 @@ export interface ActionableReceiveSummary {
   waiting: number
   selected: DiagnosedQueueRow | null
   claimed: ClaimedMessage | null
-  blocked_reason: 'active_claim' | null
+  blocked_reason: 'active_claim' | 'queue_not_claimable' | null
   active_claim: {
     busy: boolean
     queue_id: string | number | null
@@ -1123,6 +1124,7 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
 export async function receiveActionable(opts: ActionableReceiveOptions = {}): Promise<ActionableReceiveResult> {
   let plan: ReceivePlan
   let maxInspect: number
+  const targetQueueId = opts.queueId?.trim()
   try {
     plan = buildCommandPlan(opts, ['bun', 'bin/aun.ts', 'receive-actionable'])
     maxInspect = parseMaxInspect(opts.maxInspect)
@@ -1144,8 +1146,16 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<ActionableReceiveSummary>(async (tx) => {
-        const pendingRows = await tx.query<Record<string, unknown>>(
-          `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+        const rowsSql = targetQueueId
+          ? `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+                  mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.message_type AS stored_message_type,
+                  am.author_id AS stored_author_id
+             FROM message_queue mq
+             LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+            WHERE mq.agent_id = $1 AND mq.id::text = $2
+            LIMIT 1`
+          : `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
                   am.message_type AS stored_message_type,
                   am.author_id AS stored_author_id
@@ -1153,8 +1163,10 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
              LEFT JOIN agent_messages am ON am.id::text = mq.message_id
             WHERE mq.agent_id = $1 AND mq.status = 'pending'
             ORDER BY mq.priority DESC, mq.created_at ASC
-            LIMIT $2`,
-          [plan.env.AGENT_ID, maxInspect],
+            LIMIT $2`
+        const pendingRows = await tx.query<Record<string, unknown>>(
+          rowsSql,
+          targetQueueId ? [plan.env.AGENT_ID, targetQueueId] : [plan.env.AGENT_ID, maxInspect],
         )
         const activeClaimRow = await tx.queryOne<Record<string, unknown>>(
           `SELECT id, message_id, status, claimed_at, claim_expires_at
@@ -1165,9 +1177,16 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           [plan.env.AGENT_ID],
         )
         const inspected = pendingRows.map(normalizeQueueRow)
+        const targetRow = targetQueueId ? inspected[0] ?? null : null
         const selected = activeClaimRow
           ? { row: null, reason: 'active_claim' }
-          : selectActionableRow(inspected)
+          : targetQueueId
+            ? targetRow?.status !== 'pending'
+              ? { row: null, reason: targetRow ? 'target_queue_not_pending' : 'target_queue_not_found' }
+              : targetRow.classification !== 'actionable'
+                ? { row: null, reason: 'target_queue_not_actionable' }
+                : { row: targetRow, reason: 'target_queue_id' }
+            : selectActionableRow(inspected)
         const selectedRaw = selected.row
           ? pendingRows.find((row) => String(row.id) === String(selected.row?.queue_id)) ?? null
           : null
@@ -1218,7 +1237,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
         }
 
         return {
-          ok: !(activeClaim.busy && !opts.dryRun),
+          ok: !((activeClaim.busy || (targetQueueId && !selected.row)) && !opts.dryRun),
           dry_run: !!opts.dryRun,
           mode: 'receive-actionable',
           agent_id: plan.env.AGENT_ID,
@@ -1228,7 +1247,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           waiting,
           selected: selected.row,
           claimed,
-          blocked_reason: activeClaim.busy ? 'active_claim' : null,
+          blocked_reason: activeClaim.busy ? 'active_claim' : targetQueueId && !selected.row ? 'queue_not_claimable' : null,
           active_claim: activeClaim,
           skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
           unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
@@ -1237,13 +1256,16 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
       })
     })
     const blockedByActiveClaim = summary.blocked_reason === 'active_claim' && !opts.dryRun
+    const blockedByTargetQueue = summary.blocked_reason === 'queue_not_claimable' && !opts.dryRun
 
     return {
-      ok: !blockedByActiveClaim,
-      code: blockedByActiveClaim ? 1 : 0,
-      stdout: JSON.stringify(opts.dryRun || blockedByActiveClaim ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
+      ok: !(blockedByActiveClaim || blockedByTargetQueue),
+      code: blockedByActiveClaim || blockedByTargetQueue ? 1 : 0,
+      stdout: JSON.stringify(opts.dryRun || blockedByActiveClaim || blockedByTargetQueue ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
       stderr: blockedByActiveClaim
         ? `Error [RECEIVE_ACTIONABLE_BLOCKED]: active claim exists for ${plan.env.AGENT_ID}; finish or expire queue_id=${summary.active_claim.queue_id}\n`
+        : blockedByTargetQueue
+          ? `Error [RECEIVE_ACTIONABLE_BLOCKED]: queue_id=${targetQueueId} is not claimable for ${plan.env.AGENT_ID}; reason=${summary.selection_reason}\n`
         : '',
       plan,
       summary,
