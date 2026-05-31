@@ -1,6 +1,6 @@
 # agent-com 仕様書インデックス
 
-> 最終更新: 2026-05-27
+> 最終更新: 2026-05-31
 > **Canonical source: GitHub** (`docs/`)。gdrive は read-only mirror。
 > agent-com 仕様書の索引です。
 
@@ -19,9 +19,10 @@
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
+| spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
-| SPEC-INDEX.md | — | 本ファイル | 2026-04-27 |
+| SPEC-INDEX.md | — | 本ファイル | 2026-05-31 |
 
 ---
 
@@ -74,6 +75,13 @@
 - 「見つかった不整合を都度直す」進め方を禁止し、phase/slice分類後に実装する
 - 2026-05-27時点の現在phaseはMVP内部正常化とし、enterprise control plane基準のうち内部fleet正常化に必要な範囲だけを実装対象にする
 - 各sliceは `spec -> impl contract/plan -> pre-implementation audit -> implementation -> implementation audit -> merge -> POST_MERGE verification` の順で進める
+
+### spec/aun-send-notify-owner-observer-contract.md（Send/Notify Owner-Observer Contract）
+- AUN Control Plane Slice 2としてsend/notifyのactive ownerとobserverを分離する
+- `mention`を唯一のactive owner入力にし、`mentions[]`はlegacy単一owner aliasに限定する
+- `mentions[]`が複数active ownerに解決される場合は `MULTI_ACTIVE_RECIPIENT_UNSUPPORTED` でfail closedする
+- `cc[]` / `fyi[]` はobserver visibilityのみで、`message_queue` rowやbatonを作らない
+- observer visibilityはMVPではprojection/body suffix/metadataに限定し、将来のobserver receipt tableも非claimableでなければならない
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
