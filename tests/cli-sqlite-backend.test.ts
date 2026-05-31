@@ -167,6 +167,58 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
     const names = tables.map((t: any) => t.name)
     expect(names).toContain('worker_activity')
   })
+  test('conversation/baton compatibility schema exists with one-active-baton guard', () => {
+    const tables = dbRead(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`)
+    const names = tables.map((t: any) => t.name)
+    expect(names).toContain('conversations')
+    expect(names).toContain('conversation_batons')
+    expect(names).toContain('conversation_observers')
+
+    const messageCols = dbRead(`PRAGMA table_info(agent_messages)`).map((r: any) => r.name)
+    const queueCols = dbRead(`PRAGMA table_info(message_queue)`).map((r: any) => r.name)
+    expect(messageCols).toContain('conversation_id')
+    expect(messageCols).toContain('baton_id')
+    expect(queueCols).toContain('conversation_id')
+    expect(queueCols).toContain('baton_id')
+
+    const db = new Database(dbPath)
+    try {
+      const conversationId = randomUUID()
+      const batonId = randomUUID()
+      db.prepare(`
+        INSERT INTO conversations (
+          conversation_id,
+          conversation_key_hash,
+          surface,
+          channel_id,
+          thread_scope_id,
+          root_request_id,
+          conversation_kind
+        ) VALUES (?, ?, 'cli', 'probe-f-ch', 'probe-f-ch', ?, 'request')
+      `).run(conversationId, `test:${conversationId}`, `request:${conversationId}`)
+      db.prepare(`
+        INSERT INTO conversation_batons (
+          baton_id,
+          conversation_id,
+          owner_agent_id,
+          state
+        ) VALUES (?, ?, 'probe-f', 'active')
+      `).run(batonId, conversationId)
+
+      expect(() => {
+        db.prepare(`
+          INSERT INTO conversation_batons (
+            baton_id,
+            conversation_id,
+            owner_agent_id,
+            state
+          ) VALUES (?, ?, 'probe-f', 'escalated')
+        `).run(randomUUID(), conversationId)
+      }).toThrow()
+    } finally {
+      db.close()
+    }
+  })
 })
 
 describe('F1b — agent profile SSOT CLI (SQLite)', () => {
