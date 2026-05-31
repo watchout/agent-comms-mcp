@@ -160,6 +160,62 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
   })
 
+  test('queue-id mode claims the requested actionable row instead of selecting another row', () => {
+    const requestedId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 300,
+      content: 'CTO instruction: exact queued request',
+    })
+    const newerId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 30,
+      content: 'CTO instruction: newer but not requested',
+    })
+
+    const r = runAun([
+      'receive-actionable',
+      '--agent-id', TEST_AGENT,
+      '--queue-id', String(requestedId),
+      '--max-inspect', '1',
+    ])
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.queue_id).toBe(requestedId)
+    expect(body.content).toBe('CTO instruction: exact queued request')
+    expect(body.waiting).toBe(1)
+
+    const after = rows()
+    expect(after.find((row) => row.id === requestedId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+    expect(after.find((row) => row.id === newerId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('queue-id mode fails closed when the requested row is not actionable', () => {
+    const chatId = seedQueue({ messageType: 'chat', ageSeconds: 300, content: 'old FYI' })
+    const instructionId = seedQueue({ messageType: 'instruction', ageSeconds: 30, content: 'CTO instruction: do not claim' })
+
+    const r = runAun([
+      'receive-actionable',
+      '--agent-id', TEST_AGENT,
+      '--queue-id', String(chatId),
+      '--max-inspect', '10',
+    ])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
+    expect(r.stderr).toContain('target_queue_not_actionable')
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      blocked_reason: 'queue_not_claimable',
+      selection_reason: 'target_queue_not_actionable',
+      selected: null,
+      claimed: null,
+    })
+
+    const after = rows()
+    expect(after.find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
+    expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
   test('multiple pending instructions select the newest PR/head-specific CTO instruction', () => {
     const oldInstruction = seedQueue({
       messageType: 'instruction',

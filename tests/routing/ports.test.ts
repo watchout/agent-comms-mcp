@@ -195,19 +195,26 @@ describe('InboundResolver (§1.7 Port A) — §2.1 dedup', () => {
     }
   })
 
-  test('§2.2 mentions[] is normalized, deduped, and enqueued without cc[] fanout', () => {
-    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['alice', 'bob', 'alice'], cc: ['carol'] })
+  test('§2.2 one-item mentions[] is a legacy single-owner alias without cc[] fanout', () => {
+    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['alice'], cc: ['carol'] })
     expect(r.ok).toBe(true)
     if (r.ok) {
-      expect(r.enqueue).toEqual(['alice', 'bob'])
+      expect(r.enqueue).toEqual(['alice'])
       expect(r.cc).toEqual(['carol'])
+      expect(r.warnings.some((w) => w.includes('legacy single-owner alias'))).toBe(true)
     }
   })
 
+  test('§2.2 mentions[] with two active owners is rejected', () => {
+    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['alice', 'bob'] })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('MULTI_ACTIVE_RECIPIENT_UNSUPPORTED')
+  })
+
   test('§2.2 native role alias cto normalizes to canonical codex-cto', () => {
-    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['cto', 'lead-ama'] })
+    const r = resolver.resolve({ channel_id: 'ch1', mentions: ['cto'] })
     expect(r.ok).toBe(true)
-    if (r.ok) expect(r.enqueue).toEqual(['codex-cto', 'lead-ama'])
+    if (r.ok) expect(r.enqueue).toEqual(['codex-cto'])
   })
 })
 
@@ -272,6 +279,15 @@ describe('InboundResolver — §1.6 / §4.5 mention/cc validation (failure modes
     if (r.ok) {
       expect(r.cc).toEqual(['bob']) // nobody stripped
       expect(r.warnings.some((w) => w.includes('cc agent "nobody" unknown'))).toBe(true)
+    }
+  })
+
+  test('unknown fyi agent → strip + warning (degradation safe, not reject)', () => {
+    const r = resolver.resolve({ channel_id: 'ch1', mention: 'alice', fyi: ['carol', 'nobody'] })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.fyi).toEqual(['carol'])
+      expect(r.warnings.some((w) => w.includes('fyi agent "nobody" unknown'))).toBe(true)
     }
   })
 })
@@ -397,6 +413,12 @@ describe('MessageBodyDecorator (§1.7 Port D) — §4.6 cc[] body injection', ()
     const d = createMessageBodyDecorator()
     const out = d.decorate('hello', ['alice', 'bob'])
     expect(out).toBe('hello\n\n[CC: <@alice>, <@bob>]')
+  })
+
+  test('§4.6 fyi[] non-empty → suffix `[FYI: <@id>]` appended after cc', () => {
+    const d = createMessageBodyDecorator()
+    const out = d.decorate('hello', ['alice'], ['bob'])
+    expect(out).toBe('hello\n\n[CC: <@alice>]\n[FYI: <@bob>]')
   })
 
   test('§4.6 cc[] suffix is a literal text marker, not metadata field', () => {

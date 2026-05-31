@@ -70,6 +70,8 @@ beforeEach(() => {
   dbExec(`
     INSERT INTO agents (agent_id, display_name, agent_type, status)
       VALUES ('probe-dev', 'probe-dev', 'dev', 'idle');
+    INSERT INTO agents (agent_id, display_name, agent_type, status)
+      VALUES ('codex-cto', 'codex-cto', 'cto', 'idle');
     INSERT INTO channels (id, name, members)
       VALUES ('probe-ch', 'probe-ch', '["probe-dev","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)

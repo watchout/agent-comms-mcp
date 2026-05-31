@@ -113,6 +113,10 @@ function dbRead(sql: string, params: unknown[] = []): any[] {
 function allowOutboundAgents(...agentIds: string[]): void {
   const db = new Database(dbPath)
   try {
+    const insertAgent = db.prepare(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES (?, ?, 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    for (const agentId of agentIds) {
+      if (agentId !== 'probe-f') insertAgent.run(agentId, agentId)
+    }
     db.prepare(`
       INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
       VALUES ('probe-f-ch', ?, 'cli-test')
@@ -1087,6 +1091,7 @@ describe('F3 — agent-com send (SQLite)', () => {
 
   test('rejects DB channel policy outbound allowlist violations before writing reply rows', () => {
     const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
     db.close()
     const { queueId } = seedPendingMessage('acl send')
@@ -1280,6 +1285,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
 
   test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
     const db = new Database(dbPath)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
     db.close()
 

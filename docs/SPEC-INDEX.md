@@ -18,9 +18,11 @@
 | wave-rollout-rules.md | provisional | Phase C aun deployment の operational contract — wave 1-3 entry/exit/rollback、`回帰なし` metric set、completion judgment (PR #254) | 2026-04-27 |
 | design/script-driven-receive-runner.md | proposed | script-driven receive/process/completion runner — DB状態遷移をLLM tool choiceから分離 | 2026-05-15 |
 | design/aun-agent-communication-control-plane-charter.md | normative | AUN送受信系をagent communication control planeとして再設計するためのmessage/delivery/baton/turn/handoff不変条件 | 2026-05-31 |
+| spec/aun-conversation-identity-baton-contract.md | pre-implementation contract | `1 open conversation = 1 active baton` を実装可能にするconversation key、observer visibility、fanout/escalation/baton close前提 | 2026-05-31 |
 | design/aun-enterprise-control-plane-direction.md | directional | AUNをdurable agent control plane / agent operations meshとして進めるための市場・標準・設計制約 | 2026-05-26 |
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
 | spec/aun-canonical-channel-id-control-plane-contract.md | proposed | scripted/control-plane送信でchannel_idを正本にし、channel name aliasを人間向け明示解決に限定する契約 | 2026-05-31 |
+| spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-05-31 |
@@ -91,6 +93,20 @@
 - `thread_id` / `message_id` / `queue_id` は同じchannel/thread scopeに属することをDBで検証してから書き込む
 - provider channel idはconnector evidence経由でcanonical `channel_id` に解決し、文字列形状から推測しない
 - `CHANNEL_ID_REQUIRED`、`CHANNEL_ALIAS_NOT_ALLOWED`、`THREAD_CHANNEL_MISMATCH` などの安定failure codeと必須テストを定義する
+
+### spec/aun-conversation-identity-baton-contract.md（Conversation identity / baton contract）
+- `conversation` をAUN-owned logical work threadとして定義し、Discord channel/threadやqueue rowをprimary identityにしない
+- conversation keyの構成要素、root/reply/observer/fanout/escalationの決定規則を固定する
+- observer visibilityはread-only projection/audit/non-claimable deliveryに限定し、`next`/receive-runner/baton countに入れない
+- explicit fanoutはparent conversationからchild conversationを作り、各childに独立batonとparent audit linkを持たせる
+- baton schema sliceがunique active baton guard、handoff transfer、`done`非terminal扱いを実装できる前提を固定する
+
+### spec/aun-send-notify-owner-observer-contract.md（Send/Notify Owner-Observer Contract）
+- AUN Control Plane Slice 2としてsend/notifyのactive ownerとobserverを分離する
+- `mention`を唯一のactive owner入力にし、`mentions[]`はlegacy単一owner aliasに限定する
+- `mentions[]`が複数active ownerに解決される場合は `MULTI_ACTIVE_RECIPIENT_UNSUPPORTED` でfail closedする
+- `cc[]` / `fyi[]` はobserver visibilityのみで、`message_queue` rowやbatonを作らない
+- observer visibilityはMVPではprojection/body suffix/metadataに限定し、将来のobserver receipt tableも非claimableでなければならない
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する

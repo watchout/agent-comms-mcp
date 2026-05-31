@@ -5,9 +5,9 @@
  * Both server.ts (canonical enforcement) and cli/index.ts (best-effort warning)
  * route through here so the contract has exactly one expression (§1.8).
  *
- * CEO directive 2026-05-27: `mention` and `mentions[]` are normalized through
- * one port into canonical agent_id[]; missing targets reject instead of falling
- * back to a primary route.
+ * Slice 2 control-plane contract (2026-05-31): `mention` is the canonical
+ * single active owner. `mentions[]` is retained only as a one-owner legacy
+ * alias. `cc[]` / `fyi[]` are observer-only and never become queue rows.
  */
 import {
   createInboundResolver,
@@ -24,11 +24,13 @@ export interface Phase5ResolveInput {
   channel_id: string
   /** Single recipient. */
   mention?: AgentId
-  /** Multi-recipient fanout. Each resolved recipient gets one queue row. */
+  /** Legacy single-owner alias. Multi-active fanout is rejected. */
   mentions?: AgentId[]
   /** §1.2 — 参照 recipients (queue 投入なし、body 注入対象). */
   cc?: AgentId[]
-  /** Original message content (will be decorated with cc[] suffix when applicable). */
+  /** Observer-only FYI recipients (queue 投入なし、body 注入対象). */
+  fyi?: AgentId[]
+  /** Original message content (will be decorated with observer suffixes when applicable). */
   content: string
   /** Used by the resolver for UNKNOWN_AGENT validation. */
   isKnownAgent: (id: AgentId) => boolean
@@ -40,14 +42,18 @@ export interface Phase5ResolveOk {
   mentions: AgentId[]
   /** Decorated content (cc[] suffix appended when applicable). */
   content: string
+  /** Observer-only cc list; never enqueued. */
+  cc: AgentId[]
+  /** Observer-only fyi list; never enqueued. */
+  fyi: AgentId[]
   /** Non-fatal warnings (auto-convert / unknown cc strip / no primary skip). */
   warnings: string[]
 }
 
 export interface Phase5ResolveErr {
   ok: false
-  /** Error class — `INVALID_MENTION` / `UNKNOWN_AGENT` / `OUTBOUND_ACL_VIOLATION`. */
-  error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'OUTBOUND_ACL_VIOLATION'
+  /** Error class — active-owner / policy validation failures. */
+  error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' | 'OUTBOUND_ACL_VIOLATION'
   /** Identifier surfaced in error message (agent_id or channel_id). */
   detail?: AgentId
   /** For OUTBOUND_ACL_VIOLATION: the canonical attempted recipients. */
@@ -64,7 +70,10 @@ export type Phase5ResolveResult = Phase5ResolveOk | Phase5ResolveErr
  * fields are present, returns `{ ok: true, ... }` or `{ ok: false, error }`.
  */
 export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | null {
-  const usesPhase5Fields = input.mention !== undefined || input.mentions !== undefined || (input.cc && input.cc.length > 0)
+  const usesPhase5Fields = input.mention !== undefined ||
+    input.mentions !== undefined ||
+    (input.cc && input.cc.length > 0) ||
+    (input.fyi && input.fyi.length > 0)
   if (!usesPhase5Fields) {
     return null
   }
@@ -81,30 +90,34 @@ export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | 
     mention: input.mention,
     mentions: input.mentions,
     cc: input.cc,
+    fyi: input.fyi,
   })
 
   if (!resolved.ok) {
     return { ok: false, error: resolved.error, detail: resolved.agent_id }
   }
 
-  // §2.4 — outbound ACL: server-side reject 一本化 (cc[] strip 削除).
-  const aclResult = outboundValidator.validate(input.sender, input.channel_id, resolved.enqueue)
+  // §2.4 — outbound ACL: active owner + observers must all be policy-allowed.
+  const policyRecipients = [...resolved.enqueue, ...resolved.cc, ...resolved.fyi]
+  const aclResult = outboundValidator.validate(input.sender, input.channel_id, policyRecipients)
   if (!aclResult.ok) {
     return {
       ok: false,
       error: 'OUTBOUND_ACL_VIOLATION',
-      intended_recipients: resolved.enqueue,
+      intended_recipients: policyRecipients,
       violations: aclResult.violations,
     }
   }
 
-  // §1.5 — cc[] body 注入. cc は queue 非投入だが body suffix で reader に露出.
-  const decorated = decorator.decorate(input.content, resolved.cc)
+  // §1.5 — observer body 注入. Observers are visible but non-claimable.
+  const decorated = decorator.decorate(input.content, resolved.cc, resolved.fyi)
 
   return {
     ok: true,
     mentions: resolved.enqueue,
     content: decorated,
+    cc: resolved.cc,
+    fyi: resolved.fyi,
     warnings: resolved.warnings,
   }
 }
