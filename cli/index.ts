@@ -241,7 +241,23 @@ async function loadMessageConversationId(db: Client, messageId: string): Promise
 }
 
 function summarizeConversationControlPlaneResult(result: ConversationControlPlaneApplyResult): Record<string, unknown> {
-  if (result.ok === false) return { ok: false, error: result.error }
+  if (result.ok === false) {
+    const summary: Record<string, unknown> = { ok: false }
+    if ('action' in result) {
+      summary.action = result.action
+      summary.mode = result.gate.mode
+      summary.audit_only = result.gate.audit_only
+      summary.block_on_error = result.gate.block_on_error
+    }
+    if ('allocation_error' in result) {
+      summary.error = result.allocation_error.error
+      summary.allocation_error = result.allocation_error.error
+      summary.allocation_error_detail = result.allocation_error.detail ?? null
+    } else {
+      summary.error = result.error
+    }
+    return summary
+  }
   const summary: Record<string, unknown> = {
     ok: true,
     action: result.action,
@@ -260,6 +276,17 @@ function summarizeConversationControlPlaneResult(result: ConversationControlPlan
     summary.allocation_error_detail = result.allocation_error.detail ?? null
   }
   return summary
+}
+
+function conversationControlPlaneFailureError(result: ConversationControlPlaneApplyResult): string {
+  if ('allocation_error' in result) return result.allocation_error.error
+  if ('error' in result) return result.error
+  return 'CONVERSATION_CONTROL_PLANE_UNKNOWN_ERROR'
+}
+
+function conversationControlPlaneFailureDetail(result: ConversationControlPlaneApplyResult): string | null {
+  if ('allocation_error' in result) return result.allocation_error.detail ?? null
+  return null
 }
 
 async function pgNotify(db: Client, channel: string, payload: Record<string, unknown>) {
@@ -2969,12 +2996,17 @@ async function sendMessage(args: string[]) {
             ...conversationControlPlaneSummary,
           })
           if (!applied.ok) {
-            writeFailureJson('CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED', `conversation control-plane enforce failed: ${applied.error}`, {
+            const allocationError = conversationControlPlaneFailureError(applied)
+            const allocationErrorDetail = conversationControlPlaneFailureDetail(applied)
+            writeFailureJson('CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED', `conversation control-plane enforce failed: ${allocationError}`, {
               queue_id: target.queue_id,
               message_id: replyTo,
               outbound_message_id: id,
               active_owner: activeOwner,
-              error: applied.error,
+              error: allocationError,
+              allocation_error: allocationError,
+              allocation_error_detail: allocationErrorDetail,
+              conversation_control_plane: conversationControlPlaneSummary,
             })
           }
         }

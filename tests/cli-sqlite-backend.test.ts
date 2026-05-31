@@ -1155,6 +1155,69 @@ describe('F3 — agent-com send (SQLite)', () => {
     })
   })
 
+  test('enforce control-plane failure reports allocation error and rolls back send rows', () => {
+    allowOutboundAgents('probe-f', 'cto', 'probe-owner')
+    const { messageId, queueId } = seedPendingMessage('conversation enforce mismatch')
+    const conversationId = randomUUID()
+    const batonId = randomUUID()
+    const db = new Database(dbPath)
+    try {
+      db.prepare(`
+        INSERT INTO conversations (
+          conversation_id,
+          conversation_key_hash,
+          conversation_key,
+          surface,
+          channel_id,
+          thread_scope_id,
+          root_message_id,
+          conversation_kind
+        ) VALUES (?, ?, '{}', 'cli', 'probe-f-ch', 'probe-f-ch', ?, 'request')
+      `).run(conversationId, `test:${conversationId}`, messageId)
+      db.prepare(`
+        INSERT INTO conversation_batons (
+          baton_id,
+          conversation_id,
+          owner_agent_id,
+          state
+        ) VALUES (?, ?, 'probe-owner', 'active')
+      `).run(batonId, conversationId)
+      db.prepare(`UPDATE agent_messages SET conversation_id = ? WHERE id = ?`).run(conversationId, messageId)
+    } finally {
+      db.close()
+    }
+
+    runCli(['next'])
+    const r = runCli(
+      ['send', '--content', 'enforce rollback reply', '--mentions', 'cto'],
+      { AGENT_COM_CONVERSATION_CONTROL_PLANE: 'enforce' },
+    )
+
+    expect(r.status).toBe(1)
+    const payload = JSON.parse(r.stdout.trim()) as any
+    expect(payload).toMatchObject({
+      ok: false,
+      code: 'CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED',
+      error: 'ACTIVE_BATON_OWNER_MISMATCH',
+      allocation_error: 'ACTIVE_BATON_OWNER_MISMATCH',
+      allocation_error_detail: batonId,
+      conversation_control_plane: {
+        ok: false,
+        action: 'enforce_failed',
+        error: 'ACTIVE_BATON_OWNER_MISMATCH',
+        allocation_error: 'ACTIVE_BATON_OWNER_MISMATCH',
+        allocation_error_detail: batonId,
+      },
+    })
+    expect(payload.detail).toContain('ACTIVE_BATON_OWNER_MISMATCH')
+    expect(r.stderr).toContain('ACTIVE_BATON_OWNER_MISMATCH')
+
+    expect(dbRead(`SELECT id FROM agent_messages WHERE content = 'enforce rollback reply'`)).toHaveLength(0)
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto' AND message_id = ?`, [payload.outbound_message_id])).toHaveLength(0)
+    const source = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])[0]
+    expect(source).toEqual({ status: 'received', replied_with: null })
+  })
+
   test('rejects second send without a fresh next — INVALID_REPLY_TO guard', () => {
     // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE retired in
     // favour of INVALID_REPLY_TO. The CLI hits the same branch when
