@@ -116,6 +116,16 @@ export interface EnqueueWithDedupParams {
   maxAttempts?: number
 }
 
+export interface EnqueueWithDedupInTransactionParams {
+  db: QueueDedupDb
+  agentId: string
+  content: string
+  source: string
+  windowSeconds?: number
+  insertSql: string
+  insertParams: unknown[]
+}
+
 export interface EnqueueWithDedupResult {
   /** True iff INSERT actually wrote a row. */
   inserted: boolean
@@ -127,6 +137,41 @@ export interface EnqueueWithDedupResult {
   contentHash: string
   /** Number of attempts taken to commit. */
   attempts: number
+}
+
+/**
+ * Transaction-scoped variant for callers that already own the surrounding
+ * transaction. It preserves the same advisory-lock + content-window dedup
+ * semantics as enqueueWithDedup() without opening/committing a second client.
+ */
+export async function enqueueWithDedupInTransaction(
+  params: EnqueueWithDedupInTransactionParams,
+): Promise<EnqueueWithDedupResult> {
+  const {
+    db, agentId, content, source,
+    windowSeconds = 30,
+    insertSql, insertParams,
+  } = params
+  const hash = contentHash(content)
+
+  await db.query(
+    `SELECT pg_advisory_xact_lock(hashtext($1 || '::' || $2 || '::' || $3))`,
+    [agentId, hash, source],
+  )
+  const isDup = await isQueueContentDup(db, agentId, content, source, windowSeconds)
+  if (isDup) {
+    return { inserted: false, dedupSkipped: true, contentHash: hash, attempts: 1 }
+  }
+
+  const r = await db.query<{ id: number | string }>(insertSql, insertParams)
+  const inserted = (r.rowCount ?? 0) > 0
+  return {
+    inserted,
+    queueId: inserted && r.rows[0]?.id != null ? String(r.rows[0].id) : undefined,
+    dedupSkipped: !inserted,
+    contentHash: hash,
+    attempts: 1,
+  }
 }
 
 /**
