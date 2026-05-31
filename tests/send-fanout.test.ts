@@ -37,6 +37,12 @@ describe('fanoutToRecipients — happy path', () => {
       recipients: ['probe-a', 'probe-b', 'probe-c'],
     })
     expect(res.inserted).toEqual(['probe-a', 'probe-b', 'probe-c'])
+    expect(res.inserted_rows).toEqual([
+      { recipient: 'probe-a', queue_id: '1' },
+      { recipient: 'probe-b', queue_id: '2' },
+      { recipient: 'probe-c', queue_id: '3' },
+    ])
+    expect(res.inserted_queue_ids).toEqual(['1', '2', '3'])
     expect(res.deduped).toEqual([])
     expect(res.failed).toEqual([])
     expect(calls.length).toBe(3)
@@ -89,6 +95,8 @@ describe('fanoutToRecipients — dedup via RETURNING empty', () => {
       recipients: ['probe-dup', 'probe-new'],
     })
     expect(res.inserted).toEqual(['probe-new'])
+    expect(res.inserted_rows).toEqual([{ recipient: 'probe-new', queue_id: '1' }])
+    expect(res.inserted_queue_ids).toEqual(['1'])
     expect(res.deduped).toEqual(['probe-dup'])
     expect(res.failed).toEqual([])
   })
@@ -108,6 +116,10 @@ describe('fanoutToRecipients — partial failure', () => {
       recipients: ['probe-ok-1', 'probe-broken', 'probe-ok-2'],
     })
     expect(res.inserted).toEqual(['probe-ok-1', 'probe-ok-2'])
+    expect(res.inserted_rows).toEqual([
+      { recipient: 'probe-ok-1', queue_id: '1' },
+      { recipient: 'probe-ok-2', queue_id: '1' },
+    ])
     expect(res.failed).toEqual(['probe-broken'])
   })
 })
