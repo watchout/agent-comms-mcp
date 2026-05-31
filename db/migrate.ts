@@ -838,6 +838,97 @@ async function migrate() {
       ON message_queue(claim_expires_at)
       WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND status = 'received';
 
+    -- AUN control-plane conversation/baton compatibility layer.
+    -- This is schema-only: callers may stamp conversation_id / baton_id once
+    -- the resolver lands, but migration itself does not activate runners or
+    -- infer conversations from existing rows.
+    CREATE TABLE IF NOT EXISTS conversations (
+      conversation_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      conversation_key_hash TEXT NOT NULL UNIQUE,
+      conversation_key JSONB NOT NULL DEFAULT '{}'::jsonb,
+      surface TEXT NOT NULL,
+      channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE RESTRICT,
+      thread_scope_id TEXT NOT NULL,
+      root_message_id UUID REFERENCES agent_messages(id) ON DELETE RESTRICT,
+      root_request_id TEXT,
+      parent_conversation_id UUID REFERENCES conversations(conversation_id) ON DELETE SET NULL,
+      conversation_kind TEXT NOT NULL DEFAULT 'request',
+      status TEXT NOT NULL DEFAULT 'open',
+      terminal_outcome TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      closed_at TIMESTAMPTZ,
+      CHECK ((root_message_id IS NOT NULL AND root_request_id IS NULL) OR (root_message_id IS NULL AND root_request_id IS NOT NULL)),
+      CHECK (conversation_kind IN ('request', 'audit', 'handoff', 'fanout_child', 'system')),
+      CHECK (status IN ('open', 'closed', 'quarantined'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversations_channel_status
+      ON conversations(channel_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversations_parent
+      ON conversations(parent_conversation_id)
+      WHERE parent_conversation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_conversations_root_message
+      ON conversations(root_message_id)
+      WHERE root_message_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS conversation_batons (
+      baton_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      conversation_id UUID NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+      owner_agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE RESTRICT,
+      state TEXT NOT NULL DEFAULT 'active',
+      source_queue_id BIGINT REFERENCES message_queue(id) ON DELETE SET NULL,
+      lease_id UUID REFERENCES control_plane_leases(lease_id) ON DELETE SET NULL,
+      claim_id TEXT,
+      started_at TIMESTAMPTZ,
+      expires_at TIMESTAMPTZ,
+      heartbeat_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      completion_outcome TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (state IN ('pending', 'active', 'escalated', 'transferred', 'closed', 'failed', 'quarantined'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_batons_one_open
+      ON conversation_batons(conversation_id)
+      WHERE state IN ('pending', 'active', 'escalated');
+    CREATE INDEX IF NOT EXISTS idx_conversation_batons_owner_state
+      ON conversation_batons(owner_agent_id, state, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversation_batons_source_queue
+      ON conversation_batons(source_queue_id)
+      WHERE source_queue_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS conversation_observers (
+      conversation_id UUID NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      visibility_kind TEXT NOT NULL DEFAULT 'observer',
+      source_message_id UUID REFERENCES agent_messages(id) ON DELETE SET NULL,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (conversation_id, agent_id, visibility_kind),
+      CHECK (visibility_kind IN ('cc', 'fyi', 'observer'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_observers_agent
+      ON conversation_observers(agent_id, created_at DESC);
+
+    DO $$ BEGIN
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(conversation_id) ON DELETE SET NULL;
+      ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS baton_id UUID REFERENCES conversation_batons(baton_id) ON DELETE SET NULL;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(conversation_id) ON DELETE SET NULL;
+      ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS baton_id UUID REFERENCES conversation_batons(baton_id) ON DELETE SET NULL;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_conversation
+      ON agent_messages(conversation_id, created_at)
+      WHERE conversation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_message_queue_conversation
+      ON message_queue(conversation_id, status, created_at)
+      WHERE conversation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_message_queue_baton
+      ON message_queue(baton_id, status, created_at)
+      WHERE baton_id IS NOT NULL;
+
     CREATE TABLE IF NOT EXISTS worker_activity (
       activity_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,

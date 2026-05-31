@@ -720,6 +720,90 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_control_plane_leases_expiry ON control_plane_leases(status, expires_at)`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_control_plane_leases_holder_runtime ON control_plane_leases(holder_runtime_instance_id) WHERE holder_runtime_instance_id IS NOT NULL`)
 
+  // AUN control-plane conversation/baton compatibility layer. Schema-only:
+  // existing rows remain nullable until the resolver/wiring slice stamps ids.
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      conversation_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      conversation_key_hash TEXT NOT NULL UNIQUE,
+      conversation_key TEXT NOT NULL DEFAULT '{}',
+      surface TEXT NOT NULL,
+      channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE RESTRICT,
+      thread_scope_id TEXT NOT NULL,
+      root_message_id TEXT REFERENCES agent_messages(id) ON DELETE RESTRICT,
+      root_request_id TEXT,
+      parent_conversation_id TEXT REFERENCES conversations(conversation_id) ON DELETE SET NULL,
+      conversation_kind TEXT NOT NULL DEFAULT 'request' CHECK (conversation_kind IN ('request', 'audit', 'handoff', 'fanout_child', 'system')),
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'quarantined')),
+      terminal_outcome TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      closed_at TEXT,
+      CHECK ((root_message_id IS NOT NULL AND root_request_id IS NULL) OR (root_message_id IS NULL AND root_request_id IS NOT NULL))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_conversations_channel_status ON conversations(channel_id, status, created_at DESC)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_conversations_parent ON conversations(parent_conversation_id) WHERE parent_conversation_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_conversations_root_message ON conversations(root_message_id) WHERE root_message_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS conversation_batons (
+      baton_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
+      conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+      owner_agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE RESTRICT,
+      state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('pending', 'active', 'escalated', 'transferred', 'closed', 'failed', 'quarantined')),
+      source_queue_id INTEGER REFERENCES message_queue(id) ON DELETE SET NULL,
+      lease_id TEXT REFERENCES control_plane_leases(lease_id) ON DELETE SET NULL,
+      claim_id TEXT,
+      started_at TEXT,
+      expires_at TEXT,
+      heartbeat_at TEXT,
+      completed_at TEXT,
+      completion_outcome TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_batons_one_open ON conversation_batons(conversation_id) WHERE state IN ('pending', 'active', 'escalated')`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_conversation_batons_owner_state ON conversation_batons(owner_agent_id, state, created_at DESC)`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_conversation_batons_source_queue ON conversation_batons(source_queue_id) WHERE source_queue_id IS NOT NULL`)
+
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS conversation_observers (
+      conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+      visibility_kind TEXT NOT NULL DEFAULT 'observer' CHECK (visibility_kind IN ('cc', 'fyi', 'observer')),
+      source_message_id TEXT REFERENCES agent_messages(id) ON DELETE SET NULL,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (conversation_id, agent_id, visibility_kind)
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_conversation_observers_agent ON conversation_observers(agent_id, created_at DESC)`)
+
+  const conversationAgentMessageCols = db.query(`PRAGMA table_info(agent_messages)`).all() as Array<{ name: string }>
+  const conversationAgentMessageColNames = new Set(conversationAgentMessageCols.map((c) => c.name))
+  if (!conversationAgentMessageColNames.has('conversation_id')) {
+    gatedExec(`ALTER TABLE agent_messages ADD COLUMN conversation_id TEXT REFERENCES conversations(conversation_id) ON DELETE SET NULL`)
+  }
+  if (!conversationAgentMessageColNames.has('baton_id')) {
+    gatedExec(`ALTER TABLE agent_messages ADD COLUMN baton_id TEXT REFERENCES conversation_batons(baton_id) ON DELETE SET NULL`)
+  }
+
+  const conversationMessageQueueCols = db.query(`PRAGMA table_info(message_queue)`).all() as Array<{ name: string }>
+  const conversationMessageQueueColNames = new Set(conversationMessageQueueCols.map((c) => c.name))
+  if (!conversationMessageQueueColNames.has('conversation_id')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN conversation_id TEXT REFERENCES conversations(conversation_id) ON DELETE SET NULL`)
+  }
+  if (!conversationMessageQueueColNames.has('baton_id')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN baton_id TEXT REFERENCES conversation_batons(baton_id) ON DELETE SET NULL`)
+  }
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_conversation ON agent_messages(conversation_id, created_at) WHERE conversation_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_message_queue_conversation ON message_queue(conversation_id, status, created_at) WHERE conversation_id IS NOT NULL`)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_message_queue_baton ON message_queue(baton_id, status, created_at) WHERE baton_id IS NOT NULL`)
+
   gatedExec(`
     CREATE TABLE IF NOT EXISTS worker_activity (
       activity_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
