@@ -14,8 +14,8 @@
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
  *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
- *   - aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
- *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids>
+ *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
+ *   - aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
  *   - aun status
  *   - aun --help / -h
@@ -45,8 +45,8 @@ function printHelp(): void {
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
     '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
-    '  aun reply --agent-id <id> --content <text> --mentions <ids> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
-    '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <ids> [--dry-run]',
+    '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
+    '  aun notify --agent-id <id> --channel <id|name> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
     '  aun --help | -h',
