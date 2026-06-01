@@ -40,6 +40,7 @@ import {
   type AlertSink,
   type Clock,
   type CodexRunnerInvoker,
+  type HostRuntimeInvoker,
   type DBClient,
   type LivenessResult,
   type Metrics,
@@ -51,6 +52,12 @@ import {
   type SweepResult,
   type TmuxClient,
 } from './types'
+import {
+  buildHostRuntimeFailureResult,
+  selectHostRuntimeAdapter,
+  type HostRuntimeRunnerInvocation,
+  type RuntimeInvocationProfile,
+} from './host-runtime-invocation'
 import { WakePool } from './wake-pool'
 import { defaultConfigPort } from '../ports/config-port'
 import {
@@ -107,6 +114,7 @@ export class StateDaemon {
   private readonly pgListen: PgListenClient
   private readonly tmux: TmuxClient
   private readonly codexRunner: CodexRunnerInvoker | null
+  private readonly hostRuntimeInvoker: HostRuntimeInvoker | null
   private readonly clock: Clock
   private readonly metrics: Metrics
   private readonly alert: AlertSink
@@ -141,6 +149,7 @@ export class StateDaemon {
     this.pgListen = deps.pgListen
     this.tmux = deps.tmux
     this.codexRunner = deps.codexRunner ?? null
+    this.hostRuntimeInvoker = deps.hostRuntimeInvoker ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
@@ -808,14 +817,36 @@ export class StateDaemon {
       : raw.slice(0, this.config.codexRunnerAckContentMaxChars)
   }
 
+  private buildHostRuntimeInvocation(
+    row: QueueRow,
+    profile: RuntimeInvocationProfile | null,
+    now: Date,
+  ): HostRuntimeRunnerInvocation {
+    return {
+      invocation_id: `cp40d-${row.id}-${now.getTime()}`,
+      queue_id: Number(row.id),
+      message_id: row.message_id ?? undefined,
+      agent_id: row.agent_id,
+      task_kind: 'receive',
+      trusted_instruction: [
+        `Run the AUN receive runner for exact queue_id=${row.id}.`,
+        'Return typed evidence only; queue, baton, turn, completion, retry, quarantine, and close lifecycle changes remain control-plane-owned.',
+      ].join(' '),
+      policy_refs: ['policy://aun/cp-40d/host-runtime-adapter-gate'],
+      untrusted_context_refs: [`message_queue://${row.id}/payload`],
+      context_pack_refs: [],
+      expected_result_schema_ref: profile?.final_output_schema_ref ?? 'schema://aun/runtime-runner-result',
+      runtime_profile_ref: profile?.profile_id ?? 'profile://disabled',
+    }
+  }
+
+  private hostRuntimeResultOk(result: { exit_status: number; schema_valid: boolean; failure_code?: string; parser_outcome?: string }): boolean {
+    return result.exit_status === 0 && result.schema_valid && !result.failure_code && result.parser_outcome === 'success'
+  }
+
   private async invokeCodexRunner(row: QueueRow): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
-      return false
-    }
-    if (!this.codexRunner) {
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_unconfigured' })
-      await this.alert.alert(`codex runner unavailable for ${row.agent_id}`)
       return false
     }
 
@@ -849,7 +880,7 @@ export class StateDaemon {
       return false
     }
 
-    const result = await this.codexRunner.invoke({
+    const runnerInput = {
       agentId: row.agent_id,
       queueId: Number(row.id),
       messageId: row.message_id ?? null,
@@ -857,7 +888,88 @@ export class StateDaemon {
       databaseUrl: this.config.codexRunnerDatabaseUrl,
       ackContent: this.boundedAckContent(row),
       payload: row.payload,
+    }
+    const hostSelection = selectHostRuntimeAdapter({
+      enabled: this.config.hostRuntimeAdapterEnabled,
+      profile: this.config.hostRuntimeInvocationProfile,
+      invocation: this.buildHostRuntimeInvocation(row, this.config.hostRuntimeInvocationProfile, now),
+      schemaPath: this.config.hostRuntimeInvocationSchemaPath,
+      schemaJson: this.config.hostRuntimeInvocationSchemaJson,
+      outputLastMessagePath: this.config.hostRuntimeInvocationOutputLastMessagePath,
+      supportedFlags: this.config.hostRuntimeInvocationSupportedFlags ?? undefined,
+      timestamp: now.toISOString(),
     })
+    if (!hostSelection.ok) {
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, now],
+      )
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_failed' })
+      await this.alert.alert(
+        `host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: ${hostSelection.failure.failure_code}`,
+      )
+      return false
+    }
+    if (hostSelection.selected === 'host-runtime') {
+      if (!this.hostRuntimeInvoker) {
+        const failure = buildHostRuntimeFailureResult({
+          invocation_id: hostSelection.invocation.invocation_id,
+          runtime: hostSelection.profile.runtime,
+          code: 'RUNTIME_INVOKER_UNCONFIGURED',
+          message: 'host runtime invoker is not configured',
+          timestamp: now.toISOString(),
+        })
+        await this.dbQuery(
+          `UPDATE agents SET last_wake_attempt_at=NULL
+            WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+          [row.agent_id, now],
+        )
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_invoker_unconfigured' })
+        await this.alert.alert(
+          `host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: ${failure.failure_code}`,
+        )
+        return false
+      }
+      const result = await this.hostRuntimeInvoker.invoke({
+        profile: hostSelection.profile,
+        invocation: hostSelection.invocation,
+        command: hostSelection.command,
+      })
+      if (!this.hostRuntimeResultOk(result)) {
+        await this.dbQuery(
+          `UPDATE agents SET last_wake_attempt_at=NULL
+            WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+          [row.agent_id, now],
+        )
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_error' })
+        await this.alert.alert(
+          `host runtime adapter failed for ${row.agent_id} queue_id=${row.id}: ${result.failure_code ?? result.parser_outcome}`,
+        )
+        return false
+      }
+
+      await this.dbQuery(
+        `UPDATE message_queue SET last_wake_attempt_at=$1
+           WHERE id=$2 AND status='pending'`,
+        [now, row.id],
+      )
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_invoked' })
+      return true
+    }
+
+    if (!this.codexRunner) {
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, now],
+      )
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_unconfigured' })
+      await this.alert.alert(`codex runner unavailable for ${row.agent_id}`)
+      return false
+    }
+
+    const result = await this.codexRunner.invoke(runnerInput)
     if (!result.ok) {
       await this.dbQuery(
         `UPDATE agents SET last_wake_attempt_at=NULL
