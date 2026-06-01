@@ -2607,8 +2607,8 @@ async function nextMessage() {
         // multi in-flight stays visible on agents.status.
         await db.query(
           `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'メッセージ処理中' ELSE NULL END,
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
              status_updated_at = now()
            WHERE agent_id = $1`,
           [agentId],
@@ -2954,8 +2954,8 @@ async function sendMessage(args: string[]) {
       // lock is per-row, not on the agents row.
       if (!explicitClose) {
         const claimRow = await db.query(
-          `SELECT id, message_id, payload, claim_expires_at FROM message_queue
-              WHERE claimed_by = $1 AND status IN ('received', 'in_progress')
+          `SELECT id, message_id, payload FROM message_queue
+              WHERE claimed_by = $1 AND status = 'received'
               ORDER BY claimed_at DESC NULLS LAST
               LIMIT 1
               FOR UPDATE`,
@@ -2963,16 +2963,13 @@ async function sendMessage(args: string[]) {
         )
         if (claimRow.rows.length > 0) {
           const qrow = claimRow.rows[0]
-          const expiresMs = dateMs(qrow.claim_expires_at ?? null)
-          if (expiresMs !== null && expiresMs > Date.now()) {
-            let payload: Record<string, any> = {}
-            try { payload = JSON.parse(qrow.payload) } catch {}
-            target = {
-              reply_to: qrow.message_id ?? payload.message_id,
-              channel_id: payload.channel_id,
-              thread_id: payload.thread_id ?? null,
-              queue_id: qrow.id,
-            }
+          let payload: Record<string, any> = {}
+          try { payload = JSON.parse(qrow.payload) } catch {}
+          target = {
+            reply_to: qrow.message_id ?? payload.message_id,
+            channel_id: payload.channel_id,
+            thread_id: payload.thread_id ?? null,
+            queue_id: qrow.id,
           }
         }
       }
@@ -3372,13 +3369,13 @@ async function sendMessage(args: string[]) {
         )
         // spec §4.2 step 10-11 — flip the agent based on remaining open
         // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
-        // the send only closed ONE claim; if other claims are still active
+        // the send only closed ONE claim; if other claims are still 'received'
         // the agent must remain busy. EXISTS-derive keeps observability
         // (sender-feedback / heartbeat / bot_status) tracking the truth.
         await db.query(
           `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'メッセージ処理中' ELSE NULL END,
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
              status_updated_at = now()
            WHERE agent_id = $1`,
           [agentId],
