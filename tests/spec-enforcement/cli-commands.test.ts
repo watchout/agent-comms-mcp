@@ -32,6 +32,7 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const CLI_PATH = join(REPO_ROOT, 'cli', 'index.ts')
 const PKG_PATH = join(REPO_ROOT, 'package.json')
 const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
+const CP70_DOCTOR_PATH = join(REPO_ROOT, 'core', 'cp70-doctor.ts')
 const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts')
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
@@ -47,6 +48,7 @@ const CHANNEL_REGISTRATION_RECONCILE_PATH = join(REPO_ROOT, 'core', 'channel-reg
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
+const CP70_DOCTOR_SRC = readFileSync(CP70_DOCTOR_PATH, 'utf-8')
 const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
@@ -82,6 +84,10 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   })
   test('diagnoseQueue handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function diagnoseQueue\s*\(/)
+  })
+  test('CP-70 queue doctor handlers are defined', () => {
+    expect(CLI_SRC).toMatch(/async function cp70QueueDoctor\s*\(/)
+    expect(CLI_SRC).toMatch(/async function cp70QueuePreflight\s*\(/)
   })
   test('repairQueue handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function repairQueue\s*\(/)
@@ -130,6 +136,10 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   test("'diagnose-queue' and 'queue doctor' commands invoke diagnoseQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'diagnose-queue'[\s\S]*?diagnoseQueue\(/)
     expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'doctor'[\s\S]*?diagnoseQueue\(/)
+  })
+  test("'queue cp70-doctor' and 'queue cp70-preflight' invoke CP-70 handlers", () => {
+    expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'cp70-doctor'[\s\S]*?cp70QueueDoctor\(/)
+    expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'cp70-preflight'[\s\S]*?cp70QueuePreflight\(/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -419,6 +429,10 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/queue health blockers and stale-work diagnostics/)
     expect(CLI_SRC).toMatch(/queue preflight \[--gate all\|runtime\|projection\] \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/restart gate; exits non-zero while selected queue blockers remain/)
+    expect(CLI_SRC).toMatch(/queue cp70-doctor \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/read-only CP-70 control-plane hazards and exact-id dry-run repair plan/)
+    expect(CLI_SRC).toMatch(/queue cp70-preflight \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/fail-closed CP-70 daemon reactivation gate; no restart or runtime activation/)
     expect(CLI_SRC).toMatch(/queue normalize \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/dry-run normalization plan with scoped repair commands/)
   })
@@ -439,6 +453,27 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/'projection'[\s\S]*?'outbound_pending_stale'/)
     expect(CLI_SRC).toMatch(/failed_blocker_codes/)
     expect(CLI_SRC).toMatch(/Preflight\(\$\{gate\}\)/)
+  })
+
+  test('CP-70 doctor pins broad prompt-artifact scan and dry-run exact-id policy', () => {
+    expect(CP70_DOCTOR_SRC).toMatch(/LOOP_PROMPT_BACKLOG/)
+    expect(CP70_DOCTOR_SRC).toMatch(/STUCK_ACTIVE_QUEUE_ROW/)
+    expect(CP70_DOCTOR_SRC).toMatch(/DUPLICATE_ACTIVE_BATON/)
+    expect(CP70_DOCTOR_SRC).toMatch(/gate: Cp70Gate/)
+    expect(CP70_DOCTOR_SRC).toMatch(/subject_type: Cp70SubjectType/)
+    expect(CP70_DOCTOR_SRC).toMatch(/subject_id: string/)
+    expect(CP70_DOCTOR_SRC).toMatch(/recommended_repair: Cp70RepairHint \| null/)
+    expect(CP70_DOCTOR_SRC).toMatch(/message_queue\.payload/)
+    expect(CP70_DOCTOR_SRC).toMatch(/agent_messages\.content/)
+    expect(CP70_DOCTOR_SRC).toMatch(/agent_messages\.metadata/)
+    expect(CP70_DOCTOR_SRC).toMatch(/launchagent\.plist/)
+    expect(CP70_DOCTOR_SRC).toMatch(/CP70_LAUNCHAGENT_MISMATCH/)
+    expect(CP70_DOCTOR_SRC).toMatch(/CP70_CHECKOUT_PATH_SUSPECT/)
+    expect(CP70_DOCTOR_SRC).toMatch(/Informational only in #651/)
+    expect(CP70_DOCTOR_SRC).toMatch(/repair_is_dry_run_exact_id_only/)
+    expect(CP70_DOCTOR_SRC).toMatch(/no_fifo_drain/)
+    expect(CP70_DOCTOR_SRC).toMatch(/no_prompt_driven_processing/)
+    expect(CP70_DOCTOR_SRC).toMatch(/codex_session_transcript_scan/)
   })
 
   test('queue repair commands are documented and audit logged', () => {

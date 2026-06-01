@@ -33,6 +33,7 @@ import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutbou
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
+import { buildCp70DoctorReport, buildCp70Preflight, formatCp70DoctorText } from '../core/cp70-doctor'
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
@@ -4072,6 +4073,50 @@ async function preflightQueue(args: string[]) {
   }
 }
 
+async function cp70QueueDoctor(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? null
+  const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+  const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+
+  try {
+    const report = await buildCp70DoctorReport(db as any, { agentId, staleSeconds })
+    if (format === 'text') {
+      process.stdout.write(formatCp70DoctorText(report))
+      return
+    }
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  } finally {
+    await db.end()
+  }
+}
+
+async function cp70QueuePreflight(args: string[]) {
+  const { flags } = parseArgs(args)
+  const agentId = flags['agent-id'] ?? null
+  const staleMinutes = Number.parseInt(flags['stale-minutes'] ?? '15', 10)
+  const staleSeconds = Number.isFinite(staleMinutes) && staleMinutes >= 0 ? staleMinutes * 60 : 15 * 60
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+
+  try {
+    const report = await buildCp70DoctorReport(db as any, { agentId, staleSeconds })
+    const preflight = buildCp70Preflight(report)
+    if (format === 'text') {
+      process.stdout.write(formatCp70DoctorText(report, preflight))
+    } else {
+      process.stdout.write(`${JSON.stringify({ ...report, preflight }, null, 2)}\n`)
+    }
+    if (!preflight.ok) {
+      process.exitCode = 1
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand === 'normalize' && hasFlag(flags, 'execute')) {
@@ -4132,7 +4177,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com queue <doctor|preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
+    console.error('Usage: agent-com queue <doctor|preflight|cp70-doctor|cp70-preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -5313,6 +5358,10 @@ if (command === 'channel') {
   await diagnoseQueue(rest)
 } else if (command === 'queue' && subcommand === 'preflight') {
   await preflightQueue(rest)
+} else if (command === 'queue' && subcommand === 'cp70-doctor') {
+  await cp70QueueDoctor(rest)
+} else if (command === 'queue' && subcommand === 'cp70-preflight') {
+  await cp70QueuePreflight(rest)
 } else if (command === 'queue') {
   await repairQueue(subcommand, rest)
 } else if (command === 'directory') {
@@ -5367,6 +5416,10 @@ Message I/O (requires AGENT_ID env var):
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — restart gate; exits non-zero while selected queue blockers remain
+  queue cp70-doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — read-only CP-70 control-plane hazards and exact-id dry-run repair plan
+  queue cp70-preflight [--agent-id <id>] [--stale-minutes 15] [--format json|text]
+                                                       — fail-closed CP-70 daemon reactivation gate; no restart or runtime activation
   queue normalize [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — dry-run normalization plan with scoped repair commands
   queue reassign --from <agent> --to <agent> [--execute|--dry-run]
