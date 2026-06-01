@@ -8,6 +8,12 @@
 import type {
   RuntimeRunnerTypedResult,
 } from './runtime-runner-contract'
+import type {
+  HostRuntimeCommand,
+  HostRuntimeRunnerInvocation,
+  HostRuntimeRunnerResult,
+  RuntimeInvocationProfile,
+} from './host-runtime-invocation'
 
 /** spec §9 — full daemon configuration. Defaults match v0.6 §13.2. */
 export interface StateDaemonConfig {
@@ -55,6 +61,14 @@ export interface StateDaemonConfig {
   codexRunnerEnabled: boolean
   codexRunnerDatabaseUrl: string
   codexRunnerAckContentMaxChars: number
+  // CP-40D host runtime invocation adapter wiring. Disabled by default and
+  // selected only when an explicit profile plus fixture/host invoker is wired.
+  hostRuntimeAdapterEnabled: boolean
+  hostRuntimeInvocationProfile: RuntimeInvocationProfile | null
+  hostRuntimeInvocationSupportedFlags: string[] | null
+  hostRuntimeInvocationSchemaPath: string | null
+  hostRuntimeInvocationSchemaJson: string | null
+  hostRuntimeInvocationOutputLastMessagePath: string | null
   /**
    * Optional emergency narrowing gate. Production should normally leave this
    * null so DB agent/channel state decides the fleet surface.
@@ -107,6 +121,12 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   codexRunnerEnabled: false,
   codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
   codexRunnerAckContentMaxChars: 240,
+  hostRuntimeAdapterEnabled: false,
+  hostRuntimeInvocationProfile: null,
+  hostRuntimeInvocationSupportedFlags: null,
+  hostRuntimeInvocationSchemaPath: null,
+  hostRuntimeInvocationSchemaJson: null,
+  hostRuntimeInvocationOutputLastMessagePath: null,
   agentAllowlist: null,
   agentDenylist: null,
 }
@@ -262,11 +282,22 @@ export interface CodexRunnerInvoker {
   invoke(input: CodexRunnerInvocation): Promise<CodexRunnerResult>
 }
 
+export interface HostRuntimeInvocationExecution {
+  profile: RuntimeInvocationProfile
+  invocation: HostRuntimeRunnerInvocation
+  command: HostRuntimeCommand
+}
+
+export interface HostRuntimeInvoker {
+  invoke(input: HostRuntimeInvocationExecution): Promise<HostRuntimeRunnerResult>
+}
+
 export interface StateDaemonDeps {
   db: DBClient
   pgListen: PgListenClient
   tmux: TmuxClient
   codexRunner?: CodexRunnerInvoker
+  hostRuntimeInvoker?: HostRuntimeInvoker
   clock: Clock
   metrics: Metrics
   alert: AlertSink

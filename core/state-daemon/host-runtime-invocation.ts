@@ -9,6 +9,7 @@ export type HostRuntimeFailureCode =
   | 'RUNTIME_PROFILE_REQUIRED'
   | 'RUNTIME_PROFILE_INVALID'
   | 'UNSUPPORTED_RUNTIME'
+  | 'RUNTIME_INVOKER_UNCONFIGURED'
   | 'RUNTIME_FLAG_UNSUPPORTED'
   | 'SCHEMA_REQUIRED'
   | 'OUTPUT_SCHEMA_MISMATCH'
@@ -113,6 +114,51 @@ export interface HostRuntimeParseInput {
   timed_out?: boolean
   degradation_reasons?: string[]
 }
+
+export interface HostRuntimeAdapterGateInput {
+  enabled: boolean
+  profile?: RuntimeInvocationProfile | null
+  invocation: HostRuntimeRunnerInvocation
+  schemaPath?: string | null
+  schemaJson?: string | null
+  outputLastMessagePath?: string | null
+  codexBin?: string
+  claudeBin?: string
+  supportedFlags?: Iterable<string> | null
+  env?: Record<string, string | undefined>
+  timestamp?: string
+}
+
+export interface HostRuntimeAdapterGateEvidence {
+  enabled: boolean
+  selected: 'codex-runner' | 'host-runtime'
+  reason: string
+  profile_id: string | null
+  runtime: HostRuntimeKind | null
+  failure_code?: HostRuntimeFailureCode
+}
+
+export type HostRuntimeAdapterGateResult =
+  | {
+      ok: true
+      selected: 'codex-runner'
+      evidence: HostRuntimeAdapterGateEvidence
+    }
+  | {
+      ok: true
+      selected: 'host-runtime'
+      profile: RuntimeInvocationProfile
+      invocation: HostRuntimeRunnerInvocation
+      command: HostRuntimeCommand
+      parser: 'codex-jsonl' | 'claude-stream-json'
+      evidence: HostRuntimeAdapterGateEvidence
+    }
+  | {
+      ok: false
+      selected: 'host-runtime'
+      failure: HostRuntimeRunnerResult
+      evidence: HostRuntimeAdapterGateEvidence
+    }
 
 const PROMPT_DELIVERIES: readonly PromptDelivery[] = ['stdin-json', 'stdin-text', 'prompt-arg', 'session-resume']
 const OUTPUT_STREAMS: readonly OutputStream[] = ['jsonl', 'json', 'text']
@@ -320,6 +366,143 @@ export function parseCodexJsonlRuntimeResult(input: HostRuntimeParseInput): Host
 
 export function parseClaudeStreamJsonRuntimeResult(input: HostRuntimeParseInput): HostRuntimeRunnerResult {
   return parseStructuredRuntimeStream('claude', input)
+}
+
+export function parseHostRuntimeResultForProfile(
+  profile: RuntimeInvocationProfile,
+  input: HostRuntimeParseInput,
+): HostRuntimeRunnerResult {
+  if (profile.runtime === 'codex') return parseCodexJsonlRuntimeResult(input)
+  if (profile.runtime === 'claude') return parseClaudeStreamJsonRuntimeResult(input)
+  return buildHostRuntimeFailureResult({
+    invocation_id: input.invocation_id,
+    runtime: profile.runtime,
+    code: 'UNSUPPORTED_RUNTIME',
+    message: `unsupported runtime: ${profile.runtime}`,
+    timestamp: input.finished_at,
+  })
+}
+
+export function buildHostRuntimeFailureResult(input: {
+  invocation_id: string
+  runtime?: HostRuntimeKind
+  code: HostRuntimeFailureCode
+  message: string
+  timestamp?: string
+  degradation_reasons?: string[]
+}): HostRuntimeRunnerResult {
+  const at = input.timestamp ?? new Date(0).toISOString()
+  const reasons = input.degradation_reasons ?? [input.message]
+  return {
+    invocation_id: input.invocation_id,
+    runtime: input.runtime ?? 'custom',
+    exit_status: 1,
+    started_at: at,
+    finished_at: at,
+    schema_valid: false,
+    event_counts: {},
+    tool_calls: [],
+    degraded: reasons.length > 0,
+    degradation_reasons: reasons,
+    parser_outcome: 'runtime_error',
+    failure_code: input.code,
+    timed_out: false,
+  }
+}
+
+function defaultGateResult(input: HostRuntimeAdapterGateInput, reason: 'profile_disabled' | 'profile_absent'): HostRuntimeAdapterGateResult {
+  return {
+    ok: true,
+    selected: 'codex-runner',
+    evidence: {
+      enabled: input.enabled,
+      selected: 'codex-runner',
+      reason,
+      profile_id: input.profile?.profile_id ?? null,
+      runtime: input.profile?.runtime ?? null,
+    },
+  }
+}
+
+function failedGateResult(
+  input: HostRuntimeAdapterGateInput,
+  code: HostRuntimeFailureCode,
+  message: string,
+): HostRuntimeAdapterGateResult {
+  return {
+    ok: false,
+    selected: 'host-runtime',
+    failure: buildHostRuntimeFailureResult({
+      invocation_id: input.invocation.invocation_id,
+      runtime: input.profile?.runtime,
+      code,
+      message,
+      timestamp: input.timestamp,
+    }),
+    evidence: {
+      enabled: input.enabled,
+      selected: 'host-runtime',
+      reason: 'profile_failed_closed',
+      profile_id: input.profile?.profile_id ?? null,
+      runtime: input.profile?.runtime ?? null,
+      failure_code: code,
+    },
+  }
+}
+
+export function selectHostRuntimeAdapter(input: HostRuntimeAdapterGateInput): HostRuntimeAdapterGateResult {
+  if (!input.enabled) return defaultGateResult(input, 'profile_disabled')
+  if (!input.profile) return defaultGateResult(input, 'profile_absent')
+
+  let commandResult: HostRuntimeCommandResult
+  let parser: 'codex-jsonl' | 'claude-stream-json'
+  if (input.profile.runtime === 'codex') {
+    if (!hasValue(input.outputLastMessagePath)) {
+      return failedGateResult(input, 'SCHEMA_REQUIRED', 'Codex output-last-message path is required')
+    }
+    commandResult = buildCodexExecCommand({
+      profile: input.profile,
+      invocation: input.invocation,
+      schemaPath: input.schemaPath ?? '',
+      outputLastMessagePath: input.outputLastMessagePath,
+      codexBin: input.codexBin,
+      supportedFlags: input.supportedFlags ?? undefined,
+      env: input.env,
+    })
+    parser = 'codex-jsonl'
+  } else if (input.profile.runtime === 'claude') {
+    commandResult = buildClaudePrintCommand({
+      profile: input.profile,
+      invocation: input.invocation,
+      schemaJson: input.schemaJson ?? '',
+      claudeBin: input.claudeBin,
+      supportedFlags: input.supportedFlags ?? undefined,
+      env: input.env,
+    })
+    parser = 'claude-stream-json'
+  } else {
+    return failedGateResult(input, 'UNSUPPORTED_RUNTIME', `unsupported runtime: ${input.profile.runtime}`)
+  }
+
+  if (!commandResult.ok) {
+    return failedGateResult(input, commandResult.code, commandResult.message)
+  }
+
+  return {
+    ok: true,
+    selected: 'host-runtime',
+    profile: input.profile,
+    invocation: input.invocation,
+    command: commandResult.command,
+    parser,
+    evidence: {
+      enabled: input.enabled,
+      selected: 'host-runtime',
+      reason: 'profile_selected',
+      profile_id: input.profile.profile_id,
+      runtime: input.profile.runtime,
+    },
+  }
 }
 
 function normalizeFlags(flags?: Iterable<string>): Set<string> | null {
