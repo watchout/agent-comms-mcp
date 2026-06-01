@@ -126,7 +126,7 @@ import {
   withTerminalBaton,
 } from './core/no-reply-policy'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
-import { isQueueContentDup, contentHash, enqueueWithDedup } from './core/queue-dedup'
+import { isQueueContentDup, contentHash, enqueueWithDedupInTransaction } from './core/queue-dedup'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
@@ -140,6 +140,16 @@ import {
   formatOutboundAclViolation,
   recordOutboundAclViolation,
 } from './core/outbound-acl-diagnostic'
+import {
+  applyConversationControlPlaneAllocation,
+  type ConversationControlPlaneApplyResult,
+} from './core/conversation-control-plane-apply'
+import {
+  allocateConversationRootInTransaction,
+  type ConversationRootAllocationInput,
+} from './core/conversation-control-plane'
+import { resolveConversationControlPlaneGate } from './core/conversation-control-plane-rollout'
+import type { DbAdapter as ControlPlaneDbAdapter } from './core/db/adapter'
 
 // --- Load Config ---
 interface ForwardingConfig {
@@ -669,6 +679,202 @@ async function coreDbAdapter(): Promise<DbAdapter | null> {
   return {
     query: <T = any>(sql: string, params?: any[]) => client.query<T>(sql, params),
   }
+}
+
+function controlPlaneAdapterFromClient(client: Client): ControlPlaneDbAdapter {
+  const adapter: ControlPlaneDbAdapter = {
+    async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+      const result = await client.query<T>(sql, params)
+      return result.rows
+    },
+    async queryOne<T = any>(sql: string, params?: any[]): Promise<T | null> {
+      const result = await client.query<T>(sql, params)
+      return result.rows[0] ?? null
+    },
+    async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+      const result = await client.query(sql, params)
+      return { rowCount: result.rowCount ?? 0 }
+    },
+    async transaction<T>(fn: (tx: ControlPlaneDbAdapter) => Promise<T>): Promise<T> {
+      const savepoint = `mcp_control_plane_${randomUUID().replace(/-/g, '')}`
+      await client.query(`SAVEPOINT ${savepoint}`)
+      try {
+        const result = await fn(adapter)
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`)
+        return result
+      } catch (err) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => {})
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`).catch(() => {})
+        throw err
+      }
+    },
+    async close(): Promise<void> {},
+  }
+  return adapter
+}
+
+async function runWithTransactionSavepoint<T>(
+  client: Client,
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const savepoint = `${label}_${randomUUID().replace(/-/g, '')}`
+  await client.query(`SAVEPOINT ${savepoint}`)
+  try {
+    const result = await fn()
+    await client.query(`RELEASE SAVEPOINT ${savepoint}`)
+    return result
+  } catch (err) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => {})
+    await client.query(`RELEASE SAVEPOINT ${savepoint}`).catch(() => {})
+    throw err
+  }
+}
+
+async function loadMessageConversationIdFromClient(client: Client, messageId: string): Promise<string | null> {
+  try {
+    const result = await client.query<{ conversation_id: string | null }>(
+      `SELECT conversation_id FROM agent_messages WHERE id = $1 LIMIT 1`,
+      [messageId],
+    )
+    return result.rows[0]?.conversation_id ?? null
+  } catch {
+    return null
+  }
+}
+
+function summarizeConversationControlPlaneResult(result: ConversationControlPlaneApplyResult): Record<string, unknown> {
+  if (result.ok === false) {
+    const summary: Record<string, unknown> = { ok: false }
+    if ('action' in result) {
+      summary.action = result.action
+      summary.mode = result.gate.mode
+      summary.audit_only = result.gate.audit_only
+      summary.block_on_error = result.gate.block_on_error
+    }
+    if ('allocation_error' in result) {
+      summary.error = result.allocation_error.error
+      summary.allocation_error = result.allocation_error.error
+      summary.allocation_error_detail = result.allocation_error.detail ?? null
+    } else {
+      summary.error = result.error
+    }
+    return summary
+  }
+  const summary: Record<string, unknown> = {
+    ok: true,
+    action: result.action,
+    mode: result.gate.mode,
+    audit_only: result.gate.audit_only,
+    block_on_error: result.gate.block_on_error,
+  }
+  if (result.allocation) {
+    summary.conversation_id = result.allocation.conversation_id
+    summary.baton_id = result.allocation.baton_id
+    summary.conversation_action = result.allocation.conversation_action
+    summary.baton_action = result.allocation.baton_action
+  }
+  if (result.allocation_error) {
+    summary.allocation_error = result.allocation_error.error
+    summary.allocation_error_detail = result.allocation_error.detail ?? null
+  }
+  return summary
+}
+
+function conversationControlPlaneFailureError(result: ConversationControlPlaneApplyResult): string {
+  if ('allocation_error' in result) return result.allocation_error.error
+  if ('error' in result) return result.error
+  return 'CONVERSATION_CONTROL_PLANE_UNKNOWN_ERROR'
+}
+
+function conversationControlPlaneFailureDetail(result: ConversationControlPlaneApplyResult): string | null {
+  if ('allocation_error' in result) return result.allocation_error.detail ?? null
+  return null
+}
+
+async function writeConversationControlPlaneAudit(
+  client: Client,
+  agentId: string,
+  channelId: string,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  await client.query(
+    'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
+    ['conversation.control_plane.apply', agentId, channelId, JSON.stringify(detail), 'default'],
+  )
+}
+
+async function applyMcpConversationControlPlane(
+  client: Client,
+  surface: 'mcp.send' | 'mcp.notify',
+  agentId: string,
+  channelId: string,
+  activeOwner: string,
+  sourceQueueId: string | null,
+  input: ConversationRootAllocationInput,
+  auditBase: Record<string, unknown>,
+): Promise<{ ok: true; summary: Record<string, unknown> | null } | { ok: false; text: string; summary: Record<string, unknown> }> {
+  const gate = resolveConversationControlPlaneGate(surface)
+  if (!gate.ok) {
+    return {
+      ok: false,
+      text: `Error [${gate.error}]: invalid AGENT_COM_CONVERSATION_CONTROL_PLANE mode: ${gate.value}`,
+      summary: { ok: false, error: gate.error, value: gate.value, surface },
+    }
+  }
+  if (!gate.allocate) return { ok: true, summary: null }
+
+  if (!sourceQueueId) {
+    const summary = {
+      ok: false,
+      action: 'skipped',
+      mode: gate.mode,
+      audit_only: gate.audit_only,
+      block_on_error: gate.block_on_error,
+      error: 'CONVERSATION_QUEUE_ROW_NOT_INSERTED',
+    }
+    await writeConversationControlPlaneAudit(client, agentId, channelId, {
+      surface,
+      active_owner: activeOwner,
+      source_queue_id: null,
+      ...auditBase,
+      ...summary,
+    })
+    if (gate.block_on_error) {
+      return {
+        ok: false,
+        text: 'Error [CONVERSATION_QUEUE_ROW_NOT_INSERTED]: conversation control-plane could not link the active owner queue row',
+        summary,
+      }
+    }
+    return { ok: true, summary }
+  }
+
+  const applied = await applyConversationControlPlaneAllocation(
+    controlPlaneAdapterFromClient(client),
+    surface,
+    { ...input, owner_agent_id: activeOwner, source_queue_id: sourceQueueId },
+    { allocator: allocateConversationRootInTransaction },
+  )
+  const summary = summarizeConversationControlPlaneResult(applied)
+  await writeConversationControlPlaneAudit(client, agentId, channelId, {
+    surface,
+    active_owner: activeOwner,
+    source_queue_id: sourceQueueId,
+    ...auditBase,
+    ...summary,
+  })
+  if (!applied.ok) {
+    const allocationError = conversationControlPlaneFailureError(applied)
+    const allocationErrorDetail = conversationControlPlaneFailureDetail(applied)
+    const detailSuffix = allocationErrorDetail ? ` (${allocationErrorDetail})` : ''
+    return {
+      ok: false,
+      text: `Error [CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED]: conversation control-plane enforce failed: ${allocationError}${detailSuffix}`,
+      summary,
+    }
+  }
+  return { ok: true, summary }
 }
 
 /**
@@ -2325,6 +2531,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (mentions.includes(agentId)) {
       return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
+    const activeOwner = mentions[0]
+    const sendConversationGate = resolveConversationControlPlaneGate('mcp.send')
+    if (!sendConversationGate.ok) {
+      await txClient.query('ROLLBACK'); txCommitted = true
+      return { content: [{ type: 'text', text: `Error [${sendConversationGate.error}]: invalid AGENT_COM_CONVERSATION_CONTROL_PLANE mode: ${sendConversationGate.value}` }], isError: true }
+    }
+    let conversationControlPlaneSummary: Record<string, unknown> | null = null
 
     // Resolve destination (§2.2 — bot cannot choose destination)
     const sendDest = await resolveSendDestination(await coreDbAdapter(), agentId, reply_to)
@@ -2428,6 +2641,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Loop variables shared across parts for the response summary.
     const partIds: string[] = []
     let lastDelivery: ReturnType<typeof routeInbound> | null = null
+    let conversationRootMessageId: string | null = null
     let dbClient = await tryGetDb()
     const senderIsBot = !(await isHumanAgent(sendCoreDb, agentId))
     const allAgentInfos: AgentInfo[] = []
@@ -2480,6 +2694,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         input_mentions: rawInputMentions,
       })
       partIds.push(id)
+      if (!conversationRootMessageId) conversationRootMessageId = id
 
       // Update sequence
       if (dbClient) {
@@ -2522,32 +2737,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         source: 'agent-comms',
         ts: new Date().toISOString(),
       })
+      let activeOwnerQueueId: string | null = null
       for (const recipient of delivery.pushTargets) {
         if (dbClient) {
           try {
-            // Issue #251 cycle 3 — dedup transaction is now run on
-            // a per-call dedicated `pg.Client` via `enqueueWithDedup`,
-            // not on the shared singleton (`dbClient`). Concurrent
-            // callers thus cannot interleave BEGIN/COMMIT on one
-            // socket. Mirrors `core/inbound-delivery.ts` pattern.
+            // This send handler already owns a transaction. Use the
+            // transaction-scoped dedup variant so message_queue insert,
+            // control-plane stamping, reply close, and outbound enqueue share
+            // one rollback boundary. Keep each recipient behind a savepoint so
+            // a non-fatal fanout error does not poison the surrounding
+            // transaction and roll back other recipients.
             const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-            const result = await enqueueWithDedup({
-              databaseUrl: config.database_url,
-              agentId: recipient,
-              content: partContent,
-              source: 'agent-comms',
-              windowSeconds: dedupWindowSec,
-              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-              insertParams: [recipient, id, mqPayload],
-            })
+            const result = await runWithTransactionSavepoint(txClient, 'mcp_send_queue_fanout', () =>
+              enqueueWithDedupInTransaction({
+                db: txClient,
+                agentId: recipient,
+                content: partContent,
+                source: 'agent-comms',
+                windowSeconds: dedupWindowSec,
+                insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+                insertParams: [recipient, id, mqPayload],
+              }),
+            )
             if (result.dedupSkipped) {
               process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
               continue
+            }
+            if (recipient === activeOwner && result.inserted && result.queueId) {
+              activeOwnerQueueId = result.queueId
             }
           } catch (err) {
             process.stderr.write(`agent-comms: message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
           }
         }
+      }
+      const replyToConversationId = await loadMessageConversationIdFromClient(txClient, reply_to)
+      const controlPlane = await applyMcpConversationControlPlane(
+        txClient,
+        'mcp.send',
+        agentId,
+        dest.channelId,
+        activeOwner,
+        activeOwnerQueueId,
+        {
+          surface: 'mcp.send',
+          channel_id: dest.channelId,
+          thread_id: dest.threadId ?? null,
+          root_message_id: conversationRootMessageId,
+          reply_to_conversation_id: replyToConversationId,
+          provider_parent_reference: reply_to,
+          orphan_policy: 'isolate',
+          message_id: id,
+        },
+        {
+          message_id: id,
+          reply_to,
+          reply_to_conversation_id: replyToConversationId,
+        },
+      )
+      conversationControlPlaneSummary = controlPlane.summary
+      if (!controlPlane.ok) {
+        return { content: [{ type: 'text', text: controlPlane.text }], isError: true }
       }
 
       // Also forward via legacy forwarding config
@@ -2777,16 +3027,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     )
     const outboundSkipSuffix = outboundSkipReason ? ` | outbound_skip_reason=${outboundSkipReason}` : ''
     const outboundQueuedSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}${outboundSkipSuffix}`
+    const conversationSuffix = conversationControlPlaneSummary ? ` | conversation_control_plane=${String(conversationControlPlaneSummary.action ?? 'applied')}` : ''
     if (delivery.pushTargets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${outboundQueuedSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${outboundQueuedSuffix}${conversationSuffix}` }] }
     }
     if (deliveryWarning === 'NOT_MENTIONED' && !outboundQueued) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}${outboundQueuedSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}${outboundQueuedSuffix}${conversationSuffix}` }] }
     }
     if (deliveryWarning === 'THREAD_MISMATCH' && !outboundQueued) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}${outboundQueuedSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}${outboundQueuedSuffix}${conversationSuffix}` }] }
     }
-    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}${outboundQueuedSuffix}` }] }
+    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}${outboundQueuedSuffix}${conversationSuffix}` }] }
     } finally {
       // ROLLBACK any in-flight transaction if we didn't reach COMMIT. Catches
       // every early return inside the try block (content / mentions / rate /
@@ -2955,6 +3206,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
+    const activeOwner = mentions[0]
+    const notifyConversationGate = resolveConversationControlPlaneGate('mcp.notify')
+    if (!notifyConversationGate.ok) {
+      return { content: [{ type: 'text', text: `Error [${notifyConversationGate.error}]: invalid AGENT_COM_CONVERSATION_CONTROL_PLANE mode: ${notifyConversationGate.value}` }], isError: true }
+    }
+    let conversationControlPlaneSummary: Record<string, unknown> | null = null
+    let txCommitted = false
+    await client.query('BEGIN')
+    try {
     const safeContent = sanitizeContent(content)
     const notifyCoreDb = await coreDbAdapter()
     const resolvedMentionStrings = (
@@ -2976,6 +3236,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     const partIds: string[] = []
     let lastDelivery: ReturnType<typeof routeInbound> | null = null
+    let conversationRootMessageId: string | null = null
 
     // spec §4.3 steps 5-6 — per-part agent_messages + message_queue INSERT.
     // Outbound is deferred to a second loop for symmetry with send (the
@@ -3012,6 +3273,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         input_mentions: rawInputMentions,
       })
       partIds.push(id)
+      if (!conversationRootMessageId) conversationRootMessageId = id
       await client.query('UPDATE agent_messages SET sequence = $1 WHERE id = $2', [sequence, id]).catch(() => {})
       await pgNotify(client, 'agent_inbox', JSON.stringify({ event: 'message.created', to: dest.channelId, message_id: id, channel_id: dest.channelId }))
 
@@ -3039,29 +3301,58 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         source: 'agent-comms',
         ts: new Date().toISOString(),
       })
+      let activeOwnerQueueId: string | null = null
       for (const recipient of delivery.pushTargets) {
         try {
-          // Issue #251 cycle 3 — per-call dedicated client via
-          // `enqueueWithDedup`, mirrors send-fanout path (L1790
-          // area). Shared singleton (`client`) is no longer used
-          // for BEGIN/COMMIT; each dedup tx owns its own connection.
+          // notify now owns the surrounding transaction. Keep queue fanout,
+          // conversation allocation, audit, and outbound enqueue under one
+          // rollback boundary. Keep each recipient behind a savepoint so a
+          // non-fatal fanout error does not poison the transaction and roll
+          // back other recipients.
           const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-          const result = await enqueueWithDedup({
-            databaseUrl: config.database_url,
-            agentId: recipient,
-            content: partContent,
-            source: 'agent-comms',
-            windowSeconds: dedupWindowSec,
-            insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-            insertParams: [recipient, id, mqPayload],
-          })
+          const result = await runWithTransactionSavepoint(client, 'mcp_notify_queue_fanout', () =>
+            enqueueWithDedupInTransaction({
+              db: client,
+              agentId: recipient,
+              content: partContent,
+              source: 'agent-comms',
+              windowSeconds: dedupWindowSec,
+              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+              insertParams: [recipient, id, mqPayload],
+            }),
+          )
           if (result.dedupSkipped) {
             process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
             continue
           }
+          if (recipient === activeOwner && result.inserted && result.queueId) {
+            activeOwnerQueueId = result.queueId
+          }
         } catch (err) {
           process.stderr.write(`agent-comms: notify message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
         }
+      }
+      const controlPlane = await applyMcpConversationControlPlane(
+        client,
+        'mcp.notify',
+        agentId,
+        dest.channelId,
+        activeOwner,
+        activeOwnerQueueId,
+        {
+          surface: 'mcp.notify',
+          channel_id: dest.channelId,
+          thread_id: dest.threadId ?? null,
+          root_message_id: conversationRootMessageId,
+          message_id: id,
+        },
+        {
+          message_id: id,
+        },
+      )
+      conversationControlPlaneSummary = controlPlane.summary
+      if (!controlPlane.ok) {
+        return { content: [{ type: 'text', text: controlPlane.text }], isError: true }
       }
     }
 
@@ -3107,7 +3398,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } else {
       const externalId = projection.channelExternalId!
       // Issue #248 follow-up — same Discord snowflake prefix as the send tool.
-      // notify path uses `client` (no explicit transaction wrapper).
+      // notify path uses the same client transaction as queue + control-plane
+      // linkage, so outbound enqueue failure rolls back the message side too.
       const mentionPrefix = await mentionsToDiscordPrefix(mentions, client, parts.join('\n'))
       for (let partIdx = 0; partIdx < partIds.length; partIdx++) {
         const partMessageId = partIds[partIdx]
@@ -3177,8 +3469,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     const id = partIds[0]
     const partSuffix = parts.length > 1 ? ` — split into ${parts.length} parts, ids: [${partIds.join(', ')}]` : ''
+    await client.query('COMMIT')
+    txCommitted = true
+
     const outboundSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}${outboundSkipReason ? ` | outbound_skip_reason=${outboundSkipReason}` : ''}`
-    return { content: [{ type: 'text', text: `notified (id: ${id}) to channel ${dest.channelId}${partSuffix}${outboundSuffix}` }] }
+    const conversationSuffix = conversationControlPlaneSummary ? ` | conversation_control_plane=${String(conversationControlPlaneSummary.action ?? 'applied')}` : ''
+    return { content: [{ type: 'text', text: `notified (id: ${id}) to channel ${dest.channelId}${partSuffix}${outboundSuffix}${conversationSuffix}` }] }
+    } finally {
+      if (!txCommitted) {
+        await client.query('ROLLBACK').catch(() => {})
+      }
+    }
   }
 
   if (name === 'quote') {
