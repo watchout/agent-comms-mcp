@@ -141,6 +141,10 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'cp70-doctor'[\s\S]*?cp70QueueDoctor\(/)
     expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'cp70-preflight'[\s\S]*?cp70QueuePreflight\(/)
   })
+  test("'recovery readiness' invokes the CP-80 read-only preflight handler", () => {
+    expect(CLI_SRC).toMatch(/command === 'recovery'[\s\S]*?recoveryCommand\(subcommand, rest\)/)
+    expect(CLI_SRC).toMatch(/async function recoveryCommand[\s\S]*?buildRecoveryReadinessReport/)
+  })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
   })
@@ -433,6 +437,8 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/read-only CP-70 control-plane hazards and exact-id dry-run repair plan/)
     expect(CLI_SRC).toMatch(/queue cp70-preflight \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/fail-closed CP-70 daemon reactivation gate; no restart or runtime activation/)
+    expect(CLI_SRC).toMatch(/recovery readiness --scope-file <json> \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/CP-80 read-only recovery GO\/NO-GO gate; no restart, no Discord activation, no FIFO drain/)
     expect(CLI_SRC).toMatch(/queue normalize \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/dry-run normalization plan with scoped repair commands/)
   })
