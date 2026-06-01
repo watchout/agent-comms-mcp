@@ -11,6 +11,11 @@ export type HostRuntimeFailureCode =
   | 'UNSUPPORTED_RUNTIME'
   | 'RUNTIME_FLAG_UNSUPPORTED'
   | 'SCHEMA_REQUIRED'
+  | 'OUTPUT_SCHEMA_MISMATCH'
+  | 'STREAM_PARSE_ERROR'
+  | 'FINAL_MESSAGE_MISSING'
+  | 'RUNTIME_TIMEOUT'
+  | 'RUNTIME_NONZERO_EXIT'
   | 'SANDBOX_POLICY_VIOLATION'
 
 export interface RuntimeInvocationProfile {
@@ -65,6 +70,49 @@ export interface HostRuntimeCommand {
 export type HostRuntimeCommandResult =
   | { ok: true; command: HostRuntimeCommand }
   | { ok: false; code: HostRuntimeFailureCode; message: string }
+
+export interface HostRuntimeToolCallEvidence {
+  name: string
+  status: string
+  redacted_args_hash?: string
+}
+
+export interface HostRuntimeFileChangeEvidence {
+  path: string
+  action: string
+}
+
+export interface HostRuntimeRunnerResult {
+  invocation_id: string
+  runtime: HostRuntimeKind
+  exit_status: number
+  started_at: string
+  finished_at: string
+  final_message?: string
+  final_structured_result?: unknown
+  schema_valid: boolean
+  event_counts: Record<string, number>
+  tool_calls: HostRuntimeToolCallEvidence[]
+  file_changes?: HostRuntimeFileChangeEvidence[]
+  degraded: boolean
+  degradation_reasons: string[]
+  parser_outcome: 'success' | 'runtime_error' | 'parse_error' | 'schema_mismatch'
+  failure_code?: HostRuntimeFailureCode
+  parse_errors?: string[]
+  timed_out: boolean
+}
+
+export interface HostRuntimeParseInput {
+  invocation_id: string
+  stdout: string
+  exit_status: number
+  started_at: string
+  finished_at: string
+  final_message?: string
+  schema_valid?: boolean
+  timed_out?: boolean
+  degradation_reasons?: string[]
+}
 
 const PROMPT_DELIVERIES: readonly PromptDelivery[] = ['stdin-json', 'stdin-text', 'prompt-arg', 'session-resume']
 const OUTPUT_STREAMS: readonly OutputStream[] = ['jsonl', 'json', 'text']
@@ -122,6 +170,156 @@ export function parseSupportedCliFlags(helpText: string): Set<string> {
     flags.add(match[1])
   }
   return flags
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function stringField(record: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim().length > 0) return value
+  }
+  return null
+}
+
+function eventKind(event: Record<string, unknown>): string {
+  return stringField(event, ['type', 'event', 'kind']) ?? 'unknown'
+}
+
+function countEvent(counts: Record<string, number>, kind: string): void {
+  counts[kind] = (counts[kind] ?? 0) + 1
+}
+
+function extractToolCall(event: Record<string, unknown>): HostRuntimeToolCallEvidence | null {
+  const kind = eventKind(event).toLowerCase()
+  const tool = objectRecord(event.tool) ?? objectRecord(event.tool_call) ?? event
+  const name = stringField(tool, ['name', 'tool_name'])
+  if (!name && !kind.includes('tool')) return null
+  return {
+    name: name ?? 'unknown',
+    status: stringField(tool, ['status', 'state', 'outcome']) ?? stringField(event, ['status', 'state', 'outcome']) ?? 'unknown',
+    redacted_args_hash: stringField(tool, ['redacted_args_hash']),
+  }
+}
+
+function extractFileChange(event: Record<string, unknown>): HostRuntimeFileChangeEvidence | null {
+  const change = objectRecord(event.file_change) ?? objectRecord(event.file) ?? event
+  const path = stringField(change, ['path'])
+  const action = stringField(change, ['action', 'status'])
+  if (!path || !action) return null
+  const kind = eventKind(event).toLowerCase()
+  return kind.includes('file') || objectRecord(event.file_change) ? { path, action } : null
+}
+
+function extractStructuredResult(event: Record<string, unknown>): unknown {
+  if ('final_structured_result' in event) return event.final_structured_result
+  if ('structured_result' in event) return event.structured_result
+  if ('result' in event) return event.result
+  return undefined
+}
+
+function extractFinalMessage(event: Record<string, unknown>): string | null {
+  const direct = stringField(event, ['final_message', 'message', 'content', 'text'])
+  if (direct) return direct
+  const message = objectRecord(event.message)
+  return message ? stringField(message, ['content', 'text']) : null
+}
+
+function parseJsonEventStream(stdout: string): {
+  events: Record<string, unknown>[]
+  parseErrors: string[]
+} {
+  const events: Record<string, unknown>[] = []
+  const parseErrors: string[] = []
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  for (const [idx, line] of lines.entries()) {
+    try {
+      const event = objectRecord(JSON.parse(line))
+      if (event) events.push(event)
+      else parseErrors.push(`line ${idx + 1}: JSON event must be an object`)
+    } catch (err) {
+      parseErrors.push(`line ${idx + 1}: ${(err as Error).message}`)
+    }
+  }
+  return { events, parseErrors }
+}
+
+function parseStructuredRuntimeStream(runtime: HostRuntimeKind, input: HostRuntimeParseInput): HostRuntimeRunnerResult {
+  const { events, parseErrors } = parseJsonEventStream(input.stdout)
+  const eventCounts: Record<string, number> = {}
+  const toolCalls: HostRuntimeToolCallEvidence[] = []
+  const fileChanges: HostRuntimeFileChangeEvidence[] = []
+  let finalMessage = input.final_message
+  let finalStructuredResult: unknown
+
+  for (const event of events) {
+    const kind = eventKind(event)
+    countEvent(eventCounts, kind)
+    const toolCall = extractToolCall(event)
+    if (toolCall) toolCalls.push(toolCall)
+    const fileChange = extractFileChange(event)
+    if (fileChange) fileChanges.push(fileChange)
+    const structured = extractStructuredResult(event)
+    if (structured !== undefined) finalStructuredResult = structured
+    const candidateFinalMessage = extractFinalMessage(event)
+    if (candidateFinalMessage && ['final', 'final_result', 'result', 'assistant_final'].includes(kind)) {
+      finalMessage = candidateFinalMessage
+    }
+  }
+
+  const timedOut = input.timed_out === true
+  const schemaValid = input.schema_valid !== false && parseErrors.length === 0 && !timedOut && input.exit_status === 0
+  let failureCode: HostRuntimeFailureCode | undefined
+  let parserOutcome: HostRuntimeRunnerResult['parser_outcome'] = 'success'
+
+  if (timedOut) {
+    failureCode = 'RUNTIME_TIMEOUT'
+    parserOutcome = 'runtime_error'
+  } else if (parseErrors.length > 0) {
+    failureCode = 'STREAM_PARSE_ERROR'
+    parserOutcome = 'parse_error'
+  } else if (input.exit_status !== 0) {
+    failureCode = 'RUNTIME_NONZERO_EXIT'
+    parserOutcome = 'runtime_error'
+  } else if (!hasValue(finalMessage)) {
+    failureCode = 'FINAL_MESSAGE_MISSING'
+    parserOutcome = 'parse_error'
+  } else if (input.schema_valid === false) {
+    failureCode = 'OUTPUT_SCHEMA_MISMATCH'
+    parserOutcome = 'schema_mismatch'
+  }
+
+  return {
+    invocation_id: input.invocation_id,
+    runtime,
+    exit_status: input.exit_status,
+    started_at: input.started_at,
+    finished_at: input.finished_at,
+    final_message: finalMessage,
+    final_structured_result: finalStructuredResult,
+    schema_valid: schemaValid && !failureCode,
+    event_counts: eventCounts,
+    tool_calls: toolCalls,
+    file_changes: fileChanges.length > 0 ? fileChanges : undefined,
+    degraded: (input.degradation_reasons?.length ?? 0) > 0,
+    degradation_reasons: input.degradation_reasons ?? [],
+    parser_outcome: parserOutcome,
+    failure_code: failureCode,
+    parse_errors: parseErrors.length > 0 ? parseErrors : undefined,
+    timed_out: timedOut,
+  }
+}
+
+export function parseCodexJsonlRuntimeResult(input: HostRuntimeParseInput): HostRuntimeRunnerResult {
+  return parseStructuredRuntimeStream('codex', input)
+}
+
+export function parseClaudeStreamJsonRuntimeResult(input: HostRuntimeParseInput): HostRuntimeRunnerResult {
+  return parseStructuredRuntimeStream('claude', input)
 }
 
 function normalizeFlags(flags?: Iterable<string>): Set<string> | null {
