@@ -82,7 +82,7 @@
 
 ### design/aun-agent-communication-control-plane-charter.md（Agent Communication Control Plane Charter）
 - AUNをjob queueやchat bridgeではなくagent communication control planeとして固定する
-- `message -> delivery -> baton -> agent turn -> reply | handoff | close` を送受信系の正本モデルにする
+- `message -> delivery -> conversation -> baton -> agent turn -> reply | handoff | close | no-reply | retry | quarantine` を送受信系の正本モデルにする
 - `1 open conversation = 1 active baton`、`1 active baton = 1 responsible agent` をproduct invariantにする
 - LLMにqueue claim、baton ownership、close、retry、recovery状態を決めさせず、deterministic codeとDB audit eventで進める
 - send/notifyはactive ownerとobserverを分離し、`mention`は1 active owner、`cc`/`fyi`はqueue/baton非投入にする
