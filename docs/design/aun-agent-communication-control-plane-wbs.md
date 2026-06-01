@@ -42,7 +42,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | CP-10 single active owner + observers | merged | send/notify owner-observer contract and canonical channel-id contract landed |
 | CP-20 conversation identity and baton schema/store | merged | conversation identity, persistence, baton store, and one-active-baton guard landed |
 | CP-30 send-side control-plane allocation | in audit / stacked | CLI send/notify merged through #633; MCP send/notify #634 remains draft/DIRTY and needs rebase/L1 refresh |
-| CP-40 script-controlled receive runner | in progress / stacked | CP-40A targeted receive and CP-40B runtime-neutral adapter contract are stacked for audit |
+| CP-40 script-controlled receive runner | in progress / stacked | CP-40A targeted receive, CP-40B runtime-neutral adapter, CP-40C canonical presentation, and CP-40D host runtime invocation profiles define the receive/runtime boundary |
 | CP-50 process/completion runner | not started | depends on CP-40 and typed lifecycle outcome contract |
 | CP-60 typed outcomes and lifecycle view | contract proposed / stacked | close/no-reply/handoff/escalate/retry/quarantine typed outcome contract |
 | CP-70 doctor/preflight/repair | contract proposed / stacked | loop/drain/split/stale/duplicate/quarantine/preflight blocker contract |
@@ -86,6 +86,24 @@ Acceptance:
 - split transport chunks share a grouping key or canonical message id
 - queue rows created for projection chunks are not independently claimable
   runtime work unless explicitly modeled as child requests
+
+### CP-40D Host Runtime Invocation Adapter Profiles
+
+Define the concrete host CLI invocation profile below the CP-40B adapter
+contract.
+
+Acceptance:
+
+- Codex primary path is `codex exec --json --output-schema` with stdin/file
+  prompt delivery and typed JSONL result parsing
+- Claude Code primary path is `claude -p --output-format stream-json
+  --json-schema` with explicit permission/tool/MCP constraints
+- installed runtime flags are feature-detected; missing required flags fail
+  closed and optional missing flags create degraded evidence
+- untrusted queue/GitHub/chat/tool context is never interpolated into shell
+  commands or privileged prompt arguments
+- TUI injection remains a degraded compatibility fallback only, never the
+  success path for scheduler activation or recovery proof
 
 ### CP-50A Agent Turn Ledger
 

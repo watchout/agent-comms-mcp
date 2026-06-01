@@ -249,11 +249,13 @@ LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.
 
 ## Runtime Adapter Boundary
 
+Host runtime invocation profile contract:
+[`../spec/aun-host-runtime-invocation-adapter-contract.md`](../spec/aun-host-runtime-invocation-adapter-contract.md).
+
 | Runtime | Primary receive mechanism |
 |---|---|
-| Codex | receive runner plus a Codex runner adapter |
-| Claude Code | hook or script invocation first; TUI text injection only as fallback |
-| Claude Code | receive runner plus a Claude runner adapter; TUI text injection only as fallback |
+| Codex | receive runner plus `codex exec --json --output-schema` host adapter |
+| Claude Code | receive runner plus `claude -p --output-format stream-json --json-schema` host adapter; TUI text injection only as degraded fallback |
 | OpenClaw / other orchestrators | adapter invokes AUN runner API and maps task results back to AUN states |
 
 Runner configuration must be addressable by `agent_id` and use the existing

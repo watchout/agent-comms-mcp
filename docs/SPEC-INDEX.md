@@ -25,6 +25,7 @@
 | spec/aun-canonical-channel-id-control-plane-contract.md | proposed | scripted/control-plane送信でchannel_idを正本にし、channel name aliasを人間向け明示解決に限定する契約 | 2026-05-31 |
 | spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
 | spec/aun-runtime-runner-adapter-contract.md | CP-40B implementation contract | Codex/Claudeなどruntime差分をadapter境界へ閉じ込め、exact queue_id・queue/baton context・typed runner resultを共通化する契約 | 2026-06-01 |
+| spec/aun-host-runtime-invocation-adapter-contract.md | proposed | `codex exec --json --output-schema` / `claude -p --output-format stream-json --json-schema` をhost CLI adapter profileとして固定するCP-40D契約 | 2026-06-01 |
 | spec/aun-canonical-message-presentation-contract.md | proposed | transport chunkや長文分割を複数runtime taskにしないcanonical message presentation契約 | 2026-06-01 |
 | spec/aun-agent-turn-ledger-contract.md | proposed | runtime起動前にqueue/baton/lease/heartbeat/deadlineをdurable turn evidenceとして記録するCP-50A契約 | 2026-06-01 |
 | spec/aun-typed-completion-outcome-contract.md | proposed | runtime proseからlifecycleを推測せず、reply/no-reply/handoff/escalate/retry/quarantineをtyped outcomeで適用するCP-60契約 | 2026-06-01 |
@@ -127,6 +128,14 @@
 - adapter outputはtyped runner resultで、free-form runtime proseをlifecycle outcomeにしない
 - Codex adapterは `aun codex-runner --queue-id <id>` を必ず使い、FIFO drainで対象rowに到達しない
 - Claude/future runtimeも同じqueue/baton state machineを使い、launch/IO/timeout/parserだけを差し替える
+
+### spec/aun-host-runtime-invocation-adapter-contract.md（Host Runtime Invocation Adapter Contract）
+- CP-40DとしてCP-40Bの下にhost CLI invocation profileを定義する
+- Codexは `codex exec --json --output-schema --output-last-message` をprimary pathにする
+- Claude Codeは `claude -p --output-format stream-json --json-schema` をprimary pathにする
+- untrusted contextをshell argvやprompt argへ補間せず、stdin/file/context refsで渡す
+- unsupported flags、malformed stream、schema mismatch、timeout、non-zero exitをtyped evidenceにする
+- TUI injectionはdegraded fallbackのみで、scheduler activationやrecovery successの証拠にしない
 
 ### spec/aun-canonical-message-presentation-contract.md（Canonical Message Presentation Contract）
 - CP-40Cとしてtransport chunkやprovider/UIの長文分割をprojection concernに限定する
