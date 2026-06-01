@@ -28,6 +28,7 @@
 | spec/aun-canonical-message-presentation-contract.md | proposed | transport chunkや長文分割を複数runtime taskにしないcanonical message presentation契約 | 2026-06-01 |
 | spec/aun-agent-turn-ledger-contract.md | proposed | runtime起動前にqueue/baton/lease/heartbeat/deadlineをdurable turn evidenceとして記録するCP-50A契約 | 2026-06-01 |
 | spec/aun-typed-completion-outcome-contract.md | proposed | runtime proseからlifecycleを推測せず、reply/no-reply/handoff/escalate/retry/quarantineをtyped outcomeで適用するCP-60契約 | 2026-06-01 |
+| spec/aun-control-plane-doctor-preflight-contract.md | proposed | loop/drain/split/stale/duplicate/quarantine等を検出し、state_daemon/scheduler activationをfail-closedするCP-70契約 | 2026-06-01 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -150,6 +151,14 @@
 - replyはoutbound send成功またはtyped send failure evidenceなしにterminal扱いしない
 - no-reply/handoff/escalate/retry/quarantineはそれぞれreason、target、child request、bounded retry、repair actionを必須にする
 - completion runnerはtyped outcomeを適用し、runtime proseにqueue close、baton transfer、retry、quarantineを直接決めさせない
+
+### spec/aun-control-plane-doctor-preflight-contract.md（Control-Plane Doctor And Preflight Contract）
+- CP-70としてruntime/scheduler activation前のdoctor/preflight不変条件を固定する
+- doctor findingはstable code、severity、gate、subject id、evidence、repair hintを持つstructured resultにする
+- loop prompt、drain-to-target、split request、stale turn、duplicate active turn/baton、missing outcome、quarantine、projection stallをblocker候補にする
+- repair commandはdry-run first、exact durable id必須、active row修復は明示override必須、bulk active closure禁止にする
+- repairはaudit evidenceを書き、`next`/`inbox`/runtime prompt/state_daemon restartを修復手段にしない
+- clean preflight は CP-80 scheduler activation の必要条件であり、十分条件ではない
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
