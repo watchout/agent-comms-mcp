@@ -197,6 +197,9 @@ active-row closure remains disallowed.
 
 ## Durable Message vs Chat Projection
 
+Detailed contract:
+[`../spec/aun-canonical-message-presentation-contract.md`](../spec/aun-canonical-message-presentation-contract.md).
+
 AUN must store one canonical logical message in the database. Discord, Slack,
 Telegram, terminal UIs, and future proprietary UIs may impose transport-specific
 message length limits, but those limits are projection concerns only.
@@ -213,11 +216,14 @@ Required model:
 - chat/outbound adapters may create transport chunks, but chunks are not
   independent work items for the receiving LLM.
 - receive/process runners pass the reassembled canonical body to the runtime.
+- a targeted `queue_id` receive must fail closed if the selected row is only a
+  non-claimable transport fragment.
 
 If a transport adapter receives an externally chunked message, it must either
 reassemble the chunks before creating the canonical message or mark the chunks
 with a stable grouping key so the receive runner can present one logical
-message to the runtime.
+message to the runtime. Incomplete or conflicting groups must fail closed before
+runtime invocation.
 
 This keeps DB semantics independent from Discord-specific limits and prevents
 LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.

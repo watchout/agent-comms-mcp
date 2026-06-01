@@ -25,6 +25,7 @@
 | spec/aun-canonical-channel-id-control-plane-contract.md | proposed | scripted/control-plane送信でchannel_idを正本にし、channel name aliasを人間向け明示解決に限定する契約 | 2026-05-31 |
 | spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
 | spec/aun-runtime-runner-adapter-contract.md | CP-40B implementation contract | Codex/Claudeなどruntime差分をadapter境界へ閉じ込め、exact queue_id・queue/baton context・typed runner resultを共通化する契約 | 2026-06-01 |
+| spec/aun-canonical-message-presentation-contract.md | proposed | transport chunkや長文分割を複数runtime taskにしないcanonical message presentation契約 | 2026-06-01 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -123,6 +124,14 @@
 - adapter outputはtyped runner resultで、free-form runtime proseをlifecycle outcomeにしない
 - Codex adapterは `aun codex-runner --queue-id <id>` を必ず使い、FIFO drainで対象rowに到達しない
 - Claude/future runtimeも同じqueue/baton state machineを使い、launch/IO/timeout/parserだけを差し替える
+
+### spec/aun-canonical-message-presentation-contract.md（Canonical Message Presentation Contract）
+- CP-40Cとしてtransport chunkやprovider/UIの長文分割をprojection concernに限定する
+- 1 logical instructionが1 active ownerに対して高々1つのclaimable runtime taskを作る不変条件を固定する
+- fragment rowは非claimable、または`message_queue`に入れず、canonical message / presentation groupへ戻す
+- receive runnerは`queue_id` claim後にfragment groupを検証し、runtimeには1つのcanonical bodyだけを渡す
+- incomplete/conflicting groupは`PRESENTATION_GROUP_INCOMPLETE`や`PRESENTATION_GROUP_CONFLICT`でfail closedする
+- deliberate fanoutはtransport chunkから推論せず、parent/child linkを持つtyped child requestだけで扱う
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
