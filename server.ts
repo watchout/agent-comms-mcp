@@ -127,6 +127,7 @@ import {
 } from './core/no-reply-policy'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedupInTransaction } from './core/queue-dedup'
+import { buildCanonicalPresentationEvidence } from './core/canonical-presentation'
 import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
@@ -897,6 +898,7 @@ export async function requireDbForStartup(): Promise<DbAdapter> {
 }
 
 async function saveMessage(msg: {
+  id?: string
   channel_id: string; author_id: string; content: string
   message_type?: string; reply_to?: string
   metadata?: Record<string, unknown>; depth?: number
@@ -907,7 +909,7 @@ async function saveMessage(msg: {
   // Issue #266: normalized input mentions trace.
   input_mentions?: string[] | null
 }): Promise<string> {
-  const id = randomUUID()
+  const id = msg.id ?? randomUUID()
   const client = await tryGetDb()
   if (!client) {
     // DBなしモード: IDだけ返す（プラットフォーム履歴に委ねる）
@@ -2649,9 +2651,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const info = await loadAgentInfo(sendCoreDb, member)
       if (info) allAgentInfos.push(info)
     }
+    const presentationGroupId = parts.length > 1 ? randomUUID() : null
+    const canonicalMessageId = parts.length > 1 ? randomUUID() : null
 
     for (let partIdx = 0; partIdx < parts.length; partIdx++) {
       const partContent = parts[partIdx]
+      const id = partIdx === 0 && canonicalMessageId ? canonicalMessageId : randomUUID()
+      const canonicalPresentation = presentationGroupId && canonicalMessageId
+        ? buildCanonicalPresentationEvidence({
+          canonicalMessageId,
+          presentationGroupId,
+          fragmentCount: parts.length,
+          fragmentIndex: partIdx,
+          isClaimable: partIdx === 0,
+          canonicalContent: safeContent,
+          fragmentContent: partContent,
+          parentMessageId: reply_to,
+        })
+        : null
 
       // Sequence — one per part so thread ordering is preserved.
       const sequence = await getNextSequence(dest.channelId)
@@ -2661,7 +2678,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Stamp part-of-N metadata on every split piece so downstream consumers
       // can reassemble or recognise the relationship.
       const partMeta = parts.length > 1
-        ? { split_part: partIdx + 1, split_total: parts.length }
+        ? { split_part: partIdx + 1, split_total: parts.length, canonical_presentation: canonicalPresentation }
         : {}
       const fullMetadata = {
         ...metadata,
@@ -2685,7 +2702,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Save to DB
-      const id = await saveMessage({
+      await saveMessage({
+        id,
         channel_id: dest.channelId, author_id: agentId, content: partContent,
         message_type: message_type ?? 'chat', reply_to,
         metadata: fullMetadata, depth: msgDepth,
@@ -2720,25 +2738,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         allAgentInfos,
       )
       lastDelivery = delivery
+      const queueContent = canonicalPresentation ? safeContent : partContent
+      // CP-40C: transport fragments remain projection data, not claimable work.
+      const queuePushTargets = parts.length > 1 && partIdx > 0 ? [] : delivery.pushTargets
       // Issue #130 Phase 4: the pushTargets loop now writes only to
       // message_queue (Phase 2). The legacy sendInboxSignal / pushToChannelServer /
       // SSE fallback paths have been removed — delivery to recipient bots is
       // fully queue-based. Outbound to Discord goes through outbound_queue
-      // (Phase 3) below.
-      const mqContentHash = contentHash(partContent)
+      // (Phase 3) below. CP-40C keeps transport fragments out of claimable work.
+      const mqContentHash = contentHash(queueContent)
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
         author_id: agentId,
-        content: partContent,
+        content: queueContent,
         content_hash: mqContentHash,
         message_id: id,
         message_type: message_type ?? 'chat',
         source: 'agent-comms',
         ts: new Date().toISOString(),
+        ...(canonicalPresentation ? { canonical_presentation: canonicalPresentation } : {}),
       })
       let activeOwnerQueueId: string | null = null
-      for (const recipient of delivery.pushTargets) {
+      for (const recipient of queuePushTargets) {
         if (dbClient) {
           try {
             // This send handler already owns a transaction. Use the
@@ -2752,7 +2774,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               enqueueWithDedupInTransaction({
                 db: txClient,
                 agentId: recipient,
-                content: partContent,
+                content: queueContent,
                 source: 'agent-comms',
                 windowSeconds: dedupWindowSec,
                 insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
@@ -2771,33 +2793,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
       }
-      const replyToConversationId = await loadMessageConversationIdFromClient(txClient, reply_to)
-      const controlPlane = await applyMcpConversationControlPlane(
-        txClient,
-        'mcp.send',
-        agentId,
-        dest.channelId,
-        activeOwner,
-        activeOwnerQueueId,
-        {
-          surface: 'mcp.send',
-          channel_id: dest.channelId,
-          thread_id: dest.threadId ?? null,
-          root_message_id: conversationRootMessageId,
-          reply_to_conversation_id: replyToConversationId,
-          provider_parent_reference: reply_to,
-          orphan_policy: 'isolate',
-          message_id: id,
-        },
-        {
-          message_id: id,
-          reply_to,
-          reply_to_conversation_id: replyToConversationId,
-        },
-      )
-      conversationControlPlaneSummary = controlPlane.summary
-      if (!controlPlane.ok) {
-        return { content: [{ type: 'text', text: controlPlane.text }], isError: true }
+      if (parts.length === 1 || partIdx === 0) {
+        const replyToConversationId = await loadMessageConversationIdFromClient(txClient, reply_to)
+        const controlPlane = await applyMcpConversationControlPlane(
+          txClient,
+          'mcp.send',
+          agentId,
+          dest.channelId,
+          activeOwner,
+          activeOwnerQueueId,
+          {
+            surface: 'mcp.send',
+            channel_id: dest.channelId,
+            thread_id: dest.threadId ?? null,
+            root_message_id: conversationRootMessageId,
+            reply_to_conversation_id: replyToConversationId,
+            provider_parent_reference: reply_to,
+            orphan_policy: 'isolate',
+            message_id: id,
+          },
+          {
+            message_id: id,
+            reply_to,
+            reply_to_conversation_id: replyToConversationId,
+          },
+        )
+        conversationControlPlaneSummary = controlPlane.summary
+        if (!controlPlane.ok) {
+          return { content: [{ type: 'text', text: controlPlane.text }], isError: true }
+        }
       }
 
       // Also forward via legacy forwarding config
@@ -3237,15 +3261,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const partIds: string[] = []
     let lastDelivery: ReturnType<typeof routeInbound> | null = null
     let conversationRootMessageId: string | null = null
+    const presentationGroupId = parts.length > 1 ? randomUUID() : null
+    const canonicalMessageId = parts.length > 1 ? randomUUID() : null
 
-    // spec §4.3 steps 5-6 — per-part agent_messages + message_queue INSERT.
+    // spec §4.3 steps 5-6 — per-part projection records, one canonical queue row.
     // Outbound is deferred to a second loop for symmetry with send (the
     // notify flow has no reply-state to finalize between the two).
     for (let partIdx = 0; partIdx < parts.length; partIdx++) {
       const partContent = parts[partIdx]
+      const id = partIdx === 0 && canonicalMessageId ? canonicalMessageId : randomUUID()
+      const canonicalPresentation = presentationGroupId && canonicalMessageId
+        ? buildCanonicalPresentationEvidence({
+          canonicalMessageId,
+          presentationGroupId,
+          fragmentCount: parts.length,
+          fragmentIndex: partIdx,
+          isClaimable: partIdx === 0,
+          canonicalContent: safeContent,
+          fragmentContent: partContent,
+        })
+        : null
       const sequence = await getNextSequence(dest.channelId)
       const authMeta = createAuthMetadata(dest.channelId, partContent)
-      const partMeta = parts.length > 1 ? { split_part: partIdx + 1, split_total: parts.length } : {}
+      const partMeta = parts.length > 1
+        ? { split_part: partIdx + 1, split_total: parts.length, canonical_presentation: canonicalPresentation }
+        : {}
       const fullMetadata = {
         ...metadata,
         channel_resolution: {
@@ -3264,7 +3304,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
       }
 
-      const id = await saveMessage({
+      await saveMessage({
+        id,
         channel_id: dest.channelId, author_id: agentId, content: partContent,
         message_type: message_type ?? 'chat', reply_to: undefined,
         metadata: fullMetadata, depth: 0,
@@ -3289,20 +3330,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       lastDelivery = delivery
 
-      const mqContentHash = contentHash(partContent)
+      const queueContent = canonicalPresentation ? safeContent : partContent
+      // CP-40C: transport fragments remain projection data, not claimable work.
+      const queuePushTargets = parts.length > 1 && partIdx > 0 ? [] : delivery.pushTargets
+      const mqContentHash = contentHash(queueContent)
       const mqPayload = JSON.stringify({
         channel_id: dest.channelId,
         thread_id: dest.threadId ?? null,
         author_id: agentId,
-        content: partContent,
+        content: queueContent,
         content_hash: mqContentHash,
         message_id: id,
         message_type: message_type ?? 'chat',
         source: 'agent-comms',
         ts: new Date().toISOString(),
+        ...(canonicalPresentation ? { canonical_presentation: canonicalPresentation } : {}),
       })
       let activeOwnerQueueId: string | null = null
-      for (const recipient of delivery.pushTargets) {
+      for (const recipient of queuePushTargets) {
         try {
           // notify now owns the surrounding transaction. Keep queue fanout,
           // conversation allocation, audit, and outbound enqueue under one
@@ -3314,7 +3359,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             enqueueWithDedupInTransaction({
               db: client,
               agentId: recipient,
-              content: partContent,
+              content: queueContent,
               source: 'agent-comms',
               windowSeconds: dedupWindowSec,
               insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
@@ -3332,27 +3377,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           process.stderr.write(`agent-comms: notify message_queue INSERT failed for ${recipient} (non-fatal): ${err}\n`)
         }
       }
-      const controlPlane = await applyMcpConversationControlPlane(
-        client,
-        'mcp.notify',
-        agentId,
-        dest.channelId,
-        activeOwner,
-        activeOwnerQueueId,
-        {
-          surface: 'mcp.notify',
-          channel_id: dest.channelId,
-          thread_id: dest.threadId ?? null,
-          root_message_id: conversationRootMessageId,
-          message_id: id,
-        },
-        {
-          message_id: id,
-        },
-      )
-      conversationControlPlaneSummary = controlPlane.summary
-      if (!controlPlane.ok) {
-        return { content: [{ type: 'text', text: controlPlane.text }], isError: true }
+      if (parts.length === 1 || partIdx === 0) {
+        const controlPlane = await applyMcpConversationControlPlane(
+          client,
+          'mcp.notify',
+          agentId,
+          dest.channelId,
+          activeOwner,
+          activeOwnerQueueId,
+          {
+            surface: 'mcp.notify',
+            channel_id: dest.channelId,
+            thread_id: dest.threadId ?? null,
+            root_message_id: conversationRootMessageId,
+            message_id: id,
+          },
+          {
+            message_id: id,
+          },
+        )
+        conversationControlPlaneSummary = controlPlane.summary
+        if (!controlPlane.ok) {
+          return { content: [{ type: 'text', text: controlPlane.text }], isError: true }
+        }
       }
     }
 

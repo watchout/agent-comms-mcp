@@ -105,22 +105,24 @@ describe('T1 — db/migrate.ts ships the message_queue table + per-row claim col
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T2: server.ts send-tool pushTargets loop INSERTs into message_queue
+// T2: server.ts send-tool queuePushTargets loop INSERTs into message_queue
 // ─────────────────────────────────────────────────────────────────────────────
 // REGRESSION CLASS: a refactor that drops the queue INSERT from the send tool
 // would mean recipients running Phase 2 `next` see no traffic from bot→bot
 // sends. Pin both the per-part payload builder and the per-recipient INSERT.
+// CP-40C filters projection-only transport fragments out of queuePushTargets.
 describe('T2 — server.ts send-tool writes message_queue rows for each pushTarget', () => {
   test('per-part mqPayload literal is built before the recipient loop', () => {
     expect(SERVER_SRC).toMatch(/const mqPayload\s*=\s*JSON\.stringify\(\{[\s\S]{0,400}channel_id:\s*dest\.channelId/)
     // Required canonical fields the recipient's `next` will surface.
     expect(SERVER_SRC).toMatch(/mqPayload[\s\S]{0,400}thread_id:\s*dest\.threadId/)
     expect(SERVER_SRC).toMatch(/mqPayload[\s\S]{0,400}author_id:\s*agentId/)
-    expect(SERVER_SRC).toMatch(/mqPayload[\s\S]{0,400}content:\s*partContent/)
+    expect(SERVER_SRC).toMatch(/const queueContent\s*=\s*canonicalPresentation\s*\?\s*safeContent\s*:\s*partContent/)
+    expect(SERVER_SRC).toMatch(/mqPayload[\s\S]{0,400}content:\s*queueContent/)
   })
   test('the recipient loop INSERTs into message_queue with (agent_id, message_id, payload)', () => {
     // Anchor on the loop body (already verified in send-push-path.test.ts).
-    const header = 'for (const recipient of delivery.pushTargets) {'
+    const header = 'for (const recipient of queuePushTargets) {'
     const start = SERVER_SRC.indexOf(header)
     expect(start).toBeGreaterThan(-1)
     let depth = 0
