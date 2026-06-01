@@ -45,7 +45,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | CP-40 script-controlled receive runner | in progress / stacked | CP-40A targeted receive and CP-40B runtime-neutral adapter contract are stacked for audit |
 | CP-50 process/completion runner | not started | depends on CP-40 and typed lifecycle outcome contract |
 | CP-60 typed outcomes and lifecycle view | contract proposed / stacked | close/no-reply/handoff/escalate/retry/quarantine typed outcome contract |
-| CP-70 doctor/preflight/repair | partial | must detect stuck baton, stale turn, duplicate owner, split request, and loop-prompt rows |
+| CP-70 doctor/preflight/repair | contract proposed / stacked | loop/drain/split/stale/duplicate/quarantine/preflight blocker contract |
 | CP-80 scheduler activation | blocked until CP-40/50/70 | state-daemon may schedule runners only after preflight-clean evidence |
 
 ## Required Task Additions
@@ -134,6 +134,8 @@ Acceptance:
 - split audit requests and stuck active rows are grouped in one diagnostic
 - recommended repair uses exact `queue_id`, never "keep calling next"
 - state-daemon activation is blocked while these findings exist
+- repair commands are dry-run first, exact-id scoped, and audited
+- clean doctor/preflight evidence is required before CP-80 scheduler activation
 
 ## Audit Flow
 

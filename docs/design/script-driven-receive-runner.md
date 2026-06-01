@@ -178,6 +178,9 @@ inbox` injection must not be the primary receive mechanism.
 
 ## Restart Preflight Gate
 
+Detailed doctor/preflight contract:
+[`../spec/aun-control-plane-doctor-preflight-contract.md`](../spec/aun-control-plane-doctor-preflight-contract.md).
+
 `state_daemon` must not be restarted only because pending rows exist. Restart is
 allowed only after the script-level queue preflight is clean:
 
@@ -190,6 +193,12 @@ non-zero while blocker findings remain. Natural-language loop prompts such as
 operator-injected `next` / `processing` instructions are a blocker class. They
 must be closed or repaired by explicit `queue_id` before daemon activation; do
 not drain them by calling `next` from an LLM prompt.
+
+Scheduler activation must also fail closed for stale turns, duplicate active
+batons, split logical requests with multiple claimable rows, missing typed
+completion outcomes, quarantined work, or projection stalls when the selected
+gate treats them as blockers. Repair commands must be dry-run first and must
+write audit evidence before or with any mutation.
 
 For obsolete loop prompts, the safe repair path is:
 
