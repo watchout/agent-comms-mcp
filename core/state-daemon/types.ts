@@ -5,6 +5,9 @@
  * Open decisions (§5) — implementer-chosen private types live in `index.ts`,
  * not here. Anything exported from this module is part of the contract.
  */
+import type {
+  RuntimeRunnerTypedResult,
+} from './runtime-runner-contract'
 
 /** spec §9 — full daemon configuration. Defaults match v0.6 §13.2. */
 export interface StateDaemonConfig {
@@ -226,6 +229,17 @@ export interface AlertSink {
   alert(content: string): Promise<void>
 }
 
+export type {
+  RuntimeBatonContext,
+  RuntimeQueueContext,
+  RuntimeRunnerAdapter,
+  RuntimeRunnerCommand,
+  RuntimeRunnerInvocation,
+  RuntimeRunnerKind,
+  RuntimeRunnerResult,
+  RuntimeRunnerTypedResult,
+} from './runtime-runner-contract'
+
 export interface CodexRunnerInvocation {
   agentId: string
   queueId: number
@@ -233,6 +247,7 @@ export interface CodexRunnerInvocation {
   requester: string | null
   databaseUrl: string
   ackContent: string
+  payload?: unknown
 }
 
 export interface CodexRunnerResult {
@@ -240,6 +255,7 @@ export interface CodexRunnerResult {
   code: number
   stdout?: string
   stderr?: string
+  typed_result?: RuntimeRunnerTypedResult
 }
 
 export interface CodexRunnerInvoker {

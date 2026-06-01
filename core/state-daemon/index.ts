@@ -856,6 +856,7 @@ export class StateDaemon {
       requester: this.requesterFromPayload(row.payload),
       databaseUrl: this.config.codexRunnerDatabaseUrl,
       ackContent: this.boundedAckContent(row),
+      payload: row.payload,
     })
     if (!result.ok) {
       await this.dbQuery(

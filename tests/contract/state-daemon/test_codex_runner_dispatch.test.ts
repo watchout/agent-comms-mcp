@@ -174,6 +174,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         messageId: '11111111-1111-4111-8111-111111111111',
         requester: 'codex-cto',
         databaseUrl: 'postgresql:///agent_comms?host=/tmp',
+        payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work' }),
       })
       expect(runner.invocations[0].ackContent).toContain('queue_id={queue_id}')
       expect(runner.invocations[0].ackContent).toContain('message_id={message_id}')

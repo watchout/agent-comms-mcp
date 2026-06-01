@@ -241,6 +241,10 @@ out of scope and remain forbidden by the state-daemon SSOT.
 The same `agents`/channel registry should later feed the UI that manages
 channel members and agent routing.
 
+Claude Code must normalize through the same runtime runner adapter contract
+before scheduler activation. The table above preserves the current migration
+fallback wording while CP-40B pins the future adapter boundary.
+
 Runtime adapters may differ in launch, IO transport, timeout enforcement, and
 result parsing. They must not implement their own queue claim policy, baton
 ownership policy, retry policy, or completion state transitions.

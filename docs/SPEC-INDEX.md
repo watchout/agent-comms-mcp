@@ -24,6 +24,7 @@
 | design/aun-normalization-roadmap.md | normative | AUN正常化のMVP/v1/v2フェーズゲート、PR分解、完了判定、2026-05-27 MVP実行境界 | 2026-05-27 |
 | spec/aun-canonical-channel-id-control-plane-contract.md | proposed | scripted/control-plane送信でchannel_idを正本にし、channel name aliasを人間向け明示解決に限定する契約 | 2026-05-31 |
 | spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
+| spec/aun-runtime-runner-adapter-contract.md | CP-40B implementation contract | Codex/Claudeなどruntime差分をadapter境界へ閉じ込め、exact queue_id・queue/baton context・typed runner resultを共通化する契約 | 2026-06-01 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -115,6 +116,13 @@
 - `mentions[]`が複数active ownerに解決される場合は `MULTI_ACTIVE_RECIPIENT_UNSUPPORTED` でfail closedする
 - `cc[]` / `fyi[]` はobserver visibilityのみで、`message_queue` rowやbatonを作らない
 - observer visibilityはMVPではprojection/body suffix/metadataに限定し、将来のobserver receipt tableも非claimableでなければならない
+
+### spec/aun-runtime-runner-adapter-contract.md（Runtime Runner Adapter Contract）
+- CP-40BとしてCodex/Claude/OpenClawなどruntime差分をadapter境界に限定する
+- adapter inputはexact `queue_id`、queue context、conversation/baton contextを持つ同一shapeにする
+- adapter outputはtyped runner resultで、free-form runtime proseをlifecycle outcomeにしない
+- Codex adapterは `aun codex-runner --queue-id <id>` を必ず使い、FIFO drainで対象rowに到達しない
+- Claude/future runtimeも同じqueue/baton state machineを使い、launch/IO/timeout/parserだけを差し替える
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
