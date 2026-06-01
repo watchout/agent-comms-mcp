@@ -36,7 +36,10 @@ function dbRead(sql: string, params: unknown[] = []): any[] {
   try { return db.prepare(sql).all(...params) as any[] } finally { db.close() }
 }
 
-function seedPending(content = 'codex runner request'): { messageId: string; queueId: number } {
+function seedPending(
+  content = 'codex runner request',
+  presentation?: Record<string, unknown>,
+): { messageId: string; queueId: number } {
   const db = new Database(dbPath)
   try {
     const messageId = randomUUID()
@@ -48,6 +51,7 @@ function seedPending(content = 'codex runner request'): { messageId: string; que
       author_id: 'codex-cto',
       message_id: messageId,
       message_type: 'instruction',
+      ...(presentation ? { canonical_presentation: presentation } : {}),
     })
     const row = db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status)
       VALUES ('codex-aun', ?, ?, 'pending') RETURNING id`).get(messageId, payload) as { id: number }
@@ -241,6 +245,56 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
     expect(r.stderr).toContain('CODEX_RUNNER_INVALID_LIMIT')
     expect(r.stderr).toContain('--queue-id requires --limit 1')
     expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('queue-id mode rejects non-claimable presentation fragments before claim', () => {
+    const fragment = seedPending('part 1/3', {
+      presentation_group_id: 'runner-split-1',
+      fragment_count: 3,
+      fragment_index: 1,
+      is_claimable: false,
+    })
+    const fallback = seedPending('fallback must remain pending')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(fragment.queueId),
+      '--limit', '1',
+    ])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
+    expect(r.stderr).toContain('FRAGMENT_NOT_CLAIMABLE')
+    expect(JSON.parse(r.stdout)).toMatchObject({ ok: false, retained: [] })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fragment.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fallback.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('queue-id mode rejects incomplete split presentation before claim', () => {
+    const ambiguous = seedPending('1/2 missing canonical evidence', {
+      fragment_count: 2,
+      fragment_index: 1,
+    })
+    const fallback = seedPending('newer canonical fallback must remain pending')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(ambiguous.queueId),
+      '--limit', '1',
+    ])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
+    expect(r.stderr).toContain('PRESENTATION_GROUP_INCOMPLETE')
+    expect(JSON.parse(r.stdout)).toMatchObject({ ok: false, retained: [] })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [ambiguous.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fallback.queueId])[0])
       .toEqual({ status: 'pending', claimed_by: null })
   })
 

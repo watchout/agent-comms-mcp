@@ -61,6 +61,19 @@ export interface ClaimedMessage {
   source?: string | null
   created_at?: string
   reply_chain?: unknown[]
+  presentation?: PresentationEvidence
+}
+
+export interface PresentationEvidence {
+  kind: 'unsplit' | 'canonical' | 'child_request'
+  presentation_group_id: string | null
+  fragment_count: number
+  fragment_index: number
+  is_claimable: boolean
+  canonical_body_hash: string | null
+  fragment_body_hash: string | null
+  parent_message_id: string | null
+  child_request_id: string | null
 }
 
 export interface ReceiveResult {
@@ -81,9 +94,17 @@ export interface TargetedReceiveSummary {
   selected: DiagnosedQueueRow | null
   claimed: ClaimedMessage | null
   waiting: number
-  blocked_reason: 'target_queue_not_found' | 'target_queue_not_pending' | null
+  blocked_reason: TargetedReceiveBlockedReason | null
   observed_status: string | null
 }
+
+export type TargetedReceiveBlockedReason =
+  | 'target_queue_not_found'
+  | 'target_queue_not_pending'
+  | 'CANONICAL_MESSAGE_REQUIRED'
+  | 'PRESENTATION_GROUP_INCOMPLETE'
+  | 'PRESENTATION_GROUP_CONFLICT'
+  | 'FRAGMENT_NOT_CLAIMABLE'
 
 export interface TargetedReceiveResult extends ReceiveResult {
   summary?: TargetedReceiveSummary
@@ -103,6 +124,7 @@ export interface DiagnosedQueueRow {
   priority: number
   created_at: string | null
   classification: 'actionable' | 'non_action' | 'unknown'
+  presentation?: PresentationEvidence
 }
 
 export interface DiagnoseReceiveSummary {
@@ -442,6 +464,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
         const row = await tx.queryOne<Record<string, unknown>>(
           `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.content AS stored_content,
                   am.message_type AS stored_message_type,
                   am.author_id AS stored_author_id
              FROM message_queue mq
@@ -452,11 +475,16 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           [targetQueueId, plan.env.AGENT_ID],
         )
 
-        const selected = row ? normalizeQueueRow(row) : null
+        const payload = parsePayload(row?.payload)
+        const presentation = row ? evaluatePresentationClaimability(row, payload) : null
+        const selected = row ? {
+          ...normalizeQueueRow(row),
+          ...(presentation ? { presentation: presentation.evidence } : {}),
+        } : null
         const observedStatus = selected?.status ?? null
         const blockedReason = !selected
           ? 'target_queue_not_found'
-          : selected.status !== 'pending' ? 'target_queue_not_pending' : null
+          : selected.status !== 'pending' ? 'target_queue_not_pending' : presentation?.blocked_reason ?? null
         let claimed: ClaimedMessage | null = null
 
         if (selected && !blockedReason && !opts.dryRun) {
@@ -491,7 +519,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
         )
         const waiting = Number(waitingRow?.n ?? 0)
         if (selected && !blockedReason) {
-          claimed = opts.dryRun ? null : claimedMessageFromRow(selected, parsePayload(row?.payload), waiting)
+          claimed = opts.dryRun ? null : claimedMessageFromRow(selected, payload, waiting)
         }
 
         return {
@@ -719,6 +747,116 @@ function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
   }
 }
 
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function stringField(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function numberField(source: Record<string, unknown>, key: string): number | null {
+  const value = source[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function booleanField(source: Record<string, unknown>, key: string): boolean | null {
+  const value = source[key]
+  return typeof value === 'boolean' ? value : null
+}
+
+function presentationInput(payload: Record<string, unknown>): { source: Record<string, unknown>; hasMetadata: boolean } {
+  const nested = objectValue(payload.canonical_presentation) ?? objectValue(payload.presentation)
+  const source = nested ? { ...payload, ...nested } : payload
+  const keys = [
+    'presentation_group_id',
+    'fragment_count',
+    'fragment_index',
+    'is_claimable',
+    'canonical_body_hash',
+    'fragment_body_hash',
+    'parent_message_id',
+    'child_request_id',
+  ]
+  return { source, hasMetadata: keys.some((key) => source[key] !== undefined) }
+}
+
+function contentForPresentation(row: Record<string, unknown>, payload: Record<string, unknown>): string {
+  const payloadContent = payload.content
+  if (typeof payloadContent === 'string') return payloadContent
+  const storedContent = row.stored_content
+  return typeof storedContent === 'string' ? storedContent : ''
+}
+
+function validFragmentIndex(index: number, count: number): boolean {
+  return Number.isInteger(index) && (
+    (index >= 0 && index < count) ||
+    (index >= 1 && index <= count)
+  )
+}
+
+function evaluatePresentationClaimability(
+  row: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): { evidence: PresentationEvidence; blocked_reason: TargetedReceiveBlockedReason | null } {
+  const { source, hasMetadata } = presentationInput(payload)
+  const groupId = stringField(source, 'presentation_group_id')
+  const rawCount = numberField(source, 'fragment_count')
+  const rawIndex = numberField(source, 'fragment_index')
+  const isClaimable = booleanField(source, 'is_claimable')
+  const canonicalBodyHash = stringField(source, 'canonical_body_hash')
+  const fragmentBodyHash = stringField(source, 'fragment_body_hash')
+  const parentMessageId = stringField(source, 'parent_message_id')
+  const childRequestId = stringField(source, 'child_request_id')
+  const content = contentForPresentation(row, payload)
+
+  const count = rawCount ?? 1
+  const index = rawIndex ?? 0
+  const explicitChildRequest = !!childRequestId
+  const claimable = isClaimable ?? (!hasMetadata || count <= 1 || explicitChildRequest)
+  const evidence: PresentationEvidence = {
+    kind: explicitChildRequest ? 'child_request' : (hasMetadata ? 'canonical' : 'unsplit'),
+    presentation_group_id: groupId,
+    fragment_count: count,
+    fragment_index: index,
+    is_claimable: claimable,
+    canonical_body_hash: canonicalBodyHash ?? (content ? sha256(content) : null),
+    fragment_body_hash: fragmentBodyHash,
+    parent_message_id: parentMessageId,
+    child_request_id: childRequestId,
+  }
+
+  if (!Number.isInteger(count) || count < 1) {
+    return { evidence, blocked_reason: 'PRESENTATION_GROUP_CONFLICT' }
+  }
+  if (count > 1 && rawIndex === null && !explicitChildRequest) {
+    return { evidence, blocked_reason: 'PRESENTATION_GROUP_INCOMPLETE' }
+  }
+  if (!validFragmentIndex(index, count)) {
+    return { evidence, blocked_reason: 'PRESENTATION_GROUP_CONFLICT' }
+  }
+  if (isClaimable === false) {
+    return { evidence: { ...evidence, is_claimable: false }, blocked_reason: 'FRAGMENT_NOT_CLAIMABLE' }
+  }
+  if (count > 1 && !groupId && !explicitChildRequest) {
+    return { evidence, blocked_reason: 'PRESENTATION_GROUP_INCOMPLETE' }
+  }
+  if (count > 1 && isClaimable !== true && !explicitChildRequest) {
+    return { evidence: { ...evidence, is_claimable: false }, blocked_reason: 'CANONICAL_MESSAGE_REQUIRED' }
+  }
+  if (count > 1 && !canonicalBodyHash && !explicitChildRequest) {
+    return { evidence, blocked_reason: 'CANONICAL_MESSAGE_REQUIRED' }
+  }
+  if (canonicalBodyHash && content && canonicalBodyHash !== sha256(content)) {
+    return { evidence, blocked_reason: 'PRESENTATION_GROUP_CONFLICT' }
+  }
+
+  return { evidence, blocked_reason: null }
+}
+
 function selectActionableRow(rows: DiagnosedQueueRow[]): { row: DiagnosedQueueRow | null; reason: string | null } {
   const actionable = rows.filter((row) => row.classification === 'actionable')
   if (actionable.length === 0) return { row: null, reason: null }
@@ -750,6 +888,7 @@ function claimedMessageFromRow(row: DiagnosedQueueRow, payload: Record<string, u
     message_type: row.message_type,
     source: typeof payload.source === 'string' ? payload.source : null,
     created_at: row.created_at ?? undefined,
+    ...(row.presentation ? { presentation: row.presentation } : {}),
   }
 }
 
@@ -1298,6 +1437,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
         const rowsSql = targetQueueId
           ? `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.content AS stored_content,
                   am.message_type AS stored_message_type,
                   am.author_id AS stored_author_id
              FROM message_queue mq
@@ -1306,6 +1446,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             LIMIT 1`
           : `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.content AS stored_content,
                   am.message_type AS stored_message_type,
                   am.author_id AS stored_author_id
              FROM message_queue mq
@@ -1325,17 +1466,33 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             LIMIT 1`,
           [plan.env.AGENT_ID],
         )
-        const inspected = pendingRows.map(normalizeQueueRow)
+        const presentationByQueueId = new Map<string, ReturnType<typeof evaluatePresentationClaimability>>()
+        const inspected = pendingRows.map((row) => {
+          const payload = parsePayload(row.payload)
+          const presentation = evaluatePresentationClaimability(row, payload)
+          const normalized = normalizeQueueRow(row)
+          presentationByQueueId.set(String(normalized.queue_id), presentation)
+          return { ...normalized, presentation: presentation.evidence }
+        })
+        const claimableInspected = inspected.filter((row) => {
+          const presentation = presentationByQueueId.get(String(row.queue_id))
+          return !presentation?.blocked_reason
+        })
         const targetRow = targetQueueId ? inspected[0] ?? null : null
+        const targetPresentation = targetRow
+          ? presentationByQueueId.get(String(targetRow.queue_id)) ?? null
+          : null
         const selected = activeClaimRow
           ? { row: null, reason: 'active_claim' }
           : targetQueueId
             ? targetRow?.status !== 'pending'
               ? { row: null, reason: targetRow ? 'target_queue_not_pending' : 'target_queue_not_found' }
+              : targetPresentation?.blocked_reason
+                ? { row: null, reason: targetPresentation.blocked_reason }
               : targetRow.classification !== 'actionable'
                 ? { row: null, reason: 'target_queue_not_actionable' }
                 : { row: targetRow, reason: 'target_queue_id' }
-            : selectActionableRow(inspected)
+            : selectActionableRow(claimableInspected)
         const selectedRaw = selected.row
           ? pendingRows.find((row) => String(row.id) === String(selected.row?.queue_id)) ?? null
           : null

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -43,6 +43,7 @@ function seedQueue(opts: {
   status?: string
   claimedBy?: string | null
   ageSeconds?: number
+  presentation?: Record<string, unknown>
 }): { messageId: string; queueId: number } {
   return withDb((db) => {
     const messageId = randomUUID()
@@ -59,6 +60,7 @@ function seedQueue(opts: {
       author_id: 'codex-cto',
       message_id: messageId,
       message_type: messageType,
+      ...(opts.presentation ? { canonical_presentation: opts.presentation } : {}),
     })
     const claimedAt = opts.claimedBy ? new Date(Date.now() - 10_000).toISOString() : null
     const claimExpiresAt = opts.claimedBy ? new Date(Date.now() + 60_000).toISOString() : null
@@ -78,6 +80,10 @@ function seedQueue(opts: {
     ) as { id: number }
     return { messageId, queueId: row.id }
   })
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 function row(queueId: number): { status: string; claimed_by: string | null; claim_ttl: number } {
@@ -194,5 +200,77 @@ describe('test_aun_targeted_receive - exact queue_id receive runner', () => {
     expect(r.stderr).toContain('target_queue_not_pending')
     expect(row(active.queueId)).toEqual({ status: 'received', claimed_by: TEST_AGENT, claim_ttl: 1 })
     expect(row(pending.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
+  })
+
+  test('fragment target fails closed and leaves unrelated rows untouched', () => {
+    const fragment = seedQueue({
+      content: 'part 1/3',
+      presentation: {
+        presentation_group_id: 'audit-split-1',
+        fragment_count: 3,
+        fragment_index: 1,
+        is_claimable: false,
+        fragment_body_hash: sha256('part 1/3'),
+      },
+    })
+    const pending = seedQueue({ content: 'canonical work must remain pending' })
+
+    const r = runAun(['receive', '--agent-id', TEST_AGENT, '--queue-id', String(fragment.queueId)])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('TARGETED_RECEIVE_BLOCKED')
+    expect(r.stderr).toContain('FRAGMENT_NOT_CLAIMABLE')
+    expect(row(fragment.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
+    expect(row(pending.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
+  })
+
+  test('ambiguous split target fails closed before runtime claim', () => {
+    const ambiguous = seedQueue({
+      content: '1/2 without canonical evidence',
+      presentation: {
+        fragment_count: 2,
+        fragment_index: 1,
+      },
+    })
+
+    const r = runAun(['next', '--agent-id', TEST_AGENT, '--queue-id', String(ambiguous.queueId)])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('TARGETED_RECEIVE_BLOCKED')
+    expect(r.stderr).toContain('PRESENTATION_GROUP_INCOMPLETE')
+    expect(row(ambiguous.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
+  })
+
+  test('claimable canonical split row returns presentation evidence with one body', () => {
+    const content = 'complete canonical audit request'
+    const canonical = seedQueue({
+      content,
+      presentation: {
+        presentation_group_id: 'audit-split-2',
+        fragment_count: 3,
+        fragment_index: 0,
+        is_claimable: true,
+        canonical_body_hash: sha256(content),
+      },
+    })
+
+    const r = runAun(['receive', '--agent-id', TEST_AGENT, '--queue-id', String(canonical.queueId)])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      queue_id: canonical.queueId,
+      message_id: canonical.messageId,
+      content,
+      presentation: {
+        kind: 'canonical',
+        presentation_group_id: 'audit-split-2',
+        fragment_count: 3,
+        fragment_index: 0,
+        is_claimable: true,
+        canonical_body_hash: sha256(content),
+      },
+    })
+    expect(row(canonical.queueId)).toEqual({ status: 'received', claimed_by: TEST_AGENT, claim_ttl: 1 })
   })
 })
