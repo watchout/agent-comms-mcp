@@ -163,6 +163,9 @@ primary failure model.
 
 ## State-Daemon Role
 
+Detailed scheduler activation contract:
+[`../spec/aun-scheduler-activation-canary-contract.md`](../spec/aun-scheduler-activation-canary-contract.md).
+
 `state-daemon` should migrate toward a runner scheduler:
 
 - observe `message_queue` and `agents`
@@ -175,6 +178,11 @@ During migration, existing tmux wake / natural-language prompt injection remains
 the compatibility fallback for TUI agents. The implementation PR must define the
 cutover gate before making runner invocation primary. After cutover, `check
 inbox` injection must not be the primary receive mechanism.
+
+Scheduler activation must be exact-scope, leased, and canary-gated. The first
+activation for a scope must prove receive, process, completion, projection, and
+audit evidence before expansion. Discord visibility is projection evidence only;
+DB queue/turn/completion records remain authoritative.
 
 ## Restart Preflight Gate
 
