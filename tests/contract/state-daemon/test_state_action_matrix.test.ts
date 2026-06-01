@@ -77,7 +77,7 @@ describe('state_daemon state/action matrix planner', () => {
     }
   })
 
-  test('live received TUI work plans process-start wake and remains non-terminal', () => {
+  test('live received TUI work plans wake_received observation and remains non-terminal', () => {
     expect(planQueueAction({
       row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
       agent: tui,

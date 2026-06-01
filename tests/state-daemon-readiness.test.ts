@@ -198,7 +198,7 @@ describe('queue wake smoke', () => {
     expect(db.queue.size).toBe(0)
   })
 
-  test('execute passes when state-daemon wake evidence advances within the bounded poll', async () => {
+  test('execute passes when queue row remains visible without TUI wake evidence', async () => {
     const db = new FakeSmokeDb()
     let now = Date.parse('2026-05-30T00:00:00Z')
     const dryRun = await buildQueueWakeSmokeReport(db, {
@@ -215,16 +215,12 @@ describe('queue wake smoke', () => {
       nowMs: () => now,
       sleepMs: async (ms) => {
         now += ms
-        const row = Array.from(db.queue.values())[0]
-        if (row) row.last_wake_attempt_at = new Date(now).toISOString()
-        const agent = db.agents.get('__queue_wake_smoke__')
-        if (agent) agent.last_wake_attempt_at = new Date(now).toISOString()
       },
     })
 
     expect(report.ok).toBe(true)
     expect(report.result).toBe('pass')
-    expect(report.smoke.evidence).toContain('message_queue.last_wake_attempt_at advanced')
+    expect(report.smoke.evidence).toContain('message_queue row visible; TUI wake prompt injection disabled')
     expect(Array.from(db.queue.values())[0].status).toBe('pending')
     expect(db.audits).toHaveLength(1)
   })
@@ -266,7 +262,7 @@ describe('queue wake smoke integration evidence', () => {
     await cleanAll(pg)
   })
 
-  test('execute observes a real state-daemon wake after inserting its diagnostic row', async () => {
+  test('execute reports queue visibility evidence without TUI runtime launch', async () => {
     const agent = makeAgentId('queue-smoke')
     await seedAgent(pg, {
       agent_id: agent,
@@ -337,13 +333,8 @@ describe('queue wake smoke integration evidence', () => {
 
       expect(report.ok).toBe(true)
       expect(report.result).toBe('pass')
-      expect(report.smoke.evidence).toContain('message_queue.last_wake_attempt_at advanced')
-      expect(report.smoke.evidence).toContain('agents.last_wake_attempt_at advanced')
-      expect(tmux.sentKeys).toEqual([{
-        session: `${agent}-session`,
-        payload: 'Call the agent-comms next tool now. Do not call inbox.\n',
-      }])
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'ok' })).toBe(1)
+      expect(report.smoke.evidence).toContain('message_queue row visible; TUI wake prompt injection disabled')
+      expect(tmux.sentKeys).toEqual([])
 
       const queue = await pg.query<{
         status: string
@@ -357,7 +348,7 @@ describe('queue wake smoke integration evidence', () => {
         [report.smoke.queue_id],
       )
       expect(queue.rows[0].status).toBe('pending')
-      expect(queue.rows[0].last_wake_attempt_at).not.toBeNull()
+      expect(queue.rows[0].last_wake_attempt_at).toBeNull()
       expect(queue.rows[0].done_at).toBeNull()
       expect(queue.rows[0].replied_at).toBeNull()
 
@@ -365,8 +356,8 @@ describe('queue wake smoke integration evidence', () => {
       const row = status.get(agent)!
       expect(row.pending_count).toBe(1)
       expect(row.active_claim_count).toBe(0)
-      expect(row.queue_wake_state).toBe('wake_attempt_recorded')
-      expect(row.latest_wake_progress_at).not.toBeNull()
+      expect(row.queue_wake_state).toBe('idle_pending_no_wake_progress')
+      expect(row.latest_wake_progress_at).toBeNull()
     } finally {
       await daemon.stop()
     }
