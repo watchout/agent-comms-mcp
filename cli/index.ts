@@ -225,6 +225,220 @@ async function auditLog(db: Client, eventType: string, agentId: string | null, t
   )
 }
 
+type ExplicitReplyQueueRow = {
+  id: number | string
+  agent_id: string
+  message_id: string | null
+  payload: string | null
+  status: string
+  claimed_by: string | null
+  claim_expires_at: string | Date | null
+  replied_with: string | null
+}
+
+type ClaimRenewalEvidence = {
+  renewed: true
+  mode: 'exact_queue_id_same_owner'
+  reason: 'expired_same_owner_before_reply_close'
+  queue_id: number | string
+  message_id: string | null
+  agent_id: string
+  claimed_by: string
+  prior_claim_expires_at: string | null
+  new_claim_expires_at: string
+  ttl_seconds: number
+  audit_event_type: 'queue.claim_renewed'
+  authorization: 'exact_queue_id_and_same_claim_owner'
+  free_form_text_authorizes_renewal: false
+}
+
+const ACTIVE_REPLY_CLAIM_STATUSES = new Set(['received', 'in_progress'])
+const TERMINAL_REPLY_CLOSE_STATUSES = new Set(['replied', 'done', 'skipped', 'failed'])
+const MAX_CLAIM_RENEWAL_TTL_SEC = 15 * 60
+
+function parseQueuePayloadLoose(payload: string | null): Record<string, any> {
+  if (!payload) return {}
+  try {
+    const parsed = JSON.parse(payload)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function normalizeDateString(value: string | Date | null): string | null {
+  if (!value) return null
+  if (value instanceof Date) return value.toISOString()
+  return String(value)
+}
+
+function dateMs(value: string | Date | null): number | null {
+  if (!value) return null
+  const ms = new Date(value).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+function claimRenewalTtlSeconds(): number {
+  const raw = Number.parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '60', 10)
+  const ttl = Number.isFinite(raw) && raw > 0 ? raw : 60
+  return Math.min(ttl, MAX_CLAIM_RENEWAL_TTL_SEC)
+}
+
+function replyToForQueueRow(row: ExplicitReplyQueueRow): string | null {
+  const payload = parseQueuePayloadLoose(row.payload)
+  return row.message_id ?? (typeof payload.message_id === 'string' ? payload.message_id : null)
+}
+
+async function renewSameOwnerClaimForReplyClose(
+  db: Client,
+  row: ExplicitReplyQueueRow,
+  agentId: string,
+): Promise<ClaimRenewalEvidence> {
+  if (!ACTIVE_REPLY_CLAIM_STATUSES.has(row.status)) {
+    throw new Error(`INVALID_STATE: queue_id=${row.id} status=${row.status}; expected received|in_progress`)
+  }
+  if (row.agent_id !== agentId || row.claimed_by !== agentId) {
+    throw new Error(`NOT_CLAIM_OWNER: queue_id=${row.id} is not claimed by ${agentId}`)
+  }
+  const ttlSeconds = claimRenewalTtlSeconds()
+  const newClaimExpiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString()
+  const evidence: ClaimRenewalEvidence = {
+    renewed: true,
+    mode: 'exact_queue_id_same_owner',
+    reason: 'expired_same_owner_before_reply_close',
+    queue_id: row.id,
+    message_id: replyToForQueueRow(row),
+    agent_id: agentId,
+    claimed_by: agentId,
+    prior_claim_expires_at: normalizeDateString(row.claim_expires_at),
+    new_claim_expires_at: newClaimExpiresAt,
+    ttl_seconds: ttlSeconds,
+    audit_event_type: 'queue.claim_renewed',
+    authorization: 'exact_queue_id_and_same_claim_owner',
+    free_form_text_authorizes_renewal: false,
+  }
+  await auditLog(db, 'queue.claim_renewed', agentId, String(row.id), {
+    ...evidence,
+    surface: 'cli.send.explicit_close',
+  })
+  const updated = await db.query(
+    `UPDATE message_queue
+        SET claim_expires_at = $1,
+            claimed_at = COALESCE(claimed_at, now())
+      WHERE id = $2
+        AND agent_id = $3
+        AND claimed_by = $3
+        AND status IN ('received', 'in_progress')
+      RETURNING id`,
+    [newClaimExpiresAt, row.id, agentId],
+  )
+  if (updated.rows.length !== 1) {
+    throw new Error(`RACE: queue_id=${row.id} changed before claim renewal`)
+  }
+  return evidence
+}
+
+async function loadReplyCloseReplay(
+  db: Client,
+  row: ExplicitReplyQueueRow,
+  agentId: string,
+): Promise<
+  | { kind: 'idempotent'; response: Record<string, unknown> }
+  | { kind: 'terminal'; response: Record<string, unknown> }
+  | { kind: 'ambiguous'; response: Record<string, unknown> }
+> {
+  if (!row.replied_with) {
+    if (row.status === 'replied') {
+      return {
+        kind: 'ambiguous',
+        response: {
+          code: 'RECONCILE_REQUIRED',
+          detail: 'queue row is replied but missing replied_with evidence',
+          queue_id: row.id,
+          message_id: replyToForQueueRow(row),
+          status: row.status,
+        },
+      }
+    }
+    return {
+      kind: 'terminal',
+      response: {
+        code: 'ALREADY_CLOSED',
+        detail: `queue row is already terminal (${row.status})`,
+        queue_id: row.id,
+        message_id: replyToForQueueRow(row),
+        status: row.status,
+        replied_with: null,
+      },
+    }
+  }
+
+  const replyRows = await db.query<{
+    id: string
+    channel_id: string | null
+    author_id: string | null
+    reply_to: string | null
+  }>(
+    `SELECT id, channel_id, author_id, reply_to
+       FROM agent_messages
+      WHERE id = $1
+      LIMIT 1`,
+    [row.replied_with],
+  )
+  const outboundRows = await db.query<{ id: number | string; status: string }>(
+    `SELECT id, status
+       FROM outbound_queue
+      WHERE message_id = $1
+      ORDER BY created_at ASC, id ASC
+      LIMIT 10`,
+    [row.replied_with],
+  )
+  const reply = replyRows.rows[0] ?? null
+  const originalMessageId = replyToForQueueRow(row)
+  const replyMatchesQueue = !!reply
+    && reply.author_id === agentId
+    && (!originalMessageId || reply.reply_to === originalMessageId)
+
+  if (row.status === 'replied' && replyMatchesQueue) {
+    return {
+      kind: 'idempotent',
+      response: {
+        ok: true,
+        code: 'IDEMPOTENT_REPLY_CLOSE',
+        idempotent: true,
+        queue_id: row.id,
+        message_id: originalMessageId,
+        replied_with: row.replied_with,
+        outbound_message_id: row.replied_with,
+        work_closed: true,
+        close_mode: 'idempotent',
+        evidence: {
+          queue_status: row.status,
+          reply_message_present: true,
+          outbound_queue_count: outboundRows.rows.length,
+        },
+      },
+    }
+  }
+
+  return {
+    kind: 'ambiguous',
+    response: {
+      code: 'RECONCILE_REQUIRED',
+      detail: 'queue row has prior reply/outbound evidence that cannot be replayed safely',
+      queue_id: row.id,
+      message_id: originalMessageId,
+      status: row.status,
+      replied_with: row.replied_with,
+      evidence: {
+        reply_message_present: !!reply,
+        reply_message_matches_queue: replyMatchesQueue,
+        outbound_queue_count: outboundRows.rows.length,
+      },
+    },
+  }
+}
+
 function getRawDbAdapter(db: Client): DbAdapter | null {
   return (db as Client & { __adapter?: DbAdapter }).__adapter ?? null
 }
@@ -2618,10 +2832,11 @@ async function sendMessage(args: string[]) {
         reply_to: string         // agent_messages.id of the original
         channel_id: string
         thread_id: string | null
-        queue_id: number         // message_queue.id
+        queue_id: number | string // message_queue.id
       }
       let target: Target | null = null
       const explicitClose = !!queueIdRaw || !!messageIdRaw
+      let claimRenewalEvidence: ClaimRenewalEvidence | null = null
 
       if (explicitClose) {
         let qres
@@ -2656,7 +2871,7 @@ async function sendMessage(args: string[]) {
           })
         }
 
-        const qrow = qres.rows[0]
+        const qrow = qres.rows[0] as ExplicitReplyQueueRow
         if (messageIdRaw && qrow.message_id !== messageIdRaw) {
           writeFailureJson('QUEUE_MESSAGE_MISMATCH', 'queue_id and message_id identify different messages', {
             queue_id: qrow.id,
@@ -2670,23 +2885,63 @@ async function sendMessage(args: string[]) {
             message_id: qrow.message_id,
           })
         }
-        if (['replied', 'skipped', 'failed'].includes(qrow.status)) {
-          writeFailureJson('ALREADY_CLOSED', `queue row is already terminal (${qrow.status})`, {
-            queue_id: qrow.id,
-            message_id: qrow.message_id,
-            replied_with: qrow.replied_with ?? null,
-          })
+        if (qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) {
+          const replay = await loadReplyCloseReplay(db, qrow, agentId)
+          if (replay.kind === 'idempotent') {
+            await db.query('COMMIT')
+            committed = true
+            process.stdout.write(JSON.stringify(replay.response) + '\n')
+            return
+          }
+          const response = replay.response
+          writeFailureJson(
+            String(response.code),
+            String(response.detail ?? `queue row is already terminal (${qrow.status})`),
+            response,
+          )
         }
-        if (qrow.status === 'received' && qrow.claimed_by && qrow.claimed_by !== agentId) {
+        if (ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is actively claimed by ${qrow.claimed_by}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
             claimed_by: qrow.claimed_by,
           })
         }
+        if (
+          ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) &&
+          qrow.claimed_by === agentId &&
+          (dateMs(qrow.claim_expires_at) === null || dateMs(qrow.claim_expires_at)! <= Date.now())
+        ) {
+          if (!queueIdRaw) {
+            writeFailureJson('QUEUE_ID_REQUIRED_FOR_RENEWAL', 'expired same-owner claim renewal requires explicit --queue-id', {
+              queue_id: null,
+              message_id: qrow.message_id,
+              status: qrow.status,
+              claimed_by: qrow.claimed_by,
+              claim_expires_at: normalizeDateString(qrow.claim_expires_at),
+            }, 2)
+          }
+          claimRenewalEvidence = await renewSameOwnerClaimForReplyClose(db, qrow, agentId)
+          qrow.claim_expires_at = claimRenewalEvidence.new_claim_expires_at
+        }
+        if (!ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
+          writeFailureJson('INVALID_STATE', `queue row status=${qrow.status}; expected received|in_progress for explicit close`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            status: qrow.status,
+            claimed_by: qrow.claimed_by,
+          })
+        }
+        if (qrow.claimed_by !== agentId) {
+          writeFailureJson('NOT_CLAIM_OWNER', `queue row is not actively claimed by ${agentId}`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            status: qrow.status,
+            claimed_by: qrow.claimed_by,
+          })
+        }
 
-        let payload: Record<string, any> = {}
-        try { payload = JSON.parse(qrow.payload) } catch {}
+        const payload = parseQueuePayloadLoose(qrow.payload)
         const replyTo = qrow.message_id ?? payload.message_id
         const channelId = payload.channel_id
         if (!replyTo || !channelId) {
@@ -3173,6 +3428,7 @@ async function sendMessage(args: string[]) {
         work_closed: workClosed,
         close_mode: workClosed ? (explicitClose || closeRequested ? 'explicit' : 'active_claim') : 'none',
         queue_id: target.queue_id,
+        ...(claimRenewalEvidence ? { claim_renewal: claimRenewalEvidence } : {}),
         ...(conversationControlPlaneSummary ? { conversation_control_plane: conversationControlPlaneSummary } : {}),
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
