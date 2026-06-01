@@ -1,0 +1,250 @@
+# AUN Typed Completion Outcome Contract
+
+> Status: proposed
+> Slice: CP-60 typed outcomes and lifecycle view
+> Last updated: 2026-06-01
+
+## Purpose
+
+AUN must not infer lifecycle state from free-form runtime prose.
+
+CP-40 claims exactly one queue row and normalizes runtime adapter invocation.
+CP-50A records a durable agent turn before runtime launch. CP-60 defines the
+typed completion outcome that closes the turn and tells deterministic
+control-plane code what lifecycle action is allowed next.
+
+Without a typed outcome, a runtime can appear to be finished while the queue row,
+baton, reply, retry, or handoff state remains ambiguous. That ambiguity is what
+creates stranded `done` rows, repeated acknowledgements, duplicate handoffs, and
+operator-only recovery work.
+
+## Terms
+
+| Term | Meaning |
+|---|---|
+| completion outcome | Durable typed result produced by a runtime adapter or completion parser for one agent turn. |
+| lifecycle action | Deterministic queue/baton/outbound transition selected from the typed outcome. |
+| reply outcome | Outcome that sends an outbound response and terminalizes the original work. |
+| no-reply outcome | Outcome that intentionally terminalizes work without outbound response. |
+| handoff outcome | Outcome that transfers the current baton to another responsible agent. |
+| escalation outcome | Outcome that creates a typed child request with parent evidence. |
+| retry outcome | Outcome that keeps or returns work to a reclaimable state under bounded policy. |
+| quarantine outcome | Outcome that blocks automatic processing until repair or operator action. |
+
+The runtime may draft natural-language content. It must not directly update
+queue, baton, turn, retry, or quarantine state.
+
+## Product Invariants
+
+1. Every completed turn must have exactly one durable completion outcome.
+2. The outcome must reference one `turn_id`, one `queue_id`, and one
+   `message_id`.
+3. The outcome must match the active baton/conversation when those identifiers
+   are available.
+4. Free-form runtime text is evidence only; it is not the lifecycle decision.
+5. `reply`, `no_reply`, `handoff`, `escalate`, `retry`, and `quarantine` are
+   mutually exclusive terminal parser decisions for one turn.
+6. `reply` must not be marked final until outbound send succeeds or a typed
+   send-failure policy is recorded.
+7. `no_reply` must include an explicit reason code and terminal policy.
+8. `handoff` and `escalate` must include typed target and parent/child evidence.
+9. `retry` must include bounded retry policy and cannot loop indefinitely.
+10. `quarantine` must fail closed and must block scheduler activation for that
+    work until repaired.
+11. A completion outcome cannot be changed after lifecycle application except
+    by a compensating audit event.
+12. LLM output cannot close a baton, transfer ownership, retry, or quarantine
+    work without deterministic code applying the typed outcome.
+
+## Required Data Shape
+
+Implementation may add a dedicated result table, extend an existing audit/result
+table, or store typed JSON behind a stable schema. It must represent this common
+shape:
+
+```ts
+type CompletionOutcomeBase = {
+  result_id: string
+  turn_id: string
+  queue_id: string
+  message_id: string
+  agent_id: string
+  runtime_kind: 'codex' | 'claude' | 'openclaw' | 'other'
+  conversation_id: string | null
+  baton_id: string | null
+  outcome_kind: CompletionOutcomeKind
+  parser_version: string
+  raw_runtime_output_ref: string | null
+  created_at: string
+  applied_at: string | null
+  failure_code: string | null
+  failure_detail: string | null
+}
+
+type CompletionOutcomeKind =
+  | 'reply'
+  | 'no_reply'
+  | 'handoff'
+  | 'escalate'
+  | 'retry'
+  | 'quarantine'
+```
+
+Typed variants:
+
+```ts
+type ReplyOutcome = CompletionOutcomeBase & {
+  outcome_kind: 'reply'
+  reply_body: string
+  reply_format: 'plain_text' | 'markdown'
+  source_queue_id: string
+  closes_baton: boolean
+}
+
+type NoReplyOutcome = CompletionOutcomeBase & {
+  outcome_kind: 'no_reply'
+  reason_code: string
+  closes_baton: true
+}
+
+type HandoffOutcome = CompletionOutcomeBase & {
+  outcome_kind: 'handoff'
+  target_agent_id: string
+  handoff_reason_code: string
+  handoff_instruction: string
+  transfer_current_baton: true
+}
+
+type EscalationOutcome = CompletionOutcomeBase & {
+  outcome_kind: 'escalate'
+  target_agent_id: string
+  child_request_id: string
+  parent_conversation_id: string
+  parent_baton_id: string
+  child_instruction: string
+}
+
+type RetryOutcome = CompletionOutcomeBase & {
+  outcome_kind: 'retry'
+  retry_reason_code: string
+  retry_after_ms: number
+  max_attempts: number
+  attempt_number: number
+}
+
+type QuarantineOutcome = CompletionOutcomeBase & {
+  outcome_kind: 'quarantine'
+  quarantine_reason_code: string
+  operator_action: string
+  blocks_scheduler_activation: true
+}
+```
+
+Rules:
+
+- `result_id` is generated by deterministic runner code or a trusted parser.
+- `turn_id`, `queue_id`, `message_id`, and `agent_id` must match the active
+  turn ledger row.
+- `conversation_id` and `baton_id` are nullable only while earlier slices have
+  not populated them.
+- `raw_runtime_output_ref` may point to stored stdout/transcript evidence. It is
+  never parsed later as the source of lifecycle truth.
+- `applied_at` is null until the completion runner applies the lifecycle action.
+- implementation must reject multiple active/unapplied outcomes for the same
+  `turn_id`.
+
+## Lifecycle Application
+
+The completion runner applies typed outcomes as deterministic actions:
+
+| Outcome | Required action |
+|---|---|
+| `reply` | send outbound response with `source_queue_id`, then terminalize queue row and close/retain baton according to typed policy. |
+| `no_reply` | terminalize queue row without outbound response and close baton with explicit reason. |
+| `handoff` | transfer current baton to `target_agent_id` and create auditable handoff evidence. |
+| `escalate` | create a child request/conversation with parent links; do not infer fanout from mentions or transport chunks. |
+| `retry` | make work reclaimable under bounded retry policy; do not immediately loop the same runtime without policy evidence. |
+| `quarantine` | mark work blocked, write repair evidence, and prevent scheduler activation for that work. |
+
+The runner must close the CP-50A turn after recording the outcome and before
+starting a new turn for the same queue row or baton.
+
+## Failure Codes
+
+| Code | Meaning |
+|---|---|
+| `COMPLETION_OUTCOME_REQUIRED` | Turn completed without a durable typed outcome. |
+| `COMPLETION_ALREADY_FINALIZED` | A lifecycle action was already applied for this turn/result. |
+| `COMPLETION_TURN_MISMATCH` | Outcome does not match the active turn ledger row. |
+| `COMPLETION_QUEUE_MISMATCH` | Outcome queue/message/agent tuple does not match claimed work. |
+| `COMPLETION_BATON_MISMATCH` | Outcome baton does not match current active baton. |
+| `COMPLETION_OUTCOME_CONFLICT` | Multiple mutually exclusive outcomes were produced for one turn. |
+| `COMPLETION_REPLY_BODY_REQUIRED` | Reply outcome has no reply body. |
+| `COMPLETION_NO_REPLY_REASON_REQUIRED` | No-reply outcome lacks explicit reason code. |
+| `COMPLETION_HANDOFF_TARGET_REQUIRED` | Handoff outcome lacks target agent or instruction. |
+| `COMPLETION_CHILD_REQUEST_REQUIRED` | Escalation outcome lacks typed child request evidence. |
+| `COMPLETION_RETRY_POLICY_REQUIRED` | Retry outcome lacks bounded retry policy. |
+| `COMPLETION_QUARANTINE_REASON_REQUIRED` | Quarantine outcome lacks reason or repair action. |
+| `COMPLETION_SEND_FAILED` | Reply outcome could not be projected to outbound surface. |
+
+## Audit Evidence
+
+Every completion outcome and lifecycle application must write audit evidence
+with:
+
+- `result_id`
+- `turn_id`
+- `queue_id`
+- `message_id`
+- `agent_id`
+- `runtime_kind`
+- `conversation_id` and `baton_id` or null
+- `outcome_kind`
+- parser version
+- raw output reference or null
+- previous and next queue state
+- previous and next baton owner/state when changed
+- outbound message id or send failure code for reply outcomes
+- retry attempt/deadline for retry outcomes
+- parent/child request ids for escalation outcomes
+- failure code/detail when present
+
+## Tests Required For Implementation
+
+Implementation PRs must include focused coverage for:
+
+1. completion runner rejects turn completion with no typed outcome.
+2. one turn cannot record two mutually exclusive outcomes.
+3. outcome `turn_id` / `queue_id` / `message_id` / `agent_id` mismatch fails
+   closed.
+4. reply outcome requires a non-empty body and `source_queue_id`.
+5. reply outcome is not final until outbound send succeeds or
+   `COMPLETION_SEND_FAILED` is recorded.
+6. no-reply outcome requires explicit reason code and closes the baton with
+   audit evidence.
+7. handoff outcome requires target agent and transfer evidence.
+8. escalation outcome requires typed child request and parent links.
+9. retry outcome requires bounded attempt/backoff policy.
+10. quarantine outcome blocks scheduler activation for that work.
+11. raw runtime prose without typed parser result cannot mutate queue/baton
+    state.
+12. completion outcome links back to the CP-50A turn ledger row.
+
+## Non-Goals
+
+- This contract does not implement the completion runner.
+- This contract does not require a specific database table name.
+- This contract does not define provider-specific outbound projection.
+- This contract does not activate state_daemon scheduling.
+- This contract does not replace the CP-40C child-request constraints.
+
+## Acceptance Criteria
+
+CP-60 is complete when:
+
+- every completed turn has one durable typed outcome
+- deterministic code, not runtime prose, applies reply/no-reply/handoff/
+  escalation/retry/quarantine lifecycle actions
+- reply send success/failure is auditable before terminalization
+- retry and quarantine cannot loop silently
+- outcome evidence links queue, baton, turn, outbound, and audit records

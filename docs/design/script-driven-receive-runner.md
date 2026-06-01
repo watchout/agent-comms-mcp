@@ -137,19 +137,25 @@ Behavior:
 
 ### Completion Runner
 
+Detailed typed outcome contract:
+[`../spec/aun-typed-completion-outcome-contract.md`](../spec/aun-typed-completion-outcome-contract.md).
+
 Input: runtime result and claim identity
 
 Behavior:
 
-- call `done` when runtime processing has completed and a final response
-  decision is ready to be applied
-- if the result contains a reply, call `send` after `done` and close as
-  `replied`
-- if the result is explicitly no-reply, close through the approved no-reply
-  policy defined by the implementation PR; the row must not remain active
-  indefinitely
-- if the runtime fails, leave the row in a reclaimable active state and emit an
-  auditable error/alert according to the v0.9 failure policy
+- record one durable typed completion outcome for the active turn
+- reject free-form runtime prose that cannot be parsed into a typed outcome
+- apply reply/no-reply/handoff/escalate/retry/quarantine through deterministic
+  code, not through runtime-authored lifecycle commands
+- if the outcome is `reply`, send with the original `source_queue_id` and close
+  only after outbound success or typed send-failure evidence
+- if the outcome is `no_reply`, close through an explicit reason code and audit
+  event; the row must not remain active indefinitely
+- if the outcome is `handoff` or `escalate`, transfer/create baton or child
+  request with typed target and parent evidence
+- if the outcome is `retry` or `quarantine`, keep the work recoverable or
+  blocked under bounded, auditable policy
 
 `failed` and `skipped` are legacy vocabulary in the v0.9 receive path. New
 runner code must not introduce new `failed` or `skipped` transitions as the

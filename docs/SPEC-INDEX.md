@@ -27,6 +27,7 @@
 | spec/aun-runtime-runner-adapter-contract.md | CP-40B implementation contract | Codex/Claudeなどruntime差分をadapter境界へ閉じ込め、exact queue_id・queue/baton context・typed runner resultを共通化する契約 | 2026-06-01 |
 | spec/aun-canonical-message-presentation-contract.md | proposed | transport chunkや長文分割を複数runtime taskにしないcanonical message presentation契約 | 2026-06-01 |
 | spec/aun-agent-turn-ledger-contract.md | proposed | runtime起動前にqueue/baton/lease/heartbeat/deadlineをdurable turn evidenceとして記録するCP-50A契約 | 2026-06-01 |
+| spec/aun-typed-completion-outcome-contract.md | proposed | runtime proseからlifecycleを推測せず、reply/no-reply/handoff/escalate/retry/quarantineをtyped outcomeで適用するCP-60契約 | 2026-06-01 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -141,6 +142,14 @@
 - `received -> in_progress` は turn row 作成後、runtime adapter起動前に実行する
 - stale turn recovery は既存turnを`stale_reclaimed`または`quarantined`へ閉じてから新turnを作る
 - `worker_activity`はoperator visibilityであり、必須field/invariantを満たさない限りturn ledgerの代替にしない
+
+### spec/aun-typed-completion-outcome-contract.md（Typed Completion Outcome Contract）
+- CP-60としてruntime free-form proseからqueue/baton lifecycleを推測しない不変条件を固定する
+- completion outcomeは`turn_id`、`queue_id`、`message_id`、`agent_id`、runtime kind、conversation/batonを持つdurable typed resultにする
+- `reply`、`no_reply`、`handoff`、`escalate`、`retry`、`quarantine`を相互排他的なoutcomeとして定義する
+- replyはoutbound send成功またはtyped send failure evidenceなしにterminal扱いしない
+- no-reply/handoff/escalate/retry/quarantineはそれぞれreason、target、child request、bounded retry、repair actionを必須にする
+- completion runnerはtyped outcomeを適用し、runtime proseにqueue close、baton transfer、retry、quarantineを直接決めさせない
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
