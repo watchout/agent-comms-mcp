@@ -117,12 +117,14 @@ describe('T4 — MCP next tool exists in server.ts (spec §4.1)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T5: send tool pushTargets loop writes ONLY to message_queue (no legacy)
+// T5: send tool queuePushTargets loop writes ONLY to message_queue (no legacy)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('T5 — send tool pushTargets loop is queue-only (no legacy push)', () => {
   test('pushTargets loop INSERTs into message_queue', () => {
-    // Find the pushTargets loop
-    const header = 'for (const recipient of delivery.pushTargets) {'
+    // Find the queuePushTargets loop. CP-40C filters projection-only
+    // transport fragments before queue fanout.
+    expect(SERVER_SRC).toContain('const queuePushTargets = parts.length > 1 && partIdx > 0 ? [] : delivery.pushTargets')
+    const header = 'for (const recipient of queuePushTargets) {'
     const start = SERVER_SRC.indexOf(header)
     expect(start).toBeGreaterThan(-1)
     let depth = 0
