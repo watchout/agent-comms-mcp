@@ -26,6 +26,7 @@
 | spec/aun-send-notify-owner-observer-contract.md | proposed | send/notifyを1 active owner + cc/fyi observerに固定し、multi-active fanoutを禁止するSlice 2実装契約 | 2026-05-31 |
 | spec/aun-runtime-runner-adapter-contract.md | CP-40B implementation contract | Codex/Claudeなどruntime差分をadapter境界へ閉じ込め、exact queue_id・queue/baton context・typed runner resultを共通化する契約 | 2026-06-01 |
 | spec/aun-canonical-message-presentation-contract.md | proposed | transport chunkや長文分割を複数runtime taskにしないcanonical message presentation契約 | 2026-06-01 |
+| spec/aun-agent-turn-ledger-contract.md | proposed | runtime起動前にqueue/baton/lease/heartbeat/deadlineをdurable turn evidenceとして記録するCP-50A契約 | 2026-06-01 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -132,6 +133,14 @@
 - receive runnerは`queue_id` claim後にfragment groupを検証し、runtimeには1つのcanonical bodyだけを渡す
 - incomplete/conflicting groupは`PRESENTATION_GROUP_INCOMPLETE`や`PRESENTATION_GROUP_CONFLICT`でfail closedする
 - deliberate fanoutはtransport chunkから推論せず、parent/child linkを持つtyped child requestだけで扱う
+
+### spec/aun-agent-turn-ledger-contract.md（Agent Turn Ledger Contract）
+- CP-50Aとしてruntime invocation前にdurable turn rowを作成する不変条件を固定する
+- turn rowは`queue_id`、`message_id`、`agent_id`、runtime kind、lease/fencing token、heartbeat/deadline、conversation/batonを記録する
+- 1 queue row / 1 active baton に対して active turn は高々1つにする
+- `received -> in_progress` は turn row 作成後、runtime adapter起動前に実行する
+- stale turn recovery は既存turnを`stale_reclaimed`または`quarantined`へ閉じてから新turnを作る
+- `worker_activity`はoperator visibilityであり、必須field/invariantを満たさない限りturn ledgerの代替にしない
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
