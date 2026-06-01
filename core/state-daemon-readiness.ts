@@ -542,6 +542,9 @@ function smokePassed(row: SmokeQueueRow, agentLastWakeAttemptAt: string | null, 
   if (agentLastWakeAttemptAt && new Date(agentLastWakeAttemptAt).getTime() >= new Date(insertedAt).getTime()) {
     evidence.push('agents.last_wake_attempt_at advanced')
   }
+  if (row.status === 'pending' && !rowWake && !agentLastWakeAttemptAt) {
+    evidence.push('message_queue row visible; TUI wake prompt injection disabled')
+  }
   return evidence
 }
 
@@ -575,7 +578,7 @@ export async function buildQueueWakeSmokeReport(db: DbAdapter, options: QueueWak
   report.run_id = runId
   report.smoke.message_id = messageId
   report.smoke.inserted_at = insertedAt
-  const content = `State-daemon queue wake smoke ${runId}. If received, call processing then done for this queue_id; do not reply.`
+  const content = `State-daemon queue visibility smoke ${runId}. No runtime action or tool call is requested.`
   let queueId: string | null = null
   try {
     await db.transaction(async (tx) => {
@@ -648,7 +651,7 @@ export async function buildQueueWakeSmokeReport(db: DbAdapter, options: QueueWak
   report.ok = false
   report.result = 'timeout'
   report.smoke.completed_at = new Date(nowMs()).toISOString()
-  report.smoke.evidence.push('bounded poll timed out before wake evidence advanced')
+  report.smoke.evidence.push('bounded poll timed out before queue visibility or wake-disabled evidence')
   await recordSmokeAudit(db, report)
   return report
 }

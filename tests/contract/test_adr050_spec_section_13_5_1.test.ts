@@ -1,13 +1,12 @@
 /**
- * ADR-050 fixture (6c) — spec §13.5.1 normative statement is state-daemon
- * (current SSOT primary after the 2026-05-14 rename `wake-daemon` →
- * `state-daemon`). This assertion targets the rename-後 current SSOT name,
- * not the legacy historical name. Legacy `wake-daemon` references survive
- * only in ADR-050 Terminology / Migration history / Changelog / Fixture
- * history context (see ADR-050 top §Terminology).
+ * ADR-050 fixture (6c) — spec §13.5.1 normative statement remains
+ * state-daemon primary, but CP-70/CP-80 supersedes TUI prompt injection as
+ * the wake mechanism. This assertion targets the current SSOT behaviour, not
+ * the legacy historical prompt-wake implementation.
  *
  * Reads docs/agent-com-message-queue-spec.md and asserts:
- *   - §13.5.1 declares "Primary: state-daemon" (with tmux send-keys reference)
+ *   - §13.5.1 declares "Primary: state-daemon" typed observation / approved runner
+ *   - the section rejects tmux prompt injection for TUI lifecycle work
  *   - the normative section (everything before "## 改訂履歴") contains 0
  *     occurrences of the legacy API tokens (UnixSignalBus / waitForSignal /
  *     bus.signal). The Changelog history section retains the original
@@ -34,8 +33,8 @@ function normativeSection(spec: string): string {
   return spec.slice(0, idx)
 }
 
-describe('ADR-050 §6c — spec §13.5.1 primary is state-daemon (current SSOT after rename)', () => {
-  test('§13.5.1 declares Primary: state-daemon (tmux send-keys)', () => {
+describe('ADR-050 §6c — spec §13.5.1 primary is state-daemon typed observation', () => {
+  test('§13.5.1 declares Primary: state-daemon typed observation / approved runner', () => {
     const spec = loadSpec()
     // Find the section header
     const header = spec.indexOf('### 13.5.1 メッセージ配信メカニズム')
@@ -45,8 +44,13 @@ describe('ADR-050 §6c — spec §13.5.1 primary is state-daemon (current SSOT a
     const nextSection = tail.search(/\n##+ /m)
     const section = nextSection > 0 ? tail.slice(0, nextSection) : tail
 
-    expect(section).toMatch(/Primary:\s*state-daemon/)
-    expect(section).toMatch(/tmux send-keys/)
+    expect(section).toMatch(/Primary:\s*state-daemon typed observation \/ approved runner/)
+    expect(section).toMatch(/typed evidence/)
+    expect(section).toMatch(/approved runner/)
+    expect(section).toMatch(/fail-closed\/no-op/)
+    expect(section).toMatch(/TUI runtime/)
+    expect(section).not.toMatch(/prompt を注入/)
+    expect(section).not.toMatch(/prompt を受領/)
     expect(section).not.toMatch(/UnixSignalBus/)
     expect(section).not.toMatch(/waitForSignal/)
     expect(section).not.toMatch(/bus\.signal/)

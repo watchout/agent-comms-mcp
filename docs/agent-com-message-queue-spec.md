@@ -1323,13 +1323,14 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 
 ### 13.5.1 メッセージ配信メカニズム
 
-メッセージ配信は 3 層構造。**primary (state-daemon) → secondary (MCP notification) → fallback (polling)** の順に作用する。ADR-050 (2026-05-05) により、primary は state-daemon (tmux send-keys) に整合化された。
+メッセージ配信は 3 層構造。**primary (state-daemon typed observation / approved runner) → secondary (MCP notification) → fallback (polling)** の順に作用する。ADR-050 (2026-05-05) の state-daemon primary 方針は維持するが、CP-70/CP-80 以降、state-daemon の TUI prompt injection wake は廃止する。
 
-**Primary: state-daemon tmux send-keys (§13.1)**
+**Primary: state-daemon typed observation / approved runner (§13.1)**
 
-- 外部プロセス `bin/state-daemon.ts` が `message_queue` を polling し、新規 row 検出時に対象 bot の tmux session に `tmux send-keys` で prompt を注入
-- bot 側 LLM agent (Claude Code / Codex / Gemini) は prompt を受領して `next` tool を能動呼出
-- DB 機能に非依存、PG / SQLite 共通、LLM-agnostic
+- 外部プロセス `bin/state-daemon.ts` が `message_queue` を LISTEN / sweep で観測し、planner action と metrics に typed evidence を記録する
+- 承認済み runner path が設定された runtime のみ、queue_id 指定の typed runner invocation を起動できる
+- TUI runtime では `tmux send-keys` による自然言語 prompt 注入で `next` / `processing` / `done` tool 呼出を依頼しない
+- 承認済み runner path がない場合は fail-closed/no-op とし、queue row は visibility/repair 用に open のまま保持する
 - state-daemon 不通 / tmux session 不在時は non-fatal (次層にフォールバック)
 - state-daemon の HA / supervisor は ADR-051 で別途扱う
 
@@ -1342,13 +1343,13 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 - 現時点では Claude Code 未対応 (§13.5 既知制約)。対応クライアントで state-daemon を補助する位置づけ
 - pending 0 のときは送信しない。送信失敗時 (transport 断、client 未対応等) も polling は継続 (non-fatal)
 
-**Fallback: Polling (bot LLM judgement)**
+**Fallback: Polling (bot/client schedule)**
 
-- bot 側 LLM agent が state-daemon prompt を受領しなくても、定期的に `next` tool を能動呼出 (LLM 内部 judgement、prompt の指示等)
+- bot 側 client / operator が設定した polling cadence で `next` tool を呼び出す
 - state-daemon / notification が全て失敗しても最終的にメッセージ取得
 - `AGENT_COM_POLL_INTERVAL_MS` は polling driver 側の pre-fetch 間隔 (§13.5 参照)
 
-§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分は secondary として実装済み (message 本体は依然 `next` pull 一択、spec §4.1)。**primary は state-daemon** で LLM agent (Claude Code / Codex / Gemini) 環境向けの配信を実現する。
+§13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分は secondary として実装済み (message 本体は依然 `next` pull 一択、spec §4.1)。**primary は state-daemon** だが、LLM TUI への自然言語 prompt 注入ではなく typed observation / approved runner に限定する。
 
 ### 13.6 Presence Client
 

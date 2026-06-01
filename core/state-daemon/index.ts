@@ -36,7 +36,6 @@ import {
   DEFAULT_CONFIG,
   loadGcOverridesFromEnv,
   DBConnectionError,
-  TmuxSendKeysError,
   type AlertSink,
   type Clock,
   type CodexRunnerInvoker,
@@ -71,8 +70,6 @@ import { planQueueAction, type PlannedQueueAction } from './action-planner'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
-const WAKE_PENDING_PROMPT = 'Call the agent-comms next tool now. Do not call inbox.\n'
-const WAKE_RECEIVED_PROMPT = 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id. After completing the work, either send a reply if one is required or call the agent-comms done tool for the same queue_id if no reply is required. Do not stop after processing. Do not call inbox or next.\n'
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
@@ -121,28 +118,15 @@ export class StateDaemon {
   private readonly config: StateDaemonConfig
   private readonly wakePool: WakePool
   // v0.9 sub-PR 2: wake-time stall gate (§1.3a 3-layer abstraction). Sits
-  // BEFORE the per-bot suppression query inside runWakeIfNotSuppressed; if
-  // it returns a non-empty verdict array, wake is skipped and a metric is
-  // emitted tagged with the verdict kind.
+  // before queue action execution; if it returns a non-empty verdict array,
+  // wake is skipped and a metric is emitted tagged with the verdict kind.
   private readonly stallDetector: StallDetector = createDefaultStallDetector()
 
   private status: 'stopped' | 'running' | 'stopping' = 'stopped'
   private dbErrorStreak = 0
   private readonly restartHistory = new Map<string, RestartRecord>()
-  private readonly inflightWakes = new Set<Promise<void>>()
+  private readonly inflightWakes = new Set<Promise<boolean>>()
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
-
-  /**
-   * §10.3 / R9 abnormal activity rolling window. Per agent, keeps a list of
-   * recent dispatch timestamps; when the count within
-   * `abnormalActivityWindowMs` reaches `abnormalActivityThreshold` we inc
-   * `state_daemon_abnormal_activity_total{agent_id, kind='dispatch'}` and
-   * fire an operator alert. Reactive control — wake itself still happens
-   * (= 「出てから制御」 spirit, F1).
-   */
-  private readonly dispatchHistory = new Map<string, Date[]>()
-  /** One-shot per-agent latch so we don't re-alert on every event past threshold. */
-  private readonly abnormalAlerted = new Set<string>()
 
   constructor(deps: StateDaemonDeps) {
     this.db = deps.db
@@ -252,8 +236,8 @@ export class StateDaemon {
 
   /**
    * Process a single pg_notify event. Re-fetches the row to avoid stale
-   * snapshots, then dispatches per §4.3 (typically row 1 — new pending → wake).
-   * Other rows fall through to sweepStale, which is the SoT for batch.
+   * snapshots, then records/runs the typed action per §4.3. Other rows fall
+   * through to sweepStale, which is the SoT for batch.
    */
   async handleQueueEvent(event: QueueEvent): Promise<void> {
     if (this.status !== 'running') return
@@ -271,42 +255,9 @@ export class StateDaemon {
     if (!row) return // row may have been deleted
 
     if (row.status === 'pending' || row.status === 'received') {
-      // Cycle 2 fix (auditor Axis 1+3): abnormal-activity recording must
-      // happen AFTER the runtime gate so non-TUI rows (e.g. CEO's Discord
-      // human account) cannot trip the threshold + alert. The recording
-      // moved into `executeWake` where it sits behind the TUI guard.
-      await this.runWakeIfNotSuppressed(row, /* dedupResult */ 'dedup_skipped')
+      await this.runWakeIfNotSuppressed(row)
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
-  }
-
-  /**
-   * §10.3 / R9 abnormal activity detection (auditor cycle 1 Axis 1). Counts
-   * dispatch events per agent in a rolling window; on threshold cross, emit
-   * one alert + metric (latched to avoid alert flooding). Reset when the
-   * agent's window quietens (count drops below threshold).
-   */
-  private recordDispatchForAbnormalCheck(agentId: string): void {
-    const now = this.clock.now()
-    const windowStart = now.getTime() - this.config.abnormalActivityWindowMs
-    const history = this.dispatchHistory.get(agentId) ?? []
-    const recent = history.filter((t) => t.getTime() > windowStart)
-    recent.push(now)
-    this.dispatchHistory.set(agentId, recent)
-
-    if (recent.length >= this.config.abnormalActivityThreshold) {
-      if (!this.abnormalAlerted.has(agentId)) {
-        this.metrics.inc('state_daemon_abnormal_activity_total', {
-          agent_id: agentId, kind: 'dispatch',
-        })
-        void this.alert.alert(
-          `${agentId} abnormal activity: ${recent.length} dispatches in window (= 5 min default), 5+ msg threshold tripped — operator review`,
-        )
-        this.abnormalAlerted.add(agentId)
-      }
-    } else {
-      this.abnormalAlerted.delete(agentId)
-    }
   }
 
   // ── Cron sweep (§4.3 row 2-6) ──────────────────────────────────────────────
@@ -334,7 +285,7 @@ export class StateDaemon {
       if (expired.some((e) => e.id === row.id)) continue
       result.scanned++
       if (row.status === 'received') {
-        const acted = await this.runWakeIfNotSuppressed(row, 'dedup_skipped')
+        const acted = await this.runWakeIfNotSuppressed(row)
         if (acted) result.rewoken++
       } else {
         this.recordQueueAction(this.planAction(row, null, true, this.clock.now()), row)
@@ -346,7 +297,7 @@ export class StateDaemon {
       // Skip if same row was already handled as received-expired this tick
       if (expired.some((e) => e.id === row.id)) continue
       result.scanned++
-      const acted = await this.runWakeIfNotSuppressed(row, 'dedup_skipped')
+      const acted = await this.runWakeIfNotSuppressed(row)
       if (acted) result.rewoken++
     }
 
@@ -527,23 +478,21 @@ export class StateDaemon {
     return result
   }
 
-  // ── Wake execution + duplicate suppression ─────────────────────────────────
+  // ── Wake execution + approved-runner duplicate suppression ─────────────────
 
   /**
-   * Attempt to wake a row. Returns `true` if a tmux send-keys was issued,
-   * `false` if duplicate-suppressed. Throws TmuxSendKeysError on tmux failure
-   * (caller decides recovery).
+   * Attempt to dispatch work. Returns `true` only when an approved runner path
+   * was invoked. TUI prompt injection is hard-disabled: natural-language wake
+   * rows are observed through metrics and left open for deterministic runners
+   * or explicit operator repair.
    */
-  private async runWakeIfNotSuppressed(
-    row: QueueRow,
-    dedupResultLabel: string,
-  ): Promise<boolean> {
+  private async runWakeIfNotSuppressed(row: QueueRow): Promise<boolean> {
     const now = this.clock.now()
-    // v0.9 sub-PR 2 §1.3a stall gate: evaluated before the per-bot
-    // suppression check. If any of the three layers reports a stall the
-    // wake is skipped; the existing sweep / heartbeat paths own the
-    // recovery action separately. The gate is fail-open: any unexpected
-    // error in detection logs and falls through to the suppression check.
+    // v0.9 sub-PR 2 §1.3a stall gate: evaluated before typed action
+    // execution. If any of the three layers reports a stall the wake is
+    // skipped; the existing sweep / heartbeat paths own the recovery action
+    // separately. The gate is fail-open: any unexpected error in detection
+    // logs and falls through to typed action execution.
     if (row.status === 'pending') {
       try {
         const verdicts = await this.evaluateStallGate(row, now)
@@ -560,11 +509,11 @@ export class StateDaemon {
       } catch (e) {
         this.metrics.inc('state_daemon_stall_detector_error_total', {})
         this.recordDbError(e)
-        // fail open into the wake reservation path.
+        // fail open into typed action execution.
       }
     }
     const runPromise = this.wakePool.run({
-      exec: () => this.executeWake(row, now, dedupResultLabel),
+      exec: () => this.executeWake(row, now),
     })
     this.inflightWakes.add(runPromise)
     try {
@@ -608,7 +557,6 @@ export class StateDaemon {
   private async executeWake(
     row: QueueRow,
     now: Date,
-    dedupResultLabel: string,
   ): Promise<boolean> {
     const { rows } = await this.dbQuery<AgentRow>(
       `SELECT agent_id, runtime, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
@@ -641,109 +589,11 @@ export class StateDaemon {
       return this.runObservedQueueAction(action, row)
     }
 
-    const reserved = action.kind === 'wake_pending'
-      ? await this.reservePendingWake(row, now, dedupResultLabel)
-      : await this.reserveReceivedWake(row, now, dedupResultLabel)
-    if (!reserved) return false
-
-    // R9 abnormal-activity recording sits AFTER the runtime gate and the
-    // per-bot reservation so only actual wake sends feed the rolling window.
-    this.recordDispatchForAbnormalCheck(row.agent_id)
-    try {
-      await this.tmux.sendKeys(bot!.tmux_session!, action.kind === 'wake_pending'
-        ? WAKE_PENDING_PROMPT
-        : WAKE_RECEIVED_PROMPT)
-    } catch (err) {
-      await this.releaseWakeReservation(action.kind, row, now)
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'tmux_error' })
-      throw new TmuxSendKeysError((err as Error).message ?? String(err))
-    }
-    // Pending keeps the row-level timestamp as audit/diagnostic compatibility.
-    // Its suppression SSOT is agents.last_wake_attempt_at; received prompts
-    // already reserved the specific claim row before sendKeys.
-    if (action.kind === 'wake_pending') {
-      await this.dbQuery(
-        `UPDATE message_queue SET last_wake_attempt_at=$1
-           WHERE agent_id=$2 AND status='pending'`,
-        [now, row.agent_id],
-      )
-    }
-    this.metrics.inc('state_daemon_wake_actions_total', { result: 'ok' })
-    return true
-  }
-
-  private async reservePendingWake(
-    row: QueueRow,
-    now: Date,
-    dedupResultLabel: string,
-  ): Promise<boolean> {
-    // Pending receive prompts are suppressed per agent so a burst of pending
-    // rows cannot fan out duplicate "next" prompts.
-    const reserved = await this.dbQuery(
-      `UPDATE agents
-          SET last_wake_attempt_at=$1
-        WHERE agent_id=$2
-          AND (
-            last_wake_attempt_at IS NULL
-            OR last_wake_attempt_at <= $1::timestamptz - ($3 || ' seconds')::interval
-          )`,
-      [now, row.agent_id, this.config.wakeDuplicateSuppressSec],
-    )
-    if (reserved.rowCount === 0) {
-      this.metrics.inc('state_daemon_wake_actions_total', { result: dedupResultLabel })
-      return false
-    }
-    return true
-  }
-
-  private async reserveReceivedWake(
-    row: QueueRow,
-    now: Date,
-    dedupResultLabel: string,
-  ): Promise<boolean> {
-    // A received prompt must be allowed immediately after the prior pending
-    // prompt. Suppress only repeated process-start prompts for this same
-    // claim, keyed by last_wake_attempt_at >= claimed_at.
-    const reserved = await this.dbQuery(
-      `UPDATE message_queue
-          SET last_wake_attempt_at=$1
-        WHERE id=$2
-          AND status='received'
-          AND (
-            last_wake_attempt_at IS NULL
-            OR claimed_at IS NULL
-            OR last_wake_attempt_at < claimed_at
-            OR last_wake_attempt_at <= $1::timestamptz - ($3 || ' seconds')::interval
-          )`,
-      [now, row.id, this.config.wakeDuplicateSuppressSec],
-    )
-    if (reserved.rowCount === 0) {
-      this.metrics.inc('state_daemon_wake_actions_total', { result: dedupResultLabel })
-      return false
-    }
-    return true
-  }
-
-  private async releaseWakeReservation(
-    actionKind: PlannedQueueAction['kind'],
-    row: QueueRow,
-    now: Date,
-  ): Promise<void> {
-    if (actionKind === 'wake_pending') {
-      await this.dbQuery(
-        `UPDATE agents SET last_wake_attempt_at=NULL
-          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
-        [row.agent_id, now],
-      )
-      return
-    }
-    if (actionKind === 'wake_received') {
-      await this.dbQuery(
-        `UPDATE message_queue SET last_wake_attempt_at=NULL
-          WHERE id=$1 AND last_wake_attempt_at=$2`,
-        [row.id, now],
-      )
-    }
+    this.metrics.inc('state_daemon_wake_actions_total', {
+      result: 'tui_wake_disabled',
+      action: action.kind,
+    })
+    return false
   }
 
   // ── State transition helpers (§4.3) ────────────────────────────────────────
@@ -759,8 +609,8 @@ export class StateDaemon {
       [row.id],
     )
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
-    // After reclaim, re-wake (T10 expects sendKeys 1).
-    await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null }, 'dedup_skipped')
+    // After reclaim, observe the pending row without prompt injection.
+    await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null })
   }
 
   private recordQueueAction(action: PlannedQueueAction, row: QueueRow): void {

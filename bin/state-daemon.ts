@@ -38,8 +38,6 @@ import type {
 
 const execFileAsync = promisify(execFile)
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-
 // ── DBClient (single connection for queries; LISTEN uses its own client) ─────
 class PgClientAdapter implements DBClient {
   private chain: Promise<void> = Promise.resolve()
@@ -91,26 +89,6 @@ class TmuxShellAdapter implements TmuxClient {
     } catch {
       return false
     }
-  }
-  async sendKeys(session: string, payload: string): Promise<void> {
-    // PR #335 hotfix (CTO directive d00d95b6, CEO 0cd1cfd6): tmux send-keys
-    // does NOT interpret an embedded LF inside the payload string as an
-    // Enter keypress. Empirical (CTO 2026-05-09): payload `'TEST\n'` is
-    // typed into the input field as text and no LLM turn ever starts. The
-    // earlier "no Enter literal needed" assumption (PR #330 cycle / Bug 1
-    // fallout) is wrong under tmux's default key syntax. Correct shape
-    // strips the trailing LF, clears any stale editor line, sends the prompt
-    // as literal text, then sends `Enter` in a second tmux call. Codex TUI can
-    // leave duplicate wake prompts in the editor when retries happen, so clear
-    // the line first and keep the submit keypress separate.
-    const stripped = payload.endsWith('\n') ? payload.slice(0, -1) : payload
-    await execFileAsync('tmux', ['send-keys', '-t', session, 'C-u'])
-    await sleep(100)
-    if (stripped.length > 0) {
-      await execFileAsync('tmux', ['send-keys', '-t', session, '-l', stripped])
-      await sleep(100)
-    }
-    await execFileAsync('tmux', ['send-keys', '-t', session, 'Enter'])
   }
   async restartSession(agentId: string): Promise<void> {
     // Existing launcher: scripts/restart-bot.sh is the repo-owned bot restart

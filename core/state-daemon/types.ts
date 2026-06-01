@@ -204,9 +204,6 @@ export class AlreadyStartedError extends Error {
 export class DBConnectionError extends Error {
   constructor(message: string, public cause?: unknown) { super(message) }
 }
-export class TmuxSendKeysError extends Error {
-  constructor(message: string) { super(message) }
-}
 export class WakePoolSaturatedError extends Error {
   constructor(message: string) { super(message) }
 }
@@ -230,7 +227,6 @@ export interface PgListenClient {
 
 export interface TmuxClient {
   sessionExists(session: string): Promise<boolean>
-  sendKeys(session: string, payload: string): Promise<void>
   /** §5.4 補強 #5 — restart launcher (existing `scripts/restart-bot.sh` hook). */
   restartSession(agentId: string): Promise<void>
 }

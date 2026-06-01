@@ -1,7 +1,8 @@
 /**
- * State-daemon m3 fixtures: T21-T26 (heartbeat / dead-bot restart / pool grow-shrink / abnormal activity).
+ * State-daemon m3 fixtures: T21-T26 (heartbeat / dead-bot restart / pool grow-shrink / TUI no-op observation).
  *
- * Covers the v0.3 補強 #1 / #2 / #5 paths and the §10.3 reactive control alert.
+ * Covers the v0.3 reinforcement paths plus the disabled TUI wake observation
+ * contract.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
@@ -460,14 +461,10 @@ describe('T25 wake_pool_shrink_on_idle', () => {
 })
 
 // ── T26 ───────────────────────────────────────────────────────────────────────
-describe('T26 abnormal_activity_alert (R9 daemon detection path)', () => {
-  test('threshold reached → metric inc + alert + wake still fires (cycle 2 R9 body)', async () => {
-    // Spec §10.3 / R9: threshold-many dispatch events for the same agent
-    // within the configured window → state_daemon_abnormal_activity_total
-    // inc + operator alert. The wake itself MUST still fire — reactive
-    // control does not block dispatch (= 「出てから制御」 spirit, F1).
-    // Cycle 2 (auditor Axis 1+5(c)): drives the daemon's detection path
-    // end-to-end, not a direct alert smoke.
+describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
+  test('threshold-many TUI events remain typed observations without dispatch alerting', async () => {
+    // Prompt wake dispatch is disabled, so repeated TUI queue observations must
+    // not trip the historical dispatch-abnormality alert path.
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t26-chatty')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
@@ -487,19 +484,15 @@ describe('T26 abnormal_activity_alert (R9 daemon detection path)', () => {
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })
-        // PR #338 sub-PR 4 §1.5: per-bot wake suppression dedups within the
-        // suppression window. T26 measures the abnormal-activity counter,
-        // which is recorded inside `executeWake`. To keep each iteration
-        // executing wake (and thus feeding the counter), advance the clock
-        // past the suppression window between events.
+        // Advance time to prove the disabled TUI path does not depend on the
+        // historical wake suppression window.
         h.clock.advance(60_000)
       }
-      // 5th event trips the latched alert + metric.
-      expect(h.metrics.countInc('state_daemon_abnormal_activity_total', { agent_id: agent, kind: 'dispatch' })).toBe(1)
-      expect(h.alert.contains(`${agent} abnormal activity`)).toBe(true)
-      expect(h.alert.contains('5+ msg')).toBe(true)
-      // Wake still fires (at least one ok) — F1 reactive, not preventive.
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'ok' })).toBeGreaterThanOrEqual(1)
+      expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(5)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_abnormal_activity_total', { agent_id: agent, kind: 'dispatch' })).toBe(0)
+      expect(h.alert.contains('abnormal activity')).toBe(false)
     } finally {
       await h.daemon.stop()
     }
