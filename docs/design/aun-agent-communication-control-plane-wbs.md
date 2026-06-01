@@ -46,7 +46,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | CP-50 process/completion runner | not started | depends on CP-40 and typed lifecycle outcome contract |
 | CP-60 typed outcomes and lifecycle view | contract proposed / stacked | close/no-reply/handoff/escalate/retry/quarantine typed outcome contract |
 | CP-70 doctor/preflight/repair | contract proposed / stacked | loop/drain/split/stale/duplicate/quarantine/preflight blocker contract |
-| CP-80 scheduler activation | blocked until CP-40/50/70 | state-daemon may schedule runners only after preflight-clean evidence |
+| CP-80 scheduler activation | contract proposed / stacked | exact-scope scheduler activation and Discord canary gate |
 
 ## Required Task Additions
 
@@ -136,6 +136,20 @@ Acceptance:
 - state-daemon activation is blocked while these findings exist
 - repair commands are dry-run first, exact-id scoped, and audited
 - clean doctor/preflight evidence is required before CP-80 scheduler activation
+
+### CP-80A Scheduler Activation And Discord Canary
+
+Define the audited gate for returning automation and Discord projection.
+
+Acceptance:
+
+- scheduler activation requires clean CP-70 preflight for the exact scope
+- activation scope lists agents, channels, runtime kinds, and runner phases
+- canary mode proves receive/process/completion/projection/audit evidence before
+  expansion
+- Discord visibility is projection evidence, not queue truth
+- rollback pauses/disables scope without row deletion, bulk active closure,
+  prompt injection, or restart-as-repair
 
 ## Audit Flow
 

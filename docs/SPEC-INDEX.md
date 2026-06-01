@@ -29,6 +29,7 @@
 | spec/aun-agent-turn-ledger-contract.md | proposed | runtime起動前にqueue/baton/lease/heartbeat/deadlineをdurable turn evidenceとして記録するCP-50A契約 | 2026-06-01 |
 | spec/aun-typed-completion-outcome-contract.md | proposed | runtime proseからlifecycleを推測せず、reply/no-reply/handoff/escalate/retry/quarantineをtyped outcomeで適用するCP-60契約 | 2026-06-01 |
 | spec/aun-control-plane-doctor-preflight-contract.md | proposed | loop/drain/split/stale/duplicate/quarantine等を検出し、state_daemon/scheduler activationをfail-closedするCP-70契約 | 2026-06-01 |
+| spec/aun-scheduler-activation-canary-contract.md | proposed | state_daemon/scheduler activationとDiscord canaryをexact scope・lease・preflight・rollback evidenceでgateするCP-80契約 | 2026-06-01 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -159,6 +160,14 @@
 - repair commandはdry-run first、exact durable id必須、active row修復は明示override必須、bulk active closure禁止にする
 - repairはaudit evidenceを書き、`next`/`inbox`/runtime prompt/state_daemon restartを修復手段にしない
 - clean preflight は CP-80 scheduler activation の必要条件であり、十分条件ではない
+
+### spec/aun-scheduler-activation-canary-contract.md（Scheduler Activation And Discord Canary Contract）
+- CP-80としてstate_daemon/scheduler activationをexact scope、lease、preflight、canary evidenceでgateする
+- activation scope は agent ids、channel ids、runtime kinds、runner phases を明示し、fleet-wide first activationを禁止する
+- canary は receive/process/completion/projection/audit の順にDB evidenceを確認してから拡張する
+- Discord は projection surfaceであり、DB queue/conversation/baton/turn/completion evidenceが正本である
+- rollback trigger は scheduler scopeをpause/disableし、行削除・bulk active close・prompt injection・restart repairを禁止する
+- expansion は fresh preflight と prior canary evidence を必要条件にする
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
