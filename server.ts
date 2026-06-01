@@ -713,6 +713,24 @@ function controlPlaneAdapterFromClient(client: Client): ControlPlaneDbAdapter {
   return adapter
 }
 
+async function runWithTransactionSavepoint<T>(
+  client: Client,
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const savepoint = `${label}_${randomUUID().replace(/-/g, '')}`
+  await client.query(`SAVEPOINT ${savepoint}`)
+  try {
+    const result = await fn()
+    await client.query(`RELEASE SAVEPOINT ${savepoint}`)
+    return result
+  } catch (err) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => {})
+    await client.query(`RELEASE SAVEPOINT ${savepoint}`).catch(() => {})
+    throw err
+  }
+}
+
 async function loadMessageConversationIdFromClient(client: Client, messageId: string): Promise<string | null> {
   try {
     const result = await client.query<{ conversation_id: string | null }>(
@@ -2726,17 +2744,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // This send handler already owns a transaction. Use the
             // transaction-scoped dedup variant so message_queue insert,
             // control-plane stamping, reply close, and outbound enqueue share
-            // one rollback boundary.
+            // one rollback boundary. Keep each recipient behind a savepoint so
+            // a non-fatal fanout error does not poison the surrounding
+            // transaction and roll back other recipients.
             const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-            const result = await enqueueWithDedupInTransaction({
-              db: txClient,
-              agentId: recipient,
-              content: partContent,
-              source: 'agent-comms',
-              windowSeconds: dedupWindowSec,
-              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-              insertParams: [recipient, id, mqPayload],
-            })
+            const result = await runWithTransactionSavepoint(txClient, 'mcp_send_queue_fanout', () =>
+              enqueueWithDedupInTransaction({
+                db: txClient,
+                agentId: recipient,
+                content: partContent,
+                source: 'agent-comms',
+                windowSeconds: dedupWindowSec,
+                insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+                insertParams: [recipient, id, mqPayload],
+              }),
+            )
             if (result.dedupSkipped) {
               process.stderr.write(`agent-comms: queue.dedup.skipped — content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
               continue
@@ -3284,17 +3306,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           // notify now owns the surrounding transaction. Keep queue fanout,
           // conversation allocation, audit, and outbound enqueue under one
-          // rollback boundary.
+          // rollback boundary. Keep each recipient behind a savepoint so a
+          // non-fatal fanout error does not poison the transaction and roll
+          // back other recipients.
           const dedupWindowSec = parseInt(process.env.AGENT_COMMS_DEDUP_WINDOW_SEC ?? '30', 10)
-          const result = await enqueueWithDedupInTransaction({
-            db: client,
-            agentId: recipient,
-            content: partContent,
-            source: 'agent-comms',
-            windowSeconds: dedupWindowSec,
-            insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-            insertParams: [recipient, id, mqPayload],
-          })
+          const result = await runWithTransactionSavepoint(client, 'mcp_notify_queue_fanout', () =>
+            enqueueWithDedupInTransaction({
+              db: client,
+              agentId: recipient,
+              content: partContent,
+              source: 'agent-comms',
+              windowSeconds: dedupWindowSec,
+              insertSql: `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, $3) ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+              insertParams: [recipient, id, mqPayload],
+            }),
+          )
           if (result.dedupSkipped) {
             process.stderr.write(`agent-comms: queue.dedup.skipped — notify content already queued for ${recipient} within ${dedupWindowSec}s (source=agent-comms, hash=${result.contentHash})\n`)
             continue

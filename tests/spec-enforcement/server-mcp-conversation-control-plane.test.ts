@@ -34,6 +34,7 @@ describe('MCP send/notify conversation control-plane linkage', () => {
 
     expect(body).toMatch(/resolveConversationControlPlaneGate\('mcp\.send'\)/)
     expect(body).toMatch(/enqueueWithDedupInTransaction\(/)
+    expect(body).toMatch(/runWithTransactionSavepoint\(\s*txClient,\s*'mcp_send_queue_fanout'/)
     expect(body).toMatch(/activeOwnerQueueId\s*=\s*result\.queueId/)
     expect(body).toMatch(/applyMcpConversationControlPlane\([\s\S]*?'mcp\.send'/)
     expect(body).toMatch(/root_message_id:\s*conversationRootMessageId/)
@@ -48,9 +49,23 @@ describe('MCP send/notify conversation control-plane linkage', () => {
     expect(body).toMatch(/if \(!txCommitted\)[\s\S]*ROLLBACK/)
     expect(body).toMatch(/resolveConversationControlPlaneGate\('mcp\.notify'\)/)
     expect(body).toMatch(/enqueueWithDedupInTransaction\(/)
+    expect(body).toMatch(/runWithTransactionSavepoint\(\s*client,\s*'mcp_notify_queue_fanout'/)
     expect(body).toMatch(/activeOwnerQueueId\s*=\s*result\.queueId/)
     expect(body).toMatch(/applyMcpConversationControlPlane\([\s\S]*?'mcp\.notify'/)
     expect(body).toMatch(/root_message_id:\s*conversationRootMessageId/)
     expect(body).toMatch(/conversation_control_plane=/)
+  })
+
+  test('MCP queue fanout savepoints preserve non-fatal recipient failure isolation', () => {
+    const helper = SERVER_SRC.slice(
+      SERVER_SRC.indexOf('async function runWithTransactionSavepoint'),
+      SERVER_SRC.indexOf('async function loadMessageConversationIdFromClient'),
+    )
+
+    expect(helper).toMatch(/SAVEPOINT/)
+    expect(helper).toMatch(/ROLLBACK TO SAVEPOINT/)
+    expect(helper).toMatch(/RELEASE SAVEPOINT/)
+    expect(toolBody('send')).toMatch(/non-fatal fanout error does not poison/)
+    expect(toolBody('notify')).toMatch(/non-fatal fanout error does not poison/)
   })
 })
