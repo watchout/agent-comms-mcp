@@ -2923,6 +2923,22 @@ async function sendMessage(args: string[]) {
           claimRenewalEvidence = await renewSameOwnerClaimForReplyClose(db, qrow, agentId)
           qrow.claim_expires_at = claimRenewalEvidence.new_claim_expires_at
         }
+        if (!ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
+          writeFailureJson('INVALID_STATE', `queue row status=${qrow.status}; expected received|in_progress for explicit close`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            status: qrow.status,
+            claimed_by: qrow.claimed_by,
+          })
+        }
+        if (qrow.claimed_by !== agentId) {
+          writeFailureJson('NOT_CLAIM_OWNER', `queue row is not actively claimed by ${agentId}`, {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            status: qrow.status,
+            claimed_by: qrow.claimed_by,
+          })
+        }
 
         const payload = parseQueuePayloadLoose(qrow.payload)
         const replyTo = qrow.message_id ?? payload.message_id

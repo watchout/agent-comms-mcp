@@ -200,18 +200,27 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
       .toEqual({ status: 'replied', replied_with: body.message_id })
   })
 
-  test('unclaimed pending row closes by explicit queue id', () => {
+  test('unclaimed pending row fails closed by explicit queue id without writes', () => {
     const { queueId } = seedPending({ content: 'pending explicit close' })
+    const beforeMessages = dbRead(`SELECT count(*) AS n FROM agent_messages`)[0].n
+    const beforeOutbound = dbRead(`SELECT count(*) AS n FROM outbound_queue`)[0].n
 
     const reply = explicitReply(queueId)
 
-    expect(reply.status).toBe(0)
+    expect(reply.status).toBe(1)
     const body = JSON.parse(reply.stdout)
-    expect(body.work_closed).toBe(true)
-    expect(body.close_mode).toBe('explicit')
+    expect(body).toMatchObject({
+      ok: false,
+      code: 'INVALID_STATE',
+      queue_id: queueId,
+      status: 'pending',
+      claimed_by: null,
+    })
     expect(body.queue_id).toBe(queueId)
-    expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
-      .toEqual({ status: 'replied', replied_with: body.message_id })
+    expect(dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null, replied_with: null })
+    expect(dbRead(`SELECT count(*) AS n FROM agent_messages`)[0].n).toBe(beforeMessages)
+    expect(dbRead(`SELECT count(*) AS n FROM outbound_queue`)[0].n).toBe(beforeOutbound)
   })
 
   test('expired caller-owned claim closes by explicit queue id', () => {
@@ -427,6 +436,7 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
 
   test('non-member routed recipient fails with NOT_CHANNEL_MEMBER', () => {
     const { queueId } = seedPending({ channelId: 'no-probe-ch', content: 'not a channel member' })
+    expect(runAun(['receive', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
 
     const reply = explicitReply(queueId)
 
