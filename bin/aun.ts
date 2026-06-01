@@ -14,6 +14,7 @@
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
  *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
+ *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -27,7 +28,7 @@ import { start } from './aun/start'
 import { diagnoseReceive, drain, receive, receiveActionable, receiveTargeted, reconcile } from './aun/receive'
 import { notify, reply } from './aun/reply'
 import { codexRunnerTick } from './aun/codex-runner'
-import { lifecycleTransition } from './aun/lifecycle'
+import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 
 function printHelp(): void {
   const lines = [
@@ -45,6 +46,7 @@ function printHelp(): void {
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
     '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
+    '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -283,7 +285,8 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'next-actionable' &&
     subcommand !== 'processing' &&
     subcommand !== 'done' &&
-    subcommand !== 'record-no-reply'
+    subcommand !== 'record-no-reply' &&
+    subcommand !== 'renew-claim'
   ) return run(argv)
 
   if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
@@ -302,6 +305,30 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
       agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
       queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
       reason: typeof flags.reason === 'string' ? (flags.reason as string) : undefined,
+    })
+    if (res.stdout) process.stdout.write(res.stdout)
+    if (res.stderr) process.stderr.write(res.stderr)
+    return res.code
+  }
+
+  if (subcommand === 'renew-claim') {
+    let ttlSeconds: number | undefined
+    if (flags['ttl-seconds'] !== undefined) {
+      if (typeof flags['ttl-seconds'] !== 'string') {
+        process.stderr.write('Error [AUN_RENEW_CLAIM_INVALID]: --ttl-seconds requires a value\n')
+        return 2
+      }
+      ttlSeconds = Number(flags['ttl-seconds'])
+      if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0 || !Number.isInteger(ttlSeconds)) {
+        process.stderr.write('Error [AUN_RENEW_CLAIM_INVALID]: --ttl-seconds must be a positive integer\n')
+        return 2
+      }
+    }
+    const res = await renewClaim({
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+      reason: typeof flags.reason === 'string' ? (flags.reason as string) : undefined,
+      ttlSeconds,
     })
     if (res.stdout) process.stdout.write(res.stdout)
     if (res.stderr) process.stderr.write(res.stderr)
