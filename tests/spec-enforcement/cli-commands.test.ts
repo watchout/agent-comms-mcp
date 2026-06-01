@@ -263,12 +263,40 @@ describe('T5b — `agent-com send` wires conversation control-plane allocation a
     expect(body).toMatch(/conversationControlPlaneSummary/)
     expect(body).toMatch(/conversation_control_plane:\s*conversationControlPlaneSummary/)
     expect(body).toMatch(/CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED/)
+    expect(body).toMatch(/conversationControlPlaneFailureError\(applied\)/)
+  })
+})
+
+describe('T5c — `agent-com notify` wires conversation control-plane allocation after queue fanout', () => {
+  test('notifyMessage uses the inserted active-owner queue row for control-plane stamping', () => {
+    const body = notifyMessageBody()
+
+    expect(body).toMatch(/resolveConversationControlPlaneGate\('cli\.notify'\)/)
+    expect(body).toMatch(/fanoutRes\.inserted_rows\.find/)
+    expect(body).toMatch(/source_queue_id:\s*queueRow\.queue_id/)
+    expect(body).toMatch(/message_id:\s*id/)
+    expect(body).toMatch(/allocator:\s*allocateConversationRootInTransaction/)
+  })
+
+  test('notifyMessage records audit evidence and returns a summary only when the gate runs', () => {
+    const body = notifyMessageBody()
+
+    expect(body).toMatch(/conversation\.control_plane\.apply/)
+    expect(body).toMatch(/conversationControlPlaneSummary/)
+    expect(body).toMatch(/conversation_control_plane:\s*conversationControlPlaneSummary/)
+    expect(body).toMatch(/CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED/)
   })
 })
 
 // Helper: extract the body of sendMessage so T6/T7/T8 don't match unrelated text.
 function sendMessageBody(): string {
   const fnStart = CLI_SRC.indexOf('async function sendMessage')
+  const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
+  return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
+}
+
+function notifyMessageBody(): string {
+  const fnStart = CLI_SRC.indexOf('async function notifyMessage')
   const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
   return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 }

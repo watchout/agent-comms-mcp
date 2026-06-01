@@ -1450,6 +1450,54 @@ describe('F5 — agent-com notify (SQLite)', () => {
     expect(audits[0].target).toBe('probe-f-ch')
   })
 
+  test('shadow control-plane stamps notify message and active-owner queue row', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const r = runCli(
+      ['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'shadow notify'],
+      { AGENT_COM_CONVERSATION_CONTROL_PLANE: 'shadow' },
+    )
+    expect(r.status).toBe(0)
+    const payload = JSON.parse(r.stdout.trim()) as any
+    expect(payload.ok).toBe(true)
+    expect(payload.conversation_control_plane).toMatchObject({
+      ok: true,
+      action: 'allocated',
+      mode: 'shadow',
+      conversation_action: 'created',
+      baton_action: 'created',
+    })
+
+    const message = dbRead(
+      `SELECT conversation_id, baton_id FROM agent_messages WHERE id = ?`,
+      [payload.message_id],
+    )[0]
+    const queue = dbRead(
+      `SELECT id, conversation_id, baton_id FROM message_queue WHERE agent_id = 'cto' AND message_id = ?`,
+      [payload.message_id],
+    )[0]
+    expect(message.conversation_id).toBe(payload.conversation_control_plane.conversation_id)
+    expect(message.baton_id).toBe(payload.conversation_control_plane.baton_id)
+    expect(queue.conversation_id).toBe(message.conversation_id)
+    expect(queue.baton_id).toBe(message.baton_id)
+
+    const baton = dbRead(
+      `SELECT owner_agent_id, state, source_queue_id FROM conversation_batons WHERE baton_id = ?`,
+      [message.baton_id],
+    )[0]
+    expect(baton.owner_agent_id).toBe('cto')
+    expect(baton.state).toBe('active')
+    expect(String(baton.source_queue_id)).toBe(String(queue.id))
+
+    const audits = dbRead(`SELECT detail FROM audit_log WHERE event_type = 'conversation.control_plane.apply'`)
+    expect(audits).toHaveLength(1)
+    expect(JSON.parse(audits[0].detail)).toMatchObject({
+      surface: 'cli.notify',
+      active_owner: 'cto',
+      ok: true,
+      action: 'allocated',
+    })
+  })
+
   test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
     const db = new Database(dbPath)
     db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)

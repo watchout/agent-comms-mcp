@@ -3404,33 +3404,47 @@ async function notifyMessage(args: string[]) {
       process.exit(1)
     }
 
-    const id = randomUUID()
-    const authMeta = buildAuthMetadata(agentId, resolvedChannelId, content)
-    const metadata: Record<string, unknown> = {
-      mentions,
-      cli: 'agent-com notify',
-      channel_resolution: channelResolution,
-      aun_control_plane: {
-        active_owner: mentions[0] ?? null,
-        cc: ccObservers,
-        fyi: fyiObservers,
-        observers: [...new Set([...ccObservers, ...fyiObservers])],
-      },
-      ...(authMeta ?? {}),
+    const activeOwner = mentions[0]
+    if (!activeOwner) {
+      console.error('Error [INVALID_MENTION]: mention/mentions must contain exactly one non-empty agent_id')
+      process.exit(2)
     }
-    await db.query(
-      `INSERT INTO agent_messages
-         (id, channel_id, author_id, content, message_type, reply_to, metadata,
-          depth, source, thread_id, direction, role)
-       VALUES ($1, $2, $3, $4, $5, NULL, $6, 0, 'agent-comms', $7, 'outbound', 'agent')`,
-      [id, resolvedChannelId, agentId, content, messageType, JSON.stringify(metadata), resolvedThreadId],
-    )
+    const conversationGate = resolveConversationControlPlaneGate('cli.notify')
+    if (!conversationGate.ok) {
+      console.error(`Error [${conversationGate.error}]: invalid AGENT_COM_CONVERSATION_CONTROL_PLANE mode: ${conversationGate.value}`)
+      process.exit(2)
+    }
+    let conversationControlPlaneSummary: Record<string, unknown> | null = null
 
-    // Phase 2 F cycle 2: same direct fanout as `sendMessage()` — see rationale
-    // there. Notify is self-originated (no reply_to) but otherwise the
-    // delivery path is identical: per-recipient message_queue INSERT, no
-    // pg_notify delegation. ADR-050: wake-daemon handles recipient wake-up.
-    {
+    const id = randomUUID()
+    let txCommitted = false
+    await db.query('BEGIN')
+    try {
+      const authMeta = buildAuthMetadata(agentId, resolvedChannelId, content)
+      const metadata: Record<string, unknown> = {
+        mentions,
+        cli: 'agent-com notify',
+        channel_resolution: channelResolution,
+        aun_control_plane: {
+          active_owner: activeOwner,
+          cc: ccObservers,
+          fyi: fyiObservers,
+          observers: [...new Set([...ccObservers, ...fyiObservers])],
+        },
+        ...(authMeta ?? {}),
+      }
+      await db.query(
+        `INSERT INTO agent_messages
+           (id, channel_id, author_id, content, message_type, reply_to, metadata,
+            depth, source, thread_id, direction, role)
+         VALUES ($1, $2, $3, $4, $5, NULL, $6, 0, 'agent-comms', $7, 'outbound', 'agent')`,
+        [id, resolvedChannelId, agentId, content, messageType, JSON.stringify(metadata), resolvedThreadId],
+      )
+
+      // Phase 2 F cycle 2: same direct fanout as `sendMessage()` — see rationale
+      // there. Notify is self-originated (no reply_to) but otherwise the
+      // delivery path is identical: per-recipient message_queue INSERT, no
+      // pg_notify delegation. ADR-050: wake-daemon handles recipient wake-up.
       const fanoutRes = await fanoutToRecipients(
         {
           query: async <T = any>(sql: string, params?: any[]) => {
@@ -3454,79 +3468,142 @@ async function notifyMessage(args: string[]) {
           `agent-com: notify fanout had ${fanoutRes.failed.length} failure(s): ${fanoutRes.failed.join(', ')}\n`,
         )
       }
-    }
 
-    const projection = await resolveOutboundProjectionDecision(db as any, {
-      channelId: resolvedChannelId,
-      threadId: resolvedThreadId,
-      senderAgentId: agentId,
-      recipientAgentIds: mentions,
-    })
+      if (conversationGate.allocate) {
+        const queueRow = fanoutRes.inserted_rows.find((row) => row.recipient === activeOwner)
+        const rawAdapter = getRawDbAdapter(db)
+        if (!queueRow || !rawAdapter) {
+          conversationControlPlaneSummary = {
+            ok: false,
+            action: 'skipped',
+            mode: conversationGate.mode,
+            audit_only: conversationGate.audit_only,
+            block_on_error: conversationGate.block_on_error,
+            error: queueRow ? 'DB_ADAPTER_UNAVAILABLE' : 'CONVERSATION_QUEUE_ROW_NOT_INSERTED',
+          }
+          await auditLog(db, 'conversation.control_plane.apply', agentId, resolvedChannelId, {
+            surface: 'cli.notify',
+            message_id: id,
+            active_owner: activeOwner,
+            source_queue_id: queueRow?.queue_id ?? null,
+            ...conversationControlPlaneSummary,
+          })
+          if (conversationGate.block_on_error) {
+            console.error(`Error [${conversationControlPlaneSummary.error}]: conversation control-plane could not link the active owner queue row`)
+            process.exitCode = 1
+            return
+          }
+        } else {
+          const applied = await applyConversationControlPlaneAllocation(rawAdapter, 'cli.notify', {
+            surface: 'cli.notify',
+            channel_id: resolvedChannelId,
+            thread_id: resolvedThreadId,
+            root_message_id: id,
+            owner_agent_id: activeOwner,
+            source_queue_id: queueRow.queue_id,
+            message_id: id,
+          }, {
+            allocator: allocateConversationRootInTransaction,
+          })
+          conversationControlPlaneSummary = summarizeConversationControlPlaneResult(applied)
+          await auditLog(db, 'conversation.control_plane.apply', agentId, resolvedChannelId, {
+            surface: 'cli.notify',
+            message_id: id,
+            active_owner: activeOwner,
+            source_queue_id: queueRow.queue_id,
+            ...conversationControlPlaneSummary,
+          })
+          if (!applied.ok) {
+            const allocationError = conversationControlPlaneFailureError(applied)
+            const allocationErrorDetail = conversationControlPlaneFailureDetail(applied)
+            const detailSuffix = allocationErrorDetail ? ` (${allocationErrorDetail})` : ''
+            console.error(`Error [CONVERSATION_CONTROL_PLANE_ENFORCE_FAILED]: conversation control-plane enforce failed: ${allocationError}${detailSuffix}`)
+            process.exitCode = 1
+            return
+          }
+        }
+      }
 
-    let outboundQueued = false
-    const outboundSkipReason = outboundProjectionSkipReason(projection)
-    if (outboundSkipReason) {
-      await auditLog(db, 'outbound.enqueue_skipped', agentId, resolvedChannelId, {
-        code: outboundProjectionSkipCode(outboundSkipReason),
-        message_id: id,
-        channel_external_id: projection.channelExternalId,
-        consumer_source: projection.consumerSource,
-        consumer_evidence: projection.consumerEvidence,
-        projection_source: projection.projectionSource,
-        delivery_fallback_reason: projection.deliveryFallbackReason,
-        delivery_diagnostics: projection.deliveryDiagnostics,
-        reason: outboundSkipReason,
+      const projection = await resolveOutboundProjectionDecision(db as any, {
+        channelId: resolvedChannelId,
+        threadId: resolvedThreadId,
+        senderAgentId: agentId,
+        recipientAgentIds: mentions,
       })
-    } else {
-      const discordExternalId = projection.channelExternalId!
-      try {
-        // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
-        await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-          [
-            id,
-            agentId,
-            projection.consumerAgentId,
-            projection.consumerSource,
-            projection.consumerEvidence?.connector_instance_id ?? null,
-            projection.consumerEvidence?.channel_binding_id ?? null,
-            projection.consumerEvidence?.provider_channel_access_id ?? null,
-            projection.projectionIdentityId,
-            projection.intendedProjectionIdentityId,
-            projection.projectionSource,
-            projection.projectionFallbackReason,
-            projection.deliveryFallbackReason,
-            JSON.stringify(projection.deliveryDiagnostics),
-            discordExternalId,
-            truncateForDiscord(decorateProjectedContent({
-              content,
-              authorAgentId: agentId,
-              consumerAgentId: projection.consumerAgentId,
-              recipients: mentions,
-            })),
-          ],
-        )
-        outboundQueued = true
-      } catch (err) {
-        console.error(`Error [OUTBOUND_ENQUEUE_FAILED]: ${String(err).slice(0, 200)}`)
-        process.exit(1)
+      let outboundQueued = false
+      const outboundSkipReason = outboundProjectionSkipReason(projection)
+      if (outboundSkipReason) {
+        await auditLog(db, 'outbound.enqueue_skipped', agentId, resolvedChannelId, {
+          code: outboundProjectionSkipCode(outboundSkipReason),
+          message_id: id,
+          channel_external_id: projection.channelExternalId,
+          consumer_source: projection.consumerSource,
+          consumer_evidence: projection.consumerEvidence,
+          projection_source: projection.projectionSource,
+          delivery_fallback_reason: projection.deliveryFallbackReason,
+          delivery_diagnostics: projection.deliveryDiagnostics,
+          reason: outboundSkipReason,
+        })
+      } else {
+        const discordExternalId = projection.channelExternalId!
+        try {
+          // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
+          await db.query(
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+            [
+              id,
+              agentId,
+              projection.consumerAgentId,
+              projection.consumerSource,
+              projection.consumerEvidence?.connector_instance_id ?? null,
+              projection.consumerEvidence?.channel_binding_id ?? null,
+              projection.consumerEvidence?.provider_channel_access_id ?? null,
+              projection.projectionIdentityId,
+              projection.intendedProjectionIdentityId,
+              projection.projectionSource,
+              projection.projectionFallbackReason,
+              projection.deliveryFallbackReason,
+              JSON.stringify(projection.deliveryDiagnostics),
+              discordExternalId,
+              truncateForDiscord(decorateProjectedContent({
+                content,
+                authorAgentId: agentId,
+                consumerAgentId: projection.consumerAgentId,
+                recipients: mentions,
+              })),
+            ],
+          )
+          outboundQueued = true
+        } catch (err) {
+          console.error(`Error [OUTBOUND_ENQUEUE_FAILED]: ${String(err).slice(0, 200)}`)
+          process.exitCode = 1
+          return
+        }
+      }
+
+      await db.query('COMMIT')
+      txCommitted = true
+
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        message_id: id,
+        channel_id: resolvedChannelId,
+        thread_id: resolvedThreadId,
+        mentions,
+        active_owner: activeOwner,
+        cc: ccObservers,
+        fyi: fyiObservers,
+        auth_signed: authMeta !== undefined,
+        outbound_queued: outboundQueued,
+        ...(conversationControlPlaneSummary ? { conversation_control_plane: conversationControlPlaneSummary } : {}),
+        ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
+      }) + '\n')
+    } finally {
+      if (!txCommitted) {
+        await db.query('ROLLBACK').catch(() => {})
       }
     }
-
-    process.stdout.write(JSON.stringify({
-      ok: true,
-      message_id: id,
-      channel_id: resolvedChannelId,
-      thread_id: resolvedThreadId,
-      mentions,
-      active_owner: mentions[0] ?? null,
-      cc: ccObservers,
-      fyi: fyiObservers,
-      auth_signed: authMeta !== undefined,
-      outbound_queued: outboundQueued,
-      ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
-    }) + '\n')
   } finally {
     await db.end()
   }
