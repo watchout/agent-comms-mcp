@@ -123,11 +123,15 @@ of messages is drained by script policy instead of natural-language retry loops.
 
 ### Process Runner
 
+Detailed turn ledger contract:
+[`../spec/aun-agent-turn-ledger-contract.md`](../spec/aun-agent-turn-ledger-contract.md).
+
 Input: claimed `queue_id` or `agent_id`
 
 Behavior:
 
-- move `received -> in_progress` before invoking an LLM runtime
+- create durable agent turn evidence before invoking an LLM runtime
+- move `received -> in_progress` after turn creation and before runtime launch
 - pass the claimed message body and metadata to the runtime adapter
 - never let the runtime preview unrelated pending messages
 
