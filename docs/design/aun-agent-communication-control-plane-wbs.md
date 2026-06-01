@@ -44,7 +44,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | CP-30 send-side control-plane allocation | in audit / stacked | CLI send/notify merged through #633; MCP send/notify #634 remains draft/DIRTY and needs rebase/L1 refresh |
 | CP-40 script-controlled receive runner | in progress / stacked | CP-40A targeted receive and CP-40B runtime-neutral adapter contract are stacked for audit |
 | CP-50 process/completion runner | not started | depends on CP-40 and typed lifecycle outcome contract |
-| CP-60 typed outcomes and lifecycle view | not started | close/no-reply/handoff/escalate/retry/quarantine result model |
+| CP-60 typed outcomes and lifecycle view | contract proposed / stacked | close/no-reply/handoff/escalate/retry/quarantine typed outcome contract |
 | CP-70 doctor/preflight/repair | partial | must detect stuck baton, stale turn, duplicate owner, split request, and loop-prompt rows |
 | CP-80 scheduler activation | blocked until CP-40/50/70 | state-daemon may schedule runners only after preflight-clean evidence |
 
@@ -109,6 +109,20 @@ Acceptance:
 - handoff/escalation transfers or creates a child baton by deterministic code
 - runtime failure leaves a reclaimable state or a typed quarantine; it does not
   silently strand `received`, `in_progress`, or `done`
+
+### CP-60A Typed Completion Outcomes
+
+Define the durable result model consumed by the completion runner.
+
+Acceptance:
+
+- every completed turn records exactly one typed outcome
+- free-form runtime prose is evidence only, never a lifecycle decision
+- reply/no-reply/handoff/escalate/retry/quarantine outcomes are mutually
+  exclusive
+- reply terminalization waits for outbound success or typed send-failure
+  evidence
+- retry and quarantine are bounded, auditable, and cannot silently loop
 
 ### CP-70A Loop And Drain Defect Doctor
 
