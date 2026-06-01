@@ -46,6 +46,7 @@ describe('test_aun_receive_wrapper — stable next wrapper', () => {
       env: {
         ...process.env,
         AGENT_ID: 'wrong-agent',
+        AGENT_COM_EXPECTED_AGENT_ID: '',
         DATABASE_URL: 'postgresql:///agent_comms?host=/tmp',
       },
       timeout: 15_000,
@@ -71,7 +72,7 @@ describe('test_aun_receive_wrapper — stable next wrapper', () => {
     const r = spawnSync('bun', ['run', AUN_CLI, 'next', '--agent-id', 'agent-com-dev', '--dry-run'], {
       cwd: '/tmp',
       encoding: 'utf-8',
-      env: { ...process.env, DATABASE_URL: '' },
+      env: { ...process.env, AGENT_COM_EXPECTED_AGENT_ID: '', DATABASE_URL: '' },
       timeout: 15_000,
     })
 

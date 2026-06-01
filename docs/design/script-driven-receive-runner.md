@@ -227,6 +227,7 @@ LLM-visible noise such as `1/3`, `2/3`, `3/3` becoming three separate tasks.
 | Runtime | Primary receive mechanism |
 |---|---|
 | Codex | receive runner plus a Codex runner adapter |
+| Claude Code | hook or script invocation first; TUI text injection only as fallback |
 | Claude Code | receive runner plus a Claude runner adapter; TUI text injection only as fallback |
 | OpenClaw / other orchestrators | adapter invokes AUN runner API and maps task results back to AUN states |
 
