@@ -5,6 +5,32 @@ import {
 } from './state-daemon-readiness'
 
 export type Cp70DoctorSeverity = 'blocker' | 'warning' | 'info'
+export type Cp70DoctorCode =
+  | 'LOOP_PROMPT_BACKLOG'
+  | 'STUCK_ACTIVE_QUEUE_ROW'
+  | 'DUPLICATE_ACTIVE_BATON'
+  | 'CP70_LAUNCHAGENT_MISMATCH'
+  | 'CP70_CHECKOUT_PATH_SUSPECT'
+  | 'CP70_DUPLICATE_BATON_UNSUPPORTED'
+export type Cp70Gate = 'runtime' | 'projection' | 'scheduler_activation' | 'repair'
+export type Cp70SubjectType =
+  | 'queue'
+  | 'message'
+  | 'conversation'
+  | 'baton'
+  | 'turn'
+  | 'completion'
+  | 'outbound'
+  | 'agent'
+  | 'channel'
+
+export type Cp70RepairHint = {
+  command: string
+  requires_execute_flag: boolean
+  requires_exact_subject: true
+  requires_active_override: boolean
+  mutates_active_work: boolean
+}
 
 export type Cp70DoctorOptions = {
   agentId?: string | null
@@ -22,6 +48,7 @@ export type Cp70FindingSample = {
   record_id: string | number | null
   queue_id: string | number | null
   queue_ids?: Array<string | number>
+  message_id: string | null
   agent_id: string | null
   status: string | null
   created_at: string | Date | null
@@ -29,8 +56,21 @@ export type Cp70FindingSample = {
 }
 
 export type Cp70Finding = {
-  code: string
+  code: Cp70DoctorCode
   severity: Cp70DoctorSeverity
+  gate: Cp70Gate
+  subject_type: Cp70SubjectType
+  subject_id: string
+  agent_id: string | null
+  channel_id: string | null
+  conversation_id: string | null
+  baton_id: string | null
+  queue_id: string | null
+  message_id: string | null
+  turn_id: string | null
+  result_id: string | null
+  evidence: Record<string, unknown>
+  recommended_repair: Cp70RepairHint | null
   title: string
   count: number
   sample_count: number
@@ -39,7 +79,7 @@ export type Cp70Finding = {
 }
 
 export type Cp70RepairPlanItem = {
-  finding_code: string
+  finding_code: Cp70DoctorCode
   dry_run_only: true
   mutation_allowed: false
   exact_ids: Array<string | number>
@@ -184,6 +224,7 @@ function sampleFromRow(row: any): Cp70FindingSample {
     record_id: row.record_id ?? row.id ?? null,
     queue_id: row.queue_id ?? row.id ?? null,
     queue_ids: queueIds.length > 0 ? queueIds : undefined,
+    message_id: row.message_id === undefined || row.message_id === null ? null : String(row.message_id),
     agent_id: row.agent_id ?? row.author_id ?? null,
     status: row.status ?? null,
     created_at: row.created_at ?? null,
@@ -195,32 +236,147 @@ function samplesFromRows(rows: any[]): Cp70FindingSample[] {
   return rows.slice(0, 8).map(sampleFromRow)
 }
 
-function finding(
-  code: string,
+function stringId(value: string | number | null | undefined): string | null {
+  return value === null || value === undefined ? null : String(value)
+}
+
+function subjectForSample(code: Cp70DoctorCode, sample: Cp70FindingSample): { subjectType: Cp70SubjectType; subjectId: string } {
+  if (code === 'DUPLICATE_ACTIVE_BATON') {
+    return { subjectType: 'baton', subjectId: stringId(sample.record_id) ?? 'unknown' }
+  }
+  if (sample.queue_id !== null) {
+    return { subjectType: 'queue', subjectId: String(sample.queue_id) }
+  }
+  if (sample.source.startsWith('agent_messages.')) {
+    return { subjectType: 'message', subjectId: sample.message_id ?? stringId(sample.record_id) ?? 'unknown' }
+  }
+  return { subjectType: 'agent', subjectId: stringId(sample.record_id) ?? sample.agent_id ?? 'state_daemon' }
+}
+
+function durableIdsForSample(code: Cp70DoctorCode, sample: Cp70FindingSample): Pick<Cp70Finding,
+  'agent_id' | 'channel_id' | 'conversation_id' | 'baton_id' | 'queue_id' | 'message_id' | 'turn_id' | 'result_id'
+> {
+  const recordId = stringId(sample.record_id)
+  const queueId = stringId(sample.queue_id)
+  const messageId = sample.message_id ?? (sample.source.startsWith('agent_messages.') ? recordId : null)
+  return {
+    agent_id: sample.agent_id,
+    channel_id: null,
+    conversation_id: null,
+    baton_id: code === 'DUPLICATE_ACTIVE_BATON' ? recordId : null,
+    queue_id: queueId,
+    message_id: messageId,
+    turn_id: null,
+    result_id: null,
+  }
+}
+
+function repairHintForFinding(code: Cp70DoctorCode, sample: Cp70FindingSample): Cp70RepairHint | null {
+  if (code === 'LOOP_PROMPT_BACKLOG' && sample.queue_id !== null && sample.agent_id) {
+    const active = sample.status === 'received' || sample.status === 'in_progress'
+    const command = closeObsoleteDryRunCommand(sample, 'LOOP_PROMPT_BACKLOG', active)
+    return command
+      ? {
+        command,
+        requires_execute_flag: true,
+        requires_exact_subject: true,
+        requires_active_override: active,
+        mutates_active_work: active,
+      }
+      : null
+  }
+  if (code === 'STUCK_ACTIVE_QUEUE_ROW' && sample.queue_id !== null) {
+    return {
+      command: `agent-com diagnose-delivery --queue-id ${shellQuote(sample.queue_id)}`,
+      requires_execute_flag: false,
+      requires_exact_subject: true,
+      requires_active_override: true,
+      mutates_active_work: true,
+    }
+  }
+  if (code === 'DUPLICATE_ACTIVE_BATON' && sample.queue_ids && sample.queue_ids.length > 0) {
+    return {
+      command: sample.queue_ids.map((id) => `agent-com diagnose-delivery --queue-id ${shellQuote(id)}`).join(' && '),
+      requires_execute_flag: false,
+      requires_exact_subject: true,
+      requires_active_override: true,
+      mutates_active_work: true,
+    }
+  }
+  return null
+}
+
+function evidenceForSample(code: Cp70DoctorCode, sample: Cp70FindingSample): Record<string, unknown> {
+  return {
+    code,
+    source: sample.source,
+    record_id: sample.record_id,
+    status: sample.status,
+    created_at: sample.created_at,
+    queue_ids: sample.queue_ids ?? (sample.queue_id === null ? [] : [sample.queue_id]),
+    snippet: sample.evidence,
+  }
+}
+
+function findingFromSample(
+  code: Cp70DoctorCode,
   severity: Cp70DoctorSeverity,
+  gate: Cp70Gate,
   title: string,
-  rows: any[],
+  sample: Cp70FindingSample,
   action: string,
-  count = totalCount(rows),
 ): Cp70Finding {
+  const subject = subjectForSample(code, sample)
   return {
     code,
     severity,
+    gate,
+    subject_type: subject.subjectType,
+    subject_id: subject.subjectId,
+    ...durableIdsForSample(code, sample),
+    evidence: evidenceForSample(code, sample),
+    recommended_repair: repairHintForFinding(code, sample),
     title,
-    count,
-    sample_count: rows.length,
-    samples: samplesFromRows(rows),
+    count: 1,
+    sample_count: 1,
+    samples: [sample],
     action,
   }
 }
 
-function emptyFinding(
-  code: string,
+function findingsFromRows(
+  code: Cp70DoctorCode,
   severity: Cp70DoctorSeverity,
+  gate: Cp70Gate,
   title: string,
+  rows: any[],
   action: string,
-): Cp70Finding {
-  return finding(code, severity, title, [], action, 0)
+): Cp70Finding[] {
+  return rows.map(sampleFromRow).map((sample) => findingFromSample(code, severity, gate, title, sample, action))
+}
+
+function infoFinding(
+  code: Cp70DoctorCode,
+  gate: Cp70Gate,
+  title: string,
+  rows: any[],
+  action: string,
+): Cp70Finding[] {
+  return findingsFromRows(code, 'info', gate, title, rows, action)
+}
+
+function unsupportedFinding(code: Cp70DoctorCode, title: string, action: string): Cp70Finding {
+  const sample: Cp70FindingSample = {
+    source: 'cp70.doctor',
+    record_id: code,
+    queue_id: null,
+    message_id: null,
+    agent_id: null,
+    status: null,
+    created_at: null,
+    evidence: action,
+  }
+  return findingFromSample(code, 'info', 'scheduler_activation', title, sample, action)
 }
 
 function shellQuote(value: string | number): string {
@@ -274,14 +430,16 @@ function buildDuplicateBatonRows(rows: any[]): any[] {
 }
 
 function buildRepairPlan(findings: Cp70Finding[]): Cp70RepairPlanItem[] {
-  const byCode = Object.fromEntries(findings.map((item) => [item.code, item]))
+  const samplesByCode = (code: Cp70DoctorCode) => findings
+    .filter((item) => item.code === code)
+    .flatMap((item) => item.samples)
   const plan: Cp70RepairPlanItem[] = []
 
-  const prompt = byCode.TUI_WAKE_PROMPT_PRESENT
-  const promptSamples = prompt?.samples.filter((sample) => sample.source === 'message_queue.payload' && sample.queue_id !== null) ?? []
+  const promptSamples = samplesByCode('LOOP_PROMPT_BACKLOG')
+    .filter((sample) => sample.source === 'message_queue.payload' && sample.queue_id !== null)
   if (promptSamples.length > 0) {
     plan.push({
-      finding_code: 'TUI_WAKE_PROMPT_PRESENT',
+      finding_code: 'LOOP_PROMPT_BACKLOG',
       dry_run_only: true,
       mutation_allowed: false,
       exact_ids: exactIds(promptSamples),
@@ -292,28 +450,28 @@ function buildRepairPlan(findings: Cp70Finding[]): Cp70RepairPlanItem[] {
     })
   }
 
-  const staleActive = byCode.STALE_ACTIVE_QUEUE_ROWS
-  if (staleActive && staleActive.samples.length > 0) {
+  const staleActiveSamples = samplesByCode('STUCK_ACTIVE_QUEUE_ROW')
+  if (staleActiveSamples.length > 0) {
     plan.push({
-      finding_code: 'STALE_ACTIVE_QUEUE_ROWS',
+      finding_code: 'STUCK_ACTIVE_QUEUE_ROW',
       dry_run_only: true,
       mutation_allowed: false,
-      exact_ids: exactIds(staleActive.samples),
-      commands: staleActive.samples
-        .map((sample) => closeObsoleteDryRunCommand(sample, 'stale active row after CP-70 preflight review', true))
-        .filter((cmd): cmd is string => Boolean(cmd)),
-      note: 'Dry-run only. Active rows require exact queue_id review; this slice does not apply mutations.',
+      exact_ids: exactIds(staleActiveSamples),
+      commands: staleActiveSamples
+        .filter((sample) => sample.queue_id !== null)
+        .map((sample) => `agent-com diagnose-delivery --queue-id ${shellQuote(sample.queue_id!)}`),
+      note: 'Dry-run diagnosis only. Active rows are not marked done by this slice; route exact queue_ids through reclaim/repair review.',
     })
   }
 
-  const duplicate = byCode.DUPLICATE_ACTIVE_BATON
-  if (duplicate && duplicate.samples.length > 0) {
+  const duplicateSamples = samplesByCode('DUPLICATE_ACTIVE_BATON')
+  if (duplicateSamples.length > 0) {
     plan.push({
       finding_code: 'DUPLICATE_ACTIVE_BATON',
       dry_run_only: true,
       mutation_allowed: false,
-      exact_ids: exactIds(duplicate.samples),
-      commands: exactIds(duplicate.samples).map((id) => `agent-com diagnose-delivery --queue-id ${shellQuote(id)}`),
+      exact_ids: exactIds(duplicateSamples),
+      commands: exactIds(duplicateSamples).map((id) => `agent-com diagnose-delivery --queue-id ${shellQuote(id)}`),
       note: 'Dry-run diagnosis only. Resolve duplicate active baton rows with an exact-id repair plan in a separately approved change.',
     })
   }
@@ -411,11 +569,12 @@ async function resolveLaunchAgent(options: Cp70DoctorOptions): Promise<StateDaem
 
 export function buildCp70Preflight(report: Cp70DoctorReport): Cp70Preflight {
   const failed = report.findings.filter((finding) => finding.severity === 'blocker' && finding.count > 0)
+  const failedCodes = Array.from(new Set(failed.map((finding) => finding.code)))
   return {
     ok: failed.length === 0,
     gate: 'control-plane',
     failed_blocker_count: failed.length,
-    failed_blocker_codes: failed.map((finding) => finding.code),
+    failed_blocker_codes: failedCodes,
   }
 }
 
@@ -473,6 +632,7 @@ export async function buildCp70DoctorReport(db: Queryable, options: Cp70DoctorOp
     db,
     `SELECT 'agent_messages.content' AS source_table,
             am.id AS record_id, NULL AS queue_id, am.author_id AS agent_id,
+            am.id::text AS message_id,
             NULL AS status, am.created_at, am.content AS evidence,
             count(*) OVER ()::int AS total_count
        FROM agent_messages am
@@ -489,6 +649,7 @@ export async function buildCp70DoctorReport(db: Queryable, options: Cp70DoctorOp
     db,
     `SELECT 'agent_messages.metadata' AS source_table,
             am.id AS record_id, NULL AS queue_id, am.author_id AS agent_id,
+            am.id::text AS message_id,
             NULL AS status, am.created_at, coalesce(am.metadata::text, '') AS evidence,
             count(*) OVER ()::int AS total_count
        FROM agent_messages am
@@ -555,57 +716,53 @@ export async function buildCp70DoctorReport(db: Queryable, options: Cp70DoctorOp
     ...agentMessageMetadataRows,
     ...launchPromptRows,
   ]
-  const promptTotal =
-    totalCount(messageQueuePromptRows)
-    + totalCount(agentMessageContentRows)
-    + totalCount(agentMessageMetadataRows)
-    + launchPromptRows.length
 
   const findings = [
-    finding(
-      'TUI_WAKE_PROMPT_PRESENT',
+    ...findingsFromRows(
+      'LOOP_PROMPT_BACKLOG',
       'blocker',
+      'runtime',
       'legacy TUI wake prompt artifacts are present in DB or LaunchAgent evidence',
       promptRows,
       'Do not drain with next and do not prompt an LLM to call next/inbox/processing/done. Review exact ids and close obsolete artifacts only by explicit queue_id dry-run first.',
-      promptTotal,
     ),
-    finding(
-      'STALE_ACTIVE_QUEUE_ROWS',
+    ...findingsFromRows(
+      'STUCK_ACTIVE_QUEUE_ROW',
       'blocker',
+      'runtime',
       `received/in_progress rows stale beyond ${staleMinutes} minutes`,
       staleActiveRows,
       'Classify each exact queue_id. This slice only reports dry-run exact-id repair commands.',
     ),
     duplicateQuery.error
-      ? emptyFinding(
-        'DUPLICATE_ACTIVE_BATON',
-        'warning',
+      ? unsupportedFinding(
+        'CP70_DUPLICATE_BATON_UNSUPPORTED',
         'duplicate active baton/turn rows could not be evaluated with current schema',
         `Duplicate active baton support unavailable: ${duplicateQuery.error}`,
       )
-      : finding(
+      : findingsFromRows(
         'DUPLICATE_ACTIVE_BATON',
         'blocker',
+        'scheduler_activation',
         'duplicate active baton/conversation rows are present',
         duplicateBatonRows,
         'Inspect exact queue_ids and resolve duplicate active ownership with a separately approved exact-id repair.',
       ),
-    finding(
-      'STATE_DAEMON_LAUNCHAGENT_MISMATCH',
-      'blocker',
+    ...infoFinding(
+      'CP70_LAUNCHAGENT_MISMATCH',
+      'scheduler_activation',
       'state_daemon LaunchAgent installed/running evidence is inconsistent',
       launchMismatchRows,
-      'Do not restart from this command. Fix LaunchAgent install/run mismatch through the approved operator path before reactivation.',
+      'Informational only in #651: do not restart from this command; use the reviewed LaunchAgent/runbook path if this evidence matters.',
     ),
-    finding(
-      'STATE_DAEMON_CHECKOUT_PATH_SUSPECT',
-      'blocker',
+    ...infoFinding(
+      'CP70_CHECKOUT_PATH_SUSPECT',
+      'scheduler_activation',
       'state_daemon LaunchAgent/process points at a tmp checkout or build artifact',
       launchPathRows,
-      'Do not run stale tmp checkouts. Repoint through the approved install path before daemon reactivation.',
+      'Informational only in #651: do not run stale tmp checkouts; use the approved durable install path before activation.',
     ),
-  ]
+  ].flat()
 
   return {
     ok: true,

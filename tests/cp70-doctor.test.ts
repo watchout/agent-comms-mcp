@@ -64,6 +64,10 @@ function byCode(findings: Cp70Finding[]): Record<string, Cp70Finding> {
   return Object.fromEntries(findings.map((finding) => [finding.code, finding]))
 }
 
+function allByCode(findings: Cp70Finding[], code: string): Cp70Finding[] {
+  return findings.filter((finding) => finding.code === code)
+}
+
 describe('CP-70 control-plane doctor', () => {
   test('scans message_queue payload and agent_messages content/metadata for legacy TUI wake prompts', async () => {
     const seenSql: string[] = []
@@ -120,15 +124,33 @@ describe('CP-70 control-plane doctor', () => {
       inspectLaunchAgent: false,
       now: () => new Date('2026-06-01T00:00:00.000Z'),
     })
-    const prompt = byCode(report.findings).TUI_WAKE_PROMPT_PRESENT
+    const prompts = allByCode(report.findings, 'LOOP_PROMPT_BACKLOG')
 
-    expect(prompt.severity).toBe('blocker')
-    expect(prompt.count).toBe(3)
-    expect(prompt.samples.map((sample) => sample.source).sort()).toEqual([
+    expect(prompts.every((finding) => finding.severity === 'blocker')).toBe(true)
+    expect(prompts.map((finding) => finding.samples[0]?.source).sort()).toEqual([
       'agent_messages.content',
       'agent_messages.metadata',
       'message_queue.payload',
     ])
+    expect(prompts.find((finding) => finding.queue_id === '101')).toMatchObject({
+      code: 'LOOP_PROMPT_BACKLOG',
+      gate: 'runtime',
+      subject_type: 'queue',
+      subject_id: '101',
+      queue_id: '101',
+      evidence: {
+        source: 'message_queue.payload',
+      },
+      recommended_repair: {
+        requires_exact_subject: true,
+        requires_execute_flag: true,
+      },
+    })
+    expect(prompts.find((finding) => finding.subject_type === 'message')).toMatchObject({
+      code: 'LOOP_PROMPT_BACKLOG',
+      gate: 'runtime',
+      message_id: expect.any(String),
+    })
     expect(report.queue_backlog.status_counts).toEqual({ pending: 2, received: 1 })
     expect(report.policy.no_fifo_drain).toBe(true)
     expect(report.policy.no_prompt_driven_processing).toBe(true)
@@ -173,15 +195,19 @@ describe('CP-70 control-plane doctor', () => {
       launchAgentPlistText: 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id.',
     })
     const findings = byCode(report.findings)
+    const loopPrompts = allByCode(report.findings, 'LOOP_PROMPT_BACKLOG')
+    const launchMismatch = allByCode(report.findings, 'CP70_LAUNCHAGENT_MISMATCH')
+    const checkoutPath = allByCode(report.findings, 'CP70_CHECKOUT_PATH_SUSPECT')
     const preflight = buildCp70Preflight(report)
 
-    expect(findings.TUI_WAKE_PROMPT_PRESENT.samples.some((sample) => sample.source === 'launchagent.plist')).toBe(true)
-    expect(findings.STATE_DAEMON_LAUNCHAGENT_MISMATCH.count).toBe(1)
-    expect(findings.STATE_DAEMON_CHECKOUT_PATH_SUSPECT.count).toBeGreaterThanOrEqual(2)
+    expect(loopPrompts.some((finding) => finding.samples[0]?.source === 'launchagent.plist')).toBe(true)
+    expect(launchMismatch).toHaveLength(1)
+    expect(launchMismatch[0]).toMatchObject({ severity: 'info', code: 'CP70_LAUNCHAGENT_MISMATCH' })
+    expect(checkoutPath.length).toBeGreaterThanOrEqual(2)
+    expect(checkoutPath.every((finding) => finding.severity === 'info')).toBe(true)
     expect(preflight.ok).toBe(false)
-    expect(preflight.failed_blocker_codes).toContain('TUI_WAKE_PROMPT_PRESENT')
-    expect(preflight.failed_blocker_codes).toContain('STATE_DAEMON_LAUNCHAGENT_MISMATCH')
-    expect(preflight.failed_blocker_codes).toContain('STATE_DAEMON_CHECKOUT_PATH_SUSPECT')
+    expect(preflight.failed_blocker_codes).toEqual(['LOOP_PROMPT_BACKLOG'])
+    expect(findings.CP70_LAUNCHAGENT_MISMATCH.severity).toBe('info')
   })
 
   test('repair plan is dry-run only and exact-id scoped for prompt and stale active rows', async () => {
@@ -253,9 +279,20 @@ describe('CP-70 control-plane doctor', () => {
       expect(item.commands.every((command) => command.includes('--dry-run') || command.includes('diagnose-delivery'))).toBe(true)
       expect(item.commands.every((command) => !command.includes('--execute'))).toBe(true)
     }
-    expect(report.repair_plan.find((item) => item.finding_code === 'TUI_WAKE_PROMPT_PRESENT')?.exact_ids).toEqual([201])
-    expect(report.repair_plan.find((item) => item.finding_code === 'STALE_ACTIVE_QUEUE_ROWS')?.exact_ids).toEqual([301])
+    expect(report.repair_plan.find((item) => item.finding_code === 'LOOP_PROMPT_BACKLOG')?.exact_ids).toEqual([201])
+    expect(report.repair_plan.find((item) => item.finding_code === 'STUCK_ACTIVE_QUEUE_ROW')?.exact_ids).toEqual([301])
     expect(report.repair_plan.find((item) => item.finding_code === 'DUPLICATE_ACTIVE_BATON')?.exact_ids).toEqual(['401', '402'])
+    expect(byCode(report.findings).STUCK_ACTIVE_QUEUE_ROW).toMatchObject({
+      gate: 'runtime',
+      subject_type: 'queue',
+      subject_id: '301',
+      queue_id: '301',
+      recommended_repair: {
+        command: "agent-com diagnose-delivery --queue-id '301'",
+        requires_exact_subject: true,
+        requires_active_override: true,
+      },
+    })
   })
 
   test('formats CP-70 text with preflight result and transcript scan non-goal', async () => {
