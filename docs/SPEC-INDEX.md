@@ -34,6 +34,7 @@
 | spec/aun-runtime-supervisor-adapter-contract.md | proposed | #602 reboot recoveryでAUN coreとhost-specific supervisor adapterの境界、typed capabilities、endpoint evidenceを固定する契約 | 2026-06-02 |
 | operations/aun-bounded-canary-approval-pack.md | runbook | #602復旧直前のbounded canary/live smoke承認packet、evidence capture、rollback trigger checklist | 2026-06-02 |
 | spec/aun-local-supervisor-adapter-implementation-plan.md | proposed | #602/#603 local launchd/tmux supervisor adapter、persistent path、atomic LaunchAgent update dry-run計画 | 2026-06-02 |
+| operations/aun-full-recovery-runbook.md | runbook | #602 terminal reboot後のAUN full recovery GO/NO-GO、queue wake-up、Discord/state_daemon復旧policy | 2026-06-02 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -201,6 +202,13 @@
 - optional tmux inspectorはsession presence/current path evidenceのみを返し、queue処理権限やrecovery機構にはしない
 - atomic LaunchAgent updateはdry-run planとして表現し、write/rename/load/startは別approval付きexecution sliceに分離する
 - active LaunchAgentが参照するcheckout/build pathはcleanupからprotectし、`/private/tmp`等のvolatile pathはNO-GOにする
+
+### operations/aun-full-recovery-runbook.md（Full AUN Recovery Runbook）
+- #602としてterminal reboot後の復旧をdocs-only GO/NO-GO sequenceに固定する
+- CP-70 doctor、CP-80 recovery readiness、CP-80 activation-plan dry-runの順に復旧可否を判定する
+- #603 LaunchAgent/persistent path診断と#604 Discord projection診断をread-only evidenceとして位置づける
+- queue wake-upはTUI prompt injection、`next`、`inbox`、FIFO drainを禁止し、bounded runner / exact queue-id / canary-firstに限定する
+- state_daemon restart、launchctl bootstrap/kickstart、Discord live writeはreadiness GOとactivation plan GO後の明示approvalまで禁止する
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する

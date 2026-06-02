@@ -185,7 +185,23 @@ docs/operations/codex-cto-identity-normalization.md
 
 Do not mutate production identity rows, `/Users/yuji/Developer/tech-lead/.mcp.json`, `scripts/bot-registry.txt`, or restart `discord-cto` until the #417 plan is reviewed and approved for an execution window.
 
-## 6. Bounded Recovery Canary Approval (#602)
+## 6. Full AUN Recovery GO/NO-GO (#602)
+
+Terminal reboot recovery must follow the docs-only GO/NO-GO sequence in
+[`aun-full-recovery-runbook.md`](./aun-full-recovery-runbook.md).
+
+The short version:
+
+- run CP-70 doctor/preflight before CP-80 activation planning
+- use CP-80 recovery readiness and activation-plan as dry-run gates
+- treat #603 LaunchAgent persistent-path evidence and #604 Discord projection
+  diagnostics as required inputs
+- do not wake queues through TUI prompt injection, `next`, `inbox`, or FIFO
+  drain
+- do not restart state_daemon, bootstrap/kickstart launchd, or activate
+  Discord before explicit approval
+
+## 7. Bounded Recovery Canary Approval (#602)
 
 Use [`aun-bounded-canary-approval-pack.md`](./aun-bounded-canary-approval-pack.md)
 to prepare the final approval packet before any recovery canary or live smoke.
@@ -195,6 +211,6 @@ GO evidence before a separate explicit live-smoke approval. Start by saving the
 exact canary scope as `evidence/recovery-scope.json`; every CP-80 command in the
 packet must consume that file so scope drift fails closed.
 
-## 7. その他運用 (既存項目)
+## 8. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)
