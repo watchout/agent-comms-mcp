@@ -40,6 +40,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 |---|---|---|
 | CP-00 restart preflight and loop-prompt blocker | merged | queue preflight and loop-prompt backlog detection merged before scheduler activation |
 | CP-05 runtime supervisor adapter contract | proposed / #602 | AUN core owns desired runtime/endpoint/readiness policy; host-specific process/session control is delegated to supervisor adapters |
+| CP-06 persistent local supervisor adapter | proposed / #602/#603 | first local launchd/tmux adapter implementation plan; persistent path and atomic LaunchAgent update stay dry-run/approval-gated |
 | CP-10 single active owner + observers | merged | send/notify owner-observer contract and canonical channel-id contract landed |
 | CP-20 conversation identity and baton schema/store | merged | conversation identity, persistence, baton store, and one-active-baton guard landed |
 | CP-30 send-side control-plane allocation | in audit / stacked | CLI send/notify merged through #633; MCP send/notify #634 remains draft/DIRTY and needs rebase/L1 refresh |
@@ -71,6 +72,32 @@ Acceptance:
 - local tmux/launchd path is only the first adapter; future adapters can be
   systemd, Kubernetes, Nomad, Docker Compose, MDM desktop agent, or a managed
   runner
+
+### CP-06 Persistent Local Supervisor Adapter
+
+Issue #602/#603 adds the first local implementation slice under the CP-05
+contract. It connects local launchd and optional tmux evidence to the supervisor
+contract without making launchd/tmux the architecture.
+
+Acceptance:
+
+- local launchd adapter emits typed evidence for state_daemon ProgramArguments,
+  WorkingDirectory, persistent checkout/build artifact, plist path, and listener
+  identity
+- optional tmux inspector emits session/path evidence only and never becomes
+  queue processing authority
+- `/private/tmp` and other volatile ProgramArguments / WorkingDirectory targets
+  are NO-GO
+- missing executable, missing state_daemon entrypoint, and missing
+  WorkingDirectory are rejected before any host supervisor load/start action
+- atomic LaunchAgent update is modeled as dry-run plan: temp plist then rename
+  over final plist, with execution split behind separate approval
+- cleanup protects active LaunchAgent referenced checkout/build paths
+- adapters without `start`/`restart` capability cannot mutate host state
+- any approval-required host-state capability requires exact approval evidence
+  for `agent_id`, `supervisor_kind`, and intent
+- no state_daemon restart, launchd load/start, Discord write, queue drain, or
+  live runtime call is executed by this slice
 
 ### CP-40A Targeted Receive Runner
 
