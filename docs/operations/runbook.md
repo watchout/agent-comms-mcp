@@ -185,6 +185,16 @@ docs/operations/codex-cto-identity-normalization.md
 
 Do not mutate production identity rows, `/Users/yuji/Developer/tech-lead/.mcp.json`, `scripts/bot-registry.txt`, or restart `discord-cto` until the #417 plan is reviewed and approved for an execution window.
 
-## 6. その他運用 (既存項目)
+## 6. Bounded Recovery Canary Approval (#602)
+
+Use [`aun-bounded-canary-approval-pack.md`](./aun-bounded-canary-approval-pack.md)
+to prepare the final approval packet before any recovery canary or live smoke.
+The packet is read-only preparation: it requires CP-70, CP-80 readiness,
+CP-80 activation-plan, Discord projection diagnostic, and state-daemon readiness
+GO evidence before a separate explicit live-smoke approval. Start by saving the
+exact canary scope as `evidence/recovery-scope.json`; every CP-80 command in the
+packet must consume that file so scope drift fails closed.
+
+## 7. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)
