@@ -32,6 +32,7 @@
 | spec/aun-control-plane-doctor-preflight-contract.md | proposed | loop/drain/split/stale/duplicate/quarantine等を検出し、state_daemon/scheduler activationをfail-closedするCP-70契約 | 2026-06-01 |
 | spec/aun-scheduler-activation-canary-contract.md | proposed | state_daemon/scheduler activationとDiscord canaryをexact scope・lease・preflight・rollback evidenceでgateするCP-80契約 | 2026-06-01 |
 | spec/aun-runtime-supervisor-adapter-contract.md | proposed | #602 reboot recoveryでAUN coreとhost-specific supervisor adapterの境界、typed capabilities、endpoint evidenceを固定する契約 | 2026-06-02 |
+| operations/aun-bounded-canary-approval-pack.md | runbook | #602復旧直前のbounded canary/live smoke承認packet、evidence capture、rollback trigger checklist | 2026-06-02 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -185,6 +186,13 @@
 - runtime supervisor adapterはhost-specific process/session controlを所有し、coreはtyped evidenceを消費する
 - wake/start/restart等はtyped capabilitiesで表現し、restartはcapabilityと明示approvalなしにNO-GOにする
 - local tmux/launchdは最初のadapter例であり、systemd、Kubernetes、Nomad、Docker Compose、MDM desktop agent、managed runnerを将来adapterとして許容する
+
+### operations/aun-bounded-canary-approval-pack.md（Bounded Canary Approval Pack）
+- #602復旧直前のlive smoke承認requestを、実行ではなくread-only evidence packetとして準備する
+- exact agent/channel/runtime scope、`max_canary_count: 1`、`fallback_allowed:false`、no FIFO drainを固定する
+- CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readinessのGO evidenceを必須入力にする
+- rollback triggerとしてFIFO drain、loop prompt、wrong listener、Discord fallback、projection evidence missing、stuck/duplicate active work、prompt-driven next/inboxを固定する
+- Discord visibility alone is not success; DB/projection/connector/audit evidenceを成功条件にする
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
