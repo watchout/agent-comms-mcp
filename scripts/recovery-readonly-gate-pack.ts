@@ -16,6 +16,7 @@ export type GateReportName =
   | 'activation-plan'
   | 'discord-projection'
   | 'state-daemon-readiness'
+  | 'queue-processing-readiness'
   | 'install-plan'
 
 const REQUIRED_REPORTS: GateReportName[] = [
@@ -24,6 +25,7 @@ const REQUIRED_REPORTS: GateReportName[] = [
   'activation-plan',
   'discord-projection',
   'state-daemon-readiness',
+  'queue-processing-readiness',
   'install-plan',
 ]
 
@@ -241,6 +243,13 @@ export function buildReadOnlyGateCommands(options: GatePackOptions): GateCommand
       args: ['cli/index.ts', 'state-daemon', 'readiness', '--format', 'json'],
     },
     {
+      report: 'queue-processing-readiness',
+      outputFile: join(out, 'queue-processing-readiness.json'),
+      command: 'bun',
+      args: ['cli/index.ts', 'state-daemon', 'queue-readiness', '--agent-id', options.agentId, '--format', 'json'],
+      env: dbEnv,
+    },
+    {
       report: 'recovery-readiness',
       outputFile: join(out, 'recovery-readiness.json'),
       command: 'bun',
@@ -404,6 +413,10 @@ function blockerCodes(report: Record<string, unknown>): string[] {
   if (report.dependency_unavailable === true) codes.add('INSTALL_PLAN_UNAVAILABLE_PR_672_PENDING')
   if (report.mutation_performed === true) codes.add('MUTATION_PERFORMED')
   if (report.restart_performed === true) codes.add('RESTART_PERFORMED')
+  const contract = asRecord(report.contract)
+  if (contract.runtime_delivery_status_contract === 'drift') {
+    codes.add('CREDENTIAL_STATUS_CONTRACT_DRIFT')
+  }
   return [...codes].sort()
 }
 

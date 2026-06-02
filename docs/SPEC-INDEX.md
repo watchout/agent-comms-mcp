@@ -200,7 +200,7 @@
 ### operations/aun-bounded-canary-approval-pack.md（Bounded Canary Approval Pack）
 - #602復旧直前のlive smoke承認requestを、実行ではなくread-only evidence packetとして準備する
 - exact agent/channel/runtime scope、`max_canary_count: 1`、`fallback_allowed:false`、no FIFO drainを固定する
-- CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readiness、state-daemon install-plan dry-runのGO evidenceを必須入力にする
+- CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readiness、queue-processing readiness、state-daemon install-plan dry-runのGO evidenceを必須入力にする
 - rollback triggerとしてFIFO drain、loop prompt、wrong listener、Discord fallback、projection evidence missing、stuck/duplicate active work、prompt-driven next/inboxを固定する
 - Discord visibility alone is not success; DB/projection/connector/audit evidenceを成功条件にする
 
@@ -208,7 +208,7 @@
 - #602復旧実行前の最終approval materialを固定する
 - kodamaのtoken rotation safety checkをDB-first / non-secret evidenceとして要求する
 - `agent-com-api-keys:Kodama_token` が唯一のactive/registered credential refで、旧mcp-json `DISCORD_BOT_TOKEN` がrevoked/disabledであることをGO条件にする
-- CP-70/CP-80/Discord projection/state-daemon readiness/install-plan/gate summary artifactを必須入力にする
+- CP-70/CP-80/Discord projection/state-daemon readiness/queue-processing readiness/install-plan/gate summary artifactを必須入力にする
 - live smoke requestはone channel / one agent / one message / max_canary_count:1 / fallback_allowed:false / no automatic retryに限定する
 
 ### spec/aun-local-supervisor-adapter-implementation-plan.md（Local Supervisor Adapter Implementation Plan）
@@ -228,7 +228,7 @@
 ### operations/aun-full-recovery-runbook.md（Full AUN Recovery Runbook）
 - #602としてterminal reboot後の復旧をdocs-only GO/NO-GO sequenceに固定する
 - CP-70 doctor、CP-80 recovery readiness、CP-80 activation-plan dry-runの順に復旧可否を判定する
-- #603 LaunchAgent/persistent path診断と#604 Discord projection診断をread-only evidenceとして位置づける
+- #603 LaunchAgent/persistent path診断・queue-processing readiness診断と#604 Discord projection診断をread-only evidenceとして位置づける
 - queue wake-upはTUI prompt injection、`next`、`inbox`、FIFO drainを禁止し、bounded runner / exact queue-id / canary-firstに限定する
 - state_daemon restart、launchctl bootstrap/kickstart、Discord live writeはreadiness GOとactivation plan GO後の明示approvalまで禁止する
 

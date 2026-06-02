@@ -207,8 +207,9 @@ Use [`aun-bounded-canary-approval-pack.md`](./aun-bounded-canary-approval-pack.m
 to prepare the final approval packet before any recovery canary or live smoke.
 The packet is read-only preparation: it requires CP-70, CP-80 readiness,
 CP-80 activation-plan, Discord projection diagnostic, state-daemon readiness,
-and state-daemon install-plan dry-run evidence before a separate explicit
-live-smoke approval. Prefer the bounded runner:
+state-daemon queue-processing readiness, and state-daemon install-plan dry-run
+evidence before a separate explicit live-smoke approval. Prefer the bounded
+runner:
 
 ```bash
 DATABASE_URL='postgresql:///agent_comms?host=/tmp' \

@@ -17,6 +17,7 @@ const REPORTS: GateReportName[] = [
   'activation-plan',
   'discord-projection',
   'state-daemon-readiness',
+  'queue-processing-readiness',
   'install-plan',
 ]
 
@@ -112,6 +113,7 @@ describe('#602 recovery read-only gate pack', () => {
       'cp70-preflight',
       'discord-projection',
       'state-daemon-readiness',
+      'queue-processing-readiness',
       'recovery-readiness',
       'activation-plan',
     ])
@@ -120,6 +122,7 @@ describe('#602 recovery read-only gate pack', () => {
       ['bun', 'cli/index.ts', 'queue', 'cp70-preflight', '--agent-id', 'codex-cto', '--format', 'json'],
       ['bun', 'cli/index.ts', 'diagnose-projection', '--channel-id', '1487368919613444156', '--from-agent', 'codex-cto', '--to', 'ceo', '--format', 'json'],
       ['bun', 'cli/index.ts', 'state-daemon', 'readiness', '--format', 'json'],
+      ['bun', 'cli/index.ts', 'state-daemon', 'queue-readiness', '--agent-id', 'codex-cto', '--format', 'json'],
       ['bun', 'cli/index.ts', 'recovery', 'readiness', '--scope-file', '/tmp/aun-readonly-gate-evidence/recovery-scope.json', '--format', 'json'],
       ['bun', 'cli/index.ts', 'recovery', 'activation-plan', '--scope-file', '/tmp/aun-readonly-gate-evidence/recovery-scope.json', '--readiness-report', '/tmp/aun-readonly-gate-evidence/recovery-readiness.json', '--format', 'json'],
     ])
@@ -286,6 +289,27 @@ describe('#602 recovery read-only gate pack', () => {
       { source_report: 'state-daemon-readiness', code: 'STATE_DAEMON_VOLATILE_PATH' },
       { source_report: 'install-plan', code: 'INSTALL_PLAN_UNAVAILABLE_PR_672_PENDING' },
     ]))
+  })
+
+  test('credential status contract drift forces NO_GO even when projection report is otherwise GO', () => {
+    const result = summary({
+      'discord-projection': {
+        ok: true,
+        go_no_go: 'GO',
+        mutation_performed: false,
+        restart_performed: false,
+        contract: {
+          runtime_delivery_status_contract: 'drift',
+        },
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.go_no_go).toBe('NO_GO')
+    expect(result.blockers).toContainEqual({
+      source_report: 'discord-projection',
+      code: 'CREDENTIAL_STATUS_CONTRACT_DRIFT',
+    })
   })
 
   test('mutation or restart evidence forces NO_GO', () => {
