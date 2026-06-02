@@ -34,7 +34,8 @@ import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
 import { buildCp70DoctorReport, buildCp70Preflight, formatCp70DoctorText } from '../core/cp70-doctor'
-import { buildRecoveryReadinessReport, formatRecoveryReadinessText, type RecoveryReadinessScope } from '../core/recovery-readiness'
+import { buildRecoveryReadinessReport, formatRecoveryReadinessText, type RecoveryReadinessReport, type RecoveryReadinessScope } from '../core/recovery-readiness'
+import { buildRecoveryActivationPlan, formatRecoveryActivationPlanText } from '../core/recovery-activation-plan'
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
@@ -4374,35 +4375,62 @@ async function cp70QueuePreflight(args: string[]) {
   }
 }
 
-function loadRecoveryReadinessScope(path: string): RecoveryReadinessScope {
+function loadJsonObjectFile(path: string, flagName: string): Record<string, unknown> {
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    console.error(`Error: could not read --scope-file ${path}: ${message}`)
+    console.error(`Error: could not read --${flagName} ${path}: ${message}`)
     process.exit(2)
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    console.error('Error: --scope-file must contain a JSON object')
+    console.error(`Error: --${flagName} must contain a JSON object`)
     process.exit(2)
   }
-  return parsed as RecoveryReadinessScope
+  return parsed as Record<string, unknown>
+}
+
+function loadRecoveryReadinessScope(path: string): RecoveryReadinessScope {
+  return loadJsonObjectFile(path, 'scope-file') as RecoveryReadinessScope
+}
+
+function loadRecoveryReadinessReport(path: string): RecoveryReadinessReport {
+  return loadJsonObjectFile(path, 'readiness-report') as RecoveryReadinessReport
 }
 
 async function recoveryCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness') {
-    console.error('Usage: agent-com recovery readiness --scope-file <json> [--format json|text]')
+  if (subcommand !== 'readiness' && subcommand !== 'activation-plan') {
+    console.error('Usage: agent-com recovery <readiness|activation-plan> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
   const scopeFile = flags['scope-file']
   const format = flags.format ?? 'json'
   if (!scopeFile || !['json', 'text'].includes(format)) {
-    console.error('Usage: agent-com recovery readiness --scope-file <json> [--format json|text]')
+    console.error(subcommand === 'activation-plan'
+      ? 'Usage: agent-com recovery activation-plan --scope-file <json> --readiness-report <json> [--format json|text]'
+      : 'Usage: agent-com recovery readiness --scope-file <json> [--format json|text]')
     process.exit(2)
   }
   const scope = loadRecoveryReadinessScope(scopeFile)
+  if (subcommand === 'activation-plan') {
+    const readinessReportPath = flags['readiness-report']
+    if (!readinessReportPath) {
+      console.error('Usage: agent-com recovery activation-plan --scope-file <json> --readiness-report <json> [--format json|text]')
+      process.exit(2)
+    }
+    const report = buildRecoveryActivationPlan(scope, loadRecoveryReadinessReport(readinessReportPath))
+    if (format === 'text') {
+      process.stdout.write(formatRecoveryActivationPlanText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+    if (!report.ok) {
+      process.exitCode = 1
+    }
+    return
+  }
   const db = await getDb()
   try {
     const report = await buildRecoveryReadinessReport(db as any, scope)
@@ -5718,6 +5746,8 @@ Message I/O (requires AGENT_ID env var):
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   recovery readiness --scope-file <json> [--format json|text]
                                                        — CP-80 read-only recovery GO/NO-GO gate; no restart, no Discord activation, no FIFO drain
+  recovery activation-plan --scope-file <json> --readiness-report <json> [--format json|text]
+                                                       — CP-80 read-only canary-first activation plan; no runtime or Discord activation
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
