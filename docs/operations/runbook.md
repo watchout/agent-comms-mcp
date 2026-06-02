@@ -221,6 +221,15 @@ packet consumes the same scope file so scope drift fails closed. If the #672
 install-plan CLI is not present, the runner records that dependency as NO-GO;
 do not treat the approval packet as complete by omission.
 
+Before requesting execution approval, use
+[`aun-recovery-final-approval-packet.md`](./aun-recovery-final-approval-packet.md)
+to assemble the final operator packet. That packet adds the kodama token
+rotation safety check, requires all read-only evidence artifacts, and provides
+the one-message live smoke approval template. It is still preparation only:
+state_daemon restart, launchctl bootstrap/kickstart, Discord live write,
+`next`/`inbox`/FIFO drain, DB/schema migration, and live runtime calls remain
+prohibited until separately approved.
+
 ## 8. その他運用 (既存項目)
 
 (既存の運用手順は本 runbook に追記される — Phase 5 で初版作成、後続 PR で他項目統合予定)

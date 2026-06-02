@@ -35,6 +35,7 @@
 | operations/aun-bounded-canary-approval-pack.md | runbook | #602復旧直前のbounded canary/live smoke承認packet、evidence capture、rollback trigger checklist | 2026-06-02 |
 | spec/aun-local-supervisor-adapter-implementation-plan.md | proposed | #602/#603 local launchd/tmux supervisor adapter、persistent path、atomic LaunchAgent update dry-run計画 | 2026-06-02 |
 | operations/aun-full-recovery-runbook.md | runbook | #602 terminal reboot後のAUN full recovery GO/NO-GO、queue wake-up、Discord/state_daemon復旧policy | 2026-06-02 |
+| operations/aun-recovery-final-approval-packet.md | runbook | #602復旧実行前の最終承認packet、kodama token rotation安全確認、live smoke request template | 2026-06-02 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -195,6 +196,13 @@
 - CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readiness、state-daemon install-plan dry-runのGO evidenceを必須入力にする
 - rollback triggerとしてFIFO drain、loop prompt、wrong listener、Discord fallback、projection evidence missing、stuck/duplicate active work、prompt-driven next/inboxを固定する
 - Discord visibility alone is not success; DB/projection/connector/audit evidenceを成功条件にする
+
+### operations/aun-recovery-final-approval-packet.md（Recovery Final Approval Packet）
+- #602復旧実行前の最終approval materialを固定する
+- kodamaのtoken rotation safety checkをDB-first / non-secret evidenceとして要求する
+- `agent-com-api-keys:Kodama_token` が唯一のactive/registered credential refで、旧mcp-json `DISCORD_BOT_TOKEN` がrevoked/disabledであることをGO条件にする
+- CP-70/CP-80/Discord projection/state-daemon readiness/install-plan/gate summary artifactを必須入力にする
+- live smoke requestはone channel / one agent / one message / max_canary_count:1 / fallback_allowed:false / no automatic retryに限定する
 
 ### spec/aun-local-supervisor-adapter-implementation-plan.md（Local Supervisor Adapter Implementation Plan）
 - #602/#603として#669 runtime supervisor adapter contractの最初のlocal implementation sliceを定義する
