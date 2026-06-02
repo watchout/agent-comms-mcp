@@ -139,6 +139,7 @@ Conformance reports must fail closed with stable codes:
 | `VOLATILE_RUNTIME_PATH` | Program, working directory, artifact, log, or config path points at `/tmp`, `/private/tmp`, or another disposable path. |
 | `PROMPT_DRIVEN_RECOVERY_FORBIDDEN` | Recovery evidence depends on TUI prompt injection, `next`, `inbox`, or FIFO drain. |
 | `CAPABILITY_UNSUPPORTED` | Requested non-restart capability is unsupported by the adapter. |
+| `CAPABILITY_APPROVAL_REQUIRED` | Requested capability is supported but declares `requires_approval:true`, and exact approval evidence is missing or scoped to a different agent, supervisor, or intent. |
 | `RESTART_CAPABILITY_UNSUPPORTED` | Restart was requested but the adapter does not support restart. |
 | `RESTART_APPROVAL_REQUIRED` | Restart has adapter support but lacks explicit approval evidence for the exact scope. |
 | `OBSERVED_RUNTIME_FAILED` | Adapter reports a failed observed runtime. |
@@ -191,6 +192,11 @@ Without these, restart is NO-GO. state_daemon restart is not a repair mechanism
 for queue backlog, loop prompts, projection fallback, or missing runtime
 identity.
 
+The same exact approval check applies to any requested capability whose adapter
+evidence sets `requires_approval:true`. Approval must match `agent_id`,
+`supervisor_kind`, and requested intent. Missing approval, scope mismatch, or
+wrong intent is NO-GO.
+
 ## Relationship To #603, #667, And #668
 
 #603 and PR #667 provide a local LaunchAgent readiness diagnostic. That is
@@ -216,7 +222,9 @@ Implementation slices must include conformance coverage for:
    recovery mechanism.
 6. state_daemon restart requires explicit adapter capability and approval
    evidence.
-7. core conformance code does not shell out to host-specific lifecycle tools.
+7. start and approval-required wake fail closed without exact matching approval
+   evidence.
+8. core conformance code does not shell out to host-specific lifecycle tools.
 
 ## Non-Goals
 

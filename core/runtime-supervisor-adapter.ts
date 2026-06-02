@@ -68,6 +68,7 @@ export type RuntimeSupervisorBlockerCode =
   | 'VOLATILE_RUNTIME_PATH'
   | 'PROMPT_DRIVEN_RECOVERY_FORBIDDEN'
   | 'CAPABILITY_UNSUPPORTED'
+  | 'CAPABILITY_APPROVAL_REQUIRED'
   | 'RESTART_CAPABILITY_UNSUPPORTED'
   | 'RESTART_APPROVAL_REQUIRED'
   | 'OBSERVED_RUNTIME_FAILED'
@@ -213,6 +214,20 @@ function blocker(
   return { code, severity: 'blocker', subject_type, subject_id, evidence }
 }
 
+function approvalMatchesScope(
+  approval: RuntimeSupervisorApprovalEvidence | null | undefined,
+  desired: RuntimeSupervisorDesiredStateEvidence,
+  intent: RuntimeSupervisorIntent,
+): boolean {
+  return approval?.approved === true
+    && approval.scope.agent_id === desired.agent_id
+    && approval.scope.supervisor_kind === desired.supervisor_kind
+    && approval.scope.intent === intent
+    && textPresent(approval.approval_id)
+    && textPresent(approval.approved_by)
+    && textPresent(approval.approved_at)
+}
+
 export function evaluateRuntimeSupervisorConformance(
   input: RuntimeSupervisorConformanceInput,
 ): RuntimeSupervisorConformanceReport {
@@ -289,22 +304,19 @@ export function evaluateRuntimeSupervisorConformance(
     ))
   }
 
-  if (input.intent === 'restart') {
-    const approval = input.approval
-    const approvalMatchesScope = approval?.approved === true
-      && approval.scope.agent_id === desired.agent_id
-      && approval.scope.supervisor_kind === desired.supervisor_kind
-      && approval.scope.intent === 'restart'
-      && textPresent(approval.approval_id)
-      && textPresent(approval.approved_by)
-      && textPresent(approval.approved_at)
-
-    if (!approvalMatchesScope) {
-      blockers.push(blocker('RESTART_APPROVAL_REQUIRED', 'approval', desired.agent_id, {
-        required_intent: 'restart',
-        approval: approval ?? null,
-      }))
-    }
+  const approvalRequired = input.intent === 'restart' || capability?.requires_approval === true
+  if (approvalRequired && !approvalMatchesScope(input.approval, desired, input.intent)) {
+    blockers.push(blocker(
+      input.intent === 'restart' ? 'RESTART_APPROVAL_REQUIRED' : 'CAPABILITY_APPROVAL_REQUIRED',
+      'approval',
+      desired.agent_id,
+      {
+        required_intent: input.intent,
+        required_capability: requiredCapability,
+        capability_requires_approval: capability?.requires_approval === true,
+        approval: input.approval ?? null,
+      },
+    ))
   }
 
   return {

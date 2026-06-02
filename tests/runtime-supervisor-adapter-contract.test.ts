@@ -129,6 +129,66 @@ describe('#602 runtime supervisor adapter conformance', () => {
     expect(report.restart_performed).toBe(false)
   })
 
+  test('start capability requiring approval fails closed without exact matching approval', () => {
+    const input = baseInput()
+    input.intent = 'start'
+    input.observed.capabilities = [
+      { name: 'inspect', supported: true },
+      { name: 'readiness', supported: true },
+      { name: 'start', supported: true, requires_approval: true },
+    ]
+
+    expect(codes(input)).toContain('CAPABILITY_APPROVAL_REQUIRED')
+
+    input.approval = {
+      approved: true,
+      approval_id: 'approval-wrong-intent',
+      approved_by: 'operator',
+      approved_at: '2026-06-02T00:00:00.000Z',
+      scope: { agent_id: 'codex-cto', supervisor_kind: 'managed_runner', intent: 'wake' },
+    }
+    expect(codes(input)).toContain('CAPABILITY_APPROVAL_REQUIRED')
+
+    input.approval = {
+      approved: true,
+      approval_id: 'approval-start',
+      approved_by: 'operator',
+      approved_at: '2026-06-02T00:00:00.000Z',
+      scope: { agent_id: 'codex-cto', supervisor_kind: 'managed_runner', intent: 'start' },
+    }
+    expect(evaluateRuntimeSupervisorConformance(input).ok).toBe(true)
+  })
+
+  test('wake capability requiring approval fails closed without exact matching approval', () => {
+    const input = baseInput()
+    input.intent = 'wake'
+    input.observed.capabilities = [
+      { name: 'inspect', supported: true },
+      { name: 'readiness', supported: true },
+      { name: 'wake', supported: true, requires_approval: true },
+    ]
+
+    expect(codes(input)).toContain('CAPABILITY_APPROVAL_REQUIRED')
+
+    input.approval = {
+      approved: true,
+      approval_id: 'approval-wrong-agent',
+      approved_by: 'operator',
+      approved_at: '2026-06-02T00:00:00.000Z',
+      scope: { agent_id: 'other-agent', supervisor_kind: 'managed_runner', intent: 'wake' },
+    }
+    expect(codes(input)).toContain('CAPABILITY_APPROVAL_REQUIRED')
+
+    input.approval = {
+      approved: true,
+      approval_id: 'approval-wake',
+      approved_by: 'operator',
+      approved_at: '2026-06-02T00:00:00.000Z',
+      scope: { agent_id: 'codex-cto', supervisor_kind: 'managed_runner', intent: 'wake' },
+    }
+    expect(evaluateRuntimeSupervisorConformance(input).ok).toBe(true)
+  })
+
   test('core contract has no host-specific lifecycle calls', () => {
     expect(CORE_SRC).not.toMatch(/from 'node:child_process'|from "node:child_process"/)
     expect(CORE_SRC).not.toMatch(/\bexec(File|Sync)?\b/)
