@@ -83,6 +83,31 @@ The dry-run plan does not write files, rename plists, load launchd jobs, or
 start state_daemon. A future execution slice must require exact approval
 evidence before any host-state mutation.
 
+The CLI surface is:
+
+```bash
+agent-com state-daemon install-plan \
+  --commit <sha> \
+  --restore-root ~/.agent-comms/state-daemon/checkouts \
+  --launch-agents-dir ~/Library/LaunchAgents \
+  --format json
+```
+
+Optional cleanup evidence can be attached without deleting anything:
+
+```bash
+agent-com state-daemon install-plan \
+  --commit <sha> \
+  --active-plist-path ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist \
+  --checkout-dirs <path-a>,<path-b>,<path-c> \
+  --keep 3 \
+  --format json
+```
+
+`install-plan` is dry-run only. `--execute` is rejected; write/rename/load/start
+execution must be introduced as a separate approval-gated command if it is ever
+added.
+
 ## Cleanup Protection
 
 Cleanup is planned from LaunchAgent evidence, not from age alone. Any checkout

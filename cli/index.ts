@@ -58,6 +58,10 @@ import {
   formatStateDaemonLaunchAgentReadinessText,
 } from '../core/state-daemon-launchagent-readiness'
 import {
+  buildLocalLaunchdInstallDryRunPlan,
+  formatLocalLaunchdInstallDryRunText,
+} from '../core/local-supervisor-adapter'
+import {
   buildChannelRegistrationReconcileReport,
   formatChannelRegistrationReconcileText,
 } from '../core/channel-registration-reconcile'
@@ -4373,15 +4377,53 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
 }
 
 async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness') {
-    console.error('Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
+  if (subcommand !== 'readiness' && subcommand !== 'install-plan') {
+    console.error('Usage: agent-com state-daemon <readiness|install-plan> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
   const format = flags.format ?? 'json'
   if (!['json', 'text'].includes(format)) {
-    console.error('Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
+    console.error(subcommand === 'install-plan'
+      ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
+      : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
     process.exit(2)
+  }
+  if (subcommand === 'install-plan') {
+    if (hasFlag(flags, 'execute')) {
+      console.error('Error: state-daemon install-plan is dry-run only; execution requires a separate approved command')
+      process.exit(2)
+    }
+    const commit = flags.commit
+    if (!commit) {
+      console.error('Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]')
+      process.exit(2)
+    }
+    const activeLaunchAgentPlists = flags['active-plist-path']
+      ? [readFileSync(resolve(flags['active-plist-path']), 'utf8')]
+      : undefined
+    const checkoutDirs = parseCsvFlag(flags['checkout-dirs']) ?? undefined
+    const plan = buildLocalLaunchdInstallDryRunPlan({
+      commit,
+      restoreRoot: flags['restore-root'],
+      launchAgentsDir: flags['launch-agents-dir'],
+      bunPath: flags['bun-path'],
+      databaseUrl: flags['database-url'],
+      agentDenylist: flags['agent-denylist'],
+      expectedAgentId: flags['expected-agent-id'],
+      activeLaunchAgentPlists,
+      checkoutDirs,
+      keepCheckouts: flags.keep ? parsePositiveIntFlag(flags.keep, 3, 'keep') : undefined,
+    })
+    if (format === 'text') {
+      process.stdout.write(formatLocalLaunchdInstallDryRunText(plan))
+    } else {
+      process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`)
+    }
+    if (!plan.ok) {
+      process.exitCode = 1
+    }
+    return
   }
   const report = buildStateDaemonLaunchAgentReadinessReport({
     label: flags.label,
@@ -5707,6 +5749,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — CP-80 read-only canary-first activation plan; no runtime or Discord activation
   state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]
                                                        — read-only LaunchAgent persistent-path readiness diagnostic; no restart
+  state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--active-plist-path <path>] [--checkout-dirs <csv>] [--format json|text]
+                                                       — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
