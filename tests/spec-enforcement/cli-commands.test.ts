@@ -161,9 +161,14 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/async function stateDaemonCommand[\s\S]*?buildStateDaemonLaunchAgentReadinessReport/)
   })
   test("'state-daemon install-plan' invokes the dry-run local supervisor install planner", () => {
-    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan'/)
+    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness'/)
     expect(CLI_SRC).toMatch(/subcommand === 'install-plan'[\s\S]*?buildLocalLaunchdInstallDryRunPlan/)
     expect(CLI_SRC).toMatch(/state-daemon install-plan is dry-run only/)
+  })
+  test("'state-daemon queue-readiness' invokes the read-only queue-processing readiness report", () => {
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?fetchBotStatusFromDb/)
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?buildQueueProcessingReadinessReport/)
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?formatQueueProcessingReadinessText/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -667,6 +672,19 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/load_or_start_job/)
     expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/protectedPathsFromLaunchAgentPlists/)
     expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/planStateDaemonRestorePrune/)
+  })
+
+  test('help documents state-daemon queue-processing readiness diagnostic', () => {
+    expect(CLI_SRC).toMatch(/state-daemon queue-readiness \[--agent-id <id>\]/)
+    expect(CLI_SRC).toMatch(/read-only queue-processing readiness; separates transport health from queue wake progress/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/issue_ref: '#603'/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_db_mutation: true/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_state_daemon_restart: true/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_launchctl_mutation: true/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_next_inbox_fifo_drain: true/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_live_smoke: true/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/QUEUE_WAKE_STUCK/)
+    expect(STATE_DAEMON_READINESS_SRC).toMatch(/STATE_DAEMON_TRANSPORT_NOT_READY/)
   })
 
   test('queue wake smoke is bounded, approval-gated, and does not drain or terminalize rows', () => {

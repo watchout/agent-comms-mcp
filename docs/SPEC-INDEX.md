@@ -203,6 +203,13 @@
 - atomic LaunchAgent updateはdry-run planとして表現し、write/rename/load/startは別approval付きexecution sliceに分離する
 - active LaunchAgentが参照するcheckout/build pathはcleanupからprotectし、`/private/tmp`等のvolatile pathはNO-GOにする
 
+### spec/aun-state-daemon-queue-processing-readiness-contract.md（State-Daemon Queue Processing Readiness Contract）
+- #603としてDiscord transport healthとqueue-processing readinessを分離したread-only診断を固定する
+- state-daemon/launchd/process/path/fatal stderrを`transport_readiness`に、pending/active/wake state/stuck agent evidenceを`queue_processing_readiness`に分ける
+- `STATE_DAEMON_TRANSPORT_NOT_READY`と`QUEUE_WAKE_STUCK`を明示blockerとして出す
+- DB SELECTとread-only runtime inspectionのみを許可し、smoke row insert、`next`/`inbox`、launchctl mutation、state_daemon restart、Discord writeを禁止する
+- GOはread-only evidence cleanを意味するだけで、live queue wake smokeやrestart承認ではない
+
 ### operations/aun-full-recovery-runbook.md（Full AUN Recovery Runbook）
 - #602としてterminal reboot後の復旧をdocs-only GO/NO-GO sequenceに固定する
 - CP-70 doctor、CP-80 recovery readiness、CP-80 activation-plan dry-runの順に復旧可否を判定する

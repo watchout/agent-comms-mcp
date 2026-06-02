@@ -99,6 +99,64 @@ export interface QueueWakeSmokeReport {
   }
 }
 
+export type QueueProcessingReadinessGoNoGo = 'GO' | 'NO_GO'
+
+export interface QueueProcessingReadinessFinding {
+  code: string
+  severity: 'blocker' | 'warning'
+  message: string
+  agent_id?: string | null
+  evidence?: Record<string, unknown>
+}
+
+export interface QueueProcessingReadinessReport {
+  ok: boolean
+  go_no_go: QueueProcessingReadinessGoNoGo
+  generated_at: string
+  issue_ref: '#603'
+  transport_readiness: {
+    ready: boolean
+    state_daemon_status: StateDaemonReadinessStatus
+    launchd_loaded: boolean | null
+    launchd_running: boolean | null
+    pid: number | null
+    script: string | null
+    working_directory: string | null
+    stderr_fatal_fingerprint: string | null
+    blocker_codes: string[]
+  }
+  queue_processing_readiness: {
+    ready: boolean
+    total_agents: number
+    pending_total: number
+    active_claim_total: number
+    wake_state_counts: Record<QueueWakeState, number>
+    stuck_agents: Array<{
+      agent_id: string
+      queue_wake_state: QueueWakeState
+      pending_count: number
+      oldest_pending_at: string | null
+      active_claim_count: number
+    }>
+    blocker_codes: string[]
+  }
+  policy: {
+    read_only: true
+    no_db_mutation: true
+    no_state_daemon_restart: true
+    no_launchctl_mutation: true
+    no_discord_live_write: true
+    no_next_inbox_fifo_drain: true
+    no_prompt_driven_processing: true
+    no_live_smoke: true
+  }
+  blockers: QueueProcessingReadinessFinding[]
+  warnings: QueueProcessingReadinessFinding[]
+  recommended_next_commands: string[]
+  mutation_performed: false
+  restart_performed: false
+}
+
 export interface LatestQueueWakeSmoke {
   event_type: string
   agent_id: string | null
@@ -703,6 +761,108 @@ export function summarizeQueueWakeStates(rows: Iterable<BotStatusDbRow>): {
   return { counts, stuck_agents }
 }
 
+function readinessFinding(
+  code: string,
+  severity: 'blocker' | 'warning',
+  message: string,
+  extra: Omit<QueueProcessingReadinessFinding, 'code' | 'severity' | 'message'> = {},
+): QueueProcessingReadinessFinding {
+  return { code, severity, message, ...extra }
+}
+
+export function buildQueueProcessingReadinessReport(
+  rows: Iterable<BotStatusDbRow>,
+  runtime: StateDaemonRuntimeReadiness,
+  options: { now?: Date } = {},
+): QueueProcessingReadinessReport {
+  const rowList = Array.from(rows)
+  const blockers: QueueProcessingReadinessFinding[] = []
+  const warnings: QueueProcessingReadinessFinding[] = []
+  const transportBlockerCodes: string[] = []
+
+  if (runtime.status !== 'ok') {
+    transportBlockerCodes.push('STATE_DAEMON_TRANSPORT_NOT_READY')
+    blockers.push(readinessFinding('STATE_DAEMON_TRANSPORT_NOT_READY', 'blocker', 'state-daemon transport is not ready', {
+      evidence: {
+        status: runtime.status,
+        launchd_loaded: runtime.launchd.loaded,
+        launchd_running: runtime.launchd.running,
+        pid: runtime.process.pid,
+      },
+    }))
+  }
+  if (runtime.stderr.fatal_fingerprint) {
+    transportBlockerCodes.push('STATE_DAEMON_FATAL_STDERR')
+    blockers.push(readinessFinding('STATE_DAEMON_FATAL_STDERR', 'blocker', 'state-daemon stderr contains a fatal startup fingerprint', {
+      evidence: {
+        stderr_path: runtime.stderr.path,
+        fatal_fingerprint: runtime.stderr.fatal_fingerprint,
+      },
+    }))
+  }
+
+  const wakeSummary = summarizeQueueWakeStates(rowList)
+  const queueBlockerCodes = wakeSummary.stuck_agents.length > 0 ? ['QUEUE_WAKE_STUCK'] : []
+  for (const agent of wakeSummary.stuck_agents) {
+    blockers.push(readinessFinding('QUEUE_WAKE_STUCK', 'blocker', 'agent has pending queue work without safe wake progress', {
+      agent_id: agent.agent_id,
+      evidence: agent,
+    }))
+  }
+  if (rowList.length === 0) {
+    warnings.push(readinessFinding('NO_AGENT_STATUS_ROWS', 'warning', 'no agent status rows were returned for queue-processing readiness'))
+  }
+
+  const pendingTotal = rowList.reduce((sum, row) => sum + row.pending_count, 0)
+  const activeClaimTotal = rowList.reduce((sum, row) => sum + row.active_claim_count, 0)
+  const transportReady = transportBlockerCodes.length === 0
+  const queueReady = queueBlockerCodes.length === 0
+  const ok = transportReady && queueReady
+  return {
+    ok,
+    go_no_go: ok ? 'GO' : 'NO_GO',
+    generated_at: (options.now ?? new Date()).toISOString(),
+    issue_ref: '#603',
+    transport_readiness: {
+      ready: transportReady,
+      state_daemon_status: runtime.status,
+      launchd_loaded: runtime.launchd.loaded,
+      launchd_running: runtime.launchd.running,
+      pid: runtime.process.pid,
+      script: runtime.paths.script,
+      working_directory: runtime.paths.working_directory,
+      stderr_fatal_fingerprint: runtime.stderr.fatal_fingerprint,
+      blocker_codes: transportBlockerCodes,
+    },
+    queue_processing_readiness: {
+      ready: queueReady,
+      total_agents: rowList.length,
+      pending_total: pendingTotal,
+      active_claim_total: activeClaimTotal,
+      wake_state_counts: wakeSummary.counts,
+      stuck_agents: wakeSummary.stuck_agents,
+      blocker_codes: queueBlockerCodes,
+    },
+    policy: {
+      read_only: true,
+      no_db_mutation: true,
+      no_state_daemon_restart: true,
+      no_launchctl_mutation: true,
+      no_discord_live_write: true,
+      no_next_inbox_fifo_drain: true,
+      no_prompt_driven_processing: true,
+      no_live_smoke: true,
+    },
+    blockers,
+    warnings,
+    recommended_next_commands: ok
+      ? []
+      : ['Repair transport or queue-processing blockers before requesting a bounded live smoke approval.'],
+    mutation_performed: false,
+    restart_performed: false,
+  }
+}
+
 export function formatStateDaemonReadinessLine(readiness: StateDaemonRuntimeReadiness, latestSmoke?: LatestQueueWakeSmoke | null): string {
   const smokeText = latestSmoke
     ? `${latestSmoke.detail.result ?? 'unknown'}@${latestSmoke.created_at ?? 'unknown'} run=${latestSmoke.detail.run_id ?? latestSmoke.target ?? '-'}`
@@ -717,6 +877,32 @@ export function formatStateDaemonReadinessLine(readiness: StateDaemonRuntimeRead
     `stderr_fatal=${readiness.stderr.fatal_fingerprint ?? 'none'}`,
     `queue_smoke=${smokeText}`,
   ].join(' ')
+}
+
+export function formatQueueProcessingReadinessText(report: QueueProcessingReadinessReport): string {
+  const lines = [
+    'State-Daemon Queue Processing Readiness',
+    `Generated: ${report.generated_at}`,
+    `Result: ${report.go_no_go}`,
+    `Transport: ready=${report.transport_readiness.ready} status=${report.transport_readiness.state_daemon_status} loaded=${String(report.transport_readiness.launchd_loaded)} running=${String(report.transport_readiness.launchd_running)} pid=${report.transport_readiness.pid ?? '-'}`,
+    `Queue: ready=${report.queue_processing_readiness.ready} agents=${report.queue_processing_readiness.total_agents} pending=${report.queue_processing_readiness.pending_total} active_claims=${report.queue_processing_readiness.active_claim_total}`,
+    `Wake states: ${Object.entries(report.queue_processing_readiness.wake_state_counts).map(([state, count]) => `${state}=${count}`).join(', ')}`,
+    `Mutation performed: ${report.mutation_performed}`,
+    `Restart performed: ${report.restart_performed}`,
+  ]
+  if (report.blockers.length > 0) {
+    lines.push('', 'Blockers:')
+    for (const blocker of report.blockers) {
+      lines.push(`- ${blocker.code}${blocker.agent_id ? ` agent=${blocker.agent_id}` : ''}: ${blocker.message}`)
+    }
+  }
+  if (report.warnings.length > 0) {
+    lines.push('', 'Warnings:')
+    for (const warning of report.warnings) {
+      lines.push(`- ${warning.code}: ${warning.message}`)
+    }
+  }
+  return `${lines.join('\n')}\n`
 }
 
 export function formatQueueWakeSmokeText(report: QueueWakeSmokeReport): string {
