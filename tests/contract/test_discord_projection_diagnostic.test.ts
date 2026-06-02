@@ -3,6 +3,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   buildDiscordProjectionDiagnosticReport,
+  formatDiscordProjectionDiagnosticText,
 } from '../../core/discord-projection-diagnostic'
 import { resetChannelPolicyCache } from '../../core/channel-policy'
 import type { OutboundProjectionDecision } from '../../core/outbound-projection'
@@ -223,6 +224,15 @@ describe('#604 Discord projection diagnostic', () => {
     expect(report.ok).toBe(true)
     expect(report.go_no_go).toBe('GO')
     expect(report.mutation_performed).toBe(false)
+    expect(report.contract).toMatchObject({
+      runtime_login_credential_statuses: ['active', 'registered'],
+      delivery_credential_statuses: ['active', 'registered'],
+      runtime_delivery_status_contract: 'aligned',
+      sender_direct_preferred_over_router: true,
+      fallback_requires_explicit_allowance: true,
+      selected_delivery_evidence_required: true,
+      no_live_discord_write: true,
+    })
     expect(report.decision).toMatchObject({
       consumer_agent_id: 'codex-cto',
       projection_identity_id: 'codex-cto',
@@ -235,6 +245,29 @@ describe('#604 Discord projection diagnostic', () => {
       decision_source: 'sender_token_evidence',
     })
     expect(report.blockers).toEqual([])
+  })
+
+  test('credential contract is emitted in JSON and text for drift diagnostics', async () => {
+    const db = mockProjectionDb({
+      bindingDeliveryAgents: ['codex-cto'],
+      credentialStatusByAgent: { 'codex-cto': 'registered' },
+      agents: {
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const report = await buildDiscordProjectionDiagnosticReport(db, scope, {
+      now: new Date('2026-06-02T00:00:30.000Z'),
+    })
+    const text = formatDiscordProjectionDiagnosticText(report)
+
+    expect(report.contract.runtime_delivery_status_contract).toBe('aligned')
+    expect(report.contract.runtime_login_credential_statuses).toEqual(['active', 'registered'])
+    expect(report.contract.delivery_credential_statuses).toEqual(['active', 'registered'])
+    expect(text).toContain('Credential contract: aligned')
+    expect(text).toContain('Runtime login statuses: active, registered')
+    expect(text).toContain('Delivery statuses: active, registered')
   })
 
   test('usable sender credential falling back to AUN is a blocker', async () => {
