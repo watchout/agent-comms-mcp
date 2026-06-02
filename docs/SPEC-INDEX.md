@@ -33,6 +33,7 @@
 | spec/aun-scheduler-activation-canary-contract.md | proposed | state_daemon/scheduler activationとDiscord canaryをexact scope・lease・preflight・rollback evidenceでgateするCP-80契約 | 2026-06-01 |
 | spec/aun-runtime-supervisor-adapter-contract.md | proposed | #602 reboot recoveryでAUN coreとhost-specific supervisor adapterの境界、typed capabilities、endpoint evidenceを固定する契約 | 2026-06-02 |
 | operations/aun-bounded-canary-approval-pack.md | runbook | #602復旧直前のbounded canary/live smoke承認packet、evidence capture、rollback trigger checklist | 2026-06-02 |
+| spec/aun-local-supervisor-adapter-implementation-plan.md | proposed | #602/#603 local launchd/tmux supervisor adapter、persistent path、atomic LaunchAgent update dry-run計画 | 2026-06-02 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -193,6 +194,13 @@
 - CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readinessのGO evidenceを必須入力にする
 - rollback triggerとしてFIFO drain、loop prompt、wrong listener、Discord fallback、projection evidence missing、stuck/duplicate active work、prompt-driven next/inboxを固定する
 - Discord visibility alone is not success; DB/projection/connector/audit evidenceを成功条件にする
+
+### spec/aun-local-supervisor-adapter-implementation-plan.md（Local Supervisor Adapter Implementation Plan）
+- #602/#603として#669 runtime supervisor adapter contractの最初のlocal implementation sliceを定義する
+- local launchd adapterはstate_daemonのProgramArguments、WorkingDirectory、persistent checkout/build artifact、LaunchAgent plist、listener identityをtyped evidenceに変換する
+- optional tmux inspectorはsession presence/current path evidenceのみを返し、queue処理権限やrecovery機構にはしない
+- atomic LaunchAgent updateはdry-run planとして表現し、write/rename/load/startは別approval付きexecution sliceに分離する
+- active LaunchAgentが参照するcheckout/build pathはcleanupからprotectし、`/private/tmp`等のvolatile pathはNO-GOにする
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する
