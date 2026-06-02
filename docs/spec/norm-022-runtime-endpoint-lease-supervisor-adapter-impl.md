@@ -159,6 +159,12 @@ Do not store raw tokens or provider credentials in endpoint metadata.
 
 ## Supervisor Adapter Contract
 
+The general supervisor adapter boundary is defined in
+[`aun-runtime-supervisor-adapter-contract.md`](./aun-runtime-supervisor-adapter-contract.md).
+This NORM-022 document is the local endpoint lease implementation slice; it
+must not make tmux, launchd, Codex CLI, Claude Code, or any session application
+part of the architecture.
+
 Each supervisor adapter must implement the same control surface:
 
 ```text

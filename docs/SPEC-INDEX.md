@@ -31,6 +31,7 @@
 | spec/aun-typed-completion-outcome-contract.md | proposed | runtime proseからlifecycleを推測せず、reply/no-reply/handoff/escalate/retry/quarantineをtyped outcomeで適用するCP-60契約 | 2026-06-01 |
 | spec/aun-control-plane-doctor-preflight-contract.md | proposed | loop/drain/split/stale/duplicate/quarantine等を検出し、state_daemon/scheduler activationをfail-closedするCP-70契約 | 2026-06-01 |
 | spec/aun-scheduler-activation-canary-contract.md | proposed | state_daemon/scheduler activationとDiscord canaryをexact scope・lease・preflight・rollback evidenceでgateするCP-80契約 | 2026-06-01 |
+| spec/aun-runtime-supervisor-adapter-contract.md | proposed | #602 reboot recoveryでAUN coreとhost-specific supervisor adapterの境界、typed capabilities、endpoint evidenceを固定する契約 | 2026-06-02 |
 | spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md | pre-implementation audit next | tmuxではなくruntime endpoint leaseを正本にするMVP実装契約 | 2026-05-27 |
 | plans/norm-022-runtime-endpoint-lease-impl-plan.md | pre-implementation audit packet | NORM-022 implementation order, audit questions, stop conditions, POST_MERGE evidence | 2026-05-27 |
 | SPEC-INDEX.md | — | 本ファイル | 2026-06-01 |
@@ -177,6 +178,13 @@
 - Discord は projection surfaceであり、DB queue/conversation/baton/turn/completion evidenceが正本である
 - rollback trigger は scheduler scopeをpause/disableし、行削除・bulk active close・prompt injection・restart repairを禁止する
 - expansion は fresh preflight と prior canary evidence を必要条件にする
+
+### spec/aun-runtime-supervisor-adapter-contract.md（Runtime Supervisor Adapter Contract）
+- #602としてfull reboot recoveryをtmux、launchd、Claude Code、Codex CLI、特定session appへ依存させない境界を固定する
+- AUN coreはdesired runtime state、identity、endpoint evidence、queue readiness、wake-up semantics、health/readiness definitionsを所有する
+- runtime supervisor adapterはhost-specific process/session controlを所有し、coreはtyped evidenceを消費する
+- wake/start/restart等はtyped capabilitiesで表現し、restartはcapabilityと明示approvalなしにNO-GOにする
+- local tmux/launchdは最初のadapter例であり、systemd、Kubernetes、Nomad、Docker Compose、MDM desktop agent、managed runnerを将来adapterとして許容する
 
 ### design/aun-enterprise-control-plane-direction.md（AUN enterprise control plane方向）
 - AUNの市場カテゴリをdurable agent control plane / agent operations meshとして固定する

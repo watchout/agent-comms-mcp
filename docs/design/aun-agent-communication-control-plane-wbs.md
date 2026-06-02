@@ -39,6 +39,7 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | Slice | Status | Evidence / next gate |
 |---|---|---|
 | CP-00 restart preflight and loop-prompt blocker | merged | queue preflight and loop-prompt backlog detection merged before scheduler activation |
+| CP-05 runtime supervisor adapter contract | proposed / #602 | AUN core owns desired runtime/endpoint/readiness policy; host-specific process/session control is delegated to supervisor adapters |
 | CP-10 single active owner + observers | merged | send/notify owner-observer contract and canonical channel-id contract landed |
 | CP-20 conversation identity and baton schema/store | merged | conversation identity, persistence, baton store, and one-active-baton guard landed |
 | CP-30 send-side control-plane allocation | in audit / stacked | CLI send/notify merged through #633; MCP send/notify #634 remains draft/DIRTY and needs rebase/L1 refresh |
@@ -49,6 +50,27 @@ LLMs must not decide queue claim, baton ownership, close, retry, or recovery.
 | CP-80 scheduler activation | contract proposed / stacked | exact-scope scheduler activation and Discord canary gate |
 
 ## Required Task Additions
+
+### CP-05 Runtime Supervisor Adapter Contract
+
+Issue #602 adds the reboot-recovery boundary that full recovery must not depend
+on tmux, launchd, Claude Code, Codex CLI, or any specific session application.
+
+Acceptance:
+
+- AUN core owns desired runtime state, identity, endpoint evidence, queue
+  readiness, wake-up semantics, and health/readiness definitions
+- runtime supervisor adapters own host-specific process/session control
+- runtime kind, supervisor kind, endpoint identity, desired state, observed
+  state, typed capabilities, health evidence, and failure codes have a common
+  contract
+- an inspect/readiness-only adapter is valid, but cannot be used for restart
+- state_daemon restart requires explicit adapter capability and approval
+  evidence
+- prompt-driven `next` / `inbox` / FIFO drain is never a recovery mechanism
+- local tmux/launchd path is only the first adapter; future adapters can be
+  systemd, Kubernetes, Nomad, Docker Compose, MDM desktop agent, or a managed
+  runner
 
 ### CP-40A Targeted Receive Runner
 
