@@ -42,6 +42,7 @@ const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
 const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts')
 const FULL_CHANNEL_SMOKE_PATH = join(REPO_ROOT, 'core', 'full-channel-smoke.ts')
 const STATE_DAEMON_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-readiness.ts')
+const STATE_DAEMON_LAUNCHAGENT_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-launchagent-readiness.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
 const CHANNEL_REGISTRATION_RECONCILE_PATH = join(REPO_ROOT, 'core', 'channel-registration-reconcile.ts')
@@ -58,6 +59,7 @@ const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
 const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const FULL_CHANNEL_SMOKE_SRC = readFileSync(FULL_CHANNEL_SMOKE_PATH, 'utf-8')
 const STATE_DAEMON_READINESS_SRC = readFileSync(STATE_DAEMON_READINESS_PATH, 'utf-8')
+const STATE_DAEMON_LAUNCHAGENT_READINESS_SRC = readFileSync(STATE_DAEMON_LAUNCHAGENT_READINESS_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
 const CHANNEL_REGISTRATION_RECONCILE_SRC = readFileSync(CHANNEL_REGISTRATION_RECONCILE_PATH, 'utf-8')
@@ -113,6 +115,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('agentProfile handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function agentProfile\s*\(/)
   })
+  test('stateDaemonCommand handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function stateDaemonCommand\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +153,10 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   test("'recovery activation-plan' invokes the CP-80 read-only activation planner", () => {
     expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'activation-plan'/)
     expect(CLI_SRC).toMatch(/subcommand === 'activation-plan'[\s\S]*?buildRecoveryActivationPlan/)
+  })
+  test("'state-daemon readiness' invokes the read-only LaunchAgent diagnostic", () => {
+    expect(CLI_SRC).toMatch(/command === 'state-daemon'[\s\S]*?stateDaemonCommand\(subcommand, rest\)/)
+    expect(CLI_SRC).toMatch(/async function stateDaemonCommand[\s\S]*?buildStateDaemonLaunchAgentReadinessReport/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -631,6 +640,15 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(CLI_SRC).toMatch(/smoke queue-wake \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/bounded state-daemon queue wake smoke; no manual next and no terminal close/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-wake'[\s\S]*?buildQueueWakeSmokeReport/)
+  })
+
+  test('help documents state-daemon LaunchAgent readiness diagnostic', () => {
+    expect(CLI_SRC).toMatch(/state-daemon readiness \[--plist-path <path>\]/)
+    expect(CLI_SRC).toMatch(/read-only LaunchAgent persistent-path readiness diagnostic; no restart/)
+    expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/issue_ref: '#603'/)
+    expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/no_state_daemon_restart: true/)
+    expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/no_launchctl_bootstrap_or_kickstart: true/)
+    expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/restart_performed: false/)
   })
 
   test('queue wake smoke is bounded, approval-gated, and does not drain or terminalize rows', () => {

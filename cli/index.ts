@@ -54,6 +54,10 @@ import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../co
 import { buildFullChannelSmokeReport, formatFullChannelSmokeText } from '../core/full-channel-smoke'
 import { buildQueueWakeSmokeReport, formatQueueWakeSmokeText } from '../core/state-daemon-readiness'
 import {
+  buildStateDaemonLaunchAgentReadinessReport,
+  formatStateDaemonLaunchAgentReadinessText,
+} from '../core/state-daemon-launchagent-readiness'
+import {
   buildChannelRegistrationReconcileReport,
   formatChannelRegistrationReconcileText,
 } from '../core/channel-registration-reconcile'
@@ -4368,6 +4372,36 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
   }
 }
 
+async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
+  if (subcommand !== 'readiness') {
+    console.error('Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
+    process.exit(2)
+  }
+  const { flags } = parseArgs(args)
+  const format = flags.format ?? 'json'
+  if (!['json', 'text'].includes(format)) {
+    console.error('Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
+    process.exit(2)
+  }
+  const report = buildStateDaemonLaunchAgentReadinessReport({
+    label: flags.label,
+    plistPath: flags['plist-path'],
+    requireRunning: flagEnabled(flags['require-running']),
+    allowPrivateTmp: flagEnabled(flags['allow-private-tmp']),
+    expectedWorkingDirectory: flags['expected-working-directory'] ?? null,
+    expectedCheckoutRoot: flags['expected-checkout-root'] ?? null,
+    expectedAgentId: flags['expected-agent-id'] ?? null,
+  })
+  if (format === 'text') {
+    process.stdout.write(formatStateDaemonLaunchAgentReadinessText(report))
+  } else {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  }
+  if (!report.ok) {
+    process.exitCode = 1
+  }
+}
+
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand === 'normalize' && hasFlag(flags, 'execute')) {
@@ -5607,6 +5641,8 @@ if (command === 'channel') {
   await diagnoseQueue([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'recovery') {
   await recoveryCommand(subcommand, rest)
+} else if (command === 'state-daemon') {
+  await stateDaemonCommand(subcommand, rest)
 } else if (command === 'queue' && subcommand === 'doctor') {
   await diagnoseQueue(rest)
 } else if (command === 'queue' && subcommand === 'preflight') {
@@ -5669,6 +5705,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — CP-80 read-only recovery GO/NO-GO gate; no restart, no Discord activation, no FIFO drain
   recovery activation-plan --scope-file <json> --readiness-report <json> [--format json|text]
                                                        — CP-80 read-only canary-first activation plan; no runtime or Discord activation
+  state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]
+                                                       — read-only LaunchAgent persistent-path readiness diagnostic; no restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
