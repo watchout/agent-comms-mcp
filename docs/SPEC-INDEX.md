@@ -192,7 +192,7 @@
 ### operations/aun-bounded-canary-approval-pack.md（Bounded Canary Approval Pack）
 - #602復旧直前のlive smoke承認requestを、実行ではなくread-only evidence packetとして準備する
 - exact agent/channel/runtime scope、`max_canary_count: 1`、`fallback_allowed:false`、no FIFO drainを固定する
-- CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readinessのGO evidenceを必須入力にする
+- CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readiness、state-daemon install-plan dry-runのGO evidenceを必須入力にする
 - rollback triggerとしてFIFO drain、loop prompt、wrong listener、Discord fallback、projection evidence missing、stuck/duplicate active work、prompt-driven next/inboxを固定する
 - Discord visibility alone is not success; DB/projection/connector/audit evidenceを成功条件にする
 
