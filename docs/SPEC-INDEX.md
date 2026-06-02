@@ -183,6 +183,13 @@
 - rollback trigger は scheduler scopeをpause/disableし、行削除・bulk active close・prompt injection・restart repairを禁止する
 - expansion は fresh preflight と prior canary evidence を必要条件にする
 
+### spec/aun-discord-projection-diagnostic-contract.md（Discord Projection Diagnostic Contract）
+- #604としてDiscord direct deliveryとAUN/router fallbackの判定をread-only診断JSONに固定する
+- default gateはsender-direct deliveryを要求し、明示許可なしのrouter/AUN fallbackをNO-GOにする
+- credential status、delivery connector、channel binding、provider write capability、fallback reason、decision sourceをmachine-readable evidenceとして出す
+- runtime login credential statusとdelivery eligible credential statusの契約を同じreportに出し、driftをGO/NO-GO判断前に検出可能にする
+- GOはDB/resolver evidenceがcleanであることだけを意味し、live Discord delivery proofではない
+
 ### spec/aun-runtime-supervisor-adapter-contract.md（Runtime Supervisor Adapter Contract）
 - #602としてfull reboot recoveryをtmux、launchd、Claude Code、Codex CLI、特定session appへ依存させない境界を固定する
 - AUN coreはdesired runtime state、identity、endpoint evidence、queue readiness、wake-up semantics、health/readiness definitionsを所有する

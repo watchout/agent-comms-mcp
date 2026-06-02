@@ -8,6 +8,10 @@ import {
   type ProjectionConsumerSource,
   type Queryable,
 } from './outbound-projection'
+import {
+  DISCORD_DELIVERY_CREDENTIAL_STATUSES,
+  DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES,
+} from './discord-token-resolution'
 
 export type DiscordProjectionGoNoGo = 'GO' | 'NO_GO'
 export type ProviderWriteCapability =
@@ -45,6 +49,16 @@ export interface DiscordProjectionEvidenceSummary {
   provider_channel_access_id: string | null
   provider_write_capability: ProviderWriteCapability
   diagnostics: DeliveryConsumerDiagnostic[]
+}
+
+export interface DiscordProjectionCredentialContract {
+  runtime_login_credential_statuses: readonly string[]
+  delivery_credential_statuses: readonly string[]
+  runtime_delivery_status_contract: 'aligned' | 'drift'
+  sender_direct_preferred_over_router: true
+  fallback_requires_explicit_allowance: true
+  selected_delivery_evidence_required: true
+  no_live_discord_write: true
 }
 
 export interface DiscordProjectionDiagnosticReport {
@@ -88,6 +102,7 @@ export interface DiscordProjectionDiagnosticReport {
     sender_direct: DiscordProjectionEvidenceSummary
     selected_consumer: DiscordProjectionEvidenceSummary
   }
+  contract: DiscordProjectionCredentialContract
   blockers: DiscordProjectionDiagnosticFinding[]
   warnings: DiscordProjectionDiagnosticFinding[]
   policy: {
@@ -226,6 +241,22 @@ function finding(
   extra: Omit<DiscordProjectionDiagnosticFinding, 'code' | 'severity' | 'message'> = {},
 ): DiscordProjectionDiagnosticFinding {
   return { code, severity, message, ...extra }
+}
+
+function credentialContract(): DiscordProjectionCredentialContract {
+  const runtimeStatuses = [...DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES]
+  const deliveryStatuses = [...DISCORD_DELIVERY_CREDENTIAL_STATUSES]
+  const aligned = runtimeStatuses.length === deliveryStatuses.length
+    && runtimeStatuses.every((status, index) => status === deliveryStatuses[index])
+  return {
+    runtime_login_credential_statuses: runtimeStatuses,
+    delivery_credential_statuses: deliveryStatuses,
+    runtime_delivery_status_contract: aligned ? 'aligned' : 'drift',
+    sender_direct_preferred_over_router: true,
+    fallback_requires_explicit_allowance: true,
+    selected_delivery_evidence_required: true,
+    no_live_discord_write: true,
+  }
 }
 
 export async function buildDiscordProjectionDiagnosticReport(
@@ -389,6 +420,7 @@ export async function buildDiscordProjectionDiagnosticReport(
       sender_direct: senderDirect,
       selected_consumer: selectedConsumer,
     },
+    contract: credentialContract(),
     blockers,
     warnings,
     policy: {
@@ -422,6 +454,10 @@ export function formatDiscordProjectionDiagnosticText(report: DiscordProjectionD
     `Provider write: ${report.decision.provider_write_capability}`,
     `Binding: ${report.decision.channel_binding_id ?? '(none)'}`,
     `Connector: ${report.decision.delivery_connector_instance_id ?? '(none)'}`,
+    `Credential contract: ${report.contract.runtime_delivery_status_contract}`,
+    `Runtime login statuses: ${report.contract.runtime_login_credential_statuses.join(', ')}`,
+    `Delivery statuses: ${report.contract.delivery_credential_statuses.join(', ')}`,
+    `Sender direct priority: ${report.contract.sender_direct_preferred_over_router ? 'true' : 'false'}`,
     `Fallback allowed: ${report.decision.fallback_allowed ? 'true' : 'false'}`,
     `Fallback reason: ${report.decision.fallback_reason ?? '(none)'}`,
     `Mutation performed: ${report.mutation_performed ? 'true' : 'false'}`,
