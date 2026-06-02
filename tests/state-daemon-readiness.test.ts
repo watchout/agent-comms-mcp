@@ -1,12 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import type { DbAdapter } from '../core/db'
-import { classifyQueueWakeState, fetchBotStatusFromDb } from '../core/bot-status-db'
+import { classifyQueueWakeState, fetchBotStatusFromDb, type BotStatusDbRow } from '../core/bot-status-db'
 import { StateDaemon } from '../core/state-daemon'
 import {
+  buildQueueProcessingReadinessReport,
   buildQueueWakeSmokeReport,
   fingerprintFatalStderr,
+  formatQueueProcessingReadinessText,
   inspectStateDaemonRuntime,
+  type StateDaemonRuntimeReadiness,
 } from '../core/state-daemon-readiness'
 import {
   FakeAlertSink,
@@ -132,6 +135,83 @@ class FakeSmokeDb implements DbAdapter {
   async close(): Promise<void> {}
 }
 
+function runtimeReadiness(overrides: Partial<StateDaemonRuntimeReadiness> = {}): StateDaemonRuntimeReadiness {
+  const base: StateDaemonRuntimeReadiness = {
+    label: 'com.agent-comms.state-daemon',
+    status: 'ok',
+    checked_at: '2026-06-02T00:00:00.000Z',
+    launchd: {
+      available: true,
+      loaded: true,
+      running: true,
+      state: 'running',
+      pid: 123,
+      last_exit_status: 0,
+    },
+    process: {
+      pid: 123,
+      command: 'bun bin/state-daemon.ts',
+      cwd: '/Users/yuji/Developer/agent-comms-mcp',
+    },
+    paths: {
+      program: '/Users/yuji/.bun/bin/bun',
+      script: '/Users/yuji/Developer/agent-comms-mcp/bin/state-daemon.ts',
+      working_directory: '/Users/yuji/Developer/agent-comms-mcp',
+      stdout_path: '/tmp/state.out',
+      stderr_path: '/tmp/state.err',
+      plist_path: '/Users/yuji/Library/LaunchAgents/com.agent-comms.state-daemon.plist',
+    },
+    environment: {
+      database_url: 'postgresql:///agent_comms?host=/tmp',
+      agent_allowlist: null,
+      agent_denylist: null,
+    },
+    stderr: {
+      path: '/tmp/state.err',
+      exists: true,
+      fatal_fingerprint: null,
+    },
+  }
+  return {
+    ...base,
+    ...overrides,
+    launchd: { ...base.launchd, ...(overrides.launchd ?? {}) },
+    process: { ...base.process, ...(overrides.process ?? {}) },
+    paths: { ...base.paths, ...(overrides.paths ?? {}) },
+    environment: { ...base.environment, ...(overrides.environment ?? {}) },
+    stderr: { ...base.stderr, ...(overrides.stderr ?? {}) },
+  }
+}
+
+function botStatusRow(overrides: Partial<BotStatusDbRow> = {}): BotStatusDbRow {
+  return {
+    agent_id: 'codex-cto',
+    status: 'idle',
+    last_seen_at: '2026-06-02T00:00:00.000Z',
+    heartbeat_ok: true,
+    pending_count: 0,
+    oldest_pending_at: null,
+    newest_pending_at: null,
+    active_claim_count: 0,
+    oldest_active_claim_at: null,
+    health_state: 'healthy',
+    agent_last_wake_attempt_at: null,
+    pending_last_wake_attempt_at: null,
+    latest_wake_progress_at: null,
+    queue_wake_state: 'none',
+    active_connector_count: 1,
+    runtime_linked_connector_count: 1,
+    active_endpoint_lease_count: 1,
+    endpoint_lease_state: 'ok',
+    endpoint_lease_expires_at: '2026-06-02T00:05:00.000Z',
+    endpoint_lease_heartbeat_at: '2026-06-02T00:00:00.000Z',
+    discord_gateway_reported_count: 1,
+    discord_gateway_ready_count: 1,
+    discord_gateway_state: 'ready',
+    ...overrides,
+  }
+}
+
 describe('state-daemon readiness diagnostics', () => {
   test('fatal stderr fingerprint detects launchd module resolution failures', () => {
     expect(fingerprintFatalStderr('error: Module not found "/tmp/missing/bin/state-daemon.ts"'))
@@ -179,6 +259,79 @@ describe('state-daemon readiness diagnostics', () => {
     expect(readiness.process.cwd).toBe('/private/tmp/agent-comms-state-daemon')
     expect(readiness.stderr.fatal_fingerprint).toContain('Module not found')
     expect(readiness.status).toBe('degraded')
+  })
+})
+
+describe('#603 queue-processing readiness', () => {
+  test('separates healthy transport from stuck queue wake progress', () => {
+    const report = buildQueueProcessingReadinessReport([
+      botStatusRow({
+        agent_id: 'codex-cto',
+        pending_count: 2,
+        oldest_pending_at: '2026-06-02T00:00:00.000Z',
+        queue_wake_state: 'idle_pending_no_wake_progress',
+      }),
+    ], runtimeReadiness(), { now: new Date('2026-06-02T00:01:00.000Z') })
+
+    expect(report.ok).toBe(false)
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.transport_readiness.ready).toBe(true)
+    expect(report.queue_processing_readiness.ready).toBe(false)
+    expect(report.queue_processing_readiness.pending_total).toBe(2)
+    expect(report.queue_processing_readiness.blocker_codes).toEqual(['QUEUE_WAKE_STUCK'])
+    expect(report.blockers.map((blocker) => blocker.code)).toEqual(['QUEUE_WAKE_STUCK'])
+    expect(report.policy).toMatchObject({
+      read_only: true,
+      no_db_mutation: true,
+      no_state_daemon_restart: true,
+      no_launchctl_mutation: true,
+      no_discord_live_write: true,
+      no_next_inbox_fifo_drain: true,
+      no_prompt_driven_processing: true,
+      no_live_smoke: true,
+    })
+    expect(report.mutation_performed).toBe(false)
+    expect(report.restart_performed).toBe(false)
+  })
+
+  test('separates transport failure from queue-processing readiness', () => {
+    const report = buildQueueProcessingReadinessReport([
+      botStatusRow(),
+    ], runtimeReadiness({
+      status: 'unloaded',
+      launchd: {
+        available: true,
+        loaded: false,
+        running: false,
+        state: null,
+        pid: null,
+        last_exit_status: null,
+      },
+      process: {
+        pid: null,
+        command: null,
+        cwd: null,
+      },
+    }), { now: new Date('2026-06-02T00:02:00.000Z') })
+
+    expect(report.ok).toBe(false)
+    expect(report.transport_readiness.ready).toBe(false)
+    expect(report.transport_readiness.blocker_codes).toEqual(['STATE_DAEMON_TRANSPORT_NOT_READY'])
+    expect(report.queue_processing_readiness.ready).toBe(true)
+    expect(report.queue_processing_readiness.blocker_codes).toEqual([])
+  })
+
+  test('text formatter exposes both transport and queue readiness without implying live smoke', () => {
+    const report = buildQueueProcessingReadinessReport([botStatusRow()], runtimeReadiness(), {
+      now: new Date('2026-06-02T00:03:00.000Z'),
+    })
+    const text = formatQueueProcessingReadinessText(report)
+
+    expect(report.ok).toBe(true)
+    expect(text).toContain('Transport: ready=true')
+    expect(text).toContain('Queue: ready=true')
+    expect(text).toContain('Mutation performed: false')
+    expect(text).toContain('Restart performed: false')
   })
 })
 

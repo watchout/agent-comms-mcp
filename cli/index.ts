@@ -52,7 +52,14 @@ import {
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
 import { buildFullChannelSmokeReport, formatFullChannelSmokeText } from '../core/full-channel-smoke'
-import { buildQueueWakeSmokeReport, formatQueueWakeSmokeText } from '../core/state-daemon-readiness'
+import {
+  buildQueueProcessingReadinessReport,
+  buildQueueWakeSmokeReport,
+  formatQueueProcessingReadinessText,
+  formatQueueWakeSmokeText,
+  inspectStateDaemonRuntime,
+} from '../core/state-daemon-readiness'
+import { fetchBotStatusFromDb } from '../core/bot-status-db'
 import {
   buildStateDaemonLaunchAgentReadinessReport,
   formatStateDaemonLaunchAgentReadinessText,
@@ -4377,8 +4384,8 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
 }
 
 async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness' && subcommand !== 'install-plan') {
-    console.error('Usage: agent-com state-daemon <readiness|install-plan> ...')
+  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness') {
+    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
@@ -4386,7 +4393,9 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
   if (!['json', 'text'].includes(format)) {
     console.error(subcommand === 'install-plan'
       ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
-      : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
+      : subcommand === 'queue-readiness'
+        ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
+        : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
     process.exit(2)
   }
   if (subcommand === 'install-plan') {
@@ -4422,6 +4431,26 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     }
     if (!plan.ok) {
       process.exitCode = 1
+    }
+    return
+  }
+  if (subcommand === 'queue-readiness') {
+    const db = await getDb()
+    try {
+      const statusRows = await fetchBotStatusFromDb(db as any)
+      const agentIds = parseCsvFlag(flags['agent-id'] ?? flags['agent-ids']) ?? []
+      const rows = agentIds.length > 0
+        ? Array.from(statusRows.values()).filter((row) => agentIds.includes(row.agent_id))
+        : Array.from(statusRows.values())
+      const report = buildQueueProcessingReadinessReport(rows, inspectStateDaemonRuntime())
+      if (format === 'text') {
+        process.stdout.write(formatQueueProcessingReadinessText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = 1
+    } finally {
+      await db.end()
     }
     return
   }
@@ -5751,6 +5780,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only LaunchAgent persistent-path readiness diagnostic; no restart
   state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--active-plist-path <path>] [--checkout-dirs <csv>] [--format json|text]
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
+  state-daemon queue-readiness [--agent-id <id>] [--format json|text]
+                                                       — read-only queue-processing readiness; separates transport health from queue wake progress
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
