@@ -415,18 +415,17 @@ describe('T8 — thread_id flows from next → send → outbound', () => {
 })
 
 describe('T9 — projection diagnostics CLI surface', () => {
-  test('help documents diagnose-projection preview command', () => {
-    expect(CLI_SRC).toMatch(/diagnose-projection --channel <id> --from <agent> --to <agent>\[,<agent>\]/)
-    expect(CLI_SRC).toMatch(/terminal preview of surface\/projection routing/)
+  test('help documents diagnose-projection diagnostic command', () => {
+    expect(CLI_SRC).toMatch(/diagnose-projection --channel-id <id> --from-agent <agent> --to <agent>\[,<agent>\]/)
+    expect(CLI_SRC).toMatch(/read-only Discord projection GO\/NO-GO diagnostic; no live write/)
   })
 
-  test('diagnoseProjection passes recipientAgentIds to the projection resolver', () => {
+  test('diagnoseProjection passes recipientAgentIds to the projection diagnostic builder', () => {
     expect(CLI_SRC).toMatch(/const toAgentIds = [\s\S]*?\.split\(','/)
-    expect(CLI_SRC).toMatch(/resolveOutboundProjectionDecision\(db as any,\s*\{[\s\S]*?senderAgentId:\s*fromAgentId,[\s\S]*?recipientAgentIds:\s*toAgentIds,[\s\S]*?\}/)
-    expect(CLI_SRC).toMatch(/projection_source/)
-    expect(CLI_SRC).toMatch(/projection_fallback_reason/)
-    expect(CLI_SRC).toMatch(/Consumer status:/)
-    expect(CLI_SRC).toMatch(/Projection status:/)
+    expect(CLI_SRC).toMatch(/buildDiscordProjectionDiagnosticReport\(db as any,\s*\{[\s\S]*?senderAgentId:\s*fromAgentId,[\s\S]*?recipientAgentIds:\s*toAgentIds,[\s\S]*?fallbackAllowed,[\s\S]*?expectedDirectDelivery,[\s\S]*?\}/)
+    expect(CLI_SRC).toMatch(/formatDiscordProjectionDiagnosticText/)
+    expect(CLI_SRC).toMatch(/fallback-allowed/)
+    expect(CLI_SRC).toMatch(/process\.exitCode = 2/)
   })
 })
 

@@ -36,6 +36,10 @@ import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doc
 import { buildCp70DoctorReport, buildCp70Preflight, formatCp70DoctorText } from '../core/cp70-doctor'
 import { buildRecoveryReadinessReport, formatRecoveryReadinessText, type RecoveryReadinessReport, type RecoveryReadinessScope } from '../core/recovery-readiness'
 import { buildRecoveryActivationPlan, formatRecoveryActivationPlanText } from '../core/recovery-activation-plan'
+import {
+  buildDiscordProjectionDiagnosticReport,
+  formatDiscordProjectionDiagnosticText,
+} from '../core/discord-projection-diagnostic'
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
@@ -4134,124 +4138,41 @@ async function diagnoseProjection(args: string[]) {
   const { flags } = parseArgs(args)
   const channelId = flags.channel ?? flags['channel-id']
   const threadId = flags['thread-id'] ?? null
-  const fromAgentId = flags.from ?? flags['from-agent-id'] ?? process.env.AGENT_ID ?? null
-  const toAgentIds = (flags.to ?? flags['to-agent-id'] ?? flags.mentions ?? '')
+  const fromAgentId = flags.from ?? flags['from-agent'] ?? flags['from-agent-id'] ?? process.env.AGENT_ID ?? null
+  const toAgentIds = (flags.to ?? flags['to-agent'] ?? flags['to-agent-id'] ?? flags['target-agent'] ?? flags.mentions ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
   const format = flags.format ?? 'text'
+  const fallbackAllowed = flagEnabled(flags['fallback-allowed'] ?? flags['allow-fallback'])
+  const expectedDirectDelivery = flags['expected-direct'] === undefined
+    ? true
+    : flagEnabled(flags['expected-direct'])
 
   if (!channelId || !fromAgentId || toAgentIds.length === 0) {
-    console.error('Usage: agent-com diagnose-projection --channel <id> --from <agent_id> --to <agent_id>[,<agent_id>] [--thread-id <id>] [--format json]')
+    console.error('Usage: agent-com diagnose-projection --channel-id <id> --from-agent <agent_id> --to <agent_id>[,<agent_id>] [--thread-id <id>] [--fallback-allowed] [--format json|text]')
     process.exit(1)
   }
 
   const db = await getDb()
   try {
-    const projection = await resolveOutboundProjectionDecision(db as any, {
+    const report = await buildDiscordProjectionDiagnosticReport(db as any, {
       channelId,
       threadId,
       senderAgentId: fromAgentId,
       recipientAgentIds: toAgentIds,
+      fallbackAllowed,
+      expectedDirectDelivery,
     })
-    const consumerAgentId = projection.consumerAgentId
-    const consumer = consumerAgentId
-      ? await db.query(
-        `SELECT agent_id, status, runtime, metadata
-           FROM agents WHERE agent_id = $1`,
-        [consumerAgentId],
-      ).catch(() => ({ rows: [] as any[] }))
-      : { rows: [] as any[] }
-    const consumerRow = consumer.rows[0] ?? null
-    const consumerBinding = consumerAgentId ? await getDiscordUiBindingForAgent(db as any, consumerAgentId) : null
-    const consumerDiscordUiId = consumerAgentId ? await getAgentDiscordUiId(db as any, consumerAgentId) : null
-    const hasDiscordIdentity = consumerDiscordUiId !== null
-    const projectionIdentityId = projection.projectionIdentityId
-    const projectionAgent = projectionIdentityId
-      ? await db.query(
-        `SELECT agent_id, status, runtime, metadata
-           FROM agents WHERE agent_id = $1`,
-        [projectionIdentityId],
-      ).catch(() => ({ rows: [] as any[] }))
-      : { rows: [] as any[] }
-    const projectionRow = projectionAgent.rows[0] ?? null
-    const projectionBinding = projectionIdentityId ? await getDiscordUiBindingForAgent(db as any, projectionIdentityId) : null
-    const projectionDiscordUiId = projectionIdentityId ? await getAgentDiscordUiId(db as any, projectionIdentityId) : null
-    const projectionHasDiscordIdentity = projectionDiscordUiId !== null
-    const delegated = consumerAgentId !== null && consumerAgentId !== fromAgentId
-    const report = {
-      ok: true,
-      surface: {
-        provider: projection.platform,
-        channel_id: channelId,
-        thread_id: threadId,
-        external_id: projection.channelExternalId,
-      },
-      message: {
-        from_agent_id: fromAgentId,
-        to_agent_ids: toAgentIds,
-      },
-      resolved: {
-        consumer_agent_id: consumerAgentId,
-        consumer_source: projection.consumerSource,
-        consumer_evidence: projection.consumerEvidence,
-        projection_identity_id: projection.projectionIdentityId,
-        intended_projection_identity_id: projection.intendedProjectionIdentityId,
-        projection_source: projection.projectionSource,
-        projection_fallback_reason: projection.projectionFallbackReason,
-        delivery_fallback_reason: projection.deliveryFallbackReason,
-        delivery_diagnostics: projection.deliveryDiagnostics,
-        delegated,
-        consumer_discord_identity_present: hasDiscordIdentity,
-        consumer_discord_ui_id: consumerDiscordUiId,
-        consumer_discord_ui_binding_status: consumerBinding?.status ?? null,
-        projection_discord_identity_present: projectionHasDiscordIdentity,
-        projection_discord_ui_id: projectionDiscordUiId,
-        projection_discord_ui_binding_status: projectionBinding?.status ?? null,
-        consumer_status: consumerRow?.status ?? null,
-        consumer_runtime: consumerRow?.runtime ?? null,
-        projection_status: projectionRow?.status ?? null,
-        projection_runtime: projectionRow?.runtime ?? null,
-      },
-      preview: consumerAgentId
-        ? delegated
-          ? `[${fromAgentId} -> ${toAgentIds.join(',')}]\n本文...`
-          : '本文...'
-        : null,
-    }
 
     if (format === 'json') {
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      if (!report.ok) process.exitCode = 2
       return
     }
 
-    const lines = [
-      'Projection Preview',
-      '',
-      `Surface:  ${projection.platform} channel=${channelId}${threadId ? ` thread=${threadId}` : ''}`,
-      `External: ${projection.channelExternalId ?? '(none)'}`,
-      '',
-      `From:     ${fromAgentId}`,
-      `To:       ${toAgentIds.join(', ')}`,
-      '',
-      `Consumer: ${consumerAgentId ?? '(none)'}`,
-      `Identity: ${projection.projectionIdentityId ?? '(none)'}`,
-      `Intended: ${projection.intendedProjectionIdentityId ?? '(none)'}`,
-      `Consumer source:   ${projection.consumerSource}`,
-      `Consumer evidence: ${projection.consumerEvidence ? `${projection.consumerEvidence.source_table} connector=${projection.consumerEvidence.connector_instance_id}${projection.consumerEvidence.channel_binding_id ? ` binding=${projection.consumerEvidence.channel_binding_id}` : ''}${projection.consumerEvidence.provider_channel_access_id ? ` access=${projection.consumerEvidence.provider_channel_access_id}` : ''}` : '(none)'}`,
-      `Projection source: ${projection.projectionSource}`,
-      `Fallback reason:   ${projection.projectionFallbackReason ?? '(none)'}`,
-      `Delivery fallback: ${projection.deliveryFallbackReason ?? '(none)'}`,
-      `Delivery diagnostics: ${projection.deliveryDiagnostics.length > 0 ? JSON.stringify(projection.deliveryDiagnostics) : '(none)'}`,
-      `Consumer Discord:  ${hasDiscordIdentity ? `ui_id=${consumerDiscordUiId}${consumerBinding?.status ? ` (${consumerBinding.status})` : ''}` : 'no UI identity detected'}`,
-      `Projection Discord: ${projectionHasDiscordIdentity ? `ui_id=${projectionDiscordUiId}${projectionBinding?.status ? ` (${projectionBinding.status})` : ''}` : 'no UI identity detected'}`,
-      `Consumer status:   ${consumerRow?.status ?? '(unknown)'}${consumerRow?.runtime ? ` / ${consumerRow.runtime}` : ''}`,
-      `Projection status: ${projectionRow?.status ?? '(unknown)'}${projectionRow?.runtime ? ` / ${projectionRow.runtime}` : ''}`,
-      '',
-      'Discord will show:',
-      report.preview ?? '(not projected)',
-    ]
-    process.stdout.write(`${lines.join('\n')}\n`)
+    process.stdout.write(formatDiscordProjectionDiagnosticText(report))
+    if (!report.ok) process.exitCode = 2
   } finally {
     await db.end()
   }
@@ -5741,8 +5662,8 @@ Message I/O (requires AGENT_ID env var):
   reclaim [--agent-id <id>]                           — manual orphan reclaim (v2.1.0, §4.1)
   diagnose-delivery [--queue-id <id>] [--message-id <uuid>] [--outbound-message-id <uuid>]
                                                        — JSON explanation for next/projection gaps
-  diagnose-projection --channel <id> --from <agent> --to <agent>[,<agent>]
-                                                       — terminal preview of surface/projection routing
+  diagnose-projection --channel-id <id> --from-agent <agent> --to <agent>[,<agent>] [--fallback-allowed] [--format json|text]
+                                                       — read-only Discord projection GO/NO-GO diagnostic; no live write
   diagnose-queue [--agent-id <id>] [--stale-minutes 15] [--format json|text]
   recovery readiness --scope-file <json> [--format json|text]
                                                        — CP-80 read-only recovery GO/NO-GO gate; no restart, no Discord activation, no FIFO drain
