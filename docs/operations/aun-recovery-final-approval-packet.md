@@ -181,6 +181,7 @@ evidence/recovery-readiness.json
 evidence/activation-plan.json
 evidence/discord-projection.json
 evidence/state-daemon-readiness.json
+evidence/queue-processing-readiness.json
 evidence/install-plan.json
 evidence/summary.json
 evidence/kodama-token-rotation.json
@@ -224,8 +225,11 @@ The final approval packet is GO only when all conditions are true:
 - Discord projection diagnostic is direct delivery with
   `consumer_agent_id=codex-cto`, `consumer_source=sender_token_evidence`, and
   `fallback_allowed=false`
+- Discord projection diagnostic reports
+  `contract.runtime_delivery_status_contract=aligned`
 - state-daemon readiness is GO or explicitly report-only for unloaded/not-running
   with no restart performed
+- queue-processing readiness is GO and has no `QUEUE_WAKE_STUCK` blockers
 - install-plan dry-run is GO, persistent-path safe, and non-mutating
 - kodama token rotation evidence is GO and contains no raw token
 - #668 audit status is PASS or explicitly accepted as a documented dependency
