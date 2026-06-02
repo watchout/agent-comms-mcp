@@ -107,14 +107,52 @@ approval:
 | CP-80 activation-plan dry-run | `ok=true`, `go_no_go=GO`, `mutation_performed=false` | `evidence/activation-plan.json` |
 | Discord projection diagnostic | `ok=true`, direct delivery, `fallback_allowed=false` | `evidence/discord-projection.json` |
 | state-daemon readiness | `ok=true`, persistent path GO, `restart_performed=false` | `evidence/state-daemon-readiness.json` |
+| state-daemon install-plan dry-run | `ok=true`, `go_no_go=GO`, `mutation_performed=false`, `restart_performed=false` | `evidence/install-plan.json` |
 
 If any input is missing, stale, NO-GO, or scoped differently, stop. Do not
 substitute operator intuition, Discord visibility, or LLM prose for these
-reports.
+reports. If the install-plan CLI from #672 is not available in the checked-out
+build, `evidence/install-plan.json` must record that dependency as NO-GO rather
+than silently skipping it.
 
 ## Read-Only Evidence Capture Commands
 
-Create a local evidence directory for the approval packet:
+Preferred pack command:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/recovery-readonly-gate-pack.ts \
+    --output-dir evidence \
+    --agent-id codex-cto \
+    --to-agent ceo \
+    --channel-id 1487368919613444156 \
+    --install-plan-commit "$(git rev-parse HEAD)"
+```
+
+This command writes the exact read-only gate layout:
+
+```text
+evidence/recovery-scope.json
+evidence/cp70-preflight.json
+evidence/recovery-readiness.json
+evidence/activation-plan.json
+evidence/discord-projection.json
+evidence/state-daemon-readiness.json
+evidence/install-plan.json
+evidence/summary.json
+```
+
+`evidence/summary.json` is the GO/NO-GO classifier. It is GO only when every
+required report is GO and every report confirms `mutation_performed=false` and
+`restart_performed=false`. It is NO-GO for any blocker, command failure,
+missing positive GO evidence, unavailable #672 install-plan dependency, mutation
+evidence, or restart evidence. It records exact blocker codes with their source
+report names plus the current `origin/main` SHA and PR dependency status.
+
+Manual capture is allowed when the runner script is unavailable, but it must
+produce the same files and the same fail-closed summary logic.
+
+Create a local evidence directory for a manual approval packet:
 
 ```bash
 mkdir -p evidence
@@ -144,8 +182,8 @@ send a Discord message:
 ```bash
 DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
   agent-com diagnose-projection \
-    --channel 1487368919613444156 \
-    --from codex-cto \
+    --channel-id 1487368919613444156 \
+    --from-agent codex-cto \
     --to ceo \
     --format json > evidence/discord-projection.json
 ```
@@ -182,6 +220,37 @@ agent-com recovery activation-plan \
   --scope-file evidence/recovery-scope.json \
   --readiness-report evidence/recovery-readiness.json \
   --format json > evidence/activation-plan.json
+```
+
+Capture the state-daemon install-plan dry-run when the #672 CLI is available:
+
+```bash
+agent-com state-daemon install-plan \
+  --commit "$(git rev-parse HEAD)" \
+  --format json > evidence/install-plan.json
+```
+
+If that CLI is not available, write a NO-GO dependency report instead of
+declaring the approval pack complete:
+
+```json
+{
+  "ok": false,
+  "go_no_go": "NO_GO",
+  "report": "install-plan",
+  "dependency_unavailable": true,
+  "dependency": {
+    "pr": 672,
+    "command": "agent-com state-daemon install-plan"
+  },
+  "mutation_performed": false,
+  "restart_performed": false,
+  "blockers": [
+    {
+      "code": "INSTALL_PLAN_UNAVAILABLE_PR_672_PENDING"
+    }
+  ]
+}
 ```
 
 Do not run canary execution, state_daemon restart, launchctl activation,
@@ -279,6 +348,33 @@ Required decision:
   "restart_performed": false
 }
 ```
+
+### state-daemon Install Plan
+
+- `ok`
+- `go_no_go`
+- `target_commit`
+- `persistent_paths`
+- `launchagent`
+- `atomic_update_plan`
+- `cleanup_protection`
+- `supervisor_evidence`
+- `blockers`
+- `mutation_performed`
+- `restart_performed`
+
+Required decision:
+
+```json
+{
+  "go_no_go": "GO",
+  "mutation_performed": false,
+  "restart_performed": false
+}
+```
+
+If #672 is still unavailable in the checked-out build, the install-plan report
+must be `NO_GO` with blocker `INSTALL_PLAN_UNAVAILABLE_PR_672_PENDING`.
 
 ## Required DB / Projection / Connector Evidence
 

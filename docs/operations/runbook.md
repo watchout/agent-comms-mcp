@@ -190,10 +190,20 @@ Do not mutate production identity rows, `/Users/yuji/Developer/tech-lead/.mcp.js
 Use [`aun-bounded-canary-approval-pack.md`](./aun-bounded-canary-approval-pack.md)
 to prepare the final approval packet before any recovery canary or live smoke.
 The packet is read-only preparation: it requires CP-70, CP-80 readiness,
-CP-80 activation-plan, Discord projection diagnostic, and state-daemon readiness
-GO evidence before a separate explicit live-smoke approval. Start by saving the
-exact canary scope as `evidence/recovery-scope.json`; every CP-80 command in the
-packet must consume that file so scope drift fails closed.
+CP-80 activation-plan, Discord projection diagnostic, state-daemon readiness,
+and state-daemon install-plan dry-run evidence before a separate explicit
+live-smoke approval. Prefer the bounded runner:
+
+```bash
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun scripts/recovery-readonly-gate-pack.ts --output-dir evidence
+```
+
+The runner writes `evidence/recovery-scope.json` plus every report required for
+the GO/NO-GO classifier in `evidence/summary.json`. Every CP-80 command in the
+packet consumes the same scope file so scope drift fails closed. If the #672
+install-plan CLI is not present, the runner records that dependency as NO-GO;
+do not treat the approval packet as complete by omission.
 
 ## 7. その他運用 (既存項目)
 
