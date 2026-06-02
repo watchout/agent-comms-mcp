@@ -313,7 +313,17 @@ function activationScopeBlockers(scope: RecoveryReadinessScope, projectionChecks
   }]
 }
 
-function blockerFromCp70Finding(finding: Cp70Finding): RecoveryReadinessBlocker {
+function cp70LoopPromptBlocksRecovery(finding: Cp70Finding): boolean {
+  if (finding.code !== 'LOOP_PROMPT_BACKLOG') return true
+  return finding.samples.some((sample) => {
+    if (sample.source === 'launchagent.plist') return true
+    if (sample.source !== 'message_queue.payload') return false
+    return sample.status === 'pending' || sample.status === 'received' || sample.status === 'in_progress'
+  })
+}
+
+function blockerFromCp70Finding(finding: Cp70Finding): RecoveryReadinessBlocker | null {
+  if (!cp70LoopPromptBlocksRecovery(finding)) return null
   const code: RecoveryReadinessBlockerCode =
     finding.code === 'LOOP_PROMPT_BACKLOG'
       ? 'TUI_WAKE_PROMPT_PRESENT'
@@ -663,6 +673,7 @@ export async function buildRecoveryReadinessReport(
     .flatMap(({ report }) => report.findings)
     .filter((finding) => finding.severity === 'blocker' && finding.count > 0)
     .map(blockerFromCp70Finding)
+    .filter((blocker): blocker is RecoveryReadinessBlocker => blocker !== null)
   const launch = buildLaunchAgentReadiness(scope, options)
   const projection = await Promise.all(projectionChecks.map((check) => buildProjectionReadiness(db, check)))
   const blockers = [

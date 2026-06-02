@@ -286,6 +286,36 @@ describe('CP-80 recovery readiness', () => {
     expect(report.policy.no_next_inbox_fifo_drain).toBe(true)
   })
 
+  test('terminal legacy prompt artifacts are retained as CP-70 evidence but do not block recovery readiness', async () => {
+    setRoutingConfig({})
+    const report = await buildRecoveryReadinessReport(mockDb({
+      promptRows: [
+        queueSample({
+          queue_id: 80727,
+          record_id: 80727,
+          status: 'skipped',
+          evidence: 'Call the agent-comms next tool now. Do not call inbox.',
+        }),
+      ],
+    }), scope(), cleanOptions)
+
+    expect(report.cp70.reports.flatMap((item) => item.report.findings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'LOOP_PROMPT_BACKLOG',
+        queue_id: '80727',
+        samples: [expect.objectContaining({ status: 'skipped' })],
+      }),
+    ]))
+    expect(report.blockers).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'TUI_WAKE_PROMPT_PRESENT',
+        queue_ids: ['80727'],
+      }),
+    ]))
+    expect(report.ok).toBe(true)
+    expect(report.go_no_go).toBe('GO')
+  })
+
   test('stale active queue rows are reported as exact-id readiness blockers only', async () => {
     setRoutingConfig({})
     const report = await buildRecoveryReadinessReport(mockDb({
