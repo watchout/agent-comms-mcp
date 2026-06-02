@@ -43,6 +43,7 @@ const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts
 const FULL_CHANNEL_SMOKE_PATH = join(REPO_ROOT, 'core', 'full-channel-smoke.ts')
 const STATE_DAEMON_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-readiness.ts')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-launchagent-readiness.ts')
+const LOCAL_SUPERVISOR_ADAPTER_PATH = join(REPO_ROOT, 'core', 'local-supervisor-adapter.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
 const CHANNEL_REGISTRATION_RECONCILE_PATH = join(REPO_ROOT, 'core', 'channel-registration-reconcile.ts')
@@ -60,6 +61,7 @@ const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const FULL_CHANNEL_SMOKE_SRC = readFileSync(FULL_CHANNEL_SMOKE_PATH, 'utf-8')
 const STATE_DAEMON_READINESS_SRC = readFileSync(STATE_DAEMON_READINESS_PATH, 'utf-8')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_SRC = readFileSync(STATE_DAEMON_LAUNCHAGENT_READINESS_PATH, 'utf-8')
+const LOCAL_SUPERVISOR_ADAPTER_SRC = readFileSync(LOCAL_SUPERVISOR_ADAPTER_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
 const CHANNEL_REGISTRATION_RECONCILE_SRC = readFileSync(CHANNEL_REGISTRATION_RECONCILE_PATH, 'utf-8')
@@ -157,6 +159,11 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   test("'state-daemon readiness' invokes the read-only LaunchAgent diagnostic", () => {
     expect(CLI_SRC).toMatch(/command === 'state-daemon'[\s\S]*?stateDaemonCommand\(subcommand, rest\)/)
     expect(CLI_SRC).toMatch(/async function stateDaemonCommand[\s\S]*?buildStateDaemonLaunchAgentReadinessReport/)
+  })
+  test("'state-daemon install-plan' invokes the dry-run local supervisor install planner", () => {
+    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan'/)
+    expect(CLI_SRC).toMatch(/subcommand === 'install-plan'[\s\S]*?buildLocalLaunchdInstallDryRunPlan/)
+    expect(CLI_SRC).toMatch(/state-daemon install-plan is dry-run only/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -649,6 +656,17 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/no_state_daemon_restart: true/)
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/no_launchctl_bootstrap_or_kickstart: true/)
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/restart_performed: false/)
+  })
+
+  test('help documents state-daemon persistent install dry-run plan', () => {
+    expect(CLI_SRC).toMatch(/state-daemon install-plan --commit <sha>/)
+    expect(CLI_SRC).toMatch(/dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart/)
+    expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/mode: 'dry_run'/)
+    expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/execute_allowed: false/)
+    expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/write_temp_then_rename/)
+    expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/load_or_start_job/)
+    expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/protectedPathsFromLaunchAgentPlists/)
+    expect(LOCAL_SUPERVISOR_ADAPTER_SRC).toMatch(/planStateDaemonRestorePrune/)
   })
 
   test('queue wake smoke is bounded, approval-gated, and does not drain or terminalize rows', () => {

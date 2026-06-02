@@ -74,10 +74,15 @@ export interface LocalLaunchdInstallDryRunOptions {
   probe?: PathProbe
   expectedAgentId?: string
   approval?: RuntimeSupervisorApprovalEvidence | null
+  activeLaunchAgentPlists?: string[]
+  checkoutDirs?: string[]
+  keepCheckouts?: number
 }
 
 export interface LocalLaunchdInstallDryRunPlan {
   mode: 'dry_run'
+  ok: boolean
+  go_no_go: 'GO' | 'NO_GO'
   mutation_performed: false
   restart_performed: false
   execute_allowed: false
@@ -95,6 +100,7 @@ export interface LocalLaunchdInstallDryRunPlan {
     action: 'write_plist' | 'rename_plist' | 'load_or_start_job'
     reason: string
   }>
+  cleanup: LocalLaunchdCleanupDryRunPlan | null
 }
 
 export interface LocalLaunchdCleanupDryRunPlan {
@@ -265,9 +271,19 @@ export function buildLocalLaunchdInstallDryRunPlan(
     intent: 'readiness',
     approval: options.approval ?? null,
   })
+  const cleanup = options.checkoutDirs
+    ? planLocalLaunchdSupervisorCleanup({
+      restoreRoot: plan.restoreRoot,
+      checkoutDirs: options.checkoutDirs,
+      activeLaunchAgentPlists: options.activeLaunchAgentPlists,
+      keep: options.keepCheckouts,
+    })
+    : null
 
   return {
     mode: 'dry_run',
+    ok: supervisorReport.preflight.ok && supervisorReport.conformance.ok,
+    go_no_go: supervisorReport.preflight.ok && supervisorReport.conformance.ok ? 'GO' : 'NO_GO',
     mutation_performed: false,
     restart_performed: false,
     execute_allowed: false,
@@ -286,6 +302,7 @@ export function buildLocalLaunchdInstallDryRunPlan(
       { action: 'rename_plist', reason: 'atomic LaunchAgent update requires a separate approved execution slice' },
       { action: 'load_or_start_job', reason: 'host supervisor state mutation is outside this slice' },
     ],
+    cleanup,
   }
 }
 
@@ -320,4 +337,45 @@ export function observeLocalTmuxSession(input: {
     mutation_performed: false,
     restart_performed: false,
   }
+}
+
+export function formatLocalLaunchdInstallDryRunText(plan: LocalLaunchdInstallDryRunPlan): string {
+  const lines = [
+    'State-Daemon Local LaunchAgent Install Plan',
+    `Result: ${plan.go_no_go}`,
+    `Mode: ${plan.mode}`,
+    `Mutation Performed: ${plan.mutation_performed}`,
+    `Restart Performed: ${plan.restart_performed}`,
+    `Execute Allowed: ${plan.execute_allowed}`,
+    '',
+    'Persistent Paths:',
+    `  checkout: ${plan.plan.checkoutPath}`,
+    `  entry: ${plan.plan.entryPath}`,
+    `  build artifact: ${plan.plan.buildOutfile}`,
+    `  logs: ${plan.plan.logsDir}`,
+    '',
+    'LaunchAgent:',
+    `  plist: ${plan.plan.plistPath}`,
+    `  temp plist: ${plan.plan.tempPlistPath}`,
+    `  atomic update: ${plan.atomic_update.method}`,
+    '',
+    `Preflight: ${plan.preflight.ok ? 'ok' : 'blocked'}`,
+  ]
+  for (const issue of plan.preflight.errors) {
+    lines.push(`  blocker ${issue.code}: ${issue.message}${issue.path ? ` (${issue.path})` : ''}`)
+  }
+  for (const issue of plan.preflight.warnings) {
+    lines.push(`  warning ${issue.code}: ${issue.message}${issue.path ? ` (${issue.path})` : ''}`)
+  }
+  lines.push('', 'Disabled Host Actions:')
+  for (const action of plan.disabled_host_actions) {
+    lines.push(`  ${action.action}: ${action.reason}`)
+  }
+  if (plan.cleanup) {
+    lines.push('', 'Cleanup Dry Run:')
+    for (const target of plan.cleanup.targets) {
+      lines.push(`  ${target.action}: ${target.path} (${target.reason})`)
+    }
+  }
+  return `${lines.join('\n')}\n`
 }
