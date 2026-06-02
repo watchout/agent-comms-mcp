@@ -4,6 +4,7 @@ import type { DbAdapter } from './adapter'
 export class PgAdapter implements DbAdapter {
   private client: Client
   private connected = false
+  private connecting: Promise<void> | null = null
 
   constructor(configOrUrl?: string | ClientConfig) {
     const config = typeof configOrUrl === 'string'
@@ -13,10 +14,17 @@ export class PgAdapter implements DbAdapter {
   }
 
   private async ensureConnected(): Promise<void> {
-    if (!this.connected) {
-      await this.client.connect()
-      this.connected = true
+    if (this.connected) return
+    if (!this.connecting) {
+      this.connecting = this.client.connect()
+        .then(() => {
+          this.connected = true
+        })
+        .finally(() => {
+          this.connecting = null
+        })
     }
+    await this.connecting
   }
 
   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {

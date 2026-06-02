@@ -317,6 +317,13 @@ function commandErrorReport(
   }
 }
 
+function parsedReportIsExplicitNoGo(report: unknown): boolean {
+  const parsed = asRecord(report)
+  if (Object.keys(parsed).length === 0) return false
+  if (parsed.mutation_performed === true || parsed.restart_performed === true) return false
+  return parsed.go_no_go === 'NO_GO' || parsed.ok === false
+}
+
 export function runReport(command: GateCommand, repoRoot: string): unknown {
   const result = spawnSync(command.command, command.args, {
     cwd: repoRoot,
@@ -327,11 +334,15 @@ export function runReport(command: GateCommand, repoRoot: string): unknown {
     },
   })
   const parsed = parseJsonOutput(result.stdout)
-  const report = result.status !== 0 || result.signal
+  const report = result.signal
     ? commandErrorReport(command.report, result, parsed)
-    : parsed && typeof parsed === 'object'
-      ? parsed
-      : commandErrorReport(command.report, result)
+    : result.status !== 0
+      ? parsedReportIsExplicitNoGo(parsed)
+        ? parsed
+        : commandErrorReport(command.report, result, parsed)
+      : parsed && typeof parsed === 'object'
+        ? parsed
+        : commandErrorReport(command.report, result)
   jsonFile(command.outputFile, report)
   return report
 }
@@ -394,6 +405,10 @@ function blockerCodes(report: Record<string, unknown>): string[] {
   const preflight = asRecord(report.preflight)
   for (const code of Array.isArray(preflight.failed_blocker_codes) ? preflight.failed_blocker_codes : []) {
     if (typeof code === 'string') codes.add(code)
+  }
+  for (const item of Array.isArray(preflight.errors) ? preflight.errors : []) {
+    const rec = asRecord(item)
+    if (typeof rec.code === 'string') codes.add(rec.code)
   }
   for (const item of Array.isArray(report.blockers) ? report.blockers : []) {
     const rec = asRecord(item)

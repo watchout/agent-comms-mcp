@@ -248,6 +248,55 @@ describe('#602 recovery read-only gate pack', () => {
     }
   })
 
+  test('diagnostic NO-GO JSON with exit 1 is preserved as report evidence', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'aun-readonly-gate-pack-'))
+    try {
+      const outputFile = join(tmp, 'state-daemon-readiness.json')
+      const report = runReport({
+        report: 'state-daemon-readiness',
+        outputFile,
+        command: 'bun',
+        args: [
+          '-e',
+          'console.log(JSON.stringify({ ok: false, go_no_go: "NO_GO", mutation_performed: false, restart_performed: false, blockers: [{ code: "STATE_DAEMON_UNLOADED" }] })); process.exit(1)',
+        ],
+      }, process.cwd()) as Record<string, unknown>
+      const stored = JSON.parse(readFileSync(outputFile, 'utf8'))
+
+      expect(report).toMatchObject({
+        ok: false,
+        go_no_go: 'NO_GO',
+        mutation_performed: false,
+        restart_performed: false,
+        blockers: [{ code: 'STATE_DAEMON_UNLOADED' }],
+      })
+      expect(report.command_error).toBeUndefined()
+      expect(stored).toMatchObject(report)
+
+      const result = buildSummary({
+        evidenceDir: tmp,
+        scopeFile: join(tmp, 'recovery-scope.json'),
+        currentMainSha: '86c06cde8c4dae59276e47255bf28f377e8552b4',
+        repoHeadSha: '86c06cde8c4dae59276e47255bf28f377e8552b4',
+        prDependencies: {
+          pr_671_local_supervisor_adapter: { available: true, state: 'MERGED' },
+          pr_672_install_plan: { available: true, state: 'MERGED' },
+        },
+        reports: goReports({ 'state-daemon-readiness': report }),
+        now: new Date('2026-06-02T00:00:00.000Z'),
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.go_no_go).toBe('NO_GO')
+      expect(result.blockers).toContainEqual({
+        source_report: 'state-daemon-readiness',
+        code: 'STATE_DAEMON_UNLOADED',
+      })
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
   test('summary preserves exact blocker codes and source reports', () => {
     const result = summary({
       'cp70-preflight': {
@@ -278,6 +327,10 @@ describe('#602 recovery read-only gate pack', () => {
         dependency_unavailable: true,
         mutation_performed: false,
         restart_performed: false,
+        preflight: {
+          ok: false,
+          errors: [{ code: 'state_daemon_entry_missing' }],
+        },
         blockers: [{ code: 'INSTALL_PLAN_UNAVAILABLE_PR_672_PENDING' }],
       },
     })
@@ -288,6 +341,7 @@ describe('#602 recovery read-only gate pack', () => {
       { source_report: 'cp70-preflight', code: 'LOOP_PROMPT_BACKLOG' },
       { source_report: 'state-daemon-readiness', code: 'STATE_DAEMON_VOLATILE_PATH' },
       { source_report: 'install-plan', code: 'INSTALL_PLAN_UNAVAILABLE_PR_672_PENDING' },
+      { source_report: 'install-plan', code: 'state_daemon_entry_missing' },
     ]))
   })
 
