@@ -75,6 +75,10 @@ function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
 }
 
+function effectiveRuntime(agent: AgentRow): string | null {
+  return agent.runtime_engine_preference?.trim() || agent.runtime
+}
+
 function isInactiveAgentStatus(status: string | null | undefined): boolean {
   return status !== null && status !== undefined && INACTIVE_AGENT_STATUSES.has(status)
 }
@@ -96,6 +100,7 @@ interface QueueRow {
 interface AgentRow {
   agent_id: string
   runtime: string | null
+  runtime_engine_preference?: string | null
   status: string | null
   tmux_session: string | null
   last_seen_at: Date | null
@@ -410,7 +415,7 @@ export class StateDaemon {
 
   async checkBotLiveness(): Promise<LivenessResult> {
     if (this.status !== 'running') return { checked: 0, restarted: 0, escalated: 0 }
-    let sql = `SELECT agent_id, runtime, status, (metadata->>'tmux_session') AS tmux_session, last_seen_at FROM agents`
+    let sql = `SELECT agent_id, runtime, runtime_engine_preference, status, (metadata->>'tmux_session') AS tmux_session, last_seen_at FROM agents`
     const params: unknown[] = []
     const scopeClause = this.agentScopeClause(params, 'agent_id')
     if (scopeClause) sql += ` WHERE ${scopeClause.replace(/^ AND /, '')}`
@@ -426,8 +431,9 @@ export class StateDaemon {
       const lastSeen = bot.last_seen_at ? new Date(bot.last_seen_at).getTime() : 0
       const stale = now - lastSeen
       if (stale <= this.config.botDeadThresholdMs) continue
-      if (isCodexRunnerRuntime(bot.runtime)) {
-        this.metrics.inc('state_daemon_bot_liveness_skipped_total', { runtime: bot.runtime })
+      const runtime = effectiveRuntime(bot)
+      if (isCodexRunnerRuntime(runtime)) {
+        this.metrics.inc('state_daemon_bot_liveness_skipped_total', { runtime: runtime ?? 'unknown' })
         continue
       }
       // §5.4 / R7: TUI bot with stale last_seen_at gets restart attempted
@@ -535,7 +541,7 @@ export class StateDaemon {
     now: Date,
   ): Promise<readonly StallVerdict[]> {
     const { rows } = await this.dbQuery<AgentRow>(
-      `SELECT agent_id, runtime, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
+      `SELECT agent_id, runtime, runtime_engine_preference, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
       [row.agent_id],
     )
     const ctx: BotContext = {
@@ -559,7 +565,7 @@ export class StateDaemon {
     now: Date,
   ): Promise<boolean> {
     const { rows } = await this.dbQuery<AgentRow>(
-      `SELECT agent_id, runtime, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
+      `SELECT agent_id, runtime, runtime_engine_preference, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
       [row.agent_id],
     )
     const bot = rows[0]

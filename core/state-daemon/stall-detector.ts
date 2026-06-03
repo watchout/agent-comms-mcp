@@ -47,6 +47,7 @@ export interface DetectorQueueRow {
 export interface DetectorAgentRow {
   readonly agent_id: string
   readonly runtime: string | null
+  readonly runtime_engine_preference?: string | null
   readonly status: string | null
   readonly tmux_session: string | null
   readonly last_seen_at: Date | string | null
@@ -245,8 +246,19 @@ async function l1_received_stuck(ctx: BotContext): Promise<StallVerdict | null> 
 
 // ── L2: process state ──────────────────────────────────────────────────────
 
+const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
+
+function effectiveRuntime(agent: DetectorAgentRow): string | null {
+  return agent.runtime_engine_preference?.trim() || agent.runtime
+}
+
+function isCodexRunnerRuntime(runtime: string | null): boolean {
+  return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
+}
+
 async function l2_dead_bot(ctx: BotContext): Promise<StallVerdict | null> {
   if (!ctx.agent) return null
+  if (isCodexRunnerRuntime(effectiveRuntime(ctx.agent))) return null
   if (ctx.agent.status !== 'online') return null
   if (!ctx.agent.last_seen_at) return null
   const ageSec =
@@ -263,6 +275,7 @@ async function l2_dead_bot(ctx: BotContext): Promise<StallVerdict | null> {
 
 async function l2_tmux_missing(ctx: BotContext): Promise<StallVerdict | null> {
   if (!ctx.agent) return null
+  if (isCodexRunnerRuntime(effectiveRuntime(ctx.agent))) return null
   if (ctx.agent.runtime !== 'TUI') return null
   // tmux_session may be NULL (unseeded) or empty; either way the wake path
   // has no target. The heartbeat path already alerts; the gate's role is

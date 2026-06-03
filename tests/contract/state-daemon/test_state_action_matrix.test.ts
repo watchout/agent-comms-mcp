@@ -45,6 +45,16 @@ describe('state_daemon state/action matrix planner', () => {
     })).toEqual({ kind: 'invoke_codex_runner', terminal: false })
   })
 
+  test('pending + TUI legacy profile with Codex preference plans invoke_codex_runner', () => {
+    expect(planQueueAction({
+      row: { status: 'pending', claim_expires_at: null },
+      agent: { runtime: 'TUI', runtime_engine_preference: 'codex', tmux_session: 'legacy-session', status: 'idle' },
+      now,
+      defaultRuntime: 'TUI',
+      hasActiveClaim: false,
+    })).toEqual({ kind: 'invoke_codex_runner', terminal: false })
+  })
+
   test('pending + busy Codex runtime plans observe_busy without duplicate runner', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },

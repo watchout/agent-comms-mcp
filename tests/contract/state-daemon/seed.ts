@@ -69,6 +69,7 @@ export async function cleanAll(c: Client): Promise<void> {
 export interface SeedAgent {
   agent_id: string
   runtime?: 'TUI' | 'SIG' | 'codex' | 'codex-runner'
+  runtime_engine_preference?: 'codex' | 'codex-runner' | 'claude-code' | null
   tmux_session?: string | null
   status?: 'online' | 'offline' | 'idle' | 'busy' | 'restarting'
   last_seen_at?: Date | string
@@ -84,10 +85,11 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   await c.query(
     `INSERT INTO agents
        (agent_id, display_name, agent_type, runtime, status, last_seen_at,
-        last_wake_attempt_at, channel_port, metadata)
-     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb)
+        last_wake_attempt_at, channel_port, metadata, runtime_engine_preference)
+     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7)
      ON CONFLICT (agent_id) DO UPDATE SET
        runtime = EXCLUDED.runtime,
+       runtime_engine_preference = EXCLUDED.runtime_engine_preference,
        status = EXCLUDED.status,
        last_seen_at = EXCLUDED.last_seen_at,
        last_wake_attempt_at = NULL,
@@ -99,6 +101,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
       a.status ?? 'online',
       a.last_seen_at ?? new Date(),
       JSON.stringify(metadata),
+      a.runtime_engine_preference ?? null,
     ],
   )
 }
