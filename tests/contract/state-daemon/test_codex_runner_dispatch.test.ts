@@ -187,6 +187,61 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
+  test('typed terminal completion evidence is recorded separately from open runner success', async () => {
+    const agent = makeAgentId('codex-complete')
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-222222222222',
+      payload: JSON.stringify({ author_id: 'codex-cto', content: '<@999010> テスト' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    runner.result = {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        retained_count: 1,
+        retained: [{ queue_id: String(id), message_id: '11111111-1111-4111-8111-222222222222' }],
+        completion: {
+          outcome: 'completed_no_reply',
+          terminal_queue_ids: [String(id)],
+          reason: 'direct_mention_smoke_completed_without_substantive_reply',
+        },
+      }) + '\n',
+      stderr: '',
+      typed_result: {
+        outcome: 'claimed_work',
+        retained_count: 1,
+        queue_ids: [String(id)],
+        completion_outcome: 'completed_no_reply',
+        terminal_queue_ids: [String(id)],
+        completion_reason: 'direct_mention_smoke_completed_without_substantive_reply',
+      },
+    }
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
   test('pending busy Codex runtime observes and does not start duplicate runner', async () => {
     const agent = makeAgentId('codex-busy')
     await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })

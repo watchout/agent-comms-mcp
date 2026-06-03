@@ -836,7 +836,16 @@ export class StateDaemon {
          WHERE id=$2 AND status='pending'`,
       [now, row.id],
     )
-    this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })
+    const completionOutcome = result.typed_result?.completion_outcome
+    if (completionOutcome === 'completed_no_reply') {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })
+    } else if (completionOutcome === 'completion_failed') {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_completion_failed' })
+    } else if (completionOutcome === 'open') {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_open' })
+    } else {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })
+    }
     return true
   }
 

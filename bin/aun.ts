@@ -12,7 +12,7 @@
  *   - aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]
  *   - aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
- *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]
+ *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>] [--complete-no-reply --completion-reason <text>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
@@ -44,7 +44,7 @@ function printHelp(): void {
     '  aun diagnose-receive --agent-id <id> [--max-inspect <n>] [--dry-run]',
     '  aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
-    '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>]',
+    '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>] [--complete-no-reply --completion-reason <text>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
@@ -201,6 +201,8 @@ export function run(argv: string[] = process.argv): number {
         queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
         ackMentions: typeof flags['ack-mentions'] === 'string' ? (flags['ack-mentions'] as string) : undefined,
         ackContent: typeof flags['ack-content'] === 'string' ? (flags['ack-content'] as string) : undefined,
+        completeNoReply: !!flags['complete-no-reply'],
+        completionReason: typeof flags['completion-reason'] === 'string' ? (flags['completion-reason'] as string) : undefined,
         dryRun: !!flags['dry-run'],
       })
       if (res.stdout) process.stdout.write(res.stdout)
