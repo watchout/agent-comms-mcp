@@ -144,7 +144,7 @@ async function readQueueEvidence(db: Queryable, queueId: number): Promise<QueueE
             mq.payload,
             am.channel_id AS message_channel_id
        FROM message_queue mq
-       LEFT JOIN agent_messages am ON am.id = mq.message_id
+       LEFT JOIN agent_messages am ON am.id::text = mq.message_id
       WHERE mq.id = $1`,
     [queueId],
   ))
