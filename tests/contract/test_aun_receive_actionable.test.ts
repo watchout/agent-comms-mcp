@@ -40,6 +40,10 @@ function seedQueue(opts: {
   ageSeconds: number
   content?: string
   source?: string
+  authorId?: string
+  metadata?: Record<string, unknown>
+  inputMentions?: string[]
+  payloadMentions?: string[]
   status?: string
   claimedBy?: string | null
 }): number {
@@ -49,17 +53,28 @@ function seedQueue(opts: {
     const claimedAt = opts.claimedBy ? new Date(Date.now() - Math.max(opts.ageSeconds - 1, 0) * 1000).toISOString() : null
     const claimExpiresAt = opts.claimedBy ? new Date(Date.now() + 60_000).toISOString() : null
     const content = opts.content ?? `${opts.messageType} body`
+    const authorId = opts.authorId ?? 'codex-cto'
     db.prepare(
-      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source, created_at)
-       VALUES (?, 'actionable-ch', 'codex-cto', ?, ?, ?, ?)`,
-    ).run(messageId, content, opts.messageType, opts.source ?? 'agent-comms', createdAt)
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source, created_at, metadata, input_mentions)
+       VALUES (?, 'actionable-ch', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      messageId,
+      authorId,
+      content,
+      opts.messageType,
+      opts.source ?? 'agent-comms',
+      createdAt,
+      JSON.stringify(opts.metadata ?? {}),
+      JSON.stringify(opts.inputMentions ?? []),
+    )
     const payload = JSON.stringify({
       message_id: messageId,
       channel_id: 'actionable-ch',
-      author_id: 'codex-cto',
+      author_id: authorId,
       content,
       message_type: opts.messageType,
       source: opts.source ?? 'agent-comms',
+      ...(opts.payloadMentions ? { mentions: opts.payloadMentions } : {}),
     })
     const row = db.prepare(
       `INSERT INTO message_queue
@@ -106,12 +121,14 @@ beforeEach(() => {
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   withDb((db) => {
     db.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, status)
-        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'idle'),
-               ('codex-cto', 'codex-cto', 'dev', 'idle'),
-               ('auditor', 'auditor', 'auditor', 'idle');
+      INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
+        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'codex', 'idle', '{"discord_id":"999001"}'),
+               ('codex-cto', 'codex-cto', 'dev', 'codex', 'idle', '{"discord_id":"999002"}'),
+               ('auditor', 'auditor', 'auditor', 'codex', 'idle', '{}');
       INSERT INTO channels (id, name, members)
         VALUES ('actionable-ch', 'actionable-ch', '["${TEST_AGENT}","codex-cto","auditor"]');
+      INSERT INTO channel_routing_policy (channel_id, primary_agent_id, outbound_allowlist, policy_source)
+        VALUES ('actionable-ch', '${TEST_AGENT}', '["${TEST_AGENT}","codex-cto"]', 'receive-actionable-test');
     `)
   })
 })
@@ -189,7 +206,36 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === newerId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
-  test('queue-id mode fails closed when the requested row is not actionable', () => {
+  test('queue-id mode accepts Discord direct-mention chat through routing_decision without changing message_type', () => {
+    const chatId = seedQueue({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 60,
+      content: '<@999001> テスト',
+      payloadMentions: ['999001'],
+    })
+
+    const r = runAun([
+      'receive-actionable',
+      '--agent-id', TEST_AGENT,
+      '--queue-id', String(chatId),
+      '--max-inspect', '10',
+    ])
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      queue_id: chatId,
+      message_type: 'chat',
+      routing: {
+        routing_decision: 'wake_agent',
+        route_reason: 'direct_mention',
+        llm_classification_used: false,
+      },
+    })
+    expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+  })
+
+  test('queue-id mode fails closed when ambient chat is not actionable', () => {
     const chatId = seedQueue({ messageType: 'chat', ageSeconds: 300, content: 'old FYI' })
     const instructionId = seedQueue({ messageType: 'instruction', ageSeconds: 30, content: 'CTO instruction: do not claim' })
 
@@ -201,12 +247,12 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     ])
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
-    expect(r.stderr).toContain('target_queue_not_actionable')
+    expect(r.stderr).toContain('non_actionable_type')
     const body = JSON.parse(r.stdout)
     expect(body).toMatchObject({
       ok: false,
       blocked_reason: 'queue_not_claimable',
-      selection_reason: 'target_queue_not_actionable',
+      selection_reason: 'non_actionable_type',
       selected: null,
       claimed: null,
     })
@@ -214,6 +260,110 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     const after = rows()
     expect(after.find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('self-authored Discord mention chat does not wake the target agent', () => {
+    const chatId = seedQueue({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 60,
+      authorId: '999001',
+      content: '<@999001> self echo',
+      payloadMentions: ['999001'],
+    })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
+    expect(r.status).toBe(1)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      selection_reason: 'author_is_self',
+    })
+    expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('Discord chat with missing target binding fails closed without LLM classification', () => {
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
+    const chatId = seedQueue({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 60,
+      content: '<@999001> missing binding',
+    })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
+    expect(r.status).toBe(1)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      selection_reason: 'missing_mention_binding',
+    })
+    expect(body.selected).toBeNull()
+    expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('Discord chat with only agent-id mention metadata and missing target binding fails closed', () => {
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
+    const chatId = seedQueue({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 60,
+      content: 'metadata-only mention should not wake without Discord binding',
+      metadata: { mentions: [TEST_AGENT] },
+      inputMentions: [TEST_AGENT],
+      payloadMentions: [TEST_AGENT],
+    })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
+    expect(r.status).toBe(1)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      selection_reason: 'missing_mention_binding',
+    })
+    expect(body.selected).toBeNull()
+    expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('disabled target profile blocks direct mention wake', () => {
+    withDb((db) => db.exec(`UPDATE agents SET profile_enabled = 0 WHERE agent_id = '${TEST_AGENT}'`))
+    const chatId = seedQueue({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 60,
+      content: '<@999001> disabled target',
+    })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
+    expect(r.status).toBe(1)
+    const body = JSON.parse(r.stdout)
+    expect(body.selection_reason).toBe('disabled_agent')
+    expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('notice and projection remain non-actionable even when mentioned', () => {
+    const noticeId = seedQueue({
+      messageType: 'notice',
+      source: 'discord',
+      ageSeconds: 60,
+      content: '<@999001> notice',
+      payloadMentions: ['999001'],
+    })
+    const projectionId = seedQueue({
+      messageType: 'projection',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999001> projection',
+      payloadMentions: ['999001'],
+    })
+
+    for (const id of [noticeId, projectionId]) {
+      const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(id)])
+      expect(r.status).toBe(1)
+      const body = JSON.parse(r.stdout)
+      expect(body.selection_reason).toBe('non_actionable_type')
+    }
+    expect(rows().filter((row) => row.status === 'received')).toHaveLength(0)
   })
 
   test('multiple pending instructions select the newest PR/head-specific CTO instruction', () => {

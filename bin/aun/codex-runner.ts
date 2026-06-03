@@ -32,6 +32,8 @@ export interface RetainedWorkItem {
   thread_id: string | null
   from: string | null
   message_type: string | null
+  routing_decision?: string
+  route_reason?: string
   content: string
 }
 
@@ -66,6 +68,10 @@ function retainClaim(claim: ClaimedMessage): RetainedWorkItem | null {
     thread_id: claim.thread_id ?? null,
     from: claim.from ?? null,
     message_type: claim.message_type ?? null,
+    ...(claim.routing ? {
+      routing_decision: claim.routing.routing_decision,
+      route_reason: claim.routing.route_reason,
+    } : {}),
     content: claim.content ?? '',
   }
 }

@@ -61,19 +61,38 @@ function seedPending(
   }
 }
 
-function seedTypedPending(opts: { content: string; messageType: string; ageSeconds: number }): { messageId: string; queueId: number } {
+function seedTypedPending(opts: {
+  content: string
+  messageType: string
+  ageSeconds: number
+  source?: string
+  authorId?: string
+  mentions?: string[]
+}): { messageId: string; queueId: number } {
   const db = new Database(dbPath)
   try {
     const messageId = randomUUID()
     const createdAt = new Date(Date.now() - opts.ageSeconds * 1000).toISOString()
-    db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, created_at)
-      VALUES (?, 'runner-ch', 'codex-cto', ?, ?, ?)`).run(messageId, opts.content, opts.messageType, createdAt)
+    const authorId = opts.authorId ?? 'codex-cto'
+    db.prepare(`INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source, created_at, metadata, input_mentions)
+      VALUES (?, 'runner-ch', ?, ?, ?, ?, ?, ?, ?)`).run(
+      messageId,
+      authorId,
+      opts.content,
+      opts.messageType,
+      opts.source ?? 'agent-comms',
+      createdAt,
+      JSON.stringify({ mentions: opts.mentions ?? [] }),
+      JSON.stringify(opts.mentions ?? []),
+    )
     const payload = JSON.stringify({
       content: opts.content,
       channel_id: 'runner-ch',
-      author_id: 'codex-cto',
+      author_id: authorId,
       message_id: messageId,
       message_type: opts.messageType,
+      source: opts.source ?? 'agent-comms',
+      ...(opts.mentions ? { mentions: opts.mentions } : {}),
     })
     const row = db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status, created_at)
       VALUES ('codex-aun', ?, ?, 'pending', ?) RETURNING id`).get(messageId, payload, createdAt) as { id: number }
@@ -99,9 +118,9 @@ beforeEach(() => {
   const migrated = spawnSync('bun', [MIGRATE], { cwd: REPO_ROOT, env, encoding: 'utf-8' })
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   dbExec(`
-    INSERT INTO agents (agent_id, display_name, agent_type, status)
-      VALUES ('codex-aun', 'codex-aun', 'dev', 'idle'),
-             ('codex-cto', 'codex-cto', 'cto', 'idle');
+    INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
+      VALUES ('codex-aun', 'codex-aun', 'dev', 'codex', 'idle', '{"discord_id":"999010"}'),
+             ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-ch', 'runner-ch', '["codex-aun","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
@@ -222,13 +241,43 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
 
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
-    expect(r.stderr).toContain('target_queue_not_actionable')
+    expect(r.stderr).toContain('non_actionable_type')
     const body = JSON.parse(r.stdout)
     expect(body.retained).toEqual([])
     expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [stale.queueId])[0])
       .toEqual({ status: 'pending', claimed_by: null })
     expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [current.queueId])[0])
       .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('queue-id mode retains Discord direct-mention chat via deterministic routing decision', () => {
+    const direct = seedTypedPending({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999010> テスト',
+      mentions: ['999010'],
+    })
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(direct.queueId),
+      '--max-inspect', '10',
+    ])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.retained).toHaveLength(1)
+    expect(body.retained[0]).toMatchObject({
+      queue_id: String(direct.queueId),
+      message_type: 'chat',
+      routing_decision: 'wake_agent',
+      route_reason: 'direct_mention',
+      content: '<@999010> テスト',
+    })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [direct.queueId])[0])
+      .toEqual({ status: 'received', claimed_by: 'codex-aun' })
   })
 
   test('queue-id mode rejects batch limits above one before claiming', () => {
