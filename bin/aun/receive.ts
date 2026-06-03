@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import type { DbAdapter } from '../../core/db/adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
+import { decideQueueRouting, type QueueRoutingDecisionEvidence } from '../../core/routing-decision'
 
 export interface ReceiveOptions {
   agentId?: string
@@ -62,6 +63,7 @@ export interface ClaimedMessage {
   created_at?: string
   reply_chain?: unknown[]
   presentation?: PresentationEvidence
+  routing?: QueueRoutingDecisionEvidence
 }
 
 export interface PresentationEvidence {
@@ -124,6 +126,9 @@ export interface DiagnosedQueueRow {
   priority: number
   created_at: string | null
   classification: 'actionable' | 'non_action' | 'unknown'
+  routing_decision: QueueRoutingDecisionEvidence['routing_decision']
+  route_reason: QueueRoutingDecisionEvidence['route_reason']
+  routing: QueueRoutingDecisionEvidence
   presentation?: PresentationEvidence
 }
 
@@ -466,9 +471,23 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
                   am.content AS stored_content,
                   am.message_type AS stored_message_type,
-                  am.author_id AS stored_author_id
+                  am.author_id AS stored_author_id,
+                  am.source AS stored_source,
+                  am.metadata AS stored_metadata,
+                  am.input_mentions AS stored_input_mentions,
+                  a.runtime AS target_runtime,
+                  a.status AS target_status,
+                  a.metadata AS target_metadata,
+                  a.profile_enabled AS target_profile_enabled,
+                  a.disabled_at AS target_disabled_at,
+                  a.expected_provider_identity AS target_expected_provider_identity,
+                  crp.policy_source AS channel_policy_source,
+                  crp.primary_agent_id AS channel_policy_primary_agent_id,
+                  crp.adapter_owner_agent_id AS channel_policy_adapter_owner_agent_id
              FROM message_queue mq
              LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+             LEFT JOIN agents a ON a.agent_id = mq.agent_id
+             LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
             WHERE mq.id::text = $1 AND mq.agent_id = $2
             LIMIT 1
             FOR UPDATE`,
@@ -696,6 +715,66 @@ function parsePayload(payload: unknown): Record<string, unknown> {
   }
 }
 
+function parseObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function booleanFromUnknown(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1') return true
+    if (normalized === 'false' || normalized === '0') return false
+  }
+  return null
+}
+
+function stringsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  if (typeof value !== 'string' || !value.trim()) return []
+  try {
+    const parsed = JSON.parse(value)
+    if (Array.isArray(parsed)) return stringsFromUnknown(parsed)
+  } catch {}
+  return value.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function targetDiscordIdFromRow(row: Record<string, unknown>): string | null {
+  const metadata = parseObject(row.target_metadata)
+  const expected = parseObject(row.target_expected_provider_identity)
+  const candidates = [
+    metadata.discord_id,
+    metadata.discord_user_id,
+    expected.subject,
+    expected.discord_id,
+    expected.discord_user_id,
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return null
+}
+
+function mentionsForRouting(row: Record<string, unknown>, payload: Record<string, unknown>): string[] {
+  const storedMetadata = parseObject(row.stored_metadata)
+  return [
+    ...stringsFromUnknown(payload.mentions),
+    ...stringsFromUnknown(payload.input_mentions),
+    ...stringsFromUnknown(storedMetadata.mentions),
+    ...stringsFromUnknown(row.stored_input_mentions),
+  ]
+}
+
 function stableJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
@@ -732,18 +811,45 @@ function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
   const messageType = resolveMessageType(row, payload)
   const payloadAuthor = payload.author_id
   const storedAuthor = row.stored_author_id
+  const authorId = typeof payloadAuthor === 'string'
+    ? payloadAuthor
+    : typeof storedAuthor === 'string' ? storedAuthor : null
+  const source = typeof payload.source === 'string'
+    ? payload.source
+    : typeof row.stored_source === 'string' ? row.stored_source : null
+  const routing = decideQueueRouting({
+    target_agent_id: String(row.agent_id ?? ''),
+    target_runtime: typeof row.target_runtime === 'string' ? row.target_runtime : null,
+    target_status: typeof row.target_status === 'string' ? row.target_status : null,
+    target_profile_enabled: booleanFromUnknown(row.target_profile_enabled),
+    target_disabled_at: normalizeDate(row.target_disabled_at),
+    target_discord_id: targetDiscordIdFromRow(row),
+    message_type: messageType,
+    source,
+    content: typeof payload.content === 'string'
+      ? payload.content
+      : typeof row.stored_content === 'string' ? row.stored_content : null,
+    author_id: authorId,
+    mentions: mentionsForRouting(row, payload),
+    channel_policy: {
+      policy_source: typeof row.channel_policy_source === 'string' ? row.channel_policy_source : null,
+      primary_agent_id: typeof row.channel_policy_primary_agent_id === 'string' ? row.channel_policy_primary_agent_id : null,
+      adapter_owner_agent_id: typeof row.channel_policy_adapter_owner_agent_id === 'string' ? row.channel_policy_adapter_owner_agent_id : null,
+    },
+  })
   return {
     queue_id: row.id as string | number,
     message_id: (row.message_id as string | null | undefined) ?? null,
     agent_id: String(row.agent_id ?? ''),
     message_type: messageType,
-    author_id: typeof payloadAuthor === 'string'
-      ? payloadAuthor
-      : typeof storedAuthor === 'string' ? storedAuthor : null,
+    author_id: authorId,
     status: String(row.status ?? ''),
     priority: Number(row.priority ?? 0),
     created_at: normalizeDate(row.created_at),
     classification: classifyMessageType(messageType),
+    routing_decision: routing.routing_decision,
+    route_reason: routing.route_reason,
+    routing,
   }
 }
 
@@ -858,7 +964,7 @@ function evaluatePresentationClaimability(
 }
 
 function selectActionableRow(rows: DiagnosedQueueRow[]): { row: DiagnosedQueueRow | null; reason: string | null } {
-  const actionable = rows.filter((row) => row.classification === 'actionable')
+  const actionable = rows.filter((row) => row.routing_decision === 'wake_agent')
   if (actionable.length === 0) return { row: null, reason: null }
 
   const instructions = actionable.filter((row) => row.message_type === 'instruction')
@@ -889,6 +995,7 @@ function claimedMessageFromRow(row: DiagnosedQueueRow, payload: Record<string, u
     source: typeof payload.source === 'string' ? payload.source : null,
     created_at: row.created_at ?? undefined,
     ...(row.presentation ? { presentation: row.presentation } : {}),
+    routing: row.routing,
   }
 }
 
@@ -1278,10 +1385,25 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
       const pendingRows = await db.query<Record<string, unknown>>(
         `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                 mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                am.content AS stored_content,
                 am.message_type AS stored_message_type,
-                am.author_id AS stored_author_id
+                am.author_id AS stored_author_id,
+                am.source AS stored_source,
+                am.metadata AS stored_metadata,
+                am.input_mentions AS stored_input_mentions,
+                a.runtime AS target_runtime,
+                a.status AS target_status,
+                a.metadata AS target_metadata,
+                a.profile_enabled AS target_profile_enabled,
+                a.disabled_at AS target_disabled_at,
+                a.expected_provider_identity AS target_expected_provider_identity,
+                crp.policy_source AS channel_policy_source,
+                crp.primary_agent_id AS channel_policy_primary_agent_id,
+                crp.adapter_owner_agent_id AS channel_policy_adapter_owner_agent_id
            FROM message_queue mq
            LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+           LEFT JOIN agents a ON a.agent_id = mq.agent_id
+           LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
           WHERE mq.agent_id = $1 AND mq.status = 'pending'
           ORDER BY mq.priority DESC, mq.created_at ASC
           LIMIT $2`,
@@ -1439,18 +1561,46 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
                   am.content AS stored_content,
                   am.message_type AS stored_message_type,
-                  am.author_id AS stored_author_id
+                  am.author_id AS stored_author_id,
+                  am.source AS stored_source,
+                  am.metadata AS stored_metadata,
+                  am.input_mentions AS stored_input_mentions,
+                  a.runtime AS target_runtime,
+                  a.status AS target_status,
+                  a.metadata AS target_metadata,
+                  a.profile_enabled AS target_profile_enabled,
+                  a.disabled_at AS target_disabled_at,
+                  a.expected_provider_identity AS target_expected_provider_identity,
+                  crp.policy_source AS channel_policy_source,
+                  crp.primary_agent_id AS channel_policy_primary_agent_id,
+                  crp.adapter_owner_agent_id AS channel_policy_adapter_owner_agent_id
              FROM message_queue mq
              LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+             LEFT JOIN agents a ON a.agent_id = mq.agent_id
+             LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
             WHERE mq.agent_id = $1 AND mq.id::text = $2
             LIMIT 1`
           : `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
                   am.content AS stored_content,
                   am.message_type AS stored_message_type,
-                  am.author_id AS stored_author_id
+                  am.author_id AS stored_author_id,
+                  am.source AS stored_source,
+                  am.metadata AS stored_metadata,
+                  am.input_mentions AS stored_input_mentions,
+                  a.runtime AS target_runtime,
+                  a.status AS target_status,
+                  a.metadata AS target_metadata,
+                  a.profile_enabled AS target_profile_enabled,
+                  a.disabled_at AS target_disabled_at,
+                  a.expected_provider_identity AS target_expected_provider_identity,
+                  crp.policy_source AS channel_policy_source,
+                  crp.primary_agent_id AS channel_policy_primary_agent_id,
+                  crp.adapter_owner_agent_id AS channel_policy_adapter_owner_agent_id
              FROM message_queue mq
              LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+             LEFT JOIN agents a ON a.agent_id = mq.agent_id
+             LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
             WHERE mq.agent_id = $1 AND mq.status = 'pending'
             ORDER BY mq.priority DESC, mq.created_at ASC
             LIMIT $2`
@@ -1489,8 +1639,8 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
               ? { row: null, reason: targetRow ? 'target_queue_not_pending' : 'target_queue_not_found' }
               : targetPresentation?.blocked_reason
                 ? { row: null, reason: targetPresentation.blocked_reason }
-              : targetRow.classification !== 'actionable'
-                ? { row: null, reason: 'target_queue_not_actionable' }
+              : targetRow.routing_decision !== 'wake_agent'
+                ? { row: null, reason: targetRow.route_reason }
                 : { row: targetRow, reason: 'target_queue_id' }
             : selectActionableRow(claimableInspected)
         const selectedRaw = selected.row
@@ -1626,9 +1776,22 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<ReconcileR
                 am.message_type AS stored_message_type,
                 am.author_id AS stored_author_id,
                 am.content AS stored_content,
-                am.source AS stored_source
+                am.source AS stored_source,
+                am.metadata AS stored_metadata,
+                am.input_mentions AS stored_input_mentions,
+                a.runtime AS target_runtime,
+                a.status AS target_status,
+                a.metadata AS target_metadata,
+                a.profile_enabled AS target_profile_enabled,
+                a.disabled_at AS target_disabled_at,
+                a.expected_provider_identity AS target_expected_provider_identity,
+                crp.policy_source AS channel_policy_source,
+                crp.primary_agent_id AS channel_policy_primary_agent_id,
+                crp.adapter_owner_agent_id AS channel_policy_adapter_owner_agent_id
            FROM message_queue mq
            LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+           LEFT JOIN agents a ON a.agent_id = mq.agent_id
+           LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
           WHERE mq.agent_id = $1
             ${cursorWhere}
           ORDER BY mq.created_at ASC, mq.id ASC
