@@ -86,12 +86,20 @@ describe('runtime runner adapter contract', () => {
       ok: true,
       retained_count: 1,
       retained: [{ queue_id: '94526', message_id: 'msg-94526' }],
+      completion: {
+        outcome: 'completed_no_reply',
+        terminal_queue_ids: ['94526'],
+        reason: 'direct_mention_smoke_completed_without_substantive_reply',
+      },
     }))
 
     expect(typed).toMatchObject({
       outcome: 'claimed_work',
       retained_count: 1,
       queue_ids: ['94526'],
+      completion_outcome: 'completed_no_reply',
+      terminal_queue_ids: ['94526'],
+      completion_reason: 'direct_mention_smoke_completed_without_substantive_reply',
     })
     expect(parseRuntimeRunnerStdout('not-json')).toMatchObject({
       outcome: 'parse_error',

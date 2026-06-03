@@ -5,7 +5,8 @@
  * - claim actionable work through the bounded `aun receive-actionable` path
  * - retain queue/message identity in structured JSON
  * - optionally emit ACK/progress through `reply --no-close`
- * - leave final completion to `reply --close --queue-id --message-id`
+ * - optionally terminalize exact targeted no-reply work when explicitly requested
+ * - leave normal final completion to `reply --close --queue-id --message-id`
  */
 import {
   buildCommandPlan,
@@ -23,6 +24,8 @@ export interface CodexRunnerOptions extends ReceiveOptions {
   queueId?: string
   ackMentions?: string
   ackContent?: string
+  completeNoReply?: boolean
+  completionReason?: string
 }
 
 export interface RetainedWorkItem {
@@ -43,6 +46,19 @@ export interface AckResult {
   ok: boolean
   code: number
   stdout?: unknown
+  stderr?: string
+}
+
+export interface CompletionResult {
+  outcome: 'none' | 'open' | 'completed_no_reply' | 'completion_failed'
+  terminal_queue_ids: string[]
+  applied_count: number
+  reason?: string
+  command?: {
+    mode: 'record-no-reply'
+    queue_id: string
+  }
+  result?: unknown
   stderr?: string
 }
 
@@ -95,6 +111,12 @@ function validateAckOptions(opts: CodexRunnerOptions): string | null {
   return null
 }
 
+function validateCompletionOptions(opts: CodexRunnerOptions): string | null {
+  if (!opts.completeNoReply) return null
+  if (!opts.queueId?.trim()) return '--complete-no-reply requires --queue-id'
+  return null
+}
+
 export function renderAckContent(template: string, item: RetainedWorkItem): string {
   const values: Record<string, string> = {
     queue_id: item.queue_id,
@@ -109,6 +131,78 @@ export function renderAckContent(template: string, item: RetainedWorkItem): stri
     rendered = rendered.split(`{${key}}`).join(value)
   }
   return rendered
+}
+
+function completionOpen(retained: RetainedWorkItem[]): CompletionResult {
+  return retained.length > 0
+    ? {
+        outcome: 'open',
+        terminal_queue_ids: [],
+        applied_count: 0,
+      }
+    : {
+        outcome: 'none',
+        terminal_queue_ids: [],
+        applied_count: 0,
+      }
+}
+
+function recordNoReplyByQueueId(queueId: string, opts: CodexRunnerOptions): CompletionResult {
+  const argv = [
+    resolveNestedBunExecutable(),
+    'bin/aun.ts',
+    'record-no-reply',
+    '--queue-id',
+    queueId,
+  ]
+  const reason = opts.completionReason?.trim() || 'codex_runner_complete_no_reply'
+  if (reason) {
+    argv.push('--reason', reason)
+  }
+  const plan = buildCommandPlan(opts, argv)
+  const result = runCommandPlan(plan)
+  if (!result.ok) {
+    return {
+      outcome: 'completion_failed',
+      terminal_queue_ids: [],
+      applied_count: 0,
+      reason,
+      command: {
+        mode: 'record-no-reply',
+        queue_id: queueId,
+      },
+      stderr: result.stderr || `exit ${result.code}`,
+      result: result.stdout ? parseJsonOrText(result.stdout) : undefined,
+    }
+  }
+  return {
+    outcome: 'completed_no_reply',
+    terminal_queue_ids: [queueId],
+    applied_count: 1,
+    reason,
+    command: {
+      mode: 'record-no-reply',
+      queue_id: queueId,
+    },
+    result: result.stdout ? parseJsonOrText(result.stdout) : undefined,
+  }
+}
+
+function recordNoReply(item: RetainedWorkItem, opts: CodexRunnerOptions): CompletionResult {
+  return recordNoReplyByQueueId(item.queue_id, opts)
+}
+
+function activeClaimQueueId(stdout: string | undefined): string | null {
+  if (!stdout) return null
+  try {
+    const parsed = JSON.parse(stdout) as { blocked_reason?: unknown; active_claim?: { queue_id?: unknown; busy?: unknown } }
+    if (parsed.blocked_reason !== 'active_claim') return null
+    if (parsed.active_claim?.busy !== true) return null
+    const queueId = parsed.active_claim.queue_id
+    return typeof queueId === 'string' || typeof queueId === 'number' ? String(queueId) : null
+  } catch {
+    return null
+  }
 }
 
 export function resolveNestedBunExecutable(): string {
@@ -199,6 +293,15 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       stderr: `Error [CODEX_RUNNER_ACK_INVALID]: ${ackError}\n`,
     }
   }
+  const completionError = validateCompletionOptions(opts)
+  if (completionError) {
+    return {
+      ok: false,
+      code: 2,
+      stdout: '',
+      stderr: `Error [CODEX_RUNNER_COMPLETION_INVALID]: ${completionError}\n`,
+    }
+  }
 
   let firstPlanAgentId: string | null = null
   let firstPlanExpectedAgentId: string | null = null
@@ -211,6 +314,38 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       firstPlanAgentId = firstPlanAgentId ?? received.plan.env.AGENT_ID
       firstPlanExpectedAgentId = firstPlanExpectedAgentId ?? received.plan.env.AGENT_COM_EXPECTED_AGENT_ID
       if (!received.ok) {
+        const targetQueueId = opts.queueId?.trim()
+        const sameOwnerActiveClaimQueueId = activeClaimQueueId(received.stdout)
+        if (opts.completeNoReply && targetQueueId && sameOwnerActiveClaimQueueId === targetQueueId) {
+          const completion = recordNoReplyByQueueId(targetQueueId, opts)
+          if (completion.outcome === 'completed_no_reply') {
+            return {
+              ok: true,
+              code: 0,
+              stdout: JSON.stringify({
+                ok: true,
+                agent_id: firstPlanAgentId,
+                expected_agent_id: firstPlanExpectedAgentId,
+                receive_mode: 'receive-actionable',
+                retained,
+                retained_count: retained.length,
+                acked_count: 0,
+                acks: [],
+                completion,
+                receive_error: {
+                  code: received.code,
+                  stderr: received.stderr || undefined,
+                },
+                waiting,
+                limit,
+                max_inspect: maxInspect,
+                capped,
+                final_close_contract: 'completed by aun record-no-reply --queue-id <id>',
+              }) + '\n',
+              stderr: '',
+            }
+          }
+        }
         return {
           ok: false,
           code: received.code,
@@ -284,6 +419,29 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
     }
   }
 
+  let completion = completionOpen(retained)
+  if (opts.completeNoReply && retained.length === 1) {
+    completion = recordNoReply(retained[0], opts)
+    if (completion.outcome === 'completion_failed') {
+      return {
+        ok: false,
+        code: 1,
+        stdout: JSON.stringify({
+          ok: false,
+          agent_id: firstPlanAgentId,
+          expected_agent_id: firstPlanExpectedAgentId,
+          receive_mode: 'receive-actionable',
+          retained,
+          retained_count: retained.length,
+          acked_count: acks.length,
+          acks,
+          completion,
+        }) + '\n',
+        stderr: `Error [CODEX_RUNNER_COMPLETION_FAILED]: ${completion.stderr ?? 'record-no-reply failed'}\n`,
+      }
+    }
+  }
+
   return {
     ok: true,
     code: 0,
@@ -296,6 +454,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       retained_count: retained.length,
       acked_count: acks.length,
       acks,
+      completion,
       waiting: parsedBatch.waiting ?? 0,
       limit,
       max_inspect: maxInspect,

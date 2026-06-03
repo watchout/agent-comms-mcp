@@ -36,10 +36,28 @@ export type RuntimeRunnerOutcome =
   | 'parse_error'
   | 'unknown'
 
+export type RuntimeRunnerCompletionOutcome =
+  | 'none'
+  | 'open'
+  | 'completed_no_reply'
+  | 'completion_failed'
+  | 'unknown'
+
+const RUNTIME_RUNNER_COMPLETION_OUTCOMES = new Set<RuntimeRunnerCompletionOutcome>([
+  'none',
+  'open',
+  'completed_no_reply',
+  'completion_failed',
+  'unknown',
+])
+
 export interface RuntimeRunnerTypedResult {
   outcome: RuntimeRunnerOutcome
   retained_count: number | null
   queue_ids: string[]
+  completion_outcome?: RuntimeRunnerCompletionOutcome
+  terminal_queue_ids?: string[]
+  completion_reason?: string | null
   raw_json?: unknown
   parse_error?: string
 }
@@ -113,10 +131,26 @@ export function parseRuntimeRunnerStdout(stdout: string | undefined): RuntimeRun
       .map((item: Record<string, unknown>) => item?.queue_id)
       .filter((queueId: unknown): queueId is string | number => typeof queueId === 'string' || typeof queueId === 'number')
       .map((queueId: string | number) => String(queueId))
+    const completion = parsed?.completion && typeof parsed.completion === 'object'
+      ? parsed.completion as Record<string, unknown>
+      : null
+    const completionOutcome = typeof completion?.outcome === 'string'
+      && RUNTIME_RUNNER_COMPLETION_OUTCOMES.has(completion.outcome as RuntimeRunnerCompletionOutcome)
+      ? completion.outcome as RuntimeRunnerCompletionOutcome
+      : retainedCount > 0 ? 'open' : 'none'
+    const terminalQueueIds = Array.isArray(completion?.terminal_queue_ids)
+      ? completion.terminal_queue_ids
+          .filter((queueId: unknown): queueId is string | number => typeof queueId === 'string' || typeof queueId === 'number')
+          .map((queueId: string | number) => String(queueId))
+      : []
+    const completionReason = typeof completion?.reason === 'string' ? completion.reason : null
     return {
       outcome: retainedCount > 0 ? 'claimed_work' : 'no_work',
       retained_count: retainedCount,
       queue_ids: queueIds,
+      completion_outcome: completionOutcome,
+      terminal_queue_ids: terminalQueueIds,
+      completion_reason: completionReason,
       raw_json: parsed,
     }
   } catch (err) {

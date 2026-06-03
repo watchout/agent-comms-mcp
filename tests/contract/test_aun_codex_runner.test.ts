@@ -280,6 +280,154 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
       .toEqual({ status: 'received', claimed_by: 'codex-aun' })
   })
 
+  test('complete-no-reply terminalizes only the explicitly targeted retained row', () => {
+    const direct = seedTypedPending({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999010> テスト',
+      mentions: ['999010'],
+    })
+    const fallback = seedPending('fallback must not be drained')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(direct.queueId),
+      '--max-inspect', '10',
+      '--complete-no-reply',
+      '--completion-reason', 'direct_mention_smoke_completed_without_substantive_reply',
+    ])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.retained_count).toBe(1)
+    expect(body.retained[0]).toMatchObject({
+      queue_id: String(direct.queueId),
+      routing_decision: 'wake_agent',
+      route_reason: 'direct_mention',
+    })
+    expect(body.completion).toMatchObject({
+      outcome: 'completed_no_reply',
+      terminal_queue_ids: [String(direct.queueId)],
+      applied_count: 1,
+      reason: 'direct_mention_smoke_completed_without_substantive_reply',
+    })
+    const row = dbRead(`SELECT status, claimed_by, replied_with, payload FROM message_queue WHERE id = ?`, [direct.queueId])[0]
+    expect(row.status).toBe('done')
+    expect(row.claimed_by).toBe('codex-aun')
+    expect(row.replied_with).toBeNull()
+    expect(JSON.parse(row.payload).terminal_baton).toMatchObject({
+      no_reply_required: true,
+      source: 'record_no_reply_command',
+      reason: 'direct_mention_smoke_completed_without_substantive_reply',
+    })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fallback.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('complete-no-reply terminalizes an already claimed exact row without drain fallback', () => {
+    const active = seedTypedPending({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999010> テスト',
+      mentions: ['999010'],
+    })
+    const fallback = seedPending('fallback must remain pending while active exact row closes')
+    dbExec(`
+      UPDATE message_queue
+         SET status='received',
+             claimed_by='codex-aun',
+             claimed_at=datetime('now'),
+             claim_expires_at=datetime('now', '+60 seconds')
+       WHERE id=${active.queueId};
+    `)
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(active.queueId),
+      '--max-inspect', '10',
+      '--complete-no-reply',
+      '--completion-reason', 'active_claim_direct_mention_smoke_completed_without_substantive_reply',
+    ])
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.retained_count).toBe(0)
+    expect(body.receive_error.stderr).toContain('active claim exists')
+    expect(body.completion).toMatchObject({
+      outcome: 'completed_no_reply',
+      terminal_queue_ids: [String(active.queueId)],
+      applied_count: 1,
+      reason: 'active_claim_direct_mention_smoke_completed_without_substantive_reply',
+    })
+    const row = dbRead(`SELECT status, claimed_by, replied_with, payload FROM message_queue WHERE id = ?`, [active.queueId])[0]
+    expect(row.status).toBe('done')
+    expect(row.claimed_by).toBe('codex-aun')
+    expect(row.replied_with).toBeNull()
+    expect(JSON.parse(row.payload).terminal_baton).toMatchObject({
+      no_reply_required: true,
+      source: 'record_no_reply_command',
+      reason: 'active_claim_direct_mention_smoke_completed_without_substantive_reply',
+    })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fallback.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('complete-no-reply rejects exact rows claimed by another agent without mutation', () => {
+    const active = seedTypedPending({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999010> テスト claimed elsewhere',
+      mentions: ['999010'],
+    })
+    dbExec(`
+      UPDATE message_queue
+         SET status='received',
+             claimed_by='other-dev',
+             claimed_at=datetime('now'),
+             claim_expires_at=datetime('now', '+60 seconds')
+       WHERE id=${active.queueId};
+    `)
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(active.queueId),
+      '--max-inspect', '10',
+      '--complete-no-reply',
+      '--completion-reason', 'must_not_apply_to_wrong_claim_owner',
+    ])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
+    expect(r.stderr).toContain('target_queue_not_pending')
+    const row = dbRead(`SELECT status, claimed_by, replied_with, payload FROM message_queue WHERE id = ?`, [active.queueId])[0]
+    expect(row.status).toBe('received')
+    expect(row.claimed_by).toBe('other-dev')
+    expect(row.replied_with).toBeNull()
+    expect(JSON.parse(row.payload).terminal_baton).toBeUndefined()
+  })
+
+  test('complete-no-reply requires exact queue-id before claiming work', () => {
+    const { queueId } = seedPending('must remain pending')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--complete-no-reply',
+    ])
+
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('CODEX_RUNNER_COMPLETION_INVALID')
+    expect(r.stderr).toContain('--complete-no-reply requires --queue-id')
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
   test('queue-id mode rejects batch limits above one before claiming', () => {
     const { queueId } = seedPending('bad queue limit')
 
