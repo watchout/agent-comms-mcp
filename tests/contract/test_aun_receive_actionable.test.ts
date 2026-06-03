@@ -302,6 +302,29 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
+  test('Discord chat with only agent-id mention metadata and missing target binding fails closed', () => {
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
+    const chatId = seedQueue({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 60,
+      content: 'metadata-only mention should not wake without Discord binding',
+      metadata: { mentions: [TEST_AGENT] },
+      inputMentions: [TEST_AGENT],
+      payloadMentions: [TEST_AGENT],
+    })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
+    expect(r.status).toBe(1)
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      selection_reason: 'missing_mention_binding',
+    })
+    expect(body.selected).toBeNull()
+    expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
   test('disabled target profile blocks direct mention wake', () => {
     withDb((db) => db.exec(`UPDATE agents SET profile_enabled = 0 WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({

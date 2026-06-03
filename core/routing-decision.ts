@@ -84,14 +84,14 @@ function directMentionEvidence(input: QueueRoutingDecisionInput): QueueRoutingDe
   const targetAgentId = normalize(input.target_agent_id)
   const targetDiscordId = normalize(input.target_discord_id)
   const mentions = uniqueStrings(input.mentions ?? [])
-  if (targetAgentId && mentions.includes(targetAgentId)) {
-    return { matched: true, source: 'metadata', matched_value: targetAgentId }
-  }
   if (targetDiscordId && mentions.includes(targetDiscordId)) {
     return { matched: true, source: 'metadata', matched_value: targetDiscordId }
   }
   if (targetDiscordId && hasDiscordMention(input.content, targetDiscordId)) {
     return { matched: true, source: 'content', matched_value: targetDiscordId }
+  }
+  if (!isDiscordOrigin(input) && targetAgentId && mentions.includes(targetAgentId)) {
+    return { matched: true, source: 'metadata', matched_value: targetAgentId }
   }
   return { matched: false, source: null, matched_value: null }
 }
@@ -168,14 +168,14 @@ export function decideQueueRouting(input: QueueRoutingDecisionInput): QueueRouti
     return baseEvidence(input, 'wake_agent', 'actionable_message_type', mentionEvidence, selfAuthored)
   }
   if (messageType === 'chat' && isDiscordOrigin(input)) {
+    if (!normalize(input.target_discord_id)) {
+      return baseEvidence(input, 'deliver_only', 'missing_mention_binding', mentionEvidence, selfAuthored)
+    }
     if (mentionEvidence.matched) {
       if (!isRuntimeManaged(input)) {
         return baseEvidence(input, 'block', 'unsupported_runtime', mentionEvidence, selfAuthored)
       }
       return baseEvidence(input, 'wake_agent', 'direct_mention', mentionEvidence, selfAuthored)
-    }
-    if (!normalize(input.target_discord_id)) {
-      return baseEvidence(input, 'deliver_only', 'missing_mention_binding', mentionEvidence, selfAuthored)
     }
   }
   if (NON_ACTION_TYPES.has(messageType)) {
