@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -104,6 +104,13 @@ afterEach(() => {
 })
 
 describe('aun lifecycle CLI transitions', () => {
+  test('record-no-reply lookup casts agent_messages.id for Postgres uuid/text compatibility', () => {
+    const src = readFileSync(join(REPO_ROOT, 'bin', 'aun', 'lifecycle.ts'), 'utf-8')
+
+    expect(src).toContain('LEFT JOIN agent_messages am ON am.id::text = mq.message_id')
+    expect(src).not.toContain('LEFT JOIN agent_messages am ON am.id = mq.message_id')
+  })
+
   test('processing advances received to in_progress and keeps final close explicit', () => {
     const { queueId, messageId } = seedQueue('received')
 

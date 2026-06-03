@@ -308,7 +308,7 @@ export async function lifecycleTransition(
           `SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.payload,
                   am.content AS stored_content, am.message_type AS stored_message_type
              FROM message_queue mq
-             LEFT JOIN agent_messages am ON am.id = mq.message_id
+             LEFT JOIN agent_messages am ON am.id::text = mq.message_id
             WHERE mq.id = $1 AND mq.agent_id = $2`,
           [queueId, plan.env.AGENT_ID],
         )

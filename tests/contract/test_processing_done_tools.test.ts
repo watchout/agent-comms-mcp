@@ -59,6 +59,13 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     expect(SERVER_SRC).toContain("status = 'done', done_at = now()")
   })
 
+  test('server.ts lifecycle lookup casts agent_messages.id for Postgres uuid/text compatibility', () => {
+    const handlerBlock = SERVER_SRC.split("if (name === 'processing' || name === 'done')")[1] ?? ''
+
+    expect(handlerBlock).toContain('LEFT JOIN agent_messages am ON am.id::text = mq.message_id')
+    expect(handlerBlock).not.toContain('LEFT JOIN agent_messages am ON am.id = mq.message_id')
+  })
+
   test('server.ts preserves an existing terminal_baton on already-done idempotent calls', () => {
     const handlerBlock = SERVER_SRC.split("if (name === 'processing' || name === 'done')")[1] ?? ''
     const idempotentBlock = handlerBlock.split('if (status === toStatus)')[1]?.split("if (name === 'processing'")[0] ?? ''

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -10,6 +10,8 @@ import {
   buildOwnerHandoffDiagnostic,
   recordOwnerHandoffDiagnostic,
 } from '../core/owner-handoff-routing'
+
+const REPO_ROOT = join(import.meta.dir, '..')
 
 async function withOwnerHandoffDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'agent-comms-owner-handoff-'))
@@ -52,6 +54,13 @@ async function seedOwnerQueue(db: SqliteAdapter): Promise<number> {
 }
 
 describe('owner handoff routing diagnostics', () => {
+  test('queue evidence lookup casts agent_messages.id for Postgres uuid/text compatibility', () => {
+    const src = readFileSync(join(REPO_ROOT, 'core', 'owner-handoff-routing.ts'), 'utf-8')
+
+    expect(src).toContain('LEFT JOIN agent_messages am ON am.id::text = mq.message_id')
+    expect(src).not.toContain('LEFT JOIN agent_messages am ON am.id = mq.message_id')
+  })
+
   test('accepts actual owner message_queue evidence', async () => {
     await withOwnerHandoffDb(async (db) => {
       await db.execute(

@@ -3962,7 +3962,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `SELECT mq.status, mq.payload, mq.message_id, mq.agent_id,
                   am.content AS stored_content
              FROM message_queue mq
-             LEFT JOIN agent_messages am ON am.id = mq.message_id
+             LEFT JOIN agent_messages am ON am.id::text = mq.message_id
             WHERE mq.id = $1`,
           [queueId],
         )
