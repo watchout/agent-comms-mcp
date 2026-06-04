@@ -180,6 +180,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerDatabaseUrl', str('STATE_DAEMON_CODEX_RUNNER_DATABASE_URL'))
   set('codexRunnerAckContentMaxChars', num('STATE_DAEMON_CODEX_RUNNER_ACK_CONTENT_MAX_CHARS'))
   set('codexRunnerAutoCompleteNoReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_COMPLETE_NO_REPLY'))
+  set('codexRunnerAutoFinalReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_FINAL_REPLY'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
   set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
   return cfg

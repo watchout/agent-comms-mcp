@@ -754,17 +754,19 @@ export class StateDaemon {
 
     const noReplyDecision = this.noReplyDecisionForRow(row)
     const completeNoReply = this.config.codexRunnerAutoCompleteNoReply && noReplyDecision.no_reply_required
+    const autoFinalReply = this.config.codexRunnerAutoFinalReply && !completeNoReply
     const runnerInput = {
       agentId: row.agent_id,
       queueId: Number(row.id),
       messageId: row.message_id ?? null,
       requester: this.requesterFromPayload(row.payload),
       databaseUrl: this.config.codexRunnerDatabaseUrl,
-      ackContent: this.boundedAckContent(row, noReplyDecision),
+      ackContent: autoFinalReply ? '' : this.boundedAckContent(row, noReplyDecision),
       completeNoReply,
       completionReason: completeNoReply
         ? noReplyDecision.reason ?? 'state_daemon_auto_no_reply'
         : null,
+      autoFinalReply,
       payload: row.payload,
     }
     const hostSelection = selectHostRuntimeAdapter({
@@ -867,6 +869,8 @@ export class StateDaemon {
     const completionOutcome = result.typed_result?.completion_outcome
     if (completionOutcome === 'completed_no_reply') {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })
+    } else if (completionOutcome === 'completed_reply') {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_final_replied' })
     } else if (completionOutcome === 'completion_failed') {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_completion_failed' })
     } else if (completionOutcome === 'open') {

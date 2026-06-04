@@ -40,6 +40,7 @@ export type RuntimeRunnerCompletionOutcome =
   | 'none'
   | 'open'
   | 'completed_no_reply'
+  | 'completed_reply'
   | 'completion_failed'
   | 'unknown'
 
@@ -47,6 +48,7 @@ const RUNTIME_RUNNER_COMPLETION_OUTCOMES = new Set<RuntimeRunnerCompletionOutcom
   'none',
   'open',
   'completed_no_reply',
+  'completed_reply',
   'completion_failed',
   'unknown',
 ])

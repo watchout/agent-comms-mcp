@@ -107,4 +107,26 @@ describe('runtime runner adapter contract', () => {
       queue_ids: [],
     })
   })
+
+  test('adapter parser preserves completed final reply evidence', () => {
+    const typed = parseRuntimeRunnerStdout(JSON.stringify({
+      ok: true,
+      retained_count: 1,
+      retained: [{ queue_id: '94527', message_id: 'msg-94527' }],
+      completion: {
+        outcome: 'completed_reply',
+        terminal_queue_ids: ['94527'],
+        reason: 'auto_final_reply_completed',
+      },
+    }))
+
+    expect(typed).toMatchObject({
+      outcome: 'claimed_work',
+      retained_count: 1,
+      queue_ids: ['94527'],
+      completion_outcome: 'completed_reply',
+      terminal_queue_ids: ['94527'],
+      completion_reason: 'auto_final_reply_completed',
+    })
+  })
 })
