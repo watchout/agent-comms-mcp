@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export type TokenSourceEnv = Record<string, string | undefined>
 
@@ -39,6 +40,63 @@ function resolveMcpJson(rest: string): TokenSourceResolution | null {
   return { token: value.trim(), source: `mcp-json:${filePath}#${selector}` }
 }
 
+function unquoteEnvValue(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length >= 2) {
+    const quote = trimmed[0]
+    if ((quote === '"' || quote === "'") && trimmed.endsWith(quote)) {
+      return trimmed.slice(1, -1)
+    }
+  }
+  return trimmed
+}
+
+function readEnvFileValue(filePath: string, key: string): string | null {
+  let text = ''
+  try {
+    text = readFileSync(filePath, 'utf8')
+  } catch {
+    return null
+  }
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const normalized = line.startsWith('export ') ? line.slice('export '.length).trim() : line
+    const index = normalized.indexOf('=')
+    if (index <= 0) continue
+    const name = normalized.slice(0, index).trim()
+    if (name !== key) continue
+    const value = unquoteEnvValue(normalized.slice(index + 1))
+    return value.trim() ? value.trim() : null
+  }
+
+  return null
+}
+
+function resolveEnvFile(rest: string): TokenSourceResolution | null {
+  const hashIndex = rest.indexOf('#')
+  if (hashIndex <= 0 || hashIndex === rest.length - 1) return null
+
+  const filePath = rest.slice(0, hashIndex).trim()
+  const key = rest.slice(hashIndex + 1).trim()
+  if (!filePath || !key) return null
+  const token = readEnvFileValue(filePath, key)
+  if (!token) return null
+  return { token, source: `env-file:${filePath}#${key}` }
+}
+
+function resolveAgentComApiKeys(key: string, env: TokenSourceEnv): TokenSourceResolution | null {
+  const trimmedKey = key.trim()
+  if (!trimmedKey) return null
+  const filePath = env.AGENT_COM_API_KEYS_FILE?.trim()
+    || (env.HOME?.trim() ? join(env.HOME.trim(), '.agent-com-api-keys') : null)
+  if (!filePath) return null
+  const token = readEnvFileValue(filePath, trimmedKey)
+  if (!token) return null
+  return { token, source: `agent-com-api-keys:${trimmedKey}` }
+}
+
 export function resolveTokenSourceRef(ref: string | null | undefined, env: TokenSourceEnv = process.env): TokenSourceResolution | null {
   const sourceRef = typeof ref === 'string' ? ref.trim() : ''
   if (!sourceRef) return null
@@ -55,6 +113,14 @@ export function resolveTokenSourceRef(ref: string | null | undefined, env: Token
 
   if (scheme === 'mcp-json') {
     return resolveMcpJson(rest)
+  }
+
+  if (scheme === 'env-file') {
+    return resolveEnvFile(rest)
+  }
+
+  if (scheme === 'agent-com-api-keys') {
+    return resolveAgentComApiKeys(rest, env)
   }
 
   return null
