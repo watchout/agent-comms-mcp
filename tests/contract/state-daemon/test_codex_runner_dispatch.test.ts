@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import { StateDaemon } from '../../../core/state-daemon'
 import type { DBClient } from '../../../core/state-daemon/types'
@@ -25,6 +25,11 @@ afterAll(async () => {
   }
 })
 beforeEach(async () => {
+  await cleanAll(pg)
+  await pg.query('BEGIN')
+})
+afterEach(async () => {
+  await pg.query('ROLLBACK')
   await cleanAll(pg)
 })
 
