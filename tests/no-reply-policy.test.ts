@@ -33,6 +33,32 @@ describe('deterministic no-reply policy', () => {
     expect(decision.reason).toBe('explicit_no_further_action_acknowledgement')
   })
 
+  test('pure Discord direct-mention smoke is terminal no-reply work', () => {
+    const decision = detectNoReplyIntent({
+      payload: {
+        content: '<@1508976231901565028> 疎通テスト',
+        message_type: 'chat',
+      },
+    })
+
+    expect(decision).toMatchObject({
+      no_reply_required: true,
+      reason: 'direct_mention_smoke_completed_without_substantive_reply',
+      matched: 'direct_mention_smoke_text',
+    })
+  })
+
+  test('substantive test requests are not no-reply smoke', () => {
+    const decision = detectNoReplyIntent({
+      payload: {
+        content: '<@1508976231901565028> test the deployment workflow',
+        message_type: 'chat',
+      },
+    })
+
+    expect(decision.no_reply_required).toBe(false)
+  })
+
   test('terminal_baton round-trips through queue payload JSON', () => {
     const baton = buildTerminalBaton({
       reason: 'unit_test',

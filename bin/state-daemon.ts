@@ -140,6 +140,11 @@ function loadConfig(): Partial<StateDaemonConfig> {
     return Number.isFinite(n) ? n : undefined
   }
   const str = (k: string) => process.env[k]
+  const bool = (k: string) => {
+    const v = process.env[k]
+    if (v === undefined) return undefined
+    return v === '1' || v.toLowerCase() === 'true'
+  }
   const csv = (k: string) => {
     const v = process.env[k]
     if (!v) return undefined
@@ -174,6 +179,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerEnabled', str('STATE_DAEMON_CODEX_RUNNER_ENABLED') === '1')
   set('codexRunnerDatabaseUrl', str('STATE_DAEMON_CODEX_RUNNER_DATABASE_URL'))
   set('codexRunnerAckContentMaxChars', num('STATE_DAEMON_CODEX_RUNNER_ACK_CONTENT_MAX_CHARS'))
+  set('codexRunnerAutoCompleteNoReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_COMPLETE_NO_REPLY'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
   set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
   return cfg

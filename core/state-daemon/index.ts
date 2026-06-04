@@ -67,6 +67,11 @@ import {
   type StallVerdict,
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
+import {
+  detectNoReplyIntent,
+  parseQueuePayload,
+  type NoReplyDecision,
+} from '../no-reply-policy'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
@@ -666,8 +671,19 @@ export class StateDaemon {
     }
   }
 
-  private boundedAckContent(row: QueueRow): string {
-    const raw = `ACK: received by ${row.agent_id}; queue_id={queue_id}; message_id={message_id}; final close requires explicit --close.`
+  private noReplyDecisionForRow(row: QueueRow): NoReplyDecision {
+    const payload = parseQueuePayload(row.payload)
+    return detectNoReplyIntent({
+      payload,
+      content: payload.content,
+    })
+  }
+
+  private boundedAckContent(row: QueueRow, noReplyDecision: NoReplyDecision): string {
+    const finalClose = noReplyDecision.no_reply_required
+      ? 'final close will be auto-completed as no-reply.'
+      : 'final close requires explicit --close.'
+    const raw = `ACK: received by ${row.agent_id}; queue_id={queue_id}; message_id={message_id}; ${finalClose}`
     return raw.length <= this.config.codexRunnerAckContentMaxChars
       ? raw
       : raw.slice(0, this.config.codexRunnerAckContentMaxChars)
@@ -736,13 +752,19 @@ export class StateDaemon {
       return false
     }
 
+    const noReplyDecision = this.noReplyDecisionForRow(row)
+    const completeNoReply = this.config.codexRunnerAutoCompleteNoReply && noReplyDecision.no_reply_required
     const runnerInput = {
       agentId: row.agent_id,
       queueId: Number(row.id),
       messageId: row.message_id ?? null,
       requester: this.requesterFromPayload(row.payload),
       databaseUrl: this.config.codexRunnerDatabaseUrl,
-      ackContent: this.boundedAckContent(row),
+      ackContent: this.boundedAckContent(row, noReplyDecision),
+      completeNoReply,
+      completionReason: completeNoReply
+        ? noReplyDecision.reason ?? 'state_daemon_auto_no_reply'
+        : null,
       payload: row.payload,
     }
     const hostSelection = selectHostRuntimeAdapter({

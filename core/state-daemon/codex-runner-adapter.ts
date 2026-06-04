@@ -45,6 +45,12 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
     args.push('--ack-mentions', runtimeInput.requester)
     args.push('--ack-content', runtimeInput.ack_content)
   }
+  if (input.completeNoReply) {
+    args.push('--complete-no-reply')
+    if (input.completionReason?.trim()) {
+      args.push('--completion-reason', input.completionReason.trim())
+    }
+  }
   return {
     command: bunExecutable(),
     args,
