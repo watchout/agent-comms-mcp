@@ -40,9 +40,43 @@ describe('token source references', () => {
     })
   })
 
+  test('resolves env-file token refs without storing raw secrets in DB', () => {
+    tmp = mkdtempSync(join(tmpdir(), 'aun-token-ref-'))
+    const file = join(tmp, '.agent-com-api-keys')
+    writeFileSync(file, [
+      '# comments are ignored',
+      'export OTHER_TOKEN=ignored',
+      'hotel_lead_token=\" token-3 \"',
+      '',
+    ].join('\n'))
+
+    expect(resolveTokenSourceRef(`env-file:${file}#hotel_lead_token`)).toEqual({
+      token: 'token-3',
+      source: `env-file:${file}#hotel_lead_token`,
+    })
+  })
+
+  test('resolves agent-com-api-keys refs from the configured key file', () => {
+    tmp = mkdtempSync(join(tmpdir(), 'aun-token-ref-'))
+    const file = join(tmp, '.agent-com-api-keys')
+    writeFileSync(file, [
+      'Kodama_token= token-4 ',
+      'research_token=token-5',
+    ].join('\n'))
+
+    expect(resolveTokenSourceRef('agent-com-api-keys:Kodama_token', {
+      AGENT_COM_API_KEYS_FILE: file,
+    })).toEqual({
+      token: 'token-4',
+      source: 'agent-com-api-keys:Kodama_token',
+    })
+  })
+
   test('returns null for unsupported, missing, or empty token refs', () => {
     expect(resolveTokenSourceRef(null)).toBeNull()
     expect(resolveTokenSourceRef('vault:secret/aun')).toBeNull()
     expect(resolveTokenSourceRef('local-env:MISSING', {})).toBeNull()
+    expect(resolveTokenSourceRef('env-file:/missing#TOKEN')).toBeNull()
+    expect(resolveTokenSourceRef('agent-com-api-keys:MISSING', { AGENT_COM_API_KEYS_FILE: '/missing' })).toBeNull()
   })
 })
