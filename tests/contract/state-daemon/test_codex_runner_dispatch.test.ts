@@ -145,7 +145,13 @@ class CloseRowAfterReserveDB implements DBClient {
 describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('pending idle Codex runtime invokes runner and never tmux wake', async () => {
     const agent = makeAgentId('codex-runner')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
@@ -189,7 +195,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
   test('typed terminal completion evidence is recorded separately from open runner success', async () => {
     const agent = makeAgentId('codex-complete')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
@@ -244,7 +256,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
   test('pending busy Codex runtime observes and does not start duplicate runner', async () => {
     const agent = makeAgentId('codex-busy')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
     const pending = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
     await seedQueueRow(pg, {
       agent_id: agent,
@@ -278,7 +296,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
   test('Codex runner execution is disabled by default until operator activation', async () => {
     const agent = makeAgentId('codex-disabled')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
@@ -305,7 +329,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
   test('runner failure records diagnostics without terminal-failing the row', async () => {
     const agent = makeAgentId('codex-fail')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
@@ -333,7 +363,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
   test('stale pending event does not invoke runner after row was already closed', async () => {
     const agent = makeAgentId('codex-stale-event')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
@@ -405,11 +441,101 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
+  test('TUI legacy profile with Codex preference invokes runner without tmux prompt injection', async () => {
+    const agent = makeAgentId('tui-codex-preference')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      runtime_engine_preference: 'codex',
+      tmux_session: `${agent}-session`,
+      status: 'idle',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-333333333333',
+      payload: JSON.stringify({ author_id: 'ceo', content: '<@999010> 疎通テスト' }),
+    })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]).toMatchObject({
+        agentId: agent,
+        queueId: id,
+        requester: 'ceo',
+      })
+      expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('TUI legacy profile with Codex preference and no tmux session bypasses stall gate and invokes runner', async () => {
+    const agent = makeAgentId('tui-codex-no-tmux-runner')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      runtime_engine_preference: 'codex',
+      tmux_session: null,
+      status: 'idle',
+      last_seen_at: '2026-05-18T00:00:00.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-444444444444',
+      payload: JSON.stringify({ author_id: 'ceo', content: '<@999010> 疎通テスト without tmux' }),
+    })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:05:00.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]).toMatchObject({
+        agentId: agent,
+        queueId: id,
+        requester: 'ceo',
+      })
+      expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_stall_skipped_total', { kind: 'tmux_missing' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'stall_skipped' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
   test('agent allowlist ignores pg_notify rows outside the activation scope', async () => {
     const allowed = makeAgentId('allowed-codex')
     const blocked = makeAgentId('blocked-codex')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online' })
-    await seedAgent(pg, { agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
     const blockedId = await seedQueueRow(pg, { agent_id: blocked, status: 'pending' })
 
     const runner = new FakeCodexRunner()
@@ -487,8 +613,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('agent denylist ignores pg_notify rows while allowing non-denied fleet rows', async () => {
     const allowed = makeAgentId('denied-sibling-allowed')
     const denied = makeAgentId('denied-sibling-blocked')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online' })
-    await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
     const deniedId = await seedQueueRow(pg, { agent_id: denied, status: 'pending' })
     const allowedId = await seedQueueRow(pg, { agent_id: allowed, status: 'pending' })
 
@@ -534,6 +660,32 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(result).toEqual({ checked: 0, restarted: 0, escalated: 0 })
       expect(h.tmux.restarts).toEqual([])
       expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'offline' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('TUI legacy profile with Codex preference is not treated as a tmux restart target', async () => {
+    const agent = makeAgentId('tui-codex-no-restart')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      runtime_engine_preference: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:00.000Z',
+    })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:05:00.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.checkBotLiveness()
+
+      expect(result).toEqual({ checked: 1, restarted: 0, escalated: 0 })
+      expect(h.tmux.restarts).toEqual([])
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'codex' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }

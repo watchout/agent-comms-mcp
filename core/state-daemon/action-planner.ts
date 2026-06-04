@@ -20,6 +20,7 @@ export interface PlannerQueueRow {
 
 export interface PlannerAgentRow {
   runtime: string | null
+  runtime_engine_preference?: string | null
   tmux_session: string | null
   status?: string | null
 }
@@ -47,6 +48,10 @@ function isInactiveAgent(status: string | null | undefined): boolean {
   return status === 'disabled' || status === 'offline' || status === 'retired'
 }
 
+function effectiveRuntime(agent: PlannerAgentRow): string | null {
+  return agent.runtime_engine_preference?.trim() || agent.runtime
+}
+
 const TERMINAL_STATUSES = new Set([
   'replied',
   'skipped',
@@ -68,7 +73,8 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
     }
     if (!agent) return { kind: 'observe_received', terminal: false }
     if (isInactiveAgent(agent.status)) return { kind: 'agent_inactive', terminal: false }
-    if (isCodexRuntime(agent.runtime)) return { kind: 'observe_received', terminal: false }
+    const runtime = effectiveRuntime(agent)
+    if (isCodexRuntime(runtime)) return { kind: 'observe_received', terminal: false }
     if (agent.runtime !== defaultRuntime) return { kind: 'runtime_skip', terminal: false }
     if (!agent.tmux_session) return { kind: 'tmux_missing', terminal: false }
     return { kind: 'wake_received', terminal: false }
@@ -81,7 +87,8 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
   if (row.status === 'pending') {
     if (!agent) return { kind: 'agent_missing', terminal: false }
     if (isInactiveAgent(agent.status)) return { kind: 'agent_inactive', terminal: false }
-    if (isCodexRuntime(agent.runtime)) {
+    const runtime = effectiveRuntime(agent)
+    if (isCodexRuntime(runtime)) {
       if (hasActiveClaim) return { kind: 'observe_busy', terminal: false }
       return { kind: 'invoke_codex_runner', terminal: false }
     }
