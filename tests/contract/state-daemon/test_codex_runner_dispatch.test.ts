@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import { StateDaemon } from '../../../core/state-daemon'
 import type { DBClient } from '../../../core/state-daemon/types'
@@ -25,6 +25,11 @@ afterAll(async () => {
   }
 })
 beforeEach(async () => {
+  await cleanAll(pg)
+  await pg.query('BEGIN')
+})
+afterEach(async () => {
+  await pg.query('ROLLBACK')
   await cleanAll(pg)
 })
 
@@ -181,6 +186,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         requester: 'codex-cto',
         databaseUrl: 'postgresql:///agent_comms?host=/tmp',
         payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work' }),
+        completeNoReply: false,
+        completionReason: null,
       })
       expect(runner.invocations[0].ackContent).toContain('queue_id={queue_id}')
       expect(runner.invocations[0].ackContent).toContain('message_id={message_id}')
@@ -188,6 +195,72 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('direct mention smoke is passed to the runner for exact no-reply terminal completion', async () => {
+    const agent = makeAgentId('codex-smoke')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-333333333333',
+      payload: JSON.stringify({ author_id: 'codex-cto', content: '<@999010> 疎通テスト', message_type: 'chat' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    runner.result = {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        retained_count: 1,
+        retained: [{ queue_id: String(id), message_id: '11111111-1111-4111-8111-333333333333' }],
+        completion: {
+          outcome: 'completed_no_reply',
+          terminal_queue_ids: [String(id)],
+          reason: 'direct_mention_smoke_completed_without_substantive_reply',
+        },
+      }) + '\n',
+      stderr: '',
+      typed_result: {
+        outcome: 'claimed_work',
+        retained_count: 1,
+        queue_ids: [String(id)],
+        completion_outcome: 'completed_no_reply',
+        terminal_queue_ids: [String(id)],
+        completion_reason: 'direct_mention_smoke_completed_without_substantive_reply',
+      },
+    }
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]).toMatchObject({
+        queueId: id,
+        completeNoReply: true,
+        completionReason: 'direct_mention_smoke_completed_without_substantive_reply',
+      })
+      expect(runner.invocations[0].ackContent).toContain('final close will be auto-completed as no-reply')
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }

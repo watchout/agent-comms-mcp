@@ -37,6 +37,14 @@ function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
 
+function stripDiscordMentions(value: string): string {
+  return normalizeText(
+    value
+      .replace(/<@!?\d+>/g, ' ')
+      .replace(/[、。，．・:：;；!！?？()[\]{}「」『』"']/g, ' '),
+  )
+}
+
 function stringValue(...values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value
@@ -86,6 +94,27 @@ export function detectNoReplyIntent(input: {
 
   const text = normalizeText(content)
   if (text === '') return { no_reply_required: false, reason: null, matched: null }
+
+  if (/<@!?\d+>/.test(text)) {
+    const withoutMentions = stripDiscordMentions(text).toLowerCase()
+    const directMentionSmokeTexts = new Set([
+      'test',
+      'smoke',
+      'smoke test',
+      'テスト',
+      '疎通テスト',
+      '疎通 test',
+      '接続テスト',
+      '動作テスト',
+    ])
+    if (directMentionSmokeTexts.has(withoutMentions)) {
+      return {
+        no_reply_required: true,
+        reason: 'direct_mention_smoke_completed_without_substantive_reply',
+        matched: 'direct_mention_smoke_text',
+      }
+    }
+  }
 
   const explicitPatterns: Array<[RegExp, string]> = [
     [/\bno\s+(reply|response)\s+(is\s+)?required\b/i, 'explicit_no_reply_required'],

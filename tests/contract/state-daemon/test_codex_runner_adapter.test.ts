@@ -68,4 +68,29 @@ describe('state_daemon Codex runner adapter command contract', () => {
       '--limit', '1',
     ])
   })
+
+  test('adds exact no-reply completion flags only when requested by state_daemon policy', () => {
+    const plan = buildCodexRunnerCommand({
+      agentId: 'codex-aun',
+      queueId: 123,
+      messageId: 'msg-123',
+      requester: 'codex-cto',
+      databaseUrl: 'postgresql:///agent_comms?host=/tmp',
+      ackContent: 'ACK',
+      completeNoReply: true,
+      completionReason: 'direct_mention_smoke_completed_without_substantive_reply',
+    })
+
+    expect(plan.args).toEqual([
+      'bin/aun.ts',
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', '123',
+      '--limit', '1',
+      '--ack-mentions', 'codex-cto',
+      '--ack-content', 'ACK',
+      '--complete-no-reply',
+      '--completion-reason', 'direct_mention_smoke_completed_without_substantive_reply',
+    ])
+  })
 })
