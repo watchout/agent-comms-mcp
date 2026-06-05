@@ -24,14 +24,21 @@ build_profile_command() {
   local agent_id="$1" session="$2" port="$3" runtime_engine="${4:-}"
   local database_url="${AGENT_COMMS_DATABASE_URL:-${DATABASE_URL:-$DEFAULT_AUN_DATABASE_URL}}"
   local state_dir="/Users/yuji/.claude/channels/${session}"
+  local repo_root
+  repo_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  local server_path="${AGENT_COMMS_SERVER_PATH:-${repo_root}/server.ts}"
+  local bun_command="${AGENT_COMMS_BUN_COMMAND:-/Users/yuji/.bun/bin/bun}"
   case "$(printf '%s' "$runtime_engine" | tr '[:upper:]' '[:lower:]')" in
     codex)
       CLAUDE_CMD="codex --dangerously-bypass-approvals-and-sandbox"
       CLAUDE_CMD+=" -c 'mcp_servers.agent-comms.enabled=false'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.enabled=true'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.command=\"${bun_command}\"'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.args=[\"run\",\"${server_path}\"]'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_ID=\"${agent_id}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID=\"${agent_id}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DATABASE_URL=\"${database_url}\"'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED=\"0\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.WEBHOOK_PORT=\"${port}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DISCORD_STATE_DIR=\"${state_dir}\"'"
       ;;

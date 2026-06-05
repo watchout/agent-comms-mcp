@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   deterministicWorkspaceId,
+  hasRuntimeConnectorIdentityEvidence,
   heartbeatRuntimeInstance,
   inferRuntimeSessionName,
   inferWorkspaceName,
@@ -9,7 +10,7 @@ import {
 } from '../core/runtime-heartbeat'
 
 describe('runtime heartbeat evidence', () => {
-  test('upserts runtime instance and links active connector rows', async () => {
+  test('upserts runtime instance and connector rows from connector evidence', async () => {
     const calls: string[] = []
     const db = {
       async query(sql: string) {
@@ -36,9 +37,6 @@ describe('runtime heartbeat evidence', () => {
             }],
             rowCount: 1,
           }
-        }
-        if (sql.includes('UPDATE connector_instances')) {
-          return { rows: [{ connector_instance_id: 'connector-1' }], rowCount: 1 }
         }
         if (sql.includes('SELECT lease_id, fencing_token, expires_at')) {
           return { rows: [], rowCount: 0 }
@@ -78,14 +76,76 @@ describe('runtime heartbeat evidence', () => {
     expect(result.runtime_instance_id).toBe('00000000-0000-4000-8000-000000000001')
     expect(result.workspace_id).toBe('local:workspace-1')
     expect(result.connector_rows_upserted).toBe(1)
-    expect(result.connector_rows_updated).toBe(1)
+    expect(result.connector_rows_updated).toBe(0)
     expect(result.endpoint_lease_id).toBe('lease-1')
     expect(calls.join('\n')).toContain('INSERT INTO agent_workspaces')
     expect(calls.join('\n')).toContain('INSERT INTO agent_workspace_bindings')
     expect(calls.join('\n')).toContain('INSERT INTO agent_runtime_instances')
     expect(calls.join('\n')).toContain('INSERT INTO connector_instances')
-    expect(calls.join('\n')).toContain('UPDATE connector_instances')
+    expect(calls.join('\n')).not.toContain('UPDATE connector_instances')
     expect(calls.join('\n')).toContain('INSERT INTO control_plane_leases')
+  })
+
+  test('does not attach existing connector rows without connector evidence', async () => {
+    const calls: Array<{ sql: string; params: any[] }> = []
+    const db = {
+      async query(sql: string, params: any[] = []) {
+        calls.push({ sql, params })
+        if (sql.includes('FROM agents')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (sql.includes('INSERT INTO agent_runtime_instances')) {
+          return {
+            rows: [{
+              runtime_instance_id: '00000000-0000-4000-8000-000000000004',
+              agent_id: 'aun',
+              status: 'running',
+              last_seen_at: '2026-06-05T00:00:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('INSERT INTO connector_instances')) {
+          throw new Error('connector rows must not be upserted without connector evidence')
+        }
+        if (sql.includes('UPDATE connector_instances')) {
+          throw new Error('connector rows must not be updated without connector evidence')
+        }
+        if (sql.includes('SELECT lease_id, fencing_token, expires_at')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (sql.includes('SELECT COALESCE(MAX(fencing_token), 0)')) {
+          return { rows: [{ max_token: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO control_plane_leases')) {
+          return {
+            rows: [{
+              lease_id: 'lease-without-connector',
+              heartbeat_at: '2026-06-05T00:00:00.000Z',
+              expires_at: '2026-06-05T00:10:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+
+    const result = await heartbeatRuntimeInstance(db, {
+      runtimeInstanceId: '00000000-0000-4000-8000-000000000004',
+      agentId: 'aun',
+      runtimeEngine: 'TUI',
+      runtimeKind: 'local_process',
+      processId: 98282,
+      endpointUri: 'http://127.0.0.1:8802',
+      metadata: { source: 'test-without-connector' },
+    })
+
+    expect(result.connector_rows_upserted).toBe(0)
+    expect(result.connector_rows_updated).toBe(0)
+    expect(result.endpoint_lease_id).toBe('lease-without-connector')
+    const leaseInsert = calls.find((call) => call.sql.includes('INSERT INTO control_plane_leases'))
+    expect(leaseInsert?.params[4]).toBeNull()
   })
 
   test('renews an existing runtime endpoint lease on heartbeat', async () => {
@@ -309,6 +369,21 @@ describe('runtime heartbeat evidence', () => {
   test('infers session name and port from runtime environment', () => {
     expect(inferRuntimeSessionName({ DISCORD_STATE_DIR: '/tmp/channels/discord-hotel' })).toBe('discord-hotel')
     expect(parseRuntimePort({ WEBHOOK_PORT: '8811' })).toBe(8811)
+    expect(hasRuntimeConnectorIdentityEvidence({
+      DISCORD_STATE_DIR: '/tmp/channels/discord-aun',
+      WEBHOOK_PORT: '8811',
+    })).toBe(true)
+    expect(hasRuntimeConnectorIdentityEvidence({
+      AGENT_COM_RUNTIME_SESSION: 'discord-aun',
+      AUN_WEBHOOK_PORT: '8811',
+    })).toBe(true)
+    expect(hasRuntimeConnectorIdentityEvidence({
+      TMUX_PANE: '%12',
+      WEBHOOK_PORT: '8811',
+    })).toBe(false)
+    expect(hasRuntimeConnectorIdentityEvidence({
+      DISCORD_STATE_DIR: '/tmp/channels/discord-aun',
+    })).toBe(false)
   })
 
   test('derives stable local workspace identity from checkout path', () => {

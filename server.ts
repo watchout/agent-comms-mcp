@@ -134,7 +134,12 @@ import { truncateForDiscord } from './core/truncate'
 import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
-import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
+import {
+  heartbeatRuntimeInstance,
+  hasRuntimeConnectorIdentityEvidence,
+  inferRuntimeSessionName,
+  parseRuntimePort,
+} from './core/runtime-heartbeat'
 import {
   heartbeatAgentStatus,
   markAgentOfflineIfNoOtherLiveRuntime,
@@ -238,6 +243,7 @@ const config = loadConfig()
 const AGENT_ID = config.agent_id
 const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID || randomUUID()
 process.env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_INSTANCE_ID
+const RUNTIME_HEARTBEAT_DISABLED = process.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED === '1'
 const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
 if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
   process.stderr.write(
@@ -408,31 +414,38 @@ async function ensureDiscordBotToken(client?: { query: (sql: string, params?: an
 }
 
 async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  if (RUNTIME_HEARTBEAT_DISABLED) return
+
   await ensureDiscordBotToken(client)
   const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
   const registeredDiscordClient = discordClients.get(AGENT_ID) ?? null
+  const runtimeSessionName = inferRuntimeSessionName()
+  const runtimePort = parseRuntimePort()
+  const hasDiscordConnectorEvidence = Boolean(
+    discordTokenFingerprint && hasRuntimeConnectorIdentityEvidence(),
+  )
   await heartbeatRuntimeInstance(client, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
     runtimeEngine: config.agent.runtime,
     runtimeKind: process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
-    sessionName: inferRuntimeSessionName(),
+    sessionName: runtimeSessionName,
     processId: process.pid,
-    port: parseRuntimePort(),
+    port: runtimePort,
     checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
     commitSha: RUNTIME_COMMIT_SHA,
     endpointUri: `http://127.0.0.1:${WEBHOOK_PORT}`,
-    connectorProvider: discordTokenFingerprint ? 'discord' : null,
-    connectorUri: discordTokenFingerprint ? `discord://agents/${AGENT_ID}` : null,
-    connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
-    connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
+    connectorProvider: hasDiscordConnectorEvidence ? 'discord' : null,
+    connectorUri: hasDiscordConnectorEvidence ? `discord://agents/${AGENT_ID}` : null,
+    connectorKind: hasDiscordConnectorEvidence ? 'chat_adapter' : null,
+    connectorTransport: hasDiscordConnectorEvidence ? 'discord_gateway' : null,
     metadata: {
       source: 'server.ts',
       server_root: SERVER_ROOT,
       discord_gateway_ready: registeredDiscordClient?.isConnected() ?? false,
       discord_client_registered: registeredDiscordClient != null,
     },
-    connectorMetadata: discordTokenFingerprint
+    connectorMetadata: hasDiscordConnectorEvidence
       ? {
           token_fingerprint: discordTokenFingerprint,
           token_source: resolvedDiscordBotTokenSource,
@@ -4245,12 +4258,17 @@ function buildProfileCommand(agentId: string, session: string, port: number, eng
   if (normalizedEngine === 'codex') {
     const databaseUrl = process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL
     const stateDir = join(homedir(), '.claude', 'channels', session)
+    const bunCommand = process.env.AGENT_COMMS_BUN_COMMAND ?? '/Users/yuji/.bun/bin/bun'
+    const serverPath = process.env.AGENT_COMMS_SERVER_PATH ?? join(SERVER_ROOT, 'server.ts')
     const configArgs = [
       'mcp_servers.agent-comms.enabled=false',
       'mcp_servers.aun.enabled=true',
+      `mcp_servers.aun.command="${bunCommand}"`,
+      `mcp_servers.aun.args=["run","${serverPath}"]`,
       `mcp_servers.aun.env.AGENT_ID="${agentId}"`,
       `mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`,
       `mcp_servers.aun.env.DATABASE_URL="${databaseUrl}"`,
+      'mcp_servers.aun.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED="0"',
       `mcp_servers.aun.env.WEBHOOK_PORT="${port}"`,
       `mcp_servers.aun.env.DISCORD_STATE_DIR="${stateDir}"`,
     ]

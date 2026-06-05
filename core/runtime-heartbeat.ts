@@ -377,6 +377,12 @@ export function parseRuntimePort(env: NodeJS.ProcessEnv = process.env): number |
   return Number.isFinite(parsed) ? parsed : null
 }
 
+export function hasRuntimeConnectorIdentityEvidence(env: NodeJS.ProcessEnv = process.env): boolean {
+  const hasExplicitSession = Boolean(env.AGENT_COM_RUNTIME_SESSION?.trim() || env.DISCORD_STATE_DIR?.trim())
+  const hasExplicitPort = Boolean(env.WEBHOOK_PORT?.trim() || env.AUN_WEBHOOK_PORT?.trim() || env.PORT?.trim())
+  return hasExplicitSession && hasExplicitPort
+}
+
 export async function heartbeatRuntimeInstance(
   db: RuntimeHeartbeatDb,
   input: RuntimeHeartbeatInput,
@@ -427,18 +433,7 @@ export async function heartbeatRuntimeInstance(
   )
 
   const connectorRowsUpserted = await ensureRuntimeConnector(db, input)
-  const connectorUpdate = await db.query(
-    `UPDATE connector_instances
-        SET runtime_instance_id = $1,
-            last_seen_at = now(),
-            updated_at = now()
-      WHERE agent_id = $2
-        AND status = 'active'
-      RETURNING connector_instance_id`,
-    [input.runtimeInstanceId, input.agentId],
-  ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
   const holderConnectorInstanceId = connectorRowsUpserted.connectorInstanceId
-    ?? (connectorUpdate.rows[0]?.connector_instance_id ? String(connectorUpdate.rows[0].connector_instance_id) : null)
   const endpointLease = await heartbeatRuntimeEndpointLease(db, input, holderConnectorInstanceId)
 
   const row = runtime.rows[0]
@@ -449,7 +444,7 @@ export async function heartbeatRuntimeInstance(
     workspace_id: workspaceId,
     status: String(row?.status ?? 'running'),
     last_seen_at: row?.last_seen_at ?? null,
-    connector_rows_updated: connectorUpdate.rowCount ?? connectorUpdate.rows.length,
+    connector_rows_updated: 0,
     connector_rows_upserted: connectorRowsUpserted.rowCount,
     endpoint_lease_id: endpointLease?.leaseId ?? null,
     endpoint_lease_expires_at: endpointLease?.expiresAt ?? null,
