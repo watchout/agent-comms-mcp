@@ -32,7 +32,7 @@ describe('inbound smoke evidence report', () => {
       },
       async queryOne(sql: string, params?: any[]) {
         queries.push(sql)
-        if (sql.includes('COUNT(DISTINCT am.id)')) {
+        if (sql.includes('duplicate_rows')) {
           return { count: '0' }
         }
         if (sql.includes('FROM agent_messages') && params?.[0] === 'agent-com') {
@@ -87,7 +87,7 @@ describe('inbound smoke evidence report', () => {
         return []
       },
       async queryOne(sql: string) {
-        if (sql.includes('COUNT(DISTINCT am.id)')) return { count: '0' }
+        if (sql.includes('duplicate_rows')) return { count: '0' }
         if (sql.includes('FROM agent_messages')) {
           return {
             id: '00000000-0000-4000-8000-000000000002',
@@ -130,7 +130,7 @@ describe('inbound smoke evidence report', () => {
         return []
       },
       async queryOne(sql: string) {
-        if (sql.includes('COUNT(DISTINCT am.id)')) return { count: '0' }
+        if (sql.includes('duplicate_rows')) return { count: '0' }
         if (sql.includes('FROM agent_messages')) {
           return {
             id: '00000000-0000-4000-8000-000000000004',
@@ -174,7 +174,7 @@ describe('inbound smoke evidence report', () => {
         return []
       },
       async queryOne(sql: string) {
-        if (sql.includes('COUNT(DISTINCT am.id)')) return { count: '0' }
+        if (sql.includes('duplicate_rows')) return { count: '0' }
         if (sql.includes('FROM agent_messages')) {
           return {
             id: '00000000-0000-4000-8000-000000000005',
@@ -217,7 +217,7 @@ describe('inbound smoke evidence report', () => {
         return []
       },
       async queryOne(sql: string) {
-        if (sql.includes('COUNT(DISTINCT am.id)')) return { count: '2' }
+        if (sql.includes('duplicate_rows')) return { count: '2' }
         if (sql.includes('FROM agent_messages')) {
           return {
             id: '00000000-0000-4000-8000-000000000003',
@@ -242,5 +242,50 @@ describe('inbound smoke evidence report', () => {
 
     expect(report.summary.blocked).toBe(1)
     expect(report.blockers[0]).toContain('bot_authored_duplicate_rows:2')
+  })
+
+  test('allows a single bot-authored inbound message because bot-bot traffic is valid', async () => {
+    const db = {
+      async query(sql: string) {
+        if (sql.includes('FROM channels c')) {
+          return [{
+            channel_id: 'agent-com',
+            name: 'agent-com',
+            members: ['arc', 'codex-cto'],
+            external_id: '1487368919613444156',
+            adapter_owner_agent_id: 'agent-com-dev',
+          }]
+        }
+        if (sql.includes('FROM message_queue')) return [{ agent_id: 'arc', status: 'replied', count: '1' }]
+        return []
+      },
+      async queryOne(sql: string) {
+        if (sql.includes('duplicate_rows')) return { count: '0' }
+        if (sql.includes('FROM agent_messages')) {
+          return {
+            id: '00000000-0000-4000-8000-000000000006',
+            channel_id: 'agent-com',
+            author_id: 'codex-cto',
+            author_bot: true,
+            discord_message_id: '1512309915937669250',
+            input_mentions: ['arc'],
+            created_at: '2026-06-05T04:19:39.000Z',
+          }
+        }
+        return null
+      },
+      async execute() {
+        throw new Error('not used')
+      },
+      async transaction() {
+        throw new Error('not used')
+      },
+      async close() {},
+    }
+
+    const report = await buildInboundSmokeReport(db as any, { provider: 'discord' })
+
+    expect(report.summary.passed).toBe(1)
+    expect(report.blockers).toEqual([])
   })
 })

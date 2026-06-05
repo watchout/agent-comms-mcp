@@ -135,6 +135,10 @@ import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutbou
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
+import {
+  heartbeatAgentStatus,
+  markAgentOfflineIfNoOtherLiveRuntime,
+} from './core/agent-status-lifecycle'
 import { resolveDbDiscordBotToken } from './core/discord-token-resolution'
 import {
   buildOutboundAclViolationDetail,
@@ -1313,6 +1317,7 @@ async function registerAgent(): Promise<void> {
     const c = await tryGetDb()
     if (c) {
       await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+      await heartbeatAgentStatus(c, AGENT_ID).catch(() => {})
       await heartbeatRuntimeEvidence(c)
     }
   }, 5 * 60 * 1000)
@@ -1371,7 +1376,6 @@ async function unregisterAgent(): Promise<void> {
   stopOutboundConsumer()
   const client = await tryGetDb()
   if (client) {
-    await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
     await client.query(
       `UPDATE agent_runtime_instances
           SET status = 'stopped',
@@ -1380,9 +1384,15 @@ async function unregisterAgent(): Promise<void> {
         WHERE runtime_instance_id = $1`,
       [RUNTIME_INSTANCE_ID],
     ).catch(() => {})
-    // pg_notify: agent.offline + audit_log
-    await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.offline', agent_id: AGENT_ID, org_id: 'default' }))
-    await writeAuditLog('agent.offline', AGENT_ID, AGENT_ID, {})
+    const markedOffline = await markAgentOfflineIfNoOtherLiveRuntime(client, {
+      agentId: AGENT_ID,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    }).catch(() => false)
+    if (markedOffline) {
+      // pg_notify: agent.offline + audit_log
+      await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.offline', agent_id: AGENT_ID, org_id: 'default' }))
+      await writeAuditLog('agent.offline', AGENT_ID, AGENT_ID, {})
+    }
   }
 }
 
@@ -5044,7 +5054,13 @@ const shutdown = async () => {
     if (ctx.transport) await ctx.transport.close().catch(() => {})
     const client = await tryGetDb().catch(() => null)
     if (client) {
+      const markedOffline = await markAgentOfflineIfNoOtherLiveRuntime(client, {
+        agentId: ctx.botId,
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      }).catch(() => false)
+      if (markedOffline) {
       await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
+      }
     }
   }
   if (httpServer) httpServer.close()

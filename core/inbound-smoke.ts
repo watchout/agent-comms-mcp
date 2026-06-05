@@ -151,13 +151,20 @@ async function queryQueueRows(db: DbAdapter, messageId: string): Promise<Inbound
 async function queryBotDuplicateCount(db: DbAdapter, channelId: string, provider: string, cutoff: string): Promise<number | null> {
   try {
     const row = await db.queryOne(
-      `SELECT COUNT(DISTINCT am.id) AS count
-         FROM agent_messages am
-        WHERE am.channel_id = $1
-          AND am.source = $2
-          AND am.direction = 'inbound'
-          AND COALESCE(am.author_bot, false) = true
-          AND am.created_at >= $3`,
+      `SELECT COALESCE(SUM(duplicate_rows.row_count), 0) AS count
+         FROM (
+           SELECT COUNT(*) AS row_count
+             FROM agent_messages am
+            WHERE am.channel_id = $1
+              AND am.source = $2
+              AND am.direction = 'inbound'
+              AND COALESCE(am.author_bot, false) = true
+              AND am.created_at >= $3
+              AND am.discord_message_id IS NOT NULL
+              AND am.discord_message_id <> ''
+            GROUP BY am.discord_message_id
+           HAVING COUNT(*) > 1
+         ) duplicate_rows`,
       [channelId, provider, cutoff],
     )
     return asCount((row as any)?.count)

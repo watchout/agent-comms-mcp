@@ -23,6 +23,7 @@ export type AunFleetSmokeEvidence = {
   request_queue_id: string | number | null
   request_status: string | null
   request_terminal: boolean
+  ack_required: boolean
   ack_queue_status: string | null
   ack_agent_message_seen: boolean
   passed: boolean
@@ -253,6 +254,7 @@ export async function buildAunFleetReadinessReport(
           request_queue_id: null,
           request_status: null,
           request_terminal: false,
+          ack_required: true,
           ack_queue_status: null,
           ack_agent_message_seen: false,
           passed: false,
@@ -270,6 +272,7 @@ export async function buildAunFleetReadinessReport(
           request_queue_id: null,
           request_status: null,
           request_terminal: false,
+          ack_required: true,
           ack_queue_status: null,
           ack_agent_message_seen: false,
           passed: false,
@@ -288,6 +291,7 @@ export async function buildAunFleetReadinessReport(
         request_queue_id: null,
         request_status: null,
         request_terminal: false,
+        ack_required: true,
         ack_queue_status: null,
         ack_agent_message_seen: false,
         passed: false,
@@ -296,9 +300,30 @@ export async function buildAunFleetReadinessReport(
       smokeByAgent.set(authorId, current)
     }
 
+    for (const row of queueRows) {
+      const payload = parseJsonObject(row.payload)
+      if (normalizeString(payload.smoke_run_id) !== smokeRunId) continue
+      const agentId = String(row.agent_id)
+      const current = smokeByAgent.get(agentId) ?? {
+        run_id: smokeRunId,
+        request_queue_id: null,
+        request_status: null,
+        request_terminal: false,
+        ack_required: false,
+        ack_queue_status: null,
+        ack_agent_message_seen: false,
+        passed: false,
+      }
+      current.request_queue_id = row.id
+      current.request_status = String(row.status ?? '')
+      current.request_terminal = TERMINAL_QUEUE_STATUSES.has(current.request_status)
+      current.ack_required = false
+      smokeByAgent.set(agentId, current)
+    }
+
     for (const [agentId, smoke] of smokeByAgent) {
       const ackTerminal = smoke.ack_queue_status ? TERMINAL_QUEUE_STATUSES.has(smoke.ack_queue_status) : false
-      smoke.passed = smoke.request_terminal && (ackTerminal || smoke.ack_agent_message_seen)
+      smoke.passed = smoke.request_terminal && (!smoke.ack_required || ackTerminal || smoke.ack_agent_message_seen)
       smokeByAgent.set(agentId, smoke)
     }
   }
@@ -343,7 +368,7 @@ export async function buildAunFleetReadinessReport(
       } else {
         if (!smoke.request_terminal) blockers.push('smoke_request_not_terminal')
         const ackTerminal = smoke.ack_queue_status ? TERMINAL_QUEUE_STATUSES.has(smoke.ack_queue_status) : false
-        if (!ackTerminal && !smoke.ack_agent_message_seen) blockers.push('smoke_ack_missing')
+        if (smoke.ack_required && !ackTerminal && !smoke.ack_agent_message_seen) blockers.push('smoke_ack_missing')
       }
     }
 

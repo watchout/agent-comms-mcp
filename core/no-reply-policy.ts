@@ -88,6 +88,13 @@ export function detectNoReplyIntent(input: {
       matched: 'terminal_baton.no_reply_required',
     }
   }
+  if (payload.no_reply_required === true) {
+    return {
+      no_reply_required: true,
+      reason: 'payload_no_reply_required',
+      matched: 'payload.no_reply_required',
+    }
+  }
 
   const content = stringValue(input.content, payload.content, input.storedContent)
   if (!content) return { no_reply_required: false, reason: null, matched: null }
@@ -95,7 +102,7 @@ export function detectNoReplyIntent(input: {
   const text = normalizeText(content)
   if (text === '') return { no_reply_required: false, reason: null, matched: null }
 
-  if (/<@!?\d+>/.test(text)) {
+  if (payload.legacy_direct_mention_no_reply === true && /<@!?\d+>/.test(text)) {
     const withoutMentions = stripDiscordMentions(text).toLowerCase()
     const directMentionSmokeTexts = new Set([
       'test',
