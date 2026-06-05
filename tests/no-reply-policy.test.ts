@@ -22,6 +22,21 @@ describe('deterministic no-reply policy', () => {
     })
   })
 
+  test('structured no-reply payload is terminal without relying on prose', () => {
+    const decision = detectNoReplyIntent({
+      payload: {
+        content: 'NORM-060 synthetic probe',
+        no_reply_required: true,
+      },
+    })
+
+    expect(decision).toMatchObject({
+      no_reply_required: true,
+      reason: 'payload_no_reply_required',
+      matched: 'payload.no_reply_required',
+    })
+  })
+
   test('no-further-action acknowledgement is terminal without gate-classifier ambiguity', () => {
     const decision = detectNoReplyIntent({
       payload: {
@@ -33,7 +48,7 @@ describe('deterministic no-reply policy', () => {
     expect(decision.reason).toBe('explicit_no_further_action_acknowledgement')
   })
 
-  test('pure Discord direct-mention smoke is terminal no-reply work', () => {
+  test('Discord direct-mention smoke still requires a conversational reply unless explicitly no-reply', () => {
     const decision = detectNoReplyIntent({
       payload: {
         content: '<@1508976231901565028> 疎通テスト',
@@ -41,10 +56,10 @@ describe('deterministic no-reply policy', () => {
       },
     })
 
-    expect(decision).toMatchObject({
-      no_reply_required: true,
-      reason: 'direct_mention_smoke_completed_without_substantive_reply',
-      matched: 'direct_mention_smoke_text',
+    expect(decision).toEqual({
+      no_reply_required: false,
+      reason: null,
+      matched: null,
     })
   })
 

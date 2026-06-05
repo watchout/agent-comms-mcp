@@ -68,9 +68,11 @@ import {
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 import {
+  buildTerminalBaton,
   detectNoReplyIntent,
   parseQueuePayload,
   type NoReplyDecision,
+  withTerminalBaton,
 } from '../no-reply-policy'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
@@ -252,7 +254,8 @@ export class StateDaemon {
   async handleQueueEvent(event: QueueEvent): Promise<void> {
     if (this.status !== 'running') return
     if (!this.isAgentInScope(event.agent_id)) {
-      this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
+      const handled = await this.tryCompleteScopedOutNoReply(event)
+      if (!handled) this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
       return
     }
     const { rows } = await this.dbQuery<QueueRow>(
@@ -596,6 +599,9 @@ export class StateDaemon {
       hasActiveClaim,
     })
     this.recordQueueAction(action, row)
+    if (action.kind !== 'agent_missing' && await this.completeNoReplyIfRequired(row)) {
+      return true
+    }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
       return this.runObservedQueueAction(action, row)
     }
@@ -677,6 +683,53 @@ export class StateDaemon {
       payload,
       content: payload.content,
     })
+  }
+
+  private async tryCompleteScopedOutNoReply(event: QueueEvent): Promise<boolean> {
+    if (this.config.agentIdPrefix) return false
+    const { rows } = await this.dbQuery<QueueRow>(
+      `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
+              last_wake_attempt_at, last_heartbeat_at
+         FROM message_queue WHERE id = $1`,
+      [event.id],
+    )
+    const row = rows[0]
+    if (!row || (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress')) return false
+    return this.completeNoReplyIfRequired(row)
+  }
+
+  private async completeNoReplyIfRequired(row: QueueRow): Promise<boolean> {
+    if (!this.config.codexRunnerAutoCompleteNoReply) return false
+    if (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress') return false
+    const decision = this.noReplyDecisionForRow(row)
+    if (!decision.no_reply_required) return false
+
+    const now = this.clock.now()
+    const payload = parseQueuePayload(row.payload)
+    const stampedPayload = JSON.stringify(withTerminalBaton(payload, buildTerminalBaton({
+      reason: decision.reason ?? 'state_daemon_auto_no_reply',
+      setBy: 'state_daemon',
+      source: 'deterministic_no_reply_policy',
+      now: () => now,
+    })))
+    const updated = await this.dbQuery(
+      `UPDATE message_queue
+          SET status='done',
+              done_at=$2,
+              payload=$3,
+              claim_expires_at=NULL,
+              claimed_by=NULL,
+              claimed_at=NULL
+        WHERE id=$1
+          AND status IN ('pending', 'received', 'in_progress')`,
+      [row.id, now, stampedPayload],
+    )
+    if (updated.rowCount !== 1) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_reply_stale_skipped' })
+      return false
+    }
+    this.metrics.inc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })
+    return true
   }
 
   private boundedAckContent(row: QueueRow, noReplyDecision: NoReplyDecision): string {

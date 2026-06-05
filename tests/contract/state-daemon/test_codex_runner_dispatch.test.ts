@@ -206,7 +206,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('direct mention smoke is passed to the runner for exact no-reply terminal completion', async () => {
+  test('direct mention smoke is passed to auto-final reply without daemon ACK', async () => {
     const agent = makeAgentId('codex-smoke')
     await seedAgent(pg, {
       agent_id: agent,
@@ -232,9 +232,9 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         retained_count: 1,
         retained: [{ queue_id: String(id), message_id: '11111111-1111-4111-8111-333333333333' }],
         completion: {
-          outcome: 'completed_no_reply',
+          outcome: 'completed_reply',
           terminal_queue_ids: [String(id)],
-          reason: 'direct_mention_smoke_completed_without_substantive_reply',
+          reason: 'auto_final_reply_completed',
         },
       }) + '\n',
       stderr: '',
@@ -242,13 +242,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         outcome: 'claimed_work',
         retained_count: 1,
         queue_ids: [String(id)],
-        completion_outcome: 'completed_no_reply',
+        completion_outcome: 'completed_reply',
         terminal_queue_ids: [String(id)],
-        completion_reason: 'direct_mention_smoke_completed_without_substantive_reply',
+        completion_reason: 'auto_final_reply_completed',
       },
     }
     const clock = new FakeClock('2026-05-18T00:00:01.000Z')
-    const h = daemon(clock, runner)
+    const h = daemon(clock, runner, new FakeTmux(), { codexRunnerAutoFinalReply: true })
     await h.daemon.start()
     try {
       await h.daemon.__testHandleEvent({
@@ -262,11 +262,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(runner.invocations).toHaveLength(1)
       expect(runner.invocations[0]).toMatchObject({
         queueId: id,
-        completeNoReply: true,
-        completionReason: 'direct_mention_smoke_completed_without_substantive_reply',
+        completeNoReply: false,
+        completionReason: null,
+        autoFinalReply: true,
+        ackContent: '',
       })
-      expect(runner.invocations[0].ackContent).toContain('final close will be auto-completed as no-reply')
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_final_replied' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
@@ -341,7 +342,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('typed terminal completion evidence is recorded separately from open runner success', async () => {
+  test('structured no-reply terminal work is completed by state_daemon without invoking runner', async () => {
     const agent = makeAgentId('codex-complete')
     await seedAgent(pg, {
       agent_id: agent,
@@ -354,34 +355,15 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-222222222222',
-      payload: JSON.stringify({ author_id: 'codex-cto', content: '<@999010> テスト' }),
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'NORM-060 synthetic probe',
+        no_reply_required: true,
+      }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    runner.result = {
-      ok: true,
-      code: 0,
-      stdout: JSON.stringify({
-        ok: true,
-        retained_count: 1,
-        retained: [{ queue_id: String(id), message_id: '11111111-1111-4111-8111-222222222222' }],
-        completion: {
-          outcome: 'completed_no_reply',
-          terminal_queue_ids: [String(id)],
-          reason: 'direct_mention_smoke_completed_without_substantive_reply',
-        },
-      }) + '\n',
-      stderr: '',
-      typed_result: {
-        outcome: 'claimed_work',
-        retained_count: 1,
-        queue_ids: [String(id)],
-        completion_outcome: 'completed_no_reply',
-        terminal_queue_ids: [String(id)],
-        completion_reason: 'direct_mention_smoke_completed_without_substantive_reply',
-      },
-    }
     const clock = new FakeClock('2026-05-18T00:00:01.000Z')
     const h = daemon(clock, runner)
     await h.daemon.start()
@@ -394,9 +376,72 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         claim_expires_at: null,
       })
 
-      expect(runner.invocations).toHaveLength(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(1)
+      expect(runner.invocations).toHaveLength(0)
+      const row = await pg.query<{ status: string; done_at: Date | null; payload: string }>(
+        `SELECT status, done_at, payload FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      expect(row.rows[0]?.status).toBe('done')
+      expect(row.rows[0]?.done_at).toBeTruthy()
+      expect(JSON.parse(row.rows[0]?.payload ?? '{}').terminal_baton).toMatchObject({
+        no_reply_required: true,
+        reason: 'payload_no_reply_required',
+        set_by: 'state_daemon',
+        source: 'deterministic_no_reply_policy',
+      })
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(0)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('TUI no-reply terminal work is completed without prompt injection', async () => {
+    const agent = makeAgentId('tui-no-reply')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'TUI',
+      tmux_session: `${agent}-session`,
+      status: 'idle',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-555555555555',
+      payload: JSON.stringify({
+        author_id: 'state-daemon-smoke',
+        content: 'NORM-060 synthetic probe',
+        no_reply_required: true,
+      }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    const tmux = new FakeTmux()
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = daemon(clock, runner, tmux)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(0)
+      expect(tmux.sentKeys).toEqual([])
+      const row = await pg.query<{ status: string; done_at: Date | null }>(
+        `SELECT status, done_at FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      expect(row.rows[0]).toMatchObject({ status: 'done' })
+      expect(row.rows[0]?.done_at).toBeTruthy()
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }

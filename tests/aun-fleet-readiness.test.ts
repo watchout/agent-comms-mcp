@@ -105,6 +105,42 @@ describe('AUN fleet readiness', () => {
     expect(testBot?.blockers).toContain('smoke_missing')
   })
 
+  test('accepts NORM-060 terminal queue evidence without requiring ACK rows', async () => {
+    const db = fakeDb()
+    const originalQuery = db.query
+    db.query = async (sql: string) => {
+      if (sql.includes('FROM message_queue') && sql.includes('payload LIKE')) {
+        return [{
+          id: 301,
+          agent_id: 'ready-dev',
+          status: 'done',
+          payload: JSON.stringify({
+            smoke_run_id: 'norm060-RUN1',
+            author_id: 'codex-aun',
+            content: 'NORM-060 full-channel smoke norm060-RUN1 for agent-com. Synthetic probe: no reply is required.',
+          }),
+        }]
+      }
+      if (sql.includes('FROM agent_messages')) return []
+      return originalQuery(sql)
+    }
+
+    const report = await buildAunFleetReadinessReport(db, {
+      smokeRunId: 'norm060-RUN1',
+      requireSmoke: true,
+    })
+
+    const ready = report.agents.find((agent) => agent.agent_id === 'ready-dev')
+    expect(ready?.smoke).toMatchObject({
+      ack_required: false,
+      request_status: 'done',
+      request_terminal: true,
+      passed: true,
+    })
+    expect(ready?.blockers).not.toContain('smoke_ack_missing')
+    expect(ready?.readiness).toBe('ready')
+  })
+
   test('formats a compact operator report', async () => {
     const report = await buildAunFleetReadinessReport(fakeDb(), {
       smokeRunId: 'RUN1',
