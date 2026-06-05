@@ -93,4 +93,25 @@ describe('state_daemon Codex runner adapter command contract', () => {
       '--completion-reason', 'direct_mention_smoke_completed_without_substantive_reply',
     ])
   })
+
+  test('auto-final reply omits fixed ACK flags and closes through runner final reply mode', () => {
+    const plan = buildCodexRunnerCommand({
+      agentId: 'codex-aun',
+      queueId: 123,
+      messageId: 'msg-123',
+      requester: 'codex-cto',
+      databaseUrl: 'postgresql:///agent_comms?host=/tmp',
+      ackContent: '',
+      autoFinalReply: true,
+    })
+
+    expect(plan.args).toEqual([
+      'bin/aun.ts',
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', '123',
+      '--limit', '1',
+      '--auto-final-reply',
+    ])
+  })
 })

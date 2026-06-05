@@ -162,6 +162,7 @@ export interface DiagnoseReceiveSummary {
     status: string | null
     claimed_at: string | null
     claim_expires_at: string | null
+    claimed?: ClaimedMessage | null
   }
   cto_identity_split: {
     checked_agent_ids: string[]
@@ -1609,9 +1610,28 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           targetQueueId ? [plan.env.AGENT_ID, targetQueueId] : [plan.env.AGENT_ID, maxInspect],
         )
         const activeClaimRow = await tx.queryOne<Record<string, unknown>>(
-          `SELECT id, message_id, status, claimed_at, claim_expires_at
-             FROM message_queue
-            WHERE claimed_by = $1 AND status IN ('received', 'in_progress')
+          `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
+                  mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  am.content AS stored_content,
+                  am.message_type AS stored_message_type,
+                  am.author_id AS stored_author_id,
+                  am.source AS stored_source,
+                  am.metadata AS stored_metadata,
+                  am.input_mentions AS stored_input_mentions,
+                  a.runtime AS target_runtime,
+                  a.status AS target_status,
+                  a.metadata AS target_metadata,
+                  a.profile_enabled AS target_profile_enabled,
+                  a.disabled_at AS target_disabled_at,
+                  a.expected_provider_identity AS target_expected_provider_identity,
+                  crp.policy_source AS channel_policy_source,
+                  crp.primary_agent_id AS channel_policy_primary_agent_id,
+                  crp.adapter_owner_agent_id AS channel_policy_adapter_owner_agent_id
+             FROM message_queue mq
+             LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+             LEFT JOIN agents a ON a.agent_id = mq.agent_id
+             LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
+            WHERE mq.claimed_by = $1 AND mq.status IN ('received', 'in_progress')
             ORDER BY claimed_at DESC
             LIMIT 1`,
           [plan.env.AGENT_ID],
@@ -1687,6 +1707,21 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           [plan.env.AGENT_ID],
         )
         const waiting = Number(waitingRow?.n ?? 0)
+        const activeClaimPayload = parsePayload(activeClaimRow?.payload)
+        const activeClaimSelected = activeClaimRow
+          ? normalizeQueueRow(activeClaimRow)
+          : null
+        const activeClaimPresentation = activeClaimRow
+          ? evaluatePresentationClaimability(activeClaimRow, activeClaimPayload)
+          : null
+        const activeClaimClaimed = activeClaimSelected && activeClaim.busy && (
+          !targetQueueId || String(activeClaimSelected.queue_id) === targetQueueId
+        )
+          ? claimedMessageFromRow({
+              ...activeClaimSelected,
+              ...(activeClaimPresentation ? { presentation: activeClaimPresentation.evidence } : {}),
+            }, activeClaimPayload, waiting)
+          : null
         if (selected.row && !activeClaim.busy) {
           const payload = selectedRaw ? parsePayload(selectedRaw.payload) : {}
           claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting)
@@ -1704,7 +1739,10 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           selected: selected.row,
           claimed,
           blocked_reason: activeClaim.busy ? 'active_claim' : targetQueueId && !selected.row ? 'queue_not_claimable' : null,
-          active_claim: activeClaim,
+          active_claim: {
+            ...activeClaim,
+            ...(activeClaimClaimed ? { claimed: activeClaimClaimed } : {}),
+          },
           skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
           unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
           selection_reason: activeClaim.busy ? 'blocked_by_active_claim' : selected.reason,

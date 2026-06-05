@@ -41,7 +41,7 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
     '--queue-id', runtimeInput.queue_id,
     '--limit', '1',
   ]
-  if (runtimeInput.requester) {
+  if (runtimeInput.requester && !input.autoFinalReply) {
     args.push('--ack-mentions', runtimeInput.requester)
     args.push('--ack-content', runtimeInput.ack_content)
   }
@@ -50,6 +50,9 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
     if (input.completionReason?.trim()) {
       args.push('--completion-reason', input.completionReason.trim())
     }
+  }
+  if (input.autoFinalReply) {
+    args.push('--auto-final-reply')
   }
   return {
     command: bunExecutable(),

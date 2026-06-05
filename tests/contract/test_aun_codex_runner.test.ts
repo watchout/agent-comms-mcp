@@ -2,11 +2,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { renderAckContent, resolveNestedBunExecutable } from '../../bin/aun/codex-runner'
+import { renderAckContent, resolveCodexExecutable, resolveNestedBunExecutable } from '../../bin/aun/codex-runner'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
@@ -34,6 +34,29 @@ function dbExec(sql: string): void {
 function dbRead(sql: string, params: unknown[] = []): any[] {
   const db = new Database(dbPath)
   try { return db.prepare(sql).all(...params) as any[] } finally { db.close() }
+}
+
+function fakeCodexExecutable(content: string): string {
+  const path = join(tmpDir, 'fake-codex.sh')
+  writeFileSync(path, [
+    '#!/bin/sh',
+    'out=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  if [ "$1" = "--output-last-message" ]; then',
+    '    shift',
+    '    out="$1"',
+    '  fi',
+    '  shift',
+    'done',
+    'cat >/dev/null',
+    'if [ -z "$out" ]; then',
+    '  echo "missing --output-last-message" >&2',
+    '  exit 2',
+    'fi',
+    `printf '%s' ${JSON.stringify(content)} > "$out"`,
+  ].join('\n'))
+  chmodSync(path, 0o755)
+  return path
 }
 
 function seedPending(
@@ -158,6 +181,27 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
       } else {
         process.env.STATE_DAEMON_BUN_EXECUTABLE = originalOverride
       }
+    }
+  })
+
+  test('Codex executable can be overridden for non-interactive final replies', () => {
+    const priorAun = process.env.AUN_CODEX_EXECUTABLE
+    const priorGeneric = process.env.CODEX_EXECUTABLE
+    try {
+      delete process.env.AUN_CODEX_EXECUTABLE
+      delete process.env.CODEX_EXECUTABLE
+      expect(resolveCodexExecutable()).toBe('codex')
+
+      process.env.CODEX_EXECUTABLE = '/operator/bin/codex'
+      expect(resolveCodexExecutable()).toBe('/operator/bin/codex')
+
+      process.env.AUN_CODEX_EXECUTABLE = '/operator/aun-codex'
+      expect(resolveCodexExecutable()).toBe('/operator/aun-codex')
+    } finally {
+      if (priorAun === undefined) delete process.env.AUN_CODEX_EXECUTABLE
+      else process.env.AUN_CODEX_EXECUTABLE = priorAun
+      if (priorGeneric === undefined) delete process.env.CODEX_EXECUTABLE
+      else process.env.CODEX_EXECUTABLE = priorGeneric
     }
   })
 
@@ -326,6 +370,122 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
       .toEqual({ status: 'pending', claimed_by: null })
   })
 
+  test('auto-final-reply generates final content and closes the exact retained row without ACK', () => {
+    const direct = seedTypedPending({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999010> 日本語で返答して',
+      mentions: ['999010'],
+    })
+    const fallback = seedPending('fallback must remain pending')
+    const fakeCodex = fakeCodexExecutable('はい、日本語で返答します。')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(direct.queueId),
+      '--max-inspect', '10',
+      '--auto-final-reply',
+    ], {
+      AUN_CODEX_EXECUTABLE: fakeCodex,
+    })
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.acked_count).toBe(0)
+    expect(body.acks).toEqual([])
+    expect(body.completion).toMatchObject({
+      outcome: 'completed_reply',
+      terminal_queue_ids: [String(direct.queueId)],
+      applied_count: 1,
+      reason: 'auto_final_reply_completed',
+      command: {
+        mode: 'reply',
+        queue_id: String(direct.queueId),
+      },
+    })
+    const row = dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [direct.queueId])[0]
+    expect(row.status).toBe('replied')
+    expect(row.claimed_by).toBeNull()
+    expect(row.replied_with).toBeTruthy()
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fallback.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+    const replyMessage = dbRead(
+      `SELECT content, author_id, reply_to FROM agent_messages
+        WHERE id = ?`,
+      [row.replied_with],
+    )[0]
+    expect(replyMessage).toEqual({
+      content: 'はい、日本語で返答します。',
+      author_id: 'codex-aun',
+      reply_to: direct.messageId,
+    })
+  })
+
+  test('auto-final-reply completes an already claimed exact row without drain fallback', () => {
+    const active = seedTypedPending({
+      messageType: 'chat',
+      source: 'discord',
+      ageSeconds: 30,
+      content: '<@999010> すでに掴んだqueueにも返答して',
+      mentions: ['999010'],
+    })
+    const fallback = seedPending('fallback must remain pending while active exact row replies')
+    dbExec(`
+      UPDATE message_queue
+         SET status='received',
+             claimed_by='codex-aun',
+             claimed_at=datetime('now'),
+             claim_expires_at=datetime('now', '+60 seconds')
+       WHERE id=${active.queueId};
+    `)
+    const fakeCodex = fakeCodexExecutable('既存の受信済みqueueにも返答します。')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(active.queueId),
+      '--max-inspect', '10',
+      '--auto-final-reply',
+    ], {
+      AUN_CODEX_EXECUTABLE: fakeCodex,
+    })
+
+    expect(r.status).toBe(0)
+    const body = JSON.parse(r.stdout)
+    expect(body.retained_count).toBe(1)
+    expect(body.retained[0]).toMatchObject({
+      queue_id: String(active.queueId),
+      content: '<@999010> すでに掴んだqueueにも返答して',
+      routing_decision: 'wake_agent',
+      route_reason: 'direct_mention',
+    })
+    expect(body.receive_error.stderr).toContain('active claim exists')
+    expect(body.completion).toMatchObject({
+      outcome: 'completed_reply',
+      terminal_queue_ids: [String(active.queueId)],
+      applied_count: 1,
+      reason: 'auto_final_reply_completed',
+    })
+    const row = dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [active.queueId])[0]
+    expect(row.status).toBe('replied')
+    expect(row.claimed_by).toBeNull()
+    expect(row.replied_with).toBeTruthy()
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [fallback.queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+    const replyMessage = dbRead(
+      `SELECT content, author_id, reply_to FROM agent_messages
+        WHERE id = ?`,
+      [row.replied_with],
+    )[0]
+    expect(replyMessage).toEqual({
+      content: '既存の受信済みqueueにも返答します。',
+      author_id: 'codex-aun',
+      reply_to: active.messageId,
+    })
+  })
+
   test('complete-no-reply terminalizes an already claimed exact row without drain fallback', () => {
     const active = seedTypedPending({
       messageType: 'chat',
@@ -424,6 +584,43 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
     expect(r.status).toBe(2)
     expect(r.stderr).toContain('CODEX_RUNNER_COMPLETION_INVALID')
     expect(r.stderr).toContain('--complete-no-reply requires --queue-id')
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('auto-final-reply requires exact queue-id before claiming work', () => {
+    const { queueId } = seedPending('must remain pending')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--auto-final-reply',
+    ], {
+      AUN_CODEX_EXECUTABLE: fakeCodexExecutable('should not run'),
+    })
+
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('CODEX_RUNNER_COMPLETION_INVALID')
+    expect(r.stderr).toContain('--auto-final-reply requires --queue-id')
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
+  })
+
+  test('auto-final-reply is mutually exclusive with complete-no-reply', () => {
+    const { queueId } = seedPending('must remain pending')
+
+    const r = runAun([
+      'codex-runner',
+      '--agent-id', 'codex-aun',
+      '--queue-id', String(queueId),
+      '--complete-no-reply',
+      '--auto-final-reply',
+    ], {
+      AUN_CODEX_EXECUTABLE: fakeCodexExecutable('should not run'),
+    })
+
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('mutually exclusive')
     expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
       .toEqual({ status: 'pending', claimed_by: null })
   })

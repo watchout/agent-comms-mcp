@@ -62,6 +62,7 @@ export interface StateDaemonConfig {
   codexRunnerDatabaseUrl: string
   codexRunnerAckContentMaxChars: number
   codexRunnerAutoCompleteNoReply: boolean
+  codexRunnerAutoFinalReply: boolean
   // CP-40D host runtime invocation adapter wiring. Disabled by default and
   // selected only when an explicit profile plus fixture/host invoker is wired.
   hostRuntimeAdapterEnabled: boolean
@@ -123,6 +124,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
   codexRunnerAckContentMaxChars: 240,
   codexRunnerAutoCompleteNoReply: true,
+  codexRunnerAutoFinalReply: false,
   hostRuntimeAdapterEnabled: false,
   hostRuntimeInvocationProfile: null,
   hostRuntimeInvocationSupportedFlags: null,
@@ -267,6 +269,7 @@ export interface CodexRunnerInvocation {
   ackContent: string
   completeNoReply?: boolean
   completionReason?: string | null
+  autoFinalReply?: boolean
   payload?: unknown
 }
 

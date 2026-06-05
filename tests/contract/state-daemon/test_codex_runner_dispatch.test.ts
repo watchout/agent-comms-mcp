@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import { StateDaemon } from '../../../core/state-daemon'
-import type { DBClient } from '../../../core/state-daemon/types'
+import type { DBClient, StateDaemonConfig } from '../../../core/state-daemon/types'
 import {
   FakeAlertSink,
   FakeClock,
@@ -33,7 +33,12 @@ afterEach(async () => {
   await cleanAll(pg)
 })
 
-function daemon(clock: FakeClock, codexRunner: FakeCodexRunner, tmux = new FakeTmux()) {
+function daemon(
+  clock: FakeClock,
+  codexRunner: FakeCodexRunner,
+  tmux = new FakeTmux(),
+  config: Partial<StateDaemonConfig> = {},
+) {
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
@@ -48,6 +53,7 @@ function daemon(clock: FakeClock, codexRunner: FakeCodexRunner, tmux = new FakeT
       agentIdPrefix: 'sd-test-',
       codexRunnerEnabled: true,
       codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
+      ...config,
     },
   })
   return { daemon: d, metrics, alert, tmux }
@@ -261,6 +267,75 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       })
       expect(runner.invocations[0].ackContent).toContain('final close will be auto-completed as no-reply')
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('auto-final reply mode passes exact queue without daemon-authored ACK prose', async () => {
+    const agent = makeAgentId('codex-final')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-444444444444',
+      payload: JSON.stringify({ author_id: 'codex-cto', content: '<@999010> 日本語で返答して', message_type: 'chat' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    runner.result = {
+      ok: true,
+      code: 0,
+      stdout: JSON.stringify({
+        ok: true,
+        retained_count: 1,
+        retained: [{ queue_id: String(id), message_id: '11111111-1111-4111-8111-444444444444' }],
+        completion: {
+          outcome: 'completed_reply',
+          terminal_queue_ids: [String(id)],
+          reason: 'auto_final_reply_completed',
+        },
+      }) + '\n',
+      stderr: '',
+      typed_result: {
+        outcome: 'claimed_work',
+        retained_count: 1,
+        queue_ids: [String(id)],
+        completion_outcome: 'completed_reply',
+        terminal_queue_ids: [String(id)],
+        completion_reason: 'auto_final_reply_completed',
+      },
+    }
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = daemon(clock, runner, new FakeTmux(), { codexRunnerAutoFinalReply: true })
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]).toMatchObject({
+        queueId: id,
+        requester: 'codex-cto',
+        completeNoReply: false,
+        completionReason: null,
+        autoFinalReply: true,
+        ackContent: '',
+      })
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_final_replied' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_open' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
