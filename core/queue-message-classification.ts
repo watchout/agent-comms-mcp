@@ -1,6 +1,7 @@
 import { parseQueuePayload } from './no-reply-policy'
 import { decideQueueRouting, type QueueRoutingDecisionEvidence } from './routing-decision'
 
+export type QueueMessageClassification = 'actionable' | 'non_action' | 'unknown'
 export type DeterministicNonActionableMessageType = 'report' | 'chat' | 'notice' | 'projection'
 
 export type NonActionableDispositionReason =
@@ -49,6 +50,9 @@ export interface QueueDispositionStamp {
   route_reason: QueueRoutingDecisionEvidence['route_reason']
 }
 
+export const ACTIONABLE_MESSAGE_TYPES = new Set(['instruction', 'request', 'question'])
+export const NON_ACTIONABLE_MESSAGE_TYPES = new Set(['chat', 'notice', 'projection', 'report'])
+
 const DETERMINISTIC_NON_ACTIONABLE_REASONS: Record<DeterministicNonActionableMessageType, NonActionableDispositionReason> = {
   report: 'NON_ACTIONABLE_REPORT',
   chat: 'NON_ACTIONABLE_CHAT',
@@ -60,22 +64,38 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
-function normalizeDate(value: unknown): string | null {
-  if (value instanceof Date) return value.toISOString()
-  return stringValue(value)
+export function normalizeMessageType(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : 'unknown'
 }
 
-function parseObject(value: unknown): Record<string, unknown> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
-  if (typeof value !== 'string' || !value.trim()) return {}
+export function classifyQueueMessageType(messageType: unknown): QueueMessageClassification {
+  const normalized = normalizeMessageType(messageType)
+  if (ACTIONABLE_MESSAGE_TYPES.has(normalized)) return 'actionable'
+  if (NON_ACTIONABLE_MESSAGE_TYPES.has(normalized)) return 'non_action'
+  return 'unknown'
+}
+
+export function isNonActionableMessageType(messageType: unknown): boolean {
+  return classifyQueueMessageType(messageType) === 'non_action'
+}
+
+export function parseQueuePayloadObject(payload: unknown): Record<string, unknown> {
+  if (!payload) return {}
+  if (typeof payload === 'object' && !Array.isArray(payload)) return payload as Record<string, unknown>
+  if (typeof payload !== 'string' || payload.trim() === '') return {}
   try {
-    const parsed = JSON.parse(value)
+    const parsed = JSON.parse(payload)
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
       : {}
   } catch {
     return {}
   }
+}
+
+function normalizeDate(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString()
+  return stringValue(value)
 }
 
 function booleanFromUnknown(value: unknown): boolean | null {
@@ -101,8 +121,8 @@ function stringsFromUnknown(value: unknown): string[] {
 
 function targetDiscordId(agent: QueueClassificationAgent | null | undefined): string | null {
   if (!agent) return null
-  const metadata = parseObject(agent.metadata)
-  const expected = parseObject(agent.expected_provider_identity)
+  const metadata = parseQueuePayloadObject(agent.metadata)
+  const expected = parseQueuePayloadObject(agent.expected_provider_identity)
   const candidates = [
     metadata.discord_id,
     metadata.discord_user_id,
@@ -193,4 +213,9 @@ export function withQueueDispositionStamp(
     ...payload,
     queue_disposition: stamp,
   }
+}
+
+export function messageTypeFromQueuePayload(payload: unknown, fallback?: unknown): string {
+  const parsed = parseQueuePayloadObject(payload)
+  return normalizeMessageType(parsed.message_type ?? fallback)
 }

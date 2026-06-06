@@ -132,7 +132,7 @@ sleep 1
 # Step 3: Sync .mcp.json with the DB profile (compat export, not SSOT)
 PROJECT_DIR_EXPANDED="$PROJECT_DIR"
 if [ -n "${AGENT_ID:-}" ] && [ -n "${PORT:-}" ]; then
-  sync_mcp_config "$SESSION" "$PROJECT_DIR_EXPANDED" "$AGENT_ID" "$PORT" || true
+  sync_mcp_config "$SESSION" "$PROJECT_DIR_EXPANDED" "$AGENT_ID" "$PORT" "${RUNTIME_ENGINE:-}" || true
 fi
 
 # Step 4: Create new session and start Claude Code

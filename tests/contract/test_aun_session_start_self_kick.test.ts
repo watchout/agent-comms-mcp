@@ -20,21 +20,88 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const HOOK = join(REPO_ROOT, 'hooks', 'aun-session-start-self-kick.sh')
+const MEMORY_READY_MIGRATION = join(REPO_ROOT, 'db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql')
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const TEST_AGENT = `test-self-kick-${process.pid}`
 
 let dbReachable = false
+let memoryReadyMigrationApplied = false
+
+async function ensureMemoryReadySchema(c: Client): Promise<void> {
+  if (memoryReadyMigrationApplied) return
+  await c.query(readFileSync(MEMORY_READY_MIGRATION, 'utf-8'))
+  memoryReadyMigrationApplied = true
+}
+
+async function cleanupSelfKickAgent(c: Client): Promise<void> {
+  await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM agents WHERE agent_id=$1`, [TEST_AGENT])
+}
+
+async function seedSelfKickMemoryReady(c: Client): Promise<void> {
+  await ensureMemoryReadySchema(c)
+  const runtimeId = randomUUID()
+  const port = 32_000 + Number.parseInt(runtimeId.slice(0, 4), 16) % 20_000
+  const sessionName = 'test-session'
+  const checkoutPath = `/tmp/${TEST_AGENT}-memory-ready`
+  await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(
+    `INSERT INTO agents
+       (agent_id, display_name, agent_type, runtime, status, channel_port,
+        metadata, profile_revision, profile_source, home_directory)
+     VALUES ($1, $1, 'dev', 'mcp', 'idle', $2, $3::jsonb, 1, 'legacy', $4)
+     ON CONFLICT (agent_id) DO UPDATE SET
+       runtime = EXCLUDED.runtime,
+       status = EXCLUDED.status,
+       channel_port = EXCLUDED.channel_port,
+       metadata = EXCLUDED.metadata,
+       profile_revision = 1,
+       profile_source = 'legacy',
+       home_directory = EXCLUDED.home_directory`,
+    [TEST_AGENT, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
+  )
+  await c.query(
+    `INSERT INTO agent_runtime_instances
+       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
+        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+     VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
+             $5, 'self-kick-test-head', 'running',
+             '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z',
+             '{"source":"self-kick-test"}'::jsonb)`,
+    [runtimeId, TEST_AGENT, sessionName, port, checkoutPath],
+  )
+  await c.query(
+    `INSERT INTO runtime_memory_ready_evidence
+       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
+        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
+        valid_until, source, metadata)
+     VALUES
+       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
+        $3, $4, $1, $5, 'self-kick-test-head',
+        'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+        '/tmp/self-kick-memory-ready.json', 'self-kick-memory-ready',
+        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
+        '{"fixture":true}'::jsonb)`,
+    [TEST_AGENT, runtimeId, sessionName, port, checkoutPath],
+  )
+}
 
 beforeAll(async () => {
   try {
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
-    await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
-    await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
+    await ensureMemoryReadySchema(c)
+    await cleanupSelfKickAgent(c)
     await c.end()
     dbReachable = true
   } catch {
@@ -47,8 +114,7 @@ afterAll(async () => {
   try {
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
-    await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
-    await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
+    await cleanupSelfKickAgent(c)
     await c.end()
   } catch {}
 })
@@ -124,6 +190,13 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
 
   test('T-1: pending=0 → tmux send-keys NOT called', async () => {
     requireDb()
+    const c = new Client({ connectionString: DATABASE_URL })
+    await c.connect()
+    try {
+      await seedSelfKickMemoryReady(c)
+    } finally {
+      await c.end()
+    }
     const stub = makeStubDir()
     try {
       const r = runHook({
@@ -147,6 +220,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
     try {
+      await seedSelfKickMemoryReady(c)
       // One pending row in message_queue.
       await c.query(
         `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
@@ -210,6 +284,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
     try {
+      await seedSelfKickMemoryReady(c)
       await c.query(
         `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
          VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
@@ -238,6 +313,42 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
     } finally {
       stub.cleanup()
       rmSync(LOCK_PATH, { force: true })
+      const c2 = new Client({ connectionString: DATABASE_URL })
+      await c2.connect()
+      await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
+      await c2.end()
+    }
+  })
+
+  test('T-5: pending>0 but missing memory-ready evidence → send-keys NOT called', async () => {
+    requireDb()
+    const c = new Client({ connectionString: DATABASE_URL })
+    await c.connect()
+    try {
+      await seedSelfKickMemoryReady(c)
+      await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+      await c.query(
+        `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
+        [TEST_AGENT],
+      )
+    } finally {
+      await c.end()
+    }
+
+    const stub = makeStubDir()
+    try {
+      const r = runHook({
+        TMUX: 'fake',
+        AGENT_ID: TEST_AGENT,
+        DATABASE_URL,
+      }, stub.dir)
+      expect(r.status).toBe(0)
+      await sleep(3500)
+      const log = existsSync(stub.tmuxLog) ? readFileSync(stub.tmuxLog, 'utf-8') : ''
+      expect(log).not.toMatch(/send-keys/)
+    } finally {
+      stub.cleanup()
       const c2 = new Client({ connectionString: DATABASE_URL })
       await c2.connect()
       await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])

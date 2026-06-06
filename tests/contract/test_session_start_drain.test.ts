@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:tes
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { resetAutoSkipPatternsCache } from '../../config/auto-skip-patterns'
 
@@ -23,6 +24,72 @@ const dbDescribe = DATABASE_URL ? describe : describe.skip
 
 const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), '..', '..')
 const RUNNER = join(REPO_ROOT, 'hooks/session-start-drain.ts')
+const MEMORY_READY_MIGRATION = join(REPO_ROOT, 'db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql')
+let memoryReadyMigrationApplied = false
+
+async function ensureMemoryReadySchema(client: Client): Promise<void> {
+  if (memoryReadyMigrationApplied) return
+  await client.query(readFileSync(MEMORY_READY_MIGRATION, 'utf-8'))
+  memoryReadyMigrationApplied = true
+}
+
+async function cleanupMemoryReadyAgent(client: Client, agentId: string): Promise<void> {
+  await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [agentId])
+  await client.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = $1`, [agentId])
+  await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
+  await client.query(`DELETE FROM agents WHERE agent_id = $1`, [agentId])
+}
+
+async function seedMemoryReadyAgent(client: Client, agentId: string, agentType = 'dev'): Promise<void> {
+  await ensureMemoryReadySchema(client)
+  const runtimeId = randomUUID()
+  const port = 30_000 + Number.parseInt(runtimeId.slice(0, 4), 16) % 20_000
+  const sessionName = `${agentId}-memory-ready-session`
+  const checkoutPath = `/tmp/${agentId}-memory-ready`
+  await client.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = $1`, [agentId])
+  await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
+  await client.query(
+    `INSERT INTO agents
+       (agent_id, display_name, agent_type, runtime, status, channel_port,
+        metadata, profile_revision, profile_source, home_directory)
+     VALUES ($1, $1, $2, 'mcp', 'idle', $3, $4::jsonb, 1, 'legacy', $5)
+     ON CONFLICT (agent_id) DO UPDATE SET
+       agent_type = EXCLUDED.agent_type,
+       runtime = EXCLUDED.runtime,
+       status = EXCLUDED.status,
+       channel_port = EXCLUDED.channel_port,
+       metadata = EXCLUDED.metadata,
+       profile_revision = 1,
+       profile_source = 'legacy',
+       home_directory = EXCLUDED.home_directory`,
+    [agentId, agentType, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
+  )
+  await client.query(
+    `INSERT INTO agent_runtime_instances
+       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
+        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+     VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
+             $5, 'session-drain-test-head', 'running',
+             '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z',
+             '{"source":"session-start-drain-test"}'::jsonb)`,
+    [runtimeId, agentId, sessionName, port, checkoutPath],
+  )
+  await client.query(
+    `INSERT INTO runtime_memory_ready_evidence
+       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
+        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
+        valid_until, source, metadata)
+     VALUES
+       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
+        $3, $4, $1, $5, 'session-drain-test-head',
+        'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+        '/tmp/session-start-drain-memory-ready.json', 'session-start-drain-memory-ready',
+        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
+        '{"fixture":true}'::jsonb)`,
+    [agentId, runtimeId, sessionName, port, checkoutPath],
+  )
+}
 
 dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
   let client: Client
@@ -31,16 +98,18 @@ dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
   beforeAll(async () => {
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    await ensureMemoryReadySchema(client)
     resetAutoSkipPatternsCache()
   })
 
   beforeEach(async () => {
-    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    await cleanupMemoryReadyAgent(client, TEST_AGENT)
+    await seedMemoryReadyAgent(client, TEST_AGENT)
     seedCounter = 0
   })
 
   afterAll(async () => {
-    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [TEST_AGENT])
+    await cleanupMemoryReadyAgent(client, TEST_AGENT)
     await client.end()
   })
 
@@ -85,6 +154,17 @@ dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
     const r = runDrainHook()
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('drained=0')
+  })
+
+  test('missing memory-ready evidence blocks session-start drain without touching pending rows', async () => {
+    const messageId = await seed('actionable row waits for memory')
+    await client.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+
+    const r = runDrainHook()
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('memory_ready blocked reason=missing_evidence')
+    expect(r.stderr).toContain('drained=0')
+    expect((await statusOf(messageId)).status).toBe('pending')
   })
 
   test.skip('TODO #338 sub-PR 9 v0.9 schema (case 10) pending=10 with limit=5, mix → drained=5, only matched skipped, unmatched stay pending', async () => {
@@ -172,6 +252,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
   beforeAll(async () => {
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
+    await ensureMemoryReadySchema(client)
   })
 
   afterAll(async () => {
@@ -183,12 +264,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
   // and return the runner stdout/stderr/status.
   async function setupAndRun(opts: { agentType: string; agentIdPrefix: string; seedCount: number }): Promise<{ agentId: string; result: { stdout: string; stderr: string; status: number | null } }> {
     const agentId = `${opts.agentIdPrefix}-${randomUUID().slice(0, 8)}`
-    await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
-       VALUES ($1, $1, $2, 'mcp', 'idle')
-       ON CONFLICT (agent_id) DO UPDATE SET agent_type = EXCLUDED.agent_type`,
-      [agentId, opts.agentType],
-    )
+    await seedMemoryReadyAgent(client, agentId, opts.agentType)
     let counter = 0
     for (let i = 0; i < opts.seedCount; i++) {
       counter++
@@ -212,8 +288,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
   }
 
   async function cleanup(agentId: string): Promise<void> {
-    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [agentId])
-    await client.query(`DELETE FROM agents WHERE agent_id = $1`, [agentId])
+    await cleanupMemoryReadyAgent(client, agentId)
   }
 
   test('lead-bot (lead-* prefix) drains the full backlog (cap=100, plenty of headroom)', async () => {
@@ -246,11 +321,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
 
   test('per-agent env override beats role default (lead-* with limit=2 → 2 drained)', async () => {
     const agentId = `lead-override-${randomUUID().slice(0, 8)}`
-    await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
-       VALUES ($1, $1, 'org', 'mcp', 'idle') ON CONFLICT DO NOTHING`,
-      [agentId],
-    )
+    await seedMemoryReadyAgent(client, agentId, 'org')
     let counter = 0
     for (let i = 0; i < 6; i++) {
       counter++
@@ -265,7 +336,6 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
     const r = spawnSync('bun', [RUNNER], { env, encoding: 'utf-8' })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('drained=2')
-    await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [agentId])
-    await client.query(`DELETE FROM agents WHERE agent_id = $1`, [agentId])
+    await cleanupMemoryReadyAgent(client, agentId)
   })
 })

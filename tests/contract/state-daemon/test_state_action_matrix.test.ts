@@ -3,6 +3,8 @@ import { planQueueAction } from '../../../core/state-daemon/action-planner'
 
 const now = new Date('2026-05-17T00:00:00.000Z')
 const tui = { runtime: 'TUI', tmux_session: 'agent-session' }
+const memoryReadyGate = [{ kind: 'memory_ready' as const, required: true as const, status: 'pending' as const }]
+const noGates: [] = []
 
 describe('state_daemon state/action matrix planner', () => {
   test('pending + idle TUI agent plans wake_pending', () => {
@@ -12,7 +14,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'wake_pending', terminal: false })
+    })).toEqual({ kind: 'wake_pending', terminal: false, gates: memoryReadyGate })
   })
 
   test('pending + active claim plans observe_busy without terminal close', () => {
@@ -22,7 +24,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'observe_busy', terminal: false })
+    })).toEqual({ kind: 'observe_busy', terminal: false, gates: noGates })
   })
 
   test('pending + non-TUI runtime plans runtime_skip', () => {
@@ -32,7 +34,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'runtime_skip', terminal: false })
+    })).toEqual({ kind: 'runtime_skip', terminal: false, gates: noGates })
   })
 
   test('pending + idle Codex runtime plans invoke_codex_runner', () => {
@@ -42,7 +44,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'invoke_codex_runner', terminal: false })
+    })).toEqual({ kind: 'invoke_codex_runner', terminal: false, gates: memoryReadyGate })
   })
 
   test('pending + TUI legacy profile with Codex preference plans invoke_codex_runner', () => {
@@ -52,7 +54,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'invoke_codex_runner', terminal: false })
+    })).toEqual({ kind: 'invoke_codex_runner', terminal: false, gates: memoryReadyGate })
   })
 
   test('pending + busy Codex runtime plans observe_busy without duplicate runner', () => {
@@ -62,7 +64,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'observe_busy', terminal: false })
+    })).toEqual({ kind: 'observe_busy', terminal: false, gates: noGates })
   })
 
   test('pending + missing tmux plans tmux_missing', () => {
@@ -72,7 +74,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'tmux_missing', terminal: false })
+    })).toEqual({ kind: 'tmux_missing', terminal: false, gates: noGates })
   })
 
   test('pending + inactive agent is observed without wake', () => {
@@ -83,7 +85,7 @@ describe('state_daemon state/action matrix planner', () => {
         now,
         defaultRuntime: 'TUI',
         hasActiveClaim: false,
-      })).toEqual({ kind: 'agent_inactive', terminal: false })
+      })).toEqual({ kind: 'agent_inactive', terminal: false, gates: noGates })
     }
   })
 
@@ -94,7 +96,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'wake_received', terminal: false })
+    })).toEqual({ kind: 'wake_received', terminal: false, gates: memoryReadyGate })
   })
 
   test('live received inactive agent is observed without wake', () => {
@@ -104,7 +106,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'agent_inactive', terminal: false })
+    })).toEqual({ kind: 'agent_inactive', terminal: false, gates: noGates })
   })
 
   test('live received Codex runtime remains observed until a processing runner lands', () => {
@@ -114,7 +116,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'observe_received', terminal: false })
+    })).toEqual({ kind: 'observe_received', terminal: false, gates: noGates })
   })
 
   test('expired received work plans reclaim_expired without terminal close', () => {
@@ -124,7 +126,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'reclaim_expired', terminal: false })
+    })).toEqual({ kind: 'reclaim_expired', terminal: false, gates: memoryReadyGate })
   })
 
   test('in_progress work is observed and remains non-terminal', () => {
@@ -134,7 +136,7 @@ describe('state_daemon state/action matrix planner', () => {
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'observe_in_progress', terminal: false })
+    })).toEqual({ kind: 'observe_in_progress', terminal: false, gates: noGates })
   })
 
   test('terminal statuses are terminal_noop', () => {
@@ -145,7 +147,7 @@ describe('state_daemon state/action matrix planner', () => {
         now,
         defaultRuntime: 'TUI',
         hasActiveClaim: false,
-      })).toEqual({ kind: 'terminal_noop', terminal: true })
+      })).toEqual({ kind: 'terminal_noop', terminal: true, gates: noGates })
     }
   })
 })

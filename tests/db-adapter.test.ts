@@ -191,6 +191,7 @@ describe('migrateSqlite', () => {
     expect(names).toContain('agent_workspaces')
     expect(names).toContain('agent_workspace_bindings')
     expect(names).toContain('agent_runtime_instances')
+    expect(names).toContain('runtime_memory_ready_evidence')
     expect(names).toContain('agent_endpoints')
     expect(names).toContain('agent_identity_keys')
     expect(names).toContain('connector_instances')

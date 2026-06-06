@@ -32,6 +32,7 @@
 
 import { Client } from 'pg'
 import { drainPendingWithAutoSkip, type DrainSummary } from '../core/drain-with-auto-skip'
+import { evaluateRuntimeMemoryReadyGate } from '../core/runtime-memory-ready'
 
 // Issue #278 (F-3) — role-differential default drain scope.
 //
@@ -124,6 +125,15 @@ async function main(): Promise<DrainSummary> {
 
   let result: DrainSummary = { drained: 0, skipped: 0 }
   try {
+    const memoryReady = await evaluateRuntimeMemoryReadyGate(client as any, {
+      agent_id: agentId,
+      expected_agent_id: agentId,
+      project: process.env.AGENT_COMMS_MEMORY_READY_PROJECT ?? process.env.AGENT_MEMORY_PROJECT ?? 'agent-comms-mcp',
+    })
+    if (!memoryReady.ok) {
+      process.stderr.write(`session-start-drain: memory_ready blocked reason=${memoryReady.reason}\n`)
+      return result
+    }
     result = await drainPendingWithAutoSkip(client, agentId, limit)
   } catch (err) {
     process.stderr.write(`session-start-drain: query failed (non-fatal): ${err}\n`)

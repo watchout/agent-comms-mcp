@@ -104,6 +104,51 @@ function rows(): Array<{ id: number; status: string; claimed_by: string | null; 
   ).all(TEST_AGENT) as Array<{ id: number; status: string; claimed_by: string | null; content: string; message_type: string }>)
 }
 
+function deleteMemoryReadyEvidence(): void {
+  withDb((db) => {
+    db.prepare(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = ?`).run(TEST_AGENT)
+  })
+}
+
+function replaceMemoryReadyEvidence(overrides: Partial<{
+  runtime_instance_id: string
+  session_name: string
+  port: number
+  result_status: string
+  completed_at: string
+  valid_until: string
+}> = {}): void {
+  const row = {
+    runtime_instance_id: 'runtime-actionable-dev',
+    session_name: 'actionable-dev-session',
+    port: 39001,
+    result_status: 'ready',
+    completed_at: '2026-06-01T00:00:02.000Z',
+    valid_until: '2099-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+  withDb((db) => {
+    db.prepare(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = ?`).run(TEST_AGENT)
+    db.prepare(
+      `INSERT INTO runtime_memory_ready_evidence
+        (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
+         checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
+       VALUES (?, 'agent-comms-mcp', ?, 1, 'legacy', ?, ?, ?,
+         '/tmp/actionable-dev', 'test-head', 'test:mcp__wasurezu__recover_context', ?, ?,
+         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', ?, 'agent_memory_boot_recovery', '{}')`,
+    ).run(
+      TEST_AGENT,
+      row.runtime_instance_id,
+      row.session_name,
+      row.port,
+      TEST_AGENT,
+      row.result_status,
+      row.completed_at,
+      row.valid_until,
+    )
+  })
+}
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-actionable-'))
   dbPath = join(tmpDir, 'test.db')
@@ -125,6 +170,16 @@ beforeEach(() => {
         VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'codex', 'idle', '{"discord_id":"999001"}'),
                ('codex-cto', 'codex-cto', 'dev', 'codex', 'idle', '{"discord_id":"999002"}'),
                ('auditor', 'auditor', 'auditor', 'codex', 'idle', '{}');
+      UPDATE agents SET channel_port = 39001 WHERE agent_id = '${TEST_AGENT}';
+      INSERT INTO agent_runtime_instances
+        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
+        VALUES ('runtime-actionable-dev', '${TEST_AGENT}', 'codex', 'local_process', 'actionable-dev-session', 39001, '/tmp/actionable-dev', 'test-head', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z');
+      INSERT INTO runtime_memory_ready_evidence
+        (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
+         checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
+        VALUES ('${TEST_AGENT}', 'agent-comms-mcp', 'runtime-actionable-dev', 1, 'legacy', 'actionable-dev-session', 39001, '${TEST_AGENT}',
+         '/tmp/actionable-dev', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
       INSERT INTO channels (id, name, members)
         VALUES ('actionable-ch', 'actionable-ch', '["${TEST_AGENT}","codex-cto","auditor"]');
       INSERT INTO channel_routing_policy (channel_id, primary_agent_id, outbound_allowlist, policy_source)
@@ -175,6 +230,77 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === requestId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+  })
+
+  test('missing/stale/mismatched memory-ready evidence blocks receive-actionable and next-actionable before claim', () => {
+    const instructionId = seedQueue({ messageType: 'instruction', ageSeconds: 30, content: 'CTO instruction: do not claim without memory' })
+
+    deleteMemoryReadyEvidence()
+    let r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('memory_ready gate failed')
+    let body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      blocked_reason: 'memory_not_ready',
+      inspected_count: 0,
+      selected: null,
+      claimed: null,
+      selection_reason: 'memory_ready_missing_evidence',
+    })
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
+
+    replaceMemoryReadyEvidence({ valid_until: '2026-06-01T00:00:01.000Z' })
+    r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(r.status).toBe(1)
+    body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      blocked_reason: 'memory_not_ready',
+      inspected_count: 0,
+      selection_reason: 'memory_ready_expired',
+    })
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
+
+    replaceMemoryReadyEvidence({ runtime_instance_id: 'runtime-other-actionable-dev' })
+    r = runAun(['next-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(r.status).toBe(1)
+    body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      blocked_reason: 'memory_not_ready',
+      inspected_count: 0,
+      selection_reason: 'memory_ready_runtime_instance_mismatch',
+    })
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
+  test('pending report row is non-actionable and remains open without claim', () => {
+    const reportId = seedQueue({ messageType: 'report', ageSeconds: 60, content: 'status report only' })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(r.status).toBe(0)
+    expect(r.stderr).toBe('')
+    const body = JSON.parse(r.stdout)
+    expect(body).toEqual({ waiting: 1 })
+    expect(rows().find((row) => row.id === reportId)).toMatchObject({
+      status: 'pending',
+      claimed_by: null,
+      message_type: 'report',
+    })
+
+    const dryRun = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10', '--dry-run'])
+    expect(dryRun.status).toBe(0)
+    const summary = JSON.parse(dryRun.stdout)
+    expect(body).toMatchObject({
+      waiting: 1,
+    })
+    expect(summary).toMatchObject({
+      ok: true,
+      inspected_count: 1,
+      skipped_non_action_count: 1,
+      selected: null,
+      claimed: null,
+      memory_ready: { ok: true, reason: 'ready' },
+    })
   })
 
   test('queue-id mode claims the requested actionable row instead of selecting another row', () => {

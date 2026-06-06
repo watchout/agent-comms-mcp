@@ -193,6 +193,44 @@ describe('T10 received_expired_reclaim', () => {
       await h.daemon.stop()
     }
   })
+
+  test('expired received row without memory-ready evidence is not reclaimed or rewoken', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t10-memory-block')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    await pg.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [agent])
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'received',
+      created_at: new Date(T0.getTime() - 40_000),
+      claim_expires_at: new Date(T0.getTime() - 5_000),
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 35_000),
+    })
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.reclaimed).toBe(0)
+      expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_blocked',
+        action: 'reclaim_expired',
+        reason: 'missing_evidence',
+      })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
+      expect(row.status).toBe('received')
+      expect(row.claimed_by).toBe(agent)
+      expect(row.claimed_at).toBeInstanceOf(Date)
+      expect(row.claim_expires_at).toBeInstanceOf(Date)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T11 ───────────────────────────────────────────────────────────────────────
