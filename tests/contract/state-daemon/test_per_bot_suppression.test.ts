@@ -43,8 +43,8 @@ async function insertPending(agent: string, when: Date, count: number): Promise<
   for (let i = 0; i < count; i++) {
     const ins = await pg.query(
       `INSERT INTO message_queue (agent_id, status, payload, created_at)
-         VALUES ($1, 'pending', '{}', $2) RETURNING id`,
-      [agent, when],
+         VALUES ($1, 'pending', $3, $2) RETURNING id`,
+      [agent, when, JSON.stringify({ message_type: 'instruction', content: 'TUI prompt-disabled fixture work' })],
     )
     ids.push(Number((ins.rows as Array<{ id: number }>)[0].id))
   }

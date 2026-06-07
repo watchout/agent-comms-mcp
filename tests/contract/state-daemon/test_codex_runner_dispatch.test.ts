@@ -167,7 +167,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-111111111111',
-      payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work' }),
+      payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
 
@@ -191,7 +191,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         messageId: '11111111-1111-4111-8111-111111111111',
         requester: 'codex-cto',
         databaseUrl: 'postgresql:///agent_comms?host=/tmp',
-        payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work' }),
+        payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
         completeNoReply: false,
         completionReason: null,
       })
@@ -211,6 +211,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     await seedAgent(pg, {
       agent_id: agent,
       runtime: 'codex',
+      discord_id: '999010',
       tmux_session: null,
       status: 'online',
       last_seen_at: '2026-05-18T00:00:01.000Z',
@@ -219,7 +220,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-333333333333',
-      payload: JSON.stringify({ author_id: 'codex-cto', content: '<@999010> 疎通テスト', message_type: 'chat' }),
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: '<@999010> 疎通テスト',
+        message_type: 'chat',
+        source: 'discord',
+        input_mentions: ['999010'],
+      }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
 
@@ -278,6 +285,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     await seedAgent(pg, {
       agent_id: agent,
       runtime: 'codex',
+      discord_id: '999010',
       tmux_session: null,
       status: 'online',
       last_seen_at: '2026-05-18T00:00:01.000Z',
@@ -286,7 +294,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-444444444444',
-      payload: JSON.stringify({ author_id: 'codex-cto', content: '<@999010> 日本語で返答して', message_type: 'chat' }),
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: '<@999010> 日本語で返答して',
+        message_type: 'chat',
+        source: 'discord',
+        input_mentions: ['999010'],
+      }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
 
@@ -647,7 +661,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-333333333333',
-      payload: JSON.stringify({ author_id: 'ceo', content: '<@999010> 疎通テスト' }),
+      payload: JSON.stringify({ author_id: 'ceo', content: '<@999010> 疎通テスト', message_type: 'instruction' }),
     })
 
     const runner = new FakeCodexRunner()
@@ -692,7 +706,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-444444444444',
-      payload: JSON.stringify({ author_id: 'ceo', content: '<@999010> 疎通テスト without tmux' }),
+      payload: JSON.stringify({ author_id: 'ceo', content: '<@999010> 疎通テスト without tmux', message_type: 'instruction' }),
     })
 
     const runner = new FakeCodexRunner()

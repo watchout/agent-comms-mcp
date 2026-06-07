@@ -6,6 +6,8 @@ export type QueueActionKind =
   | 'reclaim_expired'
   | 'observe_received'
   | 'observe_in_progress'
+  | 'terminal_non_actionable'
+  | 'routing_hold'
   | 'terminal_noop'
   | 'runtime_skip'
   | 'tmux_missing'

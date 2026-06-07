@@ -311,7 +311,7 @@ const MAX_INSPECT_CAP = 200
 const DEFAULT_RECONCILE_LIMIT = 50
 const MAX_RECONCILE_LIMIT = 200
 const ACTIONABLE_TYPES = new Set(['instruction', 'request', 'question'])
-const NON_ACTION_TYPES = new Set(['chat', 'notice', 'projection'])
+const NON_ACTION_TYPES = new Set(['report', 'chat', 'notice', 'projection'])
 const TERMINAL_STATUSES = new Set(['done', 'replied', 'skipped', 'failed'])
 const ACTIVE_STATUSES = new Set(['read', 'received', 'in_progress'])
 

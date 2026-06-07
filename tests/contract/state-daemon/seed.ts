@@ -71,6 +71,7 @@ export interface SeedAgent {
   runtime?: 'TUI' | 'SIG' | 'codex' | 'codex-runner'
   runtime_engine_preference?: 'codex' | 'codex-runner' | 'claude-code' | null
   tmux_session?: string | null
+  discord_id?: string | null
   status?: 'online' | 'offline' | 'idle' | 'busy' | 'restarting'
   last_seen_at?: Date | string
 }
@@ -81,6 +82,9 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   const metadata: Record<string, unknown> = {}
   if (a.tmux_session !== null) {
     metadata.tmux_session = a.tmux_session ?? `${a.agent_id}-session`
+  }
+  if (a.discord_id) {
+    metadata.discord_id = a.discord_id
   }
   await c.query(
     `INSERT INTO agents
@@ -130,7 +134,7 @@ export async function seedQueueRow(c: Client, r: SeedQueueRow): Promise<number> 
       r.agent_id,
       r.status ?? 'pending',
       r.message_id ?? null,
-      r.payload ?? '{}',
+      r.payload ?? JSON.stringify({ message_type: 'instruction', content: 'state-daemon fixture work' }),
       r.claim_expires_at ?? null,
       r.claimed_by ?? null,
       r.claimed_at ?? null,
