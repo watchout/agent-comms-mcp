@@ -16,16 +16,20 @@ export type GateReportName =
   | 'activation-plan'
   | 'discord-projection'
   | 'state-daemon-readiness'
+  | 'runtime-inventory'
+  | 'fleet-readiness'
   | 'queue-processing-readiness'
   | 'install-plan'
 
 const REQUIRED_REPORTS: GateReportName[] = [
   'cp70-preflight',
-  'recovery-readiness',
-  'activation-plan',
   'discord-projection',
   'state-daemon-readiness',
+  'runtime-inventory',
+  'fleet-readiness',
   'queue-processing-readiness',
+  'recovery-readiness',
+  'activation-plan',
   'install-plan',
 ]
 
@@ -39,6 +43,9 @@ export interface GatePackOptions {
   installPlanCommit: string
   includeInstallPlan: boolean
   repoRoot: string
+  approvedCommit: string | null
+  approvedCheckoutRoots: string[]
+  driftExclusionFile: string | null
 }
 
 export interface GateCommand {
@@ -121,6 +128,38 @@ function flagBool(flags: Record<string, string | true>, key: string, fallback = 
   if (value === undefined) return fallback
   if (value === true) return true
   return !['', '0', 'false', 'no', 'off'].includes(value.toLowerCase())
+}
+
+function flagOptional(flags: Record<string, string | true>, key: string): string | null {
+  const value = flags[key]
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
+function parseCsv(raw: string | null): string[] {
+  if (!raw) return []
+  return raw.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function runtimeInventoryDriftArgs(options: GatePackOptions): string[] {
+  const args: string[] = []
+  if (options.approvedCommit) args.push('--expected-commit', options.approvedCommit)
+  if (options.approvedCheckoutRoots.length > 0) args.push('--approved-checkout-root', options.approvedCheckoutRoots.join(','))
+  return args
+}
+
+function fleetReadinessDriftArgs(options: GatePackOptions): string[] {
+  const args: string[] = []
+  if (options.approvedCommit) args.push('--approved-commit', options.approvedCommit)
+  if (options.approvedCheckoutRoots.length > 0) args.push('--approved-checkout-root', options.approvedCheckoutRoots.join(','))
+  if (options.driftExclusionFile) args.push('--drift-exclusion-file', options.driftExclusionFile)
+  return args
+}
+
+function stateDaemonDriftArgs(options: GatePackOptions): string[] {
+  const args: string[] = []
+  if (options.approvedCommit) args.push('--expected-commit', options.approvedCommit)
+  if (options.approvedCheckoutRoots.length > 0) args.push('--expected-checkout-root', options.approvedCheckoutRoots[0])
+  return args
 }
 
 function runText(command: string, args: string[], cwd: string): string | null {
@@ -240,7 +279,30 @@ export function buildReadOnlyGateCommands(options: GatePackOptions): GateCommand
       report: 'state-daemon-readiness',
       outputFile: join(out, 'state-daemon-readiness.json'),
       command: 'bun',
-      args: ['cli/index.ts', 'state-daemon', 'readiness', '--format', 'json'],
+      args: ['cli/index.ts', 'state-daemon', 'readiness', '--format', 'json', ...stateDaemonDriftArgs(options)],
+    },
+    {
+      report: 'runtime-inventory',
+      outputFile: join(out, 'runtime-inventory.json'),
+      command: 'bun',
+      args: ['cli/index.ts', 'runtime', 'inventory', '--format', 'json', ...runtimeInventoryDriftArgs(options)],
+      env: dbEnv,
+    },
+    {
+      report: 'fleet-readiness',
+      outputFile: join(out, 'fleet-readiness.json'),
+      command: 'bun',
+      args: [
+        'cli/index.ts',
+        'fleet',
+        'readiness',
+        '--format',
+        'json',
+        '--operator-agent-id',
+        options.agentId,
+        ...fleetReadinessDriftArgs(options),
+      ],
+      env: dbEnv,
     },
     {
       report: 'queue-processing-readiness',
@@ -411,6 +473,10 @@ function blockerCodes(report: Record<string, unknown>): string[] {
     if (typeof rec.code === 'string') codes.add(rec.code)
   }
   for (const item of Array.isArray(report.blockers) ? report.blockers : []) {
+    if (typeof item === 'string' && item.trim().length > 0) {
+      codes.add(item.trim())
+      continue
+    }
     const rec = asRecord(item)
     if (typeof rec.code === 'string') codes.add(rec.code)
   }
@@ -506,6 +572,7 @@ export function optionsFromArgv(argv: string[], repoRoot = resolve(join(import.m
   const { flags } = parseArgs(argv)
   const outputDir = resolve(flagString(flags, 'output-dir', 'evidence'))
   const head = repoHead(repoRoot) ?? '0000000'
+  const approvedCommit = flagOptional(flags, 'approved-commit') ?? flagOptional(flags, 'expected-commit')
   return {
     outputDir,
     databaseUrl: flagString(flags, 'database-url', process.env.DATABASE_URL ?? 'postgresql:///agent_comms?host=/tmp'),
@@ -516,6 +583,9 @@ export function optionsFromArgv(argv: string[], repoRoot = resolve(join(import.m
     installPlanCommit: flagString(flags, 'install-plan-commit', head),
     includeInstallPlan: !flagBool(flags, 'skip-install-plan', false),
     repoRoot,
+    approvedCommit,
+    approvedCheckoutRoots: parseCsv(flagOptional(flags, 'approved-checkout-root') ?? flagOptional(flags, 'approved-checkout-roots')),
+    driftExclusionFile: flagOptional(flags, 'drift-exclusion-file'),
   }
 }
 

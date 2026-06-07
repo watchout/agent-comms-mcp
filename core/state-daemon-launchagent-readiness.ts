@@ -1,6 +1,6 @@
 import { existsSync, statSync, accessSync, constants, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import {
   fingerprintFatalStderr,
   inspectStateDaemonRuntime,
@@ -52,6 +52,7 @@ export interface StateDaemonLaunchAgentReadinessReport {
     allow_private_tmp: boolean
     expected_working_directory: string | null
     expected_checkout_root: string | null
+    expected_commit: string | null
     expected_agent_id: string | null
   }
   policy: {
@@ -123,6 +124,7 @@ export interface StateDaemonLaunchAgentReadinessOptions {
   allowPrivateTmp?: boolean
   expectedWorkingDirectory?: string | null
   expectedCheckoutRoot?: string | null
+  expectedCommit?: string | null
   expectedAgentId?: string | null
   inspectRuntime?: (options?: StateDaemonRuntimeOptions) => StateDaemonRuntimeReadiness
   runtimeOptions?: StateDaemonRuntimeOptions
@@ -217,6 +219,16 @@ function safeAgentIds(label: string): Set<string> {
   return new Set(['state-daemon', 'state_daemon', label])
 }
 
+function normalizeText(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null
+  const value = String(raw).trim()
+  return value ? value : null
+}
+
+function commitMatches(actual: string, expected: string): boolean {
+  return actual === expected || actual.startsWith(expected) || expected.startsWith(actual)
+}
+
 function uniqueFindings(findings: StateDaemonLaunchAgentReadinessFinding[]): StateDaemonLaunchAgentReadinessFinding[] {
   const seen = new Set<string>()
   const out: StateDaemonLaunchAgentReadinessFinding[] = []
@@ -265,6 +277,7 @@ export function buildStateDaemonLaunchAgentReadinessReport(
   const allowPrivateTmp = options.allowPrivateTmp === true
   const expectedWorkingDirectory = options.expectedWorkingDirectory ? resolve(options.expectedWorkingDirectory) : null
   const expectedCheckoutRoot = options.expectedCheckoutRoot ? resolve(options.expectedCheckoutRoot) : null
+  const expectedCommit = normalizeText(options.expectedCommit)
   const expectedAgentId = options.expectedAgentId ?? null
   const runtime = inspectRuntime({
     ...(options.runtimeOptions ?? {}),
@@ -299,6 +312,7 @@ export function buildStateDaemonLaunchAgentReadinessReport(
   const stderrPath = config?.standardErrorPath ?? runtime.paths.stderr_path
   const env = config?.environmentVariables ?? {}
   const agentId = env.AGENT_ID ?? null
+  const restoreCommit = normalizeText(env.STATE_DAEMON_RESTORE_COMMIT)
   const blockers: StateDaemonLaunchAgentReadinessFinding[] = []
   const warnings: StateDaemonLaunchAgentReadinessFinding[] = []
 
@@ -339,6 +353,23 @@ export function buildStateDaemonLaunchAgentReadinessReport(
       path: workingDirectory,
       evidence: { expected_checkout_root: expectedCheckoutRoot },
     }))
+  }
+  if (expectedCommit) {
+    if (!restoreCommit) {
+      blockers.push(finding('RESTORE_COMMIT_MISSING', 'blocker', 'path', 'STATE_DAEMON_RESTORE_COMMIT is missing from LaunchAgent EnvironmentVariables', {
+        evidence: { expected_commit: expectedCommit },
+      }))
+    } else if (!commitMatches(restoreCommit, expectedCommit)) {
+      blockers.push(finding('RESTORE_COMMIT_MISMATCH', 'blocker', 'path', 'STATE_DAEMON_RESTORE_COMMIT does not match the approved deployed commit', {
+        evidence: { restore_commit: restoreCommit, expected_commit: expectedCommit },
+      }))
+    }
+    if (workingDirectory && !commitMatches(basename(resolve(workingDirectory)), expectedCommit)) {
+      blockers.push(finding('WORKING_DIRECTORY_COMMIT_MISMATCH', 'blocker', 'path', 'WorkingDirectory checkout segment does not match the approved deployed commit', {
+        path: workingDirectory,
+        evidence: { expected_commit: expectedCommit },
+      }))
+    }
   }
   if (runtime.process.cwd && workingDirectory && resolve(runtime.process.cwd) !== resolve(workingDirectory)) {
     blockers.push(finding('PROCESS_CWD_MISMATCH', 'blocker', 'process', 'running process cwd differs from LaunchAgent WorkingDirectory', {
@@ -398,6 +429,7 @@ export function buildStateDaemonLaunchAgentReadinessReport(
       allow_private_tmp: allowPrivateTmp,
       expected_working_directory: expectedWorkingDirectory,
       expected_checkout_root: expectedCheckoutRoot,
+      expected_commit: expectedCommit,
       expected_agent_id: expectedAgentId,
     },
     policy: policy(),

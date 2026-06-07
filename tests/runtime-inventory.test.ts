@@ -38,10 +38,10 @@ async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<
         ('gap-channel', 'gap-dev', 'gap-dev', '["gap-dev"]');
 
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, checkout_path, commit_sha, status, last_seen_at)
+        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, checkout_path, commit_sha, status, last_seen_at, metadata)
       VALUES
-        ('runtime-hotel', 'hotel-dev', 'codex', 'local_process', 'discord-hotel', 101, '/tmp/hotel', 'abc123', 'active', datetime('now')),
-        ('runtime-stale', 'stale-dev', 'codex', 'local_process', 'discord-stale', 202, '/tmp/stale', 'old999', 'active', '2020-01-01T00:00:00Z');
+        ('runtime-hotel', 'hotel-dev', 'codex', 'local_process', 'discord-hotel', 101, '/tmp/hotel', 'abc123', 'active', datetime('now'), '{"git_dirty":false}'),
+        ('runtime-stale', 'stale-dev', 'codex', 'local_process', 'discord-stale', 202, '/tmp/stale', 'old999', 'active', '2020-01-01T00:00:00Z', '{"git_dirty":true}');
 
       INSERT INTO connector_instances
         (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, trust_status)
@@ -85,6 +85,7 @@ describe('runtime inventory', () => {
       expect(stale?.freshness).toBe('stale')
       expect(stale?.warnings).toContain('runtime_stale')
       expect(stale?.warnings).toContain('runtime_commit_mismatch')
+      expect(stale?.warnings).toContain('runtime_dirty_checkout')
       expect(hotelConnector?.active_binding_count).toBe(3)
       expect(report.policy_gaps).toEqual([
         {
@@ -125,6 +126,7 @@ describe('runtime inventory', () => {
         },
       ])
       expect(report.blockers).toContain('stale-dev:runtime_stale')
+      expect(report.blockers).toContain('stale-dev:runtime_dirty_checkout')
       expect(report.blockers).toContain('bidirectional-channel:missing_active_binding')
       expect(report.blockers).toContain('gap-channel:missing_active_binding')
       expect(report.blockers).toContain('role-gap-channel:missing_active_binding')
@@ -151,6 +153,21 @@ describe('runtime inventory', () => {
         reason: 'missing_active_binding',
         active_binding_agents: [],
       })
+    })
+  })
+
+  test('approved checkout roots produce fail-closed runtime path blockers', async () => {
+    await withRuntimeDb(async (db) => {
+      const report = await buildRuntimeInventoryReport(db, {
+        staleMinutes: 60,
+        expectedCommit: 'abc123',
+        approvedCheckoutRoots: ['/approved/fleet/checkouts'],
+      })
+
+      const hotel = report.agents.find((agent) => agent.agent_id === 'hotel-dev')
+      expect(hotel?.warnings).toContain('runtime_checkout_path_unapproved')
+      expect(hotel?.checkout_drift.approved_checkout_roots).toEqual(['/approved/fleet/checkouts'])
+      expect(report.blockers).toContain('hotel-dev:runtime_checkout_path_unapproved')
     })
   })
 })

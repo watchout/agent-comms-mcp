@@ -140,6 +140,7 @@ import {
   inferRuntimeSessionName,
   parseRuntimePort,
 } from './core/runtime-heartbeat'
+import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './core/git-checkout-evidence'
 import {
   heartbeatAgentStatus,
   markAgentOfflineIfNoOtherLiveRuntime,
@@ -386,6 +387,7 @@ function currentRuntimeCommitSha(): string | null {
   }
 }
 const RUNTIME_COMMIT_SHA = currentRuntimeCommitSha()
+const RUNTIME_CHECKOUT_EVIDENCE = collectGitCheckoutEvidence(process.env.AGENT_COM_CHECKOUT_PATH ?? SERVER_ROOT)
 
 function tokenFingerprint(token: string): string | null {
   const trimmed = token.trim()
@@ -442,6 +444,7 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     metadata: {
       source: 'server.ts',
       server_root: SERVER_ROOT,
+      ...gitCheckoutMetadata(RUNTIME_CHECKOUT_EVIDENCE),
       discord_gateway_ready: registeredDiscordClient?.isConnected() ?? false,
       discord_client_registered: registeredDiscordClient != null,
     },

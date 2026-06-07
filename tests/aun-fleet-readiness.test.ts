@@ -141,6 +141,87 @@ describe('AUN fleet readiness', () => {
     expect(ready?.readiness).toBe('ready')
   })
 
+  test('approved checkout gate blocks tmux-only, stale, unapproved, and dirty runtimes', async () => {
+    const db = fakeDb()
+    const originalQuery = db.query
+    db.query = async (sql: string) => {
+      if (sql.includes('FROM agent_runtime_instances')) {
+        return [
+          {
+            runtime_instance_id: 'runtime-ready',
+            agent_id: 'ready-dev',
+            status: 'running',
+            stopped_at: null,
+            checkout_path: '/fleet/checkouts/abc123',
+            commit_sha: 'abc123',
+            metadata: { git_dirty: false },
+          },
+          {
+            runtime_instance_id: 'runtime-offline',
+            agent_id: 'offline-dev',
+            status: 'running',
+            stopped_at: null,
+            checkout_path: '/Users/yuji/Developer/agent-comms-mcp',
+            commit_sha: 'old999',
+            metadata: { git_dirty: true },
+          },
+        ]
+      }
+      return originalQuery(sql)
+    }
+
+    const report = await buildAunFleetReadinessReport(db, {
+      approvedCommit: 'abc123',
+      approvedCheckoutRoots: ['/fleet/checkouts'],
+      requireSmoke: false,
+    })
+
+    const byAgent = Object.fromEntries(report.agents.map((agent) => [agent.agent_id, agent]))
+    expect(byAgent['ready-dev'].readiness).toBe('ready')
+    expect(byAgent['ready-dev'].checkout_drift.ok).toBe(true)
+    expect(byAgent['codex-aun'].blockers).toContain('no_runtime_evidence')
+    expect(byAgent['offline-dev'].blockers).toContain('runtime_commit_mismatch')
+    expect(byAgent['offline-dev'].blockers).toContain('runtime_checkout_path_unapproved')
+    expect(byAgent['offline-dev'].blockers).toContain('runtime_dirty_checkout')
+    expect(report.blockers).toContain('offline-dev:runtime_dirty_checkout')
+  })
+
+  test('bounded drift exclusion requires actor, reason, expiry, and scope', async () => {
+    const report = await buildAunFleetReadinessReport(fakeDb(), {
+      approvedCommit: 'abc123',
+      approvedCheckoutRoots: ['/fleet/checkouts'],
+      requireSmoke: false,
+      now: new Date('2026-06-08T00:00:00.000Z'),
+      driftExclusions: [
+        {
+          agent_id: 'codex-aun',
+          actor: 'operator',
+          reason: 'outside current activation scope',
+          expires_at: '2026-06-09T00:00:00.000Z',
+          scope: 'fleet_checkout_drift',
+        },
+        {
+          agent_id: 'missing-runtime',
+          actor: 'operator',
+          reason: 'expired exclusion ignored',
+          expires_at: '2026-06-07T00:00:00.000Z',
+          scope: 'fleet_checkout_drift',
+        },
+      ],
+    })
+
+    const byAgent = Object.fromEntries(report.agents.map((agent) => [agent.agent_id, agent]))
+    expect(byAgent['codex-aun'].readiness).toBe('excluded')
+    expect(byAgent['codex-aun'].approved_exclusion).toMatchObject({
+      actor: 'operator',
+      reason: 'outside current activation scope',
+      scope: 'fleet_checkout_drift',
+    })
+    expect(byAgent['codex-aun'].blockers).toContain('approved_fleet_exclusion')
+    expect(byAgent['missing-runtime'].readiness).toBe('activation_candidate')
+    expect(byAgent['missing-runtime'].blockers).toContain('no_runtime_evidence')
+  })
+
   test('formats a compact operator report', async () => {
     const report = await buildAunFleetReadinessReport(fakeDb(), {
       smokeRunId: 'RUN1',

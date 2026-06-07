@@ -15,16 +15,22 @@ function plist(options: {
   entry?: string
   workingDirectory?: string
   label?: string
-  agentId?: string | null
-  stderrPath?: string
-} = {}): string {
+	  agentId?: string | null
+	  stderrPath?: string
+	  restoreCommit?: string | null
+	} = {}): string {
   const program = options.program ?? '/opt/homebrew/bin/bun'
   const entry = options.entry ?? '/opt/agent-comms/bin/state-daemon.ts'
   const cwd = options.workingDirectory ?? '/opt/agent-comms'
   const label = options.label ?? 'com.agent-comms.state-daemon'
-  const agentId = options.agentId === undefined ? null : options.agentId
-  const agentEnv = agentId ? `<key>AGENT_ID</key><string>${agentId}</string>` : ''
-  const stderrPath = options.stderrPath ?? `${cwd}/logs/state-daemon.err.log`
+	  const agentId = options.agentId === undefined ? null : options.agentId
+	  const agentEnv = agentId ? `<key>AGENT_ID</key><string>${agentId}</string>` : ''
+	  const restoreEnv = options.restoreCommit === undefined
+	    ? ''
+	    : options.restoreCommit === null
+	      ? ''
+	      : `<key>STATE_DAEMON_RESTORE_COMMIT</key><string>${options.restoreCommit}</string>`
+	  const stderrPath = options.stderrPath ?? `${cwd}/logs/state-daemon.err.log`
   return `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
@@ -41,10 +47,11 @@ function plist(options: {
   <string>${stderrPath}</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>DATABASE_URL</key><string>postgresql:///agent_comms?host=/tmp</string>
-    <key>STATE_DAEMON_AGENT_DENYLIST</key><string>ceo,test</string>
-    ${agentEnv}
-  </dict>
+	    <key>DATABASE_URL</key><string>postgresql:///agent_comms?host=/tmp</string>
+	    <key>STATE_DAEMON_AGENT_DENYLIST</key><string>ceo,test</string>
+	    ${agentEnv}
+	    ${restoreEnv}
+	  </dict>
 </dict>
 </plist>`
 }
@@ -119,19 +126,21 @@ function build(options: {
   pathProbe?: PathProbe
   plistExists?: boolean
   requireRunning?: boolean
-  expectedAgentId?: string | null
-  expectedWorkingDirectory?: string | null
-  expectedCheckoutRoot?: string | null
-} = {}) {
+	  expectedAgentId?: string | null
+	  expectedWorkingDirectory?: string | null
+	  expectedCheckoutRoot?: string | null
+	  expectedCommit?: string | null
+	} = {}) {
   const plistPath = '/launch/com.agent-comms.state-daemon.plist'
   const text = options.plistText ?? plist()
   return buildStateDaemonLaunchAgentReadinessReport({
     plistPath,
     now: () => new Date('2026-06-02T00:00:00.000Z'),
     requireRunning: options.requireRunning,
-    expectedAgentId: options.expectedAgentId,
-    expectedWorkingDirectory: options.expectedWorkingDirectory,
-    expectedCheckoutRoot: options.expectedCheckoutRoot,
+	    expectedAgentId: options.expectedAgentId,
+	    expectedWorkingDirectory: options.expectedWorkingDirectory,
+	    expectedCheckoutRoot: options.expectedCheckoutRoot,
+	    expectedCommit: options.expectedCommit,
     inspectRuntime: () => options.runtime ?? runtime(),
     pathProbe: options.pathProbe ?? probe(),
     existsSync: ((path: string) => {
@@ -234,8 +243,44 @@ describe('#603 state-daemon LaunchAgent readiness diagnostic', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((item) => item.code)).toContain('AGENT_ID_MISMATCH')
     expect(report.identity.agent_id).toBe('codex-cto')
-    expect(report.identity.expected_agent_id).toBe('state-daemon')
-  })
+	  expect(report.identity.expected_agent_id).toBe('state-daemon')
+	})
+
+	test('expected commit drift is a blocker without changing LaunchAgent state', () => {
+	  const report = build({
+	    plistText: plist({
+	      workingDirectory: '/Users/yuji/.agent-comms/state-daemon/checkouts/old999',
+	      restoreCommit: 'old999',
+	    }),
+	    runtime: runtime({
+	      process: {
+	        pid: 123,
+	        command: '/opt/homebrew/bin/bun /Users/yuji/.agent-comms/state-daemon/checkouts/old999/bin/state-daemon.ts',
+	        cwd: '/Users/yuji/.agent-comms/state-daemon/checkouts/old999',
+	      },
+	      paths: {
+	        program: '/opt/homebrew/bin/bun',
+	        script: '/Users/yuji/.agent-comms/state-daemon/checkouts/old999/bin/state-daemon.ts',
+	        working_directory: '/Users/yuji/.agent-comms/state-daemon/checkouts/old999',
+	        stdout_path: '/Users/yuji/.agent-comms/state-daemon/checkouts/old999/logs/state-daemon.out.log',
+	        stderr_path: '/Users/yuji/.agent-comms/state-daemon/checkouts/old999/logs/state-daemon.err.log',
+	        plist_path: '/launch/com.agent-comms.state-daemon.plist',
+	      },
+	    }),
+	    pathProbe: probe({
+	      directories: ['/Users/yuji/.agent-comms/state-daemon/checkouts/old999'],
+	    }),
+	    expectedCheckoutRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+	    expectedCommit: 'abc123',
+	  })
+
+	  expect(report.ok).toBe(false)
+	  expect(report.go_no_go).toBe('NO_GO')
+	  expect(report.scope.expected_commit).toBe('abc123')
+	  expect(report.blockers.map((item) => item.code)).toContain('RESTORE_COMMIT_MISMATCH')
+	  expect(report.blockers.map((item) => item.code)).toContain('WORKING_DIRECTORY_COMMIT_MISMATCH')
+	  expect(report.restart_performed).toBe(false)
+	})
 
   test('unloaded or not running is report-only by default', () => {
     const report = build({

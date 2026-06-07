@@ -555,6 +555,7 @@ describe('T11b — runtime inventory CLI surface', () => {
   test('help documents the runtime inventory report', () => {
     expect(CLI_SRC).toMatch(/runtime inventory \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/\[--binding-role outbound\]/)
+    expect(CLI_SRC).toMatch(/\[--approved-checkout-root <path\[,path\]>\]/)
     expect(CLI_SRC).toMatch(/read-only runtime\/connector\/binding freshness report/)
   })
 
@@ -566,6 +567,8 @@ describe('T11b — runtime inventory CLI surface', () => {
     expect(RUNTIME_INVENTORY_SRC).toMatch(/channel_routing_policy/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/binding_role/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/missing_active_binding/)
+    expect(RUNTIME_INVENTORY_SRC).toMatch(/runtime_checkout_path_unapproved/)
+    expect(RUNTIME_INVENTORY_SRC).toMatch(/runtime_dirty_checkout/)
     expect(RUNTIME_INVENTORY_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
   })
 })
@@ -612,6 +615,8 @@ describe('T11d — AUN fleet readiness CLI surface', () => {
   test('help documents the fleet readiness report', () => {
     expect(CLI_SRC).toMatch(/fleet readiness \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/\[--include-disabled\] \[--include-test\]/)
+    expect(CLI_SRC).toMatch(/\[--approved-commit <sha>\]/)
+    expect(CLI_SRC).toMatch(/\[--drift-exclusion-file <json>\]/)
     expect(CLI_SRC).toMatch(/read-only all-agent AUN readiness gates and activation blockers/)
   })
 
@@ -620,6 +625,8 @@ describe('T11d — AUN fleet readiness CLI surface', () => {
     expect(AUN_FLEET_READINESS_SRC).toMatch(/STATE_DAEMON_AGENT_DENYLIST/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/disabled_profile_excluded/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/test_profile_excluded/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/runtime_checkout_path_unapproved/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/approved_fleet_exclusion/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/smoke_request_not_terminal/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/smoke_ack_missing/)
     expect(AUN_FLEET_READINESS_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
@@ -656,8 +663,12 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
 
   test('help documents state-daemon LaunchAgent readiness diagnostic', () => {
     expect(CLI_SRC).toMatch(/state-daemon readiness \[--plist-path <path>\]/)
+    expect(CLI_SRC).toMatch(/\[--expected-commit <sha>\]/)
+    expect(CLI_SRC).toMatch(/\[--expected-checkout-root <path>\]/)
     expect(CLI_SRC).toMatch(/read-only LaunchAgent persistent-path readiness diagnostic; no restart/)
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/issue_ref: '#603'/)
+    expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/RESTORE_COMMIT_MISMATCH/)
+    expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/WORKING_DIRECTORY_COMMIT_MISMATCH/)
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/no_state_daemon_restart: true/)
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/no_launchctl_bootstrap_or_kickstart: true/)
     expect(STATE_DAEMON_LAUNCHAGENT_READINESS_SRC).toMatch(/restart_performed: false/)

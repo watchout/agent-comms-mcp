@@ -50,8 +50,9 @@ import {
   parseLsofTcpListeners,
 } from '../core/runtime-cleanup'
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
-import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
+import { buildAunFleetReadinessReport, formatAunFleetReadinessText, type AunFleetDriftExclusion } from '../core/aun-fleet-readiness'
 import { buildFullChannelSmokeReport, formatFullChannelSmokeText } from '../core/full-channel-smoke'
+import { collectGitCheckoutEvidence, gitCheckoutMetadata } from '../core/git-checkout-evidence'
 import {
   buildQueueProcessingReadinessReport,
   buildQueueWakeSmokeReport,
@@ -4331,6 +4332,26 @@ function loadRecoveryReadinessScope(path: string): RecoveryReadinessScope {
   return loadJsonObjectFile(path, 'scope-file') as RecoveryReadinessScope
 }
 
+function loadFleetDriftExclusions(path: string | undefined): AunFleetDriftExclusion[] {
+  if (!path) return []
+  const parsed = loadJsonObjectFile(path, 'drift-exclusion-file')
+  const exclusions = parsed.exclusions
+  if (!Array.isArray(exclusions)) {
+    console.error('Error: --drift-exclusion-file must contain a JSON object with an exclusions array')
+    process.exit(2)
+  }
+  return exclusions
+    .filter((item): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      agent_id: typeof item.agent_id === 'string' ? item.agent_id : null,
+      target_agent: typeof item.target_agent === 'string' ? item.target_agent : null,
+      actor: typeof item.actor === 'string' ? item.actor : null,
+      reason: typeof item.reason === 'string' ? item.reason : null,
+      expires_at: typeof item.expires_at === 'string' ? item.expires_at : null,
+      scope: typeof item.scope === 'string' ? item.scope : null,
+    }))
+}
+
 function loadRecoveryReadinessReport(path: string): RecoveryReadinessReport {
   return loadJsonObjectFile(path, 'readiness-report') as RecoveryReadinessReport
 }
@@ -4395,7 +4416,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
-        : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]')
+        : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
     process.exit(2)
   }
   if (subcommand === 'install-plan') {
@@ -4461,6 +4482,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     allowPrivateTmp: flagEnabled(flags['allow-private-tmp']),
     expectedWorkingDirectory: flags['expected-working-directory'] ?? null,
     expectedCheckoutRoot: flags['expected-checkout-root'] ?? null,
+    expectedCommit: flags['expected-commit'] ?? null,
     expectedAgentId: flags['expected-agent-id'] ?? null,
   })
   if (format === 'text') {
@@ -4594,6 +4616,7 @@ async function runtimeCommand(subcommand: string | undefined, args: string[]) {
       const report = await buildRuntimeInventoryReport((db as any).__adapter, {
         staleMinutes,
         expectedCommit: flags['expected-commit'] ?? null,
+        approvedCheckoutRoots: parseCsvFlag(flags['approved-checkout-root'] ?? flags['approved-checkout-roots']) ?? [],
         provider: flags.provider ?? 'discord',
         bindingRole: flags['binding-role'] ?? 'outbound',
       })
@@ -4689,7 +4712,7 @@ async function inboundCommand(subcommand: string | undefined, args: string[]) {
 async function fleetCommand(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand !== 'readiness') {
-    console.error('Usage: agent-com fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke] [--include-disabled] [--include-test]')
+    console.error('Usage: agent-com fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
@@ -4702,6 +4725,9 @@ async function fleetCommand(subcommand: string | undefined, args: string[]) {
       operatorAgentId: flags['operator-agent-id'] ?? 'codex-aun',
       includeDisabledProfiles: hasFlag(flags, 'include-disabled') && flagEnabled(flags['include-disabled']),
       includeTestProfiles: hasFlag(flags, 'include-test') && flagEnabled(flags['include-test']),
+      approvedCommit: flags['approved-commit'] ?? flags['expected-commit'] ?? null,
+      approvedCheckoutRoots: parseCsvFlag(flags['approved-checkout-root'] ?? flags['approved-checkout-roots']) ?? [],
+      driftExclusions: loadFleetDriftExclusions(flags['drift-exclusion-file']),
     })
     if (format === 'text') {
       process.stdout.write(formatAunFleetReadinessText(report))
@@ -5072,6 +5098,7 @@ async function heartbeat(args: string[]) {
   const agentId = resolveAgentId(args, 'heartbeat')
   const { flags } = parseArgs(args)
   const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID ?? null
+  const checkoutEvidence = collectGitCheckoutEvidence(process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd())
   const discordToken = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
   const discordTokenFingerprint = discordToken.trim()
     ? createHash('sha256').update(discordToken.trim()).digest('hex')
@@ -5101,7 +5128,7 @@ async function heartbeat(args: string[]) {
           connectorUri: discordTokenFingerprint ? `discord://agents/${agentId}` : null,
           connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
           connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
-          metadata: { source: 'agent-com heartbeat' },
+          metadata: { source: 'agent-com heartbeat', ...gitCheckoutMetadata(checkoutEvidence) },
           connectorMetadata: discordTokenFingerprint
             ? {
                 token_fingerprint: discordTokenFingerprint,
@@ -5776,7 +5803,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — CP-80 read-only recovery GO/NO-GO gate; no restart, no Discord activation, no FIFO drain
   recovery activation-plan --scope-file <json> --readiness-report <json> [--format json|text]
                                                        — CP-80 read-only canary-first activation plan; no runtime or Discord activation
-  state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--format json|text]
+  state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]
                                                        — read-only LaunchAgent persistent-path readiness diagnostic; no restart
   state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--active-plist-path <path>] [--checkout-dirs <csv>] [--format json|text]
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
@@ -5799,13 +5826,13 @@ Message I/O (requires AGENT_ID env var):
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
                                                        — dry-run by default; roll expired received/in_progress claims back to pending
   directory [--format json|text]                       — bot/channel directory and sendability report
-  runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--binding-role outbound]
+  runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--approved-checkout-root <path[,path]>] [--binding-role outbound]
                                                        — read-only runtime/connector/binding freshness report
   runtime cleanup [--format json|text] [--stale-minutes 15] [--execute --confirm <plan_hash>] [--allow-unknown-risk] [--include-disabled] [--include-test]
                                                        — dry-run stale runtime/listener/tmux cleanup plan; execute requires a matching plan hash
   inbound smoke [--format json|text] [--window-hours 168]
                                                        — read-only Discord inbound smoke evidence by channel
-  fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke] [--include-disabled] [--include-test]
+  fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]
                                                        — read-only all-agent AUN readiness gates and activation blockers
   smoke run [--format json|text] [--provider discord] [--window-hours 168] [--channel <external_id>] [--include-disabled] [--include-test] [--execute --confirm <plan_hash>] [--timeout-ms 30000]
                                                        — NORM-060 full-channel smoke (dry-run/plan default, read-only)
