@@ -62,7 +62,7 @@ memory_ready AS (
      AND e.project = :'project'
      AND e.runtime_instance_id = cr.runtime_instance_id
      AND e.expected_agent_id = :'agent_id'
-     AND e.result_status IN ('ready', 'bypassed')
+     AND e.result_status = 'ready'
      AND e.valid_until > now()
      AND e.completed_at >= cr.started_at
      AND (cr.session_name IS NULL OR e.session_name = cr.session_name)

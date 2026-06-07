@@ -64,6 +64,24 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+function normalizeDate(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString()
+  return stringValue(value)
+}
+
+function parseObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
 export function normalizeMessageType(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value.trim() : 'unknown'
 }
@@ -80,22 +98,7 @@ export function isNonActionableMessageType(messageType: unknown): boolean {
 }
 
 export function parseQueuePayloadObject(payload: unknown): Record<string, unknown> {
-  if (!payload) return {}
-  if (typeof payload === 'object' && !Array.isArray(payload)) return payload as Record<string, unknown>
-  if (typeof payload !== 'string' || payload.trim() === '') return {}
-  try {
-    const parsed = JSON.parse(payload)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {}
-  } catch {
-    return {}
-  }
-}
-
-function normalizeDate(value: unknown): string | null {
-  if (value instanceof Date) return value.toISOString()
-  return stringValue(value)
+  return parseObject(payload)
 }
 
 function booleanFromUnknown(value: unknown): boolean | null {
@@ -121,8 +124,8 @@ function stringsFromUnknown(value: unknown): string[] {
 
 function targetDiscordId(agent: QueueClassificationAgent | null | undefined): string | null {
   if (!agent) return null
-  const metadata = parseQueuePayloadObject(agent.metadata)
-  const expected = parseQueuePayloadObject(agent.expected_provider_identity)
+  const metadata = parseObject(agent.metadata)
+  const expected = parseObject(agent.expected_provider_identity)
   const candidates = [
     metadata.discord_id,
     metadata.discord_user_id,

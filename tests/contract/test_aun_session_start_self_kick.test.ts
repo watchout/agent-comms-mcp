@@ -96,6 +96,17 @@ async function seedSelfKickMemoryReady(c: Client): Promise<void> {
   )
 }
 
+async function markSelfKickEvidenceBypassed(c: Client): Promise<void> {
+  await c.query(
+    `UPDATE runtime_memory_ready_evidence
+        SET result_status='bypassed',
+            source='explicit_operator_bypass',
+            metadata='{}'::jsonb
+      WHERE agent_id=$1`,
+    [TEST_AGENT],
+  )
+}
+
 beforeAll(async () => {
   try {
     const c = new Client({ connectionString: DATABASE_URL })
@@ -327,6 +338,42 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
     try {
       await seedSelfKickMemoryReady(c)
       await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+      await c.query(
+        `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
+        [TEST_AGENT],
+      )
+    } finally {
+      await c.end()
+    }
+
+    const stub = makeStubDir()
+    try {
+      const r = runHook({
+        TMUX: 'fake',
+        AGENT_ID: TEST_AGENT,
+        DATABASE_URL,
+      }, stub.dir)
+      expect(r.status).toBe(0)
+      await sleep(3500)
+      const log = existsSync(stub.tmuxLog) ? readFileSync(stub.tmuxLog, 'utf-8') : ''
+      expect(log).not.toMatch(/send-keys/)
+    } finally {
+      stub.cleanup()
+      const c2 = new Client({ connectionString: DATABASE_URL })
+      await c2.connect()
+      await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
+      await c2.end()
+    }
+  })
+
+  test('T-6: pending>0 with bypassed memory-ready evidence → send-keys NOT called', async () => {
+    requireDb()
+    const c = new Client({ connectionString: DATABASE_URL })
+    await c.connect()
+    try {
+      await seedSelfKickMemoryReady(c)
+      await markSelfKickEvidenceBypassed(c)
       await c.query(
         `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
          VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
