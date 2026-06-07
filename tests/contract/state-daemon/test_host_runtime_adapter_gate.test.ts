@@ -132,7 +132,7 @@ async function seedPendingCodexWork(suffix: string): Promise<{ agent: string; qu
     agent_id: agent,
     status: 'pending',
     message_id: '11111111-1111-4111-8111-111111111111',
-    payload: JSON.stringify({ author_id: 'aun', content: 'untrusted payload must not become argv' }),
+    payload: JSON.stringify({ author_id: 'aun', content: 'untrusted payload must not become argv', message_type: 'instruction' }),
     created_at: new Date('2030-06-01T05:00:00.000Z'),
   })
   return { agent, queueId }

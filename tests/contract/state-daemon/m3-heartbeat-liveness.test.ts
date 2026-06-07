@@ -477,8 +477,8 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     try {
       for (let i = 0; i < 5; i++) {
         const ins = await pg.query(
-          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', '{}', $2) RETURNING id`,
-          [agent, T0],
+          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', $3, $2) RETURNING id`,
+          [agent, T0, JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' })],
         )
         const id = Number((ins.rows as Array<{ id: number }>)[0].id)
         await h.daemon.__testHandleEvent({
@@ -511,8 +511,8 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     try {
       for (let i = 0; i < 4; i++) {
         const ins = await pg.query(
-          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', '{}', $2) RETURNING id`,
-          [agent, T0],
+          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', $3, $2) RETURNING id`,
+          [agent, T0, JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' })],
         )
         const id = Number((ins.rows as Array<{ id: number }>)[0].id)
         await h.daemon.__testHandleEvent({

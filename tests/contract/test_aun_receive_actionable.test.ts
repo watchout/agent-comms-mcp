@@ -262,6 +262,28 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
+  test('pending report row is non-actionable and remains visible without claim', () => {
+    const reportId = seedQueue({ messageType: 'report', ageSeconds: 300, content: 'status report only' })
+
+    const r = runAun([
+      'receive-actionable',
+      '--agent-id', TEST_AGENT,
+      '--queue-id', String(reportId),
+      '--max-inspect', '10',
+    ])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('RECEIVE_ACTIONABLE_BLOCKED')
+    const body = JSON.parse(r.stdout)
+    expect(body).toMatchObject({
+      ok: false,
+      blocked_reason: 'queue_not_claimable',
+      selection_reason: 'non_actionable_type',
+      selected: null,
+      claimed: null,
+    })
+    expect(rows().find((row) => row.id === reportId)).toMatchObject({ status: 'pending', claimed_by: null })
+  })
+
   test('self-authored Discord mention chat does not wake the target agent', () => {
     const chatId = seedQueue({
       messageType: 'chat',

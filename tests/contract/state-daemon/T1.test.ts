@@ -71,8 +71,8 @@ describe('T1 new_pending_dispatched', () => {
       // so we drive the event ourselves to keep the test deterministic.
       const ins = await pg.query(
         `INSERT INTO message_queue (agent_id, status, payload, created_at)
-         VALUES ($1, 'pending', '{}', $2) RETURNING id`,
-        [agent, t0],
+         VALUES ($1, 'pending', $3, $2) RETURNING id`,
+        [agent, t0, JSON.stringify({ message_type: 'instruction', content: 'T1 fixture work' })],
       )
       const rowId = Number((ins.rows as Array<{ id: number }>)[0].id)
 

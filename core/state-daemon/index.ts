@@ -74,6 +74,11 @@ import {
   type NoReplyDecision,
   withTerminalBaton,
 } from '../no-reply-policy'
+import {
+  classifyQueueSurface,
+  withQueueDispositionStamp,
+  type QueueSurfaceClassification,
+} from '../queue-message-classification'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
@@ -111,6 +116,10 @@ interface AgentRow {
   status: string | null
   tmux_session: string | null
   last_seen_at: Date | null
+  metadata?: unknown
+  profile_enabled?: boolean | null
+  disabled_at?: Date | string | null
+  expected_provider_identity?: unknown
 }
 
 interface RestartRecord {
@@ -549,7 +558,10 @@ export class StateDaemon {
     now: Date,
   ): Promise<readonly StallVerdict[]> {
     const { rows } = await this.dbQuery<AgentRow>(
-      `SELECT agent_id, runtime, runtime_engine_preference, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
+      `SELECT agent_id, runtime, runtime_engine_preference, metadata,
+              (metadata->>'tmux_session') AS tmux_session, last_seen_at, status,
+              profile_enabled, disabled_at, expected_provider_identity
+         FROM agents WHERE agent_id=$1`,
       [row.agent_id],
     )
     const ctx: BotContext = {
@@ -573,11 +585,37 @@ export class StateDaemon {
     now: Date,
   ): Promise<boolean> {
     const { rows } = await this.dbQuery<AgentRow>(
-      `SELECT agent_id, runtime, runtime_engine_preference, (metadata->>'tmux_session') AS tmux_session, last_seen_at, status FROM agents WHERE agent_id=$1`,
+      `SELECT agent_id, runtime, runtime_engine_preference, metadata,
+              (metadata->>'tmux_session') AS tmux_session, last_seen_at, status,
+              profile_enabled, disabled_at, expected_provider_identity
+         FROM agents WHERE agent_id=$1`,
       [row.agent_id],
     )
     const bot = rows[0]
     const defaultRuntime = defaultConfigPort.getDefaultRuntime()
+    if (bot && row.status === 'pending') {
+      if (await this.completeNoReplyIfRequired(row)) {
+        return true
+      }
+      const surface = classifyQueueSurface({
+        agentId: row.agent_id,
+        payload: row.payload,
+        agent: bot,
+      })
+      if (!surface.actionable) {
+        if (surface.deterministic_non_actionable) {
+          this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
+          return this.completeNonActionableIfRequired(row, surface)
+        }
+        this.recordQueueAction({ kind: 'routing_hold', terminal: false }, row)
+        this.metrics.inc('state_daemon_wake_actions_total', {
+          result: 'routing_non_actionable_held',
+          message_type: surface.message_type,
+          route_reason: surface.routing.route_reason,
+        })
+        return false
+      }
+    }
     let hasActiveClaim = false
     if (bot) {
       const activeClaims = await this.dbQuery(
@@ -599,7 +637,7 @@ export class StateDaemon {
       hasActiveClaim,
     })
     this.recordQueueAction(action, row)
-    if (action.kind !== 'agent_missing' && await this.completeNoReplyIfRequired(row)) {
+    if (action.kind !== 'agent_missing' && row.status !== 'pending' && await this.completeNoReplyIfRequired(row)) {
       return true
     }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
@@ -730,6 +768,48 @@ export class StateDaemon {
     }
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })
     return true
+  }
+
+  private async completeNonActionableIfRequired(
+    row: QueueRow,
+    surface: QueueSurfaceClassification,
+  ): Promise<boolean> {
+    const disposition = surface.deterministic_non_actionable
+    if (!disposition) return false
+
+    const now = this.clock.now()
+    const stampedPayload = JSON.stringify(withQueueDispositionStamp(parseQueuePayload(row.payload), {
+      code: disposition.reason,
+      set_by: 'state_daemon',
+      set_at: now.toISOString(),
+      source: disposition.source,
+      message_type: disposition.message_type,
+      routing_decision: surface.routing.routing_decision,
+      route_reason: surface.routing.route_reason,
+    }))
+    const updated = await this.dbQuery(
+      `UPDATE message_queue
+          SET status='skipped',
+              failed_reason=$2,
+              done_at=$3,
+              payload=$4,
+              claim_expires_at=NULL,
+              claimed_by=NULL,
+              claimed_at=NULL
+        WHERE id=$1
+          AND status='pending'`,
+      [row.id, disposition.reason, now, stampedPayload],
+    )
+    if (updated.rowCount !== 1) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_actionable_stale_skipped' })
+      return false
+    }
+    this.metrics.inc('state_daemon_wake_actions_total', {
+      result: 'non_actionable_terminalized',
+      reason: disposition.reason,
+      message_type: disposition.message_type,
+    })
+    return false
   }
 
   private boundedAckContent(row: QueueRow, noReplyDecision: NoReplyDecision): string {
@@ -989,7 +1069,7 @@ export class StateDaemon {
   }
 
   private async fetchReceivedExpired(): Promise<QueueRow[]> {
-    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
+    let sql = `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
               last_wake_attempt_at, last_heartbeat_at
          FROM message_queue
         WHERE status IN ('received', 'in_progress')

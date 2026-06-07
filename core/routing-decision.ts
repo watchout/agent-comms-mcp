@@ -58,7 +58,7 @@ export interface QueueRoutingDecisionEvidence {
 }
 
 const ACTIONABLE_TYPES = new Set(['instruction', 'request', 'question'])
-const NON_ACTION_TYPES = new Set(['chat', 'notice', 'projection'])
+const NON_ACTION_TYPES = new Set(['report', 'chat', 'notice', 'projection'])
 const RUNTIME_MANAGED_TYPES = new Set(['codex', 'codex-runner', 'claude', 'claude-code', 'tui'])
 
 function normalize(value: string | null | undefined): string | null {
