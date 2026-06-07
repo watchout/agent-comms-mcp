@@ -71,6 +71,8 @@ export interface StateDaemonConfig {
   hostRuntimeInvocationSchemaPath: string | null
   hostRuntimeInvocationSchemaJson: string | null
   hostRuntimeInvocationOutputLastMessagePath: string | null
+  memoryReadyGateEnabled: boolean
+  memoryReadyProject: string
   /**
    * Optional emergency narrowing gate. Production should normally leave this
    * null so DB agent/channel state decides the fleet surface.
@@ -131,6 +133,8 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   hostRuntimeInvocationSchemaPath: null,
   hostRuntimeInvocationSchemaJson: null,
   hostRuntimeInvocationOutputLastMessagePath: null,
+  memoryReadyGateEnabled: true,
+  memoryReadyProject: 'agent-comms-mcp',
   agentAllowlist: null,
   agentDenylist: null,
 }

@@ -153,6 +153,28 @@ class CloseRowAfterReserveDB implements DBClient {
   }
 }
 
+async function deleteMemoryReadyEvidence(agentId: string): Promise<void> {
+  await pg.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [agentId])
+}
+
+async function expireMemoryReadyEvidence(agentId: string): Promise<void> {
+  await pg.query(
+    `UPDATE runtime_memory_ready_evidence
+        SET valid_until='2026-05-17T00:00:00.000Z'
+      WHERE agent_id=$1`,
+    [agentId],
+  )
+}
+
+async function mismatchMemoryReadyRuntime(agentId: string): Promise<void> {
+  await pg.query(
+    `UPDATE runtime_memory_ready_evidence
+        SET runtime_instance_id='runtime-mismatch-for-memory-ready-test'
+      WHERE agent_id=$1`,
+    [agentId],
+  )
+}
+
 describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('pending idle Codex runtime invokes runner and never tmux wake', async () => {
     const agent = makeAgentId('codex-runner')
@@ -201,6 +223,246 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('missing/stale/mismatched memory-ready evidence blocks Codex runner before dispatch', async () => {
+    const scenarios = [
+      { suffix: 'missing-memory', reason: 'missing_evidence', mutate: deleteMemoryReadyEvidence },
+      { suffix: 'stale-memory', reason: 'expired', mutate: expireMemoryReadyEvidence },
+      { suffix: 'mismatch-memory', reason: 'runtime_instance_mismatch', mutate: mismatchMemoryReadyRuntime },
+    ] as const
+
+    for (const scenario of scenarios) {
+      const agent = makeAgentId(`codex-${scenario.suffix}`)
+      await seedAgent(pg, {
+        agent_id: agent,
+        runtime: 'codex',
+        tmux_session: null,
+        status: 'online',
+        last_seen_at: '2026-05-18T00:00:01.000Z',
+      })
+      await scenario.mutate(agent)
+      const id = await seedQueueRow(pg, {
+        agent_id: agent,
+        status: 'pending',
+        message_id: '11111111-1111-4111-8111-111111111119',
+        payload: JSON.stringify({ author_id: 'codex-cto', content: `do work ${scenario.suffix}`, message_type: 'instruction' }),
+        created_at: new Date('2026-05-18T00:00:00.000Z'),
+      })
+
+      const runner = new FakeCodexRunner()
+      const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner)
+      await h.daemon.start()
+      try {
+        await h.daemon.__testHandleEvent({
+          op: 'INSERT',
+          id,
+          agent_id: agent,
+          status: 'pending',
+          claim_expires_at: null,
+        })
+
+        expect(runner.invocations).toHaveLength(0)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+          result: 'memory_ready_blocked',
+          action: 'invoke_codex_runner',
+          reason: scenario.reason,
+        })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(0)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_error' })).toBe(0)
+        const row = (await pg.query(
+          `SELECT status, claimed_by, last_wake_attempt_at FROM message_queue WHERE id=$1`,
+          [id],
+        )).rows[0] as { status: string; claimed_by: string | null; last_wake_attempt_at: Date | null }
+        expect(row).toEqual({ status: 'pending', claimed_by: null, last_wake_attempt_at: null })
+      } finally {
+        await h.daemon.stop()
+      }
+    }
+  })
+
+  test('disabled memory-ready gate config fails closed instead of bypassing dispatch', async () => {
+    const agent = makeAgentId('codex-config-bypass')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-111111111121',
+      payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work with disabled memory gate', message_type: 'instruction' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner, new FakeTmux(), {
+      memoryReadyGateEnabled: false,
+    })
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_blocked',
+        action: 'invoke_codex_runner',
+        reason: 'unaudited_bypass',
+      })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('memory-ready gate blocks TUI wake paths before wake observation', async () => {
+    const pendingScenarios = [
+      { suffix: 'tui-missing-memory', reason: 'missing_evidence', mutate: deleteMemoryReadyEvidence },
+      { suffix: 'tui-stale-memory', reason: 'expired', mutate: expireMemoryReadyEvidence },
+      { suffix: 'tui-mismatch-memory', reason: 'runtime_instance_mismatch', mutate: mismatchMemoryReadyRuntime },
+    ] as const
+
+    for (const scenario of pendingScenarios) {
+      const agent = makeAgentId(scenario.suffix)
+      await seedAgent(pg, {
+        agent_id: agent,
+        runtime: 'TUI',
+        status: 'online',
+        last_seen_at: '2026-05-18T00:00:01.000Z',
+      })
+      await scenario.mutate(agent)
+      const id = await seedQueueRow(pg, {
+        agent_id: agent,
+        status: 'pending',
+        payload: JSON.stringify({ author_id: 'codex-cto', content: `wake ${scenario.suffix}`, message_type: 'instruction' }),
+        created_at: new Date('2026-05-18T00:00:00.000Z'),
+      })
+
+      const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), new FakeCodexRunner())
+      await h.daemon.start()
+      try {
+        await h.daemon.__testHandleEvent({
+          op: 'INSERT',
+          id,
+          agent_id: agent,
+          status: 'pending',
+          claim_expires_at: null,
+        })
+        expect(h.tmux.sentKeys).toEqual([])
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+          result: 'memory_ready_blocked',
+          action: 'wake_pending',
+          reason: scenario.reason,
+        })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      } finally {
+        await h.daemon.stop()
+      }
+    }
+
+    const receivedAgent = makeAgentId('tui-received-missing-memory')
+    await seedAgent(pg, {
+      agent_id: receivedAgent,
+      runtime: 'TUI',
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    await deleteMemoryReadyEvidence(receivedAgent)
+    const receivedId = await seedQueueRow(pg, {
+      agent_id: receivedAgent,
+      status: 'received',
+      payload: JSON.stringify({ author_id: 'codex-cto', content: 'wake received without memory', message_type: 'instruction' }),
+      claim_expires_at: new Date('2026-05-18T00:01:00.000Z'),
+      claimed_by: receivedAgent,
+      claimed_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), new FakeCodexRunner())
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: receivedId,
+        agent_id: receivedAgent,
+        status: 'received',
+        claim_expires_at: new Date('2026-05-18T00:01:00.000Z'),
+      })
+      expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_blocked',
+        action: 'wake_received',
+        reason: 'missing_evidence',
+      })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('pending report row is not dispatched, terminalized, or runner-error looped', async () => {
+    const agent = makeAgentId('codex-report')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-111111111120',
+      payload: JSON.stringify({ author_id: 'agent-com-dev', message_type: 'report', content: 'implementation status only' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(0)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', {
+        action: 'terminal_non_actionable',
+        status: 'pending',
+        terminal: 'true',
+      })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'non_actionable_terminalized',
+        reason: 'NON_ACTIONABLE_REPORT',
+        message_type: 'report',
+      })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_error' })).toBe(0)
+      const row = (await pg.query(
+        `SELECT status, claimed_by, replied_with, failed_reason FROM message_queue WHERE id=$1`,
+        [id],
+      )).rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null }
+      expect(row).toEqual({
+        status: 'skipped',
+        claimed_by: null,
+        replied_with: null,
+        failed_reason: 'NON_ACTIONABLE_REPORT',
+      })
     } finally {
       await h.daemon.stop()
     }

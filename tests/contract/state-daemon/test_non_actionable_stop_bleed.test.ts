@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import { StateDaemon } from '../../../core/state-daemon'
 import type { StateDaemonConfig } from '../../../core/state-daemon/types'
@@ -28,9 +28,15 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanAll(pg)
+  await pg.query('BEGIN')
 })
 
-function buildHarness(clock = new FakeClock('2099-05-18T00:00:30.000Z'), config: Partial<StateDaemonConfig> = {}) {
+afterEach(async () => {
+  await pg.query('ROLLBACK')
+  await cleanAll(pg)
+})
+
+function buildHarness(clock = new FakeClock('2026-05-18T00:00:30.000Z'), config: Partial<StateDaemonConfig> = {}) {
   const runner = new FakeCodexRunner()
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()

@@ -19,25 +19,103 @@
  * matching the way the orchestrator hook consumes it in production.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, utimesSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, utimesSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { Client } from 'pg'
+import { randomUUID } from 'node:crypto'
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const HELPERS = join(REPO_ROOT, 'hooks', 'lib', 'aun-self-kick-helpers.sh')
+const MEMORY_READY_MIGRATION = join(REPO_ROOT, 'db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql')
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const TEST_AGENT = `test-self-kick-helpers-${process.pid}`
 
 let dbReachable = false
+let memoryReadyMigrationApplied = false
+
+async function ensureMemoryReadySchema(c: Client): Promise<void> {
+  if (memoryReadyMigrationApplied) return
+  await c.query(readFileSync(MEMORY_READY_MIGRATION, 'utf-8'))
+  memoryReadyMigrationApplied = true
+}
+
+async function cleanupSelfKickHelperAgent(c: Client): Promise<void> {
+  await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM agents WHERE agent_id=$1`, [TEST_AGENT])
+}
+
+async function seedSelfKickHelperMemoryReady(c: Client): Promise<void> {
+  await ensureMemoryReadySchema(c)
+  const runtimeId = randomUUID()
+  const port = 34_000 + Number.parseInt(runtimeId.slice(0, 4), 16) % 20_000
+  const sessionName = `${TEST_AGENT}-session`
+  const checkoutPath = `/tmp/${TEST_AGENT}-memory-ready`
+  await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(
+    `INSERT INTO agents
+       (agent_id, display_name, agent_type, runtime, status, channel_port,
+        metadata, profile_revision, profile_source, home_directory)
+     VALUES ($1, $1, 'dev', 'mcp', 'idle', $2, $3::jsonb, 1, 'legacy', $4)
+     ON CONFLICT (agent_id) DO UPDATE SET
+       runtime = EXCLUDED.runtime,
+       status = EXCLUDED.status,
+       channel_port = EXCLUDED.channel_port,
+       metadata = EXCLUDED.metadata,
+       profile_revision = 1,
+       profile_source = 'legacy',
+       home_directory = EXCLUDED.home_directory`,
+    [TEST_AGENT, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
+  )
+  await c.query(
+    `INSERT INTO agent_runtime_instances
+       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
+        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+     VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
+             $5, 'self-kick-helper-test-head', 'running',
+             '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z',
+             '{"source":"self-kick-helper-test"}'::jsonb)`,
+    [runtimeId, TEST_AGENT, sessionName, port, checkoutPath],
+  )
+  await c.query(
+    `INSERT INTO runtime_memory_ready_evidence
+       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
+        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
+        valid_until, source, metadata)
+     VALUES
+       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
+        $3, $4, $1, $5, 'self-kick-helper-test-head',
+        'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+        '/tmp/self-kick-helper-memory-ready.json', 'self-kick-helper-memory-ready',
+        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
+        '{"fixture":true}'::jsonb)`,
+    [TEST_AGENT, runtimeId, sessionName, port, checkoutPath],
+  )
+}
+
+async function markSelfKickHelperEvidenceBypassed(c: Client): Promise<void> {
+  await c.query(
+    `UPDATE runtime_memory_ready_evidence
+        SET result_status='bypassed',
+            source='explicit_operator_bypass',
+            metadata='{}'::jsonb
+      WHERE agent_id=$1`,
+    [TEST_AGENT],
+  )
+}
 
 beforeAll(async () => {
   try {
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
-    await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
-    await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
+    await ensureMemoryReadySchema(c)
+    await cleanupSelfKickHelperAgent(c)
     await c.end()
     dbReachable = true
   } catch {
@@ -50,8 +128,7 @@ afterAll(async () => {
   try {
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
-    await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
-    await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
+    await cleanupSelfKickHelperAgent(c)
     await c.end()
   } catch {}
 })
@@ -94,6 +171,7 @@ describe('test_aun_self_kick_helpers — adapter port unit tests', () => {
     const c = new Client({ connectionString: DATABASE_URL })
     await c.connect()
     try {
+      await seedSelfKickHelperMemoryReady(c)
       await c.query(
         `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
          VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
@@ -103,7 +181,49 @@ describe('test_aun_self_kick_helpers — adapter port unit tests', () => {
       expect(r.status).toBe(0)
       expect(r.stdout.trim()).toBe('1')
     } finally {
-      await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
+      await cleanupSelfKickHelperAgent(c)
+      await c.end()
+    }
+  })
+
+  test('U-1 db_query: missing memory-ready evidence holds pending count at zero', async () => {
+    requireDb()
+    const c = new Client({ connectionString: DATABASE_URL })
+    await c.connect()
+    try {
+      await seedSelfKickHelperMemoryReady(c)
+      await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+      await c.query(
+        `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
+        [TEST_AGENT],
+      )
+      const r = runWithHelper(`aun_self_kick_db_query "${TEST_AGENT}"`, { DATABASE_URL })
+      expect(r.status).toBe(0)
+      expect(r.stdout.trim()).toBe('0')
+    } finally {
+      await cleanupSelfKickHelperAgent(c)
+      await c.end()
+    }
+  })
+
+  test('U-1 db_query: bypassed evidence is not accepted by raw self-kick gate', async () => {
+    requireDb()
+    const c = new Client({ connectionString: DATABASE_URL })
+    await c.connect()
+    try {
+      await seedSelfKickHelperMemoryReady(c)
+      await markSelfKickHelperEvidenceBypassed(c)
+      await c.query(
+        `INSERT INTO message_queue (message_id, agent_id, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, '{}'::jsonb, 'pending', now())`,
+        [TEST_AGENT],
+      )
+      const r = runWithHelper(`aun_self_kick_db_query "${TEST_AGENT}"`, { DATABASE_URL })
+      expect(r.status).toBe(0)
+      expect(r.stdout.trim()).toBe('0')
+    } finally {
+      await cleanupSelfKickHelperAgent(c)
       await c.end()
     }
   })

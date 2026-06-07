@@ -6,7 +6,7 @@
 #
 # Usage:
 #   source sync-mcp-config.sh
-#   sync_mcp_config <session> <project_dir> <agent_id> <port>
+#   sync_mcp_config <session> <project_dir> <agent_id> <port> [runtime_engine]
 #
 # - Overwrites only the agent-comms server path and runtime env keys
 # - Preserves all other MCP servers and env vars (DISCORD_BOT_TOKEN, memory config, etc.)
@@ -15,6 +15,7 @@
 
 sync_mcp_config() {
   local session="$1" project_dir="$2" agent_id="$3" port="$4"
+  local runtime_engine="${5:-}"
   local mcp_json="${project_dir}/.mcp.json"
   local state_dir="/Users/yuji/.claude/channels/${session}"
   local repo_root
@@ -26,12 +27,23 @@ sync_mcp_config() {
     echo "[sync-mcp] ${session}: no .mcp.json at ${mcp_json}, skipping" >&2
     return 1
   fi
+  case "$(printf '%s' "$runtime_engine" | tr '[:upper:]' '[:lower:]')" in
+    codex|codex-runner)
+      echo "[sync-mcp] ${session}: codex command-line MCP override profile; shared .mcp.json not mutated" >&2
+      return 0
+      ;;
+  esac
 
   # Use node (bundled with bun or system) to do precise JSON manipulation
   local updated
   updated=$(node -e "
     const fs = require('fs');
     const cfg = JSON.parse(fs.readFileSync('$mcp_json', 'utf8'));
+    const owner = cfg['x-agent-comms-owner'] || cfg.agent_comms_owner || cfg.mcp_owner;
+    if (owner && owner !== '$agent_id' && owner !== '$session') {
+      console.error('[sync-mcp] ${session}: .mcp.json owner=' + owner + ' does not match ${agent_id}/${session}; skipping');
+      process.exit(0);
+    }
     const ac = cfg.mcpServers?.['agent-comms'];
     if (!ac) {
       console.error('[sync-mcp] ${session}: no agent-comms section in .mcp.json, skipping');

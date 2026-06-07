@@ -38,6 +38,11 @@ export interface PlanQueueActionInput {
 export interface PlannedQueueAction {
   kind: QueueActionKind
   terminal: boolean
+  gates: Array<{
+    kind: 'memory_ready'
+    required: true
+    status: 'pending'
+  }>
 }
 
 const CODEX_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
@@ -63,42 +68,59 @@ const TERMINAL_STATUSES = new Set([
   'done',
 ])
 
+const MEMORY_READY_ACTIONS = new Set<QueueActionKind>([
+  'wake_pending',
+  'wake_received',
+  'invoke_codex_runner',
+  'reclaim_expired',
+])
+
+function planned(kind: QueueActionKind, terminal: boolean): PlannedQueueAction {
+  return {
+    kind,
+    terminal,
+    gates: MEMORY_READY_ACTIONS.has(kind)
+      ? [{ kind: 'memory_ready', required: true, status: 'pending' }]
+      : [],
+  }
+}
+
 export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction {
   const { row, agent, now, defaultRuntime, hasActiveClaim } = input
   if (TERMINAL_STATUSES.has(row.status)) {
-    return { kind: 'terminal_noop', terminal: true }
+    return planned('terminal_noop', true)
   }
 
   if (row.status === 'received') {
     if (row.claim_expires_at && new Date(row.claim_expires_at).getTime() < now.getTime()) {
-      return { kind: 'reclaim_expired', terminal: false }
+      return planned('reclaim_expired', false)
     }
-    if (!agent) return { kind: 'observe_received', terminal: false }
-    if (isInactiveAgent(agent.status)) return { kind: 'agent_inactive', terminal: false }
+    if (!agent) return planned('observe_received', false)
+    if (isInactiveAgent(agent.status)) return planned('agent_inactive', false)
     const runtime = effectiveRuntime(agent)
-    if (isCodexRuntime(runtime)) return { kind: 'observe_received', terminal: false }
-    if (agent.runtime !== defaultRuntime) return { kind: 'runtime_skip', terminal: false }
-    if (!agent.tmux_session) return { kind: 'tmux_missing', terminal: false }
-    return { kind: 'wake_received', terminal: false }
+    if (isCodexRuntime(runtime)) return planned('observe_received', false)
+    if (agent.runtime !== defaultRuntime) return planned('runtime_skip', false)
+    if (!agent.tmux_session) return planned('tmux_missing', false)
+    return planned('wake_received', false)
   }
 
   if (row.status === 'in_progress') {
-    return { kind: 'observe_in_progress', terminal: false }
+    return planned('observe_in_progress', false)
   }
 
   if (row.status === 'pending') {
-    if (!agent) return { kind: 'agent_missing', terminal: false }
-    if (isInactiveAgent(agent.status)) return { kind: 'agent_inactive', terminal: false }
+    if (!agent) return planned('agent_missing', false)
+    if (isInactiveAgent(agent.status)) return planned('agent_inactive', false)
     const runtime = effectiveRuntime(agent)
     if (isCodexRuntime(runtime)) {
-      if (hasActiveClaim) return { kind: 'observe_busy', terminal: false }
-      return { kind: 'invoke_codex_runner', terminal: false }
+      if (hasActiveClaim) return planned('observe_busy', false)
+      return planned('invoke_codex_runner', false)
     }
-    if (agent.runtime !== defaultRuntime) return { kind: 'runtime_skip', terminal: false }
-    if (!agent.tmux_session) return { kind: 'tmux_missing', terminal: false }
-    if (hasActiveClaim) return { kind: 'observe_busy', terminal: false }
-    return { kind: 'wake_pending', terminal: false }
+    if (agent.runtime !== defaultRuntime) return planned('runtime_skip', false)
+    if (!agent.tmux_session) return planned('tmux_missing', false)
+    if (hasActiveClaim) return planned('observe_busy', false)
+    return planned('wake_pending', false)
   }
 
-  return { kind: 'observe_unknown', terminal: false }
+  return planned('observe_unknown', false)
 }

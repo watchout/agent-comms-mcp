@@ -144,6 +144,16 @@ beforeEach(() => {
     INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
       VALUES ('codex-aun', 'codex-aun', 'dev', 'codex', 'idle', '{"discord_id":"999010"}'),
              ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}');
+    UPDATE agents SET channel_port = 39002 WHERE agent_id = 'codex-aun';
+    INSERT INTO agent_runtime_instances
+      (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
+      VALUES ('runtime-codex-aun', 'codex-aun', 'codex', 'local_process', 'codex-aun-session', 39002, '/tmp/codex-aun', 'test-head', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z');
+    INSERT INTO runtime_memory_ready_evidence
+      (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
+       checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
+      VALUES ('codex-aun', 'agent-comms-mcp', 'runtime-codex-aun', 1, 'legacy', 'codex-aun-session', 39002, 'codex-aun',
+       '/tmp/codex-aun', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+       '/tmp/codex-aun-memory-ready.json', 'sqlite-codex-aun-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-ch', 'runner-ch', '["codex-aun","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)

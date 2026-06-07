@@ -15,6 +15,7 @@
  *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>] [--complete-no-reply --completion-reason <text>|--auto-final-reply]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
+ *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -29,6 +30,7 @@ import { diagnoseReceive, drain, receive, receiveActionable, receiveTargeted, re
 import { notify, reply } from './aun/reply'
 import { codexRunnerTick } from './aun/codex-runner'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
+import { memoryReadyBootstrap } from './aun/memory-ready'
 
 function printHelp(): void {
   const lines = [
@@ -47,6 +49,7 @@ function printHelp(): void {
     '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>] [--complete-no-reply --completion-reason <text>|--auto-final-reply]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
+    '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -289,7 +292,8 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'processing' &&
     subcommand !== 'done' &&
     subcommand !== 'record-no-reply' &&
-    subcommand !== 'renew-claim'
+    subcommand !== 'renew-claim' &&
+    subcommand !== 'memory-ready-bootstrap'
   ) return run(argv)
 
   if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
@@ -332,6 +336,28 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
       queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
       reason: typeof flags.reason === 'string' ? (flags.reason as string) : undefined,
       ttlSeconds,
+    })
+    if (res.stdout) process.stdout.write(res.stdout)
+    if (res.stderr) process.stderr.write(res.stderr)
+    return res.code
+  }
+
+  if (subcommand === 'memory-ready-bootstrap') {
+    const res = await memoryReadyBootstrap({
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      project: typeof flags.project === 'string' ? (flags.project as string) : undefined,
+      runtimeInstanceId: typeof flags['runtime-instance-id'] === 'string' ? (flags['runtime-instance-id'] as string) : undefined,
+      sessionName: typeof flags['session-name'] === 'string' ? (flags['session-name'] as string) : undefined,
+      port: typeof flags.port === 'string' ? (flags.port as string) : undefined,
+      profileRevision: typeof flags['profile-revision'] === 'string' ? (flags['profile-revision'] as string) : undefined,
+      profileSource: typeof flags['profile-source'] === 'string' ? (flags['profile-source'] as string) : undefined,
+      checkoutPath: typeof flags['checkout-path'] === 'string' ? (flags['checkout-path'] as string) : undefined,
+      checkoutCommitSha: typeof flags['checkout-commit-sha'] === 'string' ? (flags['checkout-commit-sha'] as string) : undefined,
+      evidencePath: typeof flags['evidence-path'] === 'string' ? (flags['evidence-path'] as string) : undefined,
+      evidenceLogId: typeof flags['evidence-log-id'] === 'string' ? (flags['evidence-log-id'] as string) : undefined,
+      recoveryCommand: typeof flags['recovery-command'] === 'string' ? (flags['recovery-command'] as string) : undefined,
+      validForSeconds: typeof flags['valid-for-seconds'] === 'string' ? (flags['valid-for-seconds'] as string) : undefined,
+      dryRun: !!flags['dry-run'],
     })
     if (res.stdout) process.stdout.write(res.stdout)
     if (res.stderr) process.stderr.write(res.stderr)

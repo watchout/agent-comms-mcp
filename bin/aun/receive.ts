@@ -12,6 +12,12 @@ import { resolve } from 'node:path'
 import type { DbAdapter } from '../../core/db/adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { decideQueueRouting, type QueueRoutingDecisionEvidence } from '../../core/routing-decision'
+import {
+  ACTIONABLE_MESSAGE_TYPES,
+  NON_ACTIONABLE_MESSAGE_TYPES,
+  classifyQueueMessageType,
+} from '../../core/queue-message-classification'
+import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../../core/runtime-memory-ready'
 
 export interface ReceiveOptions {
   agentId?: string
@@ -188,7 +194,7 @@ export interface ActionableReceiveSummary {
   waiting: number
   selected: DiagnosedQueueRow | null
   claimed: ClaimedMessage | null
-  blocked_reason: 'active_claim' | 'queue_not_claimable' | null
+  blocked_reason: 'active_claim' | 'queue_not_claimable' | 'memory_not_ready' | null
   active_claim: {
     busy: boolean
     queue_id: string | number | null
@@ -200,6 +206,7 @@ export interface ActionableReceiveSummary {
   skipped_non_action_count: number
   unknown_type_count: number
   selection_reason: string | null
+  memory_ready: RuntimeMemoryReadyGateResult
 }
 
 export interface ActionableReceiveResult extends ReceiveResult {
@@ -310,8 +317,6 @@ const DEFAULT_MAX_INSPECT = 50
 const MAX_INSPECT_CAP = 200
 const DEFAULT_RECONCILE_LIMIT = 50
 const MAX_RECONCILE_LIMIT = 200
-const ACTIONABLE_TYPES = new Set(['instruction', 'request', 'question'])
-const NON_ACTION_TYPES = new Set(['report', 'chat', 'notice', 'projection'])
 const TERMINAL_STATUSES = new Set(['done', 'replied', 'skipped', 'failed'])
 const ACTIVE_STATUSES = new Set(['read', 'received', 'in_progress'])
 
@@ -802,9 +807,7 @@ function resolveMessageType(row: Record<string, unknown>, payload: Record<string
 }
 
 function classifyMessageType(messageType: string): DiagnosedQueueRow['classification'] {
-  if (ACTIONABLE_TYPES.has(messageType)) return 'actionable'
-  if (NON_ACTION_TYPES.has(messageType)) return 'non_action'
-  return 'unknown'
+  return classifyQueueMessageType(messageType)
 }
 
 function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
@@ -1060,8 +1063,8 @@ function reconcileClassification(
   if (source === 'cli-notify' || source === 'notify' || String(payload.content ?? '').includes('fallback: notify')) {
     return 'notify_fallback_result'
   }
-  if (ACTIONABLE_TYPES.has(messageType)) return ageDays !== null && ageDays >= 7 ? 'actionable_stale' : 'actionable_current'
-  if (NON_ACTION_TYPES.has(messageType)) return 'obsolete_notice'
+  if (ACTIONABLE_MESSAGE_TYPES.has(messageType)) return ageDays !== null && ageDays >= 7 ? 'actionable_stale' : 'actionable_current'
+  if (NON_ACTIONABLE_MESSAGE_TYPES.has(messageType)) return 'obsolete_notice'
   return 'unknown_type'
 }
 
@@ -1360,6 +1363,12 @@ async function withDb<T>(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
 }
 
+function memoryReadyProject(env: Record<string, string>): string {
+  return env.AGENT_COMMS_MEMORY_READY_PROJECT?.trim()
+    || env.AGENT_MEMORY_PROJECT?.trim()
+    || 'agent-comms-mcp'
+}
+
 export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promise<DiagnoseReceiveResult> {
   let plan: ReceivePlan
   let maxInspect: number
@@ -1557,6 +1566,42 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<ActionableReceiveSummary>(async (tx) => {
+        const memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
+          agent_id: plan.env.AGENT_ID,
+          expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+          project: memoryReadyProject(plan.env),
+        })
+        if (!memoryReady.ok) {
+          const waitingRow = await tx.queryOne<{ n: number | string }>(
+            `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+            [plan.env.AGENT_ID],
+          ).catch(() => ({ n: 0 }))
+          return {
+            ok: false,
+            dry_run: !!opts.dryRun,
+            mode: 'receive-actionable',
+            agent_id: plan.env.AGENT_ID,
+            expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+            max_inspect: maxInspect,
+            inspected_count: 0,
+            waiting: Number(waitingRow?.n ?? 0),
+            selected: null,
+            claimed: null,
+            blocked_reason: 'memory_not_ready',
+            active_claim: {
+              busy: false,
+              queue_id: null,
+              message_id: null,
+              status: null,
+              claimed_at: null,
+              claim_expires_at: null,
+            },
+            skipped_non_action_count: 0,
+            unknown_type_count: 0,
+            selection_reason: `memory_ready_${memoryReady.reason}`,
+            memory_ready: memoryReady,
+          }
+        }
         const rowsSql = targetQueueId
           ? `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
@@ -1746,17 +1791,21 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
           unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
           selection_reason: activeClaim.busy ? 'blocked_by_active_claim' : selected.reason,
+          memory_ready: memoryReady,
         }
       })
     })
     const blockedByActiveClaim = summary.blocked_reason === 'active_claim' && !opts.dryRun
     const blockedByTargetQueue = summary.blocked_reason === 'queue_not_claimable' && !opts.dryRun
+    const blockedByMemoryReady = summary.blocked_reason === 'memory_not_ready'
 
     return {
-      ok: !(blockedByActiveClaim || blockedByTargetQueue),
-      code: blockedByActiveClaim || blockedByTargetQueue ? 1 : 0,
-      stdout: JSON.stringify(opts.dryRun || blockedByActiveClaim || blockedByTargetQueue ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
-      stderr: blockedByActiveClaim
+      ok: !(blockedByActiveClaim || blockedByTargetQueue || blockedByMemoryReady),
+      code: blockedByActiveClaim || blockedByTargetQueue || blockedByMemoryReady ? 1 : 0,
+      stdout: JSON.stringify(opts.dryRun || blockedByActiveClaim || blockedByTargetQueue || blockedByMemoryReady ? summary : (summary.claimed ?? { waiting: summary.waiting })) + '\n',
+      stderr: blockedByMemoryReady
+        ? `Error [RECEIVE_ACTIONABLE_BLOCKED]: memory_ready gate failed for ${plan.env.AGENT_ID}; reason=${summary.memory_ready.reason}; runtime_instance_id=${summary.memory_ready.runtime_instance_id ?? 'none'}\n`
+        : blockedByActiveClaim
         ? `Error [RECEIVE_ACTIONABLE_BLOCKED]: active claim exists for ${plan.env.AGENT_ID}; finish or expire queue_id=${summary.active_claim.queue_id}\n`
         : blockedByTargetQueue
           ? `Error [RECEIVE_ACTIONABLE_BLOCKED]: queue_id=${targetQueueId} is not claimable for ${plan.env.AGENT_ID}; reason=${summary.selection_reason}\n`

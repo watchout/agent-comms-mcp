@@ -57,8 +57,8 @@ export interface QueueRoutingDecisionEvidence {
   llm_classification_used: false
 }
 
-const ACTIONABLE_TYPES = new Set(['instruction', 'request', 'question'])
-const NON_ACTION_TYPES = new Set(['report', 'chat', 'notice', 'projection'])
+const ACTIONABLE_MESSAGE_TYPES = new Set(['instruction', 'request', 'question'])
+const NON_ACTIONABLE_MESSAGE_TYPES = new Set(['report', 'chat', 'notice', 'projection'])
 const RUNTIME_MANAGED_TYPES = new Set(['codex', 'codex-runner', 'claude', 'claude-code', 'tui'])
 
 function normalize(value: string | null | undefined): string | null {
@@ -164,7 +164,7 @@ export function decideQueueRouting(input: QueueRoutingDecisionInput): QueueRouti
   if (selfAuthored) {
     return baseEvidence(input, 'block', 'author_is_self', mentionEvidence, selfAuthored)
   }
-  if (ACTIONABLE_TYPES.has(messageType)) {
+  if (ACTIONABLE_MESSAGE_TYPES.has(messageType)) {
     return baseEvidence(input, 'wake_agent', 'actionable_message_type', mentionEvidence, selfAuthored)
   }
   if (messageType === 'chat' && isDiscordOrigin(input)) {
@@ -178,7 +178,7 @@ export function decideQueueRouting(input: QueueRoutingDecisionInput): QueueRouti
       return baseEvidence(input, 'wake_agent', 'direct_mention', mentionEvidence, selfAuthored)
     }
   }
-  if (NON_ACTION_TYPES.has(messageType)) {
+  if (NON_ACTIONABLE_MESSAGE_TYPES.has(messageType)) {
     return baseEvidence(input, 'deliver_only', 'non_actionable_type', mentionEvidence, selfAuthored)
   }
   return baseEvidence(input, 'deliver_only', 'non_actionable_type', mentionEvidence, selfAuthored)

@@ -67,6 +67,7 @@ import {
   type StallVerdict,
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
+import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../runtime-memory-ready'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
@@ -100,6 +101,7 @@ interface QueueRow {
   agent_id: string
   message_id?: string | null
   payload?: unknown
+  message_type?: string | null
   status: string
   claim_expires_at: Date | null
   claimed_at?: Date | null
@@ -268,9 +270,12 @@ export class StateDaemon {
       return
     }
     const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at
-         FROM message_queue WHERE id = $1`,
+      `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.id = $1`,
       [event.id],
     )
     const row = rows[0]
@@ -297,7 +302,13 @@ export class StateDaemon {
     const expired = await this.fetchReceivedExpired()
     for (const row of expired) {
       result.scanned++
-      this.recordQueueAction(this.planAction(row, null, false, this.clock.now()), row)
+      const action = this.planAction(row, null, false, this.clock.now())
+      this.recordQueueAction(action, row)
+      const memoryReady = await this.checkMemoryReadyGate(row, action)
+      if (!memoryReady.ok) {
+        this.recordMemoryReadyBlocked(action, row, memoryReady)
+        continue
+      }
       await this.reclaimRow(row)
       result.reclaimed++
     }
@@ -637,6 +648,11 @@ export class StateDaemon {
       hasActiveClaim,
     })
     this.recordQueueAction(action, row)
+    const memoryReady = await this.checkMemoryReadyGate(row, action)
+    if (!memoryReady.ok) {
+      this.recordMemoryReadyBlocked(action, row, memoryReady)
+      return false
+    }
     if (action.kind !== 'agent_missing' && row.status !== 'pending' && await this.completeNoReplyIfRequired(row)) {
       return true
     }
@@ -674,6 +690,75 @@ export class StateDaemon {
       status: row.status,
       terminal: action.terminal ? 'true' : 'false',
     })
+  }
+
+  private async checkMemoryReadyGate(row: QueueRow, action: PlannedQueueAction): Promise<RuntimeMemoryReadyGateResult> {
+    const gateRequired = action.gates.some((gate) => gate.kind === 'memory_ready' && gate.required)
+    if (!gateRequired) {
+      return {
+        ok: true,
+        gate: 'memory_ready',
+        reason: 'ready',
+        agent_id: row.agent_id,
+        project: this.config.memoryReadyProject,
+        checked_at: this.clock.now().toISOString(),
+        runtime_instance_id: null,
+        evidence_id: null,
+        evidence_path: null,
+        evidence_log_id: null,
+        source: 'state_daemon_gate_not_required',
+        valid_until: null,
+        current_runtime: null,
+        details: { gate_required: false },
+      }
+    }
+    if (!this.config.memoryReadyGateEnabled) {
+      return {
+        ok: false,
+        gate: 'memory_ready',
+        reason: 'unaudited_bypass',
+        agent_id: row.agent_id,
+        project: this.config.memoryReadyProject,
+        checked_at: this.clock.now().toISOString(),
+        runtime_instance_id: null,
+        evidence_id: null,
+        evidence_path: null,
+        evidence_log_id: null,
+        source: 'state_daemon_config_bypass_rejected',
+        valid_until: null,
+        current_runtime: null,
+        details: {
+          configured_gate_enabled: false,
+          required_contract: 'runtime_memory_ready_evidence.explicit_operator_bypass',
+        },
+      }
+    }
+    return evaluateRuntimeMemoryReadyGate(this.db, {
+      agent_id: row.agent_id,
+      expected_agent_id: row.agent_id,
+      project: this.config.memoryReadyProject,
+      now: this.clock.now(),
+      queue_scope: {
+        queue_id: row.id,
+        status: row.status,
+        action_kind: action.kind,
+      },
+    })
+  }
+
+  private recordMemoryReadyBlocked(
+    action: PlannedQueueAction,
+    row: QueueRow,
+    gate: RuntimeMemoryReadyGateResult,
+  ): void {
+    this.metrics.inc('state_daemon_wake_actions_total', {
+      result: 'memory_ready_blocked',
+      action: action.kind,
+      reason: gate.reason,
+    })
+    void this.alert.alert(
+      `memory_ready gate blocked ${action.kind} for ${row.agent_id} queue_id=${row.id}: ${gate.reason}`,
+    )
   }
 
   private async runObservedQueueAction(action: PlannedQueueAction, row: QueueRow): Promise<boolean> {
@@ -726,9 +811,12 @@ export class StateDaemon {
   private async tryCompleteScopedOutNoReply(event: QueueEvent): Promise<boolean> {
     if (this.config.agentIdPrefix) return false
     const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at
-         FROM message_queue WHERE id = $1`,
+      `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.id = $1`,
       [event.id],
     )
     const row = rows[0]
@@ -1057,39 +1145,45 @@ export class StateDaemon {
 
   private async fetchPendingStale(): Promise<QueueRow[]> {
     const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit]
-    let sql = `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at
-         FROM message_queue
-        WHERE status='pending'
-          AND created_at < $1::timestamptz - ($2)::interval`
-    sql += this.agentScopeClause(params, 'agent_id')
-    sql += ` ORDER BY created_at LIMIT $3`
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status='pending'
+          AND mq.created_at < $1::timestamptz - ($2)::interval`
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += ` ORDER BY mq.created_at LIMIT $3`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
 
   private async fetchReceivedExpired(): Promise<QueueRow[]> {
-    let sql = `SELECT id, agent_id, message_id, payload, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at
-         FROM message_queue
-        WHERE status IN ('received', 'in_progress')
-          AND claim_expires_at < $1::timestamptz`
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status IN ('received', 'in_progress')
+          AND mq.claim_expires_at < $1::timestamptz`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
-    sql += this.agentScopeClause(params, 'agent_id')
-    sql += ` ORDER BY claim_expires_at LIMIT $2`
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += ` ORDER BY mq.claim_expires_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
 
   private async fetchObservableWork(): Promise<QueueRow[]> {
-    let sql = `SELECT id, agent_id, status, claim_expires_at, created_at,
-              last_wake_attempt_at, last_heartbeat_at
-         FROM message_queue
-        WHERE status IN ('received', 'in_progress')
-          AND (claim_expires_at IS NULL OR claim_expires_at >= $1::timestamptz)`
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status IN ('received', 'in_progress')
+          AND (mq.claim_expires_at IS NULL OR mq.claim_expires_at >= $1::timestamptz)`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
-    sql += this.agentScopeClause(params, 'agent_id')
-    sql += ` ORDER BY created_at LIMIT $2`
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += ` ORDER BY mq.created_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }

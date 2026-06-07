@@ -7,6 +7,7 @@
  * schema. The contract is: `cleanFixture` removes everything the fixture wrote.
  */
 import { Client } from 'pg'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -20,6 +21,7 @@ const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
 const MIGRATION_FILES = [
   'db/migrations/2026-05-08-state-daemon-323.up.sql',
   'db/migrations/2026-05-14-agent-wake-suppression-ssot.up.sql',
+  'db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql',
 ]
 let migrationApplied = false
 
@@ -72,8 +74,17 @@ export interface SeedAgent {
   runtime_engine_preference?: 'codex' | 'codex-runner' | 'claude-code' | null
   tmux_session?: string | null
   discord_id?: string | null
+  port?: number | null
   status?: 'online' | 'offline' | 'idle' | 'busy' | 'restarting'
   last_seen_at?: Date | string
+  runtime_instance_id?: string
+  memoryReady?: boolean
+}
+
+function fixturePort(agentId: string): number {
+  let hash = 0
+  for (const ch of agentId) hash = (hash * 31 + ch.charCodeAt(0)) % 20_000
+  return 20_000 + hash
 }
 
 export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
@@ -86,6 +97,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   if (a.discord_id) {
     metadata.discord_id = a.discord_id
   }
+  const port = a.port === undefined ? fixturePort(a.agent_id) : a.port
   await c.query(
     `INSERT INTO agents
        (agent_id, display_name, agent_type, runtime, status, last_seen_at,
@@ -107,6 +119,52 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
       JSON.stringify(metadata),
       a.runtime_engine_preference ?? null,
     ],
+  )
+  await c.query(`UPDATE agents SET channel_port=$2 WHERE agent_id=$1`, [a.agent_id, port])
+  if (a.memoryReady === false || port === null) return
+
+  const runtimeInstanceId = a.runtime_instance_id ?? randomUUID()
+  const sessionName = a.tmux_session === null ? `${a.agent_id}-codex` : metadata.tmux_session as string
+  const runtimeStartedAt = '2026-05-01T00:00:00.000Z'
+  const completedAt = '2026-05-01T00:00:01.000Z'
+  await c.query(
+    `INSERT INTO agent_runtime_instances
+       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
+        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+     VALUES ($1, $2, $3, 'local_process', $4, $5,
+             '/tmp/state-daemon-test-checkout', 'state-daemon-test-head', 'running',
+             $6, $7, '{"source":"state-daemon-fixture"}'::jsonb)
+     ON CONFLICT (runtime_instance_id) DO UPDATE SET
+       agent_id=EXCLUDED.agent_id,
+       runtime_engine=EXCLUDED.runtime_engine,
+       session_name=EXCLUDED.session_name,
+       port=EXCLUDED.port,
+       status=EXCLUDED.status,
+       last_seen_at=EXCLUDED.last_seen_at`,
+    [
+      runtimeInstanceId,
+      a.agent_id,
+      a.runtime_engine_preference ?? a.runtime ?? 'TUI',
+      sessionName,
+      port,
+      runtimeStartedAt,
+      a.last_seen_at ?? completedAt,
+    ],
+  )
+  await c.query(
+    `INSERT INTO runtime_memory_ready_evidence
+       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
+        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
+        valid_until, source, metadata)
+     VALUES
+       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
+        $3, $4, $1, '/tmp/state-daemon-test-checkout', 'state-daemon-test-head',
+        'fixture:mcp__wasurezu__recover_context', 'ready', $5,
+        '/tmp/state-daemon-memory-ready-fixture.json', 'fixture-memory-ready-log',
+        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
+        '{"fixture":true}'::jsonb)`,
+    [a.agent_id, runtimeInstanceId, sessionName, port, completedAt],
   )
 }
 

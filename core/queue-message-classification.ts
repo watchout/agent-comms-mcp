@@ -1,6 +1,7 @@
 import { parseQueuePayload } from './no-reply-policy'
 import { decideQueueRouting, type QueueRoutingDecisionEvidence } from './routing-decision'
 
+export type QueueMessageClassification = 'actionable' | 'non_action' | 'unknown'
 export type DeterministicNonActionableMessageType = 'report' | 'chat' | 'notice' | 'projection'
 
 export type NonActionableDispositionReason =
@@ -49,6 +50,9 @@ export interface QueueDispositionStamp {
   route_reason: QueueRoutingDecisionEvidence['route_reason']
 }
 
+export const ACTIONABLE_MESSAGE_TYPES = new Set(['instruction', 'request', 'question'])
+export const NON_ACTIONABLE_MESSAGE_TYPES = new Set(['chat', 'notice', 'projection', 'report'])
+
 const DETERMINISTIC_NON_ACTIONABLE_REASONS: Record<DeterministicNonActionableMessageType, NonActionableDispositionReason> = {
   report: 'NON_ACTIONABLE_REPORT',
   chat: 'NON_ACTIONABLE_CHAT',
@@ -76,6 +80,25 @@ function parseObject(value: unknown): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+export function normalizeMessageType(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : 'unknown'
+}
+
+export function classifyQueueMessageType(messageType: unknown): QueueMessageClassification {
+  const normalized = normalizeMessageType(messageType)
+  if (ACTIONABLE_MESSAGE_TYPES.has(normalized)) return 'actionable'
+  if (NON_ACTIONABLE_MESSAGE_TYPES.has(normalized)) return 'non_action'
+  return 'unknown'
+}
+
+export function isNonActionableMessageType(messageType: unknown): boolean {
+  return classifyQueueMessageType(messageType) === 'non_action'
+}
+
+export function parseQueuePayloadObject(payload: unknown): Record<string, unknown> {
+  return parseObject(payload)
 }
 
 function booleanFromUnknown(value: unknown): boolean | null {
@@ -193,4 +216,9 @@ export function withQueueDispositionStamp(
     ...payload,
     queue_disposition: stamp,
   }
+}
+
+export function messageTypeFromQueuePayload(payload: unknown, fallback?: unknown): string {
+  const parsed = parseQueuePayloadObject(payload)
+  return normalizeMessageType(parsed.message_type ?? fallback)
 }

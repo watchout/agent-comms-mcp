@@ -35,9 +35,50 @@ aun_self_kick_db_query() {
     echo "aun-self-kick: DATABASE_URL unset, skipping" >&2
     return 0
   fi
+  local project="${AGENT_COMMS_MEMORY_READY_PROJECT:-${AGENT_MEMORY_PROJECT:-agent-comms-mcp}}"
   local total
   total=$(timeout 3 psql "$DATABASE_URL" -tAX -v ON_ERROR_STOP=1 \
-    -c "SELECT (SELECT COUNT(*) FROM message_queue WHERE agent_id='${agent_id}' AND status='pending') + (SELECT COUNT(*) FROM outbound_queue WHERE agent_id='${agent_id}' AND status IN ('pending','claimed')) AS total;" 2>/dev/null || echo "")
+    -v agent_id="$agent_id" \
+    -v project="$project" <<'SQL' 2>/dev/null || echo ""
+WITH current_runtime AS (
+  SELECT ari.runtime_instance_id::text AS runtime_instance_id,
+         ari.session_name,
+         ari.port,
+         ari.started_at,
+         COALESCE(a.profile_revision, 1) AS profile_revision,
+         COALESCE(a.profile_source, 'legacy') AS profile_source
+    FROM agent_runtime_instances ari
+    JOIN agents a ON a.agent_id = ari.agent_id
+   WHERE ari.agent_id = :'agent_id'
+     AND ari.status IN ('running', 'active')
+   ORDER BY COALESCE(ari.last_seen_at, ari.started_at) DESC, ari.started_at DESC
+   LIMIT 1
+),
+memory_ready AS (
+  SELECT 1
+    FROM current_runtime cr
+    JOIN runtime_memory_ready_evidence e
+      ON e.agent_id = :'agent_id'
+     AND e.project = :'project'
+     AND e.runtime_instance_id = cr.runtime_instance_id
+     AND e.expected_agent_id = :'agent_id'
+     AND e.result_status = 'ready'
+     AND e.valid_until > now()
+     AND e.completed_at >= cr.started_at
+     AND (cr.session_name IS NULL OR e.session_name = cr.session_name)
+     AND (cr.port IS NULL OR e.port = cr.port)
+     AND (e.profile_revision IS NULL OR e.profile_revision = cr.profile_revision)
+     AND (e.profile_source IS NULL OR e.profile_source = cr.profile_source)
+   LIMIT 1
+)
+SELECT CASE WHEN EXISTS (SELECT 1 FROM memory_ready)
+  THEN
+    (SELECT COUNT(*) FROM message_queue WHERE agent_id = :'agent_id' AND status = 'pending')
+    + (SELECT COUNT(*) FROM outbound_queue WHERE agent_id = :'agent_id' AND status IN ('pending','claimed'))
+  ELSE 0
+END AS total;
+SQL
+)
   if [ -z "$total" ] || ! [[ "$total" =~ ^[0-9]+$ ]]; then
     echo "aun-self-kick: DB unreachable or query failed, skipping" >&2
     return 0
