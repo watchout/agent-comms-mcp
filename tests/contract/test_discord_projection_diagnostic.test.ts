@@ -244,6 +244,12 @@ describe('#604 Discord projection diagnostic', () => {
       fallback_reason: 'recipient_direct_unavailable',
       decision_source: 'sender_token_evidence',
     })
+    expect(report.effective_delivery_owner).toMatchObject({
+      ok: true,
+      source: 'sender_direct',
+      consumerAgentId: 'codex-cto',
+      channelBindingId: 'binding-codex-cto',
+    })
     expect(report.blockers).toEqual([])
   })
 
@@ -268,6 +274,7 @@ describe('#604 Discord projection diagnostic', () => {
     expect(text).toContain('Credential contract: aligned')
     expect(text).toContain('Runtime login statuses: active, registered')
     expect(text).toContain('Delivery statuses: active, registered')
+    expect(text).toContain('Effective delivery owner: ok:sender_direct')
   })
 
   test('usable sender credential falling back to AUN is a blocker', async () => {
@@ -293,6 +300,14 @@ describe('#604 Discord projection diagnostic', () => {
       'FALLBACK_NOT_ALLOWED',
       'USABLE_SENDER_FELL_BACK_TO_ROUTER',
     ]))
+    expect(report.effective_delivery_owner).toMatchObject({
+      ok: false,
+      code: 'FALLBACK_POLICY_DENIED',
+      evidence: {
+        consumerAgentId: 'aun',
+        consumerSource: 'channel_policy_adapter_owner',
+      },
+    })
   })
 
   test('explicit fallback allowance makes non-direct AUN delivery a warning only when selected evidence is usable', async () => {
@@ -326,6 +341,11 @@ describe('#604 Discord projection diagnostic', () => {
     })
     expect(report.blockers).toEqual([])
     expect(report.warnings.map((item) => item.code)).toEqual(['FALLBACK_ALLOWED'])
+    expect(report.effective_delivery_owner).toMatchObject({
+      ok: true,
+      source: 'legacy_adapter_owner',
+      consumerAgentId: 'aun',
+    })
   })
 
   test('fallback allowance does not turn unknown sender credential evidence into success', async () => {
