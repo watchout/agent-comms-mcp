@@ -41,6 +41,10 @@ import {
   formatDiscordProjectionDiagnosticText,
 } from '../core/discord-projection-diagnostic'
 import { buildQueueNormalizationReport, formatQueueNormalizationText } from '../core/queue-normalization'
+import {
+  buildQueueTerminalStatePreflightReport,
+  formatQueueTerminalStatePreflightText,
+} from '../core/queue-terminal-state-preflight'
 import { buildDirectoryReport, formatDirectoryText } from '../core/directory'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 import {
@@ -4311,6 +4315,28 @@ async function cp70QueuePreflight(args: string[]) {
   }
 }
 
+async function terminalStateQueuePreflight(args: string[]) {
+  const { flags } = parseArgs(args)
+  const format = flags.format ?? 'json'
+  const db = await getDb()
+
+  try {
+    const report = await buildQueueTerminalStatePreflightReport(db as any, {
+      agentId: flags['agent-id'] ?? null,
+    })
+    if (format === 'text') {
+      process.stdout.write(formatQueueTerminalStatePreflightText(report))
+    } else {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    }
+    if (!report.preflight.ok) {
+      process.exitCode = 1
+    }
+  } finally {
+    await db.end()
+  }
+}
+
 function loadJsonObjectFile(path: string, flagName: string): Record<string, unknown> {
   let parsed: unknown
   try {
@@ -4533,7 +4559,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
-    console.error('Usage: agent-com queue <doctor|preflight|cp70-doctor|cp70-preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
+    console.error('Usage: agent-com queue <doctor|preflight|terminal-preflight|cp70-doctor|cp70-preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -5718,6 +5744,8 @@ if (command === 'channel') {
   await diagnoseQueue(rest)
 } else if (command === 'queue' && subcommand === 'preflight') {
   await preflightQueue(rest)
+} else if (command === 'queue' && subcommand === 'terminal-preflight') {
+  await terminalStateQueuePreflight(rest)
 } else if (command === 'queue' && subcommand === 'cp70-doctor') {
   await cp70QueueDoctor(rest)
 } else if (command === 'queue' && subcommand === 'cp70-preflight') {
@@ -5786,6 +5814,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — restart gate; exits non-zero while selected queue blockers remain
+  queue terminal-preflight [--agent-id <id>] [--format json|text]
+                                                       — read-only #407 terminal-state contract and migration readiness preflight
   queue cp70-doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — read-only CP-70 control-plane hazards and exact-id dry-run repair plan
   queue cp70-preflight [--agent-id <id>] [--stale-minutes 15] [--format json|text]
