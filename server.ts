@@ -359,6 +359,9 @@ const { port: WEBHOOK_PORT, explicit: WEBHOOK_PORT_EXPLICIT } = resolveWebhookPo
 // parent is init (PID 1) — true orphans — get the kill. Live-parent PIDs
 // (= running MCP server) are skipped. Matches scripts/cleanup-orphan-ports.sh.
 if (WEBHOOK_PORT_EXPLICIT) {
+  if (isProtectedInfrastructurePort(WEBHOOK_PORT)) {
+    process.stderr.write(`agent-comms: refusing protected infrastructure port cleanup request: ${WEBHOOK_PORT}\n`)
+  } else
   try {
     const out = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
     const candidates = out ? out.split('\n').map(s => s.trim()).filter(Boolean) : []
@@ -4393,6 +4396,10 @@ function getProcessOnPort(port: number): string[] {
   }
 }
 
+function isProtectedInfrastructurePort(port: number): boolean {
+  return port === 5432 || port === 5433
+}
+
 // Issue #248 cycle 3: PPID==1 (init-reparented) filter — only kill PIDs that
 // are real orphans, never PIDs whose parent process is still alive (= a
 // running bot's MCP server). Matches scripts/cleanup-orphan-ports.sh.
@@ -4408,6 +4415,10 @@ function isPidOrphan(pid: string): boolean {
 }
 
 function killPidsOnPort(port: number, excludeSelf = true): number {
+  if (isProtectedInfrastructurePort(port)) {
+    console.warn(`agent-comms: refusing protected infrastructure port cleanup request: ${port}`)
+    return 0
+  }
   const pids = getProcessOnPort(port)
   let killed = 0
   for (const pid of pids) {

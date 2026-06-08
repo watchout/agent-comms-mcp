@@ -15,6 +15,17 @@ if [ -z "$PORT" ]; then
   exit 0
 fi
 
+case "$PORT" in
+  ''|*[!0-9]*)
+    echo "Refusing non-numeric port cleanup request: $PORT" >&2
+    exit 0
+    ;;
+  5432|5433)
+    echo "Refusing protected PostgreSQL port cleanup request: $PORT" >&2
+    exit 0
+    ;;
+esac
+
 # PPID==1 のみ抽出。PPID!=1 (= 親 process 健在 = 生きた MCP / 他 SessionStart
 # hook) は skip。`ps` 失敗時は PPID 不明扱いで skip (false-positive 回避)。
 PIDS=$(lsof -ti :"$PORT" 2>/dev/null | xargs -I{} sh -c 'ppid=$(ps -o ppid= -p {} 2>/dev/null | tr -d " "); [ "$ppid" = "1" ] && echo {}')
