@@ -18,6 +18,7 @@ import {
   type StateDaemonLaunchAgentConfig,
   type StateDaemonPreflightIssue,
 } from './state-daemon/launchagent'
+import { fullGitShaEquals } from './fleet-checkout-drift'
 
 export type StateDaemonLaunchAgentGoNoGo = 'GO' | 'NO_GO'
 export type StateDaemonLaunchAgentFindingSeverity = 'blocker' | 'warning'
@@ -226,7 +227,7 @@ function normalizeText(raw: unknown): string | null {
 }
 
 function commitMatches(actual: string, expected: string): boolean {
-  return actual === expected || actual.startsWith(expected) || expected.startsWith(actual)
+  return fullGitShaEquals(actual, expected)
 }
 
 function uniqueFindings(findings: StateDaemonLaunchAgentReadinessFinding[]): StateDaemonLaunchAgentReadinessFinding[] {

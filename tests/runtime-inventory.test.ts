@@ -7,6 +7,9 @@ import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
 
+const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
+const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
 async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'agent-comms-runtime-'))
   const dbPath = join(dir, 'agent-comms.db')
@@ -40,8 +43,8 @@ async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<
       INSERT INTO agent_runtime_instances
         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, checkout_path, commit_sha, status, last_seen_at, metadata)
       VALUES
-        ('runtime-hotel', 'hotel-dev', 'codex', 'local_process', 'discord-hotel', 101, '/tmp/hotel', 'abc123', 'active', datetime('now'), '{"git_dirty":false}'),
-        ('runtime-stale', 'stale-dev', 'codex', 'local_process', 'discord-stale', 202, '/tmp/stale', 'old999', 'active', '2020-01-01T00:00:00Z', '{"git_dirty":true}');
+        ('runtime-hotel', 'hotel-dev', 'codex', 'local_process', 'discord-hotel', 101, '/tmp/hotel', '${APPROVED_COMMIT}', 'active', datetime('now'), '{"git_dirty":false}'),
+        ('runtime-stale', 'stale-dev', 'codex', 'local_process', 'discord-stale', 202, '/tmp/stale', '${OTHER_COMMIT}', 'active', '2020-01-01T00:00:00Z', '{"git_dirty":true}');
 
       INSERT INTO connector_instances
         (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, trust_status)
@@ -72,7 +75,7 @@ describe('runtime inventory', () => {
     await withRuntimeDb(async (db) => {
       const report = await buildRuntimeInventoryReport(db, {
         staleMinutes: 60,
-        expectedCommit: 'abc123',
+        expectedCommit: APPROVED_COMMIT,
       })
 
       const hotel = report.agents.find((agent) => agent.agent_id === 'hotel-dev')
@@ -160,7 +163,7 @@ describe('runtime inventory', () => {
     await withRuntimeDb(async (db) => {
       const report = await buildRuntimeInventoryReport(db, {
         staleMinutes: 60,
-        expectedCommit: 'abc123',
+        expectedCommit: APPROVED_COMMIT,
         approvedCheckoutRoots: ['/approved/fleet/checkouts'],
       })
 
@@ -168,6 +171,24 @@ describe('runtime inventory', () => {
       expect(hotel?.warnings).toContain('runtime_checkout_path_unapproved')
       expect(hotel?.checkout_drift.approved_checkout_roots).toEqual(['/approved/fleet/checkouts'])
       expect(report.blockers).toContain('hotel-dev:runtime_checkout_path_unapproved')
+    })
+  })
+
+  test('approved commit evidence requires a full SHA match', async () => {
+    await withRuntimeDb(async (db) => {
+      await db.execute(`UPDATE agent_runtime_instances SET commit_sha = '${APPROVED_COMMIT.slice(0, 3)}' WHERE runtime_instance_id = 'runtime-hotel'`)
+
+      const report = await buildRuntimeInventoryReport(db, {
+        staleMinutes: 60,
+        expectedCommit: APPROVED_COMMIT,
+      })
+
+      const hotel = report.agents.find((agent) => agent.agent_id === 'hotel-dev')
+      const hotelConnector = report.connectors.find((connector) => connector.agent_id === 'hotel-dev')
+      expect(hotel?.warnings).toContain('runtime_commit_mismatch')
+      expect(hotel?.checkout_drift.reasons).toContain('runtime_commit_mismatch')
+      expect(hotelConnector?.warnings).toContain('connector_runtime_commit_mismatch')
+      expect(report.blockers).toContain('hotel-dev:runtime_commit_mismatch')
     })
   })
 })

@@ -222,8 +222,8 @@ function validDriftExclusion(
     const actor = normalizeString(exclusion.actor)
     const reason = normalizeString(exclusion.reason)
     const expiresAt = normalizeString(exclusion.expires_at)
-    const scope = normalizeString(exclusion.scope) ?? 'fleet_checkout_drift'
-    if (!actor || !reason || !expiresAt) continue
+    const scope = normalizeString(exclusion.scope)
+    if (!actor || !reason || !expiresAt || !scope) continue
     if (!['fleet_checkout_drift', 'fleet_recovery', 'all'].includes(scope)) continue
     const expiresMs = Date.parse(expiresAt)
     if (!Number.isFinite(expiresMs) || expiresMs <= now.getTime()) continue

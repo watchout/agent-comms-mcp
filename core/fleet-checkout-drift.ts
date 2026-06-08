@@ -95,8 +95,18 @@ function isInside(root: string, candidate: string): boolean {
   return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`)
 }
 
+export function fullGitShaEquals(actual: string | null | undefined, expected: string | null | undefined): boolean {
+  const normalizedActual = cleanText(actual)
+  const normalizedExpected = cleanText(expected)
+  return normalizedActual !== null
+    && normalizedExpected !== null
+    && /^[0-9a-f]{40}$/i.test(normalizedActual)
+    && /^[0-9a-f]{40}$/i.test(normalizedExpected)
+    && normalizedActual.toLowerCase() === normalizedExpected.toLowerCase()
+}
+
 function commitMatches(commit: string, approvedCommit: string): boolean {
-  return commit === approvedCommit || commit.startsWith(approvedCommit) || approvedCommit.startsWith(commit)
+  return fullGitShaEquals(commit, approvedCommit)
 }
 
 export function evaluateFleetCheckoutDrift(

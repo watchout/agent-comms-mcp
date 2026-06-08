@@ -1,6 +1,7 @@
 import type { DbAdapter } from './db'
 import {
   evaluateFleetCheckoutDrift,
+  fullGitShaEquals,
   normalizeApprovedCheckoutRoots,
   type FleetCheckoutDriftResult,
 } from './fleet-checkout-drift'
@@ -157,7 +158,7 @@ function runtimeWarnings(row: any | null, freshness: RuntimeFreshness, expectedC
   if (expectedCommit) {
     const commit = normalizeString(row.commit_sha)
     if (!commit) warnings.push('runtime_commit_missing')
-    else if (!commit.startsWith(expectedCommit) && !expectedCommit.startsWith(commit)) warnings.push('runtime_commit_mismatch')
+    else if (!fullGitShaEquals(commit, expectedCommit)) warnings.push('runtime_commit_mismatch')
   }
   if (!normalizeString(row.checkout_path)) warnings.push('runtime_checkout_path_missing')
   return warnings
