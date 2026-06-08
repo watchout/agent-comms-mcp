@@ -47,6 +47,7 @@ const LOCAL_SUPERVISOR_ADAPTER_PATH = join(REPO_ROOT, 'core', 'local-supervisor-
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
 const CHANNEL_REGISTRATION_RECONCILE_PATH = join(REPO_ROOT, 'core', 'channel-registration-reconcile.ts')
+const MESSAGE_QUEUE_SCHEMA_GUARD_PATH = join(REPO_ROOT, 'core', 'message-queue-schema-guard.ts')
 
 const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
@@ -65,6 +66,7 @@ const LOCAL_SUPERVISOR_ADAPTER_SRC = readFileSync(LOCAL_SUPERVISOR_ADAPTER_PATH,
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
 const CHANNEL_REGISTRATION_RECONCILE_SRC = readFileSync(CHANNEL_REGISTRATION_RECONCILE_PATH, 'utf-8')
+const MESSAGE_QUEUE_SCHEMA_GUARD_SRC = readFileSync(MESSAGE_QUEUE_SCHEMA_GUARD_PATH, 'utf-8')
 const PKG = JSON.parse(readFileSync(PKG_PATH, 'utf-8')) as { bin?: Record<string, string> }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +249,29 @@ describe('T4 — `agent-com next` requires AGENT_ID', () => {
     })
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('AGENT_ID')
+  })
+})
+
+describe('T4b — `agent-com next` guards message_queue status vocabulary drift', () => {
+  test('nextMessage checks message_queue_status_check before claiming rows', () => {
+    const nextBlock = CLI_SRC.split('async function nextMessage()')[1]?.split("await db.query('BEGIN')")[0] ?? ''
+
+    expect(nextBlock).toContain('assertMessageQueueStatusVocabularyCompatible')
+    expect(nextBlock).toContain('agent-com next')
+    expect(nextBlock).toContain('formatMessageQueueStatusCodeDrift')
+    expect(nextBlock).toContain('process.exitCode = 1')
+  })
+
+  test('schema guard reports explicit DB_CODE_DRIFT vocabulary evidence without mutation SQL', () => {
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('DB_CODE_DRIFT')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('message_queue_status_check')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('expected_vocabulary')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('actual_vocabulary')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('missing_statuses')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('constraint_definition')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('pg_get_constraintdef')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).toContain('sqlite_master')
+    expect(MESSAGE_QUEUE_SCHEMA_GUARD_SRC).not.toMatch(/ALTER\s+TABLE|UPDATE\s+message_queue|DELETE\s+FROM\s+message_queue|INSERT\s+INTO\s+message_queue/)
   })
 })
 

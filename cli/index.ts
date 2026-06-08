@@ -65,6 +65,11 @@ import {
   formatStateDaemonLaunchAgentReadinessText,
 } from '../core/state-daemon-launchagent-readiness'
 import {
+  assertMessageQueueStatusVocabularyCompatible,
+  formatMessageQueueStatusCodeDrift,
+  isDbCodeDriftError,
+} from '../core/message-queue-schema-guard'
+import {
   buildLocalLaunchdInstallDryRunPlan,
   formatLocalLaunchdInstallDryRunText,
 } from '../core/local-supervisor-adapter'
@@ -2576,6 +2581,16 @@ async function nextMessage() {
   const agentId = requireAgentId('next')
   const db = await getDb()
   try {
+    try {
+      await assertMessageQueueStatusVocabularyCompatible(db, { operation: 'agent-com next' })
+    } catch (err) {
+      if (isDbCodeDriftError(err)) {
+        process.stderr.write(`${formatMessageQueueStatusCodeDrift(err.report)}\n`)
+        process.exitCode = 1
+        return
+      }
+      throw err
+    }
     // Issue #278 (A) segment 3d — per-row claim path. Mirrors the MCP
     // server next handler post-segment-3c: orphan recovery is structural
     // via the claim-TTL sweeper (core/claim-ttl.ts), so the legacy

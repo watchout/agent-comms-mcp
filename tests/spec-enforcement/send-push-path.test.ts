@@ -94,6 +94,9 @@ describe('T4 — MCP next tool exists in server.ts (spec §4.1)', () => {
     const end = SERVER_SRC.indexOf("if (name === 'send')", start)
     expect(end).toBeGreaterThan(start)
     const body = SERVER_SRC.slice(start, end)
+    expect(body).toContain('assertMessageQueueStatusVocabularyCompatible')
+    expect(body).toContain('mcp.next')
+    expect(body).toContain('formatMessageQueueStatusCodeDrift')
     expect(body).toMatch(/FROM message_queue/)
     expect(body).toMatch(/FOR UPDATE SKIP LOCKED/)
     // Issue #278 (A) segment 3c — the legacy implicit-skip

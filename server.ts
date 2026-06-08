@@ -125,6 +125,11 @@ import {
   parseQueuePayload,
   withTerminalBaton,
 } from './core/no-reply-policy'
+import {
+  assertMessageQueueStatusVocabularyCompatible,
+  formatMessageQueueStatusCodeDrift,
+  isDbCodeDriftError,
+} from './core/message-queue-schema-guard'
 import { notifySenderAndObserve } from './core/sender-feedback-emit'
 import { isQueueContentDup, contentHash, enqueueWithDedupInTransaction } from './core/queue-dedup'
 import { buildCanonicalPresentationEvidence } from './core/canonical-presentation'
@@ -2172,6 +2177,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for next' }], isError: true }
     }
     try {
+      await assertMessageQueueStatusVocabularyCompatible(client, { operation: 'mcp.next' })
       await client.query('BEGIN')
       // Issue #278 (A) segment 3c — legacy priorId IMPLICIT_ABANDON pattern
       // removed. The previous shape locked the agents row with FOR UPDATE,
@@ -2355,6 +2361,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       return { content: [{ type: 'text', text: JSON.stringify(result) }] }
     } catch (err) {
+      if (isDbCodeDriftError(err)) {
+        return { content: [{ type: 'text', text: formatMessageQueueStatusCodeDrift(err.report) }], isError: true }
+      }
       await client.query('ROLLBACK').catch(() => {})
       return { content: [{ type: 'text', text: `Error [NEXT_FAILED]: ${err}` }], isError: true }
     }
@@ -3946,11 +3955,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ─────────────────────────────────────────────────────────────────────
   // PR #338 sub-PR 6 — processing / done state-transition tools (spec §1.2)
   // ─────────────────────────────────────────────────────────────────────
-  // Both tools assume the v0.9 status enum is live (sub-PR 1 merged +
-  // up.sql applied on the operator side). On a pre-migration DB the
-  // CHECK constraint rejects 'in_progress' / 'done' and the UPDATE
-  // surfaces as a SQL error to the caller — we do not silently swallow
-  // that because the schema mismatch IS the bug to surface.
+  // Both tools require the message_queue_status_check DB CHECK constraint
+  // to accept the active v0.9 receive vocabulary. Guard before writing so
+  // an old DB fails with an explicit DB_CODE_DRIFT diagnostic instead of a
+  // generic SQL constraint violation.
   //
   // Idempotence: a second call on a row already at the target status
   // returns ok:true with `already_transitioned:true` and no UPDATE.
@@ -3971,6 +3979,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const toStatus = name === 'processing' ? 'in_progress' : 'done'
     try {
+      await assertMessageQueueStatusVocabularyCompatible(client, { operation: `mcp.${name}` })
       await client.query('BEGIN')
       try {
         // Inspect first so idempotence and INVALID_STATE can be reported
@@ -4091,6 +4100,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw err
       }
     } catch (err) {
+      if (isDbCodeDriftError(err)) {
+        return { content: [{ type: 'text', text: formatMessageQueueStatusCodeDrift(err.report) }], isError: true }
+      }
       return { content: [{ type: 'text', text: `Error: ${name} failed: ${String(err).slice(0, 500)}` }], isError: true }
     }
   }
