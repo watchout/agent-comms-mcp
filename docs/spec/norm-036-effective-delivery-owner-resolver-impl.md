@@ -1,7 +1,7 @@
 # NORM-036 Effective Delivery Owner Resolver Impl
 
 Date: 2026-05-25
-Status: Pre-implementation audit target
+Status: Named contract implemented for audit
 Phase: MVP internal normalization
 Slice: NORM-036
 
@@ -32,6 +32,12 @@ The resolver reads:
 - provider identities from NORM-025
 
 ## Resolver Output
+
+The public contract is exported from `core/outbound-projection.ts` as:
+
+- `EffectiveDeliveryOwnerResult`
+- `resolveEffectiveDeliveryOwner(...)`
+- `toEffectiveDeliveryOwnerResult(...)`
 
 The resolver returns:
 
@@ -114,6 +120,17 @@ human to infer why `agent-com-dev` posted a message intended for `auditor`.
 7. CLI/doctor diagnostics can explain the selected owner or failure code.
 8. Existing mixed-fleet behavior remains compatible while new evidence columns
    are nullable.
+
+## Implementation Notes
+
+- Legacy `adapter_owner_agent_id` / primary fallback is denied by default in
+  the named contract and returns `FALLBACK_POLICY_DENIED` unless a diagnostic
+  caller explicitly sets fallback allowance.
+- Runtime projection remains mixed-fleet compatible, but diagnostics expose the
+  named effective-owner result so fallback is not silent.
+- Multiple eligible `channel_connector_bindings` may choose a single winner
+  only when `priority` has a unique lowest value; otherwise the result is
+  `AMBIGUOUS_CONNECTOR`.
 
 ## Non-Goals
 

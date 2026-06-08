@@ -2,8 +2,10 @@ import {
   outboundProjectionSkipCode,
   outboundProjectionSkipReason,
   resolveOutboundProjectionDecision,
+  toEffectiveDeliveryOwnerResult,
   type DeliveryConsumerDiagnostic,
   type DeliveryConsumerEvidence,
+  type EffectiveDeliveryOwnerResult,
   type OutboundProjectionDecision,
   type ProjectionConsumerSource,
   type Queryable,
@@ -98,6 +100,7 @@ export interface DiscordProjectionDiagnosticReport {
     consumer_evidence: DeliveryConsumerEvidence | null
     delivery_diagnostics: DeliveryConsumerDiagnostic[]
   }
+  effective_delivery_owner: EffectiveDeliveryOwnerResult
   evidence: {
     sender_direct: DiscordProjectionEvidenceSummary
     selected_consumer: DiscordProjectionEvidenceSummary
@@ -280,6 +283,7 @@ export async function buildDiscordProjectionDiagnosticReport(
   const selectedDiagnostics = diagnosticsFor(decision, decision.consumerAgentId)
   const senderDiagnostics = diagnosticsFor(decision, senderAgentId, 'sender_token_evidence')
   const selectedConsumer = evidenceSummary(decision.consumerAgentId, decision.consumerEvidence, selectedDiagnostics)
+  const effectiveDeliveryOwner = toEffectiveDeliveryOwnerResult(decision, { fallbackAllowed })
   const senderDirect = evidenceSummary(
     senderAgentId,
     directSenderSelected(decision, senderAgentId) ? decision.consumerEvidence : null,
@@ -416,6 +420,7 @@ export async function buildDiscordProjectionDiagnosticReport(
       consumer_evidence: decision.consumerEvidence,
       delivery_diagnostics: decision.deliveryDiagnostics,
     },
+    effective_delivery_owner: effectiveDeliveryOwner,
     evidence: {
       sender_direct: senderDirect,
       selected_consumer: selectedConsumer,
@@ -460,6 +465,7 @@ export function formatDiscordProjectionDiagnosticText(report: DiscordProjectionD
     `Sender direct priority: ${report.contract.sender_direct_preferred_over_router ? 'true' : 'false'}`,
     `Fallback allowed: ${report.decision.fallback_allowed ? 'true' : 'false'}`,
     `Fallback reason: ${report.decision.fallback_reason ?? '(none)'}`,
+    `Effective delivery owner: ${report.effective_delivery_owner.ok ? `ok:${report.effective_delivery_owner.source}` : `blocked:${report.effective_delivery_owner.code}`}`,
     `Mutation performed: ${report.mutation_performed ? 'true' : 'false'}`,
   ]
 

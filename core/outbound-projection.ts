@@ -82,6 +82,47 @@ export interface OutboundProjectionDecision {
   deliveryDiagnostics: DeliveryConsumerDiagnostic[]
 }
 
+export type EffectiveDeliveryOwnerSource =
+  | 'explicit_binding'
+  | 'sender_direct'
+  | 'recipient_direct'
+  | 'derived_single_connector'
+  | 'legacy_adapter_owner'
+  | 'legacy_primary'
+
+export type EffectiveDeliveryOwnerFailureCode =
+  | 'NO_ELIGIBLE_CONNECTOR'
+  | 'AMBIGUOUS_CONNECTOR'
+  | 'PROVIDER_WRITE_ACCESS_MISSING'
+  | 'BINDING_MISSING'
+  | 'CREDENTIAL_NOT_DELIVERY_ELIGIBLE'
+  | 'FALLBACK_POLICY_DENIED'
+
+export type EffectiveDeliveryOwnerResult =
+  | {
+      ok: true
+      source: EffectiveDeliveryOwnerSource
+      consumerAgentId: string
+      connectorInstanceId: string | null
+      credentialId: string | null
+      credentialStatus: string | null
+      channelBindingId: string | null
+      providerChannelAccessId: string | null
+      evidence: DeliveryConsumerEvidence | null
+      fallbackReason: DeliveryFallbackReason
+      diagnostics: DeliveryConsumerDiagnostic[]
+    }
+  | {
+      ok: false
+      code: EffectiveDeliveryOwnerFailureCode
+      evidence: {
+        consumerAgentId: string | null
+        consumerSource: ProjectionConsumerSource
+        fallbackReason: DeliveryFallbackReason
+        diagnostics: DeliveryConsumerDiagnostic[]
+      }
+    }
+
 export interface DeliveryConsumerEvidence {
   source_table: 'channel_connector_bindings' | 'provider_channel_access'
   provider: 'discord'
@@ -92,6 +133,7 @@ export interface DeliveryConsumerEvidence {
   credential_id: string
   credential_status: string
   channel_binding_id: string | null
+  channel_binding_priority?: number | null
   provider_channel_access_id: string | null
 }
 
@@ -208,10 +250,10 @@ async function writeBindingForConnector(
   platform: 'discord',
   channelId: string,
   connectorInstanceId: string,
-): Promise<string | null> {
+): Promise<{ bindingId: string; priority: number | null } | null> {
   const rows = await queryRows(
     db,
-    `SELECT channel_binding_id
+    `SELECT channel_binding_id, priority
        FROM channel_connector_bindings
       WHERE provider = $1
         AND channel_id = $2
@@ -225,7 +267,13 @@ async function writeBindingForConnector(
       LIMIT 1`,
     [platform, channelId, connectorInstanceId],
   )
-  return firstString(rows[0]?.channel_binding_id)
+  const bindingId = firstString(rows[0]?.channel_binding_id)
+  if (!bindingId) return null
+  const rawPriority = Number(rows[0]?.priority)
+  return {
+    bindingId,
+    priority: Number.isFinite(rawPriority) ? rawPriority : null,
+  }
 }
 
 async function providerWriteAccessForConnector(
@@ -332,8 +380,8 @@ async function eligibleDeliveryConnectorEvidence(
       })
       continue
     }
-    const bindingId = await writeBindingForConnector(db, input.platform, channelId, connectorInstanceId)
-    if (bindingId) {
+    const binding = await writeBindingForConnector(db, input.platform, channelId, connectorInstanceId)
+    if (binding) {
       eligible.push({
         source_table: 'channel_connector_bindings',
         provider: input.platform,
@@ -343,13 +391,15 @@ async function eligibleDeliveryConnectorEvidence(
         connector_instance_id: connectorInstanceId,
         credential_id: credential.credential_id,
         credential_status: credential.credential_status,
-        channel_binding_id: bindingId,
+        channel_binding_id: binding.bindingId,
+        channel_binding_priority: binding.priority,
         provider_channel_access_id: null,
       })
       diagnostic('eligible', connectorInstanceId, {
         credential_id: credential.credential_id,
         credential_status: credential.credential_status,
-        channel_binding_id: bindingId,
+        channel_binding_id: binding.bindingId,
+        channel_binding_priority: binding.priority,
         evidence_source: 'channel_connector_bindings',
       })
       continue
@@ -385,12 +435,21 @@ async function eligibleDeliveryConnectorEvidence(
       })
     }
   }
-  if (eligible.length > 1) {
-    diagnostic('ambiguous_delivery_connectors', null, {
-      connector_instance_ids: eligible.map((item) => item.connector_instance_id),
-    })
-  }
   return { eligible, diagnostics }
+}
+
+function selectDeliveryEvidence(eligible: DeliveryConsumerEvidence[]): DeliveryConsumerEvidence | null {
+  if (eligible.length === 0) return null
+  if (eligible.length === 1) return eligible[0]
+
+  const rankedBindings = eligible
+    .filter((item) => item.source_table === 'channel_connector_bindings' && typeof item.channel_binding_priority === 'number')
+    .sort((a, b) => (a.channel_binding_priority ?? Number.MAX_SAFE_INTEGER) - (b.channel_binding_priority ?? Number.MAX_SAFE_INTEGER))
+  if (rankedBindings.length === 0) return null
+
+  const winningPriority = rankedBindings[0]!.channel_binding_priority
+  const winners = rankedBindings.filter((item) => item.channel_binding_priority === winningPriority)
+  return winners.length === 1 ? winners[0] : null
 }
 
 async function deliveryConsumerEvidence(
@@ -422,7 +481,24 @@ async function deliveryConsumerEvidence(
     agentId: input.agentId,
     source: input.source,
   })
-  return { evidence: eligible.length === 1 ? eligible[0] : null, diagnostics }
+  const evidence = selectDeliveryEvidence(eligible)
+  if (!evidence && eligible.length > 1) {
+    diagnostics.push({
+      agent_id: input.agentId,
+      connector_instance_id: null,
+      source: input.source,
+      code: 'ambiguous_delivery_connectors',
+      detail: {
+        connector_instance_ids: eligible.map((item) => item.connector_instance_id),
+        channel_binding_priorities: eligible.map((item) => ({
+          connector_instance_id: item.connector_instance_id,
+          channel_binding_id: item.channel_binding_id,
+          channel_binding_priority: item.channel_binding_priority ?? null,
+        })),
+      },
+    })
+  }
+  return { evidence, diagnostics }
 }
 
 async function ownerFromMetadataIfEligible(
@@ -732,4 +808,95 @@ export async function resolveOutboundProjectionDecision(
     return fallbackProjection(base, recipientFallbackReason, singleRecipient)
   }
   return fallbackProjection(base)
+}
+
+export function toEffectiveDeliveryOwnerResult(
+  decision: OutboundProjectionDecision,
+  options: { fallbackAllowed?: boolean } = {},
+): EffectiveDeliveryOwnerResult {
+  const legacyFallback = decision.consumerSource === 'channel_policy_adapter_owner'
+    || decision.consumerSource === 'channel_policy_primary'
+  if (legacyFallback && options.fallbackAllowed !== true) {
+    return {
+      ok: false,
+      code: 'FALLBACK_POLICY_DENIED',
+      evidence: {
+        consumerAgentId: decision.consumerAgentId,
+        consumerSource: decision.consumerSource,
+        fallbackReason: decision.deliveryFallbackReason,
+        diagnostics: decision.deliveryDiagnostics,
+      },
+    }
+  }
+
+  if (decision.consumerAgentId) {
+    return {
+      ok: true,
+      source: effectiveDeliveryOwnerSource(decision),
+      consumerAgentId: decision.consumerAgentId,
+      connectorInstanceId: decision.consumerEvidence?.connector_instance_id ?? null,
+      credentialId: decision.consumerEvidence?.credential_id ?? null,
+      credentialStatus: decision.consumerEvidence?.credential_status ?? null,
+      channelBindingId: decision.consumerEvidence?.channel_binding_id ?? null,
+      providerChannelAccessId: decision.consumerEvidence?.provider_channel_access_id ?? null,
+      evidence: decision.consumerEvidence,
+      fallbackReason: decision.deliveryFallbackReason,
+      diagnostics: decision.deliveryDiagnostics,
+    }
+  }
+
+  return {
+    ok: false,
+    code: effectiveDeliveryOwnerFailureCode(decision.deliveryDiagnostics),
+    evidence: {
+      consumerAgentId: null,
+      consumerSource: decision.consumerSource,
+      fallbackReason: decision.deliveryFallbackReason,
+      diagnostics: decision.deliveryDiagnostics,
+    },
+  }
+}
+
+export async function resolveEffectiveDeliveryOwner(
+  db: Queryable,
+  input: {
+    channelId: string
+    threadId?: string | null
+    platform?: 'discord'
+    senderAgentId?: string | null
+    recipientAgentIds?: string[] | null
+    fallbackAllowed?: boolean
+  },
+): Promise<EffectiveDeliveryOwnerResult> {
+  const decision = await resolveOutboundProjectionDecision(db, input)
+  return toEffectiveDeliveryOwnerResult(decision, { fallbackAllowed: input.fallbackAllowed })
+}
+
+function effectiveDeliveryOwnerSource(decision: OutboundProjectionDecision): EffectiveDeliveryOwnerSource {
+  switch (decision.consumerSource) {
+    case 'sender_token_evidence':
+      return 'sender_direct'
+    case 'recipient_token_evidence':
+      return 'recipient_direct'
+    case 'thread_adapter_metadata':
+    case 'channel_adapter_metadata':
+      return 'explicit_binding'
+    case 'channel_policy_adapter_owner':
+      return 'legacy_adapter_owner'
+    case 'channel_policy_primary':
+      return 'legacy_primary'
+    default:
+      return decision.consumerEvidence?.source_table === 'provider_channel_access'
+        ? 'derived_single_connector'
+        : 'explicit_binding'
+  }
+}
+
+function effectiveDeliveryOwnerFailureCode(diagnostics: DeliveryConsumerDiagnostic[]): EffectiveDeliveryOwnerFailureCode {
+  const codes = new Set(diagnostics.map((diagnostic) => diagnostic.code))
+  if (codes.has('ambiguous_delivery_connectors')) return 'AMBIGUOUS_CONNECTOR'
+  if (codes.has('credential_not_delivery_eligible') || codes.has('credential_missing')) return 'CREDENTIAL_NOT_DELIVERY_ELIGIBLE'
+  if (codes.has('provider_write_access_missing') || codes.has('provider_write_access_read_only')) return 'PROVIDER_WRITE_ACCESS_MISSING'
+  if (codes.has('write_binding_missing')) return 'BINDING_MISSING'
+  return 'NO_ELIGIBLE_CONNECTOR'
 }

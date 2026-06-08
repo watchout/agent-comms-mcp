@@ -3,6 +3,7 @@ import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
 import {
   OUTBOUND_SKIP_NO_DELIVERY_CONSUMER,
   outboundProjectionSkipReason,
+  resolveEffectiveDeliveryOwner,
   resolveOutboundProjectionDecision,
   resolveOutboundProjectionRoute,
 } from '../../core/outbound-projection'
@@ -50,6 +51,7 @@ function mockProjectionDb(options: {
   ambiguousDeliveryAgents?: string[]
   credentialStatusByAgent?: Record<string, string>
   providerAccessByExternalId?: Record<string, string[]>
+  bindingPriorityByConnector?: Record<string, number>
 } = {}) {
   const eligibleAgents = new Set(options.eligibleDeliveryAgents ?? [])
   const bindingAgents = new Set(options.bindingDeliveryAgents ?? [])
@@ -122,7 +124,13 @@ function mockProjectionDb(options: {
         const connectorInstanceId = typeof params?.[2] === 'string' ? params[2] : ''
         const agentId = agentFromConnector(connectorInstanceId)
         if (bindingAgents.has(agentId)) {
-          return { rows: [{ channel_binding_id: `binding-${agentId}` }] }
+          const bindingId = ambiguousAgents.has(agentId) ? `binding-${connectorInstanceId}` : `binding-${agentId}`
+          return {
+            rows: [{
+              channel_binding_id: bindingId,
+              priority: options.bindingPriorityByConnector?.[connectorInstanceId] ?? 10,
+            }],
+          }
         }
         return { rows: [] }
       }
@@ -834,5 +842,160 @@ describe('#604 Discord direct-delivery credential contract', () => {
     expect(decision.projectionIdentityId).toBe('aun')
     expect(decision.intendedProjectionIdentityId).toBe('ceo')
     expect(decision.projectionFallbackReason).toBe('recipient_projection_human')
+  })
+})
+
+describe('#698 NORM-036 effective delivery owner named contract', () => {
+  test('registered sender credential with write binding exposes sender_direct owner result', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+      },
+    })
+    const db = mockProjectionDb({
+      bindingDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const owner = await resolveEffectiveDeliveryOwner(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+    })
+
+    expect(owner).toMatchObject({
+      ok: true,
+      source: 'sender_direct',
+      consumerAgentId: 'codex-cto',
+      connectorInstanceId: 'connector-codex-cto',
+      credentialStatus: 'registered',
+      channelBindingId: 'binding-codex-cto',
+    })
+  })
+
+  test('legacy adapter-owner fallback is denied by default in the named contract', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+      },
+    })
+    const db = mockProjectionDb({
+      readOnlyDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const owner = await resolveEffectiveDeliveryOwner(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+    })
+
+    expect(owner).toMatchObject({
+      ok: false,
+      code: 'FALLBACK_POLICY_DENIED',
+      evidence: {
+        consumerAgentId: 'aun',
+        consumerSource: 'channel_policy_adapter_owner',
+        fallbackReason: 'sender_direct_unavailable',
+      },
+    })
+  })
+
+  test('explicit fallback allowance exposes legacy adapter-owner as an auditable owner', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+      },
+    })
+    const db = mockProjectionDb({
+      readOnlyDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const owner = await resolveEffectiveDeliveryOwner(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
+      fallbackAllowed: true,
+    })
+
+    expect(owner).toMatchObject({
+      ok: true,
+      source: 'legacy_adapter_owner',
+      consumerAgentId: 'aun',
+      connectorInstanceId: 'connector-aun',
+      providerChannelAccessId: 'access-aun',
+      fallbackReason: 'sender_direct_unavailable',
+    })
+  })
+
+  test('multiple write bindings use a unique lowest priority winner', async () => {
+    const db = mockProjectionDb({
+      ambiguousDeliveryAgents: ['codex-cto'],
+      bindingDeliveryAgents: ['codex-cto'],
+      bindingPriorityByConnector: {
+        'connector-codex-cto-1': 20,
+        'connector-codex-cto-2': 5,
+      },
+      agents: {
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+      },
+    })
+
+    const owner = await resolveEffectiveDeliveryOwner(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+
+    expect(owner).toMatchObject({
+      ok: true,
+      source: 'recipient_direct',
+      consumerAgentId: 'codex-cto',
+      connectorInstanceId: 'connector-codex-cto-2',
+      channelBindingId: 'binding-connector-codex-cto-2',
+    })
+  })
+
+  test('multiple eligible connectors without a unique priority winner return AMBIGUOUS_CONNECTOR', async () => {
+    const db = mockProjectionDb({
+      ambiguousDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['codex-cto'],
+      agents: {
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+      },
+    })
+
+    const owner = await resolveEffectiveDeliveryOwner(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-aun',
+      recipientAgentIds: ['codex-cto'],
+    })
+
+    expect(owner).toMatchObject({
+      ok: false,
+      code: 'AMBIGUOUS_CONNECTOR',
+    })
   })
 })
