@@ -535,7 +535,7 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).not.toMatch(/payload_preview/)
   })
 
-  test('CP-70 doctor pins broad prompt-artifact scan and dry-run exact-id policy', () => {
+  test('CP-70 doctor pins active prompt-backlog scan and dry-run exact-id policy', () => {
     expect(CP70_DOCTOR_SRC).toMatch(/LOOP_PROMPT_BACKLOG/)
     expect(CP70_DOCTOR_SRC).toMatch(/STUCK_ACTIVE_QUEUE_ROW/)
     expect(CP70_DOCTOR_SRC).toMatch(/DUPLICATE_ACTIVE_BATON/)
@@ -544,8 +544,9 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CP70_DOCTOR_SRC).toMatch(/subject_id: string/)
     expect(CP70_DOCTOR_SRC).toMatch(/recommended_repair: Cp70RepairHint \| null/)
     expect(CP70_DOCTOR_SRC).toMatch(/message_queue\.payload/)
-    expect(CP70_DOCTOR_SRC).toMatch(/agent_messages\.content/)
-    expect(CP70_DOCTOR_SRC).toMatch(/agent_messages\.metadata/)
+    expect(CP70_DOCTOR_SRC).toMatch(/mq\.status IN \('pending', 'received', 'in_progress'\)/)
+    expect(CP70_DOCTOR_SRC).not.toMatch(/agent_messages\.content/)
+    expect(CP70_DOCTOR_SRC).not.toMatch(/agent_messages\.metadata/)
     expect(CP70_DOCTOR_SRC).toMatch(/launchagent\.plist/)
     expect(CP70_DOCTOR_SRC).toMatch(/CP70_LAUNCHAGENT_MISMATCH/)
     expect(CP70_DOCTOR_SRC).toMatch(/CP70_CHECKOUT_PATH_SUSPECT/)

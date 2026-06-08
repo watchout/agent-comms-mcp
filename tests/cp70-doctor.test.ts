@@ -69,7 +69,7 @@ function allByCode(findings: Cp70Finding[], code: string): Cp70Finding[] {
 }
 
 describe('CP-70 control-plane doctor', () => {
-  test('scans message_queue payload and agent_messages content/metadata for legacy TUI wake prompts', async () => {
+  test('scans only active message_queue payload for legacy TUI wake prompt backlog', async () => {
     const seenSql: string[] = []
     const db = {
       async query(sql: string) {
@@ -92,30 +92,6 @@ describe('CP-70 control-plane doctor', () => {
             ],
           }
         }
-        if (sql.includes("'agent_messages.content'")) {
-          return {
-            rows: [
-              queueRow({
-                source_table: 'agent_messages.content',
-                record_id: 'msg-content',
-                queue_id: null,
-                evidence: 'Start processing the agent-comms message you just received...',
-              }),
-            ],
-          }
-        }
-        if (sql.includes("'agent_messages.metadata'")) {
-          return {
-            rows: [
-              queueRow({
-                source_table: 'agent_messages.metadata',
-                record_id: 'msg-meta',
-                queue_id: null,
-                evidence: '{"wake":"processing tool for its queue_id"}',
-              }),
-            ],
-          }
-        }
         return { rows: [] }
       },
     }
@@ -127,12 +103,8 @@ describe('CP-70 control-plane doctor', () => {
     const prompts = allByCode(report.findings, 'LOOP_PROMPT_BACKLOG')
 
     expect(prompts.every((finding) => finding.severity === 'blocker')).toBe(true)
-    expect(prompts.map((finding) => finding.samples[0]?.source).sort()).toEqual([
-      'agent_messages.content',
-      'agent_messages.metadata',
-      'message_queue.payload',
-    ])
-    expect(prompts.find((finding) => finding.queue_id === '101')).toMatchObject({
+    expect(prompts.map((finding) => finding.samples[0]?.source)).toEqual(['message_queue.payload'])
+    expect(prompts[0]).toMatchObject({
       code: 'LOOP_PROMPT_BACKLOG',
       gate: 'runtime',
       subject_type: 'queue',
@@ -146,21 +118,17 @@ describe('CP-70 control-plane doctor', () => {
         requires_execute_flag: true,
       },
     })
-    expect(prompts.find((finding) => finding.subject_type === 'message')).toMatchObject({
-      code: 'LOOP_PROMPT_BACKLOG',
-      gate: 'runtime',
-      message_id: expect.any(String),
-    })
+    expect(prompts.find((finding) => finding.subject_type === 'message')).toBeUndefined()
     expect(report.queue_backlog.status_counts).toEqual({ pending: 2, received: 1 })
     expect(report.policy.no_fifo_drain).toBe(true)
     expect(report.policy.no_prompt_driven_processing).toBe(true)
     expect(report.non_goals).toContain('codex_session_transcript_scan')
 
     const payloadScan = seenSql.find((sql) => sql.includes("'message_queue.payload'")) ?? ''
-    const metadataScan = seenSql.find((sql) => sql.includes("'agent_messages.metadata'")) ?? ''
     expect(payloadScan).toContain('mq.payload')
+    expect(payloadScan).toContain("mq.status IN ('pending', 'received', 'in_progress')")
     expect(payloadScan).not.toContain("payload->>'content'")
-    expect(metadataScan).toContain("coalesce(am.metadata::text, '')")
+    expect(seenSql.some((sql) => sql.includes('agent_messages'))).toBe(false)
   })
 
   test('reports LaunchAgent prompt, installed/running mismatch, and tmp checkout path evidence', async () => {
