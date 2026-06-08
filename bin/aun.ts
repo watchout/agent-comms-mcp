@@ -13,6 +13,7 @@
  *   - aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]
  *   - aun drain --agent-id <id> [--limit <n>] [--dry-run]
  *   - aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>] [--complete-no-reply --completion-reason <text>|--auto-final-reply]
+ *   - aun codex-runner-preflight --agent-id <id> [--queue-id <id>] [--max-inspect <n>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
@@ -29,6 +30,7 @@ import { start } from './aun/start'
 import { diagnoseReceive, drain, receive, receiveActionable, receiveTargeted, reconcile } from './aun/receive'
 import { notify, reply } from './aun/reply'
 import { codexRunnerTick } from './aun/codex-runner'
+import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
 
@@ -47,6 +49,7 @@ function printHelp(): void {
     '  aun reconcile --dry-run --agent-id <id> --limit <n> [--cursor <cursor>]',
     '  aun drain --agent-id <id> [--limit <n>] [--dry-run]',
     '  aun codex-runner --agent-id <id> [--queue-id <id>] [--limit <n>] [--ack-mentions <ids>] [--ack-content <text>] [--complete-no-reply --completion-reason <text>|--auto-final-reply]',
+    '  aun codex-runner-preflight --agent-id <id> [--queue-id <id>] [--max-inspect <n>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
@@ -289,6 +292,7 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'reconcile' &&
     subcommand !== 'receive-actionable' &&
     subcommand !== 'next-actionable' &&
+    subcommand !== 'codex-runner-preflight' &&
     subcommand !== 'processing' &&
     subcommand !== 'done' &&
     subcommand !== 'record-no-reply' &&
@@ -404,6 +408,26 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
       dryRun: !!flags['dry-run'],
       maxInspect,
       queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+    })
+    if (res.stdout) process.stdout.write(res.stdout)
+    if (res.stderr) process.stderr.write(res.stderr)
+    return res.code
+  }
+
+  if (subcommand === 'codex-runner-preflight') {
+    const maxInspectFlag = flags['max-inspect']
+    let maxInspect: number | undefined
+    if (maxInspectFlag !== undefined) {
+      if (typeof maxInspectFlag !== 'string') {
+        process.stderr.write('Error [CODEX_RUNNER_PREFLIGHT_FAILED]: --max-inspect requires a value\n')
+        return 2
+      }
+      maxInspect = Number(maxInspectFlag)
+    }
+    const res = await codexRunnerLifecyclePreflight({
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+      maxInspect,
     })
     if (res.stdout) process.stdout.write(res.stdout)
     if (res.stderr) process.stderr.write(res.stderr)
