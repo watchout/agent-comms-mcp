@@ -34,6 +34,7 @@ const PKG_PATH = join(REPO_ROOT, 'package.json')
 const QUEUE_DOCTOR_PATH = join(REPO_ROOT, 'core', 'queue-doctor.ts')
 const CP70_DOCTOR_PATH = join(REPO_ROOT, 'core', 'cp70-doctor.ts')
 const QUEUE_NORMALIZATION_PATH = join(REPO_ROOT, 'core', 'queue-normalization.ts')
+const QUEUE_TERMINAL_STATE_PREFLIGHT_PATH = join(REPO_ROOT, 'core', 'queue-terminal-state-preflight.ts')
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const RUNTIME_INVENTORY_PATH = join(REPO_ROOT, 'core', 'runtime-inventory.ts')
@@ -53,6 +54,7 @@ const CLI_SRC = readFileSync(CLI_PATH, 'utf-8')
 const QUEUE_DOCTOR_SRC = readFileSync(QUEUE_DOCTOR_PATH, 'utf-8')
 const CP70_DOCTOR_SRC = readFileSync(CP70_DOCTOR_PATH, 'utf-8')
 const QUEUE_NORMALIZATION_SRC = readFileSync(QUEUE_NORMALIZATION_PATH, 'utf-8')
+const QUEUE_TERMINAL_STATE_PREFLIGHT_SRC = readFileSync(QUEUE_TERMINAL_STATE_PREFLIGHT_PATH, 'utf-8')
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const RUNTIME_INVENTORY_SRC = readFileSync(RUNTIME_INVENTORY_PATH, 'utf-8')
@@ -94,6 +96,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('CP-70 queue doctor handlers are defined', () => {
     expect(CLI_SRC).toMatch(/async function cp70QueueDoctor\s*\(/)
     expect(CLI_SRC).toMatch(/async function cp70QueuePreflight\s*\(/)
+  })
+  test('terminal-state queue preflight handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function terminalStateQueuePreflight\s*\(/)
   })
   test('repairQueue handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function repairQueue\s*\(/)
@@ -149,6 +154,9 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
   test("'queue cp70-doctor' and 'queue cp70-preflight' invoke CP-70 handlers", () => {
     expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'cp70-doctor'[\s\S]*?cp70QueueDoctor\(/)
     expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'cp70-preflight'[\s\S]*?cp70QueuePreflight\(/)
+  })
+  test("'queue terminal-preflight' invokes terminal-state preflight", () => {
+    expect(CLI_SRC).toMatch(/command === 'queue' && subcommand === 'terminal-preflight'[\s\S]*?terminalStateQueuePreflight\(/)
   })
   test("'recovery readiness' invokes the CP-80 read-only preflight handler", () => {
     expect(CLI_SRC).toMatch(/command === 'recovery'[\s\S]*?recoveryCommand\(subcommand, rest\)/)
@@ -482,6 +490,8 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/queue health blockers and stale-work diagnostics/)
     expect(CLI_SRC).toMatch(/queue preflight \[--gate all\|runtime\|projection\] \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/restart gate; exits non-zero while selected queue blockers remain/)
+    expect(CLI_SRC).toMatch(/queue terminal-preflight \[--agent-id <id>\] \[--format json\|text\]/)
+    expect(CLI_SRC).toMatch(/read-only #407 terminal-state contract and migration readiness preflight/)
     expect(CLI_SRC).toMatch(/queue cp70-doctor \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
     expect(CLI_SRC).toMatch(/read-only CP-70 control-plane hazards and exact-id dry-run repair plan/)
     expect(CLI_SRC).toMatch(/queue cp70-preflight \[--agent-id <id>\] \[--stale-minutes 15\] \[--format json\|text\]/)
@@ -510,6 +520,19 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(CLI_SRC).toMatch(/'projection'[\s\S]*?'outbound_pending_stale'/)
     expect(CLI_SRC).toMatch(/failed_blocker_codes/)
     expect(CLI_SRC).toMatch(/Preflight\(\$\{gate\}\)/)
+  })
+
+  test('queue terminal-preflight pins #407 fail-closed terminal contract checks', () => {
+    expect(CLI_SRC).toMatch(/buildQueueTerminalStatePreflightReport\(db as any/)
+    expect(CLI_SRC).toMatch(/formatQueueTerminalStatePreflightText/)
+    expect(CLI_SRC).toMatch(/if \(!report\.preflight\.ok\)[\s\S]*?process\.exitCode = 1/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).toMatch(/replied_missing_reply_evidence/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).toMatch(/pending_with_claim/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).toMatch(/legacy_status_rows/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).toMatch(/terminal_status_contract_not_enforced/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).toMatch(/live_migration_requires_operator_approval: true/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).toMatch(/payload_bytes/)
+    expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).not.toMatch(/payload_preview/)
   })
 
   test('CP-70 doctor pins broad prompt-artifact scan and dry-run exact-id policy', () => {
