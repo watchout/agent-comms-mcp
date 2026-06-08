@@ -50,6 +50,9 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
   test('server.ts handler branch exists for both tools', () => {
     expect(SERVER_SRC).toContain("if (name === 'processing' || name === 'done')")
     // Spec §1.2 invariants surface as named error codes.
+    expect(SERVER_SRC).toContain('assertMessageQueueStatusVocabularyCompatible')
+    expect(SERVER_SRC).toContain('DB_CODE_DRIFT')
+    expect(SERVER_SRC).toContain('message_queue_status_check')
     expect(SERVER_SRC).toContain('INVALID_STATE')
     expect(SERVER_SRC).toContain('already_transitioned')
     expect(SERVER_SRC).toContain('detectNoReplyIntent')
