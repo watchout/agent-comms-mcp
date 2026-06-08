@@ -180,15 +180,6 @@ function buildAgentFilter(alias: string, params: unknown[], agentId: string | nu
   return ` AND ${alias}.agent_id = $${params.length}`
 }
 
-function buildAgentMessageFilter(params: unknown[], agentId: string | null): string {
-  if (!agentId) return ''
-  params.push(agentId)
-  const authorIndex = params.length
-  params.push(`%${agentId}%`)
-  const metadataIndex = params.length
-  return ` AND (am.author_id = $${authorIndex} OR coalesce(am.metadata::text, '') LIKE $${metadataIndex})`
-}
-
 function toNumber(value: unknown): number {
   if (typeof value === 'number') return value
   if (typeof value === 'string') {
@@ -620,44 +611,11 @@ export async function buildCp70DoctorReport(db: Queryable, options: Cp70DoctorOp
             count(*) OVER ()::int AS total_count
        FROM message_queue mq
       WHERE (${promptWhere('mq.payload')})
+        AND mq.status IN ('pending', 'received', 'in_progress')
         ${mqPromptAgentFilter}
       ORDER BY mq.created_at ASC
       LIMIT ${SAMPLE_LIMIT}`,
     mqPromptParams,
-  )
-
-  const amContentParams = promptParams()
-  const amContentFilter = buildAgentMessageFilter(amContentParams, agentId)
-  const agentMessageContentRows = await queryRows(
-    db,
-    `SELECT 'agent_messages.content' AS source_table,
-            am.id AS record_id, NULL AS queue_id, am.author_id AS agent_id,
-            am.id::text AS message_id,
-            NULL AS status, am.created_at, am.content AS evidence,
-            count(*) OVER ()::int AS total_count
-       FROM agent_messages am
-      WHERE (${promptWhere('am.content')})
-        ${amContentFilter}
-      ORDER BY am.created_at ASC
-      LIMIT ${SAMPLE_LIMIT}`,
-    amContentParams,
-  )
-
-  const amMetadataParams = promptParams()
-  const amMetadataFilter = buildAgentMessageFilter(amMetadataParams, agentId)
-  const agentMessageMetadataRows = await queryRows(
-    db,
-    `SELECT 'agent_messages.metadata' AS source_table,
-            am.id AS record_id, NULL AS queue_id, am.author_id AS agent_id,
-            am.id::text AS message_id,
-            NULL AS status, am.created_at, coalesce(am.metadata::text, '') AS evidence,
-            count(*) OVER ()::int AS total_count
-       FROM agent_messages am
-      WHERE (${promptWhere("coalesce(am.metadata::text, '')")})
-        ${amMetadataFilter}
-      ORDER BY am.created_at ASC
-      LIMIT ${SAMPLE_LIMIT}`,
-    amMetadataParams,
   )
 
   const staleParams: unknown[] = [String(staleSeconds)]
@@ -712,8 +670,6 @@ export async function buildCp70DoctorReport(db: Queryable, options: Cp70DoctorOp
 
   const promptRows = [
     ...messageQueuePromptRows,
-    ...agentMessageContentRows,
-    ...agentMessageMetadataRows,
     ...launchPromptRows,
   ]
 
