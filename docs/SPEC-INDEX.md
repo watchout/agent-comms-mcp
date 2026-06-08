@@ -33,6 +33,7 @@
 | spec/aun-scheduler-activation-canary-contract.md | proposed | state_daemon/scheduler activationとDiscord canaryをexact scope・lease・preflight・rollback evidenceでgateするCP-80契約 | 2026-06-01 |
 | spec/aun-runtime-supervisor-adapter-contract.md | proposed | #602 reboot recoveryでAUN coreとhost-specific supervisor adapterの境界、typed capabilities、endpoint evidenceを固定する契約 | 2026-06-02 |
 | operations/aun-bounded-canary-approval-pack.md | runbook | #602復旧直前のbounded canary/live smoke承認packet、evidence capture、rollback trigger checklist | 2026-06-02 |
+| operations/codex-runner-activation-runbook.md | runbook | #422 Codex runner activation のread-only evidence packet、approval request、recovery-proof、rollback trigger | 2026-06-08 |
 | spec/aun-local-supervisor-adapter-implementation-plan.md | proposed | #602/#603 local launchd/tmux supervisor adapter、persistent path、atomic LaunchAgent update dry-run計画 | 2026-06-02 |
 | operations/aun-full-recovery-runbook.md | runbook | #602 terminal reboot後のAUN full recovery GO/NO-GO、queue wake-up、Discord/state_daemon復旧policy | 2026-06-02 |
 | operations/aun-recovery-final-approval-packet.md | runbook | #602復旧実行前の最終承認packet、kodama token rotation安全確認、live smoke request template | 2026-06-02 |
@@ -203,6 +204,13 @@
 - CP-70 preflight、CP-80 readiness、CP-80 activation-plan、Discord projection diagnostic、state-daemon readiness、queue-processing readiness、state-daemon install-plan dry-runのGO evidenceを必須入力にする
 - rollback triggerとしてFIFO drain、loop prompt、wrong listener、Discord fallback、projection evidence missing、stuck/duplicate active work、prompt-driven next/inboxを固定する
 - Discord visibility alone is not success; DB/projection/connector/audit evidenceを成功条件にする
+
+### operations/codex-runner-activation-runbook.md（Codex Runner Activation Runbook）
+- #422 R5としてCodex runner activation前のoperator approval packetを固定する
+- exact agent/channel/runtime/phases、`max_canary_count:1`、`fallback_allowed:false`、production mutation禁止をscope条件にする
+- queue preflight、state-daemon queue readiness、runner preflightまたはreceive-actionable dry-run、projection diagnosticをread-only evidenceにする
+- recovery-proof/v1 artifactでqueue/message/routing/claim/runner_result/terminal/projection evidenceを結合する
+- rollback triggerとしてidentity mismatch、FIFO drain、prompt injection、missing runner result、missing projection、secret/payload leakを固定する
 
 ### operations/aun-recovery-final-approval-packet.md（Recovery Final Approval Packet）
 - #602復旧実行前の最終approval materialを固定する
