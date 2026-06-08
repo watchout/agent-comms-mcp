@@ -5,6 +5,12 @@ import {
   profileExclusionReason,
   type ProfileExclusionReason,
 } from './profile-classification'
+import {
+  evaluateFleetCheckoutDrift,
+  normalizeApprovedCheckoutRoots,
+  type FleetCheckoutDriftReason,
+  type FleetCheckoutDriftResult,
+} from './fleet-checkout-drift'
 
 export type AunFleetReadinessClass = 'ready' | 'activation_candidate' | 'excluded'
 
@@ -16,6 +22,27 @@ export type AunFleetReadinessOptions = {
   activeStatuses?: string[]
   includeDisabledProfiles?: boolean
   includeTestProfiles?: boolean
+  approvedCommit?: string | null
+  approvedCheckoutRoots?: string[] | null
+  driftExclusions?: AunFleetDriftExclusion[] | null
+  now?: Date
+}
+
+export type AunFleetDriftExclusion = {
+  agent_id?: string | null
+  target_agent?: string | null
+  actor?: string | null
+  reason?: string | null
+  expires_at?: string | null
+  scope?: string | null
+}
+
+export type AunFleetApprovedExclusion = {
+  agent_id: string
+  actor: string
+  reason: string
+  expires_at: string
+  scope: string
 }
 
 export type AunFleetSmokeEvidence = {
@@ -43,6 +70,15 @@ export type AunFleetAgentReadiness = {
   profile_excluded_reason: ProfileExclusionReason
   active_status: boolean
   runtime_evidence: boolean
+  checkout_drift: {
+    ok: boolean
+    approved_commit: string | null
+    approved_checkout_roots: string[]
+    runtime_count: number
+    reasons: FleetCheckoutDriftReason[]
+    runtimes: FleetCheckoutDriftResult[]
+  }
+  approved_exclusion: AunFleetApprovedExclusion | null
   smoke: AunFleetSmokeEvidence | null
   readiness: AunFleetReadinessClass
   blockers: string[]
@@ -64,6 +100,9 @@ export type AunFleetReadinessReport = {
     active_statuses: string[]
     include_disabled_profiles: boolean
     include_test_profiles: boolean
+    approved_commit: string | null
+    approved_checkout_roots: string[]
+    drift_exclusion_count: number
   }
   summary: {
     agents: number
@@ -143,6 +182,18 @@ function actionForBlocker(blocker: string): string {
       return 'perform operator-approved context-preserving activation'
     case 'no_runtime_evidence':
       return 'add tmux metadata or runtime heartbeat evidence'
+    case 'runtime_commit_missing':
+      return 'restart under an approved checkout that records commit evidence'
+    case 'runtime_commit_mismatch':
+      return 'restart under the approved deployed commit before recovery can count this agent'
+    case 'runtime_checkout_path_missing':
+      return 'record runtime checkout_path heartbeat evidence before recovery can count this agent'
+    case 'runtime_checkout_path_unapproved':
+      return 'restart under the approved fleet checkout root'
+    case 'runtime_dirty_checkout':
+      return 'replace dirty runtime checkout with a clean approved checkout or attach a bounded exclusion'
+    case 'approved_fleet_exclusion':
+      return 'review exclusion actor/reason/expiry before counting this agent outside the required fleet'
     case 'smoke_missing':
       return 'run AUN smoke from the operator identity and record ACK evidence'
     case 'smoke_request_not_terminal':
@@ -154,6 +205,31 @@ function actionForBlocker(blocker: string): string {
     default:
       return 'investigate readiness blocker'
   }
+}
+
+function unique<T>(items: T[]): T[] {
+  return [...new Set(items)]
+}
+
+function validDriftExclusion(
+  agentId: string,
+  exclusions: AunFleetDriftExclusion[],
+  now: Date,
+): AunFleetApprovedExclusion | null {
+  for (const exclusion of exclusions) {
+    const target = normalizeString(exclusion.agent_id ?? exclusion.target_agent)
+    if (target !== agentId) continue
+    const actor = normalizeString(exclusion.actor)
+    const reason = normalizeString(exclusion.reason)
+    const expiresAt = normalizeString(exclusion.expires_at)
+    const scope = normalizeString(exclusion.scope)
+    if (!actor || !reason || !expiresAt || !scope) continue
+    if (!['fleet_checkout_drift', 'fleet_recovery', 'all'].includes(scope)) continue
+    const expiresMs = Date.parse(expiresAt)
+    if (!Number.isFinite(expiresMs) || expiresMs <= now.getTime()) continue
+    return { agent_id: agentId, actor, reason, expires_at: new Date(expiresMs).toISOString(), scope }
+  }
+  return null
 }
 
 async function queryRows(db: DbAdapter, sql: string, params?: unknown[]): Promise<any[]> {
@@ -172,6 +248,11 @@ export async function buildAunFleetReadinessReport(
   const includeDisabledProfiles = options.includeDisabledProfiles ?? false
   const includeTestProfiles = options.includeTestProfiles ?? false
   const activeStatusSet = new Set(activeStatuses)
+  const approvedCommit = normalizeString(options.approvedCommit)
+  const approvedCheckoutRoots = normalizeApprovedCheckoutRoots(options.approvedCheckoutRoots)
+  const driftPolicyActive = approvedCommit !== null || approvedCheckoutRoots.length > 0
+  const driftExclusions = options.driftExclusions ?? []
+  const now = options.now ?? new Date()
 
   const agentRows = await queryRows(
     db,
@@ -187,7 +268,7 @@ export async function buildAunFleetReadinessReport(
   )
   const runtimeRows = await queryRows(
     db,
-    `SELECT agent_id, status, stopped_at
+    `SELECT runtime_instance_id, agent_id, status, stopped_at, checkout_path, commit_sha, last_seen_at, metadata
        FROM agent_runtime_instances
       ORDER BY agent_id, started_at DESC`,
   )
@@ -210,12 +291,16 @@ export async function buildAunFleetReadinessReport(
 
   const runtimeCountByAgent = new Map<string, number>()
   const liveRuntimeCountByAgent = new Map<string, number>()
+  const liveRuntimeRowsByAgent = new Map<string, any[]>()
   for (const runtime of runtimeRows) {
     const agentId = String(runtime.agent_id)
     increment(runtimeCountByAgent, agentId)
     const status = String(runtime.status ?? '')
     if (!runtime.stopped_at && LIVE_RUNTIME_STATUSES.has(status)) {
       increment(liveRuntimeCountByAgent, agentId)
+      const rows = liveRuntimeRowsByAgent.get(agentId) ?? []
+      rows.push(runtime)
+      liveRuntimeRowsByAgent.set(agentId, rows)
     }
   }
 
@@ -337,18 +422,28 @@ export async function buildAunFleetReadinessReport(
     const channels = channelsByAgent.get(agentId) ?? []
     const runtimeInstanceCount = runtimeCountByAgent.get(agentId) ?? 0
     const liveRuntimeInstanceCount = liveRuntimeCountByAgent.get(agentId) ?? 0
+    const liveRuntimeRows = liveRuntimeRowsByAgent.get(agentId) ?? []
+    const checkoutDriftRuntimes = liveRuntimeRows.map((runtimeRow) => evaluateFleetCheckoutDrift(runtimeRow, {
+      approvedCommit,
+      approvedCheckoutRoots,
+    }))
+    const checkoutDriftReasons = unique(checkoutDriftRuntimes.flatMap((drift) => drift.reasons))
+    const checkoutDriftOk = (!driftPolicyActive || liveRuntimeRows.length > 0) && checkoutDriftReasons.length === 0
     const activeQueueCount = activeQueueCountByAgent.get(agentId) ?? 0
     const denied = denylist.has(agentId)
+    const approvedExclusion = validDriftExclusion(agentId, driftExclusions, now)
     const profileExcludedReason = profileExclusionReason(row, {
       includeDisabledProfiles,
       includeTestProfiles,
     })
     const activeStatus = activeStatusSet.has(status)
-    const runtimeEvidence = tmuxSession !== null || liveRuntimeInstanceCount > 0
+    const runtimeEvidence = liveRuntimeInstanceCount > 0 || (!driftPolicyActive && tmuxSession !== null)
     const smoke = smokeByAgent.get(agentId) ?? null
     const blockers: string[] = []
 
-    if (denied) {
+    if (approvedExclusion) {
+      blockers.push('approved_fleet_exclusion')
+    } else if (denied) {
       blockers.push('denied_by_state_daemon')
     } else if (profileExcludedReason === 'disabled_profile') {
       blockers.push('disabled_profile_excluded')
@@ -358,9 +453,10 @@ export async function buildAunFleetReadinessReport(
       if (channels.length === 0) blockers.push('no_channel_membership')
       if (!activeStatus) blockers.push('inactive_status')
       if (!runtimeEvidence) blockers.push('no_runtime_evidence')
+      if (runtimeEvidence && !checkoutDriftOk) blockers.push(...checkoutDriftReasons)
     }
 
-    if (!denied && !profileExcludedReason && requireSmoke) {
+    if (!approvedExclusion && !denied && !profileExcludedReason && requireSmoke) {
       if (agentId === operatorAgentId && smoke === null) {
         if (activeQueueCount > 0) blockers.push('active_queue_not_drained')
       } else if (!smoke) {
@@ -372,7 +468,7 @@ export async function buildAunFleetReadinessReport(
       }
     }
 
-    const readiness: AunFleetReadinessClass = denied || profileExcludedReason !== null
+    const readiness: AunFleetReadinessClass = approvedExclusion || denied || profileExcludedReason !== null
       ? 'excluded'
       : blockers.length === 0
         ? 'ready'
@@ -392,10 +488,19 @@ export async function buildAunFleetReadinessReport(
       profile_excluded_reason: profileExcludedReason,
       active_status: activeStatus,
       runtime_evidence: runtimeEvidence,
+      checkout_drift: {
+        ok: checkoutDriftOk,
+        approved_commit: approvedCommit,
+        approved_checkout_roots: approvedCheckoutRoots,
+        runtime_count: liveRuntimeRows.length,
+        reasons: checkoutDriftReasons,
+        runtimes: checkoutDriftRuntimes,
+      },
+      approved_exclusion: approvedExclusion,
       smoke,
       readiness,
-      blockers,
-      actions: [...new Set(blockers.map(actionForBlocker))],
+      blockers: unique(blockers),
+      actions: unique(blockers.map(actionForBlocker)),
     }
   })
 
@@ -403,7 +508,7 @@ export async function buildAunFleetReadinessReport(
 
   return {
     ok: true,
-    generated_at: new Date().toISOString(),
+    generated_at: now.toISOString(),
     policy: {
       db_is_source_of_truth: true,
       final_design_guardrail: 'read-only readiness report; do not infer readiness from Discord visibility alone',
@@ -416,6 +521,9 @@ export async function buildAunFleetReadinessReport(
       active_statuses: activeStatuses,
       include_disabled_profiles: includeDisabledProfiles,
       include_test_profiles: includeTestProfiles,
+      approved_commit: approvedCommit,
+      approved_checkout_roots: approvedCheckoutRoots,
+      drift_exclusion_count: driftExclusions.length,
     },
     summary: {
       agents: agents.length,

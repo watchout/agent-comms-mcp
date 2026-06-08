@@ -181,6 +181,8 @@ evidence/recovery-readiness.json
 evidence/activation-plan.json
 evidence/discord-projection.json
 evidence/state-daemon-readiness.json
+evidence/runtime-inventory.json
+evidence/fleet-readiness.json
 evidence/queue-processing-readiness.json
 evidence/install-plan.json
 evidence/summary.json
@@ -190,13 +192,18 @@ evidence/kodama-token-rotation.json
 Use the merged #674 read-only gate pack:
 
 ```bash
+APPROVED_COMMIT="$(git rev-parse HEAD)"
+APPROVED_CHECKOUT_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
+
 DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
   bun scripts/recovery-readonly-gate-pack.ts \
     --output-dir evidence \
     --agent-id codex-cto \
     --to-agent ceo \
     --channel-id 1487368919613444156 \
-    --install-plan-commit "$(git rev-parse HEAD)"
+    --install-plan-commit "$APPROVED_COMMIT" \
+    --approved-commit "$APPROVED_COMMIT" \
+    --approved-checkout-root "$APPROVED_CHECKOUT_ROOT"
 ```
 
 The required scope is canary-first:
@@ -229,6 +236,11 @@ The final approval packet is GO only when all conditions are true:
   `contract.runtime_delivery_status_contract=aligned`
 - state-daemon readiness is GO or explicitly report-only for unloaded/not-running
   with no restart performed
+- runtime inventory has zero stale, unapproved checkout, commit mismatch,
+  missing checkout evidence, or dirty checkout blockers
+- fleet readiness has zero checkout drift blockers for production active agents;
+  any bounded drift exclusion is present as auditable `approved_fleet_exclusion`
+  evidence and does not count the agent as ready
 - queue-processing readiness is GO and has no `QUEUE_WAKE_STUCK` blockers
 - install-plan dry-run is GO, persistent-path safe, and non-mutating
 - kodama token rotation evidence is GO and contains no raw token
@@ -248,6 +260,11 @@ Any of these makes the approval packet NO-GO:
   active baton/turn, or legacy prompt artifact
 - state-daemon path under `/private/tmp` or other volatile checkout
 - missing state-daemon ProgramArguments or WorkingDirectory target
+- any production runtime heartbeat missing the approved commit/checkout path
+- any production runtime on an unapproved checkout root, mismatched commit, or
+  dirty working tree
+- any MCP-only or tmux-only runtime identity counted as fleet ready while an
+  approved commit or checkout-root gate is active
 - state-daemon listener identity mismatch
 - Discord projection fallback to AUN/router when direct delivery is expected
 - Discord credential/write capability unknown

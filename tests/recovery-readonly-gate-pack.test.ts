@@ -17,6 +17,8 @@ const REPORTS: GateReportName[] = [
   'activation-plan',
   'discord-projection',
   'state-daemon-readiness',
+  'runtime-inventory',
+  'fleet-readiness',
   'queue-processing-readiness',
   'install-plan',
 ]
@@ -32,6 +34,9 @@ function options(overrides: Partial<GatePackOptions> = {}): GatePackOptions {
     installPlanCommit: '34f035bb84b569135f54ead2635009b118a5e39f',
     includeInstallPlan: true,
     repoRoot: '/repo',
+    approvedCommit: null,
+    approvedCheckoutRoots: [],
+    driftExclusionFile: null,
     ...overrides,
   }
 }
@@ -113,6 +118,8 @@ describe('#602 recovery read-only gate pack', () => {
       'cp70-preflight',
       'discord-projection',
       'state-daemon-readiness',
+      'runtime-inventory',
+      'fleet-readiness',
       'queue-processing-readiness',
       'recovery-readiness',
       'activation-plan',
@@ -122,6 +129,8 @@ describe('#602 recovery read-only gate pack', () => {
       ['bun', 'cli/index.ts', 'queue', 'cp70-preflight', '--agent-id', 'codex-cto', '--format', 'json'],
       ['bun', 'cli/index.ts', 'diagnose-projection', '--channel-id', '1487368919613444156', '--from-agent', 'codex-cto', '--to', 'ceo', '--format', 'json'],
       ['bun', 'cli/index.ts', 'state-daemon', 'readiness', '--format', 'json'],
+      ['bun', 'cli/index.ts', 'runtime', 'inventory', '--format', 'json'],
+      ['bun', 'cli/index.ts', 'fleet', 'readiness', '--format', 'json', '--operator-agent-id', 'codex-cto'],
       ['bun', 'cli/index.ts', 'state-daemon', 'queue-readiness', '--agent-id', 'codex-cto', '--format', 'json'],
       ['bun', 'cli/index.ts', 'recovery', 'readiness', '--scope-file', '/tmp/aun-readonly-gate-evidence/recovery-scope.json', '--format', 'json'],
       ['bun', 'cli/index.ts', 'recovery', 'activation-plan', '--scope-file', '/tmp/aun-readonly-gate-evidence/recovery-scope.json', '--readiness-report', '/tmp/aun-readonly-gate-evidence/recovery-readiness.json', '--format', 'json'],
@@ -133,6 +142,52 @@ describe('#602 recovery read-only gate pack', () => {
     expect(executableTokens).not.toContain('launchctl')
     expect(executableTokens).not.toContain('bootstrap')
     expect(executableTokens).not.toContain('kickstart')
+  })
+
+  test('runner commands pass approved fleet checkout policy without mutation', () => {
+    const commands = buildReadOnlyGateCommands(options({
+      approvedCommit: '51d0524853e7c47ba374d42bb07b3bab8af9ad82',
+      approvedCheckoutRoots: ['/Users/yuji/.agent-comms/state-daemon/checkouts'],
+      driftExclusionFile: '/tmp/fleet-drift-exclusions.json',
+    }))
+
+    expect(commands.find((c) => c.report === 'state-daemon-readiness')?.args).toEqual([
+      'cli/index.ts',
+      'state-daemon',
+      'readiness',
+      '--format',
+      'json',
+      '--expected-commit',
+      '51d0524853e7c47ba374d42bb07b3bab8af9ad82',
+      '--expected-checkout-root',
+      '/Users/yuji/.agent-comms/state-daemon/checkouts',
+    ])
+    expect(commands.find((c) => c.report === 'runtime-inventory')?.args).toEqual([
+      'cli/index.ts',
+      'runtime',
+      'inventory',
+      '--format',
+      'json',
+      '--expected-commit',
+      '51d0524853e7c47ba374d42bb07b3bab8af9ad82',
+      '--approved-checkout-root',
+      '/Users/yuji/.agent-comms/state-daemon/checkouts',
+    ])
+    expect(commands.find((c) => c.report === 'fleet-readiness')?.args).toEqual([
+      'cli/index.ts',
+      'fleet',
+      'readiness',
+      '--format',
+      'json',
+      '--operator-agent-id',
+      'codex-cto',
+      '--approved-commit',
+      '51d0524853e7c47ba374d42bb07b3bab8af9ad82',
+      '--approved-checkout-root',
+      '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      '--drift-exclusion-file',
+      '/tmp/fleet-drift-exclusions.json',
+    ])
   })
 
   test('summary is GO only when every report is GO and non-mutating', () => {
@@ -364,6 +419,32 @@ describe('#602 recovery read-only gate pack', () => {
       source_report: 'discord-projection',
       code: 'CREDENTIAL_STATUS_CONTRACT_DRIFT',
     })
+  })
+
+  test('runtime and fleet string blockers force NO_GO with source reports', () => {
+    const result = summary({
+      'runtime-inventory': {
+        ok: true,
+        go_no_go: 'GO',
+        mutation_performed: false,
+        restart_performed: false,
+        blockers: ['agent-com-dev:runtime_checkout_path_unapproved'],
+      },
+      'fleet-readiness': {
+        ok: true,
+        go_no_go: 'GO',
+        mutation_performed: false,
+        restart_performed: false,
+        blockers: ['agent-com-dev:runtime_commit_mismatch'],
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.go_no_go).toBe('NO_GO')
+    expect(result.blockers).toEqual(expect.arrayContaining([
+      { source_report: 'runtime-inventory', code: 'agent-com-dev:runtime_checkout_path_unapproved' },
+      { source_report: 'fleet-readiness', code: 'agent-com-dev:runtime_commit_mismatch' },
+    ]))
   })
 
   test('mutation or restart evidence forces NO_GO', () => {

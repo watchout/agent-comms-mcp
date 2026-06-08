@@ -120,7 +120,13 @@ bun scripts/state-daemon-launchagent.ts preflight \
 When the dedicated #603 CLI is present, use it as the front door:
 
 ```bash
-agent-com state-daemon readiness --format json
+APPROVED_COMMIT="$(git rev-parse HEAD)"
+APPROVED_CHECKOUT_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
+
+agent-com state-daemon readiness \
+  --format json \
+  --expected-commit "$APPROVED_COMMIT" \
+  --expected-checkout-root "$APPROVED_CHECKOUT_ROOT"
 ```
 
 Unloaded or not running state is evidence. It is not permission to restart.

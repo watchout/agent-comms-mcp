@@ -113,6 +113,52 @@ This report is read-only and classifies every agent as `ready`,
 `activation_candidate`, or `excluded` from DB evidence. Use it before and after
 any activation or smoke run so readiness decisions stay script-controlled.
 
+For recovery or production restart approval, include the approved deployed
+commit and checkout root. This makes the runtime-instance evidence fail closed
+when a bot is on an unapproved path, an older or mismatched commit, a dirty
+checkout, or only legacy tmux metadata:
+
+```bash
+APPROVED_COMMIT="$(git rev-parse HEAD)"
+APPROVED_CHECKOUT_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
+
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts runtime inventory \
+    --format json \
+    --expected-commit "$APPROVED_COMMIT" \
+    --approved-checkout-root "$APPROVED_CHECKOUT_ROOT" \
+    > evidence/runtime-inventory.json
+
+DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
+  bun cli/index.ts fleet readiness \
+    --format json \
+    --approved-commit "$APPROVED_COMMIT" \
+    --approved-checkout-root "$APPROVED_CHECKOUT_ROOT" \
+    --drift-exclusion-file evidence/fleet-drift-exclusions.json \
+    > evidence/fleet-readiness.json
+```
+
+`fleet-drift-exclusions.json` is optional. When used, each exclusion must be
+bounded and auditable:
+
+```json
+{
+  "exclusions": [
+    {
+      "target_agent": "agent-com-dev",
+      "actor": "ceo",
+      "reason": "approved maintenance window",
+      "scope": "fleet_checkout_drift",
+      "expires_at": "2026-06-08T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+Missing actor, reason, target, recognized scope, or future expiry is ignored.
+An approved exclusion classifies the agent as `excluded`; it does not make the
+agent ready.
+
 Active queue check:
 
 ```sql

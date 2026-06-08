@@ -1,10 +1,17 @@
 import type { DbAdapter } from './db'
+import {
+  evaluateFleetCheckoutDrift,
+  fullGitShaEquals,
+  normalizeApprovedCheckoutRoots,
+  type FleetCheckoutDriftResult,
+} from './fleet-checkout-drift'
 
 type RuntimeFreshness = 'fresh' | 'stale' | 'missing_heartbeat' | 'stopped' | 'unknown'
 
 type RuntimeInventoryOptions = {
   staleMinutes?: number
   expectedCommit?: string | null
+  approvedCheckoutRoots?: string[] | null
   provider?: string
   bindingRole?: string
 }
@@ -23,6 +30,7 @@ export type RuntimeInventoryAgent = {
   port: number | null
   checkout_path: string | null
   commit_sha: string | null
+  checkout_drift: FleetCheckoutDriftResult
   last_seen_at: string | null
   freshness: RuntimeFreshness
   warnings: string[]
@@ -76,6 +84,7 @@ export type RuntimeInventoryReport = {
   options: {
     stale_minutes: number
     expected_commit: string | null
+    approved_checkout_roots: string[]
     provider: string
     binding_role: string
   }
@@ -149,15 +158,32 @@ function runtimeWarnings(row: any | null, freshness: RuntimeFreshness, expectedC
   if (expectedCommit) {
     const commit = normalizeString(row.commit_sha)
     if (!commit) warnings.push('runtime_commit_missing')
-    else if (!commit.startsWith(expectedCommit) && !expectedCommit.startsWith(commit)) warnings.push('runtime_commit_mismatch')
+    else if (!fullGitShaEquals(commit, expectedCommit)) warnings.push('runtime_commit_mismatch')
   }
   if (!normalizeString(row.checkout_path)) warnings.push('runtime_checkout_path_missing')
   return warnings
 }
 
+function runtimeWarningsForDrift(
+  row: any | null,
+  freshness: RuntimeFreshness,
+  drift: FleetCheckoutDriftResult,
+): string[] {
+  const warnings = runtimeWarnings(row, freshness, drift.approved_commit)
+  if (!row) return warnings
+  for (const reason of drift.reasons) {
+    if (!warnings.includes(reason)) warnings.push(reason)
+  }
+  return warnings
+}
+
 function blockerFromWarning(agentId: string, warning: string): string | null {
   if (warning === 'runtime_stale') return `${agentId}:runtime_stale`
+  if (warning === 'runtime_commit_missing') return `${agentId}:runtime_commit_missing`
   if (warning === 'runtime_commit_mismatch') return `${agentId}:runtime_commit_mismatch`
+  if (warning === 'runtime_checkout_path_missing') return `${agentId}:runtime_checkout_path_missing`
+  if (warning === 'runtime_checkout_path_unapproved') return `${agentId}:runtime_checkout_path_unapproved`
+  if (warning === 'runtime_dirty_checkout') return `${agentId}:runtime_dirty_checkout`
   return null
 }
 
@@ -185,6 +211,7 @@ export async function buildRuntimeInventoryReport(
 ): Promise<RuntimeInventoryReport> {
   const staleMinutes = options.staleMinutes ?? 15
   const expectedCommit = options.expectedCommit ?? null
+  const approvedCheckoutRoots = normalizeApprovedCheckoutRoots(options.approvedCheckoutRoots)
   const provider = options.provider ?? 'discord'
   const bindingRole = options.bindingRole ?? 'outbound'
   const staleMs = staleMinutes * 60_000
@@ -197,7 +224,7 @@ export async function buildRuntimeInventoryReport(
   const runtimeRows = await db.query(
     `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
             host_id, session_name, process_id, port, checkout_path, commit_sha,
-            endpoint_uri, status, started_at, stopped_at, last_seen_at
+            endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
        FROM agent_runtime_instances
       ORDER BY agent_id, started_at DESC`,
   )
@@ -262,7 +289,11 @@ export async function buildRuntimeInventoryReport(
     const runtimes = runtimesByAgent.get(agentId) ?? []
     const latest = runtimes[0] ?? null
     const freshness = classifyRuntime(latest, nowMs, staleMs)
-    const warnings = runtimeWarnings(latest, freshness, expectedCommit)
+    const checkoutDrift = evaluateFleetCheckoutDrift(latest, {
+      approvedCommit: expectedCommit,
+      approvedCheckoutRoots,
+    })
+    const warnings = runtimeWarningsForDrift(latest, freshness, checkoutDrift)
     return {
       agent_id: agentId,
       agent_status: String(row.status ?? ''),
@@ -277,6 +308,7 @@ export async function buildRuntimeInventoryReport(
       port: latest?.port === null || latest?.port === undefined ? null : Number(latest.port),
       checkout_path: normalizeString(latest?.checkout_path),
       commit_sha: normalizeString(latest?.commit_sha),
+      checkout_drift: checkoutDrift,
       last_seen_at: timestampString(latest?.last_seen_at),
       freshness,
       warnings,
@@ -293,6 +325,16 @@ export async function buildRuntimeInventoryReport(
     if (!runtimeId) warnings.push('connector_without_runtime')
     else if (!runtime) warnings.push('connector_runtime_missing')
     else warnings.push(...runtimeWarnings(runtime, freshness, expectedCommit).map((warning) => `connector_${warning}`))
+    if (runtimeId && runtime) {
+      const checkoutDrift = evaluateFleetCheckoutDrift(runtime, {
+        approvedCommit: expectedCommit,
+        approvedCheckoutRoots,
+      })
+      for (const reason of checkoutDrift.reasons) {
+        const warning = `connector_${reason}`
+        if (!warnings.includes(warning)) warnings.push(warning)
+      }
+    }
     return {
       connector_instance_id: String(row.connector_instance_id),
       agent_id: String(row.agent_id),
@@ -369,7 +411,14 @@ export async function buildRuntimeInventoryReport(
   const blockers = [
     ...agents.flatMap((agent) => agent.warnings.map((warning) => blockerFromWarning(agent.agent_id, warning)).filter((item): item is string => item !== null)),
     ...connectors.flatMap((connector) => connector.warnings
-      .filter((warning) => warning === 'connector_runtime_stale' || warning === 'connector_runtime_commit_mismatch')
+      .filter((warning) => [
+        'connector_runtime_stale',
+        'connector_runtime_commit_missing',
+        'connector_runtime_commit_mismatch',
+        'connector_runtime_checkout_path_missing',
+        'connector_runtime_checkout_path_unapproved',
+        'connector_runtime_dirty_checkout',
+      ].includes(warning))
       .map((warning) => `${connector.agent_id}:${warning}`)),
     ...policyGaps.map((gap) => `${gap.channel_id}:${gap.reason}`),
   ]
@@ -390,6 +439,7 @@ export async function buildRuntimeInventoryReport(
     options: {
       stale_minutes: staleMinutes,
       expected_commit: expectedCommit,
+      approved_checkout_roots: approvedCheckoutRoots,
       provider,
       binding_role: bindingRole,
     },
