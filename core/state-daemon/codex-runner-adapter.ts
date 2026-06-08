@@ -69,6 +69,13 @@ export function buildCodexRuntimeRunnerInvocation(input: CodexRunnerInvocation):
   return toRuntimeInvocation(input)
 }
 
+function typedResultFailed(result: ReturnType<typeof parseRuntimeRunnerStdout>): boolean {
+  return result.outcome === 'runtime_error'
+    || result.outcome === 'parse_error'
+    || result.completion_outcome === 'runtime_failed'
+    || result.completion_outcome === 'unsupported_completion'
+}
+
 export class ExecFileCodexRunnerInvoker implements CodexRunnerInvoker {
   constructor(
     private readonly cwd: string = process.cwd(),
@@ -83,7 +90,17 @@ export class ExecFileCodexRunnerInvoker implements CodexRunnerInvoker {
         env: { ...process.env, ...plan.env },
         timeout: this.timeoutMs,
       })
-      return { ok: true, code: 0, stdout, stderr, typed_result: parseRuntimeRunnerStdout(stdout) }
+      const typedResult = parseRuntimeRunnerStdout(stdout)
+      if (typedResultFailed(typedResult)) {
+        return {
+          ok: false,
+          code: 1,
+          stdout,
+          stderr: typedResult.parse_error ?? typedResult.completion_reason ?? 'codex runner result failed contract validation',
+          typed_result: typedResult,
+        }
+      }
+      return { ok: true, code: 0, stdout, stderr, typed_result: typedResult }
     } catch (err) {
       const e = err as Error & { code?: number; stdout?: string; stderr?: string }
       return {

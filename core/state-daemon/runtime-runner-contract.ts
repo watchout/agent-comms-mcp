@@ -1,3 +1,8 @@
+import {
+  parseCodexRunnerResultContract,
+  type CodexRunnerResultStatus,
+} from '../codex-runner-result-contract'
+
 export const RUNTIME_RUNNER_CONTRACT_VERSION = 1 as const
 
 export type RuntimeRunnerKind = 'codex' | 'claude'
@@ -37,21 +42,11 @@ export type RuntimeRunnerOutcome =
   | 'unknown'
 
 export type RuntimeRunnerCompletionOutcome =
+  | CodexRunnerResultStatus
   | 'none'
   | 'open'
-  | 'completed_no_reply'
-  | 'completed_reply'
   | 'completion_failed'
   | 'unknown'
-
-const RUNTIME_RUNNER_COMPLETION_OUTCOMES = new Set<RuntimeRunnerCompletionOutcome>([
-  'none',
-  'open',
-  'completed_no_reply',
-  'completed_reply',
-  'completion_failed',
-  'unknown',
-])
 
 export interface RuntimeRunnerTypedResult {
   outcome: RuntimeRunnerOutcome
@@ -116,50 +111,38 @@ export function buildRuntimeRunnerInvocation(input: {
 }
 
 export function parseRuntimeRunnerStdout(stdout: string | undefined): RuntimeRunnerTypedResult {
-  if (!stdout || stdout.trim() === '') {
-    return {
-      outcome: 'runtime_error',
-      retained_count: null,
-      queue_ids: [],
-    }
-  }
   try {
-    const parsed = JSON.parse(stdout)
-    const retained = Array.isArray(parsed?.retained) ? parsed.retained : []
-    const retainedCount = typeof parsed?.retained_count === 'number'
-      ? parsed.retained_count
-      : retained.length
-    const queueIds = retained
-      .map((item: Record<string, unknown>) => item?.queue_id)
-      .filter((queueId: unknown): queueId is string | number => typeof queueId === 'string' || typeof queueId === 'number')
-      .map((queueId: string | number) => String(queueId))
-    const completion = parsed?.completion && typeof parsed.completion === 'object'
-      ? parsed.completion as Record<string, unknown>
-      : null
-    const completionOutcome = typeof completion?.outcome === 'string'
-      && RUNTIME_RUNNER_COMPLETION_OUTCOMES.has(completion.outcome as RuntimeRunnerCompletionOutcome)
-      ? completion.outcome as RuntimeRunnerCompletionOutcome
-      : retainedCount > 0 ? 'open' : 'none'
-    const terminalQueueIds = Array.isArray(completion?.terminal_queue_ids)
-      ? completion.terminal_queue_ids
-          .filter((queueId: unknown): queueId is string | number => typeof queueId === 'string' || typeof queueId === 'number')
-          .map((queueId: string | number) => String(queueId))
-      : []
-    const completionReason = typeof completion?.reason === 'string' ? completion.reason : null
+    const parsed = parseCodexRunnerResultContract(stdout)
+    if (!parsed.ok) {
+      return {
+        outcome: parsed.result.reason_code === 'stdout_parse_failed' ? 'parse_error' : 'runtime_error',
+        retained_count: parsed.result.retained_count > 0 ? parsed.result.retained_count : null,
+        queue_ids: [],
+        completion_outcome: parsed.result.result_status,
+        terminal_queue_ids: [],
+        completion_reason: parsed.result.reason,
+        raw_json: parsed.raw_json,
+        parse_error: parsed.error,
+      }
+    }
+
+    const result = parsed.result
     return {
-      outcome: retainedCount > 0 ? 'claimed_work' : 'no_work',
-      retained_count: retainedCount,
-      queue_ids: queueIds,
-      completion_outcome: completionOutcome,
-      terminal_queue_ids: terminalQueueIds,
-      completion_reason: completionReason,
-      raw_json: parsed,
+      outcome: result.retained_count > 0 ? 'claimed_work' : 'no_work',
+      retained_count: result.retained_count,
+      queue_ids: result.queue_ids,
+      completion_outcome: result.result_status,
+      terminal_queue_ids: result.terminal_queue_ids,
+      completion_reason: result.reason ?? result.reason_code,
+      raw_json: parsed.raw_json,
     }
   } catch (err) {
     return {
       outcome: 'parse_error',
       retained_count: null,
       queue_ids: [],
+      completion_outcome: 'runtime_failed',
+      terminal_queue_ids: [],
       parse_error: (err as Error).message,
     }
   }

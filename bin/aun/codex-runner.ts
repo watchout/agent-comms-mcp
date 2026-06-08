@@ -22,6 +22,7 @@ import {
   type ReceiveOptions,
 } from './receive'
 import { reply } from './reply'
+import { attachCodexRunnerResultContract } from '../../core/codex-runner-result-contract'
 
 export interface CodexRunnerOptions extends ReceiveOptions {
   limit?: number
@@ -105,6 +106,10 @@ function parseJsonOrText(stdout: string): unknown {
   } catch {
     return stdout
   }
+}
+
+function stringifyRunnerPayload(payload: Record<string, unknown>): string {
+  return JSON.stringify(attachCodexRunnerResultContract(payload)) + '\n'
 }
 
 function wantsAck(opts: CodexRunnerOptions): boolean {
@@ -409,7 +414,7 @@ function receiveOneActionable(opts: CodexRunnerOptions, maxInspect: number) {
     return {
       ok: true,
       code: 0,
-      stdout: JSON.stringify({
+      stdout: stringifyRunnerPayload({
         ok: true,
         dry_run: true,
         mode: 'codex-runner',
@@ -418,8 +423,11 @@ function receiveOneActionable(opts: CodexRunnerOptions, maxInspect: number) {
         argv: plan.argv,
         agent_id: plan.env.AGENT_ID,
         expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+        retained: [],
+        retained_count: 0,
+        completion: completionOpen([]),
         database_url_candidates: plan.databaseUrlCandidates,
-      }) + '\n',
+      }),
       stderr: '',
       plan,
       claimed: null as ClaimedMessage | null,
@@ -521,7 +529,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
             return {
               ok: true,
               code: 0,
-              stdout: JSON.stringify({
+              stdout: stringifyRunnerPayload({
                 ok: true,
                 agent_id: firstPlanAgentId,
                 expected_agent_id: firstPlanExpectedAgentId,
@@ -540,7 +548,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
                 max_inspect: maxInspect,
                 capped,
                 final_close_contract: 'completed by aun record-no-reply --queue-id <id>',
-              }) + '\n',
+              }),
               stderr: '',
             }
           }
@@ -564,7 +572,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
             return {
               ok: true,
               code: 0,
-              stdout: JSON.stringify({
+              stdout: stringifyRunnerPayload({
                 ok: true,
                 agent_id: firstPlanAgentId,
                 expected_agent_id: firstPlanExpectedAgentId,
@@ -583,14 +591,14 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
                 max_inspect: maxInspect,
                 capped,
                 final_close_contract: 'completed by aun reply --close --queue-id <id> --message-id <uuid>',
-              }) + '\n',
+              }),
               stderr: '',
             }
           }
           return {
             ok: false,
             code: 1,
-            stdout: JSON.stringify({
+            stdout: stringifyRunnerPayload({
               ok: false,
               agent_id: firstPlanAgentId,
               expected_agent_id: firstPlanExpectedAgentId,
@@ -604,14 +612,14 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
                 code: received.code,
                 stderr: received.stderr || undefined,
               },
-            }) + '\n',
+            }),
             stderr: `Error [CODEX_RUNNER_COMPLETION_FAILED]: ${completion.stderr ?? 'auto-final reply failed'}\n`,
           }
         }
         return {
           ok: false,
           code: received.code,
-          stdout: JSON.stringify({ ok: false, retained, waiting }) + '\n',
+          stdout: stringifyRunnerPayload({ ok: false, retained, waiting }),
           stderr: received.stderr,
         }
       }
@@ -669,12 +677,12 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
         return {
           ok: false,
           code: ack.code,
-          stdout: JSON.stringify({
+          stdout: stringifyRunnerPayload({
             ok: false,
             agent_id: firstPlanAgentId,
             retained,
             acks,
-          }) + '\n',
+          }),
           stderr: ack.stderr,
         }
       }
@@ -688,7 +696,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       return {
         ok: false,
         code: 1,
-        stdout: JSON.stringify({
+        stdout: stringifyRunnerPayload({
           ok: false,
           agent_id: firstPlanAgentId,
           expected_agent_id: firstPlanExpectedAgentId,
@@ -698,7 +706,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
           acked_count: acks.length,
           acks,
           completion,
-        }) + '\n',
+        }),
         stderr: `Error [CODEX_RUNNER_COMPLETION_FAILED]: ${completion.stderr ?? 'record-no-reply failed'}\n`,
       }
     }
@@ -708,7 +716,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       return {
         ok: false,
         code: 1,
-        stdout: JSON.stringify({
+        stdout: stringifyRunnerPayload({
           ok: false,
           agent_id: firstPlanAgentId,
           expected_agent_id: firstPlanExpectedAgentId,
@@ -718,7 +726,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
           acked_count: acks.length,
           acks,
           completion,
-        }) + '\n',
+        }),
         stderr: `Error [CODEX_RUNNER_COMPLETION_FAILED]: ${completion.stderr ?? 'auto-final reply failed'}\n`,
       }
     }
@@ -727,7 +735,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
   return {
     ok: true,
     code: 0,
-    stdout: JSON.stringify({
+    stdout: stringifyRunnerPayload({
       ok: true,
       agent_id: firstPlanAgentId,
       expected_agent_id: firstPlanExpectedAgentId,
@@ -742,7 +750,7 @@ export function codexRunnerTick(opts: CodexRunnerOptions = {}): CodexRunnerResul
       max_inspect: maxInspect,
       capped: parsedBatch.capped ?? false,
       final_close_contract: 'aun reply --close --queue-id <id> --message-id <uuid>',
-    }) + '\n',
+    }),
     stderr: '',
   }
 }
