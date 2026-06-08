@@ -224,6 +224,15 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
     const body = JSON.parse(r.stdout)
     expect(body.receive_mode).toBe('receive-actionable')
     expect(body.retained_count).toBe(1)
+    expect(body.result_contract_version).toBe(1)
+    expect(body.runner_result).toMatchObject({
+      contract_version: 1,
+      result_status: 'needs_human',
+      retained_count: 1,
+      queue_ids: [String(queueId)],
+      reason_code: 'final_close_required',
+      fail_closed: true,
+    })
     expect(body.retained[0]).toMatchObject({
       queue_id: String(queueId),
       message_id: messageId,
@@ -367,6 +376,12 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
       applied_count: 1,
       reason: 'direct_mention_smoke_completed_without_substantive_reply',
     })
+    expect(body.runner_result).toMatchObject({
+      result_status: 'completed_no_reply',
+      terminal_queue_ids: [String(direct.queueId)],
+      reason_code: 'completed_no_reply',
+      fail_closed: false,
+    })
     const row = dbRead(`SELECT status, claimed_by, replied_with, payload FROM message_queue WHERE id = ?`, [direct.queueId])[0]
     expect(row.status).toBe('done')
     expect(row.claimed_by).toBe('codex-aun')
@@ -414,6 +429,12 @@ describe('test_aun_codex_runner - DB-primary Codex receive tick', () => {
         mode: 'reply',
         queue_id: String(direct.queueId),
       },
+    })
+    expect(body.runner_result).toMatchObject({
+      result_status: 'completed_reply',
+      terminal_queue_ids: [String(direct.queueId)],
+      reason_code: 'completed_reply',
+      fail_closed: false,
     })
     const row = dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [direct.queueId])[0]
     expect(row.status).toBe('replied')

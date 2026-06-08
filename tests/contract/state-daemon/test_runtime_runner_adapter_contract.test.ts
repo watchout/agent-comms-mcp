@@ -8,6 +8,7 @@ import {
   buildRuntimeRunnerInvocation,
   parseRuntimeRunnerStdout,
 } from '../../../core/state-daemon/runtime-runner-contract'
+import { attachCodexRunnerResultContract } from '../../../core/codex-runner-result-contract'
 
 describe('runtime runner adapter contract', () => {
   test('normalizes Codex and Claude to the same queue/baton invocation shape', () => {
@@ -82,16 +83,17 @@ describe('runtime runner adapter contract', () => {
   })
 
   test('adapter stdout is reduced to typed runner result evidence', () => {
-    const typed = parseRuntimeRunnerStdout(JSON.stringify({
+    const typed = parseRuntimeRunnerStdout(JSON.stringify(attachCodexRunnerResultContract({
       ok: true,
       retained_count: 1,
       retained: [{ queue_id: '94526', message_id: 'msg-94526' }],
       completion: {
         outcome: 'completed_no_reply',
         terminal_queue_ids: ['94526'],
+        applied_count: 1,
         reason: 'direct_mention_smoke_completed_without_substantive_reply',
       },
-    }))
+    })))
 
     expect(typed).toMatchObject({
       outcome: 'claimed_work',
@@ -103,22 +105,24 @@ describe('runtime runner adapter contract', () => {
     })
     expect(parseRuntimeRunnerStdout('not-json')).toMatchObject({
       outcome: 'parse_error',
+      completion_outcome: 'runtime_failed',
       retained_count: null,
       queue_ids: [],
     })
   })
 
   test('adapter parser preserves completed final reply evidence', () => {
-    const typed = parseRuntimeRunnerStdout(JSON.stringify({
+    const typed = parseRuntimeRunnerStdout(JSON.stringify(attachCodexRunnerResultContract({
       ok: true,
       retained_count: 1,
       retained: [{ queue_id: '94527', message_id: 'msg-94527' }],
       completion: {
         outcome: 'completed_reply',
         terminal_queue_ids: ['94527'],
+        applied_count: 1,
         reason: 'auto_final_reply_completed',
       },
-    }))
+    })))
 
     expect(typed).toMatchObject({
       outcome: 'claimed_work',
@@ -128,5 +132,27 @@ describe('runtime runner adapter contract', () => {
       terminal_queue_ids: ['94527'],
       completion_reason: 'auto_final_reply_completed',
     })
+  })
+
+  test('adapter parser fails closed when runner_result is missing', () => {
+    const typed = parseRuntimeRunnerStdout(JSON.stringify({
+      ok: true,
+      retained_count: 1,
+      retained: [{ queue_id: '94528', message_id: 'msg-94528' }],
+      completion: {
+        outcome: 'completed_reply',
+        terminal_queue_ids: ['94528'],
+        reason: 'legacy_untyped_stdout',
+      },
+    }))
+
+    expect(typed).toMatchObject({
+      outcome: 'runtime_error',
+      retained_count: null,
+      queue_ids: [],
+      completion_outcome: 'unsupported_completion',
+      terminal_queue_ids: [],
+    })
+    expect(typed.parse_error).toContain('runner_result')
   })
 })
