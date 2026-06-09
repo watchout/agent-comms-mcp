@@ -128,6 +128,7 @@ type ProjectionResolver = (
     threadId?: string | null
     senderAgentId: string
     recipientAgentIds: string[]
+    fallbackAllowed?: boolean
   },
 ) => Promise<OutboundProjectionDecision>
 
@@ -279,6 +280,7 @@ export async function buildDiscordProjectionDiagnosticReport(
     threadId,
     senderAgentId,
     recipientAgentIds,
+    fallbackAllowed,
   })
   const selectedDiagnostics = diagnosticsFor(decision, decision.consumerAgentId)
   const senderDiagnostics = diagnosticsFor(decision, senderAgentId, 'sender_token_evidence')

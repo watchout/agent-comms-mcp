@@ -25,6 +25,10 @@ export interface ChannelPolicyEntry {
   nativeRoleOutboundOwners: Record<AgentId, AgentId>
   /** ADR-060 — sender-specific native projection identity intent, not delivery ownership. */
   nativeProjectionIdentities: Record<AgentId, AgentId>
+  /** NORM-036 — explicit permit for legacy adapter-owner delivery fallback. */
+  adapterOwnerFallbackAllowed: boolean
+  /** NORM-036 — explicit permit for legacy primary-agent delivery fallback. */
+  primaryFallbackAllowed: boolean
   /** §1.3 / §2.4 — outbound ACL allowlist. `null` = entry absent (legacy: all senders permitted). */
   outboundAllowlist: AgentId[] | null
   /** Evidence source for operator/audit diagnostics. */
@@ -38,6 +42,8 @@ interface RoutingConfig {
     adapterOwner?: AgentId | null
     nativeRoleOutboundOwners?: Record<AgentId, AgentId>
     nativeProjectionIdentities?: Record<AgentId, AgentId>
+    adapterOwnerFallbackAllowed?: boolean
+    primaryFallbackAllowed?: boolean
     outboundAllowlist?: AgentId[]
     policySource?: string
   }>
@@ -85,6 +91,12 @@ function truthyEnv(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
 }
 
+function explicitBoolean(value: unknown): boolean {
+  if (value === true) return true
+  if (typeof value === 'string') return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+  return false
+}
+
 function channelPolicyFileFallbackEnabled(): boolean {
   return Boolean(process.env.AGENT_COM_BOT_ROUTING_PATH) ||
     truthyEnv(process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK)
@@ -100,6 +112,8 @@ function normalizePolicyEntry(
       adapterOwner: null,
       nativeRoleOutboundOwners: {},
       nativeProjectionIdentities: {},
+      adapterOwnerFallbackAllowed: false,
+      primaryFallbackAllowed: false,
       outboundAllowlist: fallbackPolicySource === 'none' ? [] : null,
       policySource: fallbackPolicySource,
     }
@@ -125,6 +139,8 @@ function normalizePolicyEntry(
     adapterOwner: entry.adapterOwner ?? null,
     nativeRoleOutboundOwners,
     nativeProjectionIdentities,
+    adapterOwnerFallbackAllowed: explicitBoolean(entry.adapterOwnerFallbackAllowed),
+    primaryFallbackAllowed: explicitBoolean(entry.primaryFallbackAllowed),
     outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
     policySource: entry.policySource ?? fallbackPolicySource,
   }
@@ -263,6 +279,8 @@ export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ l
         outboundAllowlist: parseStringArray(row.outbound_allowlist),
         nativeRoleOutboundOwners: parseStringMap(row.native_role_outbound_owners),
         nativeProjectionIdentities: parseStringMap(row.native_projection_identities),
+        adapterOwnerFallbackAllowed: false,
+        primaryFallbackAllowed: false,
         policySource: typeof row.policy_source === 'string' && row.policy_source.trim() ? row.policy_source.trim() : 'db',
       }
     }

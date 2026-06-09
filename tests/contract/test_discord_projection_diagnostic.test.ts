@@ -47,6 +47,11 @@ function mockProjectionDb(options: {
   const readOnlyAgents = new Set(options.readOnlyDeliveryAgents ?? [])
   const connectorOnlyAgents = new Set(options.connectorOnlyAgents ?? [])
   const credentialMissingAgents = new Set(options.credentialMissingAgents ?? [])
+  const boundAgents = new Set([
+    ...eligibleAgents,
+    ...bindingAgents,
+    ...readOnlyAgents,
+  ])
   const agentFromConnector = (connectorId: unknown) => {
     if (typeof connectorId !== 'string') return ''
     const match = connectorId.match(/^connector-(.+)$/)
@@ -81,7 +86,7 @@ function mockProjectionDb(options: {
           }],
         }
       }
-      if (sql.includes('connector_instances')) {
+      if (sql.includes('connector_instances') && !sql.includes('channel_connector_bindings')) {
         const agentId = typeof params?.[1] === 'string' ? params[1] : ''
         return { rows: connectorIdsFor(agentId).map((connector_instance_id) => ({ connector_instance_id, status: 'active' })) }
       }
@@ -98,9 +103,19 @@ function mockProjectionDb(options: {
         return { rows: [] }
       }
       if (sql.includes('channel_connector_bindings')) {
+        if (sql.includes('JOIN connector_instances')) {
+          return {
+            rows: Array.from(boundAgents).flatMap((agentId) => connectorIdsFor(agentId).map((connector_instance_id) => ({
+              agent_id: agentId,
+              connector_instance_id,
+              channel_binding_id: `binding-${agentId}`,
+              priority: 10,
+            }))),
+          }
+        }
         const connectorInstanceId = typeof params?.[2] === 'string' ? params[2] : ''
         const agentId = agentFromConnector(connectorInstanceId)
-        if (bindingAgents.has(agentId)) {
+        if (boundAgents.has(agentId)) {
           return { rows: [{ channel_binding_id: `binding-${agentId}` }] }
         }
         return { rows: [] }
@@ -108,7 +123,7 @@ function mockProjectionDb(options: {
       if (sql.includes('provider_channel_access')) {
         const connectorInstanceId = typeof params?.[2] === 'string' ? params[2] : ''
         const agentId = agentFromConnector(connectorInstanceId)
-        if (eligibleAgents.has(agentId)) {
+        if (eligibleAgents.has(agentId) || bindingAgents.has(agentId)) {
           return { rows: [{ provider_channel_access_id: `access-${agentId}`, capabilities: { message_create: true } }] }
         }
         if (readOnlyAgents.has(agentId)) {
@@ -205,11 +220,11 @@ afterEach(() => {
 })
 
 describe('#604 Discord projection diagnostic', () => {
-  test('sender credential registered and writable yields direct delivery PASS', async () => {
+  test('sender credential active with binding and write capability yields direct delivery PASS', async () => {
     const db = mockProjectionDb({
       bindingDeliveryAgents: ['codex-cto'],
       eligibleDeliveryAgents: ['aun'],
-      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      credentialStatusByAgent: { 'codex-cto': 'active', aun: 'active' },
       agents: {
         aun: mockAgent('aun'),
         'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
@@ -226,8 +241,8 @@ describe('#604 Discord projection diagnostic', () => {
     expect(report.mutation_performed).toBe(false)
     expect(report.contract).toMatchObject({
       runtime_login_credential_statuses: ['active', 'registered'],
-      delivery_credential_statuses: ['active', 'registered'],
-      runtime_delivery_status_contract: 'aligned',
+      delivery_credential_statuses: ['active'],
+      runtime_delivery_status_contract: 'drift',
       sender_direct_preferred_over_router: true,
       fallback_requires_explicit_allowance: true,
       selected_delivery_evidence_required: true,
@@ -238,7 +253,7 @@ describe('#604 Discord projection diagnostic', () => {
       projection_identity_id: 'codex-cto',
       delivery_connector_instance_id: 'connector-codex-cto',
       channel_binding_id: 'binding-codex-cto',
-      credential_status: 'registered',
+      credential_status: 'active',
       provider_write_capability: 'channel_binding_outbound',
       fallback_allowed: false,
       fallback_reason: 'recipient_direct_unavailable',
@@ -268,13 +283,13 @@ describe('#604 Discord projection diagnostic', () => {
     })
     const text = formatDiscordProjectionDiagnosticText(report)
 
-    expect(report.contract.runtime_delivery_status_contract).toBe('aligned')
+    expect(report.contract.runtime_delivery_status_contract).toBe('drift')
     expect(report.contract.runtime_login_credential_statuses).toEqual(['active', 'registered'])
-    expect(report.contract.delivery_credential_statuses).toEqual(['active', 'registered'])
-    expect(text).toContain('Credential contract: aligned')
+    expect(report.contract.delivery_credential_statuses).toEqual(['active'])
+    expect(text).toContain('Credential contract: drift')
     expect(text).toContain('Runtime login statuses: active, registered')
-    expect(text).toContain('Delivery statuses: active, registered')
-    expect(text).toContain('Effective delivery owner: ok:sender_direct')
+    expect(text).toContain('Delivery statuses: active')
+    expect(text).toContain('Effective delivery owner: blocked:CREDENTIAL_NOT_DELIVERY_ELIGIBLE')
   })
 
   test('usable sender credential falling back to AUN is a blocker', async () => {
@@ -314,7 +329,7 @@ describe('#604 Discord projection diagnostic', () => {
     const db = mockProjectionDb({
       readOnlyDeliveryAgents: ['codex-cto'],
       eligibleDeliveryAgents: ['aun'],
-      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      credentialStatusByAgent: { 'codex-cto': 'active', aun: 'active' },
       agents: {
         aun: mockAgent('aun'),
         'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
@@ -333,17 +348,17 @@ describe('#604 Discord projection diagnostic', () => {
     expect(report.go_no_go).toBe('GO')
     expect(report.decision).toMatchObject({
       consumer_agent_id: 'aun',
-      decision_source: 'channel_policy_adapter_owner',
+      decision_source: 'derived_single_connector',
       fallback_allowed: true,
       fallback_reason: 'sender_direct_unavailable',
       credential_status: 'active',
-      provider_write_capability: 'provider_channel_access_write',
+      provider_write_capability: 'channel_binding_outbound',
     })
     expect(report.blockers).toEqual([])
     expect(report.warnings.map((item) => item.code)).toEqual(['FALLBACK_ALLOWED'])
     expect(report.effective_delivery_owner).toMatchObject({
       ok: true,
-      source: 'legacy_adapter_owner',
+      source: 'derived_single_connector',
       consumerAgentId: 'aun',
     })
   })
@@ -380,7 +395,7 @@ describe('#604 Discord projection diagnostic', () => {
   ])('%s fails closed', async (_name, options, expectedCode) => {
     const db = mockProjectionDb({
       ...options,
-      credentialStatusByAgent: { 'codex-cto': 'registered' },
+      credentialStatusByAgent: { 'codex-cto': 'active' },
       agents: {
         'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
         ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
