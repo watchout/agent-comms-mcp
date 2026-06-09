@@ -15,6 +15,11 @@ import {
   withTerminalBaton,
   type TerminalBaton,
 } from '../../core/no-reply-policy'
+import {
+  assertMessageQueueStatusVocabularyCompatible,
+  formatMessageQueueStatusCodeDrift,
+  isDbCodeDriftError,
+} from '../../core/message-queue-schema-guard'
 
 export type LifecycleMode = 'processing' | 'done' | 'record-no-reply'
 
@@ -295,6 +300,7 @@ export async function lifecycleTransition(
 
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      await assertMessageQueueStatusVocabularyCompatible(db, { operation: `aun ${mode}` })
       return db.transaction<LifecycleTransitionSummary>(async (tx) => {
         const row = await tx.queryOne<{
           id: string | number
@@ -428,6 +434,15 @@ export async function lifecycleTransition(
       summary,
     }
   } catch (err) {
+    if (isDbCodeDriftError(err)) {
+      return {
+        ok: false,
+        code: 1,
+        stdout: '',
+        stderr: `${formatMessageQueueStatusCodeDrift(err.report)}\n`,
+        plan,
+      }
+    }
     return {
       ok: false,
       code: 1,
