@@ -115,6 +115,7 @@ import {
 import { syncChannelPolicyConnectors, type BindingRole, type OrderingScope } from '../core/channel-connector-sync'
 import { buildLiveTmuxProfileDoctorBlockers, parseTmuxListPanes } from '../core/tmux-runtime-inspector'
 import { profileExclusionReason } from '../core/profile-classification'
+import { reconcileDiscordDeliveryCredentialPromotion } from '../core/discord-credential-promotion'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -1891,6 +1892,7 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
                 credential_kind = 'bot_token',
                 status = CASE
                   WHEN status IN ('disabled', 'revoked') THEN status
+                  WHEN status = 'active' THEN status
                   ELSE 'registered'
                 END,
                 trust_status = CASE
@@ -2094,6 +2096,13 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
     actions: projection.actions,
     deferred: projection.deferred,
   })
+
+  if (connectorInstanceId && credentialId && connectorAction?.provider === 'discord') {
+    await reconcileDiscordDeliveryCredentialPromotion(db, {
+      agentId: projection.agent_id,
+      actor: 'bot_profile_projector',
+    })
+  }
 }
 
 async function agentProfile(args: string[]) {
