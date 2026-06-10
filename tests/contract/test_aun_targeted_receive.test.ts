@@ -93,6 +93,25 @@ function row(queueId: number): { status: string; claimed_by: string | null; clai
   ).get(queueId) as { status: string; claimed_by: string | null; claim_ttl: number })
 }
 
+function forceV08OnlyStatusVocabulary(): void {
+  withDb((db) => {
+    const row = db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'message_queue'`,
+    ).get() as { sql: string }
+    const drifted = row.sql.replace(
+      /CHECK \(status IN \([^)]+\)\)/,
+      "CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'))",
+    )
+    if (drifted === row.sql) throw new Error('message_queue status CHECK was not found')
+    db.exec('PRAGMA foreign_keys = OFF')
+    db.exec('ALTER TABLE message_queue RENAME TO message_queue_old')
+    db.exec(drifted)
+    db.exec('INSERT INTO message_queue SELECT * FROM message_queue_old')
+    db.exec('DROP TABLE message_queue_old')
+    db.exec('PRAGMA foreign_keys = ON')
+  })
+}
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-targeted-receive-'))
   dbPath = join(tmpDir, 'test.db')
@@ -141,6 +160,22 @@ describe('test_aun_targeted_receive - exact queue_id receive runner', () => {
     })
     expect(row(requested.queueId)).toEqual({ status: 'received', claimed_by: TEST_AGENT, claim_ttl: 1 })
     expect(row(newer.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
+  })
+
+  test('receive --queue-id reports DB_CODE_DRIFT when status vocabulary rejects received', () => {
+    const target = seedQueue({ content: 'schema drift must fail before claim' })
+    forceV08OnlyStatusVocabulary()
+
+    const r = runAun(['receive', '--agent-id', TEST_AGENT, '--queue-id', String(target.queueId)])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Error [DB_CODE_DRIFT]')
+    expect(r.stderr).toContain('message_queue_status_check')
+    expect(r.stderr).toContain('expected_vocabulary')
+    expect(r.stderr).toContain('actual_vocabulary')
+    expect(r.stderr).toContain('constraint_definition')
+    expect(r.stderr).not.toContain('TARGETED_RECEIVE_FAILED')
+    expect(row(target.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
   })
 
   test('next --queue-id uses the same targeted claim path', () => {

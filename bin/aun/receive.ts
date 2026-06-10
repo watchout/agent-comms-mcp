@@ -18,6 +18,12 @@ import {
   classifyQueueMessageType,
 } from '../../core/queue-message-classification'
 import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../../core/runtime-memory-ready'
+import {
+  assertMessageQueueStatusVocabularyCompatible,
+  formatMessageQueueStatusCodeDrift,
+  isDbCodeDriftError,
+} from '../../core/message-queue-schema-guard'
+import { transitionMessageQueueStatus } from '../../core/message-queue-transitions'
 
 export interface ReceiveOptions {
   agentId?: string
@@ -471,6 +477,9 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
 
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      await assertMessageQueueStatusVocabularyCompatible(db, {
+        operation: 'aun receive --queue-id',
+      })
       return db.transaction<TargetedReceiveSummary>(async (tx) => {
         const row = await tx.queryOne<Record<string, unknown>>(
           `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
@@ -514,17 +523,23 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
 
         if (selected && !blockedReason && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+          const claimedAt = new Date().toISOString()
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
-          const update = await tx.execute(
-            `UPDATE message_queue
-                SET status = 'received',
-                    read_at = now(),
-                    claimed_by = $1,
-                    claimed_at = now(),
-                    claim_expires_at = $2
-              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.queue_id, plan.env.AGENT_ID],
-          )
+          const update = await transitionMessageQueueStatus({
+            db: tx,
+            queueId: selected.queue_id,
+            toStatus: 'received',
+            set: [
+              { column: 'read_at', value: claimedAt },
+              { column: 'claimed_by', value: plan.env.AGENT_ID },
+              { column: 'claimed_at', value: claimedAt },
+              { column: 'claim_expires_at', value: claimExpiresAt },
+            ],
+            where: [
+              { sql: 'agent_id = ?', params: [plan.env.AGENT_ID] },
+              { sql: "status = 'pending'" },
+            ],
+          })
           if (update.rowCount !== 1) {
             throw new Error(`target queue row changed before claim: queue_id=${selected.queue_id}`)
           }
@@ -574,6 +589,16 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
       summary,
     }
   } catch (err) {
+    const drift = dbCodeDriftStderr(err)
+    if (drift) {
+      return {
+        ok: false,
+        code: 1,
+        stdout: '',
+        stderr: drift,
+        plan,
+      }
+    }
     return {
       ok: false,
       code: 1,
@@ -582,6 +607,10 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
       plan,
     }
   }
+}
+
+function dbCodeDriftStderr(err: unknown): string | null {
+  return isDbCodeDriftError(err) ? `${formatMessageQueueStatusCodeDrift(err.report)}\n` : null
 }
 
 export function parseDrainLimit(limit: number | undefined): number {
@@ -1565,6 +1594,9 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
 
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      await assertMessageQueueStatusVocabularyCompatible(db, {
+        operation: 'aun receive-actionable',
+      })
       return db.transaction<ActionableReceiveSummary>(async (tx) => {
         const memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
           agent_id: plan.env.AGENT_ID,
@@ -1723,17 +1755,23 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
 
         if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+          const claimedAt = new Date().toISOString()
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
-          const update = await tx.execute(
-            `UPDATE message_queue
-                SET status = 'received',
-                    read_at = now(),
-                    claimed_by = $1,
-                    claimed_at = now(),
-                    claim_expires_at = $2
-              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.row.queue_id, plan.env.AGENT_ID],
-          )
+          const update = await transitionMessageQueueStatus({
+            db: tx,
+            queueId: selected.row.queue_id,
+            toStatus: 'received',
+            set: [
+              { column: 'read_at', value: claimedAt },
+              { column: 'claimed_by', value: plan.env.AGENT_ID },
+              { column: 'claimed_at', value: claimedAt },
+              { column: 'claim_expires_at', value: claimExpiresAt },
+            ],
+            where: [
+              { sql: 'agent_id = ?', params: [plan.env.AGENT_ID] },
+              { sql: "status = 'pending'" },
+            ],
+          })
           if (update.rowCount !== 1) {
             throw new Error(`selected queue row changed before claim: queue_id=${selected.row.queue_id}`)
           }
@@ -1814,6 +1852,16 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
       summary,
     }
   } catch (err) {
+    const drift = dbCodeDriftStderr(err)
+    if (drift) {
+      return {
+        ok: false,
+        code: 1,
+        stdout: '',
+        stderr: drift,
+        plan,
+      }
+    }
     return {
       ok: false,
       code: 1,

@@ -80,6 +80,12 @@ import {
   withQueueDispositionStamp,
   type QueueSurfaceClassification,
 } from '../queue-message-classification'
+import { assertMessageQueueStatusVocabularyCompatible } from '../message-queue-schema-guard'
+import {
+  transitionMessageQueueStatus,
+  type MessageQueueTransitionInput,
+  type MessageQueueTransitionResult,
+} from '../message-queue-transitions'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
@@ -337,15 +343,7 @@ export class StateDaemon {
     const abandon = await this.fetchAbandonRecent()
     for (const row of abandon) {
       result.scanned++
-      await this.dbQuery(
-        `UPDATE message_queue
-            SET status='pending',
-                claimed_by=NULL,
-                claimed_at=NULL,
-                claim_expires_at=NULL
-          WHERE id=$1`,
-        [row.id],
-      )
+      await this.transitionQueueStatus({ queueId: row.id, toStatus: 'pending' })
       result.abandonReset++
     }
 
@@ -670,15 +668,7 @@ export class StateDaemon {
   // ── State transition helpers (§4.3) ────────────────────────────────────────
 
   private async reclaimRow(row: QueueRow): Promise<void> {
-    await this.dbQuery(
-      `UPDATE message_queue
-          SET status='pending',
-              claim_expires_at=NULL,
-              claimed_by=NULL,
-              claimed_at=NULL
-        WHERE id=$1`,
-      [row.id],
-    )
+    await this.transitionQueueStatus({ queueId: row.id, toStatus: 'pending' })
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
     // After reclaim, observe the pending row without prompt injection.
     await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null })
@@ -838,18 +828,19 @@ export class StateDaemon {
       source: 'deterministic_no_reply_policy',
       now: () => now,
     })))
-    const updated = await this.dbQuery(
-      `UPDATE message_queue
-          SET status='done',
-              done_at=$2,
-              payload=$3,
-              claim_expires_at=NULL,
-              claimed_by=NULL,
-              claimed_at=NULL
-        WHERE id=$1
-          AND status IN ('pending', 'received', 'in_progress')`,
-      [row.id, now, stampedPayload],
-    )
+    await assertMessageQueueStatusVocabularyCompatible(this.db, {
+      operation: 'state_daemon complete no-reply',
+    })
+    const updated = await this.transitionQueueStatus({
+      queueId: row.id,
+      toStatus: 'done',
+      set: [
+        { column: 'done_at', value: now },
+        { column: 'payload', value: stampedPayload },
+      ],
+      clearClaim: true,
+      where: [{ sql: "status IN ('pending', 'received', 'in_progress')" }],
+    })
     if (updated.rowCount !== 1) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_reply_stale_skipped' })
       return false
@@ -1234,6 +1225,17 @@ export class StateDaemon {
       }
       throw new DBConnectionError((err as Error).message ?? String(err), err)
     }
+  }
+
+  private async transitionQueueStatus(
+    input: Omit<MessageQueueTransitionInput, 'db'>,
+  ): Promise<MessageQueueTransitionResult> {
+    return transitionMessageQueueStatus({
+      ...input,
+      db: {
+        query: (sql, params) => this.dbQuery(sql, params),
+      },
+    })
   }
 
   private recordDbError(_err: unknown): void {
