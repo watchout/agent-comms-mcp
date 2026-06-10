@@ -111,6 +111,17 @@ describe('aun lifecycle CLI transitions', () => {
     expect(src).not.toContain('LEFT JOIN agent_messages am ON am.id = mq.message_id')
   })
 
+  test('lifecycle commands guard message_queue status vocabulary before transition writes', () => {
+    const src = readFileSync(join(REPO_ROOT, 'bin', 'aun', 'lifecycle.ts'), 'utf-8')
+    const transitionBlock = src.split('export async function lifecycleTransition')[1] ?? ''
+    const beforeTransaction = transitionBlock.split('return db.transaction')[0] ?? ''
+
+    expect(beforeTransaction).toContain('assertMessageQueueStatusVocabularyCompatible')
+    expect(beforeTransaction).toContain('aun ${mode}')
+    expect(src).toContain('formatMessageQueueStatusCodeDrift')
+    expect(src).toContain('isDbCodeDriftError')
+  })
+
   test('processing advances received to in_progress and keeps final close explicit', () => {
     const { queueId, messageId } = seedQueue('received')
 
@@ -276,6 +287,40 @@ describe('aun lifecycle CLI transitions', () => {
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('INVALID_STATE')
     expect(queueRow(queueId).status).toBe('pending')
+  })
+
+  test('processing fails with DB_CODE_DRIFT on a v0.8-only message_queue constraint', () => {
+    const driftDbPath = join(tmpDir, 'v08-only.db')
+    const db = new Database(driftDbPath, { create: true })
+    try {
+      db.exec(`
+        CREATE TABLE message_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_id TEXT NOT NULL,
+          message_id TEXT,
+          payload TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'))
+        )
+      `)
+    } finally {
+      db.close()
+    }
+    env = {
+      ...env,
+      AGENT_COM_SQLITE_PATH: driftDbPath,
+    }
+
+    const r = runAun(['processing', '--agent-id', TEST_AGENT, '--queue-id', '1'])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Error [DB_CODE_DRIFT]')
+    expect(r.stderr).toContain('message_queue_status_check')
+    expect(r.stderr).toContain('expected_vocabulary')
+    expect(r.stderr).toContain('actual_vocabulary')
+    expect(r.stderr).toContain('constraint_definition')
+    expect(r.stderr).toContain('in_progress')
+    expect(r.stderr).not.toContain('AUN_LIFECYCLE_FAILED')
   })
 
   test('agent identity guard prevents touching another agent row', () => {
