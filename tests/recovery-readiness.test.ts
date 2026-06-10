@@ -150,6 +150,7 @@ function mockDb(options: {
   const bindingAgents = new Set(options.bindingDeliveryAgents ?? ['codex-cto'])
   const readOnlyAgents = new Set(options.readOnlyDeliveryAgents ?? [])
   const eligibleAgents = new Set(options.eligibleDeliveryAgents ?? [])
+  const boundAgents = new Set([...bindingAgents, ...readOnlyAgents, ...eligibleAgents])
   const agents = {
     'codex-cto': mockAgent('codex-cto'),
     ceo: mockAgent('ceo', { agentType: 'human' }),
@@ -157,7 +158,7 @@ function mockDb(options: {
     ...(options.agents ?? {}),
   }
   const connectorIdsFor = (agentId: string) => (
-    bindingAgents.has(agentId) || readOnlyAgents.has(agentId) || eligibleAgents.has(agentId)
+    boundAgents.has(agentId)
       ? [`connector-${agentId}`]
       : []
   )
@@ -193,7 +194,7 @@ function mockDb(options: {
       if (sql.includes('channel_adapters')) {
         return { rows: [{ external_id: '1487368919613444156', metadata: null }] }
       }
-      if (sql.includes('connector_instances')) {
+      if (sql.includes('connector_instances') && !sql.includes('channel_connector_bindings')) {
         const agentId = typeof params?.[1] === 'string' ? params[1] : ''
         return { rows: connectorIdsFor(agentId).map((connector_instance_id) => ({ connector_instance_id, status: 'active' })) }
       }
@@ -201,12 +202,22 @@ function mockDb(options: {
         const agentId = typeof params?.[1] === 'string' ? params[1] : ''
         const connectorId = typeof params?.[2] === 'string' ? params[2] : ''
         return connectorIdsFor(agentId).includes(connectorId)
-          ? { rows: [{ credential_id: `credential-${agentId}`, credential_status: 'registered' }] }
+          ? { rows: [{ credential_id: `credential-${agentId}`, credential_status: 'active' }] }
           : { rows: [] }
       }
       if (sql.includes('channel_connector_bindings')) {
+        if (sql.includes('JOIN connector_instances')) {
+          return {
+            rows: Array.from(boundAgents).flatMap((agentId) => connectorIdsFor(agentId).map((connector_instance_id) => ({
+              agent_id: agentId,
+              connector_instance_id,
+              channel_binding_id: `binding-${agentId}`,
+              priority: 10,
+            }))),
+          }
+        }
         const agentId = agentFromConnector(params?.[2])
-        return bindingAgents.has(agentId)
+        return boundAgents.has(agentId)
           ? { rows: [{ channel_binding_id: `binding-${agentId}` }] }
           : { rows: [] }
       }
@@ -215,7 +226,7 @@ function mockDb(options: {
         if (readOnlyAgents.has(agentId)) {
           return { rows: [{ provider_channel_access_id: `access-${agentId}`, capabilities: { channel_get: true } }] }
         }
-        return eligibleAgents.has(agentId)
+        return eligibleAgents.has(agentId) || bindingAgents.has(agentId)
           ? { rows: [{ provider_channel_access_id: `access-${agentId}`, capabilities: { message_create: true } }] }
           : { rows: [] }
       }
@@ -426,10 +437,9 @@ describe('CP-80 recovery readiness', () => {
 
     expect(report.ok).toBe(false)
     expect(report.projection_readiness[0].decision.consumerAgentId).toBe('aun')
-    expect(report.projection_readiness[0].decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(report.projection_readiness[0].decision.consumerSource).toBe('derived_single_connector')
     expect(report.blockers.map((b) => b.code)).toEqual(expect.arrayContaining([
       'PROJECTION_DIRECT_DELIVERY_MISMATCH',
-      'PROJECTION_FALLBACK_DISALLOWED',
     ]))
 
     const allowed = await buildRecoveryReadinessReport(fallbackDb, scope({
@@ -438,7 +448,7 @@ describe('CP-80 recovery readiness', () => {
         sender_agent_id: 'codex-cto',
         recipient_agent_ids: ['ceo'],
         expected_consumer_agent_id: 'aun',
-        expected_consumer_source: 'channel_policy_adapter_owner',
+        expected_consumer_source: 'derived_single_connector',
         allow_fallback: true,
       }],
     }), cleanOptions)

@@ -1,6 +1,7 @@
 # NORM-036 Effective Delivery Owner Resolver Impl
 
 Date: 2026-05-25
+Updated: 2026-06-10
 Status: Named contract implemented for audit
 Phase: MVP internal normalization
 Slice: NORM-036
@@ -58,11 +59,10 @@ type EffectiveDeliveryOwnerResult =
       code:
         | 'NO_ELIGIBLE_CONNECTOR'
         | 'AMBIGUOUS_CONNECTOR'
-        | 'MISSING_CREDENTIAL'
-        | 'MISSING_PROVIDER_ACCESS'
-        | 'CONNECTOR_DISABLED'
-        | 'RECIPIENT_NOT_MEMBER'
-        | 'RECIPIENT_NOT_ALLOWED'
+        | 'PROVIDER_WRITE_ACCESS_MISSING'
+        | 'BINDING_MISSING'
+        | 'CREDENTIAL_NOT_DELIVERY_ELIGIBLE'
+        | 'FALLBACK_POLICY_DENIED'
       evidence: Record<string, unknown>
     }
 ```
@@ -79,11 +79,15 @@ The exact TypeScript shape may vary, but the output must be machine-readable.
 2. Use explicit active connector binding when present and healthy.
 3. Derive eligible connectors:
    - active connector instance
-   - active non-revoked credential
-   - provider identity is active and non-revoked
-   - provider channel access says `can_write=true`
+   - active non-revoked credential; `registered` is runtime-login-valid but
+     not delivery-eligible
+   - active outbound, bidirectional, or projection channel binding
+   - provider channel access `capabilities` JSONB has write permission
+     (`message_create`, `send_messages`, `can_write`, `write`, or `outbound`)
 4. If exactly one connector is eligible, choose it.
-5. If multiple connectors are eligible, return `AMBIGUOUS_CONNECTOR`.
+5. If multiple connectors are eligible, choose a single lowest-priority
+   `channel_connector_bindings.priority` winner only when that priority is
+   unique; otherwise return `AMBIGUOUS_CONNECTOR`.
 6. If none are eligible, use legacy `adapter_owner_agent_id` only when:
    - fallback policy permits it
    - the legacy owner has enough current connector evidence to post
@@ -131,6 +135,10 @@ human to infer why `agent-com-dev` posted a message intended for `auditor`.
 - Multiple eligible `channel_connector_bindings` may choose a single winner
   only when `priority` has a unique lowest value; otherwise the result is
   `AMBIGUOUS_CONNECTOR`.
+- Delivery eligibility is deliberately stricter than runtime login: runtime
+  login may use `registered` credentials, but delivery requires `active`.
+  Reconcile code may promote `registered` to `active` only after verifying token
+  identity and channel write permission.
 
 ## Non-Goals
 

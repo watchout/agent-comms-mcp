@@ -436,6 +436,17 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const strict = runCli(['agent', 'profile', 'doctor', '--strict'])
     expect(strict.status).toBe(0)
     expect(JSON.parse(strict.stdout).ok).toBe(true)
+
+    {
+      const db = new Database(dbPath)
+      db.exec(`UPDATE connector_instances SET status = 'active'`)
+      db.exec(`UPDATE connector_credentials SET status = 'active'`)
+      db.close()
+    }
+    const rerun = runCli(['agent', 'profile', 'project', 'probe-f', '--execute'])
+    expect(rerun.status).toBe(0)
+    expect(dbRead(`SELECT status FROM connector_instances`)[0].status).toBe('active')
+    expect(dbRead(`SELECT status FROM connector_credentials`)[0].status).toBe('active')
   })
 
   test('worker activity report writes DB-backed progress evidence and status exposes it', () => {

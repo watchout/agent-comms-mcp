@@ -233,7 +233,7 @@ The final approval packet is GO only when all conditions are true:
   `consumer_agent_id=codex-cto`, `consumer_source=sender_token_evidence`, and
   `fallback_allowed=false`
 - Discord projection diagnostic reports
-  `contract.runtime_delivery_status_contract=aligned`
+  `contract.runtime_delivery_status_contract=drift` with active delivery credential evidence
 - state-daemon readiness is GO or explicitly report-only for unloaded/not-running
   with no restart performed
 - runtime inventory has zero stale, unapproved checkout, commit mismatch,

@@ -1,7 +1,7 @@
 import { resolveTokenSourceRef, type TokenSourceEnv } from './token-source-ref'
 
 export const DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES = ['active', 'registered'] as const
-export const DISCORD_DELIVERY_CREDENTIAL_STATUSES = ['active', 'registered'] as const
+export const DISCORD_DELIVERY_CREDENTIAL_STATUSES = ['active'] as const
 
 export type DiscordRuntimeLoginCredentialStatus = typeof DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES[number]
 export type DiscordDeliveryCredentialStatus = typeof DISCORD_DELIVERY_CREDENTIAL_STATUSES[number]

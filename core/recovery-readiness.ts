@@ -566,6 +566,7 @@ async function buildProjectionReadiness(
     threadId: normalized.thread_id,
     senderAgentId: normalized.sender_agent_id,
     recipientAgentIds: normalized.recipient_agent_ids,
+    fallbackAllowed: normalized.allow_fallback,
   })
   const blockerCodes: RecoveryReadinessBlockerCode[] = []
   const blockers: RecoveryReadinessBlocker[] = []

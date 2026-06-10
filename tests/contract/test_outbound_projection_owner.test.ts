@@ -58,6 +58,13 @@ function mockProjectionDb(options: {
   const readOnlyAgents = new Set(options.readOnlyDeliveryAgents ?? [])
   const mismatchedAgents = new Set(options.mismatchedDeliveryAgents ?? [])
   const ambiguousAgents = new Set(options.ambiguousDeliveryAgents ?? [])
+  const boundAgents = new Set([
+    ...eligibleAgents,
+    ...bindingAgents,
+    ...readOnlyAgents,
+    ...mismatchedAgents,
+    ...ambiguousAgents,
+  ])
   const agentFromConnector = (connectorId: unknown) => {
     if (typeof connectorId !== 'string') return ''
     const match = connectorId.match(/^connector-(.+?)(?:-(?:[0-9]+|credential|access))?$/)
@@ -100,7 +107,7 @@ function mockProjectionDb(options: {
           }],
         }
       }
-      if (sql.includes('connector_instances')) {
+      if (sql.includes('connector_instances') && !sql.includes('channel_connector_bindings')) {
         const agentId = typeof params?.[1] === 'string' ? params[1] : ''
         return { rows: connectorIdsFor(agentId).map((connector_instance_id) => ({ connector_instance_id, status: 'active' })) }
       }
@@ -121,9 +128,19 @@ function mockProjectionDb(options: {
         return { rows: [] }
       }
       if (sql.includes('channel_connector_bindings')) {
+        if (sql.includes('JOIN connector_instances')) {
+          return {
+            rows: Array.from(boundAgents).flatMap((agentId) => connectorIdsFor(agentId).map((connector_instance_id) => ({
+              agent_id: agentId,
+              connector_instance_id,
+              channel_binding_id: ambiguousAgents.has(agentId) ? `binding-${connector_instance_id}` : `binding-${agentId}`,
+              priority: options.bindingPriorityByConnector?.[connector_instance_id] ?? 10,
+            }))),
+          }
+        }
         const connectorInstanceId = typeof params?.[2] === 'string' ? params[2] : ''
         const agentId = agentFromConnector(connectorInstanceId)
-        if (bindingAgents.has(agentId)) {
+        if (boundAgents.has(agentId)) {
           const bindingId = ambiguousAgents.has(agentId) ? `binding-${connectorInstanceId}` : `binding-${agentId}`
           return {
             rows: [{
@@ -148,7 +165,7 @@ function mockProjectionDb(options: {
               : [],
           }
         }
-        if ((eligibleAgents.has(agentId) || ambiguousAgents.has(agentId)) && (!targetScopedAgents || targetScopedAgents.has(agentId))) {
+        if ((eligibleAgents.has(agentId) || bindingAgents.has(agentId) || ambiguousAgents.has(agentId)) && (!targetScopedAgents || targetScopedAgents.has(agentId))) {
           return { rows: [{ provider_channel_access_id: `access-${agentId}`, capabilities: { message_create: true } }] }
         }
         if (readOnlyAgents.has(agentId)) {
@@ -196,7 +213,7 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('channel_adapter_metadata')
   })
 
-  test('bot-routing adapterOwner is the config fallback', async () => {
+  test('bot-routing adapterOwner with binding evidence resolves as derived owner', async () => {
     setRoutingConfig({ ch1: { primary: 'primary-agent', adapterOwner: 'adapter-agent' } })
     const db = mockProjectionDb({
       eligibleDeliveryAgents: ['adapter-agent'],
@@ -205,7 +222,7 @@ describe('#410 outbound projection owner resolution', () => {
     const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1' })
     expect(route.channelExternalId).toBe('discord-ch')
     expect(route.consumerAgentId).toBe('adapter-agent')
-    expect(route.source).toBe('channel_policy_adapter_owner')
+    expect(route.source).toBe('derived_single_connector')
   })
 
   test('bot-routing adapterOwner without connector evidence is not a Discord delivery consumer', async () => {
@@ -222,7 +239,7 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('none')
   })
 
-  test('production routing ignores bot-routing file fallback when DB policy is missing', async () => {
+  test('production routing ignores bot-routing file fallback but still honors sender evidence', async () => {
     delete process.env.AGENT_COM_BOT_ROUTING_PATH
     delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
     resetChannelPolicyCache()
@@ -241,12 +258,17 @@ describe('#410 outbound projection owner resolution', () => {
     })
 
     expect(route.channelExternalId).toBe('1487368919613444156')
-    expect(route.consumerAgentId).toBeNull()
-    expect(route.source).toBe('none')
-    expect(route.consumerEvidence).toBeNull()
+    expect(route.consumerAgentId).toBe('codex-cto')
+    expect(route.source).toBe('sender_token_evidence')
+    expect(route.consumerEvidence).toMatchObject({
+      agent_id: 'codex-cto',
+      connector_instance_id: 'connector-codex-cto',
+      channel_binding_id: 'binding-codex-cto',
+      provider_channel_access_id: 'access-codex-cto',
+    })
   })
 
-  test('native-role owner overrides channel adapterOwner only for matching sender', async () => {
+  test('native-role owner does not override the sender delivery contract', async () => {
     setRoutingConfig({
       ch1: {
         primary: 'primary-agent',
@@ -256,6 +278,10 @@ describe('#410 outbound projection owner resolution', () => {
     })
     const db = mockProjectionDb({
       eligibleDeliveryAgents: ['agent-com-dev', 'codex-cto'],
+      bindingPriorityByConnector: {
+        'connector-agent-com-dev': 10,
+        'connector-codex-cto': 20,
+      },
       agents: {
         'agent-com-dev': mockAgent('agent-com-dev'),
         'codex-cto': mockAgent('codex-cto'),
@@ -263,11 +289,11 @@ describe('#410 outbound projection owner resolution', () => {
     })
     const codexCto = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-cto' })
     expect(codexCto.consumerAgentId).toBe('codex-cto')
-    expect(codexCto.source).toBe('channel_policy_native_role_owner')
+    expect(codexCto.source).toBe('sender_token_evidence')
 
     const otherAgent = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-aun' })
     expect(otherAgent.consumerAgentId).toBe('agent-com-dev')
-    expect(otherAgent.source).toBe('channel_policy_adapter_owner')
+    expect(otherAgent.source).toBe('derived_single_connector')
   })
 
   test('explicit adapter metadata still wins over native-role policy', async () => {
@@ -325,12 +351,12 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.consumerAgentId).toBe('codex-cto')
     expect(route.source).toBe('recipient_token_evidence')
     expect(route.consumerEvidence).toMatchObject({
-      source_table: 'provider_channel_access',
+      source_table: 'channel_connector_bindings',
       agent_id: 'codex-cto',
       connector_instance_id: 'connector-codex-cto',
       credential_id: 'credential-codex-cto',
       provider_channel_access_id: 'access-codex-cto',
-      channel_binding_id: null,
+      channel_binding_id: 'binding-codex-cto',
     })
   })
 
@@ -355,7 +381,7 @@ describe('#410 outbound projection owner resolution', () => {
       connector_instance_id: 'connector-codex-cto',
       credential_id: 'credential-codex-cto',
       channel_binding_id: 'binding-codex-cto',
-      provider_channel_access_id: null,
+      provider_channel_access_id: 'access-codex-cto',
     })
   })
 
@@ -382,7 +408,7 @@ describe('#410 outbound projection owner resolution', () => {
     })
     expect(route.channelExternalId).toBe('discord-thread')
     expect(route.consumerAgentId).toBe('agent-com-dev')
-    expect(route.source).toBe('channel_policy_adapter_owner')
+    expect(route.source).toBe('derived_single_connector')
   })
 
   test('multiple recipients do not use recipient-facing default projection', async () => {
@@ -399,7 +425,7 @@ describe('#410 outbound projection owner resolution', () => {
       recipientAgentIds: ['codex-cto', 'ceo'],
     })
     expect(route.consumerAgentId).toBe('agent-com-dev')
-    expect(route.source).toBe('channel_policy_adapter_owner')
+    expect(route.source).toBe('derived_single_connector')
   })
 
   test('channel primary remains a compatibility fallback', async () => {
@@ -410,7 +436,7 @@ describe('#410 outbound projection owner resolution', () => {
     })
     const route = await resolveOutboundProjectionRoute(db, { channelId: 'ch1' })
     expect(route.consumerAgentId).toBe('agent-com-dev')
-    expect(route.source).toBe('channel_policy_primary')
+    expect(route.source).toBe('derived_single_connector')
   })
 
   test('production agent-com channel projects logical codex-cto through the codex CTO token owner', async () => {
@@ -428,7 +454,7 @@ describe('#410 outbound projection owner resolution', () => {
     })
 
     expect(route.consumerAgentId).toBe('codex-cto')
-    expect(route.source).toBe('channel_policy_native_role_owner')
+    expect(route.source).toBe('sender_token_evidence')
   })
 })
 
@@ -450,7 +476,7 @@ describe('ADR-060 outbound projection identity decision', () => {
 
     expect(decision.channelExternalId).toBe('discord-ch')
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
@@ -504,7 +530,7 @@ describe('ADR-060 outbound projection identity decision', () => {
 
     expect(decision.channelExternalId).toBe('discord-thread')
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
   })
@@ -555,7 +581,7 @@ describe('ADR-060 outbound projection identity decision', () => {
     })
 
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
   })
@@ -577,7 +603,7 @@ describe('ADR-060 outbound projection identity decision', () => {
     })
 
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
   })
@@ -599,7 +625,7 @@ describe('ADR-060 outbound projection identity decision', () => {
     })
 
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('recipient_default_projection')
   })
@@ -625,7 +651,7 @@ describe('ADR-060 outbound projection identity decision', () => {
     })
 
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('sender_native_projection')
@@ -653,7 +679,7 @@ describe('ADR-060 outbound projection identity decision', () => {
     })
 
     expect(decision.consumerAgentId).toBe('agent-com-dev')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.projectionIdentityId).toBe('agent-com-dev')
     expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('fallback_adapter_owner')
@@ -717,15 +743,16 @@ describe('ADR-060 outbound projection identity decision', () => {
 })
 
 describe('#604 Discord direct-delivery credential contract', () => {
-  test('runtime login and delivery eligibility share registered credential status', () => {
+  test('runtime login accepts registered but delivery eligibility is active-only', () => {
     expect(DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES).toContain('registered')
-    expect(DISCORD_DELIVERY_CREDENTIAL_STATUSES).toContain('registered')
+    expect(DISCORD_DELIVERY_CREDENTIAL_STATUSES).toEqual(['active'])
     expect(isDiscordRuntimeLoginCredentialStatus('registered')).toBe(true)
-    expect(isDiscordDeliveryCredentialStatus('registered')).toBe(true)
+    expect(isDiscordDeliveryCredentialStatus('registered')).toBe(false)
+    expect(isDiscordDeliveryCredentialStatus('active')).toBe(true)
     expect(isDiscordDeliveryCredentialStatus('revoked')).toBe(false)
   })
 
-  test('codex-cto registered credential with outbound binding posts directly instead of falling back to AUN', async () => {
+  test('codex-cto registered credential with binding is not direct-delivery eligible', async () => {
     setRoutingConfig({
       main: {
         primary: 'aun',
@@ -749,22 +776,30 @@ describe('#604 Discord direct-delivery credential contract', () => {
       recipientAgentIds: ['ceo'],
     })
 
-    expect(decision.consumerAgentId).toBe('codex-cto')
-    expect(decision.consumerSource).toBe('sender_token_evidence')
+    expect(decision.consumerAgentId).toBe('aun')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.consumerEvidence).toMatchObject({
       source_table: 'channel_connector_bindings',
-      agent_id: 'codex-cto',
-      credential_status: 'registered',
-      channel_binding_id: 'binding-codex-cto',
+      agent_id: 'aun',
+      credential_status: 'active',
+      channel_binding_id: 'binding-aun',
+      provider_channel_access_id: 'access-aun',
     })
-    expect(decision.deliveryFallbackReason).toBe('recipient_direct_unavailable')
-    expect(decision.projectionIdentityId).toBe('codex-cto')
+    expect(decision.deliveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agent_id: 'codex-cto',
+        source: 'sender_token_evidence',
+        code: 'credential_not_delivery_eligible',
+      }),
+    ]))
+    expect(decision.deliveryFallbackReason).toBe('sender_direct_unavailable')
+    expect(decision.projectionIdentityId).toBe('aun')
     expect(decision.intendedProjectionIdentityId).toBe('ceo')
     expect(decision.projectionSource).toBe('fallback_adapter_owner')
     expect(decision.projectionFallbackReason).toBe('recipient_projection_human')
   })
 
-  test('runtime decision pins sender direct priority while legacy route keeps adapter-owner priority', async () => {
+  test('route and decision share active-only delivery eligibility', async () => {
     setRoutingConfig({
       main: {
         primary: 'aun',
@@ -794,13 +829,13 @@ describe('#604 Discord direct-delivery credential contract', () => {
     })
 
     expect(route.consumerAgentId).toBe('aun')
-    expect(route.source).toBe('channel_policy_adapter_owner')
-    expect(decision.consumerAgentId).toBe('codex-cto')
-    expect(decision.consumerSource).toBe('sender_token_evidence')
-    expect(decision.deliveryFallbackReason).toBe('recipient_direct_unavailable')
+    expect(route.source).toBe('derived_single_connector')
+    expect(decision.consumerAgentId).toBe('aun')
+    expect(decision.consumerSource).toBe('derived_single_connector')
+    expect(decision.deliveryFallbackReason).toBe('sender_direct_unavailable')
   })
 
-  test('registered sender credential without write evidence falls back to AUN with diagnostics', async () => {
+  test('registered sender credential reports credential ineligibility while AUN uses priority evidence', async () => {
     setRoutingConfig({
       main: {
         primary: 'aun',
@@ -825,17 +860,17 @@ describe('#604 Discord direct-delivery credential contract', () => {
     })
 
     expect(decision.consumerAgentId).toBe('aun')
-    expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.consumerSource).toBe('derived_single_connector')
     expect(decision.deliveryFallbackReason).toBe('sender_direct_unavailable')
     expect(decision.deliveryDiagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({
         agent_id: 'codex-cto',
         source: 'sender_token_evidence',
-        code: 'provider_write_access_read_only',
+        code: 'credential_not_delivery_eligible',
       }),
       expect.objectContaining({
         agent_id: 'aun',
-        source: 'channel_policy_adapter_owner',
+        source: 'derived_single_connector',
         code: 'eligible',
       }),
     ]))
@@ -846,7 +881,7 @@ describe('#604 Discord direct-delivery credential contract', () => {
 })
 
 describe('#698 NORM-036 effective delivery owner named contract', () => {
-  test('registered sender credential with write binding exposes sender_direct owner result', async () => {
+  test('registered sender credential with write binding returns CREDENTIAL_NOT_DELIVERY_ELIGIBLE without fallback evidence', async () => {
     setRoutingConfig({
       main: {
         primary: 'aun',
@@ -855,10 +890,8 @@ describe('#698 NORM-036 effective delivery owner named contract', () => {
     })
     const db = mockProjectionDb({
       bindingDeliveryAgents: ['codex-cto'],
-      eligibleDeliveryAgents: ['aun'],
-      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      credentialStatusByAgent: { 'codex-cto': 'registered' },
       agents: {
-        aun: mockAgent('aun'),
         'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
         ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
       },
@@ -871,12 +904,13 @@ describe('#698 NORM-036 effective delivery owner named contract', () => {
     })
 
     expect(owner).toMatchObject({
-      ok: true,
-      source: 'sender_direct',
-      consumerAgentId: 'codex-cto',
-      connectorInstanceId: 'connector-codex-cto',
-      credentialStatus: 'registered',
-      channelBindingId: 'binding-codex-cto',
+      ok: false,
+      code: 'CREDENTIAL_NOT_DELIVERY_ELIGIBLE',
+      evidence: {
+        consumerAgentId: null,
+        consumerSource: 'none',
+        fallbackReason: 'sender_direct_unavailable',
+      },
     })
   })
 
@@ -889,10 +923,11 @@ describe('#698 NORM-036 effective delivery owner named contract', () => {
     })
     const db = mockProjectionDb({
       readOnlyDeliveryAgents: ['codex-cto'],
-      eligibleDeliveryAgents: ['aun'],
-      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      eligibleDeliveryAgents: ['aun', 'router-two'],
+      credentialStatusByAgent: { 'codex-cto': 'active', aun: 'active', 'router-two': 'active' },
       agents: {
         aun: mockAgent('aun'),
+        'router-two': mockAgent('router-two'),
         'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
         ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
       },
@@ -908,7 +943,7 @@ describe('#698 NORM-036 effective delivery owner named contract', () => {
       ok: false,
       code: 'FALLBACK_POLICY_DENIED',
       evidence: {
-        consumerAgentId: 'aun',
+        consumerAgentId: null,
         consumerSource: 'channel_policy_adapter_owner',
         fallbackReason: 'sender_direct_unavailable',
       },
@@ -924,10 +959,11 @@ describe('#698 NORM-036 effective delivery owner named contract', () => {
     })
     const db = mockProjectionDb({
       readOnlyDeliveryAgents: ['codex-cto'],
-      eligibleDeliveryAgents: ['aun'],
-      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      eligibleDeliveryAgents: ['aun', 'router-two'],
+      credentialStatusByAgent: { 'codex-cto': 'active', aun: 'active', 'router-two': 'active' },
       agents: {
         aun: mockAgent('aun'),
+        'router-two': mockAgent('router-two'),
         'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
         ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
       },
@@ -938,6 +974,42 @@ describe('#698 NORM-036 effective delivery owner named contract', () => {
       senderAgentId: 'codex-cto',
       recipientAgentIds: ['ceo'],
       fallbackAllowed: true,
+    })
+
+    expect(owner).toMatchObject({
+      ok: true,
+      source: 'legacy_adapter_owner',
+      consumerAgentId: 'aun',
+      connectorInstanceId: 'connector-aun',
+      providerChannelAccessId: 'access-aun',
+      fallbackReason: 'sender_direct_unavailable',
+    })
+  })
+
+  test('explicit channel policy permit exposes legacy adapter-owner without caller fallback override', async () => {
+    setRoutingConfig({
+      main: {
+        primary: 'aun',
+        adapterOwner: 'aun',
+        adapterOwnerFallbackAllowed: true,
+      },
+    })
+    const db = mockProjectionDb({
+      readOnlyDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun', 'router-two'],
+      credentialStatusByAgent: { 'codex-cto': 'active', aun: 'active', 'router-two': 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'router-two': mockAgent('router-two'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const owner = await resolveEffectiveDeliveryOwner(db, {
+      channelId: 'main',
+      senderAgentId: 'codex-cto',
+      recipientAgentIds: ['ceo'],
     })
 
     expect(owner).toMatchObject({

@@ -14,7 +14,7 @@ export interface OutboundProjectionRoute {
   platform: 'discord'
   channelExternalId: string | null
   consumerAgentId: string | null
-  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'recipient_token_evidence' | 'sender_token_evidence' | 'recipient_default_projection' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
+  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'recipient_token_evidence' | 'sender_token_evidence' | 'derived_single_connector' | 'recipient_default_projection' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
   consumerEvidence: DeliveryConsumerEvidence | null
 }
 
@@ -23,6 +23,7 @@ export type ProjectionConsumerSource =
   | 'channel_adapter_metadata'
   | 'recipient_token_evidence'
   | 'sender_token_evidence'
+  | 'derived_single_connector'
   | 'channel_policy_adapter_owner'
   | 'channel_policy_primary'
   | 'none'
@@ -52,6 +53,7 @@ export type DeliveryConsumerDiagnosticCode =
   | 'provider_write_access_missing'
   | 'provider_write_access_read_only'
   | 'ambiguous_delivery_connectors'
+  | 'fallback_policy_denied'
 
 export type DeliveryFallbackReason =
   | 'recipient_direct_unavailable'
@@ -135,6 +137,15 @@ export interface DeliveryConsumerEvidence {
   channel_binding_id: string | null
   channel_binding_priority?: number | null
   provider_channel_access_id: string | null
+}
+
+export interface OutboundProjectionInput {
+  channelId: string
+  threadId?: string | null
+  platform?: 'discord'
+  senderAgentId?: string | null
+  recipientAgentIds?: string[] | null
+  fallbackAllowed?: boolean
 }
 
 export type OutboundProjectionSkipReason =
@@ -381,7 +392,12 @@ async function eligibleDeliveryConnectorEvidence(
       continue
     }
     const binding = await writeBindingForConnector(db, input.platform, channelId, connectorInstanceId)
-    if (binding) {
+    if (!binding) {
+      diagnostic('write_binding_missing', connectorInstanceId)
+      continue
+    }
+    const { accessId, readOnlyAccessIds } = await providerWriteAccessForConnector(db, input.platform, providerChannelId, agentId, connectorInstanceId)
+    if (accessId) {
       eligible.push({
         source_table: 'channel_connector_bindings',
         provider: input.platform,
@@ -393,45 +409,25 @@ async function eligibleDeliveryConnectorEvidence(
         credential_status: credential.credential_status,
         channel_binding_id: binding.bindingId,
         channel_binding_priority: binding.priority,
-        provider_channel_access_id: null,
+        provider_channel_access_id: accessId,
       })
       diagnostic('eligible', connectorInstanceId, {
         credential_id: credential.credential_id,
         credential_status: credential.credential_status,
         channel_binding_id: binding.bindingId,
         channel_binding_priority: binding.priority,
-        evidence_source: 'channel_connector_bindings',
-      })
-      continue
-    }
-    diagnostic('write_binding_missing', connectorInstanceId)
-    const { accessId, readOnlyAccessIds } = await providerWriteAccessForConnector(db, input.platform, providerChannelId, agentId, connectorInstanceId)
-    if (accessId) {
-      eligible.push({
-        source_table: 'provider_channel_access',
-        provider: input.platform,
-        channel_id: channelId,
-        provider_channel_id: providerChannelId,
-        agent_id: agentId,
-        connector_instance_id: connectorInstanceId,
-        credential_id: credential.credential_id,
-        credential_status: credential.credential_status,
-        channel_binding_id: null,
         provider_channel_access_id: accessId,
-      })
-      diagnostic('eligible', connectorInstanceId, {
-        credential_id: credential.credential_id,
-        credential_status: credential.credential_status,
-        provider_channel_access_id: accessId,
-        evidence_source: 'provider_channel_access',
+        evidence_source: 'channel_connector_bindings+provider_channel_access',
       })
     } else if (readOnlyAccessIds.length > 0) {
       diagnostic('provider_write_access_read_only', connectorInstanceId, {
         provider_channel_access_ids: readOnlyAccessIds,
+        channel_binding_id: binding.bindingId,
       })
     } else {
       diagnostic('provider_write_access_missing', connectorInstanceId, {
         provider_channel_id: providerChannelId,
+        channel_binding_id: binding.bindingId,
       })
     }
   }
@@ -501,6 +497,71 @@ async function deliveryConsumerEvidence(
   return { evidence, diagnostics }
 }
 
+async function derivedSingleConnectorEvidence(
+  db: Queryable,
+  input: {
+    platform: 'discord'
+    channelId: string
+    providerChannelId: string
+  },
+): Promise<{ evidence: DeliveryConsumerEvidence | null; diagnostics: DeliveryConsumerDiagnostic[] }> {
+  const rows = await queryRows(
+    db,
+    `SELECT DISTINCT ci.agent_id
+       FROM channel_connector_bindings b
+       JOIN connector_instances ci
+         ON ci.connector_instance_id = b.connector_instance_id
+      WHERE b.provider = $1
+        AND b.channel_id = $2
+        AND COALESCE(b.status, 'active') = 'active'
+        AND b.binding_role IN ('outbound', 'bidirectional', 'projection')
+        AND ci.provider = b.provider
+        AND COALESCE(ci.status, 'registered') = 'active'
+        AND COALESCE(ci.trust_status, 'local') NOT IN ('revoked', 'disabled')
+        AND ci.agent_id IS NOT NULL
+      ORDER BY ci.agent_id`,
+    [input.platform, input.channelId],
+  )
+  const agentIds = Array.from(new Set(rows
+    .map((row) => firstString(row.agent_id))
+    .filter((agentId): agentId is string => agentId !== null)))
+  const eligible: DeliveryConsumerEvidence[] = []
+  const diagnostics: DeliveryConsumerDiagnostic[] = []
+
+  for (const agentId of agentIds) {
+    const result = await deliveryConsumerEvidence(db, {
+      platform: input.platform,
+      channelId: input.channelId,
+      providerChannelId: input.providerChannelId,
+      agentId,
+      source: 'derived_single_connector',
+    })
+    diagnostics.push(...result.diagnostics)
+    if (result.evidence) eligible.push(result.evidence)
+  }
+
+  const evidence = selectDeliveryEvidence(eligible)
+  if (!evidence && eligible.length > 1) {
+    diagnostics.push({
+      agent_id: null,
+      connector_instance_id: null,
+      source: 'derived_single_connector',
+      code: 'ambiguous_delivery_connectors',
+      detail: {
+        connector_instance_ids: eligible.map((item) => item.connector_instance_id),
+        channel_binding_priorities: eligible.map((item) => ({
+          agent_id: item.agent_id,
+          connector_instance_id: item.connector_instance_id,
+          channel_binding_id: item.channel_binding_id,
+          channel_binding_priority: item.channel_binding_priority ?? null,
+        })),
+      },
+    })
+  }
+
+  return { evidence, diagnostics }
+}
+
 async function ownerFromMetadataIfEligible(
   db: Queryable,
   platform: 'discord',
@@ -539,7 +600,7 @@ async function projectionHealth(
 
 async function resolveSurfaceAndConsumer(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null; recipientAgentIds?: string[] | null },
+  input: OutboundProjectionInput,
 ): Promise<{
   platform: 'discord'
   channelExternalId: string | null
@@ -621,6 +682,24 @@ async function resolveSurfaceAndConsumer(
     deliveryFallbackReason = 'sender_direct_unavailable'
   }
 
+  const derivedResult = await derivedSingleConnectorEvidence(db, {
+    platform,
+    channelId: input.channelId,
+    providerChannelId,
+  })
+  deliveryDiagnostics.push(...derivedResult.diagnostics)
+  if (derivedResult.evidence) {
+    return {
+      platform,
+      channelExternalId,
+      consumerAgentId: derivedResult.evidence.agent_id,
+      consumerSource: 'derived_single_connector',
+      consumerEvidence: derivedResult.evidence,
+      deliveryFallbackReason,
+      deliveryDiagnostics,
+    }
+  }
+
   const policy = getChannelPolicy(input.channelId)
   if (policy.adapterOwner) {
     const adapterOwnerResult = await deliveryConsumerEvidence(db, {
@@ -632,6 +711,31 @@ async function resolveSurfaceAndConsumer(
     })
     deliveryDiagnostics.push(...adapterOwnerResult.diagnostics)
     if (adapterOwnerResult.evidence) {
+      const fallbackPermitted = input.fallbackAllowed === true || policy.adapterOwnerFallbackAllowed
+      if (!fallbackPermitted) {
+        deliveryDiagnostics.push({
+          agent_id: policy.adapterOwner,
+          connector_instance_id: adapterOwnerResult.evidence.connector_instance_id,
+          source: 'channel_policy_adapter_owner',
+          code: 'fallback_policy_denied',
+          detail: {
+            fallback_policy: 'adapter_owner',
+            explicit_permit_required: true,
+            connector_instance_id: adapterOwnerResult.evidence.connector_instance_id,
+            channel_binding_id: adapterOwnerResult.evidence.channel_binding_id,
+            provider_channel_access_id: adapterOwnerResult.evidence.provider_channel_access_id,
+          },
+        })
+        return {
+          platform,
+          channelExternalId,
+          consumerAgentId: null,
+          consumerSource: 'channel_policy_adapter_owner',
+          consumerEvidence: null,
+          deliveryFallbackReason: deliveryFallbackReason ?? 'channel_policy_adapter_owner',
+          deliveryDiagnostics,
+        }
+      }
       return {
         platform,
         channelExternalId,
@@ -653,6 +757,31 @@ async function resolveSurfaceAndConsumer(
     })
     deliveryDiagnostics.push(...primaryResult.diagnostics)
     if (primaryResult.evidence) {
+      const fallbackPermitted = input.fallbackAllowed === true || policy.primaryFallbackAllowed
+      if (!fallbackPermitted) {
+        deliveryDiagnostics.push({
+          agent_id: policy.primary,
+          connector_instance_id: primaryResult.evidence.connector_instance_id,
+          source: 'channel_policy_primary',
+          code: 'fallback_policy_denied',
+          detail: {
+            fallback_policy: 'primary',
+            explicit_permit_required: true,
+            connector_instance_id: primaryResult.evidence.connector_instance_id,
+            channel_binding_id: primaryResult.evidence.channel_binding_id,
+            provider_channel_access_id: primaryResult.evidence.provider_channel_access_id,
+          },
+        })
+        return {
+          platform,
+          channelExternalId,
+          consumerAgentId: null,
+          consumerSource: 'channel_policy_primary',
+          consumerEvidence: null,
+          deliveryFallbackReason: deliveryFallbackReason ?? 'channel_policy_primary',
+          deliveryDiagnostics,
+        }
+      }
       return {
         platform,
         channelExternalId,
@@ -685,79 +814,22 @@ function fallbackProjection(
 
 export async function resolveOutboundProjectionRoute(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null; recipientAgentIds?: string[] | null },
+  input: OutboundProjectionInput,
 ): Promise<OutboundProjectionRoute> {
   await refreshChannelPolicyDbSnapshot(db)
-  const platform = input.platform ?? 'discord'
-  let channelExternalId: string | null = null
-  let providerChannelId = input.channelId
-
-  if (input.threadId) {
-    const tr = await db.query(
-      `SELECT external_id, metadata FROM thread_adapters WHERE thread_id = $1 AND platform = $2`,
-      [input.threadId, platform],
-    ).catch(() => ({ rows: [] as any[] }))
-    if (tr.rows.length > 0) {
-      channelExternalId = tr.rows[0].external_id ?? null
-      providerChannelId = tr.rows[0].external_id ?? providerChannelId
-      const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, tr.rows[0].metadata, 'thread_adapter_metadata')
-      if (owner) {
-        return { platform, channelExternalId, consumerAgentId: owner.owner, source: 'thread_adapter_metadata', consumerEvidence: owner.evidence }
-      }
-    }
+  const base = await resolveSurfaceAndConsumer(db, input)
+  return {
+    platform: base.platform,
+    channelExternalId: base.channelExternalId,
+    consumerAgentId: base.consumerAgentId,
+    source: base.consumerSource,
+    consumerEvidence: base.consumerEvidence,
   }
-
-  const cr = await db.query(
-    `SELECT external_id, metadata FROM channel_adapters WHERE channel_id = $1 AND platform = $2`,
-    [input.channelId, platform],
-  ).catch(() => ({ rows: [] as any[] }))
-  if (cr.rows.length > 0) {
-    const channelAdapterExternalId = cr.rows[0].external_id ?? null
-    const targetAlreadyResolved = channelExternalId !== null
-    channelExternalId = channelExternalId ?? channelAdapterExternalId
-    if (!targetAlreadyResolved) {
-      providerChannelId = channelAdapterExternalId ?? providerChannelId
-    }
-    const owner = await ownerFromMetadataIfEligible(db, platform, input.channelId, providerChannelId, cr.rows[0].metadata, 'channel_adapter_metadata')
-    if (owner) {
-      return { platform, channelExternalId, consumerAgentId: owner.owner, source: 'channel_adapter_metadata', consumerEvidence: owner.evidence }
-    }
-  }
-
-  const singleRecipient = singleRecipientFrom(input.recipientAgentIds)
-  const recipientEvidence = singleRecipient
-    ? await deliveryConsumerEvidence(db, { platform, channelId: input.channelId, providerChannelId, agentId: singleRecipient, source: 'recipient_token_evidence' })
-    : null
-  if (singleRecipient && recipientEvidence?.evidence) {
-    return { platform, channelExternalId, consumerAgentId: singleRecipient, source: 'recipient_token_evidence', consumerEvidence: recipientEvidence.evidence }
-  }
-
-  const policy = getChannelPolicy(input.channelId)
-  const nativeRoleOwner = input.senderAgentId ? policy.nativeRoleOutboundOwners[input.senderAgentId] : null
-  const nativeRoleEvidence = nativeRoleOwner
-    ? await deliveryConsumerEvidence(db, { platform, channelId: input.channelId, providerChannelId, agentId: nativeRoleOwner, source: 'sender_token_evidence' })
-    : null
-  if (nativeRoleOwner && nativeRoleEvidence?.evidence) {
-    return { platform, channelExternalId, consumerAgentId: nativeRoleOwner, source: 'channel_policy_native_role_owner', consumerEvidence: nativeRoleEvidence.evidence }
-  }
-  const adapterOwnerEvidence = policy.adapterOwner
-    ? await deliveryConsumerEvidence(db, { platform, channelId: input.channelId, providerChannelId, agentId: policy.adapterOwner, source: 'channel_policy_adapter_owner' })
-    : null
-  if (policy.adapterOwner && adapterOwnerEvidence?.evidence) {
-    return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, source: 'channel_policy_adapter_owner', consumerEvidence: adapterOwnerEvidence.evidence }
-  }
-  const primaryEvidence = policy.primary
-    ? await deliveryConsumerEvidence(db, { platform, channelId: input.channelId, providerChannelId, agentId: policy.primary, source: 'channel_policy_primary' })
-    : null
-  if (policy.primary && primaryEvidence?.evidence) {
-    return { platform, channelExternalId, consumerAgentId: policy.primary, source: 'channel_policy_primary', consumerEvidence: primaryEvidence.evidence }
-  }
-  return { platform, channelExternalId, consumerAgentId: null, source: 'none', consumerEvidence: null }
 }
 
 export async function resolveOutboundProjectionDecision(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null; recipientAgentIds?: string[] | null },
+  input: OutboundProjectionInput,
 ): Promise<OutboundProjectionDecision> {
   await refreshChannelPolicyDbSnapshot(db)
   const base = await resolveSurfaceAndConsumer(db, input)
@@ -869,7 +941,13 @@ export async function resolveEffectiveDeliveryOwner(
   },
 ): Promise<EffectiveDeliveryOwnerResult> {
   const decision = await resolveOutboundProjectionDecision(db, input)
-  return toEffectiveDeliveryOwnerResult(decision, { fallbackAllowed: input.fallbackAllowed })
+  const policy = getChannelPolicy(input.channelId)
+  const policyFallbackAllowed =
+    (decision.consumerSource === 'channel_policy_adapter_owner' && policy.adapterOwnerFallbackAllowed)
+    || (decision.consumerSource === 'channel_policy_primary' && policy.primaryFallbackAllowed)
+  return toEffectiveDeliveryOwnerResult(decision, {
+    fallbackAllowed: input.fallbackAllowed === true || policyFallbackAllowed,
+  })
 }
 
 function effectiveDeliveryOwnerSource(decision: OutboundProjectionDecision): EffectiveDeliveryOwnerSource {
@@ -881,6 +959,8 @@ function effectiveDeliveryOwnerSource(decision: OutboundProjectionDecision): Eff
     case 'thread_adapter_metadata':
     case 'channel_adapter_metadata':
       return 'explicit_binding'
+    case 'derived_single_connector':
+      return 'derived_single_connector'
     case 'channel_policy_adapter_owner':
       return 'legacy_adapter_owner'
     case 'channel_policy_primary':
@@ -894,6 +974,7 @@ function effectiveDeliveryOwnerSource(decision: OutboundProjectionDecision): Eff
 
 function effectiveDeliveryOwnerFailureCode(diagnostics: DeliveryConsumerDiagnostic[]): EffectiveDeliveryOwnerFailureCode {
   const codes = new Set(diagnostics.map((diagnostic) => diagnostic.code))
+  if (codes.has('fallback_policy_denied')) return 'FALLBACK_POLICY_DENIED'
   if (codes.has('ambiguous_delivery_connectors')) return 'AMBIGUOUS_CONNECTOR'
   if (codes.has('credential_not_delivery_eligible') || codes.has('credential_missing')) return 'CREDENTIAL_NOT_DELIVERY_ELIGIBLE'
   if (codes.has('provider_write_access_missing') || codes.has('provider_write_access_read_only')) return 'PROVIDER_WRITE_ACCESS_MISSING'
