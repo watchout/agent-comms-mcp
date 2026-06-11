@@ -26,6 +26,10 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { DiscordAdapter } from './adapters/discord'
+import { createStreamableHttpHandler, isStreamableHttpEnabled } from './adapters/streamable-http'
+import { createLogger } from './core/logger'
+
+const serverLog = createLogger('server')
 import {
   discord,
   discordClients,
@@ -4725,7 +4729,7 @@ if (MULTI_BOT_MODE) {
       // Graceful reconnect: close existing connection for same bot_id
       const existingCtx = botContexts.get(botId)
       if (existingCtx && existingCtx.transport) {
-        process.stderr.write(`[SSE] bot reconnecting: ${botId} (closing previous)\n`)
+        serverLog.info('sse.bot_reconnect', { bot_id: botId })
         const oldSessionId = existingCtx.transport.sessionId
         daemonTransports.delete(oldSessionId)
         await existingCtx.transport.close().catch(() => {})
@@ -4738,7 +4742,7 @@ if (MULTI_BOT_MODE) {
         }
       }
 
-      process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
+      serverLog.info('sse.bot_connected', { bot_id: botId })
 
       try {
         // Create per-bot Server + Transport
@@ -4750,7 +4754,7 @@ if (MULTI_BOT_MODE) {
         botContexts.set(botId, ctx)
 
         res.on('close', () => {
-          process.stderr.write(`[SSE] bot disconnected: ${botId}, reason: connection_close\n`)
+          serverLog.info('sse.bot_disconnected', { bot_id: botId, reason: 'connection_close' })
           daemonTransports.delete(sessionId)
           const current = botContexts.get(botId)
           if (current && current.transport?.sessionId === sessionId) {
@@ -4780,7 +4784,7 @@ if (MULTI_BOT_MODE) {
             await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' }))
           }
         } catch (err) {
-          process.stderr.write(`agent-comms: agent registration failed for ${botId} (non-fatal): ${err}\n`)
+          serverLog.warn('agent.registration_failed', { bot_id: botId, err: String(err) })
         }
 
         // Per-Bot Discord Client (On-Demand)
@@ -4811,7 +4815,7 @@ if (MULTI_BOT_MODE) {
         }
         } // end else (skip if already connected)
       } catch (err) {
-        process.stderr.write(`[SSE] bot connection error: ${botId}, reason: ${err}\n`)
+        serverLog.error('sse.bot_connection_error', { bot_id: botId, err: String(err) })
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Internal server error' }))
@@ -4848,6 +4852,17 @@ if (MULTI_BOT_MODE) {
           res.end(JSON.stringify({ error: 'Internal server error' }))
         }
       }
+      return
+    }
+
+    // MCP Streamable HTTP endpoint (v2 enterprise transport, MCP spec 2025-06-18)
+    // Activated by NEW_STREAMABLE_HTTP_ENABLED=1; legacy SSE routes unaffected.
+    // bot_id query param routes to the per-bot server; falls back to shared `mcp`.
+    if (url.pathname === '/mcp' && isStreamableHttpEnabled()) {
+      const botId = url.searchParams.get('bot_id')
+      const targetServer = (botId && botContexts.get(botId)?.server) ?? mcp
+      const mcpHandler = createStreamableHttpHandler(targetServer)
+      await mcpHandler(req, res)
       return
     }
 
