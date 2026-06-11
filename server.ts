@@ -26,6 +26,17 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { DiscordAdapter } from './adapters/discord'
+import { createStreamableHttpHandler, isStreamableHttpEnabled } from './adapters/streamable-http'
+import { createLogger } from './core/logger'
+import {
+  isOAuthPersistenceEnabled,
+  issueAuthorizationCode,
+  exchangeCodeForToken,
+  validateBearerToken,
+  lookupClient,
+} from './core/oauth21'
+
+const serverLog = createLogger('server')
 import {
   discord,
   discordClients,
@@ -4688,12 +4699,72 @@ if (MULTI_BOT_MODE) {
     if (url.pathname === '/oauth/authorize' && req.method === 'GET') {
       const redirectUri = url.searchParams.get('redirect_uri') ?? ''
       const state = url.searchParams.get('state') ?? ''
-      res.writeHead(302, { Location: `${redirectUri}?code=local-no-auth&state=${state}` })
+      const clientId = url.searchParams.get('client_id') ?? ''
+      const codeChallenge = url.searchParams.get('code_challenge') ?? ''
+      const codeChallengeMethod = url.searchParams.get('code_challenge_method') ?? ''
+
+      if (isOAuthPersistenceEnabled()) {
+        const db = await tryGetDb()
+        if (db && clientId && codeChallenge && codeChallengeMethod === 'S256') {
+          const client = await lookupClient(db, clientId)
+          if (client && (client.redirect_uris.includes(redirectUri) || redirectUri.startsWith('http://localhost') || redirectUri.startsWith('http://127.0.0.1'))) {
+            try {
+              const code = await issueAuthorizationCode(db, {
+                client_id: clientId,
+                redirect_uri: redirectUri,
+                scope: client.scope,
+                code_challenge: codeChallenge,
+                subject: AGENT_ID,
+              })
+              res.writeHead(302, { Location: `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}` })
+              res.end()
+              return
+            } catch (err) {
+              serverLog.error('oauth.authorize_failed', { client_id: clientId, err: String(err) })
+            }
+          }
+        }
+      }
+
+      // Fallback: bypass for local-no-auth clients
+      res.writeHead(302, { Location: `${redirectUri}?code=local-no-auth&state=${encodeURIComponent(state)}` })
       res.end()
       return
     }
 
     if (url.pathname === '/oauth/token' && req.method === 'POST') {
+      if (isOAuthPersistenceEnabled()) {
+        const db = await tryGetDb()
+        const bodyChunks: Buffer[] = []
+        await new Promise<void>((resolve) => {
+          req.on('data', (c: Buffer) => bodyChunks.push(c))
+          req.on('end', resolve)
+        })
+        const body = new URLSearchParams(Buffer.concat(bodyChunks).toString())
+        const grantType = body.get('grant_type')
+        const code = body.get('code') ?? ''
+        const clientId = body.get('client_id') ?? ''
+        const redirectUri = body.get('redirect_uri') ?? ''
+        const codeVerifier = body.get('code_verifier') ?? ''
+
+        if (db && grantType === 'authorization_code' && code !== 'local-no-auth' && codeVerifier) {
+          try {
+            const rawToken = await exchangeCodeForToken(db, { code, client_id: clientId, redirect_uri: redirectUri, code_verifier: codeVerifier })
+            if (rawToken) {
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ access_token: rawToken, token_type: 'Bearer', expires_in: 3600 }))
+              return
+            }
+          } catch (err) {
+            serverLog.error('oauth.token_exchange_failed', { client_id: clientId, err: String(err) })
+          }
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid_grant' }))
+          return
+        }
+      }
+
+      // Fallback: bypass for local-no-auth flow
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
         access_token: 'local-no-auth',
@@ -4725,7 +4796,7 @@ if (MULTI_BOT_MODE) {
       // Graceful reconnect: close existing connection for same bot_id
       const existingCtx = botContexts.get(botId)
       if (existingCtx && existingCtx.transport) {
-        process.stderr.write(`[SSE] bot reconnecting: ${botId} (closing previous)\n`)
+        serverLog.info('sse.bot_reconnect', { bot_id: botId })
         const oldSessionId = existingCtx.transport.sessionId
         daemonTransports.delete(oldSessionId)
         await existingCtx.transport.close().catch(() => {})
@@ -4738,7 +4809,7 @@ if (MULTI_BOT_MODE) {
         }
       }
 
-      process.stderr.write(`[SSE] bot connected: ${botId} at ${new Date().toISOString()}\n`)
+      serverLog.info('sse.bot_connected', { bot_id: botId })
 
       try {
         // Create per-bot Server + Transport
@@ -4750,7 +4821,7 @@ if (MULTI_BOT_MODE) {
         botContexts.set(botId, ctx)
 
         res.on('close', () => {
-          process.stderr.write(`[SSE] bot disconnected: ${botId}, reason: connection_close\n`)
+          serverLog.info('sse.bot_disconnected', { bot_id: botId, reason: 'connection_close' })
           daemonTransports.delete(sessionId)
           const current = botContexts.get(botId)
           if (current && current.transport?.sessionId === sessionId) {
@@ -4780,7 +4851,7 @@ if (MULTI_BOT_MODE) {
             await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' }))
           }
         } catch (err) {
-          process.stderr.write(`agent-comms: agent registration failed for ${botId} (non-fatal): ${err}\n`)
+          serverLog.warn('agent.registration_failed', { bot_id: botId, err: String(err) })
         }
 
         // Per-Bot Discord Client (On-Demand)
@@ -4811,7 +4882,7 @@ if (MULTI_BOT_MODE) {
         }
         } // end else (skip if already connected)
       } catch (err) {
-        process.stderr.write(`[SSE] bot connection error: ${botId}, reason: ${err}\n`)
+        serverLog.error('sse.bot_connection_error', { bot_id: botId, err: String(err) })
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Internal server error' }))
@@ -4848,6 +4919,17 @@ if (MULTI_BOT_MODE) {
           res.end(JSON.stringify({ error: 'Internal server error' }))
         }
       }
+      return
+    }
+
+    // MCP Streamable HTTP endpoint (v2 enterprise transport, MCP spec 2025-06-18)
+    // Activated by NEW_STREAMABLE_HTTP_ENABLED=1; legacy SSE routes unaffected.
+    // bot_id query param routes to the per-bot server; falls back to shared `mcp`.
+    if (url.pathname === '/mcp' && isStreamableHttpEnabled()) {
+      const botId = url.searchParams.get('bot_id')
+      const targetServer = (botId && botContexts.get(botId)?.server) ?? mcp
+      const mcpHandler = createStreamableHttpHandler(targetServer)
+      await mcpHandler(req, res)
       return
     }
 
