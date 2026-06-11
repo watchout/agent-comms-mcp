@@ -4,10 +4,64 @@
     "1487368919613444156": {
       "primary": "agent-com-dev",
       "adapterOwner": "agent-com-dev",
-      "nativeRoleOutboundOwners": {
-        "codex-cto": "codex-cto"
+      "nativeProjectionIdentities": {
+        "cto": "codex-cto"
       },
-      "outboundAllowlist": ["agent-com-dev", "cto", "codex-cto", "codex-aun", "codex-audit", "ceo", "auditor", "arc", "lead-sus", "hotel-dev"]
+      "outboundAllowlist": [
+        "agent-com-dev",
+        "cto",
+        "codex-cto",
+        "codex-aun",
+        "codex-audit",
+        "ceo",
+        "auditor",
+        "arc",
+        "lead-sus",
+        "hotel-dev",
+        "spec",
+        "devauditor",
+        "l2auditor",
+        "qa",
+        "check"
+      ],
+      "companyDevOs": {
+        "implementationRoutesTo": "repo-specific implementation bot",
+        "nonImplementationAgents": [
+          "spec",
+          "arc",
+          "devauditor",
+          "l2auditor",
+          "qa",
+          "check",
+          "codex-cto"
+        ],
+        "roleBoundarySource": "companyDevOsRuntimePolicy"
+      }
     }
+  },
+  "companyDevOsRuntimePolicy": {
+    "version": "2026-06-07",
+    "source": "watchout/iyasaka-arc/company-dev-os/",
+    "liveRegistrationDone": true,
+    "liveRegistrationAppliedAt": "2026-06-07",
+    "liveRegistrationSource": "company_dev_os_aun_apply:2026-06-07",
+    "liveRegistrationRequiresSeparateApproval": false,
+    "requiredAgents": [
+      "spec",
+      "arc",
+      "devauditor",
+      "l2auditor",
+      "qa",
+      "check",
+      "codex-cto"
+    ],
+    "forbiddenDefaultActions": [
+      "deploy",
+      "secret_change",
+      "db_mutation",
+      "queue_drain",
+      "state_daemon_restart",
+      "live_discord_write"
+    ]
   }
 }

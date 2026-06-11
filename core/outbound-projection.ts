@@ -10,12 +10,13 @@ export interface OutboundProjectionRoute {
   platform: 'discord'
   channelExternalId: string | null
   consumerAgentId: string | null
-  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'recipient_default_projection' | 'channel_policy_native_role_owner' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
+  source: 'thread_adapter_metadata' | 'channel_adapter_metadata' | 'sender_token_evidence' | 'recipient_default_projection' | 'channel_policy_adapter_owner' | 'channel_policy_primary' | 'none'
 }
 
 export type ProjectionConsumerSource =
   | 'thread_adapter_metadata'
   | 'channel_adapter_metadata'
+  | 'sender_token_evidence'
   | 'channel_policy_adapter_owner'
   | 'channel_policy_primary'
   | 'none'
@@ -152,6 +153,52 @@ async function ownerFromMetadataIfEligible(
   return (await deliveryConsumerEligible(db, platform, owner)) ? owner : null
 }
 
+async function senderTokenOwnerIfEligible(
+  db: Queryable,
+  input: { channelId: string; platform: 'discord'; senderAgentId?: string | null },
+): Promise<string | null> {
+  const senderAgentId = typeof input.senderAgentId === 'string' ? input.senderAgentId.trim() : ''
+  if (!senderAgentId) return null
+  if (!await deliveryConsumerEligible(db, input.platform, senderAgentId)) return null
+
+  const bindingRows = await queryRows(
+    db,
+    `SELECT ci.agent_id
+       FROM channel_connector_bindings b
+       JOIN connector_instances ci
+         ON ci.connector_instance_id = b.connector_instance_id
+      WHERE b.channel_id = $1
+        AND b.provider = $2
+        AND b.binding_role IN ('outbound', 'bidirectional', 'projection')
+        AND COALESCE(b.status, 'active') = 'active'
+        AND ci.agent_id = $3
+        AND COALESCE(ci.status, 'active') <> 'disabled'
+      ORDER BY b.priority ASC, b.channel_binding_id
+      LIMIT 1`,
+    [input.channelId, input.platform, senderAgentId],
+  )
+  if (bindingRows.length > 0) return senderAgentId
+
+  const accessRows = await queryRows(
+    db,
+    `SELECT ci.agent_id
+       FROM provider_channel_access a
+       JOIN connector_instances ci
+         ON ci.connector_instance_id = a.connector_instance_id
+      WHERE a.provider_channel_id = $1
+        AND a.provider = $2
+        AND a.agent_id = $3
+        AND ci.agent_id = $3
+        AND COALESCE(a.status, 'active') = 'active'
+        AND COALESCE(a.trust_status, 'verified') IN ('verified', 'trusted', 'local')
+        AND COALESCE(ci.status, 'active') <> 'disabled'
+      ORDER BY a.updated_at DESC NULLS LAST, a.provider_channel_access_id
+      LIMIT 1`,
+    [input.channelId, input.platform, senderAgentId],
+  )
+  return accessRows.length > 0 ? senderAgentId : null
+}
+
 async function projectionHealth(
   db: Queryable,
   agentId: string,
@@ -169,7 +216,7 @@ async function projectionHealth(
 
 async function resolveSurfaceAndConsumer(
   db: Queryable,
-  input: { channelId: string; threadId?: string | null; platform?: 'discord' },
+  input: { channelId: string; threadId?: string | null; platform?: 'discord'; senderAgentId?: string | null },
 ): Promise<{
   platform: 'discord'
   channelExternalId: string | null
@@ -206,6 +253,14 @@ async function resolveSurfaceAndConsumer(
   }
 
   const policy = getChannelPolicy(input.channelId)
+  const senderTokenOwner = await senderTokenOwnerIfEligible(db, {
+    channelId: input.channelId,
+    platform,
+    senderAgentId: input.senderAgentId,
+  })
+  if (senderTokenOwner) {
+    return { platform, channelExternalId, consumerAgentId: senderTokenOwner, consumerSource: 'sender_token_evidence' }
+  }
   if (policy.adapterOwner && await deliveryConsumerEligible(db, platform, policy.adapterOwner)) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, consumerSource: 'channel_policy_adapter_owner' }
   }
@@ -282,11 +337,16 @@ export async function resolveOutboundProjectionRoute(
     }
   }
 
-  const policy = getChannelPolicy(input.channelId)
-  const nativeRoleOwner = input.senderAgentId ? policy.nativeRoleOutboundOwners[input.senderAgentId] : null
-  if (nativeRoleOwner && await deliveryConsumerEligible(db, platform, nativeRoleOwner)) {
-    return { platform, channelExternalId, consumerAgentId: nativeRoleOwner, source: 'channel_policy_native_role_owner' }
+  const senderTokenOwner = await senderTokenOwnerIfEligible(db, {
+    channelId: input.channelId,
+    platform,
+    senderAgentId: input.senderAgentId,
+  })
+  if (senderTokenOwner) {
+    return { platform, channelExternalId, consumerAgentId: senderTokenOwner, source: 'sender_token_evidence' }
   }
+
+  const policy = getChannelPolicy(input.channelId)
   if (policy.adapterOwner && await deliveryConsumerEligible(db, platform, policy.adapterOwner)) {
     return { platform, channelExternalId, consumerAgentId: policy.adapterOwner, source: 'channel_policy_adapter_owner' }
   }
@@ -339,6 +399,29 @@ export async function resolveOutboundProjectionDecision(
       base,
       health.registered ? 'native_projection_unhealthy' : 'native_projection_unregistered',
       nativeProjectionIdentity,
+    )
+  }
+
+  const senderAgentId = typeof input.senderAgentId === 'string' ? input.senderAgentId.trim() : ''
+  if (
+    senderAgentId
+    && base.consumerSource === 'sender_token_evidence'
+    && base.consumerAgentId === senderAgentId
+  ) {
+    const health = await projectionHealth(db, senderAgentId)
+    if (health.healthy) {
+      return {
+        ...base,
+        projectionIdentityId: senderAgentId,
+        intendedProjectionIdentityId: senderAgentId,
+        projectionSource: 'sender_native_projection',
+        projectionFallbackReason: null,
+      }
+    }
+    return fallbackProjection(
+      base,
+      health.registered ? 'native_projection_unhealthy' : 'native_projection_unregistered',
+      senderAgentId,
     )
   }
 

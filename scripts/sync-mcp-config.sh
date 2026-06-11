@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-mcp-config.sh — Sync .mcp.json agent-comms config with bot-registry.txt
+# sync-mcp-config.sh — Export the DB bot profile into .mcp.json compatibility config
 # Ensures AGENT_ID, AGENT_COM_EXPECTED_AGENT_ID, WEBHOOK_PORT,
 # DISCORD_STATE_DIR, DATABASE_URL, and the agent-comms server path in each
 # project's .mcp.json match the script-controlled runtime contract.
@@ -32,9 +32,10 @@ sync_mcp_config() {
   updated=$(node -e "
     const fs = require('fs');
     const cfg = JSON.parse(fs.readFileSync('$mcp_json', 'utf8'));
-    const ac = cfg.mcpServers?.['agent-comms'];
+    const serverName = cfg.mcpServers?.['agent-comms'] ? 'agent-comms' : (cfg.mcpServers?.aun ? 'aun' : '');
+    const ac = serverName ? cfg.mcpServers?.[serverName] : null;
     if (!ac) {
-      console.error('[sync-mcp] ${session}: no agent-comms section in .mcp.json, skipping');
+      console.error('[sync-mcp] ${session}: no agent-comms/aun section in .mcp.json, skipping');
       process.exit(1);
     }
     const env = ac.env || {};

@@ -39,6 +39,7 @@ import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core
 import { buildInboundSmokeReport, formatInboundSmokeText } from '../core/inbound-smoke'
 import { buildAunFleetReadinessReport, formatAunFleetReadinessText } from '../core/aun-fleet-readiness'
 import { getAgentDiscordUiId, getDiscordUiBindingForAgent } from '../core/ui-bindings'
+import { resolveReplyRecipientAgentId, resolveReplyToDiscordMessageId } from '../core/route-message-db'
 import {
   deterministicWorkspaceId,
   heartbeatRuntimeInstance,
@@ -1827,9 +1828,12 @@ async function agentProfile(args: string[]) {
         const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
           ? metadata.tmux_session.trim()
           : ''
-        if (!tmuxSession) {
+        const supervisorType = typeof metadata.supervisor_type === 'string' && metadata.supervisor_type.trim()
+          ? metadata.supervisor_type.trim().toLowerCase()
+          : 'tmux'
+        if (supervisorType === 'tmux' && !tmuxSession) {
           blockers.push({ agent_id: agentId, code: 'missing_tmux_session' })
-        } else {
+        } else if (tmuxSession) {
           const agents = sessionOwners.get(tmuxSession) ?? []
           agents.push(agentId)
           sessionOwners.set(tmuxSession, agents)
@@ -1968,6 +1972,46 @@ async function agentProfile(args: string[]) {
               provider: row.provider,
               connector_uri: row.connector_uri,
               code: 'connector_missing_profile_source_evidence',
+            })
+          }
+        }
+        const activeConnectorEndpointRows = await db.query(
+          `SELECT ci.connector_instance_id,
+                  ci.agent_id,
+                  ci.provider,
+                  ci.connector_uri,
+                  ci.runtime_instance_id,
+                  cpl.lease_id,
+                  cpl.expires_at
+             FROM connector_instances ci
+             JOIN agents a ON a.agent_id = ci.agent_id
+             LEFT JOIN control_plane_leases cpl
+               ON cpl.lease_scope_type = 'runtime_instance'
+              AND cpl.lease_scope_id = ci.runtime_instance_id::text
+              AND cpl.status = 'active'
+              AND cpl.expires_at > now()
+            WHERE ci.status = 'active'
+              AND a.agent_type <> 'human'
+              AND COALESCE(a.profile_enabled, true) = true
+            ORDER BY ci.agent_id, ci.provider, ci.connector_uri`,
+        ).catch(() => ({ rows: [] as any[] }))
+        for (const row of activeConnectorEndpointRows.rows) {
+          if (!row.runtime_instance_id) {
+            blockers.push({
+              agent_id: row.agent_id,
+              connector_instance_id: row.connector_instance_id,
+              provider: row.provider,
+              connector_uri: row.connector_uri,
+              code: 'active_connector_missing_runtime_instance',
+            })
+          } else if (!row.lease_id) {
+            blockers.push({
+              agent_id: row.agent_id,
+              connector_instance_id: row.connector_instance_id,
+              provider: row.provider,
+              connector_uri: row.connector_uri,
+              runtime_instance_id: row.runtime_instance_id,
+              code: 'active_connector_missing_endpoint_lease',
             })
           }
         }
@@ -2265,7 +2309,7 @@ async function nextMessage() {
  *
  * Flags:
  *   --content "<text>"        required
- *   --mentions a,b,c          required (comma-separated agent IDs)
+ *   --mentions a,b,c          optional; omitted replies infer from queue source
  *   --message-type chat|...   default: chat
  *   --queue-id <id>           optional durable close target
  *   --message-id <uuid>       optional cross-check for --queue-id
@@ -2297,12 +2341,11 @@ async function sendMessage(args: string[]) {
     console.error('Error: --no-close and --close are mutually exclusive')
     process.exit(2)
   }
-  if (!mentionsRaw) {
-    console.error('Error: --mentions is required (comma-separated agent IDs)')
-    process.exit(2)
-  }
-  const mentions = mentionsRaw.split(',').map(m => m.trim()).filter(Boolean)
-  if (mentions.length === 0) {
+  const mentionsExplicit = hasFlag(flags, 'mentions')
+  let mentions = mentionsExplicit && mentionsRaw !== undefined
+    ? mentionsRaw.split(',').map(m => m.trim()).filter(Boolean)
+    : []
+  if (mentionsExplicit && mentions.length === 0) {
     console.error('Error: --mentions must contain at least one agent ID')
     process.exit(2)
   }
@@ -2310,16 +2353,18 @@ async function sendMessage(args: string[]) {
   // Phase 5 — best-effort client-side warning (server is canonical, §1.4).
   try {
     const { resolvePhase5 } = await import('../core/routing/server-integration')
-    const phase5Warn = resolvePhase5({
-      sender: agentId,
-      channel_id: '',
-      mentions,
-      content,
-      isKnownAgent: () => true,
-    })
-    if (phase5Warn && phase5Warn.ok) {
-      for (const w of phase5Warn.warnings) {
-        process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
+    if (mentions.length > 0) {
+      const phase5Warn = resolvePhase5({
+        sender: agentId,
+        channel_id: '',
+        mentions,
+        content,
+        isKnownAgent: () => true,
+      })
+      if (phase5Warn && phase5Warn.ok) {
+        for (const w of phase5Warn.warnings) {
+          process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
+        }
       }
     }
   } catch {}
@@ -2519,6 +2564,17 @@ async function sendMessage(args: string[]) {
       const threadId: string | null = target.thread_id
       const channelId: string = target.channel_id
       const replyTo: string = target.reply_to
+      if (!mentionsExplicit) {
+        const inferred = await resolveReplyRecipientAgentId(db as any, replyTo, agentId)
+        if (inferred) {
+          mentions = [inferred]
+          process.stderr.write(`agent-com: inferred reply recipient from queue source: ${inferred}\n`)
+        }
+      }
+      if (mentions.length === 0) {
+        console.error('Error: --mentions is required unless the queued source author resolves to an agent_id')
+        throw new CliSendExit(2)
+      }
       // Membership check — bot can only reply in channels it belongs to.
       const ch = await db.query('SELECT members FROM channels WHERE id = $1', [channelId])
       if (ch.rows.length === 0) {
@@ -2648,6 +2704,7 @@ async function sendMessage(args: string[]) {
         recipientAgentIds: mentions,
       })
       const discordExternalId = projection.channelExternalId
+      const replyToDiscordId = await resolveReplyToDiscordMessageId(db as any, replyTo)
 
       let outboundQueued = false
       let outboundSkipReason: string | null = null
@@ -2657,8 +2714,8 @@ async function sendMessage(args: string[]) {
           // enqueue so an over-long LLM reply is truncated once, deterministically,
           // instead of being split across retries inside the Discord adapter.
           await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, reply_to_discord_id, content)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
             [
               id,
               agentId,
@@ -2668,6 +2725,7 @@ async function sendMessage(args: string[]) {
               projection.projectionSource,
               projection.projectionFallbackReason,
               discordExternalId,
+              replyToDiscordId,
               truncateForDiscord(decorateProjectedContent({
                 content,
                 authorAgentId: agentId,
@@ -2928,8 +2986,8 @@ async function notifyMessage(args: string[]) {
       try {
         // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
         await db.query(
-          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, content)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, channel_external_id, reply_to_discord_id, content)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9)`,
           [
             id,
             agentId,

@@ -29,6 +29,7 @@ function mockProjectionDb(options: {
   channelAdapterMetadata?: unknown
   channelExternalId?: string
   agents?: Record<string, any>
+  senderTokenAgents?: string[]
 } = {}) {
   return {
     query: async (sql: string, params?: unknown[]) => {
@@ -45,6 +46,14 @@ function mockProjectionDb(options: {
             metadata: options.channelAdapterMetadata ?? null,
           }],
         }
+      }
+      if (sql.includes('channel_connector_bindings')) {
+        const agentId = typeof params?.[2] === 'string' ? params[2] : ''
+        return { rows: options.senderTokenAgents?.includes(agentId) ? [{ agent_id: agentId }] : [] }
+      }
+      if (sql.includes('provider_channel_access')) {
+        const agentId = typeof params?.[2] === 'string' ? params[2] : ''
+        return { rows: options.senderTokenAgents?.includes(agentId) ? [{ agent_id: agentId }] : [] }
       }
       if (sql.includes('connector_instances')) {
         return { rows: [] }
@@ -108,15 +117,15 @@ describe('#410 outbound projection owner resolution', () => {
     expect(route.source).toBe('none')
   })
 
-  test('native-role owner overrides channel adapterOwner only for matching sender', async () => {
+  test('sender token evidence overrides channel adapterOwner only for matching sender', async () => {
     setRoutingConfig({
       ch1: {
         primary: 'primary-agent',
         adapterOwner: 'agent-com-dev',
-        nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
       },
     })
     const db = mockProjectionDb({
+      senderTokenAgents: ['codex-cto'],
       agents: {
         'agent-com-dev': mockAgent('agent-com-dev'),
         'codex-cto': mockAgent('codex-cto'),
@@ -124,22 +133,22 @@ describe('#410 outbound projection owner resolution', () => {
     })
     const codexCto = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-cto' })
     expect(codexCto.consumerAgentId).toBe('codex-cto')
-    expect(codexCto.source).toBe('channel_policy_native_role_owner')
+    expect(codexCto.source).toBe('sender_token_evidence')
 
     const otherAgent = await resolveOutboundProjectionRoute(db, { channelId: 'ch1', senderAgentId: 'codex-aun' })
     expect(otherAgent.consumerAgentId).toBe('agent-com-dev')
     expect(otherAgent.source).toBe('channel_policy_adapter_owner')
   })
 
-  test('explicit adapter metadata still wins over native-role policy', async () => {
+  test('explicit adapter metadata still wins over sender token evidence', async () => {
     setRoutingConfig({
       ch1: {
         adapterOwner: 'agent-com-dev',
-        nativeRoleOutboundOwners: { 'codex-cto': 'codex-cto' },
       },
     })
     const db = mockProjectionDb({
       channelAdapterMetadata: { consumer_agent_id: 'metadata-owner' },
+      senderTokenAgents: ['codex-cto'],
       agents: {
         'metadata-owner': mockAgent('metadata-owner'),
         'codex-cto': mockAgent('codex-cto'),
@@ -213,6 +222,7 @@ describe('#410 outbound projection owner resolution', () => {
     setRoutingConfig(cfg.default.channels)
     const db = mockProjectionDb({
       channelExternalId: '1487368919613444156',
+      senderTokenAgents: ['codex-cto'],
       agents: { 'codex-cto': mockAgent('codex-cto') },
     })
 
@@ -222,7 +232,7 @@ describe('#410 outbound projection owner resolution', () => {
     })
 
     expect(route.consumerAgentId).toBe('codex-cto')
-    expect(route.source).toBe('channel_policy_native_role_owner')
+    expect(route.source).toBe('sender_token_evidence')
   })
 })
 
@@ -271,6 +281,33 @@ describe('ADR-060 outbound projection identity decision', () => {
 
     expect(decision.consumerAgentId).toBe('agent-com-dev')
     expect(decision.consumerSource).toBe('channel_policy_adapter_owner')
+    expect(decision.projectionIdentityId).toBe('codex-cto')
+    expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
+    expect(decision.projectionSource).toBe('sender_native_projection')
+    expect(decision.projectionFallbackReason).toBeNull()
+  })
+
+  test('sender token evidence selects the delivery consumer and sender projection identity', async () => {
+    setRoutingConfig({
+      ch1: {
+        primary: 'primary-agent',
+        adapterOwner: 'agent-com-dev',
+      },
+    })
+    const db = mockProjectionDb({
+      senderTokenAgents: ['codex-cto'],
+      agents: {
+        'agent-com-dev': mockAgent('agent-com-dev'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+      },
+    })
+    const decision = await resolveOutboundProjectionDecision(db, {
+      channelId: 'ch1',
+      senderAgentId: 'codex-cto',
+    })
+
+    expect(decision.consumerAgentId).toBe('codex-cto')
+    expect(decision.consumerSource).toBe('sender_token_evidence')
     expect(decision.projectionIdentityId).toBe('codex-cto')
     expect(decision.intendedProjectionIdentityId).toBe('codex-cto')
     expect(decision.projectionSource).toBe('sender_native_projection')

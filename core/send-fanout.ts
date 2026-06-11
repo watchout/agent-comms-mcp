@@ -18,6 +18,9 @@
  * clause is idempotent against the partial UNIQUE index
  * `uq_mq_agent_message` so a retried fanout does not double-enqueue.
  */
+import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
+import { autoSkipReason } from './message-queue-terminal'
+
 export interface FanoutDb {
   query<T = any>(sql: string, params?: any[]): Promise<{ rows: T[] }>
 }
@@ -75,16 +78,29 @@ export async function fanoutToRecipients(
 
   for (const recipient of params.recipients) {
     try {
+      const autoSkip = matchesAutoSkipPattern({
+        content: params.content,
+        messageType: params.messageType ?? 'chat',
+        authorAgentId: params.authorId,
+        recipientAgentId: recipient,
+      })
       // `ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL`
       // targets the partial UNIQUE index `uq_mq_agent_message`. PG requires
       // the WHERE predicate match the index. SQLite (bun:sqlite) also
       // accepts this exact shape (verified), so no per-backend branching.
       const r = await db.query<{ id: number | string }>(
-        `INSERT INTO message_queue (agent_id, message_id, payload)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
-         RETURNING id`,
-        [recipient, params.messageId, mqPayload],
+        autoSkip.matched
+          ? `INSERT INTO message_queue (agent_id, message_id, payload, status, failed_reason, done_at)
+             VALUES ($1, $2, $3, 'skipped', $4, $5)
+             ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
+             RETURNING id`
+          : `INSERT INTO message_queue (agent_id, message_id, payload)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
+             RETURNING id`,
+        autoSkip.matched
+          ? [recipient, params.messageId, mqPayload, autoSkipReason(autoSkip.reason ?? 'unknown'), new Date().toISOString()]
+          : [recipient, params.messageId, mqPayload],
       )
       if (r.rows.length > 0) {
         inserted.push(recipient)

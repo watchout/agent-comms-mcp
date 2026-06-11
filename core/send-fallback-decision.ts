@@ -14,6 +14,8 @@
  *     identifies the row to mark `'replied'` after the outbound INSERT.
  *     Both `received` and `in_progress` are active claims: `processing`
  *     advances a claimed row to `in_progress` before the LLM replies.
+ *   - `already_closed` → reject a stale second send for a queue row
+ *     already closed by an earlier reply/done/skip/fail transition.
  *   - `fallback` (claim_expired | claim_missing) → skip the
  *     `message_queue` UPDATE and emit
  *     `| fallback: notify (reason: ...)` on the success return.
@@ -40,6 +42,7 @@
 
 export type SendFallbackDecision =
   | { kind: 'claim_present'; claimedMqId: number | string }
+  | { kind: 'already_closed'; queueId: number | string; status: string; repliedWith: string | null }
   | { kind: 'fallback'; reason: 'claim_expired' | 'claim_missing' }
   | { kind: 'invalid_reply_to' }
 
@@ -79,6 +82,35 @@ export async function decideSendFallback(
   )
   if (claimRow.rows.length > 0) {
     return { kind: 'claim_present', claimedMqId: claimRow.rows[0].id }
+  }
+
+  // A closed queue row for this (reply_to, agent) pair means a previous
+  // send/done/skip/fail already consumed the work. This must not fall
+  // through to notify-style fallback: doing so re-broadcasts duplicate
+  // human-visible replies after the original queue was terminally closed.
+  const terminalRow = await txClient.query<{
+    id: number | string
+    status: string
+    replied_with: string | null
+  }>(
+    `SELECT id, status, replied_with
+       FROM message_queue
+      WHERE message_id = $1
+        AND agent_id = $2
+        AND status IN ('done', 'replied', 'skipped', 'failed')
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+      FOR UPDATE`,
+    [reply_to, agentId],
+  )
+  if (terminalRow.rows.length > 0) {
+    const row = terminalRow.rows[0]
+    return {
+      kind: 'already_closed',
+      queueId: row.id,
+      status: row.status,
+      repliedWith: row.replied_with ?? null,
+    }
   }
 
   // 2. §B-5 invariant — reply_to must exist in agent_messages AND

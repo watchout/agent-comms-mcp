@@ -271,6 +271,8 @@ export class DiscordAdapter implements UIAdapter, Adapter {
                FROM agents
               WHERE metadata->>'discord_id' = $1
                 AND agent_id <> $2
+                AND disabled_at IS NULL
+                AND COALESCE(profile_enabled, true) = true
               ORDER BY agent_id`,
             [c.user.id, this.agentId],
           )
@@ -648,7 +650,8 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     if (this.messageCallback) {
       const unified: UnifiedMessage = {
         id: msg.id,
-        channel: msg.channelId,
+        channel: parentChannelId ?? msg.channelId,
+        thread: msg.channel.isThread() ? msg.channelId : undefined,
         author: {
           id: msg.author.id,
           name: msg.author.username,

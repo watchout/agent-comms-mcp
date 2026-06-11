@@ -60,6 +60,8 @@ function makeDeps(opts: {
   parentLookup?: ParentLookupMode
   registeredChannel?: boolean
   receiverIsMember?: boolean
+  channelMembers?: string[]
+  discordResolution?: Record<string, string>
   routeSpy?: RouteInboundFn
   stderrSink?: (chunk: string) => void
 }): {
@@ -75,8 +77,9 @@ function makeDeps(opts: {
   const receiverAgentId = 'receiver-bot'
 
   const coreDbAdapter = async () => ({
-    async query(sql: string, _params?: any[]): Promise<{ rows: any[] }> {
+    async query(sql: string, params?: any[]): Promise<{ rows: any[] }> {
       const s = sql.toLowerCase()
+      const firstParam = typeof params?.[0] === 'string' ? params[0] : ''
       // §1.1 cycle 3 — 2-step lookup. Each branch is counted separately
       // so case 1d can assert column priority is deterministic
       // (metadata query never fires when the column already hit).
@@ -107,15 +110,23 @@ function makeDeps(opts: {
         if (lookup.kind === 'both') return { rows: [lookup.metadataRow as any] }
         return { rows: [] }
       }
+      if (s.includes('from agent_ui_bindings') && s.includes('ui_id = $1')) {
+        const agentId = opts.discordResolution?.[firstParam]
+        return agentId ? { rows: [{ agent_id: agentId, ui_id: firstParam } as any] } : { rows: [] }
+      }
+      if (s.includes('from agents') && s.includes("metadata->>'discord_id' = $1")) {
+        const agentId = opts.discordResolution?.[firstParam]
+        return agentId ? { rows: [{ agent_id: agentId } as any] } : { rows: [] }
+      }
       if (s.includes('from channels')) {
         if (!opts.registeredChannel) return { rows: [] }
-        const members = opts.receiverIsMember ? [receiverAgentId] : []
+        const members = opts.channelMembers ?? (opts.receiverIsMember ? [receiverAgentId] : [])
         return { rows: [{ id: channelId, members, type: 'group', thread_id: null } as any] }
       }
       // §2.2 mock split — loadAgentInfo: WHERE agent_id = $1
       if (s.includes('from agents') && s.includes('where agent_id = $1')) {
         return {
-          rows: [{ agent_id: receiverAgentId, status: 'active', discord_id: null } as any],
+          rows: [{ agent_id: firstParam || receiverAgentId, status: 'active', discord_id: null } as any],
         }
       }
       // §2.2 mock split — resolveAgentFromDiscordId: human author returns null
@@ -316,6 +327,58 @@ describe('PR-β cycle 3 — handleInboundMessage 2-step lookup + early capture +
     expect(routeCalls[0].mentions).toEqual(['origin-bot'])
     expect(saved[0].author_bot).toBe(false)
     expect(saved[0].input_mentions).toEqual(['origin-bot'])
+  })
+
+  test('case 4b — empty mentions + Discord parent author → auto-fill is normalized to agent_id', async () => {
+    const spy: RouteInboundFn = (msg, ctx, _agents) => ({
+      pushTargets: [ctx.members?.[1] ?? 'arc'],
+      dropTargets: {},
+      senderIsHuman: !msg.authorAgentId,
+      noMentions: msg.mentions.length === 0,
+    })
+    const { deps, saved, routeCalls } = makeDeps({
+      parentLookup: { kind: 'column', row: { id: 'parent-uuid', author_id: '1488361927846658098' } },
+      registeredChannel: true,
+      channelMembers: ['receiver-bot', 'arc'],
+      discordResolution: { '1488361927846658098': 'arc' },
+      routeSpy: spy,
+    })
+    setInboundReceiverDeps(deps)
+
+    await handleInboundMessage({
+      ...baseParams,
+      replyToMessageId: 'discord-parent',
+      mentions: [],
+    })
+
+    expect(routeCalls.length).toBe(1)
+    expect(routeCalls[0].mentions).toEqual(['arc'])
+    expect(saved[0].input_mentions).toEqual(['arc'])
+  })
+
+  test('case 4c — raw Discord mentions are normalized before save and route', async () => {
+    const spy: RouteInboundFn = (msg, ctx, _agents) => ({
+      pushTargets: [ctx.members?.[1] ?? 'arc'],
+      dropTargets: {},
+      senderIsHuman: !msg.authorAgentId,
+      noMentions: msg.mentions.length === 0,
+    })
+    const { deps, saved, routeCalls } = makeDeps({
+      registeredChannel: true,
+      channelMembers: ['receiver-bot', 'arc'],
+      discordResolution: { '1488361927846658098': 'arc' },
+      routeSpy: spy,
+    })
+    setInboundReceiverDeps(deps)
+
+    await handleInboundMessage({
+      ...baseParams,
+      mentions: ['1488361927846658098'],
+    })
+
+    expect(routeCalls.length).toBe(1)
+    expect(routeCalls[0].mentions).toEqual(['arc'])
+    expect(saved[0].input_mentions).toEqual(['arc'])
   })
 
   test('case 5 — explicit mentions → routeInbound spy receives unchanged mentions', async () => {

@@ -56,13 +56,13 @@ import {
 // contract is unchanged — see ADR-041 implementation step 1/2.
 import {
   routeInbound,
-  parseMentions,
   buildSendMentions,
   isEmergencyMessage,
   type AgentInfo,
   type ChannelInfo,
   type RouteResult,
 } from './core/route-message'
+import { parseNativeAgentMentions } from './core/mention-normalization'
 // #527 — channel.primary lookup for no-mention single-recipient routing.
 // In-process cache, populated from `config/bot-routing.json`.
 import { getChannelPolicy } from './core/channel-policy'
@@ -75,6 +75,10 @@ import {
   formatPendingAge,
   type BotStatusDbRow,
 } from './core/bot-status-db'
+import {
+  destructiveLifecycleGateFailure,
+  evaluateCleanupPort,
+} from './core/bot-lifecycle'
 import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
@@ -115,7 +119,12 @@ import { truncateForDiscord } from './core/truncate'
 import { resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
-import { heartbeatRuntimeInstance, inferRuntimeSessionName, parseRuntimePort } from './core/runtime-heartbeat'
+import {
+  heartbeatRuntimeInstance,
+  hasRuntimeConnectorIdentityEvidence,
+  inferRuntimeSessionName,
+  parseRuntimePort,
+} from './core/runtime-heartbeat'
 import { resolveTokenSourceRef } from './core/token-source-ref'
 
 // --- Load Config ---
@@ -200,6 +209,7 @@ const config = loadConfig()
 const AGENT_ID = config.agent_id
 const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID || randomUUID()
 process.env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_INSTANCE_ID
+const RUNTIME_HEARTBEAT_DISABLED = process.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED === '1'
 const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
 if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
   process.stderr.write(
@@ -378,28 +388,35 @@ async function ensureDiscordBotToken(client?: { query: (sql: string, params?: an
 }
 
 async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  if (RUNTIME_HEARTBEAT_DISABLED) return
+
   await ensureDiscordBotToken(client)
   const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
+  const runtimeSessionName = inferRuntimeSessionName()
+  const runtimePort = parseRuntimePort()
+  const hasDiscordConnectorEvidence = Boolean(
+    discordTokenFingerprint && hasRuntimeConnectorIdentityEvidence(),
+  )
   await heartbeatRuntimeInstance(client, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
     runtimeEngine: config.agent.runtime,
     runtimeKind: process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
-    sessionName: inferRuntimeSessionName(),
+    sessionName: runtimeSessionName,
     processId: process.pid,
-    port: parseRuntimePort(),
+    port: runtimePort,
     checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
     commitSha: RUNTIME_COMMIT_SHA,
     endpointUri: `http://127.0.0.1:${WEBHOOK_PORT}`,
-    connectorProvider: discordTokenFingerprint ? 'discord' : null,
-    connectorUri: discordTokenFingerprint ? `discord://agents/${AGENT_ID}` : null,
-    connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
-    connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
+    connectorProvider: hasDiscordConnectorEvidence ? 'discord' : null,
+    connectorUri: hasDiscordConnectorEvidence ? `discord://agents/${AGENT_ID}` : null,
+    connectorKind: hasDiscordConnectorEvidence ? 'chat_adapter' : null,
+    connectorTransport: hasDiscordConnectorEvidence ? 'discord_gateway' : null,
     metadata: {
       source: 'server.ts',
       server_root: SERVER_ROOT,
     },
-    connectorMetadata: discordTokenFingerprint
+    connectorMetadata: hasDiscordConnectorEvidence
       ? {
           token_fingerprint: discordTokenFingerprint,
           token_source: process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : 'DISCORD_BOT_TOKEN',
@@ -680,7 +697,7 @@ async function saveMessage(msg: {
   source?: string; thread_id?: string; direction?: string; role?: string
   author_bot?: boolean
   session_id?: string; project?: string
-  // Issue #266: raw args.mentions snapshot for outbound trace.
+  // Issue #266: normalized input mentions trace.
   input_mentions?: string[] | null
 }): Promise<string> {
   const id = randomUUID()
@@ -1086,7 +1103,7 @@ async function registerAgent(): Promise<void> {
   heartbeatInterval = setInterval(async () => {
     const c = await tryGetDb()
     if (c) {
-      await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+      await c.query(`UPDATE agents SET status = 'online', last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
       await heartbeatRuntimeEvidence(c)
     }
   }, 5 * 60 * 1000)
@@ -1323,7 +1340,8 @@ async function extractDiscordMentions(content: string, rawDiscordUserIds?: strin
   // #527 cycle 3: GROUP_KEYWORDS now includes 'everyone' and 'here' so
   // those broadcast escape hatches survive into core routing instead of
   // being filtered out at the receiver boundary.
-  const nativeMentions = parseMentions(content)
+  const aliasMap = inboundChannel ? getChannelPolicy(inboundChannel.channelId).nativeRoleOutboundOwners : undefined
+  const nativeMentions = parseNativeAgentMentions(content, aliasMap)
     .filter((agentId) => !memberSet || memberSet.has(agentId) || GROUP_KEYWORDS.has(agentId))
   return [...new Set([...agentIds, ...nativeMentions])]
 }
@@ -1676,17 +1694,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'send',
-      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. v0.9: \`mention\` (1 primary recipient, required); \`cc\` parameter is removed — 1 mention = 1 queue row.${agentListStr}`,
+      description: `Send a message. Destination is determined by reply_to (original message location). You cannot choose the destination. Use either \`mention\` for one recipient or \`mentions[]\` for multi-recipient fanout. Each recipient gets one queue row.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mention: { type: 'string', description: 'Required: 1 primary recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mention: { type: 'string', description: 'One recipient (agent_id). Empty string → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Optional multi-recipient agent_id list. Use this instead of repeated send calls when the same content targets several agents.' },
           reply_to: { type: 'string', description: 'Reply-to message UUID. Required. Determines send destination.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['content', 'reply_to', 'mention'],
+        required: ['content', 'reply_to'],
       },
     },
     {
@@ -1694,18 +1713,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // reply_to is intentionally absent: notify does not mark any
       // message_queue row 'replied' and does not touch agents.current_message_id.
       name: 'notify',
-      description: `Post a self-originated message to a channel without replying to anything. Use for watchdog alerts, startup notifications, and periodic reports. v0.9: \`mention\` (required); \`cc\` parameter is removed.${agentListStr}`,
+      description: `Post a self-originated message to a channel without replying to anything. Use \`mention\` or \`mentions[]\`; each recipient gets one queue row.${agentListStr}`,
       inputSchema: {
         type: 'object' as const,
         properties: {
           channel: { type: 'string', description: 'Channel id (or name) to post into. Required.' },
           thread_id: { type: 'string', description: 'Optional thread id to post into (instead of the parent channel).' },
           content: { type: 'string', description: 'Message content (max 50,000 chars)' },
-          mention: { type: 'string', description: 'Required: 1 primary recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mention: { type: 'string', description: 'One recipient. Empty → INVALID_MENTION; unknown → UNKNOWN_AGENT.' },
+          mentions: { type: 'array', items: { type: 'string' }, description: 'Optional multi-recipient agent_id list.' },
           message_type: { type: 'string', enum: ['instruction', 'report', 'approval', 'chat', 'emergency'], description: 'Default: chat' },
           metadata: { type: 'object', description: 'Custom metadata (JSONB)' },
         },
-        required: ['channel', 'content', 'mention'],
+        required: ['channel', 'content'],
       },
     },
     // focus/unfocus removed — reply_to is required (agent-com-message-queue-spec §4 routing, 旧 channel-thread-control-spec から統合)
@@ -2087,14 +2107,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'send') {
     let { content, reply_to, message_type, metadata } = args as any
-    // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
-    // argument is removed. Callers MUST use `mention` (1 primary, required) +
-    // `cc[]` (reference, queue 非投入). A caller still passing `mentions` is
-    // surfaced as INVALID_MENTION with a migration hint instead of silent
-    // auto-conversion. See ADR-041 amendment 2026-05-05.
-    if (args.mentions !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary' } instead" }], isError: true }
-    }
     // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. CC fanout was the
     // sole caller of the (now-removed) skip tool, and v0.9 enforces
     // 1 mention = 1 queue row. Reject any caller still passing cc[] with a
@@ -2105,12 +2117,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Phase 5 wiring runs AFTER the per-row claim acquisition so the channel
     // is resolved; see resolvePhase5(...) call site below.
     // mentions[] is the resolved enqueue list produced by resolvePhase5(); it
-    // starts empty and is populated from { mention } via the routing port.
+    // starts empty and is populated from { mention } / { mentions[] } via the routing port.
     let mentions: string[] = []
-    // Issue #266: snapshot the raw mention(s) for outbound trace. After the
-    // mentions[] removal this is just [args.mention] (or [] when missing —
-    // the INVALID_MENTION reject below catches that case).
-    const rawInputMentions: string[] = typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
+    // Issue #266: snapshot the normalized input mentions for outbound trace.
+    let rawInputMentions: string[] = []
 
     // Validate content
     if (!content || content.length === 0) {
@@ -2155,8 +2165,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: 'Error [DB_UNAVAILABLE]: database required for send' }], isError: true }
     }
     let claimedMqId: number | string | null = null
-    let fallbackReason: 'claim_expired' | 'claim_missing' | null = null
-    let fallbackSourceQueueId: string | null = null
+    let outboundQueued = false
     let txCommitted = false
     await txClient.query('BEGIN')
     try {
@@ -2169,41 +2178,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         txCommitted = true
         return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: reply_to is required for send — call \`next\` first to obtain a claim` }], isError: true }
       }
-      // CEO P1 — server-side silent fallback to notify when the reply_to
-      // claim is missing or expired. Decision tree extracted to
-      // core/send-fallback-decision.ts so the cases (claim_present /
-      // fallback / invalid_reply_to) can be unit-tested directly.
+      // Issue #580 — stale or missing claims must stop before projection.
+      // The decision helper locks active claims and returns terminal evidence
+      // for closed/missing rows so this handler cannot duplicate Discord output
+      // through a notify-style fallback.
       const decision = await decideSendFallback(txClient, reply_to, agentId)
       if (decision.kind === 'invalid_reply_to') {
         await txClient.query('ROLLBACK')
         txCommitted = true
         return { content: [{ type: 'text', text: `Error [INVALID_REPLY_TO]: reply_to=${reply_to} not found in agent_messages or has no channel` }], isError: true }
       }
-      if (decision.kind === 'fallback') {
-        fallbackReason = decision.reason
-        const fallbackSource = await txClient.query<{ id: number | string }>(
-          `SELECT id FROM message_queue
-             WHERE message_id = $1 AND agent_id = $2
-             ORDER BY created_at ASC, id ASC
-             LIMIT 1`,
-          [reply_to, agentId],
-        )
-        fallbackSourceQueueId = fallbackSource.rows[0]?.id !== undefined
-          ? String(fallbackSource.rows[0].id)
-          : null
-        process.stderr.write(`agent-comms: send fallback to notify — ${agentId} reply_to=${reply_to} reason=${fallbackReason}\n`)
-        // claimedMqId stays null → the downstream message_queue UPDATE
-        // (status='replied') is gated on it and skipped in the
-        // fallback path.
+      if (decision.kind === 'claim_unavailable') {
+        await txClient.query('ROLLBACK')
+        txCommitted = true
+        if (decision.reason === 'claim_closed') {
+          const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
+          const statusSuffix = decision.status ? ` status=${decision.status}` : ''
+          return {
+            content: [{
+              type: 'text',
+              text: `send no-op [CLAIM_ALREADY_CLOSED]: reply_to=${reply_to}${queueSuffix}${statusSuffix}; no outbound projection queued`,
+            }],
+          }
+        }
+        if (decision.reason === 'claim_expired') {
+          const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
+          const statusSuffix = decision.status ? ` status=${decision.status}` : ''
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [CLAIM_EXPIRED]: active claim expired for reply_to=${reply_to}${queueSuffix}${statusSuffix}; reclaim or call next before send. No outbound projection queued.`,
+            }],
+            isError: true,
+          }
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: `Error [CLAIM_MISSING]: no active claim for reply_to=${reply_to}; call next/processing before send. No outbound projection queued.`,
+          }],
+          isError: true,
+        }
       } else {
         claimedMqId = decision.claimedMqId
       }
 
-    // Phase 5 cleanup — mention/cc validation + outbound ACL + cc[] body
-    // decoration (Issues #305/#306/#308/#250 + ADR-041 amendment 2026-05-05).
+    // Phase 5 cleanup — mention/mentions validation + outbound ACL.
     // Resolves channel from claim, applies validation, decorates content.
-    // mention is now schema-required (CEO directive 5e2d9235); resolvePhase5
-    // always runs and the legacy mentions[] auto-convert path is gone.
+    // mention and mentions[] normalize through one canonical port.
     {
       const claimChannelRow = await txClient.query(
         `SELECT channel_id FROM agent_messages WHERE id = $1 LIMIT 1`,
@@ -2217,6 +2239,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         sender: agentId,
         channel_id: phase5Channel,
         mention: (args as any).mention,
+        mentions: (args as any).mentions,
         cc: (args as any).cc,
         content,
         isKnownAgent: (id: string) => knownAgents.includes(id),
@@ -2224,7 +2247,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && !phase5.ok) {
         if (phase5.error === 'INVALID_MENTION') {
           await txClient.query('ROLLBACK'); txCommitted = true
-          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention/mentions must contain at least one non-empty agent_id' }], isError: true }
         }
         if (phase5.error === 'UNKNOWN_AGENT') {
           await txClient.query('ROLLBACK'); txCommitted = true
@@ -2238,15 +2261,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && phase5.ok) {
         content = phase5.content
         mentions = phase5.mentions
+        rawInputMentions = phase5.mentions
         for (const w of phase5.warnings) {
           process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
         }
       }
     }
 
-    // mention is schema-required, but the runtime guard catches the case
-    // where the MCP runtime somehow bypassed schema (defensive). Use
-    // the suggestive error (buildNotMentionedErrorMsg) so callers still get
+    // The runtime guard catches the case where neither mention nor mentions[]
+    // produced a queue recipient. Use the suggestive error so callers still get
     // a usable agent list for migration.
     if (mentions.length === 0) {
       let authorId: string | null = null
@@ -2260,7 +2283,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Self-send prevention
-    if (mentions.length === 1 && mentions[0] === agentId) {
+    if (mentions.includes(agentId)) {
       return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
@@ -2387,16 +2410,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const partMeta = parts.length > 1
         ? { split_part: partIdx + 1, split_total: parts.length }
         : {}
-      const fallbackMeta = fallbackReason
-        ? {
-            fallback_notify: {
-              reason: fallbackReason,
-              source_message_id: reply_to,
-              source_queue_id: fallbackSourceQueueId,
-            },
-          }
-        : {}
-      const fullMetadata = { ...metadata, ...authMeta, ...partMeta, ...fallbackMeta }
+      const fullMetadata = { ...metadata, ...authMeta, ...partMeta }
 
       // Save to DB
       const id = await saveMessage({
@@ -2549,24 +2563,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // We use `claimedMqId` captured under the SELECT FOR UPDATE lock at the
     // top of the handler, so there is no second read here and no chance of
     // a concurrent writer slipping in between read and update.
-    // CEO P1 fallback: when claimedMqId is null (claim_expired or
-    // claim_missing), no message_queue row consumed this send call,
-    // so there is nothing to mark 'replied'. The new outbound row was
-    // already inserted via the regular path; only the claim
-    // bookkeeping is skipped.
-    if (claimedMqId !== null) {
-      await txClient.query(
-        `UPDATE message_queue
-            SET status = 'replied',
-                replied_at = now(),
-                replied_with = $1,
-                claimed_by = NULL,
-                claimed_at = NULL,
-                claim_expires_at = NULL
-          WHERE id = $2`,
-        [id, claimedMqId],
-      )
-    }
+    await txClient.query(
+      `UPDATE message_queue
+          SET status = 'replied',
+              replied_at = now(),
+              replied_with = $1,
+              claimed_by = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL
+        WHERE id = $2`,
+      [id, claimedMqId],
+    )
     // spec §4.2 step 10-11 — flip the agent based on remaining open
     // claims (§8.1 busy ↔ idle). Issue #278 cycle 1 (auditor BLOCK 1):
     // with multi in-flight, this send only closes ONE claim — other
@@ -2636,6 +2643,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 truncateForDiscord(partContent),
               ],
             )
+            outboundQueued = true
           } catch (err) {
             // ARC codex audit (PR#135): do NOT silently swallow. The
             // outbound_queue is the sole delivery path; a failed INSERT =
@@ -2674,25 +2682,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     txCommitted = true
 
     // Response with delivery feedback
-    // Issue #118 ③: include reply_context (original author + channel + content snippet)
-    // CEO P1: when fallback fired, surface `fallback: notify (reason: ...)`
-    // alongside reply_context so callers observe that their `send` was
-    // promoted to a notify-equivalent dispatch (silent reject is forbidden).
+    // Issue #118 ③: include reply_context (original author + channel + content snippet).
+    // Issue #580: include outbound projection terminal evidence so a
+    // successful Discord projection queue is never reported as a missing
+    // delivery target.
     const replyCtxSuffix = buildReplyContextSuffix(
       reply_to ? await getMessageById(sendCoreDb, reply_to) : null,
       dest.channelId,
     )
-    const fallbackSuffix = fallbackReason ? ` | fallback: notify (reason: ${fallbackReason})` : ''
+    const outboundQueuedSuffix = ` | outbound_queued=${outboundQueued ? 'true' : 'false'}`
     if (delivery.pushTargets.length > 0) {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${fallbackSuffix}` }] }
+      return { content: [{ type: 'text', text: `sent (id: ${id}) to ${delivery.pushTargets.length} recipient(s)${partSuffix}${replyCtxSuffix}${outboundQueuedSuffix}` }] }
     }
-    if (deliveryWarning === 'NOT_MENTIONED') {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}${fallbackSuffix}` }] }
+    if (deliveryWarning === 'NOT_MENTIONED' && !outboundQueued) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 配信先なし: メンション（@agent_id）が必要です。送り直してください${partSuffix}${outboundQueuedSuffix}` }] }
     }
-    if (deliveryWarning === 'THREAD_MISMATCH') {
-      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}${fallbackSuffix}` }] }
+    if (deliveryWarning === 'THREAD_MISMATCH' && !outboundQueued) {
+      return { content: [{ type: 'text', text: `sent (id: ${id}) — DB保存済み。⚠️ 受信者のactive_threadと不一致のため配信されていません${partSuffix}${outboundQueuedSuffix}` }] }
     }
-    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}${fallbackSuffix}` }] }
+    return { content: [{ type: 'text', text: `sent (id: ${id}) to ${to}${partSuffix}${outboundQueuedSuffix}` }] }
     } finally {
       // ROLLBACK any in-flight transaction if we didn't reach COMMIT. Catches
       // every early return inside the try block (content / mentions / rate /
@@ -2717,22 +2725,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // the spec flow without pulling in reply_to-dependent paths.
   if (name === 'notify') {
     let { channel, thread_id: threadArg, content, message_type, metadata } = args as any
-    // Phase 5 cleanup (CEO directive 5e2d9235, 2026-05-05) — legacy `mentions[]`
-    // argument is removed. Callers MUST use `mention` (1 primary). See ADR-041
-    // amendment 2026-05-05.
-    if (args.mentions !== undefined) {
-      return { content: [{ type: 'text', text: "Error [INVALID_MENTION]: mentions[] is removed in Phase 5 cleanup, use { mention: 'primary' } instead" }], isError: true }
-    }
     // sub-PR 3 (v0.9 spec §1.4): cc parameter is removed. Reject upfront.
     if ((args as any).cc !== undefined) {
       return { content: [{ type: 'text', text: "Error [INVALID_PARAMETER]: cc parameter is removed in v0.9 — 1 mention = 1 queue row." }], isError: true }
     }
     // mentions[] is the resolved enqueue list; populated by resolvePhase5().
     let mentions: string[] = []
-    // Issue #266: snapshot raw mention for outbound trace.
-    const rawInputMentions: string[] = typeof args.mention === 'string' && args.mention.length > 0 ? [args.mention] : []
+    // Issue #266: snapshot normalized input mentions for outbound trace.
+    let rawInputMentions: string[] = []
 
-    // spec §4.3 step 1 — channel / mention / content required.
+    // spec §4.3 step 1 — channel / content required.
     if (!channel || typeof channel !== 'string') {
       return { content: [{ type: 'text', text: 'Error [CHANNEL_REQUIRED]: channel is required for notify' }], isError: true }
     }
@@ -2741,13 +2743,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (content.length > CORE_CONTENT_LIMIT) {
       return { content: [{ type: 'text', text: `Error [CONTENT_TOO_LARGE]: content exceeds core limit (${CORE_CONTENT_LIMIT} chars)` }], isError: true }
-    }
-    // mention is schema-required, but defensive check (matches send).
-    if (typeof args.mention !== 'string' || args.mention.length === 0) {
-      return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
-    }
-    if (args.mention === agentId) {
-      return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
     const client = await tryGetDb()
@@ -2813,17 +2808,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Error [NOT_A_MEMBER]: access denied — not a member of channel '${dest.channelId}'` }], isError: true }
     }
 
-    // spec §4.3 step 3 — single-mention validation (legacy mentions[] path
-    // removed in Phase 5 cleanup). resolvePhase5(...) below handles the
-    // canonical UNKNOWN_AGENT / INVALID_MENTION / OUTBOUND_ACL_VIOLATION
-    // rejects, so this guard is just a defense-in-depth check that the
-    // mention agent_id passes the validateMentionOrError shape filter.
-    const validAgentIds = await refreshAgentCache()
-    const mentionErr = validateMentionOrError(args.mention, validAgentIds)
-    if (mentionErr) {
-      return { content: [{ type: 'text', text: mentionErr }], isError: true }
-    }
-
     // Rate limit + duplicate guards (same posture as send; notify is
     // caller-driven so still bounded).
     const rate = await checkRateLimit(agentId)
@@ -2842,8 +2826,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Phase 5 cleanup — notify wiring (resolvePhase5 + 4 ports). Runs after
     // channel resolution + permission/rate/dup gates, before content
     // sanitisation so cc[] body suffix is included in the saved message.
-    // mention is schema-required so resolvePhase5 always runs (legacy
-    // mentions[]-only branch is gone). ADR-041 amendment 2026-05-05.
+    // mention and mentions[] normalize through one canonical port.
     {
       const knownAgentsN = await refreshAgentCache()
       await refreshChannelPolicyDbSnapshot(client)
@@ -2851,13 +2834,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         sender: agentId,
         channel_id: dest.channelId,
         mention: (args as any).mention,
+        mentions: (args as any).mentions,
         cc: (args as any).cc,
         content,
         isKnownAgent: (id: string) => knownAgentsN.includes(id),
       })
       if (phase5 && !phase5.ok) {
         if (phase5.error === 'INVALID_MENTION') {
-          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention must be a non-empty agent_id' }], isError: true }
+          return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention/mentions must contain at least one non-empty agent_id' }], isError: true }
         }
         if (phase5.error === 'UNKNOWN_AGENT') {
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
@@ -2869,10 +2853,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (phase5 && phase5.ok) {
         content = phase5.content
         mentions = phase5.mentions
+        rawInputMentions = phase5.mentions
         for (const w of phase5.warnings) {
           process.stderr.write(`agent-comms: phase5 warning: ${w}\n`)
         }
       }
+    }
+
+    if (mentions.length === 0) {
+      return { content: [{ type: 'text', text: 'Error [INVALID_MENTION]: mention/mentions must contain at least one non-empty agent_id' }], isError: true }
+    }
+    if (mentions.includes(agentId)) {
+      return { content: [{ type: 'text', text: 'Error [SELF_SEND]: 自分自身には送信できません' }], isError: true }
     }
 
     const safeContent = sanitizeContent(content)
@@ -3273,6 +3265,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (entry.blockers && entry.blockers.length > 0) {
       return { content: [{ type: 'text', text: `Session/agent "${session}" has incomplete bot profile: ${entry.blockers.join(', ')}` }], isError: true }
     }
+    const endpointStatus = await loadEndpointLeaseStatus()
+    const gateFailure = destructiveLifecycleGateFailure(entry, endpointStatus.get(entry.agentId))
+    if (gateFailure) {
+      return { content: [{ type: 'text', text: `Session/agent "${session}" restart blocked — ${gateFailure}` }], isError: true }
+    }
     const log = await restartBotSession(entry)
     return { content: [{ type: 'text', text: `[restart_bot] ${session}:\n${log}` }] }
   }
@@ -3303,7 +3300,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    health.status === 'misconfigured' ? '⚠️' : '❓'
       const dbRow = dbStatus.get(entry.agentId)
       const dbSuffix = dbRow
-        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'}`
+        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count}`
         : ' | (no db row)'
       const sourceSuffix = entry.source ? ` | source=${entry.source}` : ''
       const blockerSuffix = entry.blockers && entry.blockers.length > 0 ? ` | blockers=${entry.blockers.join(',')}` : ''
@@ -3320,6 +3317,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const results: string[] = []
     let alive = 0, restarted = 0
+    const endpointStatus = await loadEndpointLeaseStatus()
     for (const entry of registry) {
       if (entry.blockers && entry.blockers.length > 0) {
         results.push(`⚠️ ${entry.session || entry.agentId}: incomplete profile — ${entry.blockers.join(', ')}`)
@@ -3330,6 +3328,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         alive++
         results.push(`✅ ${entry.session}: ${health.status} — ${health.details}`)
       } else {
+        const gateFailure = destructiveLifecycleGateFailure(entry, endpointStatus.get(entry.agentId))
+        if (gateFailure) {
+          results.push(`⛔ ${entry.session || entry.agentId}: restart blocked — ${gateFailure}`)
+          continue
+        }
         if (dry_run) {
           results.push(`⚠️ ${entry.session}: ${health.status} — ${health.details} (would restart)`)
         } else {
@@ -3522,20 +3525,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const results: string[] = []
     let cleaned = 0
+    const endpointStatus = await loadEndpointLeaseStatus()
     for (const entry of registry) {
-      if (entry.blockers?.includes('missing_channel_port') || !entry.port) {
-        results.push(`⚠️ ${entry.session || entry.agentId}: skipped cleanup — missing channel_port`)
+      const evaluation = evaluateCleanupPort(entry, endpointStatus.get(entry.agentId), {
+        hasTmuxSession: tmuxHasSession,
+        getProcessOnPort,
+      })
+      if (evaluation.action === 'skip') {
+        results.push(`⛔ port ${entry.port || '-'} (${entry.session || entry.agentId}): skipped cleanup — ${evaluation.reason}`)
         continue
       }
-      const sessionExists = tmuxHasSession(entry.session)
-      const pids = getProcessOnPort(entry.port)
-      if (!sessionExists && pids.length > 0) {
+      if (evaluation.action === 'kill') {
         const killed = killPidsOnPort(entry.port, false)
         cleaned += killed
-        results.push(`🧹 port ${entry.port} (${entry.session}): killed ${killed} orphan process(es) — PID: ${pids.join(',')}`)
-      } else if (sessionExists && pids.length > 0) {
+        results.push(`🧹 port ${entry.port} (${entry.session}): killed ${killed} orphan process(es) — PID: ${evaluation.pids.join(',')}`)
+      } else if (evaluation.action === 'active') {
         results.push(`✅ port ${entry.port} (${entry.session}): in use by active session`)
-      } else if (!sessionExists && pids.length === 0) {
+      } else if (evaluation.action === 'free') {
         results.push(`⬚ port ${entry.port} (${entry.session}): free (session not running)`)
       } else {
         results.push(`✅ port ${entry.port} (${entry.session}): clean`)
@@ -3611,19 +3617,29 @@ function createBotServer(botId: string): BotContext {
   return ctx
 }
 
-// --- Bot Registry (lifecycle management) ---
+// --- Bot Profile Inventory (lifecycle management; DB is SSOT) ---
 interface BotEntry {
   session: string
   projectDir: string
   agentId: string
   port: number
   command: string
+  supervisorType?: string
   source?: string
   blockers?: string[]
 }
 
-const BOT_REGISTRY_PATH = process.env.BOT_REGISTRY
-  ?? join(dirname(new URL(import.meta.url).pathname), 'scripts', 'bot-registry.txt')
+async function loadEndpointLeaseStatus(): Promise<Map<string, BotStatusDbRow>> {
+  const client = await tryGetDb()
+  if (!client) return new Map()
+  try {
+    return await fetchBotStatusFromDb(client)
+  } catch (err) {
+    process.stderr.write(`agent-comms: endpoint lease gate DB query failed (fail-closed): ${err}\n`)
+    return new Map()
+  }
+}
+
 const DEFAULT_CLAUDE_CMD = 'claude --mcp-config .mcp.json --dangerously-skip-permissions'
 const DEFAULT_AUN_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
 
@@ -3639,21 +3655,34 @@ function parseBotMetadata(raw: unknown): Record<string, unknown> {
   }
 }
 
+function botSupervisorType(metadata: Record<string, unknown>, session: string): string {
+  const explicit = typeof metadata.supervisor_type === 'string' && metadata.supervisor_type.trim()
+    ? metadata.supervisor_type.trim().toLowerCase()
+    : ''
+  if (explicit) return explicit
+  return session ? 'tmux' : 'unknown'
+}
+
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
-function buildProfileCommand(agentId: string, session: string, port: number, engine: string | null, fallbackCommand?: string): { command: string, source: string } {
+function buildProfileCommand(agentId: string, session: string, port: number, engine: string | null): { command: string, source: string, blocker?: string } {
   const normalizedEngine = (engine ?? '').trim().toLowerCase()
   if (normalizedEngine === 'codex') {
     const databaseUrl = process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL
     const stateDir = join(homedir(), '.claude', 'channels', session)
+    const bunCommand = process.env.AGENT_COMMS_BUN_COMMAND ?? '/Users/yuji/.bun/bin/bun'
+    const serverPath = process.env.AGENT_COMMS_SERVER_PATH ?? join(SERVER_ROOT, 'server.ts')
     const configArgs = [
       'mcp_servers.agent-comms.enabled=false',
       'mcp_servers.aun.enabled=true',
+      `mcp_servers.aun.command="${bunCommand}"`,
+      `mcp_servers.aun.args=["run","${serverPath}"]`,
       `mcp_servers.aun.env.AGENT_ID="${agentId}"`,
       `mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`,
       `mcp_servers.aun.env.DATABASE_URL="${databaseUrl}"`,
+      'mcp_servers.aun.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED="0"',
       `mcp_servers.aun.env.WEBHOOK_PORT="${port}"`,
       `mcp_servers.aun.env.DISCORD_STATE_DIR="${stateDir}"`,
     ]
@@ -3668,89 +3697,71 @@ function buildProfileCommand(agentId: string, session: string, port: number, eng
   if (normalizedEngine === 'claude-code' || normalizedEngine === 'claude') {
     return { command: DEFAULT_CLAUDE_CMD, source: 'agents.runtime_engine_preference' }
   }
-  if (fallbackCommand?.trim()) return { command: fallbackCommand.trim(), source: 'bot-registry.compat' }
-  return { command: DEFAULT_CLAUDE_CMD, source: 'default' }
-}
-
-function loadBotRegistryFile(): BotEntry[] {
-  try {
-    const content = readFileSync(BOT_REGISTRY_PATH, 'utf-8')
-    return content.split('\n')
-      .filter(line => line.trim() && !line.startsWith('#'))
-      .map(line => {
-        const parts = line.split('|').map(s => s.trim())
-        const [session, projectDir, agentId, portStr, ...cmdParts] = parts
-        const command = cmdParts.join('|').trim() || DEFAULT_CLAUDE_CMD
-        return { session, projectDir, agentId, port: parseInt(portStr, 10), command, source: 'bot-registry.compat' }
-      })
-      .filter(e => e.session && !isNaN(e.port))
-  } catch {
-    return []
+  return {
+    command: '',
+    source: 'agents.runtime_engine_preference',
+    blocker: normalizedEngine ? `unknown_runtime_engine_preference:${normalizedEngine}` : 'missing_runtime_engine_preference',
   }
 }
 
 async function loadBotRegistry(): Promise<BotEntry[]> {
-  const fileEntries = loadBotRegistryFile()
-  const fileByAgent = new Map(fileEntries.map((entry) => [entry.agentId, entry]))
-  const fileBySession = new Map(fileEntries.map((entry) => [entry.session, entry]))
   const client = await tryGetDb()
-  if (!client) return fileEntries
+  if (!client) {
+    process.stderr.write('agent-comms: bot profile inventory unavailable — database required because agents table is SSOT\n')
+    return []
+  }
 
   try {
     const result = await client.query(
       `SELECT agent_id, home_directory, channel_port, runtime, runtime_engine_preference,
               metadata, profile_enabled
          FROM agents
-        WHERE agent_type <> 'human'
+        WHERE agent_type NOT IN ('human', 'system')
           AND COALESCE(profile_enabled, true) = true
+          AND disabled_at IS NULL
+          AND status IS DISTINCT FROM 'disabled'
         ORDER BY agent_id`,
     )
     const entries: BotEntry[] = []
-    const seenFileAgents = new Set<string>()
     for (const row of result.rows) {
       const agentId = String(row.agent_id)
       const metadata = parseBotMetadata(row.metadata)
       const profileSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
         ? metadata.tmux_session.trim()
         : ''
-      const fallback = fileByAgent.get(agentId) ?? (profileSession ? fileBySession.get(profileSession) : undefined)
-      if (fallback) seenFileAgents.add(fallback.agentId)
-      const session = profileSession || fallback?.session || ''
+      const session = profileSession
+      const supervisorType = botSupervisorType(metadata, session)
       const projectDir = (typeof row.home_directory === 'string' && row.home_directory.trim())
         ? row.home_directory.trim()
-        : fallback?.projectDir ?? ''
+        : ''
       const parsedPort = Number(row.channel_port)
-      const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : fallback?.port ?? 0
+      const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 0
       const commandInfo = buildProfileCommand(
         agentId,
-        session || fallback?.session || agentId,
+        session || agentId,
         port,
         row.runtime_engine_preference ?? row.runtime ?? null,
-        fallback?.command,
       )
       const blockers: string[] = []
-      if (!session) blockers.push('missing_tmux_session')
+      if (supervisorType === 'tmux' && !session) blockers.push('missing_tmux_session')
       if (!projectDir) blockers.push('missing_home_directory')
       if (!port) blockers.push('missing_channel_port')
+      if (commandInfo.blocker) blockers.push(commandInfo.blocker)
       entries.push({
         session,
         projectDir,
         agentId,
         port,
         command: commandInfo.command,
-        source: fallback ? `agents+${commandInfo.source}` : `agents.${commandInfo.source}`,
+        supervisorType,
+        source: commandInfo.source,
         blockers,
       })
     }
-    for (const entry of fileEntries) {
-      if (!seenFileAgents.has(entry.agentId) && !entries.some((candidate) => candidate.agentId === entry.agentId)) {
-        entries.push(entry)
-      }
-    }
     return entries
   } catch (err) {
-    process.stderr.write(`agent-comms: bot profile inventory DB query failed, using bot-registry fallback: ${err}\n`)
-    return fileEntries
+    process.stderr.write(`agent-comms: bot profile inventory DB query failed; no fallback because agents table is SSOT: ${err}\n`)
+    return []
   }
 }
 
@@ -3795,7 +3806,15 @@ function isPidOrphan(pid: string): boolean {
   }
 }
 
+function isProtectedInfrastructurePort(port: number): boolean {
+  return port === 5432 || port === 5433
+}
+
 function killPidsOnPort(port: number, excludeSelf = true): number {
+  if (isProtectedInfrastructurePort(port)) {
+    process.stderr.write(`agent-comms: refusing protected infrastructure port cleanup: ${port}\n`)
+    return 0
+  }
   const pids = getProcessOnPort(port)
   let killed = 0
   for (const pid of pids) {
@@ -3849,8 +3868,6 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
 // cover all six branches with injected deps. This wrapper binds the
 // real tmux / lsof / ps side-effect helpers.
 function checkBotHealth(entry: BotEntry): BotHealthResult {
-  if (!entry.session) return { status: 'misconfigured', details: 'missing tmux session in bot profile' }
-  if (!entry.port || entry.port <= 0) return { status: 'misconfigured', details: 'missing channel_port in bot profile' }
   return checkBotHealthCore(entry, {
     hasSession: tmuxHasSession,
     capture: tmuxCapture,

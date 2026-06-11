@@ -143,6 +143,10 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     // (c) INSERT agent_messages + message_queue row
     const db = new Database(dbPath)
     const messageId = `msg-${randomUUID()}`
+    db.prepare(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
+       VALUES (?, ?, 'dev', 'claude-code', 'online', ?, 1)`,
+    ).run(AGENT_ID, AGENT_ID, JSON.stringify({ tmux_session: SESSION }))
     db.exec(`INSERT INTO agent_messages (id, author_id, content, message_type, source) VALUES ('${messageId}', 'tester', 'hi', 'chat', 'agent-comms')`)
     db.exec(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('${AGENT_ID}', '${messageId}', '{}', 'pending')`)
     db.close()

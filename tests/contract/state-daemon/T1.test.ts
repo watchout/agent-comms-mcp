@@ -37,6 +37,41 @@ beforeEach(async () => {
 })
 
 describe('T1 new_pending_dispatched', () => {
+  test('production-scoped daemon ignores reserved sd-test rows', async () => {
+    const agent = makeAgentId('reserved-scope')
+    const clock = new FakeClock('2026-05-08T00:00:00.000Z')
+    const tmux = new FakeTmux()
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: {
+        async query() {
+          throw new Error('reserved sd-test row should be skipped before DB lookup')
+        },
+      },
+      pgListen: new FakePgListen(),
+      tmux,
+      clock,
+      metrics,
+      alert: new FakeAlertSink(),
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 1,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(tmux.sentKeys.length).toBe(0)
+      expect(metrics.countInc('state_daemon_scope_skipped_total', { agent_id: agent, path: 'notify' })).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+  })
+
   test('new pending row → wake target tmux + last_wake_attempt_at + metric ok', async () => {
     const agent = makeAgentId('t1-alpha')
     await seedAgent(pg, {

@@ -538,6 +538,91 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(passingPayload.ok).toBe(true)
     expect(passingPayload.blockers).toEqual([])
   })
+
+  test('strict profile doctor gates active connectors on runtime endpoint leases', () => {
+    const runtimeId = randomUUID()
+    const connectorId = randomUUID()
+    const profiled = runCli([
+      'agent', 'profile', 'set', 'probe-f',
+      '--home-directory', '~/Developer/probe-f',
+      '--channel-port', '19992',
+      '--tmux-session', 'probe-f-session',
+      '--runtime-engine', 'codex',
+      '--execute',
+    ])
+    expect(profiled.status).toBe(0)
+    {
+      const db = new Database(dbPath)
+      db.prepare(
+        `INSERT INTO agent_runtime_instances
+           (runtime_instance_id, agent_id, runtime_engine, status)
+         VALUES (?, 'probe-f', 'codex', 'active')`,
+      ).run(runtimeId)
+      db.close()
+    }
+    const projected = runCli(['agent', 'profile', 'project', 'probe-f', '--execute'])
+    expect(projected.status).toBe(0)
+    {
+      const db = new Database(dbPath)
+      const runtime = db.prepare(
+        `SELECT workspace_id
+           FROM agent_runtime_instances
+          WHERE runtime_instance_id = ?`,
+      ).get(runtimeId) as { workspace_id: string | null }
+      expect(runtime.workspace_id).not.toBeNull()
+      db.prepare(
+        `INSERT INTO connector_instances
+           (connector_instance_id, agent_id, provider, connector_uri, status, metadata)
+         VALUES (?, 'probe-f', 'discord', 'discord://agents/probe-f/norm022', 'active', ?)`,
+      ).run(connectorId, JSON.stringify({ source: 'runtime_heartbeat' }))
+      db.close()
+    }
+
+    const missingRuntime = runCli(['agent', 'profile', 'doctor', '--strict'])
+    expect(missingRuntime.status).toBe(1)
+    const missingRuntimePayload = JSON.parse(missingRuntime.stdout)
+    expect(missingRuntimePayload.blockers).toContainEqual(expect.objectContaining({
+      agent_id: 'probe-f',
+      connector_instance_id: connectorId,
+      code: 'active_connector_missing_runtime_instance',
+    }))
+
+    {
+      const db = new Database(dbPath)
+      db.prepare(
+        `UPDATE connector_instances
+            SET runtime_instance_id = ?
+          WHERE connector_instance_id = ?`,
+      ).run(runtimeId, connectorId)
+      db.close()
+    }
+    const missingLease = runCli(['agent', 'profile', 'doctor', '--strict'])
+    expect(missingLease.status).toBe(1)
+    const missingLeasePayload = JSON.parse(missingLease.stdout)
+    expect(missingLeasePayload.blockers).toContainEqual(expect.objectContaining({
+      agent_id: 'probe-f',
+      connector_instance_id: connectorId,
+      runtime_instance_id: runtimeId,
+      code: 'active_connector_missing_endpoint_lease',
+    }))
+
+    {
+      const db = new Database(dbPath)
+      db.prepare(
+        `INSERT INTO control_plane_leases
+           (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
+            holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at)
+         VALUES
+           ('runtime_instance', ?, 'worker', 'probe-f', ?, ?, 1, datetime('now', '+5 minutes'))`,
+      ).run(runtimeId, runtimeId, connectorId)
+      db.close()
+    }
+    const passing = runCli(['agent', 'profile', 'doctor', '--strict'])
+    expect(passing.status).toBe(0)
+    const passingPayload = JSON.parse(passing.stdout)
+    expect(passingPayload.ok).toBe(true)
+    expect(passingPayload.blockers).toEqual([])
+  })
 })
 
 describe('F2 — agent-com next (SQLite)', () => {

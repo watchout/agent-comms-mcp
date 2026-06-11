@@ -72,6 +72,59 @@ export async function getMessageById(
   }
 }
 
+function parseMetadataObject(raw: unknown): Record<string, unknown> {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw !== 'string' || raw.trim() === '') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+export async function resolveReplyRecipientAgentId(
+  db: DbAdapter | null,
+  replyTo: string,
+  senderAgentId: string,
+): Promise<string | null> {
+  if (!db) return null
+  const original = await getMessageById(db, replyTo)
+  if (!original?.author_id) return null
+
+  const resolved = await resolveAgentFromDiscordId(db, original.author_id)
+  const candidate = resolved ?? original.author_id
+  if (!candidate || candidate === senderAgentId) return null
+
+  const exists = await db.query(
+    'SELECT agent_id FROM agents WHERE agent_id = $1 LIMIT 1',
+    [candidate],
+  )
+  return exists.rows.length > 0 ? candidate : null
+}
+
+export async function resolveReplyToDiscordMessageId(
+  db: DbAdapter | null,
+  replyTo: string,
+): Promise<string | null> {
+  if (!db) return null
+  const r = await db.query(
+    'SELECT discord_message_id, metadata FROM agent_messages WHERE id = $1 LIMIT 1',
+    [replyTo],
+  )
+  if (r.rows.length === 0) return null
+  const direct = r.rows[0].discord_message_id
+  if (typeof direct === 'string' && direct.trim().length > 0) return direct.trim()
+  const metadata = parseMetadataObject(r.rows[0].metadata)
+  const fromMetadata = metadata.discord_message_id
+  return typeof fromMetadata === 'string' && fromMetadata.trim().length > 0
+    ? fromMetadata.trim()
+    : null
+}
+
 /**
  * Check if sender is a human agent (agent_type='human').
  *

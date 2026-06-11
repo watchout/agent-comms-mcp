@@ -10,24 +10,361 @@
         "AGENT_ID": "codex-aun",
         "AGENT_COM_EXPECTED_AGENT_ID": "codex-aun"
       },
-      "selfSendTo": ["codex-cto"],
+      "selfSendTo": [
+        "codex-cto"
+      ],
       "selfSendInterpretation": "If an AUN lead session cannot notify codex-cto because of SELF_SEND, the local MCP registration is running as codex-cto and must be fixed before governance handoff."
     },
     "pr_audit_l1": {
-      "agentId": "auditor",
+      "agentId": "devauditor",
       "description": "Independent L1 PR audit",
-      "expectedRuntime": "TUI"
+      "expectedRuntime": "TUI",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Primary Audit",
+          "Secondary Audit",
+          "Verdict",
+          "Required Fixes",
+          "Rework Instruction"
+        ]
+      }
     },
     "pr_audit_l2": {
-      "agentId": "codex-audit",
+      "agentId": "l2auditor",
       "description": "Independent L2 PR audit",
-      "expectedRuntime": "runtime row decides dispatch path"
+      "expectedRuntime": "runtime row decides dispatch path",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Primary Audit",
+          "Secondary Audit",
+          "Verdict",
+          "Required Fixes",
+          "Rework Instruction"
+        ]
+      }
     },
     "pr_approval_l3": {
       "agentId": "codex-cto",
       "description": "CTO/L3 approval before merge",
-      "legacyAgentIds": ["cto"],
-      "newWorkAllowedViaLegacyIds": false
+      "legacyAgentIds": [
+        "cto"
+      ],
+      "newWorkAllowedViaLegacyIds": false,
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "GO / CONDITIONAL GO / NO-GO",
+          "Critical Risks",
+          "Required Before Merge",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "feature_goal": {
+      "agentId": "spec",
+      "description": "Company Dev OS feature goal owner",
+      "companyDevOs": {
+        "llm": "Claude",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".claude/agents/company-dev-os-spec.md",
+        "required_output": [
+          "Feature Goal",
+          "Acceptance Criteria",
+          "Handoff to arc"
+        ]
+      }
+    },
+    "business_workflow": {
+      "agentId": "spec",
+      "description": "Company Dev OS business workflow owner",
+      "companyDevOs": {
+        "llm": "Claude",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".claude/agents/company-dev-os-spec.md",
+        "required_output": [
+          "Feature Goal",
+          "Acceptance Criteria",
+          "Handoff to arc"
+        ]
+      }
+    },
+    "acceptance_criteria": {
+      "agentId": "spec",
+      "description": "Company Dev OS acceptance criteria owner",
+      "companyDevOs": {
+        "llm": "Claude",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".claude/agents/company-dev-os-spec.md",
+        "required_output": [
+          "Feature Goal",
+          "Acceptance Criteria",
+          "Handoff to arc"
+        ]
+      }
+    },
+    "technical_design": {
+      "agentId": "arc",
+      "description": "Company Dev OS technical design owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Design",
+          "PR Breakdown",
+          "Implementation Order",
+          "Instruction for repo-specific implementation bot"
+        ]
+      }
+    },
+    "implementation_approach": {
+      "agentId": "arc",
+      "description": "Company Dev OS implementation approach owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Design",
+          "PR Breakdown",
+          "Implementation Order",
+          "Instruction for repo-specific implementation bot"
+        ]
+      }
+    },
+    "pr_breakdown": {
+      "agentId": "arc",
+      "description": "Company Dev OS PR breakdown owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Design",
+          "PR Breakdown",
+          "Implementation Order",
+          "Instruction for repo-specific implementation bot"
+        ]
+      }
+    },
+    "implementation_order": {
+      "agentId": "arc",
+      "description": "Company Dev OS implementation order owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Design",
+          "PR Breakdown",
+          "Implementation Order",
+          "Instruction for repo-specific implementation bot"
+        ]
+      }
+    },
+    "implementation": {
+      "description": "Company Dev OS implementation is resolved dynamically to the repository-specific implementation bot; no common implementation bot is created.",
+      "companyDevOs": {
+        "llm": "existing runtime",
+        "can_edit_files": true,
+        "can_create_pr": "if repo policy allows",
+        "can_commit": "if repo policy allows",
+        "can_apply_fixes": "within approved scope",
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Implementation Handoff",
+          "Changed Files",
+          "Tests / Checks Run",
+          "Known Risks",
+          "Next Required Review"
+        ]
+      }
+    },
+    "primary_audit": {
+      "agentId": "devauditor",
+      "description": "Company Dev OS primary audit owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Primary Audit",
+          "Secondary Audit",
+          "Verdict",
+          "Required Fixes",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "secondary_audit": {
+      "agentId": "l2auditor",
+      "description": "Company Dev OS secondary audit owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Primary Audit",
+          "Secondary Audit",
+          "Verdict",
+          "Required Fixes",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "technical_practical_check": {
+      "agentId": "qa",
+      "description": "Company Dev OS technical practical check owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Practical Check",
+          "Commands Run",
+          "Scenario Checked",
+          "Failure Modes Checked",
+          "Verdict"
+        ]
+      }
+    },
+    "human_practical_acceptance": {
+      "agentId": "check",
+      "description": "Company Dev OS human practical acceptance owner",
+      "companyDevOs": {
+        "llm": "Claude",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".claude/agents/company-dev-os-check.md",
+        "required_output": [
+          "Human Practical Acceptance",
+          "Stuck Points",
+          "Operational Issues",
+          "Verdict"
+        ]
+      }
+    },
+    "high_risk_go_no_go": {
+      "agentId": "codex-cto",
+      "description": "Company Dev OS high-risk technical Go/No-Go owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "GO / CONDITIONAL GO / NO-GO",
+          "Critical Risks",
+          "Required Before Merge",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "release_risk_viewpoint": {
+      "agentId": "codex-cto",
+      "description": "Company Dev OS release risk viewpoint owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "GO / CONDITIONAL GO / NO-GO",
+          "Critical Risks",
+          "Required Before Merge",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "merge": {
+      "agentId": "codex-cto",
+      "description": "Company Dev OS default merge gate owner; an explicitly authorized repository merge owner may override.",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "GO / CONDITIONAL GO / NO-GO",
+          "Critical Risks",
+          "Required Before Merge",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "post_merge_smoke": {
+      "agentId": "qa",
+      "description": "Company Dev OS post-merge smoke owner",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Practical Check",
+          "Commands Run",
+          "Scenario Checked",
+          "Failure Modes Checked",
+          "Verdict"
+        ]
+      }
     }
   },
   "legacyAgentIds": {
@@ -35,13 +372,161 @@
       "canonicalAgentId": "codex-cto",
       "status": "disabled",
       "newWorkAllowed": false,
-      "reason": "The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto."
+      "reason": "The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto.",
+      "companyDevOs": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "GO / CONDITIONAL GO / NO-GO",
+          "Critical Risks",
+          "Required Before Merge",
+          "Rework Instruction"
+        ]
+      }
     }
   },
   "mcpNamespacePolicy": {
     "canonicalRegistration": "aun",
-    "legacyRegistrations": ["agent-comms"],
+    "legacyRegistrations": [
+      "agent-comms"
+    ],
     "canonicalToolPrefix": "mcp__aun__",
-    "legacyToolPrefixes": ["mcp__agent_comms__", "mcp__agent-comms__"]
+    "legacyToolPrefixes": [
+      "mcp__agent_comms__",
+      "mcp__agent-comms__"
+    ]
+  },
+  "companyDevOsRuntimePolicy": {
+    "version": "2026-06-07",
+    "source": "watchout/iyasaka-arc/company-dev-os/",
+    "standardFlow": [
+      "spec",
+      "arc",
+      "repo-specific implementation bot",
+      "audit",
+      "qa",
+      "check",
+      "cto when high-risk"
+    ],
+    "oneBotOneRoleOneLlm": true,
+    "nonImplementationRoles": [
+      "spec",
+      "arc",
+      "audit",
+      "qa",
+      "check",
+      "cto"
+    ],
+    "onlyImplementationRole": "repo-specific implementation bot",
+    "rolePolicy": {
+      "spec": {
+        "llm": "Claude",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".claude/agents/company-dev-os-spec.md",
+        "required_output": [
+          "Feature Goal",
+          "Acceptance Criteria",
+          "Handoff to arc"
+        ]
+      },
+      "arc": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Design",
+          "PR Breakdown",
+          "Implementation Order",
+          "Instruction for repo-specific implementation bot"
+        ]
+      },
+      "repo_specific_implementation_bot": {
+        "llm": "existing runtime",
+        "can_edit_files": true,
+        "can_create_pr": "if repo policy allows",
+        "can_commit": "if repo policy allows",
+        "can_apply_fixes": "within approved scope",
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Implementation Handoff",
+          "Changed Files",
+          "Tests / Checks Run",
+          "Known Risks",
+          "Next Required Review"
+        ]
+      },
+      "audit": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Primary Audit",
+          "Secondary Audit",
+          "Verdict",
+          "Required Fixes",
+          "Rework Instruction"
+        ]
+      },
+      "qa": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "Technical Practical Check",
+          "Commands Run",
+          "Scenario Checked",
+          "Failure Modes Checked",
+          "Verdict"
+        ]
+      },
+      "check": {
+        "llm": "Claude",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".claude/agents/company-dev-os-check.md",
+        "required_output": [
+          "Human Practical Acceptance",
+          "Stuck Points",
+          "Operational Issues",
+          "Verdict"
+        ]
+      },
+      "cto": {
+        "llm": "Codex",
+        "can_edit_files": false,
+        "can_create_pr": false,
+        "can_commit": false,
+        "can_apply_fixes": false,
+        "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+        "required_output": [
+          "GO / CONDITIONAL GO / NO-GO",
+          "Critical Risks",
+          "Required Before Merge",
+          "Rework Instruction"
+        ]
+      }
+    },
+    "liveRegistrationDone": true,
+    "liveRegistrationAppliedAt": "2026-06-07",
+    "liveRegistrationSource": "company_dev_os_aun_apply:2026-06-07",
+    "liveRegistrationRequiresSeparateApproval": false
   }
 }

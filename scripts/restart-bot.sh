@@ -2,19 +2,17 @@
 # restart-bot.sh — Safely restart a bot session from the DB bot profile.
 # Usage: ./scripts/restart-bot.sh <session-name-or-agent-id>
 # Example: ./scripts/restart-bot.sh discord-haishin
-# If the DB profile cannot be read, falls back to bot-registry.txt.
-# If session not found in DB or registry, falls back to manual args:
-#   ./scripts/restart-bot.sh <session-name> <project-dir> [port] [command]
+# DB `agents` profile is the only source of truth. File registry/manual args are
+# intentionally not accepted because they can drift from runtime identity.
 
 set -euo pipefail
 
 # Ensure PATH includes homebrew (cron/watchdog environment is minimal)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-REQUESTED_SESSION="${1:?Usage: restart-bot.sh <session-name-or-agent-id> [project-dir] [port] [command]}"
+REQUESTED_SESSION="${1:?Usage: restart-bot.sh <session-name-or-agent-id>}"
 SESSION="$REQUESTED_SESSION"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REGISTRY="${BOT_REGISTRY:-${SCRIPT_DIR}/bot-registry.txt}"
 DEFAULT_CMD="claude --mcp-config .mcp.json --dangerously-skip-permissions"
 DEFAULT_AUN_DATABASE_URL="postgresql:///agent_comms?host=/tmp"
 PROFILE_SOURCE=""
@@ -26,14 +24,21 @@ build_profile_command() {
   local agent_id="$1" session="$2" port="$3" runtime_engine="${4:-}"
   local database_url="${AGENT_COMMS_DATABASE_URL:-${DATABASE_URL:-$DEFAULT_AUN_DATABASE_URL}}"
   local state_dir="/Users/yuji/.claude/channels/${session}"
+  local repo_root
+  repo_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  local server_path="${AGENT_COMMS_SERVER_PATH:-${repo_root}/server.ts}"
+  local bun_command="${AGENT_COMMS_BUN_COMMAND:-/Users/yuji/.bun/bin/bun}"
   case "$(printf '%s' "$runtime_engine" | tr '[:upper:]' '[:lower:]')" in
     codex)
       CLAUDE_CMD="codex --dangerously-bypass-approvals-and-sandbox"
       CLAUDE_CMD+=" -c 'mcp_servers.agent-comms.enabled=false'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.enabled=true'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.command=\"${bun_command}\"'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.args=[\"run\",\"${server_path}\"]'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_ID=\"${agent_id}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID=\"${agent_id}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DATABASE_URL=\"${database_url}\"'"
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED=\"0\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.WEBHOOK_PORT=\"${port}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DISCORD_STATE_DIR=\"${state_dir}\"'"
       ;;
@@ -48,8 +53,14 @@ build_profile_command() {
 }
 
 load_db_profile() {
-  [ "${AGENT_COMMS_RESTART_DB:-1}" != "0" ] || return 1
-  command -v psql >/dev/null 2>&1 || return 1
+  if [ "${AGENT_COMMS_RESTART_DB:-1}" = "0" ]; then
+    echo "[restart-bot] ERROR: DB profile lookup is required; AGENT_COMMS_RESTART_DB=0 is not supported" >&2
+    exit 1
+  fi
+  if ! command -v psql >/dev/null 2>&1; then
+    echo "[restart-bot] ERROR: psql is required to read DB bot profiles" >&2
+    exit 1
+  fi
 
   local database_url="${AGENT_COMMS_DATABASE_URL:-${DATABASE_URL:-$DEFAULT_AUN_DATABASE_URL}}"
   local profile_line
@@ -71,7 +82,10 @@ LIMIT 1;
 SQL
 )"
   profile_line="${profile_line%%$'\n'*}"
-  [ -n "$profile_line" ] || return 1
+  if [ -z "$profile_line" ]; then
+    echo "[restart-bot] ERROR: no enabled DB bot profile found for '${REQUESTED_SESSION}'" >&2
+    exit 1
+  fi
 
   IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT RUNTIME_ENGINE <<< "$profile_line"
   PROFILE_SOURCE="agents.profile"
@@ -83,31 +97,9 @@ SQL
   fi
 
   build_profile_command "$AGENT_ID" "$SESSION" "$PORT" "${RUNTIME_ENGINE:-}"
-  return 0
 }
 
-# Prefer the DB bot profile. bot-registry.txt is a compatibility fallback,
-# not the identity/profile source of truth.
-load_db_profile || true
-
-# Try to resolve from registry
-if [ -z "$PROFILE_SOURCE" ] && [ -f "$REGISTRY" ]; then
-  REGISTRY_LINE=$(grep "^${SESSION}|" "$REGISTRY" 2>/dev/null || true)
-fi
-
-if [ -n "$PROFILE_SOURCE" ]; then
-  :
-elif [ -n "${REGISTRY_LINE:-}" ]; then
-  IFS='|' read -r _SESSION PROJECT_DIR AGENT_ID PORT CLAUDE_CMD <<< "$REGISTRY_LINE"
-  PROFILE_SOURCE="bot-registry.compat"
-  CLAUDE_CMD="${CLAUDE_CMD:-$DEFAULT_CMD}"
-else
-  # Fallback to positional args
-  PROJECT_DIR="${2:?Session not in registry. Usage: restart-bot.sh <session> <project-dir> [port] [command]}"
-  PORT="${3:-}"
-  CLAUDE_CMD="${4:-$DEFAULT_CMD}"
-  PROFILE_SOURCE="manual-args"
-fi
+load_db_profile
 
 echo "[restart-bot] Restarting ${SESSION}..."
 echo "[restart-bot] Profile source: ${PROFILE_SOURCE}"
@@ -132,12 +124,8 @@ fi
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 sleep 1
 
-# Step 3: Sync .mcp.json with registry (SSOT enforcement)
-if [ "$PROFILE_SOURCE" = "agents.profile" ]; then
-  PROJECT_DIR_EXPANDED="$PROJECT_DIR"
-else
-  PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")
-fi
+# Step 3: Sync .mcp.json with the DB profile (compat export, not SSOT)
+PROJECT_DIR_EXPANDED="$PROJECT_DIR"
 if [ -n "${AGENT_ID:-}" ] && [ -n "${PORT:-}" ]; then
   sync_mcp_config "$SESSION" "$PROJECT_DIR_EXPANDED" "$AGENT_ID" "$PORT" || true
 fi

@@ -12,8 +12,9 @@
  * 19 bots after PR #172 removed the flag from every launch path.
  */
 export interface BotHealthEntry {
-  session: string
-  port: number
+  session?: string | null
+  port?: number | null
+  supervisorType?: string | null
 }
 
 export interface BotHealthDeps {
@@ -29,7 +30,25 @@ export interface BotHealthResult {
   details: string
 }
 
+function normalizedSupervisorType(entry: BotHealthEntry): string {
+  const explicit = typeof entry.supervisorType === 'string' && entry.supervisorType.trim()
+    ? entry.supervisorType.trim().toLowerCase()
+    : ''
+  if (explicit) return explicit
+  return entry.session ? 'tmux' : 'unknown'
+}
+
 export function checkBotHealth(entry: BotHealthEntry, deps: BotHealthDeps): BotHealthResult {
+  const supervisorType = normalizedSupervisorType(entry)
+  if (supervisorType !== 'tmux') {
+    return {
+      status: 'healthy',
+      details: `supervisor_type=${supervisorType}; tmux diagnostics skipped`,
+    }
+  }
+  if (!entry.session) return { status: 'misconfigured', details: 'missing tmux session in bot profile' }
+  if (!entry.port || entry.port <= 0) return { status: 'misconfigured', details: 'missing channel_port in bot profile' }
+
   // Check 1: tmux session present.
   if (!deps.hasSession(entry.session)) {
     return { status: 'dead', details: 'tmux session not found' }

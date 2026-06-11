@@ -198,41 +198,40 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).not.toContain("oldDb||'(none)'")
   })
 
-  test('10c. restart-bot.sh resolves the DB bot profile before bot-registry fallback', () => {
+  test('10c. restart-bot.sh requires the DB bot profile and has no registry fallback', () => {
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
-    const dbLoadIdx = script.indexOf('load_db_profile || true')
-    const registryIdx = script.indexOf('# Try to resolve from registry')
 
-    expect(dbLoadIdx).toBeGreaterThan(-1)
-    expect(registryIdx).toBeGreaterThan(-1)
-    expect(dbLoadIdx).toBeLessThan(registryIdx)
+    expect(script).toContain('load_db_profile')
     expect(script).toContain('FROM agents')
     expect(script).toContain("metadata->>'tmux_session'")
     expect(script).toContain('runtime_engine_preference')
     expect(script).toContain('PROFILE_SOURCE="agents.profile"')
     expect(script).toContain("mcp_servers.aun.enabled=true")
-    expect(script).toContain('refusing registry fallback to avoid drift')
+    expect(script).toContain('DB profile lookup is required')
+    expect(script).toContain('no enabled DB bot profile found')
     expect(script).toContain('build_profile_command "$AGENT_ID" "$SESSION" "$PORT"')
     expect(script).toContain('AGENT_COMMS_RESTART_DRY_RUN')
     expect(script).toContain("-F '|'")
     expect(script).toContain("IFS='|' read -r SESSION PROJECT_DIR AGENT_ID PORT RUNTIME_ENGINE")
     expect(script).toContain('[ -z "${RUNTIME_ENGINE:-}" ]')
-    expect(script).toContain('if [ "$PROFILE_SOURCE" = "agents.profile" ]; then')
     expect(script).toContain('PROJECT_DIR_EXPANDED="$PROJECT_DIR"')
-    expect(script).toContain('PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")')
+    expect(script).not.toContain('bot-registry.compat')
+    expect(script).not.toContain('BOT_REGISTRY')
+    expect(script).not.toContain('PROJECT_DIR_EXPANDED=$(eval echo "$PROJECT_DIR")')
     expect(script).not.toContain("COALESCE(NULLIF(metadata->>'tmux_session', ''), agent_id)")
     expect(script).not.toContain("COALESCE(NULLIF(runtime_engine_preference, ''), runtime, '')")
   })
 
-  test('11. watchdog.sh DEFAULT_CMD does NOT carry AGENT_COM_RUNTIME prefix (dual mode removed)', () => {
-    // Phase C I4: dual mode removed. Restart-phantom-prompt fix
-    // (2026-04-21): `server:agent-comms` removed from DEFAULT_CMD.
+  test('11. watchdog.sh reads DB profiles only and does not use registry commands', () => {
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
-    const line = script.split('\n').find(l => l.trimStart().startsWith('DEFAULT_CMD='))
-    expect(line).toBeDefined()
-    expect(line!).not.toContain('AGENT_COM_RUNTIME')
-    expect(line!).not.toContain('server:agent-comms')
-    expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+--mcp-config/)
+    expect(script).toContain('DB `agents` profiles are the only source of truth')
+    expect(script).toContain('FROM agents')
+    expect(script).toContain("metadata->>'tmux_session'")
+    expect(script).toContain('profile_enabled')
+    expect(script).toContain('restart-bot.sh" "$agent_id"')
+    expect(script).not.toContain('BOT_REGISTRY')
+    expect(script).not.toContain('DEFAULT_CMD')
+    expect(script).not.toContain('dangerously-load-development-channels')
   })
 
   test('12. stdio postConnect registers AGENT_ID → shared discord in discordClients Map', () => {
@@ -267,16 +266,18 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line!).toMatch(/^\s*const\s+DEFAULT_CLAUDE_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
-  test('13b. MCP lifecycle bot inventory reads DB bot profiles before registry compatibility fallback', () => {
+  test('13b. MCP lifecycle bot inventory reads DB bot profiles only', () => {
     const loader = sliceFn(SERVER_SRC, 'loadBotRegistry')
     expect(loader).toMatch(/SELECT\s+agent_id,\s+home_directory,\s+channel_port/i)
     expect(loader).toContain('metadata')
     expect(loader).toContain('COALESCE(profile_enabled, true)')
-    expect(loader).toContain('fileByAgent')
-    expect(loader).toContain('fallback?.command')
+    expect(loader).toContain('database required because agents table is SSOT')
     expect(SERVER_SRC).toContain('mcp_servers.aun.enabled=true')
-    expect(SERVER_SRC).toContain('bot-registry.compat')
     expect(SERVER_SRC).toContain('process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL')
+    expect(SERVER_SRC).not.toContain('bot-registry.compat')
+    expect(SERVER_SRC).not.toContain('loadBotRegistryFile')
+    expect(loader).not.toContain('fileByAgent')
+    expect(loader).not.toContain('fallback?.command')
 
     const handler = SERVER_SRC.slice(SERVER_SRC.indexOf("if (name === 'restart_bot')"), SERVER_SRC.indexOf("if (name === 'cleanup_ports')"))
     expect(handler).toContain('await loadBotRegistry()')

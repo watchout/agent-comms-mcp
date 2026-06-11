@@ -64,6 +64,7 @@ import { planQueueAction, type PlannedQueueAction } from './action-planner'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
+const RESERVED_TEST_AGENT_PREFIXES = ['sd-test-']
 const WAKE_PENDING_PROMPT = 'Call the agent-comms next tool now. Do not call inbox.\n'
 const WAKE_RECEIVED_PROMPT = 'Start processing the agent-comms message you just received. Call the agent-comms processing tool for its queue_id. After completing the work, either send a reply if one is required or call the agent-comms done tool for the same queue_id if no reply is required. Do not stop after processing. Do not call inbox or next.\n'
 
@@ -895,14 +896,35 @@ export class StateDaemon {
   // ── Sweep fetch helpers ────────────────────────────────────────────────────
 
   private isAgentInScope(agentId: string): boolean {
+    if (this.isReservedTestAgent(agentId) && !this.canProcessReservedTestAgents()) return false
     if (this.config.agentIdPrefix && !agentId.startsWith(this.config.agentIdPrefix)) return false
     if (this.config.agentDenylist && this.config.agentDenylist.includes(agentId)) return false
     if (this.config.agentAllowlist && !this.config.agentAllowlist.includes(agentId)) return false
     return true
   }
 
+  private isReservedTestAgent(agentId: string): boolean {
+    return RESERVED_TEST_AGENT_PREFIXES.some((prefix) => agentId.startsWith(prefix))
+  }
+
+  private canProcessReservedTestAgents(): boolean {
+    if (this.config.agentIdPrefix && RESERVED_TEST_AGENT_PREFIXES.some((prefix) => this.config.agentIdPrefix?.startsWith(prefix))) {
+      return true
+    }
+    if (this.config.agentAllowlist?.some((agentId) => this.isReservedTestAgent(agentId))) {
+      return true
+    }
+    return false
+  }
+
   private agentScopeClause(params: unknown[], column: string): string {
     let sql = ''
+    if (!this.canProcessReservedTestAgents()) {
+      for (const prefix of RESERVED_TEST_AGENT_PREFIXES) {
+        params.push(prefix + '%')
+        sql += ` AND ${column} NOT LIKE $${params.length}`
+      }
+    }
     if (this.config.agentIdPrefix) {
       params.push(this.config.agentIdPrefix + '%')
       sql += ` AND ${column} LIKE $${params.length}`

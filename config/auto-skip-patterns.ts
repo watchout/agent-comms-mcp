@@ -85,12 +85,26 @@ export function resetAutoSkipPatternsCache(): void {
   cachedPatterns = null
 }
 
+function isTerminalNoopContinuation(input: AutoSkipMatchInput): boolean {
+  if (input.messageType !== 'report') return false
+  if (!/^Processed queue \d+\.\n\nAcknowledged:/.test(input.content)) return false
+  if (!/\bNo (?:additional|further)\b[\s\S]*\b(?:action|changes)\b[\s\S]*\bcontinuation\b/i.test(input.content)) return false
+  return /\bResidual gates remain unchanged:/i.test(input.content)
+}
+
 export function matchesAutoSkipPattern(input: AutoSkipMatchInput): AutoSkipMatchResult {
   // Bot self-echo: the recipient is the same agent that authored the message.
   // routeInbound already self-skips push, but we additionally tag this so the
   // skipped row's audit trail is explicit rather than silently empty.
   if (input.authorAgentId && input.authorAgentId === input.recipientAgentId) {
     return { matched: true, reason: 'self_echo' }
+  }
+  // Queue continuation reports that explicitly say no further work is
+  // required and leave residual gates unchanged are protocol-close
+  // messages. Treat them as audit-visible terminal rows instead of
+  // actionable work, regardless of which two bots exchanged them.
+  if (isTerminalNoopContinuation(input)) {
+    return { matched: true, reason: 'terminal_noop_continuation' }
   }
   for (const p of getAutoSkipPatterns()) {
     if (p.messageType && p.messageType !== input.messageType) continue

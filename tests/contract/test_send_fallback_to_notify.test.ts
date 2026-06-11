@@ -12,8 +12,8 @@
  * relies on:
  *
  *   T-1 existing reply path → kind: 'claim_present'
- *   T-2 claim expired       → kind: 'fallback', reason: claim_expired
- *                              + p95 latency < 100 ms
+ *   T-2 already closed      → kind: 'already_closed' so stale second
+ *                              sends cannot fallback-notify duplicates
  *   T-3 claim missing       → kind: 'fallback', reason: claim_missing
  *                              + p95 latency < 100 ms
  *   T-4 invalid reply_to    → kind: 'invalid_reply_to' (UUID absent)
@@ -135,24 +135,32 @@ describe('test_send_fallback_to_notify — decideSendFallback decision tree', ()
     }
   })
 
-  test.skip('TODO #338 sub-PR 9 v0.9 schema T-2 (claim expired): claim flipped to status=replied → fallback claim_expired + latency<100ms', async () => {
+  test('T-2 (already closed): claim flipped to status=replied → already_closed + no fallback duplicate', async () => {
     requireDb()
-    // Seed a 'received' claim, then flip to 'replied' to simulate an
-    // already-consumed (expired) claim. The agent has interacted with
-    // this msg before, so reason must be `claim_expired`.
+    // This mirrors the production duplicate: the first reply closed
+    // the row and cleared claimed_by; a second send for the same
+    // reply_to must not silently promote to notify.
     const replyTo = await seedOriginal({ withClaim: 'received' })
+    const repliedWith = randomUUID()
     await client.query(
-      `UPDATE message_queue SET status = 'replied', replied_at = now() WHERE message_id = $1`,
-      [replyTo],
+      `UPDATE message_queue
+          SET status = 'replied',
+              replied_at = now(),
+              replied_with = $2,
+              claimed_by = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL
+        WHERE message_id = $1`,
+      [replyTo, repliedWith],
     )
     const t0 = Date.now()
     const decision = await inTx(tx => decideSendFallback(tx, replyTo, TEST_AGENT))
     const elapsed = Date.now() - t0
-    expect(decision.kind).toBe('fallback')
-    if (decision.kind === 'fallback') {
-      expect(decision.reason).toBe('claim_expired')
+    expect(decision.kind).toBe('already_closed')
+    if (decision.kind === 'already_closed') {
+      expect(decision.status).toBe('replied')
+      expect(decision.repliedWith).toBe(repliedWith)
     }
-    // p95 < 100 ms merge gate (cycle 2 §2 latency assertion).
     expect(elapsed).toBeLessThan(100)
   })
 
