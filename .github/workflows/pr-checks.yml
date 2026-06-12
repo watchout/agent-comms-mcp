@@ -175,7 +175,7 @@ jobs:
             fi
           fi
 
-      - name: Hard gate: no test-skip patterns
+      - name: "Hard gate: no test-skip patterns"
         run: |
           if git diff origin/main...HEAD | grep -qE '^\+.*(\.skip\(|\.only\(|it\.skip|describe\.skip)'; then
             echo "::error::HARD GATE: test skip patterns detected in diff. Remove before merge."
@@ -183,7 +183,7 @@ jobs:
           fi
           echo "No test-skip patterns ✅"
 
-      - name: Hard gate: no console.log in production code
+      - name: "Hard gate: no console.log in production code"
         run: |
           CONSOLE_HITS=$(git diff origin/main...HEAD -- \
             '*.ts' ':!*.test.ts' ':!tests/' \
@@ -193,7 +193,7 @@ jobs:
             echo "$CONSOLE_HITS"
           fi
 
-      - name: Hard gate: no process.stderr.write in new code
+      - name: "Hard gate: no process.stderr.write in new code"
         run: |
           NEW_STDERR=$(git diff origin/main...HEAD -- \
             'core/*.ts' 'adapters/*.ts' ':!*.test.ts' \
