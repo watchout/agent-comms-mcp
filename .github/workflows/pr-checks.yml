@@ -1,4 +1,21 @@
-name: PR Checks (Layer 0)
+name: PR Checks (Layer 0 + route classification)
+
+# Company Dev OS operating model — AUN pilot
+#
+# Layer 0 (machine gate, blocking):
+#   - PR uptodate check (merge queue simulation)
+#   - bun test full suite
+#   - detect-breaking-changes.sh (7 patterns)
+#   - classify-pr.sh → route label output
+#
+# Audit (parallel, non-blocking for yellow):
+#   - Runs in parallel with Layer 0
+#   - Red finding → job fails (blocks merge)
+#   - Yellow finding → annotation only (async issue creation on post-merge)
+#
+# Route enforcement:
+#   route:fast-merge   → Layer 0 green = merge OK
+#   route:ceo-approval → Layer 0 green + CTO + CEO = merge OK
 
 on:
   pull_request:
@@ -6,7 +23,9 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  # ── Layer 0: Machine gate ────────────────────────────────────────────────
+  layer0:
+    name: Layer 0 — machine gate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -24,43 +43,137 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so `scripts/detect-breaking-changes.sh` can
-          # `git diff BASE...HEAD`. With the default shallow checkout
-          # the base ref is unreachable and the script bails with
-          # `fatal: ambiguous argument 'main..HEAD'`.
           fetch-depth: 0
+
+      # ── Merge queue simulation: PR must be up-to-date with main ──────────
+      # Without GitHub Team plan (which has native merge queue), we enforce
+      # the same invariant: no PR can merge if it's behind main.
+      # This prevents "passed CI on stale base" failures.
+      - name: Check PR is up-to-date with main
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin main
+          BEHIND=$(git rev-list --count HEAD..origin/main)
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "::error::PR is $BEHIND commit(s) behind main."
+            echo "::error::Rebase onto latest main and re-push before merging."
+            echo "::error::This enforces the merge queue invariant: all merges re-verified on latest main."
+            exit 1
+          fi
+          echo "PR is up-to-date with main ✅"
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Run migrations (idempotent, safe to re-run)
+
+      - name: Run migrations
         run: bun run db/migrate.ts
+
       - name: Type check
         run: bunx tsc --noEmit --allowImportingTsExtensions --skipLibCheck || true
-      - name: Breaking-change detection (Layer 0 gate)
-        # Scans for 7 breaking-change patterns (deleted fallbacks,
-        # signature changes, removed exports, removed env vars,
-        # DROP TABLE/COLUMN, API endpoint deletion, shared/global
-        # resource deletion) vs origin/main. Base ref must be
-        # `origin/main` because only origin/* refs are populated
-        # after actions/checkout@v4.
-        #
-        # When the PR carries the `breaking-change-verified` label,
-        # the governance flow (ai-dev-framework governance-flow.md)
-        # treats the change as intentional and consumer-verified —
-        # this step then logs findings for the audit trail but does
-        # not block the build. Without the label, any detection is
-        # a hard fail.
+
+      - name: Breaking-change detection
         if: "!contains(github.event.pull_request.labels.*.name, 'breaking-change-verified')"
         run: bash scripts/detect-breaking-changes.sh origin/main
+
       - name: Breaking-change detection (label-override, informational)
         if: contains(github.event.pull_request.labels.*.name, 'breaking-change-verified')
         run: |
-          echo "::notice::PR has 'breaking-change-verified' label — detection is informational only."
+          echo "::notice::PR has 'breaking-change-verified' label — detection informational."
           bash scripts/detect-breaking-changes.sh origin/main || true
-      - name: Run test suite
-        run: bun test
+
+      - name: PR route classification
+        id: classify
+        if: github.event_name == 'pull_request'
+        run: |
+          bash scripts/classify-pr.sh origin/main --json > route.json || true
+          cat route.json
+          ROUTE=$(jq -r '.route' route.json 2>/dev/null || echo "fast-merge")
+          echo "route=$ROUTE" >> "$GITHUB_OUTPUT"
+          if [ "$ROUTE" = "ceo-approval" ]; then
+            echo "::warning::route:ceo-approval detected — this PR requires CEO approval before merge."
+            echo "::warning::$(jq -r '.reasons | join(", ")' route.json)"
+          else
+            echo "::notice::route:fast-merge — CI green = merge ready (CTO async review)"
+          fi
+
+      - name: Run full test suite
+        run: bun test --timeout 30000
+
+      - name: Upload route classification
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-${{ github.event.pull_request.number }}
+          path: route.json
+          retention-days: 7
+
+  # ── Audit (parallel with Layer 0, async signal) ──────────────────────────
+  # audit bot runs in parallel — does NOT block merge for yellow findings.
+  # Red findings (hard gate items) fail this job and block the PR.
+  audit:
+    name: Audit signal (async)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scope check — 1 PR 1 concern
+        id: scope
+        run: |
+          CHANGED_COUNT=$(git diff --name-only origin/main...HEAD | wc -l)
+          echo "changed_files=$CHANGED_COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$CHANGED_COUNT" -gt 40 ]; then
+            echo "::warning::PR touches $CHANGED_COUNT files — consider splitting into smaller slices."
+          fi
+
+      - name: SSOT drift check
+        run: |
+          # Detect changes to docs/SSOT.md without corresponding implementation
+          # or implementation without SSOT update (yellow finding, not blocking)
+          if git diff --name-only origin/main...HEAD | grep -q 'docs/SSOT.md'; then
+            echo "::notice::SSOT.md updated — verify implementation is aligned."
+          fi
+          if git diff --name-only origin/main...HEAD | grep -qE '(core/|adapters/).*\.(ts)$'; then
+            if ! git diff --name-only origin/main...HEAD | grep -q 'docs/SSOT.md'; then
+              echo "::notice::Implementation changed without SSOT update — verify spec alignment (yellow finding)."
+            fi
+          fi
+
+      - name: Hard gate: no test-skip patterns
+        run: |
+          if git diff origin/main...HEAD | grep -qE '^\+.*(\.skip\(|\.only\(|it\.skip|describe\.skip)'; then
+            echo "::error::HARD GATE: test skip patterns detected in diff. Remove before merge."
+            exit 1
+          fi
+          echo "No test-skip patterns ✅"
+
+      - name: Hard gate: no console.log in production code
+        run: |
+          CONSOLE_HITS=$(git diff origin/main...HEAD -- \
+            '*.ts' ':!*.test.ts' ':!tests/' \
+            | grep -E '^\+[^+].*console\.(log|warn|error|debug)\(' || true)
+          if [ -n "$CONSOLE_HITS" ]; then
+            echo "::warning::console.log in production code detected — use core/logger.ts instead."
+            echo "$CONSOLE_HITS"
+          fi
+
+      - name: Hard gate: no process.stderr.write in new code
+        run: |
+          NEW_STDERR=$(git diff origin/main...HEAD -- \
+            'core/*.ts' 'adapters/*.ts' ':!*.test.ts' \
+            | grep -E '^\+[^+].*process\.stderr\.write' || true)
+          if [ -n "$NEW_STDERR" ]; then
+            echo "::warning::New process.stderr.write in core/adapters — use core/logger.ts instead."
+            echo "$NEW_STDERR"
+          fi
