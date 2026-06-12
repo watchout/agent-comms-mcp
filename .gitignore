@@ -6,20 +6,18 @@ config.json
 .mcp.json.bak
 logs/
 *.log
-.claude/
-!.claude/
+# Bot-local workspace config — never track (hooks/settings auto-apply to every
+# session opening this repo; tracking them is an undeclared behavior change).
+# Only .claude/agents/ role definitions are repo content.
+.claude/*
 !.claude/agents/
+.claude/agents/*
 !.claude/agents/company-dev-os-spec.md
 !.claude/agents/company-dev-os-check.md
+.codex/
+.framework/active-skill.json
 agent-com-dev-state.md
 dist/
-
-# Local-only .claude artifacts (settings backups, hook backups, worktrees)
-.claude/settings.json.*
-.claude/hooks/*.envvar.*
-.claude/hooks/*.pre-restore.*
-.claude/worktrees/
-
 # SQLite test DB
 agent-com.db
 agent-com.db-*
