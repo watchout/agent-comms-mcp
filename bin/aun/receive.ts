@@ -496,7 +496,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
              LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
             WHERE mq.id::text = $1 AND mq.agent_id = $2
             LIMIT 1
-            FOR UPDATE`,
+            FOR UPDATE OF mq`,
           [targetQueueId, plan.env.AGENT_ID],
         )
 
