@@ -4687,6 +4687,9 @@ const daemonTransports = new Map<string, SSEServerTransport>()
 const EXPERIMENTAL_HTTP_MCP = process.env.AGENT_COMMS_EXPERIMENTAL_HTTP_MCP === '1'
 const httpMcpTransports = new Map<string, StreamableHTTPServerTransport>()
 const httpMcpBots = new Map<string, string>()
+// Spike B (ADR-029R): same-bot reconnect must close/replace the prior
+// connection deterministically — one live HTTP MCP session per bot_id.
+const httpMcpSessionByBot = new Map<string, string>()
 let httpServer: ReturnType<typeof createServer> | null = null
 
 if (MULTI_BOT_MODE) {
@@ -4819,8 +4822,20 @@ if (MULTI_BOT_MODE) {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
+            // Same-bot reconnect: deterministically close/replace the prior
+            // session (Spike B acceptance; mirrors the SSE path's graceful
+            // reconnect).
+            const priorSid = httpMcpSessionByBot.get(botId)
+            if (priorSid && priorSid !== sid) {
+              const prior = httpMcpTransports.get(priorSid)
+              httpMcpTransports.delete(priorSid)
+              httpMcpBots.delete(priorSid)
+              prior?.close().catch(() => {})
+              serverLog.info('http_mcp.session_replaced', { bot_id: botId, prior_session_id: priorSid, session_id: sid })
+            }
             httpMcpTransports.set(sid, transport)
             httpMcpBots.set(sid, botId)
+            httpMcpSessionByBot.set(botId, sid)
             serverLog.info('http_mcp.session_initialized', { bot_id: botId, session_id: sid })
           },
         })
@@ -4829,6 +4844,7 @@ if (MULTI_BOT_MODE) {
           if (sid) {
             httpMcpTransports.delete(sid)
             httpMcpBots.delete(sid)
+            if (httpMcpSessionByBot.get(botId) === sid) httpMcpSessionByBot.delete(botId)
             serverLog.info('http_mcp.session_closed', { bot_id: botId, session_id: sid })
           }
         }
