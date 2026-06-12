@@ -4765,116 +4765,12 @@ async function resolveBearerIdentity(token: string): Promise<{ agent_id: string;
     return null
   }
 }
-let httpServer: ReturnType<typeof createServer> | null = null
-
-if (MULTI_BOT_MODE) {
-  httpServer = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
-
-    // OAuth bypass endpoints (Claude Code SSE MCP workaround)
-    // Claude Code forces OAuth discovery on SSE connections. These dummy
-    // endpoints satisfy the OAuth flow without actual authentication.
-    if (url.pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({
-        issuer: `http://localhost:${SSE_PORT}`,
-        authorization_endpoint: `http://localhost:${SSE_PORT}/oauth/authorize`,
-        token_endpoint: `http://localhost:${SSE_PORT}/oauth/token`,
-        response_types_supported: ['code'],
-        grant_types_supported: ['authorization_code'],
-      }))
-      return
-    }
-
-    if (url.pathname === '/oauth/authorize' && req.method === 'GET') {
-      const redirectUri = url.searchParams.get('redirect_uri') ?? ''
-      const state = url.searchParams.get('state') ?? ''
-      const clientId = url.searchParams.get('client_id') ?? ''
-      const codeChallenge = url.searchParams.get('code_challenge') ?? ''
-      const codeChallengeMethod = url.searchParams.get('code_challenge_method') ?? ''
-
-      if (isOAuthPersistenceEnabled()) {
-        const db = await tryGetDb()
-        if (db && clientId && codeChallenge && codeChallengeMethod === 'S256') {
-          const client = await lookupClient(db, clientId)
-          if (client && (client.redirect_uris.includes(redirectUri) || redirectUri.startsWith('http://localhost') || redirectUri.startsWith('http://127.0.0.1'))) {
-            try {
-              const code = await issueAuthorizationCode(db, {
-                client_id: clientId,
-                redirect_uri: redirectUri,
-                scope: client.scope,
-                code_challenge: codeChallenge,
-                subject: AGENT_ID,
-              })
-              res.writeHead(302, { Location: `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}` })
-              res.end()
-              return
-            } catch (err) {
-              serverLog.error('oauth.authorize_failed', { client_id: clientId, err: String(err) })
-            }
-          }
-        }
-      }
-
-      // Fallback: bypass for local-no-auth clients
-      res.writeHead(302, { Location: `${redirectUri}?code=local-no-auth&state=${encodeURIComponent(state)}` })
-      res.end()
-      return
-    }
-
-    if (url.pathname === '/oauth/token' && req.method === 'POST') {
-      if (isOAuthPersistenceEnabled()) {
-        const db = await tryGetDb()
-        const bodyChunks: Buffer[] = []
-        await new Promise<void>((resolve) => {
-          req.on('data', (c: Buffer) => bodyChunks.push(c))
-          req.on('end', resolve)
-        })
-        const body = new URLSearchParams(Buffer.concat(bodyChunks).toString())
-        const grantType = body.get('grant_type')
-        const code = body.get('code') ?? ''
-        const clientId = body.get('client_id') ?? ''
-        const redirectUri = body.get('redirect_uri') ?? ''
-        const codeVerifier = body.get('code_verifier') ?? ''
-
-        if (db && grantType === 'authorization_code' && code !== 'local-no-auth' && codeVerifier) {
-          try {
-            const rawToken = await exchangeCodeForToken(db, { code, client_id: clientId, redirect_uri: redirectUri, code_verifier: codeVerifier })
-            if (rawToken) {
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ access_token: rawToken, token_type: 'Bearer', expires_in: 3600 }))
-              return
-            }
-          } catch (err) {
-            serverLog.error('oauth.token_exchange_failed', { client_id: clientId, err: String(err) })
-          }
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'invalid_grant' }))
-          return
-        }
-      }
-
-      // Fallback: bypass for local-no-auth flow
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({
-        access_token: 'local-no-auth',
-        token_type: 'Bearer',
-        expires_in: 999999999,
-      }))
-      return
-    }
-
-    // Health endpoint
-    if (url.pathname === '/health' && req.method === 'GET') {
-      if (!authenticateRequest(req, res)) return
-      const health = getHealthStatus()
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(health))
-      return
-    }
-
-    // Streamable HTTP MCP endpoint (ADR-029R, experimental flag-gated)
-    if (url.pathname === '/mcp' && EXPERIMENTAL_HTTP_MCP) {
+/**
+ * ADR-029R — Streamable HTTP MCP endpoint handler (flag-gated by caller).
+ * Extracted from the multi-bot http handler so the SSE section stays
+ * compact; identity binding semantics are documented at the maps above.
+ */
+async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
       const existingSessionId = req.headers['mcp-session-id'] as string | undefined
 
       // Established session: route to its transport (POST/GET/DELETE all flow
@@ -5002,6 +4898,120 @@ if (MULTI_BOT_MODE) {
       // Non-POST request without an established session: nothing to serve.
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'no session — POST an initialize request to create one' }))
+      return
+}
+
+let httpServer: ReturnType<typeof createServer> | null = null
+
+if (MULTI_BOT_MODE) {
+  httpServer = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+
+    // OAuth bypass endpoints (Claude Code SSE MCP workaround)
+    // Claude Code forces OAuth discovery on SSE connections. These dummy
+    // endpoints satisfy the OAuth flow without actual authentication.
+    if (url.pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        issuer: `http://localhost:${SSE_PORT}`,
+        authorization_endpoint: `http://localhost:${SSE_PORT}/oauth/authorize`,
+        token_endpoint: `http://localhost:${SSE_PORT}/oauth/token`,
+        response_types_supported: ['code'],
+        grant_types_supported: ['authorization_code'],
+      }))
+      return
+    }
+
+    if (url.pathname === '/oauth/authorize' && req.method === 'GET') {
+      const redirectUri = url.searchParams.get('redirect_uri') ?? ''
+      const state = url.searchParams.get('state') ?? ''
+      const clientId = url.searchParams.get('client_id') ?? ''
+      const codeChallenge = url.searchParams.get('code_challenge') ?? ''
+      const codeChallengeMethod = url.searchParams.get('code_challenge_method') ?? ''
+
+      if (isOAuthPersistenceEnabled()) {
+        const db = await tryGetDb()
+        if (db && clientId && codeChallenge && codeChallengeMethod === 'S256') {
+          const client = await lookupClient(db, clientId)
+          if (client && (client.redirect_uris.includes(redirectUri) || redirectUri.startsWith('http://localhost') || redirectUri.startsWith('http://127.0.0.1'))) {
+            try {
+              const code = await issueAuthorizationCode(db, {
+                client_id: clientId,
+                redirect_uri: redirectUri,
+                scope: client.scope,
+                code_challenge: codeChallenge,
+                subject: AGENT_ID,
+              })
+              res.writeHead(302, { Location: `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}` })
+              res.end()
+              return
+            } catch (err) {
+              serverLog.error('oauth.authorize_failed', { client_id: clientId, err: String(err) })
+            }
+          }
+        }
+      }
+
+      // Fallback: bypass for local-no-auth clients
+      res.writeHead(302, { Location: `${redirectUri}?code=local-no-auth&state=${encodeURIComponent(state)}` })
+      res.end()
+      return
+    }
+
+    if (url.pathname === '/oauth/token' && req.method === 'POST') {
+      if (isOAuthPersistenceEnabled()) {
+        const db = await tryGetDb()
+        const bodyChunks: Buffer[] = []
+        await new Promise<void>((resolve) => {
+          req.on('data', (c: Buffer) => bodyChunks.push(c))
+          req.on('end', resolve)
+        })
+        const body = new URLSearchParams(Buffer.concat(bodyChunks).toString())
+        const grantType = body.get('grant_type')
+        const code = body.get('code') ?? ''
+        const clientId = body.get('client_id') ?? ''
+        const redirectUri = body.get('redirect_uri') ?? ''
+        const codeVerifier = body.get('code_verifier') ?? ''
+
+        if (db && grantType === 'authorization_code' && code !== 'local-no-auth' && codeVerifier) {
+          try {
+            const rawToken = await exchangeCodeForToken(db, { code, client_id: clientId, redirect_uri: redirectUri, code_verifier: codeVerifier })
+            if (rawToken) {
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ access_token: rawToken, token_type: 'Bearer', expires_in: 3600 }))
+              return
+            }
+          } catch (err) {
+            serverLog.error('oauth.token_exchange_failed', { client_id: clientId, err: String(err) })
+          }
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid_grant' }))
+          return
+        }
+      }
+
+      // Fallback: bypass for local-no-auth flow
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        access_token: 'local-no-auth',
+        token_type: 'Bearer',
+        expires_in: 999999999,
+      }))
+      return
+    }
+
+    // Health endpoint
+    if (url.pathname === '/health' && req.method === 'GET') {
+      if (!authenticateRequest(req, res)) return
+      const health = getHealthStatus()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(health))
+      return
+    }
+
+    // Streamable HTTP MCP endpoint (ADR-029R, experimental flag-gated)
+    if (url.pathname === '/mcp' && EXPERIMENTAL_HTTP_MCP) {
+      await handleHttpMcpRequest(req, res, url)
       return
     }
 
