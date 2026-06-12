@@ -1,0 +1,21 @@
+{
+  "repo_id": "watchout/agent-comms-mcp",
+  "repo_type": "mcp-core",
+  "runtime": true,
+  "protected_surfaces": ["routing", "agent-queue", "mcp-contract", "auth"],
+  "allowed_tier": "all",
+  "ci_gate_0": {
+    "required_checks": ["test", "lint", "typecheck"],
+    "integration_commands": ["npm test -- --testPathPattern=integration"],
+    "exact_head_required": true
+  },
+  "complete_evidence": {
+    "types": ["pr-merged", "deploy-confirmed", "health-check", "smoke-test", "runtime-identity"],
+    "health_endpoint": "/health",
+    "smoke_command": "npm run smoke"
+  },
+  "audit_route": "required",
+  "rollback_owner": "codex-cto",
+  "implementation_bot": "agent-com-dev",
+  "aun_pilot": "watchout/iyasaka-arc#722"
+}
