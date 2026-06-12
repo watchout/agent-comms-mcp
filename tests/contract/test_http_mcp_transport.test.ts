@@ -197,3 +197,131 @@ describe('ADR-029R Spike A — Streamable HTTP MCP transport', () => {
     expect(res.status).toBe(400)
   })
 })
+
+// ── ARC CI safety gates (separate server boots with different env) ──────────
+
+function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
+  return spawn('bun', ['run', 'server.ts'], {
+    cwd: `${import.meta.dir}/../..`,
+    env: {
+      ...process.env,
+      AGENT_ID: `${PREFIX}-stdio2`,
+      AGENT_COM_EXPECTED_AGENT_ID: `${PREFIX}-stdio2`,
+      AGENT_COMMS_PORT: String(port),
+      WEBHOOK_PORT: String(port + 1000),
+      AGENT_COM_PG_NOTIFY: 'false',
+      AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
+      AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '1',
+      DATABASE_URL,
+      DISCORD_BOT_TOKEN: '',
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+}
+
+async function waitHealth(port: number, headers: Record<string, string> = {}): Promise<void> {
+  const deadline = Date.now() + 15000
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { headers })
+      if (res.ok) return
+    } catch {}
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  throw new Error('server /health never became ready')
+}
+
+function initBody(): string {
+  return JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'gate-test', version: '0' } },
+  })
+}
+
+describe('ARC gate — /mcp is off by default (no experimental flag)', () => {
+  const PORT = HTTP_PORT + 2
+  let proc: ChildProcess | null = null
+
+  beforeAll(async () => {
+    // Note: AGENT_COMMS_EXPERIMENTAL_HTTP_MCP deliberately ABSENT.
+    proc = bootServerWith({}, PORT)
+    await waitHealth(PORT)
+  }, 30000)
+
+  afterAll(() => {
+    proc?.kill('SIGTERM')
+  })
+
+  test('initialize POST to /mcp does not reach the MCP endpoint when the flag is off', async () => {
+    const res = await fetch(`http://127.0.0.1:${PORT}/mcp?bot_id=${BOT_B}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: initBody(),
+    })
+    // The route must not exist: anything but an MCP initialize success is
+    // acceptable, and it must not create a session.
+    expect(res.status).toBe(404)
+    expect(res.headers.get('mcp-session-id')).toBeNull()
+  })
+})
+
+describe('ARC gate — bearer auth enforced on /mcp (AUTH_SKIP_LOCALHOST=false)', () => {
+  const PORT = HTTP_PORT + 4
+  const TOKEN = `gate-test-token-${process.pid}`
+  let proc: ChildProcess | null = null
+
+  beforeAll(async () => {
+    proc = bootServerWith({
+      AGENT_COMMS_EXPERIMENTAL_HTTP_MCP: '1',
+      AUTH_TOKEN: TOKEN,
+      AUTH_SKIP_LOCALHOST: 'false',
+    }, PORT)
+    await waitHealth(PORT, { Authorization: `Bearer ${TOKEN}` })
+  }, 30000)
+
+  afterAll(() => {
+    proc?.kill('SIGTERM')
+  })
+
+  test('missing bearer → 401, no session created', async () => {
+    const res = await fetch(`http://127.0.0.1:${PORT}/mcp?bot_id=${BOT_B}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: initBody(),
+    })
+    expect(res.status).toBe(401)
+    expect(res.headers.get('mcp-session-id')).toBeNull()
+  })
+
+  test('wrong bearer → 401', async () => {
+    const res = await fetch(`http://127.0.0.1:${PORT}/mcp?bot_id=${BOT_B}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer wrong-token',
+      },
+      body: initBody(),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  test('valid bearer → initialize succeeds and tools are listable', async () => {
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${PORT}/mcp?bot_id=${BOT_B}`),
+      { requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } } },
+    )
+    const client = new McpClient({ name: 'gate-auth', version: '0.0.1' })
+    await client.connect(transport)
+    try {
+      const tools = await client.listTools()
+      expect(tools.tools.map((t) => t.name)).toContain('bot_status')
+    } finally {
+      await transport.terminateSession().catch(() => {})
+      await client.close()
+    }
+  })
+})
