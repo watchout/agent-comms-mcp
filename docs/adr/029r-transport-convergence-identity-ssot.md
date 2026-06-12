@@ -89,15 +89,37 @@ carry no identity.
   `<workspace>/.agent/identity.json` → `{ "agent_id": "...", "project": "..." }`.
 - One shared resolver (library, consumed by agent-comms AND agent-memory and
   future MCPs) with strict precedence:
-  1. explicit env override (`AGENT_ID`) — operator action, MUST be audit-logged
+  1. explicit operator override — see override discipline below
   2. workspace identity declaration
   3. **FAIL** — there is no default identity
-- At startup the server cross-checks the resolved identity against
-  `agent_workspaces` / `agent_workspace_bindings` (already present in the DB)
-  and fails closed on mismatch or missing binding.
+- **Override discipline (ARC review condition 1).** A plain `AGENT_ID` env
+  var — including anything inherited from a global config layer — is NOT an
+  override and fails closed in fleet/protected mode. A valid override
+  requires an explicit operator marker
+  (`AGENT_ID_OVERRIDE_REASON` + `AGENT_ID_OVERRIDE_ACTOR`), is disabled by
+  default in fleet/protected mode, and every use is audit-logged with reason
+  and actor. (The 2026-06-12 incident's inherited global
+  `AGENT_ID="codex-cto"` carried no marker and would have failed closed.)
+- **Workspace cross-check precision (ARC review condition 2).** The check is:
+  canonicalize the workspace path via `realpath` → resolve `workspace_id`
+  from `agent_workspaces(org_id, local_path)` → require an **active**
+  `agent_workspace_bindings(agent_id, workspace_id)` row. `identity.json` is
+  a declaration, never authority: it cannot bypass the binding check and
+  cannot create a binding. A copied workspace (same identity.json, different
+  realpath) therefore fails closed.
 - `AGENT_MEMORY_AGENT_ID` becomes a deprecated alias of the same resolver
   (cross-repo change with agent-memory; the global `="aun"` default is removed
   the same way the agent-comms global default was removed on 2026-06-12).
+
+#### Identity negative cases (ARC review condition 3 — binding for Spike A/C and the resolver test suite; all MUST fail closed)
+
+| case | expected |
+|---|---|
+| missing `identity.json` and no valid override | FAIL (no identity) |
+| declared agent_id not present in `agents` | FAIL |
+| no active `agent_workspace_bindings` row for (agent_id, workspace_id) | FAIL |
+| copied workspace: identity.json present but realpath ≠ bound `local_path` | FAIL |
+| env `AGENT_ID` present without override marker (incl. global-config inheritance) | FAIL |
 
 ### Phase 2 — auth-subject binding (daemon era; ARC frozen requirement 2)
 
