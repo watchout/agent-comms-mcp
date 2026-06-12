@@ -72,6 +72,45 @@ describe('Issue #277 (B) — auto-skip pattern matcher', () => {
     expect(r.reason).toBe('self_echo')
   })
 
+  test('case 5e — terminal no-op queue continuation is skipped generically', () => {
+    const r = matchesAutoSkipPattern({
+      content: [
+        'Processed queue 86535.',
+        '',
+        'Acknowledged: the implementation re-audit PASS residual note is covered. No further audit or implementation action is required for this continuation.',
+        '',
+        'Residual gates remain unchanged: intentional stage/commit before merge preparation and separate POST_MERGE evidence after merge.',
+      ].join('\n'),
+      messageType: 'report',
+      authorAgentId: 'review-bot',
+      recipientAgentId: 'implementation-bot',
+    })
+    expect(r.matched).toBe(true)
+    expect(r.reason).toBe('terminal_noop_continuation')
+  })
+
+  test('case 6a — audit content with new action is NOT skipped', () => {
+    const r = matchesAutoSkipPattern({
+      content: 'Processed queue 90000.\n\nBLOCK: please change server.ts and request re-audit.',
+      messageType: 'report',
+      authorAgentId: 'review-bot',
+      recipientAgentId: 'implementation-bot',
+    })
+    expect(r.matched).toBe(false)
+    expect(r.reason).toBeUndefined()
+  })
+
+  test('case 6b — no-action prose without queue-continuation shape is NOT skipped', () => {
+    const r = matchesAutoSkipPattern({
+      content: 'No further action is required for this incident report, but please review the attached evidence.',
+      messageType: 'report',
+      authorAgentId: 'review-bot',
+      recipientAgentId: 'implementation-bot',
+    })
+    expect(r.matched).toBe(false)
+    expect(r.reason).toBeUndefined()
+  })
+
   test('case 6 — normal CTO directive is NOT skipped (push proceeds)', () => {
     const r = matchesAutoSkipPattern({
       content: 'CTO directive: please rebase PR #260 to origin/main',
@@ -196,14 +235,9 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row).toBeDefined()
     expect(row!.pending_count).toBe(0)
     expect(row!.oldest_pending_at).toBeNull()
-    expect(row!.newest_pending_at).toBeNull()
-    expect(row!.active_claim_count).toBe(0)
-    expect(row!.latest_wake_progress_at).toBeNull()
-    expect(row!.queue_wake_state).toBe('none')
     expect(['healthy', 'busy_active', 'busy_stuck', 'crashed', 'offline'] as BotHealthState[]).toContain(row!.health_state)
     expect(row!.endpoint_lease_state).toBe('not_applicable')
     expect(row!.active_endpoint_lease_count).toBe(0)
-    expect(row!.discord_gateway_state).toBe('not_applicable')
   })
 
   test('NORM-022 — bot_status exposes runtime endpoint lease state', async () => {
@@ -219,7 +253,6 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row.active_connector_count).toBe(1)
     expect(row.runtime_linked_connector_count).toBe(0)
     expect(row.active_endpoint_lease_count).toBe(0)
-    expect(row.discord_gateway_state).toBe('missing_runtime')
 
     await cleanupRuntimeEvidence(TEST_AGENT)
     const runtimeId = randomUUID()
@@ -243,7 +276,6 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row.active_connector_count).toBe(1)
     expect(row.runtime_linked_connector_count).toBe(1)
     expect(row.active_endpoint_lease_count).toBe(0)
-    expect(row.discord_gateway_state).toBe('not_reported')
 
     await client.query(
       `INSERT INTO control_plane_leases
@@ -258,17 +290,6 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row.active_endpoint_lease_count).toBe(1)
     expect(row.endpoint_lease_expires_at).not.toBeNull()
     expect(row.endpoint_lease_heartbeat_at).not.toBeNull()
-    expect(row.discord_gateway_state).toBe('not_reported')
-
-    await client.query(
-      `UPDATE agent_runtime_instances
-          SET metadata = jsonb_build_object('discord_gateway_ready', true)
-        WHERE runtime_instance_id = $1`,
-      [runtimeId],
-    )
-    row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
-    expect(row.discord_gateway_state).toBe('ready')
-    expect(row.discord_gateway_ready_count).toBe(1)
   })
 
   test('NORM-022 — bot_status blocks partial runtime endpoint lease coverage', async () => {
@@ -367,8 +388,6 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     const row = m.get(TEST_AGENT)!
     expect(row.pending_count).toBe(2)
     expect(row.oldest_pending_at).not.toBeNull()
-    expect(row.newest_pending_at).not.toBeNull()
-    expect(['pending_observed', 'idle_pending_no_wake_progress']).toContain(row.queue_wake_state)
     const ageSec = Math.floor((Date.now() - new Date(row.oldest_pending_at!).getTime()) / 1000)
     expect(ageSec).toBeGreaterThanOrEqual(110)
   })

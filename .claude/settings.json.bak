@@ -1,0 +1,198 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-code-gate.sh\"",
+            "statusMessage": "Pre-Code Gate check..."
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-tracker.sh\"",
+            "statusMessage": "Tracking skill activation..."
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/aun-pre-tool-use-inbox-gate.sh\"",
+            "statusMessage": "Inbox gate check..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/.claude/hooks/boris-block-dangerous-git.sh",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__agent-comms__send|mcp__agent-comms__notify",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/.claude/hooks/spec-read-before-question.sh --agent-id agent-com-dev",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__agent-comms__send|mcp__agent-comms__notify",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/.claude/hooks/no-time-constraints.sh --agent-id agent-com-dev",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/framework-runner.sh\" 2>/dev/null || true"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/channel-routing.sh\" 2>/dev/null || true"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/Developer/agent-comms-mcp/.claude/hooks/auto-next.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/aun-session-start-drain.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/aun-session-start-self-kick.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "DATABASE_URL=postgresql:///agent_comms?host=/tmp AGENT_MEMORY_AGENT_ID=agent-com-dev AGENT_MEMORY_PROJECT=agent-comms-mcp AGENT_MEMORY_BOOT_MODE=restart_pack AGENT_MEMORY_CAPTURE_MODE=raw AGENT_MEMORY_TAG_CAPTURE=0 AGENT_MEMORY_BOOT_CATCH_UP=0 AGENT_MEMORY_INDEXER_MODE=rules bash /Users/yuji/Developer/agent-memory/scripts/boot-hook.sh 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/aun-claim-close-enforcement.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/.claude/hooks/boris-test-on-stop.sh",
+            "timeout": 35000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash(gh issue close *)|Bash(gh pr create *)|Bash(gh pr merge *)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-task.sh\" 2>/dev/null || true"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/.claude/hooks/boris-lint-after-edit.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/yuji/Developer/agent-comms-mcp/.claude/hooks/auto-next.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "DATABASE_URL=postgresql:///agent_comms?host=/tmp AGENT_MEMORY_AGENT_ID=agent-com-dev AGENT_MEMORY_PROJECT=agent-comms-mcp AGENT_MEMORY_HOST=claude bash /Users/yuji/Developer/agent-memory/scripts/context-health-hook.sh 2>/dev/null || true"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "DATABASE_URL=postgresql:///agent_comms?host=/tmp AGENT_MEMORY_AGENT_ID=agent-com-dev AGENT_MEMORY_PROJECT=agent-comms-mcp AGENT_MEMORY_BOOT_MODE=restart_pack AGENT_MEMORY_CAPTURE_MODE=raw AGENT_MEMORY_TAG_CAPTURE=0 AGENT_MEMORY_BOOT_CATCH_UP=0 AGENT_MEMORY_INDEXER_MODE=rules bash /Users/yuji/Developer/agent-memory/scripts/boot-hook.sh 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

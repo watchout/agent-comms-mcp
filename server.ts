@@ -4425,6 +4425,10 @@ function isPidOrphan(pid: string): boolean {
   }
 }
 
+function isProtectedInfrastructurePort(port: number): boolean {
+  return port === 5432 || port === 5433
+}
+
 function killPidsOnPort(port: number, excludeSelf = true): number {
   if (isProtectedInfrastructurePort(port)) {
     console.warn(`agent-comms: refusing protected infrastructure port cleanup request: ${port}`)

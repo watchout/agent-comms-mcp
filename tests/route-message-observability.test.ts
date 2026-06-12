@@ -386,6 +386,32 @@ describe('T7: missing-mention alert routing + @everyone broadcast', () => {
     expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b', 'agent-c'])
   })
 
+  test('emergency with explicit mention routes only to the mentioned agent', () => {
+    const channel: ChannelInfo = {
+      channelId: 'ch-1',
+      members: ['agent-a', 'agent-b', 'agent-c'],
+      type: 'channel',
+      primary: null,
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-c', agentType: 'dev', observerMode: false, discordId: null },
+    ]
+    const msg = {
+      authorAgentId: 'aun',
+      authorIsBot: true,
+      content: 'P0 targeted emergency',
+      mentions: ['agent-b'],
+      messageType: 'emergency',
+    }
+
+    const result = routeMessage(msg, channel, agents, 'inbound')
+    expect(result.pushTargets).toEqual(['agent-b'])
+    expect(result.dropTargets['agent-a']).toBe('NOT_MENTIONED')
+    expect(result.dropTargets['agent-c']).toBe('NOT_MENTIONED')
+  })
+
   test('@all alias still works (regression)', () => {
     const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
     const agents: AgentInfo[] = [

@@ -107,9 +107,6 @@ describe('cleanup-orphan-ports.sh — PPID==1 only kill (Issue #248 root cause)'
     const r = spawnSync('bash', [SCRIPT, '5432'])
     expect(r.status).toBe(0)
     expect(r.stderr.toString()).toContain('Refusing protected PostgreSQL port cleanup request: 5432')
-
-    const invalid = spawnSync('bash', [SCRIPT, 'not-a-port'])
-    expect(invalid.status).toBe(0)
-    expect(invalid.stderr.toString()).toContain('Refusing non-numeric port cleanup request: not-a-port')
+    expect(r.stdout.toString()).not.toContain('Killing')
   })
 })

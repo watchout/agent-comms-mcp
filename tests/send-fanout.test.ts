@@ -78,6 +78,33 @@ describe('fanoutToRecipients — happy path', () => {
     expect(payload.message_type).toBe('approval')
     expect(payload.source).toBe('cli-notify')
   })
+
+  test('auto-skips terminal no-op continuation instead of enqueuing actionable work', async () => {
+    const calls: Array<{ sql: string; params: any[] }> = []
+    const db = makeDb(async (sql, params) => {
+      calls.push({ sql, params })
+      return { rows: [{ id: 1 }] }
+    })
+    const content = [
+      'Processed queue 86535.',
+      '',
+      'Acknowledged: the implementation re-audit PASS residual note is covered. No further audit or implementation action is required for this continuation.',
+      '',
+      'Residual gates remain unchanged: intentional stage/commit before merge preparation and separate POST_MERGE evidence after merge.',
+    ].join('\n')
+    const res = await fanoutToRecipients(db, {
+      messageId: 'msg-terminal-noop',
+      channelId: 'ch-1',
+      authorId: 'review-bot',
+      content,
+      recipients: ['implementation-bot'],
+      messageType: 'report',
+    })
+    expect(res.inserted).toEqual(['implementation-bot'])
+    expect(calls[0].sql).toContain('status, failed_reason, done_at')
+    expect(calls[0].sql).toContain("'skipped'")
+    expect(calls[0].params[3]).toBe('AUTO_SKIP_PATTERN:terminal_noop_continuation')
+  })
 })
 
 describe('fanoutToRecipients — dedup via RETURNING empty', () => {

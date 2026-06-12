@@ -55,11 +55,6 @@ Residual note from audit: implementation is still in uncommitted working-tree
 state, including new untracked files. Merge preparation must stage and commit
 intentionally. POST_MERGE evidence is still required separately.
 
-Merge preparation on 2026-05-29 moved the audited implementation onto clean PR
-branch `codex/norm-022-slice1-pr` from `origin/main` after the DB profile SSOT
-hotfix merged. The original dirty local branch remains untouched as audit
-source evidence; this branch contains the intentionally staged NORM-022 slice.
-
 ## Files Changed
 
 ```text
@@ -74,12 +69,6 @@ tests/contract/test_routing_v3_stage_a.test.ts
 tests/norm-022-runtime-endpoint-lease.test.ts
 tests/spec-enforcement/norm-022-server-gates.test.ts
 docs/operations/norm-022-implementation-audit-request.md
-docs/plans/norm-022-runtime-endpoint-lease-impl-plan.md
-docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md
-docs/SPEC-INDEX.md
-docs/design/aun-normalization-roadmap.md
-docs/design/aun-normalization-wbs.md
-docs/operations/agent-role-routing-map.md
 ```
 
 ## Frozen Fixtures And Regressions

@@ -7,6 +7,10 @@ config.json
 logs/
 *.log
 .claude/
+!.claude/
+!.claude/agents/
+!.claude/agents/company-dev-os-spec.md
+!.claude/agents/company-dev-os-check.md
 agent-com-dev-state.md
 dist/
 
