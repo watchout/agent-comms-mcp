@@ -46,6 +46,8 @@ export interface UnifiedMessage {
   id: string
   /** Channel identifier */
   channel: string
+  /** Thread identifier, when the message originated in a platform thread */
+  thread?: string
   /** Sender info */
   author: {
     id: string

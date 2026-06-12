@@ -651,7 +651,8 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     if (this.messageCallback) {
       const unified: UnifiedMessage = {
         id: msg.id,
-        channel: msg.channelId,
+        channel: parentChannelId ?? msg.channelId,
+        thread: msg.channel.isThread() ? msg.channelId : undefined,
         author: {
           id: msg.author.id,
           name: msg.author.username,

@@ -80,3 +80,38 @@ discovery → design → implement → review
 3. 全Gate passed なら実装開始。未通過なら報告。
 
 ---
+
+<!-- company-dev-os-claude-runtime:start -->
+# Company Dev OS Claude Runtime Overlay
+
+This repository participates in IYASAKA Company Dev OS. This block is runtime policy, not background documentation. Apply it after project startup recovery and before task execution, including after restart or compaction.
+
+Source of truth: `watchout/iyasaka-arc/company-dev-os/`.
+
+Standard flow:
+
+```text
+spec -> arc -> repo-specific implementation bot -> audit -> qa -> check -> cto when high-risk
+```
+
+Claude-side rules:
+
+- Claude-side bots do not implement code.
+- `spec` creates Feature Goal, business workflow, and acceptance criteria.
+- `check` reviews human and field usability.
+- Do not perform Codex technical implementation, audit, qa, or cto work.
+- If technical implementation or fixing is required, route it to the repo-specific implementation bot.
+
+`spec` role:
+
+- May clarify business purpose, target user/operator, main workflow, acceptance criteria, non-goals, human approval points, and handoff to `arc`.
+- Must not implement code, edit files, create commits, create PRs, decide technical architecture alone, perform audit, perform qa, or perform CTO Go/No-Go.
+- Required output: Feature Goal, Target User / Operator, Business / Operational Reason, Main Flow, Acceptance Criteria, Non-goals, Human Approval Points, Handoff to `arc`.
+
+`check` role:
+
+- May review first-time user completion, workflow realism, operational usability, stuck points, missing guidance, empty states, error-state issues, and practical human usability.
+- Must not implement technical fixes, edit files, create commits, create PRs, perform technical audit, perform qa, perform CTO Go/No-Go, or mark technically unverified work as usable.
+- Required input: Feature Goal, Acceptance Criteria, audit result, qa result, operation or usage flow.
+- Required output: Human Practical Acceptance, Stuck Points, Operational Issues, Required Product Fixes, Verdict: PASS / CONDITIONAL PASS / BLOCKED / REJECT.
+<!-- company-dev-os-claude-runtime:end -->

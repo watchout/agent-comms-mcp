@@ -327,7 +327,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('memory-ready gate blocks TUI wake paths before wake observation', async () => {
+  test('legacy TUI paths are disabled before memory-ready gated runner dispatch', async () => {
     const pendingScenarios = [
       { suffix: 'tui-missing-memory', reason: 'missing_evidence', mutate: deleteMemoryReadyEvidence },
       { suffix: 'tui-stale-memory', reason: 'expired', mutate: expireMemoryReadyEvidence },
@@ -363,10 +363,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         expect(h.tmux.sentKeys).toEqual([])
         expect(h.metrics.countInc('state_daemon_wake_actions_total', {
           result: 'memory_ready_blocked',
-          action: 'wake_pending',
+          action: 'legacy_tui_disabled',
           reason: scenario.reason,
-        })).toBe(1)
-        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+        })).toBe(0)
+        expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       } finally {
         await h.daemon.stop()
       }
@@ -403,10 +404,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_wake_actions_total', {
         result: 'memory_ready_blocked',
-        action: 'wake_received',
+        action: 'legacy_tui_disabled',
         reason: 'missing_evidence',
-      })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
@@ -883,7 +885,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('TUI pending path is observed but does not inject wake prompts', async () => {
+  test('legacy TUI pending path is disabled and does not inject wake prompts', async () => {
     const agent = makeAgentId('tui-wake-disabled')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-session`, status: 'online' })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
@@ -903,7 +905,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(runner.invocations).toHaveLength(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
     } finally {
       await h.daemon.stop()
@@ -1047,7 +1050,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
     } finally {
       await h.daemon.stop()
@@ -1072,7 +1076,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
     } finally {
       await h.daemon.stop()

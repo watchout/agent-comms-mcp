@@ -90,7 +90,17 @@ import {
   inferWorkspaceName,
   parseRuntimePort,
 } from '../core/runtime-heartbeat'
-import { closeObsoletePendingQueueRows, reassignPendingQueueRows, reclaimExpiredQueueClaims } from '../core/queue-repair'
+import {
+  closeDuplicatePendingQueueRows,
+  closeObsoleteOutboundRows,
+  closeObsoletePendingQueueRows,
+  reassignPendingQueueRows,
+  reclaimExpiredQueueClaims,
+} from '../core/queue-repair'
+import {
+  buildQueueDaemonStatusReport,
+  buildQueueSmokeReadiness,
+} from '../core/queue-runtime'
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from '../core/channel-policy'
 import { createOutboundPolicyValidator } from '../core/routing'
 import { allocateConversationRootInTransaction } from '../core/conversation-control-plane'
@@ -247,7 +257,8 @@ function parseRepairDryRun(flags: Record<string, string>): boolean {
     process.exit(2)
   }
   if (hasFlag(flags, 'execute') && !execute) return true
-  return !execute
+  if (execute) return false
+  return !hasFlag(flags, 'execute')
 }
 
 async function auditLog(db: Client, eventType: string, agentId: string | null, target: string | null, detail: Record<string, unknown>) {
@@ -4569,6 +4580,23 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
+    if (subcommand === 'daemon-status') {
+      const report = await buildQueueDaemonStatusReport((db as any).__adapter ?? db as any)
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'smoke') {
+      const agentId = flags['agent-id']
+      if (!agentId) {
+        console.error('Usage: agent-com queue smoke --agent-id <agent> [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const report = await buildQueueSmokeReadiness((db as any).__adapter ?? db as any, agentId)
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
     if (subcommand === 'reassign') {
       const fromAgentId = flags.from
       const toAgentId = flags.to
@@ -4577,6 +4605,19 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
         process.exit(2)
       }
       const report = await reassignPendingQueueRows(db as any, { fromAgentId, toAgentId, dryRun })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'close-duplicates') {
+      const fromAgentId = flags.from
+      const toAgentId = flags.to
+      const reason = flags.reason
+      if (!fromAgentId || !toAgentId || !reason) {
+        console.error('Usage: agent-com queue close-duplicates --from <agent> --to <agent> --reason <text> [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const report = await closeDuplicatePendingQueueRows(db as any, { fromAgentId, toAgentId, reason, dryRun })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }
@@ -4599,13 +4640,34 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       return
     }
 
-    if (subcommand === 'reclaim-expired') {
-      const report = await reclaimExpiredQueueClaims(db as any, { agentId: flags['agent-id'] ?? null, dryRun })
+    if (subcommand === 'close-outbound-obsolete') {
+      const reason = flags.reason
+      if (!reason) {
+        console.error('Usage: agent-com queue close-outbound-obsolete [--agent-id <id>] [--consumer-agent-id <id>] --reason <text> [--max-age <duration>] [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const report = await closeObsoleteOutboundRows(db as any, {
+        agentId: flags['agent-id'] ?? null,
+        consumerAgentId: flags['consumer-agent-id'] ?? null,
+        reason,
+        maxAge: flags['max-age'] ?? undefined,
+        dryRun,
+      })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }
 
-    console.error('Usage: agent-com queue <doctor|preflight|terminal-preflight|cp70-doctor|cp70-preflight|normalize|reassign|close-obsolete|reclaim-expired> ...')
+    if (subcommand === 'reclaim-expired') {
+      const report = await reclaimExpiredQueueClaims(db as any, {
+        agentId: flags['agent-id'] ?? null,
+        queueId: flags['queue-id'] ?? null,
+        dryRun,
+      })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    console.error('Usage: agent-com queue <doctor|preflight|terminal-preflight|cp70-doctor|cp70-preflight|normalize|daemon-status|smoke|reassign|close-obsolete|close-duplicates|close-outbound-obsolete|reclaim-expired> ...')
     process.exit(2)
   } finally {
     await db.end()
@@ -5877,8 +5939,14 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run by default; reassign pending rows to a replacement identity
   queue close-obsolete --agent-id <agent> --reason <text> [--queue-id <id>] [--include-active] [--execute|--dry-run]
                                                        — dry-run by default; close obsolete pending rows, or one explicit active row
+  queue close-duplicates --from <agent> --to <agent> --reason <text> [--execute|--dry-run]
+                                                       — dry-run by default; close pending rows already represented on the target identity
+  queue close-outbound-obsolete [--agent-id <agent>] [--consumer-agent-id <agent>] --reason <text> [--max-age 12h] [--execute|--dry-run]
+                                                       — dry-run by default; close stale outbound projection rows
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
                                                        — dry-run by default; roll expired received/in_progress claims back to pending
+  queue daemon-status [--format json|text]             — read-only DB-observed queue daemon liveness and queue status
+  queue smoke --agent-id <agent> [--execute|--dry-run] — queue smoke readiness; execute command is reported, not run by default
   directory [--format json|text]                       — bot/channel directory and sendability report
   runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--approved-checkout-root <path[,path]>] [--binding-role outbound]
                                                        — read-only runtime/connector/binding freshness report

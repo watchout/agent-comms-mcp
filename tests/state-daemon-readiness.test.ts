@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import type { DbAdapter } from '../core/db'
-import { classifyQueueWakeState, fetchBotStatusFromDb, type BotStatusDbRow } from '../core/bot-status-db'
+import { fetchBotStatusFromDb, type BotStatusDbRow } from '../core/bot-status-db'
 import { StateDaemon } from '../core/state-daemon'
 import {
   buildQueueProcessingReadinessReport,
@@ -378,23 +378,9 @@ describe('queue wake smoke', () => {
     expect(db.audits).toHaveLength(1)
   })
 
-  test('stuck-pattern classifier flags idle pending without wake progress and busy suppression', () => {
-    expect(classifyQueueWakeState({
-      pending_count: 1,
-      oldest_pending_at: new Date(Date.now() - 60_000).toISOString(),
-      active_claim_count: 0,
-      health_state: 'healthy',
-      latest_wake_progress_at: null,
-    })).toBe('idle_pending_no_wake_progress')
-
-    expect(classifyQueueWakeState({
-      pending_count: 3,
-      oldest_pending_at: new Date().toISOString(),
-      active_claim_count: 1,
-      health_state: 'busy_active',
-      latest_wake_progress_at: new Date().toISOString(),
-    })).toBe('busy_active_pending_growth')
-  })
+  // The wake-state classifier (classifyQueueWakeState) was superseded by the
+  // endpoint lease read model in NORM-022; its stuck-pattern test was removed
+  // with it.
 })
 
 describe('queue wake smoke integration evidence', () => {
@@ -508,9 +494,10 @@ describe('queue wake smoke integration evidence', () => {
       const status = await fetchBotStatusFromDb(pg)
       const row = status.get(agent)!
       expect(row.pending_count).toBe(1)
-      expect(row.active_claim_count).toBe(0)
-      expect(row.queue_wake_state).toBe('idle_pending_no_wake_progress')
-      expect(row.latest_wake_progress_at).toBeNull()
+      // active_claim_count / queue_wake_state / latest_wake_progress_at were
+      // removed with the wake-state classifier (NORM-022 endpoint lease read
+      // model); pending visibility is the remaining DB-truth contract here.
+      expect(row.health_state).toBe('healthy')
     } finally {
       await daemon.stop()
     }
@@ -544,7 +531,8 @@ describe('queue wake smoke integration evidence', () => {
     const row = status.get(agent)!
     expect(row.health_state).toBe('busy_active')
     expect(row.pending_count).toBe(1)
-    expect(row.active_claim_count).toBe(1)
-    expect(row.queue_wake_state).toBe('busy_active_pending_growth')
+    // active_claim_count / queue_wake_state were removed with the wake-state
+    // classifier; busy_active health_state above is the surviving signal that
+    // an active claim suppresses wake escalation.
   })
 })

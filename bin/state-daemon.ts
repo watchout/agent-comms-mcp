@@ -27,11 +27,14 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
 import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
+import { receiveTargeted } from './aun/receive'
+import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
 import type {
   AlertSink,
   DBClient,
   Metrics,
   PgListenClient,
+  QueueWorkScheduler,
   StateDaemonConfig,
   TmuxClient,
 } from '../core/state-daemon/types'
@@ -130,6 +133,88 @@ class CompositeAlertSink implements AlertSink {
   }
 }
 
+// ── QueueWorkScheduler (opt-in script-controlled queue runner) ──────────────
+class QueueWorkRunnerScheduler implements QueueWorkScheduler {
+  constructor(
+    private readonly env: NodeJS.ProcessEnv,
+    private readonly cwd: string,
+  ) {}
+
+  async runPending(input: { queueId: number; agentId: string }): Promise<void> {
+    const env = this.envFor(input.agentId)
+    const received = await receiveTargeted({
+      agentId: input.agentId,
+      queueId: String(input.queueId),
+      env,
+      cwd: this.cwd,
+    })
+    if (!received.ok) {
+      throw new Error(`targeted receive failed code=${received.code} stderr=${received.stderr.trim()}`)
+    }
+    await this.runReceived(input)
+  }
+
+  async runReceived(input: { queueId: number; agentId: string }): Promise<void> {
+    const env = this.envFor(input.agentId)
+    const result = await runQueueWork({
+      agentId: input.agentId,
+      queueId: String(input.queueId),
+      runtime: this.runtime(),
+      finalize: env.STATE_DAEMON_QUEUE_WORK_FINALIZE === '1',
+      env,
+      cwd: this.cwd,
+    })
+    if (!result.ok) {
+      // Rows claimed by another path (e.g. a live TUI session that called
+      // `next`) are not scheduler work — leave them untouched, no alert.
+      if ((result.runner as { code?: string } | undefined)?.code === 'CLAIM_NOT_OWNED') return
+      throw new Error(this.describeFailure(result))
+    }
+  }
+
+  private envFor(agentId: string): NodeJS.ProcessEnv {
+    const env = {
+      ...this.env,
+      AGENT_ID: agentId,
+      AGENT_COM_EXPECTED_AGENT_ID: agentId,
+      AUN_RECEIVE_CLAIM_SOURCE: this.env.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
+      AUN_QUEUE_WORK_INVOCATION_SOURCE: this.env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
+      // Only process rows this scheduler claimed itself (receive_claim.source
+      // match) — never rows claimed by a TUI session or another runner.
+      AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
+        this.env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
+          ?? this.env.AUN_RECEIVE_CLAIM_SOURCE
+          ?? 'state-daemon-queue-work-scheduler',
+    }
+    if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
+      env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND
+    }
+    if (env.STATE_DAEMON_QUEUE_WORK_ARGS_JSON && !env.AUN_QUEUE_WORK_ARGS_JSON) {
+      env.AUN_QUEUE_WORK_ARGS_JSON = env.STATE_DAEMON_QUEUE_WORK_ARGS_JSON
+    }
+    if (env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS && !env.AUN_QUEUE_WORK_TIMEOUT_MS) {
+      env.AUN_QUEUE_WORK_TIMEOUT_MS = env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS
+    }
+    return env
+  }
+
+  private runtime(): string | undefined {
+    return this.env.STATE_DAEMON_QUEUE_WORK_RUNTIME ?? this.env.AUN_QUEUE_WORK_RUNTIME
+  }
+
+  private describeFailure(result: RunQueueWorkCliResult): string {
+    return result.error
+      ?? (result.runner && typeof result.runner === 'object'
+        ? JSON.stringify(result.runner)
+        : 'queue work runner returned ok=false')
+  }
+}
+
+function queueWorkSchedulerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED
+  return raw === '1' || raw?.toLowerCase() === 'true'
+}
+
 // ── env → config mapping ─────────────────────────────────────────────────────
 function loadConfig(): Partial<StateDaemonConfig> {
   const cfg: Partial<StateDaemonConfig> = {}
@@ -197,6 +282,9 @@ export async function main(): Promise<void> {
     pgListen: new PgNotifyListenClient(connStr),
     tmux: new TmuxShellAdapter(),
     codexRunner: new ExecFileCodexRunnerInvoker(process.cwd()),
+    queueWorkScheduler: queueWorkSchedulerEnabled()
+      ? new QueueWorkRunnerScheduler(process.env, process.cwd())
+      : undefined,
     clock: { now: () => new Date() },
     metrics: new StdoutMetrics(),
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),

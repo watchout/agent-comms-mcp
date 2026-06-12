@@ -1,0 +1,132 @@
+{
+  "version": "2026-06-06",
+  "source": "watchout/iyasaka-arc/company-dev-os/",
+  "repository": "watchout/agent-comms-mcp",
+  "default_agent_id": "agent-com-dev",
+  "standard_flow": [
+    "spec",
+    "arc",
+    "repo-specific implementation bot",
+    "audit",
+    "qa",
+    "check",
+    "cto when high-risk"
+  ],
+  "roles": {
+    "spec": {
+      "llm": "Claude",
+      "role_prompt_path": ".claude/agents/company-dev-os-spec.md",
+      "can_edit_files": false,
+      "can_create_pr": false,
+      "can_commit": false,
+      "can_apply_fixes": false,
+      "required_output": [
+        "Feature Goal",
+        "Target User / Operator",
+        "Business / Operational Reason",
+        "Main Flow",
+        "Acceptance Criteria",
+        "Non-goals",
+        "Human Approval Points",
+        "Handoff to arc"
+      ]
+    },
+    "arc": {
+      "llm": "Codex",
+      "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+      "can_edit_files": false,
+      "can_create_pr": false,
+      "can_commit": false,
+      "can_apply_fixes": false,
+      "required_output": [
+        "Technical Design",
+        "Target Modules / Files",
+        "Data / API / Contract Impact",
+        "PR Breakdown",
+        "Implementation Order",
+        "Test Strategy",
+        "Risk Level",
+        "Instruction for repo-specific implementation bot"
+      ]
+    },
+    "repo-specific implementation bot": {
+      "llm": "existing runtime",
+      "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+      "can_edit_files": true,
+      "can_create_pr": "if repo policy allows",
+      "can_commit": "if repo policy allows",
+      "can_apply_fixes": "within approved scope",
+      "required_output": [
+        "Implementation Handoff",
+        "Changed Files",
+        "Tests / Checks Run",
+        "Known Risks",
+        "Next Required Review"
+      ]
+    },
+    "audit": {
+      "llm": "Codex",
+      "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+      "can_edit_files": false,
+      "can_create_pr": false,
+      "can_commit": false,
+      "can_apply_fixes": false,
+      "required_output": [
+        "Primary Audit",
+        "Secondary Audit",
+        "Verdict",
+        "Required Fixes",
+        "Rework Instruction",
+        "CTO Review Required"
+      ]
+    },
+    "qa": {
+      "llm": "Codex",
+      "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+      "can_edit_files": false,
+      "can_create_pr": false,
+      "can_commit": false,
+      "can_apply_fixes": false,
+      "required_output": [
+        "Technical Practical Check",
+        "Commands Run",
+        "Scenario Checked",
+        "Failure Modes Checked",
+        "Verdict",
+        "Required Fixes"
+      ]
+    },
+    "check": {
+      "llm": "Claude",
+      "role_prompt_path": ".claude/agents/company-dev-os-check.md",
+      "can_edit_files": false,
+      "can_create_pr": false,
+      "can_commit": false,
+      "can_apply_fixes": false,
+      "required_output": [
+        "Human Practical Acceptance",
+        "Stuck Points",
+        "Operational Issues",
+        "Required Product Fixes",
+        "Verdict"
+      ]
+    },
+    "cto": {
+      "llm": "Codex",
+      "role_prompt_path": ".agents/skills/company-dev-os-runtime/SKILL.md",
+      "can_edit_files": false,
+      "can_create_pr": false,
+      "can_commit": false,
+      "can_apply_fixes": false,
+      "required_output": [
+        "GO / CONDITIONAL GO / NO-GO",
+        "Critical Risks",
+        "Required Before Merge",
+        "Accepted Debt",
+        "Rollback / Recovery Notes",
+        "State Transition Request",
+        "Rework Instruction"
+      ]
+    }
+  }
+}

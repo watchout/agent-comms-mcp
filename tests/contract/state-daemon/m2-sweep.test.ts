@@ -318,8 +318,9 @@ describe('T12b stale dispatch observation semantics', () => {
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_state_actions_total', {
-        action: 'wake_received',
+        action: 'legacy_tui_disabled',
         status: 'received',
         terminal: 'false',
       })).toBe(1)
@@ -548,9 +549,10 @@ describe('T16 pg_notify_immediate_dispatch', () => {
       h.pgListen.emit(JSON.stringify({
         op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
       }))
-      // wait microtask for fire-and-forget
-      await new Promise((r) => setTimeout(r, 50))
+      // wait for FakePgListen fire-and-forget handler
+      await new Promise((r) => setTimeout(r, 100))
       expect(h.tmux.sentKeys).toEqual([])
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
       expect(h.metrics.observed('state_daemon_pg_notify_lag_ms').length).toBe(1)
     } finally {
@@ -597,10 +599,11 @@ describe('T16 pg_notify_immediate_dispatch', () => {
 
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', {
-        action: 'wake_received',
+        action: 'legacy_tui_disabled',
         status: 'received',
         terminal: 'false',
       })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(2)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(2)
     } finally {
       await h.daemon.stop()

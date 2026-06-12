@@ -94,7 +94,8 @@ describe('T1 new_pending_dispatched', () => {
       expect(row.status).toBe('pending')
       expect(row.last_wake_attempt_at).toBeNull()
 
-      expect(metrics.countInc('state_daemon_state_actions_total', { action: 'wake_pending' })).toBe(1)
+      expect(metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
       expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
       // No alerts.
       expect(alert.alerts.length).toBe(0)

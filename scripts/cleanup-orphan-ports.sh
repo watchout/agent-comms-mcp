@@ -14,6 +14,16 @@ PORT="$1"
 if [ -z "$PORT" ]; then
   exit 0
 fi
+case "$PORT" in
+  *[!0-9]*)
+    echo "Refusing non-numeric port cleanup request: $PORT" >&2
+    exit 0
+    ;;
+  5432|5433)
+    echo "Refusing protected PostgreSQL port cleanup request: $PORT" >&2
+    exit 0
+    ;;
+esac
 
 case "$PORT" in
   ''|*[!0-9]*)

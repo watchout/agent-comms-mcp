@@ -314,8 +314,9 @@ export function routeMessage(
       continue
     }
 
-    // Emergency → always push (only mentions bypass, §5.1)
-    if (isEmergency) {
+    // Emergency without explicit mentions is a broadcast bypass. If a caller
+    // supplies concrete mentions, keep routing scoped to those targets.
+    if (isEmergency && noMentions) {
       pushTargets.push(agent.agentId)
       continue
     }

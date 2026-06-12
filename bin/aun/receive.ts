@@ -496,7 +496,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
              LEFT JOIN channel_routing_policy crp ON crp.channel_id = am.channel_id
             WHERE mq.id::text = $1 AND mq.agent_id = $2
             LIMIT 1
-            FOR UPDATE`,
+            FOR UPDATE OF mq`,
           [targetQueueId, plan.env.AGENT_ID],
         )
 
@@ -515,15 +515,22 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
         if (selected && !blockedReason && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
+          const claimSource = plan.env.AUN_RECEIVE_CLAIM_SOURCE?.trim() || null
+          const claimPayload = queuePayloadWithReceiveClaim(payload, {
+            source: claimSource,
+            agentId: plan.env.AGENT_ID,
+            queueId: targetQueueId,
+          })
           const update = await tx.execute(
             `UPDATE message_queue
                 SET status = 'received',
                     read_at = now(),
                     claimed_by = $1,
                     claimed_at = now(),
-                    claim_expires_at = $2
+                    claim_expires_at = $2,
+                    payload = COALESCE($5, payload)
               WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.queue_id, plan.env.AGENT_ID],
+            [plan.env.AGENT_ID, claimExpiresAt, selected.queue_id, plan.env.AGENT_ID, claimPayload],
           )
           if (update.rowCount !== 1) {
             throw new Error(`target queue row changed before claim: queue_id=${selected.queue_id}`)
@@ -719,6 +726,22 @@ function parsePayload(payload: unknown): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function queuePayloadWithReceiveClaim(
+  payload: Record<string, unknown>,
+  input: { source: string | null; agentId: string; queueId: string },
+): string | null {
+  if (!input.source) return null
+  return JSON.stringify({
+    ...payload,
+    receive_claim: {
+      mode: 'targeted-receive',
+      source: input.source,
+      agent_id: input.agentId,
+      queue_id: input.queueId,
+    },
+  })
 }
 
 function parseObject(value: unknown): Record<string, unknown> {

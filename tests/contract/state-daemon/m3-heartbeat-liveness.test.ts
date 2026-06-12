@@ -1,5 +1,5 @@
 /**
- * State-daemon m3 fixtures: T21-T26 (heartbeat / dead-bot restart / pool grow-shrink / TUI no-op observation).
+ * State-daemon m3 fixtures: T21-T26 (heartbeat / legacy TUI liveness disabled / pool grow-shrink / TUI no-op observation).
  *
  * Covers the v0.3 reinforcement paths plus the disabled TUI wake observation
  * contract.
@@ -264,8 +264,8 @@ describe.skip('TODO #338 sub-PR 9 v0.9 schema T21 heartbeat_refresh_extends_clai
 })
 
 // ── T22 ───────────────────────────────────────────────────────────────────────
-describe('T22 dead_bot_tmux_missing_restart', () => {
-  test('TUI bot stale + tmux session absent → restart launcher + metric + alert', async () => {
+describe('T22 legacy_tui_liveness_disabled', () => {
+  test('legacy TUI bot stale + tmux session absent → no restart; new runtime path required', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t22-zombie')
     await seedAgent(pg, {
@@ -281,13 +281,13 @@ describe('T22 dead_bot_tmux_missing_restart', () => {
     await h.daemon.start()
     try {
       const result = await h.daemon.checkBotLiveness()
-      expect(result.restarted).toBe(1)
-      expect(h.tmux.restarts).toContain(agent)
-      expect(h.metrics.countInc('state_daemon_bot_restarts_total', { agent_id: agent })).toBe(1)
-      expect(h.alert.contains(`${agent} restarted`)).toBe(true)
-      // status should have transitioned away from 'online'
+      expect(result.restarted).toBe(0)
+      expect(result.escalated).toBe(0)
+      expect(h.tmux.restarts).toEqual([])
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.alert.alerts).toEqual([])
       const r = await pg.query(`SELECT status FROM agents WHERE agent_id=$1`, [agent])
-      expect((r.rows as Array<{ status: string }>)[0].status).not.toBe('online')
+      expect((r.rows as Array<{ status: string }>)[0].status).toBe('online')
     } finally {
       await h.daemon.stop()
     }
@@ -339,8 +339,8 @@ describe('T22 dead_bot_tmux_missing_restart', () => {
 })
 
 // ── T23 ───────────────────────────────────────────────────────────────────────
-describe('T23 bot_restart_loop_limit_escalate', () => {
-  test('bot already restarted N times in window → no further restart, escalate alert', async () => {
+describe('T23 legacy_tui_restart_loop_removed', () => {
+  test('repeated stale legacy TUI liveness checks do not restart or escalate', async () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t23-flap')
     await seedAgent(pg, {
@@ -352,28 +352,24 @@ describe('T23 bot_restart_loop_limit_escalate', () => {
     h.tmux.existingSessions = new Set()
     await h.daemon.start()
     try {
-      // Drive 3 restart attempts to exhaust the window. Each call advances the
-      // clock minimally so timestamps differ but stay within the 1h window.
       for (let i = 0; i < 3; i++) {
         h.clock.advance(1000)
         await h.daemon.checkBotLiveness()
       }
-      expect(h.tmux.restarts.length).toBe(3)
-      // 4th call: already at limit → no restart, escalate alert.
+      expect(h.tmux.restarts.length).toBe(0)
       h.tmux.restarts.length = 0
       h.alert.reset()
       h.metrics.reset()
       h.clock.advance(1000)
-      // Re-stale the bot so liveness re-fires
       await pg.query(`UPDATE agents SET last_seen_at=$1 WHERE agent_id=$2`, [
         new Date(h.clock.now().getTime() - 180_000), agent,
       ])
       const result = await h.daemon.checkBotLiveness()
       expect(result.restarted).toBe(0)
-      expect(result.escalated).toBeGreaterThanOrEqual(1)
+      expect(result.escalated).toBe(0)
       expect(h.tmux.restarts.length).toBe(0)
-      expect(h.metrics.countInc('state_daemon_bot_dead_total', { agent_id: agent })).toBe(1)
-      expect(h.alert.contains('CEO escalate')).toBe(true)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.alert.alerts).toEqual([])
     } finally {
       await h.daemon.stop()
     }

@@ -130,15 +130,15 @@ exec ${JSON.stringify(HOOK_SRC)}
     }
     writeFileSync(join(botProjectDir, '.claude', 'settings.json'), JSON.stringify(settings, null, 2))
 
-    // Seed the recipient agent + a minimal `agents` row so the NOTIFY path
-    // does not short-circuit on missing metadata.
+    // Seed the recipient agent with the DB-profile tmux session used by
+    // wake-daemon. DB `agents` is the session SSOT.
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
-       VALUES ($1, $1, 'dev', 'claude-code', 'online')
-       ON CONFLICT (agent_id) DO NOTHING`,
-      [RECV_AGENT],
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, home_directory, profile_enabled)
+       VALUES ($1, $1, 'dev', 'claude-code', 'online', jsonb_build_object('tmux_session', $2::text), $3, true)
+       ON CONFLICT (agent_id) DO UPDATE SET metadata = EXCLUDED.metadata, home_directory = EXCLUDED.home_directory, profile_enabled = true`,
+      [RECV_AGENT, RECV_SESSION, botProjectDir],
     )
     await client.query(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
@@ -178,9 +178,8 @@ exec ${JSON.stringify(HOOK_SRC)}
   })
 
   test('4 conditions all pass: daemon wake ≤2s / LLM turn ≤5s / hook fire / queue drain ≤60s', async () => {
-    // Start the wake-daemon with a bot-registry shim that knows about our
-    // recipient session. We pass PROJECT_ROOT's registry and rely on the
-    // daemon's `discord-<agent_id>` fallback for session resolution.
+    // Start the wake-daemon. It resolves the recipient session from the DB
+    // `agents` profile seeded above.
     daemon = spawn('bun', [DAEMON], {
       env: {
         ...process.env,
