@@ -14,6 +14,12 @@ logs/
 agent-com-dev-state.md
 dist/
 
+# Local-only .claude artifacts (settings backups, hook backups, worktrees)
+.claude/settings.json.*
+.claude/hooks/*.envvar.*
+.claude/hooks/*.pre-restore.*
+.claude/worktrees/
+
 # SQLite test DB
 agent-com.db
 agent-com.db-*
