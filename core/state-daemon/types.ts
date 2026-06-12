@@ -237,6 +237,9 @@ export interface TmuxClient {
   sessionExists(session: string): Promise<boolean>
   /** §5.4 補強 #5 — restart launcher (existing `scripts/restart-bot.sh` hook). */
   restartSession(agentId: string): Promise<void>
+  /** Send a prompt string + Enter to the named tmux session via send-keys.
+   *  Used as codex-runner fallback when codexRunnerEnabled=false. */
+  sendPrompt(session: string, prompt: string): Promise<void>
 }
 
 export interface Clock {

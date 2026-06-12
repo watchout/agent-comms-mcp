@@ -96,6 +96,9 @@ export class FakeTmux implements TmuxClient {
   async restartSession(agentId: string): Promise<void> {
     this.restarts.push(agentId)
   }
+  async sendPrompt(session: string, prompt: string): Promise<void> {
+    this.sentKeys.push({ session, payload: prompt })
+  }
   reset(): void {
     this.sentKeys = []
     this.restarts = []

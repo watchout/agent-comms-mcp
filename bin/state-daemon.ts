@@ -96,6 +96,9 @@ class TmuxShellAdapter implements TmuxClient {
     // .mcp.json from registry SSOT, and recreates the tmux session.
     await execFileAsync('bash', ['scripts/restart-bot.sh', agentId])
   }
+  async sendPrompt(session: string, prompt: string): Promise<void> {
+    await execFileAsync('tmux', ['send-keys', '-t', session, prompt, 'Enter'])
+  }
 }
 
 // ── Metrics (structured JSON log lines on stdout) ────────────────────────────

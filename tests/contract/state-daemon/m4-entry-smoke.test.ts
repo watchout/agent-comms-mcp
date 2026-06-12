@@ -43,11 +43,12 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
     expect(SRC).toMatch(/LISTEN \$\{channel\}/)
     // The actual channel name is supplied by daemon.start() per types.ts.
   })
-  test('tmux adapter: has-session check + restart launcher, no prompt send-keys path', () => {
+  test('tmux adapter: has-session check + restart launcher + sendPrompt (codex-runner fallback)', () => {
     expect(SRC).toMatch(/tmux.*has-session/)
     expect(SRC).not.toMatch(/async sendKeys/)
-    expect(SRC).not.toMatch(/send-keys/)
-    expect(SRC).not.toMatch(/payload\.endsWith\('\\n'\)/)
+    // sendPrompt added as codex-runner-disabled fallback (#718-PB)
+    expect(SRC).toMatch(/async sendPrompt/)
+    expect(SRC).toMatch(/send-keys/)
     // Restart launcher = scripts/restart-bot.sh, the existing repo-owned
     // restart entrypoint used by watchdog/operator paths.
     expect(SRC).toMatch(/scripts\/restart-bot\.sh/)
