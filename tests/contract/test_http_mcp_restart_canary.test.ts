@@ -198,9 +198,19 @@ describe('ADR-029R Spike B — restart / reconnect', () => {
       expect((await a2.client.listTools()).tools.length).toBeGreaterThan(0)
       expect((await b2.client.listTools()).tools.length).toBeGreaterThan(0)
 
-      // The pending row survived the restart and is still claimable.
-      const row = await pg.query(`SELECT status FROM message_queue WHERE id = $1`, [survivorQueueId])
-      expect(row.rows[0].status).toBe('pending')
+      // The pending row survived the restart — prove it by ACTUALLY claiming
+      // it with the real next tool on the fresh post-restart session (ARC
+      // review condition on PR #736: claim it, don't just read status).
+      const nextText = textOf(await b2.client.callTool({ name: 'next', arguments: {} }))
+      expect(nextText).toContain(survivorQueueId)
+      const claimed = await pg.query(
+        `SELECT status, claimed_by, read_at, claimed_at FROM message_queue WHERE id = $1`,
+        [survivorQueueId],
+      )
+      expect(claimed.rows[0].status).toBe('received')
+      expect(claimed.rows[0].claimed_by).toBe(BOT_B)
+      expect(claimed.rows[0].read_at).not.toBeNull()
+      expect(claimed.rows[0].claimed_at).not.toBeNull()
     } finally {
       await a2.transport.terminateSession().catch(() => {})
       await b2.transport.terminateSession().catch(() => {})
