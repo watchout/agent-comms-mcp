@@ -426,3 +426,90 @@ describe('spike-bot-id mode requires explicit opt-in (dev/test only)', () => {
     expect(res.status).toBe(400)
   })
 })
+
+describe('established-session credential re-validation (ARC review 4489519640)', () => {
+  async function openSession(botId: string): Promise<string> {
+    const res = await fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${TOKENS[botId]}`,
+      },
+      body: initBody(),
+    })
+    expect(res.status).toBe(200)
+    const sid = res.headers.get('mcp-session-id')
+    expect(sid).toBeTruthy()
+    return sid!
+  }
+
+  function sessionRequest(sid: string, headers: Record<string, string>, method = 'POST'): Promise<Response> {
+    return fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'mcp-session-id': sid,
+        ...headers,
+      },
+      ...(method === 'POST' ? { body: JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'tools/list' }) } : {}),
+    })
+  }
+
+  test('session id alone (missing bearer) → 401, session stays alive', async () => {
+    const sid = await openSession(BOT_B)
+    try {
+      const res = await sessionRequest(sid, {})
+      expect(res.status).toBe(401)
+      expect((await res.json()).code).toBe('IDENTITY_CREDENTIAL_REQUIRED')
+
+      // The hijack attempt did not kill the legitimate session.
+      const ok = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` })
+      expect(ok.status).toBe(200)
+    } finally {
+      await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` }, 'DELETE')
+    }
+  })
+
+  test('unknown/revoked bearer on an established session → 401', async () => {
+    const sid = await openSession(BOT_B)
+    try {
+      const res = await sessionRequest(sid, { Authorization: 'Bearer not-a-real-token' })
+      expect(res.status).toBe(401)
+      expect((await res.json()).code).toBe('IDENTITY_NOT_BOUND')
+    } finally {
+      await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` }, 'DELETE')
+    }
+  })
+
+  test("another bot's VALID bearer on this session → 403 SESSION_OWNER_MISMATCH", async () => {
+    const sid = await openSession(BOT_B)
+    try {
+      const res = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_A]}` })
+      expect(res.status).toBe(403)
+      expect((await res.json()).code).toBe('SESSION_OWNER_MISMATCH')
+    } finally {
+      await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` }, 'DELETE')
+    }
+  })
+
+  test('correct bearer: requests AND termination work; termination without bearer is refused', async () => {
+    const sid = await openSession(BOT_B)
+
+    const ok = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` })
+    expect(ok.status).toBe(200)
+
+    // DELETE without credential must NOT terminate the session.
+    const badDelete = await sessionRequest(sid, {}, 'DELETE')
+    expect(badDelete.status).toBe(401)
+    const stillAlive = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` })
+    expect(stillAlive.status).toBe(200)
+
+    // DELETE with the owner's credential terminates; the id is then 404.
+    const goodDelete = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` }, 'DELETE')
+    expect([200, 204]).toContain(goodDelete.status)
+    const afterDelete = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` })
+    expect(afterDelete.status).toBe(404)
+  })
+})

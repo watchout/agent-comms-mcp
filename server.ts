@@ -4775,7 +4775,38 @@ async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, u
 
       // Established session: route to its transport (POST/GET/DELETE all flow
       // through handleRequest; DELETE terminates the session per spec).
+      //
+      // ARC review 4489519640: a session id alone is NOT identity. Every
+      // established-session request re-validates the caller's credential and
+      // compares the resolved agent to the session owner — otherwise a leaked
+      // session id (or another bot's valid bearer) could ride the session.
       if (existingSessionId && httpMcpTransports.has(existingSessionId)) {
+        if (HTTP_MCP_IDENTITY_MODE === 'binding') {
+          const authHeader = req.headers.authorization ?? ''
+          const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+          if (!token) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'bearer credential required (identity binding mode)', code: 'IDENTITY_CREDENTIAL_REQUIRED' }))
+            return
+          }
+          const bound = await resolveBearerIdentity(token)
+          if (!bound) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unknown or inactive credential', code: 'IDENTITY_NOT_BOUND' }))
+            return
+          }
+          const owner = httpMcpBots.get(existingSessionId)
+          if (owner !== bound.agent_id) {
+            serverLog.warn('http_mcp.session_owner_mismatch', { session_owner: owner, bound_agent_id: bound.agent_id, session_id: existingSessionId })
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'credential identity does not own this session', code: 'SESSION_OWNER_MISMATCH' }))
+            return
+          }
+        } else {
+          // spike-bot-id mode: the shared AUTH_TOKEN guard applies to
+          // established sessions too.
+          if (!authenticateRequest(req, res)) return
+        }
         const meta = httpMcpSessionMeta.get(existingSessionId)
         if (meta) meta.last_activity = new Date().toISOString()
         await httpMcpTransports.get(existingSessionId)!.handleRequest(req, res)
