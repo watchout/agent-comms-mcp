@@ -1,0 +1,11 @@
+{
+  "currentTaskId": "aun-pilot-devos",
+  "tasks": [
+    {
+      "taskId": "aun-pilot-devos",
+      "status": "in_progress",
+      "subject": "AUN pilot: Company Dev OS merge queue operating model",
+      "startedAt": "2026-06-12T00:00:00.000Z"
+    }
+  ]
+}

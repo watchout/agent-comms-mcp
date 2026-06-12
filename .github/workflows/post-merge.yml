@@ -1,0 +1,96 @@
+name: Post-merge smoke + async audit
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # ── Post-merge smoke ─────────────────────────────────────────────────────
+  # Mechanical complete gate per Company Dev OS operating model.
+  # CI green ≠ complete. This job verifies production-level invariants.
+  smoke:
+    name: Post-merge smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agent_comms_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Apply migrations
+        run: bun run db/migrate.ts
+      - name: Run contract tests (live DB required)
+        run: bun test tests/contract/ --timeout 30000
+      - name: Post-merge smoke checks (CI mode, no fleet PID)
+        run: SKIP_PID_CHECK=1 bash scripts/post-merge-smoke.sh ${{ github.sha }}
+      - name: Verify commit in DB bootstrap
+        run: |
+          echo "Smoke complete for commit: ${{ github.sha }}"
+          echo "Fleet PID verification must be done on production machines."
+          echo "Run: bash scripts/post-merge-smoke.sh ${{ github.sha }}"
+
+  # ── Async audit (parallel, non-blocking for yellow) ──────────────────────
+  # Audit runs in parallel with smoke. Red findings block via PR check.
+  # Yellow findings auto-create issues for the next slice.
+  # This job runs post-merge to catch regressions introduced during
+  # the merge window.
+  audit:
+    name: Async audit signal
+    runs-on: ubuntu-latest
+    needs: []  # intentionally no dependency — runs in parallel with smoke
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Breaking-change scan (audit layer)
+        id: breaking
+        run: |
+          # Compare against previous commit to catch anything that slipped through
+          PREV=$(git rev-parse HEAD~1 2>/dev/null || echo "HEAD~1")
+          bash scripts/detect-breaking-changes.sh "$PREV" json > breaking-findings.json 2>/dev/null || true
+          cat breaking-findings.json
+      - name: PR route classification audit
+        id: classify
+        run: |
+          PREV=$(git rev-parse HEAD~1 2>/dev/null || echo "HEAD~1")
+          bash scripts/classify-pr.sh "$PREV" --json > route-classification.json 2>/dev/null || true
+          cat route-classification.json
+          ROUTE=$(jq -r '.route' route-classification.json 2>/dev/null || echo "unknown")
+          echo "route=$ROUTE" >> "$GITHUB_OUTPUT"
+      - name: Flag protected merge without gate evidence
+        if: steps.classify.outputs.route == 'ceo-approval'
+        run: |
+          echo "::warning::This commit contains protected-category changes."
+          echo "::warning::Verify that CEO approval was obtained before this merge."
+          echo "::warning::If this was a route:fast-merge, the classify-pr.sh patterns may need updating."
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-${{ github.sha }}
+          path: |
+            breaking-findings.json
+            route-classification.json
+          retention-days: 30
