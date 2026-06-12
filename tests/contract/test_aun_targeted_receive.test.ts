@@ -93,6 +93,13 @@ function row(queueId: number): { status: string; claimed_by: string | null; clai
   ).get(queueId) as { status: string; claimed_by: string | null; claim_ttl: number })
 }
 
+function rowPayload(queueId: number): Record<string, unknown> {
+  return withDb((db) => {
+    const found = db.prepare(`SELECT payload FROM message_queue WHERE id = ?`).get(queueId) as { payload: string }
+    return JSON.parse(found.payload)
+  })
+}
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-targeted-receive-'))
   dbPath = join(tmpDir, 'test.db')
@@ -155,6 +162,26 @@ describe('test_aun_targeted_receive - exact queue_id receive runner', () => {
     expect(body.content).toBe('first exact request')
     expect(row(first.queueId)).toEqual({ status: 'received', claimed_by: TEST_AGENT, claim_ttl: 1 })
     expect(row(second.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
+    expect(rowPayload(first.queueId).receive_claim).toBeUndefined()
+  })
+
+  test('receive --queue-id can persist daemon claim source evidence without changing claim semantics', () => {
+    const target = seedQueue({ content: 'daemon exact request', ageSeconds: 30 })
+    env = {
+      ...env,
+      AUN_RECEIVE_CLAIM_SOURCE: 'state-daemon-queue-work-scheduler',
+    }
+
+    const r = runAun(['receive', '--agent-id', TEST_AGENT, '--queue-id', String(target.queueId)])
+
+    expect(r.status).toBe(0)
+    expect(row(target.queueId)).toEqual({ status: 'received', claimed_by: TEST_AGENT, claim_ttl: 1 })
+    expect(rowPayload(target.queueId).receive_claim).toEqual({
+      mode: 'targeted-receive',
+      source: 'state-daemon-queue-work-scheduler',
+      agent_id: TEST_AGENT,
+      queue_id: String(target.queueId),
+    })
   })
 
   test('dry-run reports the target row without mutating it', () => {

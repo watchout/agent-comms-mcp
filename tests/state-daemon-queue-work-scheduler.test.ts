@@ -23,6 +23,97 @@ class SingleRowDb implements DBClient {
   }
 }
 
+class PendingLlmDb implements DBClient {
+  constructor(
+    private readonly agentId: string,
+    private readonly row: any,
+  ) {}
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1')) {
+      if (String(this.row.id) === String(params?.[0])) return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM agents WHERE agent_id=$1')) {
+      return {
+        rows: [{
+          agent_id: this.agentId,
+          runtime: 'codex',
+          runtime_engine_preference: 'codex',
+          metadata: {},
+          tmux_session: null,
+          last_seen_at: new Date('2026-05-07T23:59:00.000Z'),
+          status: 'idle',
+          profile_enabled: true,
+          disabled_at: null,
+          expected_provider_identity: null,
+        }] as T[],
+        rowCount: 1,
+      }
+    }
+    if (sql.includes('FROM message_queue') && sql.includes('claimed_by=$1')) {
+      return { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.includes('profile_revision') && sql.includes('FROM agents')) {
+      return {
+        rows: [{
+          agent_id: this.agentId,
+          profile_revision: null,
+          profile_source: null,
+          channel_port: null,
+          home_directory: '/repo',
+          metadata: {},
+        }] as T[],
+        rowCount: 1,
+      }
+    }
+    if (sql.includes('FROM agent_runtime_instances')) {
+      return {
+        rows: [{
+          runtime_instance_id: 'rt-queue-scheduler',
+          agent_id: this.agentId,
+          session_name: null,
+          port: null,
+          checkout_path: '/repo',
+          commit_sha: null,
+          started_at: '2026-05-07T23:50:00.000Z',
+          last_seen_at: '2026-05-07T23:59:00.000Z',
+          status: 'running',
+        }] as T[],
+        rowCount: 1,
+      }
+    }
+    if (sql.includes('FROM runtime_memory_ready_evidence')) {
+      return {
+        rows: [{
+          id: 1,
+          agent_id: this.agentId,
+          project: 'agent-comms-mcp',
+          runtime_instance_id: 'rt-queue-scheduler',
+          profile_revision: null,
+          profile_source: null,
+          session_name: null,
+          port: null,
+          expected_agent_id: this.agentId,
+          checkout_path: '/repo',
+          checkout_commit_sha: null,
+          recovery_command: 'mcp__wasurezu__recover_context',
+          result_status: 'ready',
+          failure_reason: null,
+          completed_at: '2026-05-07T23:55:00.000Z',
+          evidence_path: null,
+          evidence_log_id: null,
+          valid_until: '2026-05-08T01:00:00.000Z',
+          source: 'wasurezu_boot_recovery',
+          metadata: {},
+        }] as T[],
+        rowCount: 1,
+      }
+    }
+    return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
 describe('state_daemon queue work scheduler boundary', () => {
   test('received queue events schedule the runner without using tmux wake', async () => {
     const calls: Array<{ queueId: number; agentId: string }> = []
@@ -70,5 +161,138 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'received_runner_invoked',
     })).toBe(1)
+  })
+
+  test('pending LLM queue events use the scheduler when runPending is configured', async () => {
+    const agentId = 'codex-audit'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input)
+      },
+      async runReceived() {
+        throw new Error('runReceived should not be called for pending events')
+      },
+    }
+    const metrics = new FakeMetrics()
+    const tmux = new FakeTmux()
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, {
+        id: 490,
+        agent_id: agentId,
+        status: 'pending',
+        message_id: 'msg-490',
+        payload: JSON.stringify({
+          author_id: 'codex-cto',
+          content: 'Audit PR #490',
+          message_type: 'instruction',
+        }),
+        claim_expires_at: null,
+        created_at: new Date('2026-05-08T00:00:00.000Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux,
+      clock: new FakeClock(),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+      config: { codexRunnerEnabled: true },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 490,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 490, agentId }])
+    expect(tmux.sentKeys).toEqual([])
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'pending_runner_invoked',
+    })).toBe(1)
+  })
+
+  test('received notify for the same queue row is suppressed while pending runner is in flight', async () => {
+    const agentId = 'codex-audit'
+    const calls: Array<{ phase: 'pending' | 'received'; queueId: number; agentId: string }> = []
+    let releasePending!: () => void
+    let pendingStartedResolve!: () => void
+    const pendingStarted = new Promise<void>((resolve) => {
+      pendingStartedResolve = resolve
+    })
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push({ phase: 'pending', ...input })
+        pendingStartedResolve()
+        await new Promise<void>((release) => {
+          releasePending = release
+        })
+      },
+      async runReceived(input) {
+        calls.push({ phase: 'received', ...input })
+      },
+    }
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, {
+        id: 491,
+        agent_id: agentId,
+        status: 'pending',
+        message_id: 'msg-491',
+        payload: JSON.stringify({
+          author_id: 'codex-cto',
+          content: 'Audit PR #491',
+          message_type: 'instruction',
+        }),
+        claim_expires_at: null,
+        created_at: new Date('2026-05-08T00:00:00.000Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+      config: { codexRunnerEnabled: true },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 491,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await pendingStarted
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: 491,
+        agent_id: agentId,
+        status: 'received',
+        claim_expires_at: null,
+      })
+
+      expect(calls).toEqual([{ phase: 'pending', queueId: 491, agentId }])
+      expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+        result: 'received_runner_dedup_skipped',
+      })).toBe(1)
+    } finally {
+      releasePending()
+      await daemon.stop()
+    }
   })
 })

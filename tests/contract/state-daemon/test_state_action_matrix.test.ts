@@ -7,14 +7,14 @@ const memoryReadyGate = [{ kind: 'memory_ready' as const, required: true as cons
 const noGates: [] = []
 
 describe('state_daemon state/action matrix planner', () => {
-  test('pending + idle TUI agent plans wake_pending', () => {
+  test('pending + idle legacy TUI agent is disabled for queue delivery', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },
       agent: tui,
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'wake_pending', terminal: false, gates: memoryReadyGate })
+    })).toEqual({ kind: 'legacy_tui_disabled', terminal: false, gates: noGates })
   })
 
   test('pending + active claim plans observe_busy without terminal close', () => {
@@ -67,14 +67,14 @@ describe('state_daemon state/action matrix planner', () => {
     })).toEqual({ kind: 'observe_busy', terminal: false, gates: noGates })
   })
 
-  test('pending + missing tmux plans tmux_missing', () => {
+  test('pending + missing tmux is still legacy TUI disabled', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },
       agent: { runtime: 'TUI', tmux_session: null },
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
-    })).toEqual({ kind: 'tmux_missing', terminal: false, gates: noGates })
+    })).toEqual({ kind: 'legacy_tui_disabled', terminal: false, gates: noGates })
   })
 
   test('pending + inactive agent is observed without wake', () => {
@@ -89,14 +89,14 @@ describe('state_daemon state/action matrix planner', () => {
     }
   })
 
-  test('live received TUI work plans wake_received observation and remains non-terminal', () => {
+  test('live received legacy TUI work is disabled and remains non-terminal', () => {
     expect(planQueueAction({
       row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
       agent: tui,
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
-    })).toEqual({ kind: 'wake_received', terminal: false, gates: memoryReadyGate })
+    })).toEqual({ kind: 'legacy_tui_disabled', terminal: false, gates: noGates })
   })
 
   test('live received inactive agent is observed without wake', () => {

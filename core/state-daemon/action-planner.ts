@@ -2,6 +2,7 @@ export type QueueActionKind =
   | 'wake_pending'
   | 'wake_received'
   | 'invoke_codex_runner'
+  | 'legacy_tui_disabled'
   | 'observe_busy'
   | 'reclaim_expired'
   | 'observe_received'
@@ -75,8 +76,6 @@ const TERMINAL_STATUSES = new Set([
 ])
 
 const MEMORY_READY_ACTIONS = new Set<QueueActionKind>([
-  'wake_pending',
-  'wake_received',
   'invoke_codex_runner',
   'reclaim_expired',
 ])
@@ -106,8 +105,7 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
     const runtime = effectiveRuntime(agent)
     if (isLlmRunnerRuntime(runtime)) return planned('observe_received', false)
     if (agent.runtime !== defaultRuntime) return planned('runtime_skip', false)
-    if (!agent.tmux_session) return planned('tmux_missing', false)
-    return planned('wake_received', false)
+    return planned('legacy_tui_disabled', false)
   }
 
   if (row.status === 'in_progress') {
@@ -123,9 +121,8 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
       return planned('invoke_codex_runner', false)
     }
     if (agent.runtime !== defaultRuntime) return planned('runtime_skip', false)
-    if (!agent.tmux_session) return planned('tmux_missing', false)
     if (hasActiveClaim) return planned('observe_busy', false)
-    return planned('wake_pending', false)
+    return planned('legacy_tui_disabled', false)
   }
 
   return planned('observe_unknown', false)

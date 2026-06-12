@@ -217,7 +217,7 @@ export class WakePoolSaturatedError extends Error {
 }
 export class BotRestartLimitError extends Error {
   constructor(public agentId: string) {
-    super(`bot ${agentId} hit restart loop limit (1h/N)`)
+    super(`legacy bot restart is disabled for ${agentId}`)
   }
 }
 
@@ -235,7 +235,7 @@ export interface PgListenClient {
 
 export interface TmuxClient {
   sessionExists(session: string): Promise<boolean>
-  /** §5.4 補強 #5 — restart launcher (existing `scripts/restart-bot.sh` hook). */
+  /** Legacy adapter hook retained for compatibility; StateDaemon no longer restarts TUI/tmux bots. */
   restartSession(agentId: string): Promise<void>
 }
 
@@ -301,6 +301,7 @@ export interface HostRuntimeInvoker {
 
 /** Schedules queue work for agents driven by LLM runners (Codex, Claude Code, etc.). */
 export interface QueueWorkScheduler {
+  runPending?(input: { queueId: number; agentId: string }): Promise<void>
   runReceived(input: { queueId: number; agentId: string }): Promise<void>
 }
 

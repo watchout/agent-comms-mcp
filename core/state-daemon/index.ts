@@ -9,8 +9,8 @@
  *     but only inside a bounded active-claim age window (§5.1 / R4 /
  *     補強 #1). A coarse agent status is not enough to keep a claim alive
  *     forever; stale claims must expire and be reclaimable.
- *   - Polls `agents.last_seen_at` every 30s; restarts TUI bots with missing
- *     tmux sessions (§5.4 / R7 / 補強 #5), with a 1h/N rate limit (F8).
+ *   - Polls `agents.last_seen_at` every 30s; legacy TUI/tmux runtimes are
+ *     skipped so queue delivery is owned by approved runner/runtime paths.
  *   - Manages a dynamic-capacity wake pool (§5.2 / 補強 #2).
  *   - Emits abnormal-activity alerts (§10.3 / 「出てから制御」).
  *
@@ -21,18 +21,19 @@
  *   F1 prevention checks (chain analysis / pair detection / ack pattern /
  *      rate limit) are NOT implemented here. TUI 統一 + B4 system prompt +
  *      reactive control 担当. 再導入 PR は block.
- *   F5 SIG runtime に wake 試行 path 禁止 — `wakeRow` throws on non-TUI.
- *   F6 wake-daemon 並行稼働中の重複 wake は許容 (idempotent + duplicate
- *      suppression で吸収).
+ *   F5 legacy TUI/tmux prompt wake path 禁止 — no prompt submission or restart
+ *      repair may count as delivery.
+ *   F6 wake-daemon 並行稼働中の重複 wake は queue state idempotency +
+ *      duplicate suppression で吸収.
  *   F7 既 expired claim の TTL 延長禁止 — heartbeat は `claim_expires_at >
  *      now()` の row のみ update.
- *   F8 bot restart 1h N 回上限超で抑止 + CEO escalate alert.
+ *   F8 legacy bot restart is disabled; runner/runtime health must provide
+ *      recovery evidence instead.
  *   F12 `bot_registry` table / `bot-registry.txt` の参照禁止 — `agents`
  *      table が SoT (CTO 検証済).
  */
 import {
   AlreadyStartedError,
-  BotRestartLimitError,
   DEFAULT_CONFIG,
   loadGcOverridesFromEnv,
   DBConnectionError,
@@ -126,11 +127,6 @@ interface AgentRow {
   expected_provider_identity?: unknown
 }
 
-interface RestartRecord {
-  /** Restart timestamps within the last hour, oldest first. */
-  recent: Date[]
-}
-
 export class StateDaemon {
   private readonly db: DBClient
   private readonly pgListen: PgListenClient
@@ -150,8 +146,8 @@ export class StateDaemon {
 
   private status: 'stopped' | 'running' | 'stopping' = 'stopped'
   private dbErrorStreak = 0
-  private readonly restartHistory = new Map<string, RestartRecord>()
   private readonly inflightWakes = new Set<Promise<boolean>>()
+  private readonly inflightQueueWork = new Map<string, Promise<void>>()
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
   constructor(deps: StateDaemonDeps) {
@@ -249,9 +245,12 @@ export class StateDaemon {
     this.intervalHandles.length = 0
     // Wait up to 5s for in-flight wake jobs to finish (§1.2 invariants).
     const deadline = this.clock.now().getTime() + 5000
-    while (this.inflightWakes.size > 0 && this.clock.now().getTime() < deadline) {
+    while ((this.inflightWakes.size > 0 || this.inflightQueueWork.size > 0) && this.clock.now().getTime() < deadline) {
       await Promise.race([
-        Promise.all(Array.from(this.inflightWakes)),
+        Promise.all([
+          ...Array.from(this.inflightWakes),
+          ...Array.from(this.inflightQueueWork.values()),
+        ]),
         new Promise((r) => setTimeout(r, 50)),
       ])
     }
@@ -277,8 +276,11 @@ export class StateDaemon {
     // For received events, the pg_notify payload already contains the data we
     // need. Dispatch to queueWorkScheduler immediately without a DB roundtrip.
     if (event.status === 'received' && this.queueWorkScheduler) {
-      void this.queueWorkScheduler.runReceived({ queueId: event.id, agentId: event.agent_id })
-      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'received_runner_invoked' })
+      this.scheduleQueueWorkRunner(
+        'received',
+        { id: event.id, agent_id: event.agent_id } as QueueRow,
+        () => this.queueWorkScheduler!.runReceived({ queueId: event.id, agentId: event.agent_id }),
+      )
       return
     }
 
@@ -477,50 +479,14 @@ export class StateDaemon {
         this.metrics.inc('state_daemon_bot_liveness_skipped_total', { runtime: runtime ?? 'unknown' })
         continue
       }
-      // §5.4 / R7: TUI bot with stale last_seen_at gets restart attempted
-      // regardless of whether the tmux_session field is currently populated
-      // — the launcher (restart-bot.sh) reattaches or recreates the session
-      // by agent_id, so a missing tmux_session value is not a blocker; it is
-      // exactly the case we want restarted. Non-TUI runtimes are still alert-
-      // only (cycle 1 auditor Axis 1: tmux_session 欠落 path も restart 試行へ).
-      if (bot.runtime !== defaultConfigPort.getDefaultRuntime()) {
-        await this.alert.alert(
-          `bot ${bot.agent_id} dead (runtime=${bot.runtime}, manual intervention)`,
-        )
-        result.escalated++
+      if (bot.runtime === defaultConfigPort.getDefaultRuntime()) {
+        this.metrics.inc('state_daemon_bot_liveness_skipped_total', { runtime: 'legacy_tui_disabled' })
         continue
       }
-      // tmux_session may be NULL (per-agent metadata not yet seeded) — when
-      // it is, treat the session as absent and let the restart path run.
-      const exists = bot.tmux_session
-        ? await this.tmux.sessionExists(bot.tmux_session)
-        : false
-      if (exists) continue
-
-      if (this.exceededRestartLimit(bot.agent_id)) {
-        this.metrics.inc('state_daemon_bot_dead_total', { agent_id: bot.agent_id })
-        await this.alert.alert(
-          `bot ${bot.agent_id} restart loop limit reached — CEO escalate (limit ${this.config.botRestartMaxPerHour}/hour)`,
-        )
-        result.escalated++
-        continue
-      }
-      try {
-        await this.tmux.restartSession(bot.agent_id)
-        this.recordRestart(bot.agent_id)
-        await this.dbQuery(
-          `UPDATE agents SET status='restarting' WHERE agent_id=$1 AND status='online'`,
-          [bot.agent_id],
-        )
-        this.metrics.inc('state_daemon_bot_restarts_total', { agent_id: bot.agent_id })
-        await this.alert.alert(`bot ${bot.agent_id} restarted (tmux session missing)`)
-        result.restarted++
-      } catch (err) {
-        await this.alert.alert(
-          `bot ${bot.agent_id} restart failed: ${(err as Error).message ?? String(err)}`,
-        )
-        result.escalated++
-      }
+      await this.alert.alert(
+        `bot ${bot.agent_id} dead (runtime=${bot.runtime}, manual intervention)`,
+      )
+      result.escalated++
     }
     return result
   }
@@ -781,6 +747,13 @@ export class StateDaemon {
   ): Promise<boolean> {
     switch (action.kind) {
       case 'invoke_codex_runner':
+        if (this.queueWorkScheduler?.runPending) {
+          this.scheduleQueueWorkRunner('pending', row, () => this.queueWorkScheduler!.runPending!({
+            queueId: row.id,
+            agentId: row.agent_id,
+          }))
+          return true
+        }
         return this.invokeCodexRunner(row, agent)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
@@ -800,16 +773,49 @@ export class StateDaemon {
         return false
       case 'observe_received':
         if (this.queueWorkScheduler) {
-          void this.queueWorkScheduler.runReceived({ queueId: row.id, agentId: row.agent_id })
-          this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'received_runner_invoked' })
+          this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
+            queueId: row.id,
+            agentId: row.agent_id,
+          }))
           return true
         }
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
+        return false
+      case 'legacy_tui_disabled':
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })
+        return false
+      case 'wake_pending':
+      case 'wake_received':
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })
         return false
       default:
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
         return false
     }
+  }
+
+  private scheduleQueueWorkRunner(
+    phase: 'pending' | 'received',
+    row: QueueRow,
+    run: () => Promise<void>,
+  ): void {
+    const key = String(row.id)
+    if (this.inflightQueueWork.has(key)) {
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_dedup_skipped` })
+      return
+    }
+    this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_invoked` })
+    const promise = run()
+      .catch((err) => {
+        const message = (err as Error).message ?? String(err)
+        this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_error` })
+        void this.alert.alert(`queue work ${phase} runner failed for ${row.agent_id} queue_id=${row.id}: ${message}`)
+      })
+      .finally(() => {
+        this.inflightQueueWork.delete(key)
+      })
+    this.inflightQueueWork.set(key, promise)
   }
 
   private requesterFromPayload(payload: unknown): string | null {
@@ -1231,24 +1237,6 @@ export class StateDaemon {
     // is now via claim-ttl sweeper (rolling back to 'pending'). This fetch
     // is a no-op in v0.9 — Issue #349 will redesign abandonment tracking.
     return []
-  }
-
-  // ── Restart rate limiter (§5.4 / F8) ───────────────────────────────────────
-
-  private exceededRestartLimit(agentId: string): boolean {
-    const rec = this.restartHistory.get(agentId)
-    if (!rec) return false
-    const now = this.clock.now().getTime()
-    rec.recent = rec.recent.filter((t) => now - t.getTime() < 3_600_000)
-    return rec.recent.length >= this.config.botRestartMaxPerHour
-  }
-
-  private recordRestart(agentId: string): void {
-    const rec = this.restartHistory.get(agentId) ?? { recent: [] }
-    const now = this.clock.now()
-    rec.recent = rec.recent.filter((t) => now.getTime() - t.getTime() < 3_600_000)
-    rec.recent.push(now)
-    this.restartHistory.set(agentId, rec)
   }
 
   // ── DB error tracking ──────────────────────────────────────────────────────
