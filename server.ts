@@ -12,6 +12,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { createServer, IncomingMessage, ServerResponse } from 'node:http'
 import {
   CallToolRequestSchema,
@@ -4679,6 +4680,13 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
 // --- 1. Multi-bot SSE HTTP server (conditional) ---
 const MULTI_BOT_MODE = EXPECTED_BOTS.length > 0 || !!process.env.AGENT_COMMS_PORT
 const daemonTransports = new Map<string, SSEServerTransport>()
+// ADR-029R Spike A: experimental Streamable HTTP MCP endpoint. Off by default
+// (frozen requirement 4: fallback discipline). Identity via bot_id query param
+// is SPIKE-ONLY — ADR-029R §5 Phase 2 replaces it with auth-subject binding
+// before any fleet use.
+const EXPERIMENTAL_HTTP_MCP = process.env.AGENT_COMMS_EXPERIMENTAL_HTTP_MCP === '1'
+const httpMcpTransports = new Map<string, StreamableHTTPServerTransport>()
+const httpMcpBots = new Map<string, string>()
 let httpServer: ReturnType<typeof createServer> | null = null
 
 if (MULTI_BOT_MODE) {
@@ -4784,6 +4792,53 @@ if (MULTI_BOT_MODE) {
       const health = getHealthStatus()
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(health))
+      return
+    }
+
+    // Streamable HTTP MCP endpoint (ADR-029R Spike A, experimental, off by default)
+    if (url.pathname === '/mcp' && EXPERIMENTAL_HTTP_MCP) {
+      if (!authenticateRequest(req, res)) return
+      const existingSessionId = req.headers['mcp-session-id'] as string | undefined
+
+      // Established session: route to its transport (POST/GET/DELETE all flow
+      // through handleRequest; DELETE terminates the session per spec).
+      if (existingSessionId && httpMcpTransports.has(existingSessionId)) {
+        await httpMcpTransports.get(existingSessionId)!.handleRequest(req, res)
+        return
+      }
+
+      // New session: must be an initialize POST with an explicit bot identity.
+      if (req.method === 'POST') {
+        const botId = url.searchParams.get('bot_id')
+        if (!botId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'bot_id query parameter is required (spike-only identity; see ADR-029R §5)' }))
+          return
+        }
+        const ctx = createBotServer(botId)
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            httpMcpTransports.set(sid, transport)
+            httpMcpBots.set(sid, botId)
+            serverLog.info('http_mcp.session_initialized', { bot_id: botId, session_id: sid })
+          },
+        })
+        transport.onclose = () => {
+          const sid = transport.sessionId
+          if (sid) {
+            httpMcpTransports.delete(sid)
+            httpMcpBots.delete(sid)
+            serverLog.info('http_mcp.session_closed', { bot_id: botId, session_id: sid })
+          }
+        }
+        await ctx.server.connect(transport)
+        await transport.handleRequest(req, res)
+        return
+      }
+
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unknown or expired mcp-session-id' }))
       return
     }
 
