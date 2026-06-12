@@ -104,6 +104,7 @@ export type QueueWorkRunOutcome =
       code:
         | 'NO_RECEIVED_ROW'
         | 'INVALID_STATE'
+        | 'CLAIM_NOT_OWNED'
         | 'TRANSITION_RACE'
         | 'ADAPTER_ERROR'
         | 'ADAPTER_RESULT_NOT_OK'
@@ -118,6 +119,12 @@ export interface RunReceivedQueueWorkOptions {
   agentId?: string
   adapter: LlmRuntimeAdapter
   invocationSource?: string
+  /**
+   * When set, only rows whose payload.receive_claim.source matches are
+   * processed. Rows claimed by another path (e.g. a live TUI session calling
+   * `next`) are left untouched with CLAIM_NOT_OWNED instead of being advanced.
+   */
+  expectedClaimSource?: string
   now?: () => Date
 }
 
@@ -294,6 +301,20 @@ export async function runReceivedQueueWork(
         code: 'INVALID_STATE',
         queue_id: queueIdOf(row),
         status: row.status,
+      }
+    }
+
+    if (opts.expectedClaimSource) {
+      const claimSource = parsePayload(row.payload).receive_claim?.source ?? null
+      if (claimSource !== opts.expectedClaimSource) {
+        await db.query('ROLLBACK')
+        return {
+          ok: false,
+          code: 'CLAIM_NOT_OWNED',
+          queue_id: queueIdOf(row),
+          status: row.status,
+          detail: `receive_claim.source=${claimSource ?? 'null'} expected=${opts.expectedClaimSource}`,
+        }
       }
     }
 

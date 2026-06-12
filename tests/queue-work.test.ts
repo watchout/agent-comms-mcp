@@ -180,6 +180,74 @@ describe('runReceivedQueueWork', () => {
     })
   })
 
+  test('expectedClaimSource leaves rows claimed by another path untouched (CLAIM_NOT_OWNED)', async () => {
+    // Row claimed by a live TUI session: no receive_claim.source in payload.
+    const db = new FakeQueueDb(receivedRow())
+    let invoked = false
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fake-runtime',
+      capabilities,
+      async invoke() {
+        invoked = true
+        return okResult()
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      expectedClaimSource: 'state-daemon-queue-work-scheduler',
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'CLAIM_NOT_OWNED',
+      queue_id: '42',
+      status: 'received',
+    })
+    expect(invoked).toBe(false)
+    expect(db.row.status).toBe('received')
+    expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+  })
+
+  test('expectedClaimSource processes rows whose receive_claim.source matches', async () => {
+    const db = new FakeQueueDb(receivedRow({
+      payload: JSON.stringify({
+        channel_id: 'audit',
+        thread_id: 'thread-1',
+        author_id: 'codex-cto',
+        content: 'Audit PR #489',
+        message_type: 'chat',
+        receive_claim: {
+          mode: 'targeted-receive',
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+        },
+      }),
+    }))
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fake-runtime',
+      capabilities,
+      async invoke() {
+        return okResult()
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      expectedClaimSource: 'state-daemon-queue-work-scheduler',
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: true, code: 'DONE', queue_id: '42' })
+    expect(db.row.status).toBe('done')
+  })
+
   test('adapter failures leave the row in_progress with runner_error evidence', async () => {
     const db = new FakeQueueDb(receivedRow())
     const adapter: LlmRuntimeAdapter = {

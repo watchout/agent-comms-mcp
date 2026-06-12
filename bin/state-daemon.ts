@@ -165,6 +165,9 @@ class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       cwd: this.cwd,
     })
     if (!result.ok) {
+      // Rows claimed by another path (e.g. a live TUI session that called
+      // `next`) are not scheduler work — leave them untouched, no alert.
+      if ((result.runner as { code?: string } | undefined)?.code === 'CLAIM_NOT_OWNED') return
       throw new Error(this.describeFailure(result))
     }
   }
@@ -176,6 +179,12 @@ class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       AGENT_COM_EXPECTED_AGENT_ID: agentId,
       AUN_RECEIVE_CLAIM_SOURCE: this.env.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
       AUN_QUEUE_WORK_INVOCATION_SOURCE: this.env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
+      // Only process rows this scheduler claimed itself (receive_claim.source
+      // match) — never rows claimed by a TUI session or another runner.
+      AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
+        this.env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
+          ?? this.env.AUN_RECEIVE_CLAIM_SOURCE
+          ?? 'state-daemon-queue-work-scheduler',
     }
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
       env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND

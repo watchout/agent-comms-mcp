@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { resolve } from 'node:path'
 import { createDbAdapter } from '../../core/db'
 import {
@@ -16,6 +16,7 @@ export interface RunQueueWorkOptions {
   queueId?: string
   runtime?: string
   invocationSource?: string
+  expectedClaimSource?: string
   finalize?: boolean
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
@@ -28,6 +29,7 @@ export interface RunQueueWorkPlan {
   queue_id: string | null
   runtime: string
   invocation_source: string | null
+  expected_claim_source: string | null
   finalize: boolean
   adapter_contract: 'queue_work_envelope_v1_stdin_to_queue_work_result_v1_stdout'
 }
@@ -52,6 +54,7 @@ function parseArgs(argv: string[]): RunQueueWorkOptions {
     if (tok === '--agent-id') out.agentId = argv[++i]
     else if (tok === '--queue-id') out.queueId = argv[++i]
     else if (tok === '--runtime') out.runtime = argv[++i]
+    else if (tok === '--expected-claim-source') out.expectedClaimSource = argv[++i]
     else if (tok === '--finalize') out.finalize = true
     else if (tok === '--dry-run') out.dryRun = true
   }
@@ -66,6 +69,7 @@ export function buildRunQueueWorkPlan(opts: RunQueueWorkOptions = {}): RunQueueW
     queue_id: opts.queueId ?? null,
     runtime: opts.runtime ?? env.AUN_QUEUE_WORK_RUNTIME ?? (env.AUN_QUEUE_WORK_COMMAND ? 'command-json' : 'unconfigured'),
     invocation_source: opts.invocationSource ?? env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? null,
+    expected_claim_source: opts.expectedClaimSource ?? env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE ?? null,
     finalize: !!opts.finalize,
     adapter_contract: 'queue_work_envelope_v1_stdin_to_queue_work_result_v1_stdout',
   }
@@ -97,6 +101,44 @@ class EchoRuntimeAdapter implements LlmRuntimeAdapter {
   }
 }
 
+interface ExecResult {
+  status: number
+  stdout: string
+  stderr: string
+}
+
+/**
+ * Async execFile so adapter runs never block the caller's event loop — the
+ * state-daemon invokes this in-process and must keep heartbeat/sweep/notify
+ * handling alive while an LLM runtime works on a queue item.
+ */
+function execFileAsync(
+  command: string,
+  args: string[],
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number; maxBuffer: number; input?: string },
+): Promise<ExecResult> {
+  return new Promise((resolvePromise) => {
+    const child = execFile(command, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      timeout: opts.timeout,
+      maxBuffer: opts.maxBuffer,
+      encoding: 'utf-8',
+    }, (err, stdout, stderr) => {
+      const status = err == null
+        ? 0
+        : typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === 'number'
+          ? (err as { code: number }).code
+          : 1
+      resolvePromise({ status, stdout: stdout ?? '', stderr: stderr ?? '' })
+    })
+    if (opts.input !== undefined && child.stdin) {
+      child.stdin.write(opts.input)
+      child.stdin.end()
+    }
+  })
+}
+
 class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'command-json'
   capabilities = {
@@ -117,23 +159,22 @@ class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
   ) {}
 
   async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
-    const child = spawnSync(this.command, this.args, {
+    const child = await execFileAsync(this.command, this.args, {
       cwd: this.cwd,
       env: this.env,
       input: JSON.stringify(envelope) + '\n',
-      encoding: 'utf-8',
       timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
       maxBuffer: 1024 * 1024 * 20,
     })
-    if ((child.status ?? 1) !== 0) {
+    if (child.status !== 0) {
       throw new Error(
-        `runtime command failed status=${child.status ?? 'null'} stderr=${(child.stderr ?? '').slice(0, 1000)}`,
+        `runtime command failed status=${child.status} stderr=${child.stderr.slice(0, 1000)}`,
       )
     }
     try {
-      return JSON.parse(child.stdout ?? '{}') as QueueWorkResult
+      return JSON.parse(child.stdout || '{}') as QueueWorkResult
     } catch (err) {
-      throw new Error(`runtime command returned non-JSON stdout: ${(child.stdout ?? '').slice(0, 1000)}`)
+      throw new Error(`runtime command returned non-JSON stdout: ${child.stdout.slice(0, 1000)}`)
     }
   }
 }
@@ -173,7 +214,7 @@ class AgentComCliReplySender implements QueueReplySender {
     if (!input.mention) {
       throw new Error('reply mention is required for agent-com send')
     }
-    const child = spawnSync('bun', [
+    const child = await execFileAsync('bun', [
       'cli/index.ts',
       'send',
       '--content',
@@ -190,12 +231,11 @@ class AgentComCliReplySender implements QueueReplySender {
         AGENT_ID: input.agent_id,
         AGENT_COM_EXPECTED_AGENT_ID: input.agent_id,
       },
-      encoding: 'utf-8',
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 5,
     })
-    if ((child.status ?? 1) !== 0) {
-      throw new Error(`agent-com send failed status=${child.status ?? 'null'} stderr=${child.stderr ?? ''}`)
+    if (child.status !== 0) {
+      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr}`)
     }
     const parsed = JSON.parse(child.stdout || '{}')
     return { message_id: parsed.message_id ?? null }
@@ -229,6 +269,7 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
       agentId: plan.agent_id ?? undefined,
       adapter: createRuntimeAdapter(plan, env),
       invocationSource: plan.invocation_source ?? undefined,
+      expectedClaimSource: plan.expected_claim_source ?? undefined,
     })
     let finalizer: unknown = undefined
     if (plan.finalize && runner.ok) {
