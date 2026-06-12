@@ -45,10 +45,16 @@ export interface PlannedQueueAction {
   }>
 }
 
-const CODEX_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
+// All runtimes that are dispatched through the LLM runner path (invoke_codex_runner action).
+// 'codex*' → bun bin/aun.ts codex-runner (legacy batch runner)
+// 'claude-code*' / 'claude*' → host-runtime adapter → claude -p headless
+const LLM_RUNNER_RUNTIMES = new Set([
+  'codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER',
+  'claude-code', 'claude', 'CLAUDE', 'CLAUDE_CODE',
+])
 
-function isCodexRuntime(runtime: string | null): boolean {
-  return runtime !== null && CODEX_RUNTIMES.has(runtime)
+function isLlmRunnerRuntime(runtime: string | null): boolean {
+  return runtime !== null && LLM_RUNNER_RUNTIMES.has(runtime)
 }
 
 function isInactiveAgent(status: string | null | undefined): boolean {
@@ -98,7 +104,7 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
     if (!agent) return planned('observe_received', false)
     if (isInactiveAgent(agent.status)) return planned('agent_inactive', false)
     const runtime = effectiveRuntime(agent)
-    if (isCodexRuntime(runtime)) return planned('observe_received', false)
+    if (isLlmRunnerRuntime(runtime)) return planned('observe_received', false)
     if (agent.runtime !== defaultRuntime) return planned('runtime_skip', false)
     if (!agent.tmux_session) return planned('tmux_missing', false)
     return planned('wake_received', false)
@@ -112,7 +118,7 @@ export function planQueueAction(input: PlanQueueActionInput): PlannedQueueAction
     if (!agent) return planned('agent_missing', false)
     if (isInactiveAgent(agent.status)) return planned('agent_inactive', false)
     const runtime = effectiveRuntime(agent)
-    if (isCodexRuntime(runtime)) {
+    if (isLlmRunnerRuntime(runtime)) {
       if (hasActiveClaim) return planned('observe_busy', false)
       return planned('invoke_codex_runner', false)
     }

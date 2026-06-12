@@ -299,12 +299,18 @@ export interface HostRuntimeInvoker {
   invoke(input: HostRuntimeInvocationExecution): Promise<HostRuntimeRunnerResult>
 }
 
+/** Schedules queue work for agents driven by LLM runners (Codex, Claude Code, etc.). */
+export interface QueueWorkScheduler {
+  runReceived(input: { queueId: number; agentId: string }): Promise<void>
+}
+
 export interface StateDaemonDeps {
   db: DBClient
   pgListen: PgListenClient
   tmux: TmuxClient
   codexRunner?: CodexRunnerInvoker
   hostRuntimeInvoker?: HostRuntimeInvoker
+  queueWorkScheduler?: QueueWorkScheduler
   clock: Clock
   metrics: Metrics
   alert: AlertSink

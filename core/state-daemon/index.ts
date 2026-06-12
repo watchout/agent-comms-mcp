@@ -40,6 +40,7 @@ import {
   type Clock,
   type CodexRunnerInvoker,
   type HostRuntimeInvoker,
+  type QueueWorkScheduler,
   type DBClient,
   type LivenessResult,
   type Metrics,
@@ -67,6 +68,7 @@ import {
   type StallVerdict,
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
+import { selectAgentAdapter } from './adapter-registry'
 import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../runtime-memory-ready'
 import {
   buildTerminalBaton,
@@ -135,6 +137,7 @@ export class StateDaemon {
   private readonly tmux: TmuxClient
   private readonly codexRunner: CodexRunnerInvoker | null
   private readonly hostRuntimeInvoker: HostRuntimeInvoker | null
+  private readonly queueWorkScheduler: QueueWorkScheduler | null
   private readonly clock: Clock
   private readonly metrics: Metrics
   private readonly alert: AlertSink
@@ -157,6 +160,7 @@ export class StateDaemon {
     this.tmux = deps.tmux
     this.codexRunner = deps.codexRunner ?? null
     this.hostRuntimeInvoker = deps.hostRuntimeInvoker ?? null
+    this.queueWorkScheduler = deps.queueWorkScheduler ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
@@ -269,6 +273,15 @@ export class StateDaemon {
       if (!handled) this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
       return
     }
+
+    // For received events, the pg_notify payload already contains the data we
+    // need. Dispatch to queueWorkScheduler immediately without a DB roundtrip.
+    if (event.status === 'received' && this.queueWorkScheduler) {
+      void this.queueWorkScheduler.runReceived({ queueId: event.id, agentId: event.agent_id })
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'received_runner_invoked' })
+      return
+    }
+
     const { rows } = await this.dbQuery<QueueRow>(
       `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
@@ -657,7 +670,7 @@ export class StateDaemon {
       return true
     }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
-      return this.runObservedQueueAction(action, row)
+      return this.runObservedQueueAction(action, row, bot)
     }
 
     this.metrics.inc('state_daemon_wake_actions_total', {
@@ -761,10 +774,14 @@ export class StateDaemon {
     )
   }
 
-  private async runObservedQueueAction(action: PlannedQueueAction, row: QueueRow): Promise<boolean> {
+  private async runObservedQueueAction(
+    action: PlannedQueueAction,
+    row: QueueRow,
+    agent?: AgentRow | null,
+  ): Promise<boolean> {
     switch (action.kind) {
       case 'invoke_codex_runner':
-        return this.invokeCodexRunner(row)
+        return this.invokeCodexRunner(row, agent)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
@@ -780,6 +797,14 @@ export class StateDaemon {
         return false
       case 'observe_busy':
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })
+        return false
+      case 'observe_received':
+        if (this.queueWorkScheduler) {
+          void this.queueWorkScheduler.runReceived({ queueId: row.id, agentId: row.agent_id })
+          this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'received_runner_invoked' })
+          return true
+        }
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
         return false
       default:
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
@@ -937,7 +962,7 @@ export class StateDaemon {
     return result.exit_status === 0 && result.schema_valid && !result.failure_code && result.parser_outcome === 'success'
   }
 
-  private async invokeCodexRunner(row: QueueRow): Promise<boolean> {
+  private async invokeCodexRunner(row: QueueRow, agent?: AgentRow | null): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
       return false
@@ -990,10 +1015,19 @@ export class StateDaemon {
       autoFinalReply,
       payload: row.payload,
     }
+    // Per-agent adapter selection: if the agent has a runtime_engine_preference
+    // that maps to a known LLM (claude-code, codex), use the per-agent profile.
+    // This allows auditor/devauditor (claude-code) and codex-* bots to each get
+    // the correct headless invocation without global config changes.
+    const agentAdapter = selectAgentAdapter(agent?.runtime_engine_preference)
+    const effectiveProfile: RuntimeInvocationProfile | undefined =
+      agentAdapter.profile ?? this.config.hostRuntimeInvocationProfile
+    const hostAdapterEnabled =
+      this.config.hostRuntimeAdapterEnabled || agentAdapter.kind === 'claude-code'
     const hostSelection = selectHostRuntimeAdapter({
-      enabled: this.config.hostRuntimeAdapterEnabled,
-      profile: this.config.hostRuntimeInvocationProfile,
-      invocation: this.buildHostRuntimeInvocation(row, this.config.hostRuntimeInvocationProfile, now),
+      enabled: hostAdapterEnabled,
+      profile: effectiveProfile,
+      invocation: this.buildHostRuntimeInvocation(row, effectiveProfile, now),
       schemaPath: this.config.hostRuntimeInvocationSchemaPath,
       schemaJson: this.config.hostRuntimeInvocationSchemaJson,
       outputLastMessagePath: this.config.hostRuntimeInvocationOutputLastMessagePath,
