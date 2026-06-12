@@ -3,8 +3,15 @@
  *
  * Performs, idempotently and dry-run by default:
  *   1. verify the agent exists in `agents` (never creates agents)
- *   2. upsert `agent_workspaces` (org_id, local_path=realpath(workspace))
- *   3. upsert an ACTIVE `agent_workspace_bindings` row
+ *   2. fail-closed preflight (ARC review on PR #738):
+ *      - an existing agent_workspaces(org_id, local_path) row is REUSED,
+ *        never duplicated;
+ *      - if another agent holds an ACTIVE binding on that workspace,
+ *        fail closed (workspace takeover is not seeding);
+ *      - if .agent/identity.json already declares a DIFFERENT agent_id,
+ *        fail closed. There is deliberately no --force: re-identifying a
+ *        workspace is a migration and requires protected review, not a flag.
+ *   3. upsert `agent_workspaces` + an ACTIVE `agent_workspace_bindings` row
  *   4. write `<workspace>/.agent/identity.json` (declaration only — the DB
  *      rows above are the authority, per ADR-029R §5)
  *
@@ -12,7 +19,7 @@
  *   bun scripts/seed-workspace-identity.ts --agent-id <id> --workspace <path> \
  *       [--project <name>] [--org-id default] [--execute]
  */
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Client } from 'pg'
 
@@ -47,17 +54,21 @@ async function main(): Promise<void> {
     process.exit(1)
   }
   const canonicalPath = realpathSync(args.workspace)
-  const workspaceId = `ws-${args.agentId}-${Buffer.from(canonicalPath).toString('base64url').slice(0, 12)}`
   const identityFile = join(canonicalPath, '.agent', 'identity.json')
 
-  const plan = {
-    agent_id: args.agentId,
-    org_id: args.orgId,
-    workspace_id: workspaceId,
-    local_path: canonicalPath,
-    identity_file: identityFile,
-    project: args.project ?? null,
-    dry_run: !args.execute,
+  // Preflight 1: an existing identity.json declaring a different agent fails
+  // closed before any DB work (no --force by design; see header).
+  if (existsSync(identityFile)) {
+    try {
+      const declared = JSON.parse(readFileSync(identityFile, 'utf-8'))
+      if (typeof declared?.agent_id === 'string' && declared.agent_id.trim() && declared.agent_id.trim() !== args.agentId) {
+        process.stderr.write(`Error [IDENTITY_DECLARATION_CONFLICT]: ${identityFile} already declares agent_id '${declared.agent_id.trim()}' (requested '${args.agentId}'). Re-identifying a workspace is a protected migration, not a seeding operation.\n`)
+        process.exit(1)
+      }
+    } catch (err) {
+      process.stderr.write(`Error [IDENTITY_DECLARATION_UNREADABLE]: ${identityFile}: ${(err as Error).message}\n`)
+      process.exit(1)
+    }
   }
 
   const client = new Client({ connectionString: process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms' })
@@ -67,6 +78,41 @@ async function main(): Promise<void> {
     if (agent.rows.length === 0) {
       process.stderr.write(`Error: agent_id '${args.agentId}' not present in agents — register the agent first; this tool never creates agents\n`)
       process.exit(1)
+    }
+
+    // Preflight 2: reuse an existing workspace row for this (org_id,
+    // local_path) — never create a duplicate.
+    const existingWs = await client.query<{ workspace_id: string }>(
+      `SELECT workspace_id FROM agent_workspaces WHERE org_id = $1 AND local_path = $2`,
+      [args.orgId, canonicalPath],
+    )
+    const workspaceId = existingWs.rows.length > 0
+      ? existingWs.rows[0].workspace_id
+      : `ws-${args.agentId}-${Buffer.from(canonicalPath).toString('base64url').slice(0, 12)}`
+
+    // Preflight 3: an ACTIVE binding held by another agent fails closed.
+    if (existingWs.rows.length > 0) {
+      const otherBinding = await client.query<{ agent_id: string }>(
+        `SELECT agent_id FROM agent_workspace_bindings
+          WHERE workspace_id = $1 AND active = true AND agent_id <> $2
+          LIMIT 1`,
+        [workspaceId, args.agentId],
+      )
+      if (otherBinding.rows.length > 0) {
+        process.stderr.write(`Error [BINDING_CONFLICT]: workspace ${workspaceId} (${canonicalPath}) has an ACTIVE binding for '${otherBinding.rows[0].agent_id}'. Workspace takeover requires protected review; this tool fails closed.\n`)
+        process.exit(1)
+      }
+    }
+
+    const plan = {
+      agent_id: args.agentId,
+      org_id: args.orgId,
+      workspace_id: workspaceId,
+      workspace_reused: existingWs.rows.length > 0,
+      local_path: canonicalPath,
+      identity_file: identityFile,
+      project: args.project ?? null,
+      dry_run: !args.execute,
     }
 
     if (!args.execute) {

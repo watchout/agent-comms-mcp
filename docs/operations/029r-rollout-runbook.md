@@ -121,3 +121,15 @@ as normal mode. Discord connections remain daemon-only.
 - agent-memory (`wasurezu`) identity unification via the shared resolver
   (cross-repo; global `AGENT_MEMORY_AGENT_ID` default removal) — issue #733.
 - Queue-work debts #730/#731/#732 before broader scheduler rollout.
+
+## 8. Canary evidence packaging requirement (ARC review on PR #738)
+
+The canary evidence posted to #722 MUST include, per canary bot, the exact
+generated client config used in the live launch — proving the generator's
+output is what actually ran:
+
+- the `generate-http-mcp-client-config.ts` output for that bot (codex TOML
+  block or claude .mcp.json entry) as installed, and
+- the token env var NAME used (e.g. `AUN_MCP_TOKEN_SECRETARY`) —
+  **secret values always redacted**; only names and the `key_id` from
+  `issue-http-mcp-token.ts` output are recorded.
