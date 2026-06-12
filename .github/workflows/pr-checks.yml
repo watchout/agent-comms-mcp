@@ -132,6 +132,10 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # gh pr merge requires a git repository context — without checkout the
+      # job fails with "not a git repository" (observed on PR #736).
+      - uses: actions/checkout@v4
+
       - name: Squash-merge PR
         run: |
           gh pr merge ${{ github.event.pull_request.number }} \

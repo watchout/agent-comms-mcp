@@ -59,6 +59,9 @@ async function main(): Promise<void> {
       AGENT_COMMS_PORT: String(HTTP_PORT),
       WEBHOOK_PORT: String(WEBHOOK_PORT),
       AGENT_COMMS_EXPERIMENTAL_HTTP_MCP: '1',
+      // PR 4: default identity mode is 'binding'; this harness predates
+      // per-bot credentials, so it opts into the dev/test spike mode.
+      AGENT_COMMS_HTTP_MCP_IDENTITY: 'spike-bot-id',
       AUTH_TOKEN,
       AUTH_SKIP_LOCALHOST: 'false',
       AGENT_COM_PG_NOTIFY: 'false',
