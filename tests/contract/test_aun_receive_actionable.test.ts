@@ -104,6 +104,25 @@ function rows(): Array<{ id: number; status: string; claimed_by: string | null; 
   ).all(TEST_AGENT) as Array<{ id: number; status: string; claimed_by: string | null; content: string; message_type: string }>)
 }
 
+function forceV08OnlyStatusVocabulary(): void {
+  withDb((db) => {
+    const row = db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'message_queue'`,
+    ).get() as { sql: string }
+    const drifted = row.sql.replace(
+      /CHECK \(status IN \([^)]+\)\)/,
+      "CHECK (status IN ('pending', 'read', 'replied', 'skipped', 'failed'))",
+    )
+    if (drifted === row.sql) throw new Error('message_queue status CHECK was not found')
+    db.exec('PRAGMA foreign_keys = OFF')
+    db.exec('ALTER TABLE message_queue RENAME TO message_queue_old')
+    db.exec(drifted)
+    db.exec('INSERT INTO message_queue SELECT * FROM message_queue_old')
+    db.exec('DROP TABLE message_queue_old')
+    db.exec('PRAGMA foreign_keys = ON')
+  })
+}
+
 function deleteMemoryReadyEvidence(): void {
   withDb((db) => {
     db.prepare(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = ?`).run(TEST_AGENT)
@@ -230,6 +249,26 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === requestId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+  })
+
+  test('receive-actionable reports DB_CODE_DRIFT when status vocabulary rejects received', () => {
+    const instructionId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 30,
+      content: 'CTO instruction: schema drift must fail before claim',
+    })
+    forceV08OnlyStatusVocabulary()
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('Error [DB_CODE_DRIFT]')
+    expect(r.stderr).toContain('message_queue_status_check')
+    expect(r.stderr).toContain('expected_vocabulary')
+    expect(r.stderr).toContain('actual_vocabulary')
+    expect(r.stderr).toContain('constraint_definition')
+    expect(r.stderr).not.toContain('RECEIVE_ACTIONABLE_FAILED')
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
   test('missing/stale/mismatched memory-ready evidence blocks receive-actionable and next-actionable before claim', () => {
