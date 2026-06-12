@@ -13,8 +13,8 @@ function adaptSql(sql: string): string {
   s = s.replace(/\bBOOLEAN\b/gi, 'INTEGER')
   s = s.replace(/\bDEFAULT\s+(true)\b/gi, 'DEFAULT 1')
   s = s.replace(/\bDEFAULT\s+(false)\b/gi, 'DEFAULT 0')
-  s = s.replace(/\bFOR\s+UPDATE\s+SKIP\s+LOCKED\b/gi, '')
-  s = s.replace(/\bFOR\s+UPDATE\b/gi, '')
+  // Covers FOR UPDATE [OF <table>] [SKIP LOCKED] — SQLite has no row locks.
+  s = s.replace(/\bFOR\s+UPDATE(\s+OF\s+\w+)?(\s+SKIP\s+LOCKED)?\b/gi, '')
   // PostgreSQL INTERVAL literals — map to SQLite-compatible datetime modifier
   //   `NOW() - INTERVAL '15 minutes'` → `datetime('now', '-15 minutes')`
   //   must run after the NOW()→datetime('now') replacement above to catch
