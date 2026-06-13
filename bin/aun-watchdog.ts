@@ -12,12 +12,10 @@
  *    AND status != 'offline'`
  *
  * Recovery:
- *   `tmux send-keys` injects an Enter into the tmux session whose
- *   name comes from the DB bot profile (`agents.metadata.tmux_session`).
- *   The typical bot startup line is the daemon-style restart-bot.sh
- *   already mounted on Enter, so a single newline triggers it.
- *   When that fails (no tmux server / session missing), we fall
- *   back to spawning `scripts/restart-bot.sh <session>` directly.
+ *   Spawn `scripts/restart-bot.sh <session>` directly. Restart script
+ *   owns startup-safety preflight, DB profile lookup, orphan-port cleanup,
+ *   tmux replacement, and Codex prompt handling. The watchdog must not send
+ *   a blind Enter into an already-unhealthy TUI session.
  *
  * Safety knobs (Issue #278 §5 Open decisions, all overridable):
  *   AUN_WATCHDOG_POLL_SEC               default 30
@@ -65,6 +63,18 @@ interface WatchdogSession {
 interface RateLimitState {
   /** Per-agent restart timestamps (ms). Trimmed to last hour on each check. */
   history: Map<string, number[]>
+}
+
+interface RuntimeProfileIssue {
+  agentId: string
+  session: string
+  reason: 'tmux_session_missing' | 'port_missing_expected_agent'
+  detail: string
+}
+
+interface RuntimeLivenessChecks {
+  hasTmuxSession(sessionName: string): boolean
+  portHasExpectedAgent(port: string, agentId: string): boolean
 }
 
 const rateLimit: RateLimitState = { history: new Map() }
@@ -135,6 +145,70 @@ async function findCrashedAgents(client: Client): Promise<CrashedAgent[]> {
   return r.rows.map(row => ({ agentId: row.agent_id, lastSeenAt: row.last_seen_at, status: row.status }))
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function commandHasAgentId(command: string, agentId: string): boolean {
+  const escapedAgentId = escapeRegExp(agentId)
+  const agentIdAssignment = new RegExp(`(?:^|\\s)AGENT_ID=(?:"${escapedAgentId}"|'${escapedAgentId}'|${escapedAgentId})(?=\\s|$)`)
+  return agentIdAssignment.test(command.trim())
+}
+
+function hasTmuxSession(sessionName: string): boolean {
+  if (!sessionName) return false
+  const r = spawnSync('tmux', ['has-session', '-t', sessionName], { encoding: 'utf-8', timeout: 3000 })
+  return r.status === 0
+}
+
+function portHasExpectedAgent(port: string, agentId: string): boolean {
+  if (!/^\d+$/.test(port)) return false
+  const lsofR = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf-8', timeout: 3000 })
+  if (lsofR.status !== 0 || !lsofR.stdout.trim()) return false
+
+  for (const pid of lsofR.stdout.trim().split(/\s+/)) {
+    const psR = spawnSync('ps', ['eww', '-p', pid, '-o', 'command='], { encoding: 'utf-8', timeout: 3000 })
+    const command = psR.stdout ?? ''
+    if (command.includes('bun') && command.includes('server.ts') && commandHasAgentId(command, agentId)) {
+      return true
+    }
+  }
+  return false
+}
+
+const runtimeLivenessChecks: RuntimeLivenessChecks = {
+  hasTmuxSession,
+  portHasExpectedAgent,
+}
+
+function findRuntimeProfileIssues(
+  registry: Map<string, WatchdogSession>,
+  checks: RuntimeLivenessChecks = runtimeLivenessChecks,
+): RuntimeProfileIssue[] {
+  const issues: RuntimeProfileIssue[] = []
+  for (const [agentId, profile] of registry) {
+    if (!profile.session) continue
+    if (!checks.hasTmuxSession(profile.session)) {
+      issues.push({
+        agentId,
+        session: profile.session,
+        reason: 'tmux_session_missing',
+        detail: `tmux session ${profile.session} is missing`,
+      })
+      continue
+    }
+    if (profile.port && !checks.portHasExpectedAgent(profile.port, agentId)) {
+      issues.push({
+        agentId,
+        session: profile.session,
+        reason: 'port_missing_expected_agent',
+        detail: `port ${profile.port} has no bun server.ts with AGENT_ID=${agentId}`,
+      })
+    }
+  }
+  return issues
+}
+
 function isRateLimited(agentId: string): boolean {
   const now = Date.now()
   const hourAgo = now - 3600 * 1000
@@ -154,13 +228,6 @@ function attemptRestart(agentId: string, sessionName: string | null): { outcome:
   if (DRY_RUN) return { outcome: 'dry_run', detail: `would restart ${sessionName ?? agentId}` }
   if (!sessionName) return { outcome: 'no_session', detail: `agent ${agentId} has no tmux_session in DB profile` }
 
-  // Try tmux send-keys Enter first (the cheapest, lets the bot's tmux
-  // pane resume itself). Fall back to a full restart-bot.sh spawn.
-  const tmuxR = spawnSync('tmux', ['send-keys', '-t', sessionName, 'Enter'], { encoding: 'utf-8', timeout: 3000 })
-  if (tmuxR.status === 0) {
-    return { outcome: 'tmux_send_keys', detail: `Enter sent to tmux session ${sessionName}` }
-  }
-
   if (!existsSync(RESTART_SCRIPT)) {
     return { outcome: 'restart_script_missing', detail: `${RESTART_SCRIPT} not found` }
   }
@@ -172,7 +239,14 @@ function attemptRestart(agentId: string, sessionName: string | null): { outcome:
   return { outcome: 'restart_script_spawned', detail: `bash ${RESTART_SCRIPT} ${sessionName} (pid=${child.pid ?? 'unknown'})` }
 }
 
-async function recordAuditLog(client: Client, agentId: string, sessionName: string | null, restart: { outcome: string; detail: string }, lastSeenAt: Date | null): Promise<void> {
+async function recordAuditLog(
+  client: Client,
+  agentId: string,
+  sessionName: string | null,
+  restart: { outcome: string; detail: string },
+  lastSeenAt: Date | null,
+  reason?: string,
+): Promise<void> {
   try {
     await client.query(
       `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
@@ -186,6 +260,7 @@ async function recordAuditLog(client: Client, agentId: string, sessionName: stri
           last_seen_at: lastSeenAt ? lastSeenAt.toISOString() : null,
           crash_threshold_sec: CRASH_THRESHOLD_SEC,
           dry_run: DRY_RUN,
+          reason,
         }),
       ],
     )
@@ -195,9 +270,28 @@ async function recordAuditLog(client: Client, agentId: string, sessionName: stri
 }
 
 async function tickOnce(client: Client, registry: Map<string, WatchdogSession>): Promise<void> {
+  // Phase 1: runtime profile checks (tmux session missing, port mismatch) — these
+  // detect issues that bypass heartbeat-based detection (e.g. session died but DB
+  // status is still 'idle' from the last heartbeat within threshold).
+  const restarted = new Set<string>()
+  for (const issue of findRuntimeProfileIssues(registry)) {
+    if (isRateLimited(issue.agentId)) {
+      logLine('warn', `rate-limit hit for ${issue.agentId} (>=${RATE_LIMIT_PER_HOUR}/hr); skipping`)
+      continue
+    }
+    logLine('info', `runtime profile unhealthy: ${issue.agentId} reason=${issue.reason} detail=${issue.detail}`)
+    const restart = attemptRestart(issue.agentId, issue.session)
+    logLine('info', `restart attempt for ${issue.agentId}: outcome=${restart.outcome} detail=${restart.detail}`)
+    if (restart.outcome !== 'dry_run' && restart.outcome !== 'rate_limited') recordRestart(issue.agentId)
+    await recordAuditLog(client, issue.agentId, issue.session, restart, null, issue.reason)
+    restarted.add(issue.agentId)
+  }
+
+  // Phase 2: heartbeat-based crash detection.
   const crashed = await findCrashedAgents(client)
   if (crashed.length === 0) return
   for (const a of crashed) {
+    if (restarted.has(a.agentId)) continue
     if (isRateLimited(a.agentId)) {
       logLine('warn', `rate-limit hit for ${a.agentId} (>=${RATE_LIMIT_PER_HOUR}/hr); skipping`)
       continue
@@ -245,7 +339,7 @@ async function main(): Promise<void> {
 
 // Test-only export: allow `import { findCrashedAgents, isRateLimited,
 // recordRestart }` for unit fixtures without running the daemon loop.
-export { findCrashedAgents, isRateLimited, recordRestart, rateLimit, loadDbProfileSessions }
+export { commandHasAgentId, findCrashedAgents, findRuntimeProfileIssues, isRateLimited, recordRestart, rateLimit, loadDbProfileSessions }
 
 if (import.meta.main) {
   main().catch(err => {

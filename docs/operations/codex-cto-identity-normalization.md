@@ -108,7 +108,9 @@ After DB mutation approval:
    - `mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="codex-cto"`
    - `mcp_servers.aun.env.WEBHOOK_PORT="8789"`
    - `mcp_servers.aun.env.DISCORD_STATE_DIR="/Users/yuji/.claude/channels/discord-cto"`
-   - `mcp_servers.agent-comms.enabled=false` while `aun` is the active MCP registration
+   - Do not pass `mcp_servers.agent-comms.enabled=false`. Codex 0.139 treats
+     that as an incomplete MCP server definition when no legacy `agent-comms`
+     registration exists, and fails startup with `invalid transport`.
 2. Update `scripts/bot-registry.txt` operational mapping:
    - `discord-cto|~/Developer/codex|codex-cto|8789|...`
 3. Controlled restart:

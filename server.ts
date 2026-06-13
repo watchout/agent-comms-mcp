@@ -99,6 +99,17 @@ import {
   evaluateCleanupPort,
 } from './core/bot-lifecycle'
 import {
+  evaluateStartupSafety,
+  extractStartupIdentity,
+  type StartupPortListenerEvidence,
+  type StartupTmuxRuntimeEvidence,
+} from './core/startup-safety'
+import {
+  observeTmuxRuntime,
+  parseProcessList,
+  type TmuxPaneSnapshot,
+} from './core/tmux-runtime-inspector'
+import {
   buildNotMentionedErrorMsg,
   validateMentionOrError,
   buildReplyContextSuffix,
@@ -4291,7 +4302,6 @@ function buildProfileCommand(agentId: string, session: string, port: number, eng
     const bunCommand = process.env.AGENT_COMMS_BUN_COMMAND ?? '/Users/yuji/.bun/bin/bun'
     const serverPath = process.env.AGENT_COMMS_SERVER_PATH ?? join(SERVER_ROOT, 'server.ts')
     const configArgs = [
-      'mcp_servers.agent-comms.enabled=false',
       'mcp_servers.aun.enabled=true',
       `mcp_servers.aun.command="${bunCommand}"`,
       `mcp_servers.aun.args=["run","${serverPath}"]`,
@@ -4408,8 +4418,65 @@ function getProcessOnPort(port: number): string[] {
   }
 }
 
-function isProtectedInfrastructurePort(port: number): boolean {
-  return port === 5432 || port === 5433
+function getProcessCommand(pid: string): string {
+  try {
+    const r = Bun.spawnSync(['ps', 'eww', '-p', pid, '-o', 'command='])
+    return new TextDecoder().decode(r.stdout).trim()
+  } catch {
+    return ''
+  }
+}
+
+function getProcessPpid(pid: string): number | null {
+  try {
+    const r = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', pid])
+    const ppid = Number.parseInt(new TextDecoder().decode(r.stdout).trim(), 10)
+    return Number.isInteger(ppid) ? ppid : null
+  } catch {
+    return null
+  }
+}
+
+function collectStartupPortListeners(port: number): StartupPortListenerEvidence[] {
+  return getProcessOnPort(port).map((pidRaw) => {
+    const command = getProcessCommand(pidRaw)
+    const ppid = getProcessPpid(pidRaw)
+    const identity = extractStartupIdentity(command)
+    return {
+      pid: Number.parseInt(pidRaw, 10),
+      port,
+      ppid,
+      command,
+      observed_agent_id: identity.agentId,
+      orphan: ppid === 1,
+    }
+  }).filter((listener) => Number.isInteger(listener.pid) && listener.pid > 0)
+}
+
+function collectStartupTmuxRuntimeEvidence(sessionName: string): StartupTmuxRuntimeEvidence[] {
+  if (!sessionName || !tmuxHasSession(sessionName)) return []
+  const paneOutput = tmuxExec(['list-panes', '-t', sessionName, '-F', '#{session_name}\t#{pane_pid}\t#{pane_current_path}']).stdout
+  const panes: TmuxPaneSnapshot[] = paneOutput
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const [session_name, pidRaw, current_path = ''] = line.split('\t')
+      const pane_pid = Number.parseInt(pidRaw ?? '', 10)
+      return session_name && Number.isInteger(pane_pid)
+        ? { session_name, pane_pid, current_path: current_path || null }
+        : null
+    })
+    .filter((pane): pane is TmuxPaneSnapshot => pane !== null)
+  if (panes.length === 0) return []
+  const processResult = Bun.spawnSync(['ps', '-axo', 'pid,ppid,command'])
+  const processes = parseProcessList(new TextDecoder().decode(processResult.stdout))
+  return panes.flatMap((pane) => observeTmuxRuntime(pane, processes)).map((obs) => ({
+    session_name: obs.session_name,
+    observed_agent_id: obs.observed_agent_id,
+    expected_agent_id: obs.expected_agent_id,
+    server_pid: obs.server_pid,
+  }))
 }
 
 // Issue #248 cycle 3: PPID==1 (init-reparented) filter — only kill PIDs that
@@ -4449,6 +4516,24 @@ function killPidsOnPort(port: number, excludeSelf = true): number {
 async function restartBotSession(entry: BotEntry): Promise<string> {
   const log: string[] = []
   const expandedDir = entry.projectDir.replace(/^~/, homedir())
+  const startupSafety = evaluateStartupSafety({
+    agentId: entry.agentId,
+    expectedAgentId: entry.agentId,
+    sessionName: entry.session,
+    port: entry.port,
+    command: entry.command,
+    launcherRoot: SERVER_ROOT,
+    managedCheckoutRoot: join(homedir(), '.agent-comms', 'state-daemon', 'checkouts'),
+    currentCheckoutPath: join(homedir(), '.agent-comms', 'state-daemon', 'current'),
+    portListeners: collectStartupPortListeners(entry.port),
+    tmuxRuntimeEvidence: collectStartupTmuxRuntimeEvidence(entry.session),
+    codexPostStartEnterPolicy: 'update_prompt_only',
+  })
+  if (!startupSafety.ok) {
+    const blockers = startupSafety.blockers.map((blocker) => `${blocker.code}:${blocker.detail}`).join('; ')
+    throw new Error(`STARTUP_SAFETY_BLOCKED ${entry.agentId}: ${blockers}`)
+  }
+  log.push(`Startup safety preflight PASS`)
 
   // 1. Kill orphan on port
   const killed = killPidsOnPort(entry.port)
@@ -4461,14 +4546,20 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
 
   // 3. Create new session and start Claude Code
   tmuxExec(['new-session', '-d', '-s', entry.session, '-c', expandedDir])
+  const tmuxTarget = `${entry.session}:0.0`
   Bun.sleepSync(1000)
-  tmuxExec(['send-keys', '-t', entry.session, entry.command, 'Enter'])
+  tmuxExec(['send-keys', '-t', tmuxTarget, '-l', entry.command])
+  tmuxExec(['send-keys', '-t', tmuxTarget, 'Enter'])
   log.push(`Started: ${entry.command}`)
 
-  // 4. Wait for TUI prompt and auto-confirm
+  // 4. Wait for Codex update prompt and explicitly skip it. Do not send an
+  // extra Enter on the normal Codex start screen; it can submit a suggestion.
   Bun.sleepSync(3000)
-  tmuxExec(['send-keys', '-t', entry.session, 'Enter'])
-  log.push(`Sent Enter to confirm TUI prompt`)
+  const paneText = tmuxCapture(tmuxTarget)
+  if (/\bcodex\b/.test(entry.command) && paneText.includes('Update now')) {
+    tmuxExec(['send-keys', '-t', tmuxTarget, '2', 'Enter'])
+    log.push(`Skipped Codex update prompt`)
+  }
 
   // 5. Verify startup — post-PR#172: look for bun server.ts on the
   // expected port instead of the retired "Listening for channel
