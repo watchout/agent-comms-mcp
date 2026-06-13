@@ -110,6 +110,59 @@ export interface StateDaemonCanaryPreflightReport {
   restart_performed: false
 }
 
+export interface StateDaemonCanaryResultVerificationReport {
+  ok: boolean
+  go_no_go: 'GO' | 'NO_GO'
+  generated_at: string
+  issue_ref: '#742'
+  policy: {
+    read_only: true
+    no_db_mutation: true
+    no_state_daemon_restart: true
+    no_launchctl_mutation: true
+    no_discord_gateway_restart: true
+    no_fleet_rollout: true
+    no_queue_claim: true
+    no_terminal_close: true
+  }
+  expected: {
+    queue_id: string
+    message_id: string | null
+    agent_id: string
+    claim_source: string
+    invocation_source: string
+    allowlist: string[]
+  }
+  row: {
+    found: boolean
+    queue_id: string
+    message_id: string | null
+    agent_id: string | null
+    status: string | null
+    receive_claim_source: string | null
+    runner_result_invocation_source: string | null
+    runner_error_invocation_source: string | null
+    runner_result_present: boolean
+    runner_error_present: boolean
+    replied_with: string | null
+    done_at: string | null
+    replied_at: string | null
+  }
+  non_allowlisted_scheduler_rows: Array<{
+    queue_id: string
+    message_id: string | null
+    agent_id: string
+    status: string
+    receive_claim_source: string | null
+    runner_result_invocation_source: string | null
+    runner_error_invocation_source: string | null
+  }>
+  blockers: StateDaemonCanaryPreflightFinding[]
+  warnings: StateDaemonCanaryPreflightFinding[]
+  mutation_performed: false
+  restart_performed: false
+}
+
 interface AgentProfileRow {
   agent_id: string
   runtime: string | null
@@ -132,6 +185,17 @@ interface QueueRow {
   claim_expires_at: string | Date | null
 }
 
+interface CanaryResultRow {
+  id: string | number
+  agent_id: string
+  message_id: string | null
+  payload: string
+  status: string
+  done_at?: string | Date | null
+  replied_at?: string | Date | null
+  replied_with?: string | null
+}
+
 export interface StateDaemonCanaryPreflightOptions {
   targetAgentId: string
   expectedCommit?: string | null
@@ -150,6 +214,16 @@ export interface StateDaemonCanaryPreflightOptions {
   env?: NodeJS.ProcessEnv
 }
 
+export interface StateDaemonCanaryResultVerificationOptions {
+  queueId: string
+  messageId?: string | null
+  agentId: string
+  claimSource?: string
+  invocationSource?: string
+  allowlist?: string[]
+  now?: Date
+}
+
 function policy(): StateDaemonCanaryPreflightReport['policy'] {
   return {
     read_only: true,
@@ -160,6 +234,19 @@ function policy(): StateDaemonCanaryPreflightReport['policy'] {
     no_fleet_rollout: true,
     no_live_canary_insert: true,
     queue_daemon_status_not_used_as_evidence: true,
+  }
+}
+
+function verificationPolicy(): StateDaemonCanaryResultVerificationReport['policy'] {
+  return {
+    read_only: true,
+    no_db_mutation: true,
+    no_state_daemon_restart: true,
+    no_launchctl_mutation: true,
+    no_discord_gateway_restart: true,
+    no_fleet_rollout: true,
+    no_queue_claim: true,
+    no_terminal_close: true,
   }
 }
 
@@ -181,6 +268,11 @@ function parseJsonObject(raw: unknown): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function objectAt(raw: unknown, key: string): Record<string, unknown> {
+  const parent = parseJsonObject(raw)
+  return parseJsonObject(parent[key])
 }
 
 function boolish(raw: unknown): boolean {
@@ -325,6 +417,50 @@ function formatQueueRow(row: QueueRow, targetAgentId: string, now: Date, staleMi
     claimed_by: row.claimed_by ?? null,
     claim_expires_at: iso(row.claim_expires_at),
     classification: classifyQueueRow(row, targetAgentId, now, staleMinutes),
+  }
+}
+
+async function loadCanaryResultRow(db: DbAdapter, queueId: string): Promise<CanaryResultRow | null> {
+  const rows = await db.query<CanaryResultRow>(
+    `SELECT id, agent_id, message_id, payload, status, done_at, replied_at, replied_with
+       FROM message_queue
+      WHERE id = $1
+      LIMIT 1`,
+    [queueId],
+  )
+  return rows[0] ?? null
+}
+
+async function loadSchedulerTouchedRows(db: DbAdapter, source: string): Promise<CanaryResultRow[]> {
+  return await db.query<CanaryResultRow>(
+    `SELECT id, agent_id, message_id, payload, status, done_at, replied_at, replied_with
+       FROM message_queue
+      WHERE payload LIKE $1
+      ORDER BY id ASC`,
+    [`%${source}%`],
+  )
+}
+
+function sourceText(payload: Record<string, unknown>, parent: string, key = 'source'): string | null {
+  const nested = objectAt(payload, parent)
+  return cleanText(nested[key])
+}
+
+function invocationSourceText(payload: Record<string, unknown>, parent: 'runner_result' | 'runner_error'): string | null {
+  const nested = objectAt(payload, parent)
+  return cleanText(nested.invocation_source)
+}
+
+function formatSchedulerTouchedRow(row: CanaryResultRow): StateDaemonCanaryResultVerificationReport['non_allowlisted_scheduler_rows'][number] {
+  const payload = parseJsonObject(row.payload)
+  return {
+    queue_id: String(row.id),
+    message_id: row.message_id ?? null,
+    agent_id: row.agent_id,
+    status: row.status,
+    receive_claim_source: sourceText(payload, 'receive_claim'),
+    runner_result_invocation_source: invocationSourceText(payload, 'runner_result'),
+    runner_error_invocation_source: invocationSourceText(payload, 'runner_error'),
   }
 }
 
@@ -592,6 +728,123 @@ export async function buildStateDaemonCanaryPreflightReport(
   }
 }
 
+export async function buildStateDaemonCanaryResultVerificationReport(
+  db: DbAdapter,
+  options: StateDaemonCanaryResultVerificationOptions,
+): Promise<StateDaemonCanaryResultVerificationReport> {
+  const now = options.now ?? new Date()
+  const claimSource = options.claimSource ?? 'state-daemon-queue-work-scheduler'
+  const invocationSource = options.invocationSource ?? claimSource
+  const allowlist = options.allowlist ?? [options.agentId]
+  const row = await loadCanaryResultRow(db, options.queueId)
+  const payload = parseJsonObject(row?.payload)
+  const receiveClaimSource = row ? sourceText(payload, 'receive_claim') : null
+  const runnerResultInvocationSource = row ? invocationSourceText(payload, 'runner_result') : null
+  const runnerErrorInvocationSource = row ? invocationSourceText(payload, 'runner_error') : null
+  const runnerResultPresent = row ? Object.keys(objectAt(payload, 'runner_result')).length > 0 : false
+  const runnerErrorPresent = row ? Object.keys(objectAt(payload, 'runner_error')).length > 0 : false
+  const touchedRows = (await loadSchedulerTouchedRows(db, claimSource))
+    .map(formatSchedulerTouchedRow)
+  const allowed = new Set(allowlist)
+  const nonAllowlisted = touchedRows.filter((touched) => !allowed.has(touched.agent_id))
+  const blockers: StateDaemonCanaryPreflightFinding[] = []
+  const warnings: StateDaemonCanaryPreflightFinding[] = []
+
+  if (!row) {
+    blockers.push(finding('blocker', 'canary_row_missing', `queue_id=${options.queueId} was not found`))
+  } else {
+    if (row.agent_id !== options.agentId) {
+      blockers.push(finding('blocker', 'canary_agent_mismatch', 'canary row agent_id does not match expected target', {
+        actual: row.agent_id,
+        expected: options.agentId,
+      }))
+    }
+    if (options.messageId && row.message_id !== options.messageId) {
+      blockers.push(finding('blocker', 'canary_message_id_mismatch', 'canary row message_id does not match expected message_id', {
+        actual: row.message_id,
+        expected: options.messageId,
+      }))
+    }
+    if (receiveClaimSource !== claimSource) {
+      blockers.push(finding('blocker', 'receive_claim_source_mismatch', 'payload.receive_claim.source is missing or not scheduler-owned', {
+        actual: receiveClaimSource,
+        expected: claimSource,
+      }))
+    }
+    if (runnerErrorPresent) {
+      blockers.push(finding('blocker', 'runner_error_present', 'payload.runner_error is present; canary did not complete successfully', {
+        invocation_source: runnerErrorInvocationSource,
+      }))
+    }
+    if (!runnerResultPresent) {
+      blockers.push(finding('blocker', 'runner_result_missing', 'payload.runner_result is missing'))
+    } else if (runnerResultInvocationSource !== invocationSource) {
+      blockers.push(finding('blocker', 'runner_result_invocation_source_mismatch', 'payload.runner_result.invocation_source does not match scheduler', {
+        actual: runnerResultInvocationSource,
+        expected: invocationSource,
+      }))
+    }
+    if (row.status !== 'done' && row.status !== 'replied') {
+      blockers.push(finding('blocker', 'canary_not_terminal', 'canary row did not reach terminal done or replied status', {
+        status: row.status,
+      }))
+    }
+    if (row.status === 'replied' && !row.replied_at) {
+      warnings.push(finding('warning', 'replied_without_replied_at', 'canary row is replied but replied_at is empty'))
+    }
+    if (row.status === 'done' && !row.done_at) {
+      warnings.push(finding('warning', 'done_without_done_at', 'canary row is done but done_at is empty'))
+    }
+  }
+
+  if (nonAllowlisted.length > 0) {
+    blockers.push(finding('blocker', 'non_allowlisted_scheduler_rows', 'scheduler source touched non-allowlisted queue rows', {
+      rows: nonAllowlisted.map((touched) => ({
+        queue_id: touched.queue_id,
+        agent_id: touched.agent_id,
+        status: touched.status,
+      })),
+    }))
+  }
+
+  const ok = blockers.length === 0
+  return {
+    ok,
+    go_no_go: ok ? 'GO' : 'NO_GO',
+    generated_at: now.toISOString(),
+    issue_ref: '#742',
+    policy: verificationPolicy(),
+    expected: {
+      queue_id: options.queueId,
+      message_id: options.messageId ?? null,
+      agent_id: options.agentId,
+      claim_source: claimSource,
+      invocation_source: invocationSource,
+      allowlist,
+    },
+    row: {
+      found: Boolean(row),
+      queue_id: options.queueId,
+      message_id: row?.message_id ?? null,
+      agent_id: row?.agent_id ?? null,
+      status: row?.status ?? null,
+      receive_claim_source: receiveClaimSource,
+      runner_result_invocation_source: runnerResultInvocationSource,
+      runner_error_invocation_source: runnerErrorInvocationSource,
+      runner_result_present: runnerResultPresent,
+      runner_error_present: runnerErrorPresent,
+      replied_with: row?.replied_with ?? null,
+      done_at: iso(row?.done_at),
+      replied_at: iso(row?.replied_at),
+    },
+    non_allowlisted_scheduler_rows: nonAllowlisted,
+    blockers,
+    warnings,
+    mutation_performed: false,
+    restart_performed: false,
+  }
+}
+
 export function formatStateDaemonCanaryPreflightText(report: StateDaemonCanaryPreflightReport): string {
   const lines = [
     `State-daemon canary preflight: ${report.go_no_go}`,
@@ -600,6 +853,25 @@ export function formatStateDaemonCanaryPreflightText(report: StateDaemonCanaryPr
     `Checkout: ${report.state_daemon.checkout?.commit_sha ?? 'unknown'} expected=${report.state_daemon.expected_commit ?? 'none'}`,
     `Queue: target_active=${report.queue.target_active_count} non_target_active=${report.queue.non_target_active_count}`,
     `Startup safety: ${report.startup_safety ? (report.startup_safety.ok ? 'PASS' : 'FAIL') : 'not_run'}`,
+  ]
+  if (report.blockers.length > 0) {
+    lines.push('Blockers:')
+    for (const blocker of report.blockers) lines.push(`  - ${blocker.code}: ${blocker.message}`)
+  }
+  if (report.warnings.length > 0) {
+    lines.push('Warnings:')
+    for (const warning of report.warnings) lines.push(`  - ${warning.code}: ${warning.message}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+export function formatStateDaemonCanaryResultVerificationText(report: StateDaemonCanaryResultVerificationReport): string {
+  const lines = [
+    `State-daemon canary result verification: ${report.go_no_go}`,
+    `Queue: id=${report.expected.queue_id} message_id=${report.expected.message_id ?? 'none'} agent=${report.expected.agent_id}`,
+    `Row: found=${report.row.found} status=${report.row.status ?? 'missing'}`,
+    `Sources: receive_claim=${report.row.receive_claim_source ?? 'missing'} runner_result=${report.row.runner_result_invocation_source ?? 'missing'} runner_error=${report.row.runner_error_invocation_source ?? 'none'}`,
+    `Non-allowlisted scheduler rows: ${report.non_allowlisted_scheduler_rows.length}`,
   ]
   if (report.blockers.length > 0) {
     lines.push('Blockers:')

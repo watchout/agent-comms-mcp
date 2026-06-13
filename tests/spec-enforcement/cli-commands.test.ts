@@ -183,10 +183,15 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?formatQueueProcessingReadinessText/)
   })
   test("'state-daemon canary-preflight' invokes the read-only #742 canary evidence report", () => {
-    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'canary-preflight'/)
+    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'canary-preflight' && subcommand !== 'canary-verify'/)
     expect(CLI_SRC).toMatch(/subcommand === 'canary-preflight'[\s\S]*?buildRuntimeCleanupReport/)
     expect(CLI_SRC).toMatch(/subcommand === 'canary-preflight'[\s\S]*?buildStateDaemonCanaryPreflightReport/)
     expect(CLI_SRC).toMatch(/subcommand === 'canary-preflight'[\s\S]*?formatStateDaemonCanaryPreflightText/)
+  })
+  test("'state-daemon canary-verify' invokes the read-only #742 post-canary verifier", () => {
+    expect(CLI_SRC).toMatch(/subcommand === 'canary-verify'[\s\S]*?buildStateDaemonCanaryResultVerificationReport/)
+    expect(CLI_SRC).toMatch(/subcommand === 'canary-verify'[\s\S]*?formatStateDaemonCanaryResultVerificationText/)
+    expect(CLI_SRC).toMatch(/state-daemon canary-verify --agent-id <id> --queue-id <id>/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -767,6 +772,17 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/no_discord_gateway_restart: true/)
     expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/canary_target_has_active_queue_rows/)
     expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
+  })
+
+  test('help documents #742 state-daemon post-canary DB-primary verifier', () => {
+    expect(CLI_SRC).toMatch(/state-daemon canary-verify --agent-id <id> --queue-id <id>/)
+    expect(CLI_SRC).toMatch(/read-only #742 post-canary DB-primary verifier/)
+    expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/payload\.receive_claim\.source is missing or not scheduler-owned/)
+    expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/payload\.runner_result\.invocation_source does not match scheduler/)
+    expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/canary_not_terminal/)
+    expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/non_allowlisted_scheduler_rows/)
+    expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/no_queue_claim: true/)
+    expect(STATE_DAEMON_CANARY_PREFLIGHT_SRC).toMatch(/no_terminal_close: true/)
   })
 
   test('queue wake smoke is bounded, approval-gated, and does not drain or terminalize rows', () => {

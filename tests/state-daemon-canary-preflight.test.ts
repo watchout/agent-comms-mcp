@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db'
-import { buildStateDaemonCanaryPreflightReport } from '../core/state-daemon-canary-preflight'
+import {
+  buildStateDaemonCanaryPreflightReport,
+  buildStateDaemonCanaryResultVerificationReport,
+} from '../core/state-daemon-canary-preflight'
 
 const EXPECTED_COMMIT = '193791749f855b6da1f130a1f180a1c1e3295349'
 
@@ -184,6 +187,73 @@ describe('state-daemon canary preflight', () => {
         'startup_safety_port_owned_by_different_agent',
         'canary_target_has_active_queue_rows',
         'runtime_cleanup_unknown_risk_targets',
+      ]))
+    })
+  })
+})
+
+describe('state-daemon canary result verification', () => {
+  test('returns GO for exact terminal row with scheduler claim and runner sources', async () => {
+    await withDb(`
+      INSERT INTO agents
+        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, home_directory, runtime_engine_preference, profile_enabled)
+      VALUES
+        ('qa', 'QA', 'dev', 'TUI', 'idle', '{}', 8822, '/tmp/qa', 'codex', 1);
+
+      INSERT INTO message_queue
+        (id, agent_id, message_id, payload, status, created_at, done_at, replied_at, replied_with)
+      VALUES
+        (9001, 'qa', 'msg-qa', '{"receive_claim":{"source":"state-daemon-queue-work-scheduler"},"runner_result":{"schema_version":"queue_work_result_v1","ok":true,"summary":"ok","next_action":"close","invocation_source":"state-daemon-queue-work-scheduler"}}', 'replied', '2026-06-14T00:00:00.000Z', '2026-06-14T00:00:10.000Z', '2026-06-14T00:00:11.000Z', NULL);
+    `, async (db) => {
+      const report = await buildStateDaemonCanaryResultVerificationReport(db, {
+        queueId: '9001',
+        messageId: 'msg-qa',
+        agentId: 'qa',
+        now: new Date('2026-06-14T00:00:12.000Z'),
+      })
+
+      expect(report.ok).toBe(true)
+      expect(report.go_no_go).toBe('GO')
+      expect(report.policy.no_queue_claim).toBe(true)
+      expect(report.row.status).toBe('replied')
+      expect(report.row.receive_claim_source).toBe('state-daemon-queue-work-scheduler')
+      expect(report.row.runner_result_invocation_source).toBe('state-daemon-queue-work-scheduler')
+      expect(report.non_allowlisted_scheduler_rows).toEqual([])
+      expect(report.blockers).toEqual([])
+    })
+  })
+
+  test('returns NO_GO for source mismatch, non-terminal row, and non-allowlisted scheduler touch', async () => {
+    await withDb(`
+      INSERT INTO agents
+        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, home_directory, runtime_engine_preference, profile_enabled)
+      VALUES
+        ('qa', 'QA', 'dev', 'TUI', 'idle', '{}', 8822, '/tmp/qa', 'codex', 1),
+        ('audit', 'Audit', 'dev', 'TUI', 'idle', '{}', 8823, '/tmp/audit', 'codex', 1);
+
+      INSERT INTO message_queue
+        (id, agent_id, message_id, payload, status, created_at)
+      VALUES
+        (9002, 'qa', 'msg-qa', '{"receive_claim":{"source":"manual"},"runner_error":{"invocation_source":"manual","code":"ADAPTER_ERROR"}}', 'in_progress', '2026-06-14T00:00:00.000Z'),
+        (9003, 'audit', 'msg-audit', '{"receive_claim":{"source":"state-daemon-queue-work-scheduler"}}', 'received', '2026-06-14T00:00:00.000Z');
+    `, async (db) => {
+      const report = await buildStateDaemonCanaryResultVerificationReport(db, {
+        queueId: '9002',
+        messageId: 'msg-other',
+        agentId: 'qa',
+        now: new Date('2026-06-14T00:00:12.000Z'),
+      })
+
+      expect(report.ok).toBe(false)
+      expect(report.go_no_go).toBe('NO_GO')
+      expect(report.non_allowlisted_scheduler_rows.map((row) => row.queue_id)).toEqual(['9003'])
+      expect(report.blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
+        'canary_message_id_mismatch',
+        'receive_claim_source_mismatch',
+        'runner_error_present',
+        'runner_result_missing',
+        'canary_not_terminal',
+        'non_allowlisted_scheduler_rows',
       ]))
     })
   })
