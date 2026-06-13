@@ -4649,7 +4649,35 @@ function authenticateRequest(req: IncomingMessage, res: ServerResponse): boolean
 }
 
 // --- SSE Transport: Health endpoint (Phase C I5: unified — always uses botContexts) ---
-function getHealthStatus(): { status: string; uptime: number; connected_bots: Record<string, { connected_at: string; last_activity: string }>; expected_bots: string[] } {
+// ADR-029R frozen requirement 3 + ARC prerequisite 2: exact source identity
+// must be visible in health so drift is mechanically detectable.
+const SOURCE_STARTED_AT = new Date().toISOString()
+const SOURCE_IDENTITY: { repo_path: string; git_sha: string; startup_command: string; pid: number; started_at: string } = {
+  repo_path: process.cwd(),
+  git_sha: (() => {
+    try {
+      const head = readFileSync(join(process.cwd(), '.git', 'HEAD'), 'utf-8').trim()
+      if (head.startsWith('ref: ')) {
+        return readFileSync(join(process.cwd(), '.git', head.slice(5)), 'utf-8').trim()
+      }
+      return head
+    } catch {
+      return process.env.AGENT_COMMS_SOURCE_SHA ?? 'unknown'
+    }
+  })(),
+  startup_command: process.argv.join(' '),
+  pid: process.pid,
+  started_at: SOURCE_STARTED_AT,
+}
+
+function getHealthStatus(): {
+  status: string
+  uptime: number
+  connected_bots: Record<string, { connected_at: string; last_activity: string }>
+  expected_bots: string[]
+  source: typeof SOURCE_IDENTITY
+  http_mcp: { identity_mode: string; sessions: Array<{ bot_id: string; session_id: string; connected_at: string; last_activity: string }> }
+} {
   const uptimeSeconds = Math.floor((Date.now() - sseStartTime) / 1000)
   const bots: Record<string, { connected_at: string; last_activity: string }> = {}
 
@@ -4667,7 +4695,21 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
     }
   }
 
-  return { status, uptime: uptimeSeconds, connected_bots: bots, expected_bots: EXPECTED_BOTS }
+  const httpSessions = Array.from(httpMcpSessionMeta.entries()).map(([sid, meta]) => ({
+    bot_id: meta.bot_id,
+    session_id: sid,
+    connected_at: meta.connected_at,
+    last_activity: meta.last_activity,
+  }))
+
+  return {
+    status,
+    uptime: uptimeSeconds,
+    connected_bots: bots,
+    expected_bots: EXPECTED_BOTS,
+    source: SOURCE_IDENTITY,
+    http_mcp: { identity_mode: HTTP_MCP_IDENTITY_MODE, sessions: httpSessions },
+  }
 }
 
 // --- Start (Phase C I5: unified flow — no TRANSPORT_MODE branching) ---
@@ -4680,16 +4722,216 @@ function getHealthStatus(): { status: string; uptime: number; connected_bots: Re
 // --- 1. Multi-bot SSE HTTP server (conditional) ---
 const MULTI_BOT_MODE = EXPECTED_BOTS.length > 0 || !!process.env.AGENT_COMMS_PORT
 const daemonTransports = new Map<string, SSEServerTransport>()
-// ADR-029R Spike A: experimental Streamable HTTP MCP endpoint. Off by default
-// (frozen requirement 4: fallback discipline). Identity via bot_id query param
-// is SPIKE-ONLY — ADR-029R §5 Phase 2 replaces it with auth-subject binding
-// before any fleet use.
+// ADR-029R: Streamable HTTP MCP endpoint. Off by default (frozen
+// requirement 4: fallback discipline).
 const EXPERIMENTAL_HTTP_MCP = process.env.AGENT_COMMS_EXPERIMENTAL_HTTP_MCP === '1'
+// Identity mode (ADR-029R §5 / frozen requirement 2):
+//   'binding' (default): the connection's bearer token IS the identity —
+//     sha256(token) is looked up in agent_identity_keys
+//     (key_type='bearer-sha256', status='active') and the session is bound
+//     to that agent. A bot_id query param, if present, must MATCH the bound
+//     identity (mismatch fails closed). Every binding is audit-logged.
+//   'spike-bot-id': dev/test only — the spike-era bot_id query identity,
+//     guarded by the shared AUTH_TOKEN. Never valid for fleet/protected use.
+const HTTP_MCP_IDENTITY_MODE =
+  process.env.AGENT_COMMS_HTTP_MCP_IDENTITY === 'spike-bot-id' ? 'spike-bot-id' : 'binding'
 const httpMcpTransports = new Map<string, StreamableHTTPServerTransport>()
 const httpMcpBots = new Map<string, string>()
 // Spike B (ADR-029R): same-bot reconnect must close/replace the prior
 // connection deterministically — one live HTTP MCP session per bot_id.
 const httpMcpSessionByBot = new Map<string, string>()
+// Frozen requirement 5 (observability): per-session timestamps for /health.
+const httpMcpSessionMeta = new Map<string, { bot_id: string; connected_at: string; last_activity: string }>()
+
+/** Resolve a bearer token to a bound agent identity (binding mode). */
+async function resolveBearerIdentity(token: string): Promise<{ agent_id: string; key_id: string } | null> {
+  const fingerprint = createHash('sha256').update(token).digest('hex')
+  try {
+    const client = await tryGetDb()
+    if (!client) return null
+    const result = await client.query(
+      `SELECT key_id, agent_id FROM agent_identity_keys
+        WHERE key_type = 'bearer-sha256'
+          AND fingerprint = $1
+          AND status = 'active'
+          AND (valid_until IS NULL OR valid_until > now())
+        LIMIT 1`,
+      [fingerprint],
+    )
+    if (result.rows.length === 0) return null
+    return { agent_id: result.rows[0].agent_id, key_id: result.rows[0].key_id }
+  } catch {
+    // Fail closed on DB errors: no identity, no session.
+    return null
+  }
+}
+/**
+ * ADR-029R — Streamable HTTP MCP endpoint handler (flag-gated by caller).
+ * Extracted from the multi-bot http handler so the SSE section stays
+ * compact; identity binding semantics are documented at the maps above.
+ */
+async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+      const existingSessionId = req.headers['mcp-session-id'] as string | undefined
+
+      // Established session: route to its transport (POST/GET/DELETE all flow
+      // through handleRequest; DELETE terminates the session per spec).
+      //
+      // ARC review 4489519640: a session id alone is NOT identity. Every
+      // established-session request re-validates the caller's credential and
+      // compares the resolved agent to the session owner — otherwise a leaked
+      // session id (or another bot's valid bearer) could ride the session.
+      if (existingSessionId && httpMcpTransports.has(existingSessionId)) {
+        if (HTTP_MCP_IDENTITY_MODE === 'binding') {
+          const authHeader = req.headers.authorization ?? ''
+          const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+          if (!token) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'bearer credential required (identity binding mode)', code: 'IDENTITY_CREDENTIAL_REQUIRED' }))
+            return
+          }
+          const bound = await resolveBearerIdentity(token)
+          if (!bound) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unknown or inactive credential', code: 'IDENTITY_NOT_BOUND' }))
+            return
+          }
+          const owner = httpMcpBots.get(existingSessionId)
+          if (owner !== bound.agent_id) {
+            serverLog.warn('http_mcp.session_owner_mismatch', { session_owner: owner, bound_agent_id: bound.agent_id, session_id: existingSessionId })
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'credential identity does not own this session', code: 'SESSION_OWNER_MISMATCH' }))
+            return
+          }
+        } else {
+          // spike-bot-id mode: the shared AUTH_TOKEN guard applies to
+          // established sessions too.
+          if (!authenticateRequest(req, res)) return
+        }
+        const meta = httpMcpSessionMeta.get(existingSessionId)
+        if (meta) meta.last_activity = new Date().toISOString()
+        await httpMcpTransports.get(existingSessionId)!.handleRequest(req, res)
+        return
+      }
+
+      // Stale/unknown mcp-session-id — including a stale initialize after a
+      // daemon restart — is deterministic: 404 per the MCP Streamable HTTP
+      // spec, signalling the client to re-initialize a fresh session.
+      if (existingSessionId) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          error: 'unknown or expired mcp-session-id — re-initialize a new session',
+          code: 'SESSION_NOT_FOUND',
+        }))
+        return
+      }
+
+      // New session: initialize POST. Identity per HTTP_MCP_IDENTITY_MODE.
+      if (req.method === 'POST') {
+        let botId: string | null = null
+        let boundKeyId: string | null = null
+
+        if (HTTP_MCP_IDENTITY_MODE === 'binding') {
+          const authHeader = req.headers.authorization ?? ''
+          const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+          if (!token) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'bearer credential required (identity binding mode)', code: 'IDENTITY_CREDENTIAL_REQUIRED' }))
+            return
+          }
+          const bound = await resolveBearerIdentity(token)
+          if (!bound) {
+            res.writeHead(401, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unknown or inactive credential', code: 'IDENTITY_NOT_BOUND' }))
+            return
+          }
+          const claimed = url.searchParams.get('bot_id')
+          if (claimed && claimed !== bound.agent_id) {
+            serverLog.warn('http_mcp.identity_mismatch', { claimed_bot_id: claimed, bound_agent_id: bound.agent_id })
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'bot_id does not match the bound credential identity', code: 'IDENTITY_MISMATCH' }))
+            return
+          }
+          botId = bound.agent_id
+          boundKeyId = bound.key_id
+        } else {
+          // spike-bot-id (dev/test only): shared AUTH_TOKEN + explicit bot_id.
+          if (!authenticateRequest(req, res)) return
+          botId = url.searchParams.get('bot_id')
+          if (!botId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'bot_id query parameter is required (spike-bot-id mode; dev/test only)' }))
+            return
+          }
+        }
+        if (!botId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'no identity resolved' }))
+          return
+        }
+        const resolvedBotId = botId
+        const ctx = createBotServer(resolvedBotId)
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            // Same-bot reconnect: deterministically close/replace the prior
+            // session (Spike B acceptance; mirrors the SSE path's graceful
+            // reconnect).
+            const priorSid = httpMcpSessionByBot.get(resolvedBotId)
+            if (priorSid && priorSid !== sid) {
+              const prior = httpMcpTransports.get(priorSid)
+              httpMcpTransports.delete(priorSid)
+              httpMcpBots.delete(priorSid)
+              httpMcpSessionMeta.delete(priorSid)
+              prior?.close().catch(() => {})
+              serverLog.info('http_mcp.session_replaced', { bot_id: resolvedBotId, prior_session_id: priorSid, session_id: sid })
+            }
+            const now = new Date().toISOString()
+            httpMcpTransports.set(sid, transport)
+            httpMcpBots.set(sid, resolvedBotId)
+            httpMcpSessionByBot.set(resolvedBotId, sid)
+            httpMcpSessionMeta.set(sid, { bot_id: resolvedBotId, connected_at: now, last_activity: now })
+            serverLog.info('http_mcp.session_initialized', { bot_id: resolvedBotId, session_id: sid, identity_mode: HTTP_MCP_IDENTITY_MODE })
+            // Frozen requirement 2: record the identity binding as durable
+            // DB evidence (binding mode only).
+            if (boundKeyId) {
+              void (async () => {
+                try {
+                  const client = await tryGetDb()
+                  if (client) {
+                    await client.query(
+                      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+                       VALUES ('http_mcp.identity_bound', $1, $2, $3, 'default')`,
+                      [resolvedBotId, sid, JSON.stringify({ key_id: boundKeyId, session_id: sid, bound_at: now })],
+                    )
+                  }
+                } catch (err) {
+                  serverLog.warn('http_mcp.identity_bind_audit_failed', { bot_id: resolvedBotId, err: String(err) })
+                }
+              })()
+            }
+          },
+        })
+        transport.onclose = () => {
+          const sid = transport.sessionId
+          if (sid) {
+            httpMcpTransports.delete(sid)
+            httpMcpBots.delete(sid)
+            httpMcpSessionMeta.delete(sid)
+            if (httpMcpSessionByBot.get(resolvedBotId) === sid) httpMcpSessionByBot.delete(resolvedBotId)
+            serverLog.info('http_mcp.session_closed', { bot_id: resolvedBotId, session_id: sid })
+          }
+        }
+        await ctx.server.connect(transport)
+        await transport.handleRequest(req, res)
+        return
+      }
+
+      // Non-POST request without an established session: nothing to serve.
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'no session — POST an initialize request to create one' }))
+      return
+}
+
 let httpServer: ReturnType<typeof createServer> | null = null
 
 if (MULTI_BOT_MODE) {
@@ -4798,63 +5040,9 @@ if (MULTI_BOT_MODE) {
       return
     }
 
-    // Streamable HTTP MCP endpoint (ADR-029R Spike A, experimental, off by default)
+    // Streamable HTTP MCP endpoint (ADR-029R, experimental flag-gated)
     if (url.pathname === '/mcp' && EXPERIMENTAL_HTTP_MCP) {
-      if (!authenticateRequest(req, res)) return
-      const existingSessionId = req.headers['mcp-session-id'] as string | undefined
-
-      // Established session: route to its transport (POST/GET/DELETE all flow
-      // through handleRequest; DELETE terminates the session per spec).
-      if (existingSessionId && httpMcpTransports.has(existingSessionId)) {
-        await httpMcpTransports.get(existingSessionId)!.handleRequest(req, res)
-        return
-      }
-
-      // New session: must be an initialize POST with an explicit bot identity.
-      if (req.method === 'POST') {
-        const botId = url.searchParams.get('bot_id')
-        if (!botId) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'bot_id query parameter is required (spike-only identity; see ADR-029R §5)' }))
-          return
-        }
-        const ctx = createBotServer(botId)
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (sid) => {
-            // Same-bot reconnect: deterministically close/replace the prior
-            // session (Spike B acceptance; mirrors the SSE path's graceful
-            // reconnect).
-            const priorSid = httpMcpSessionByBot.get(botId)
-            if (priorSid && priorSid !== sid) {
-              const prior = httpMcpTransports.get(priorSid)
-              httpMcpTransports.delete(priorSid)
-              httpMcpBots.delete(priorSid)
-              prior?.close().catch(() => {})
-              serverLog.info('http_mcp.session_replaced', { bot_id: botId, prior_session_id: priorSid, session_id: sid })
-            }
-            httpMcpTransports.set(sid, transport)
-            httpMcpBots.set(sid, botId)
-            httpMcpSessionByBot.set(botId, sid)
-            serverLog.info('http_mcp.session_initialized', { bot_id: botId, session_id: sid })
-          },
-        })
-        transport.onclose = () => {
-          const sid = transport.sessionId
-          if (sid) {
-            httpMcpTransports.delete(sid)
-            httpMcpBots.delete(sid)
-            if (httpMcpSessionByBot.get(botId) === sid) httpMcpSessionByBot.delete(botId)
-            serverLog.info('http_mcp.session_closed', { bot_id: botId, session_id: sid })
-          }
-        }
-        await ctx.server.connect(transport)
-        await transport.handleRequest(req, res)
-        return
-      }
-
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'unknown or expired mcp-session-id' }))
+      await handleHttpMcpRequest(req, res, url)
       return
     }
 

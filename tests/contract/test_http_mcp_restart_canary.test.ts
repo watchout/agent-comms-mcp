@@ -17,6 +17,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Client as PgClient } from 'pg'
@@ -74,8 +75,26 @@ async function waitForExit(proc: ChildProcess, timeoutMs = 8000): Promise<void> 
   })
 }
 
+// PR 4: identity binding mode — per-bot bearer credentials, identity derived
+// from the token (no bot_id query param).
+const TOKENS: Record<string, string> = {}
+
+async function seedBearerKey(client: PgClient, agentId: string): Promise<void> {
+  const token = `tok-bc-${randomUUID()}`
+  TOKENS[agentId] = token
+  const fingerprint = createHash('sha256').update(token).digest('hex')
+  await client.query(
+    `INSERT INTO agent_identity_keys (agent_id, key_type, public_key, fingerprint, status, metadata)
+     VALUES ($1, 'bearer-sha256', 'bearer-token-sha256', $2, 'active', '{"purpose":"contract-test"}')
+     ON CONFLICT (fingerprint) DO NOTHING`,
+    [agentId, fingerprint],
+  )
+}
+
 async function connectClient(botId: string): Promise<{ client: McpClient; transport: StreamableHTTPClientTransport }> {
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${HTTP_PORT}/mcp?bot_id=${botId}`))
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${HTTP_PORT}/mcp`), {
+    requestInit: { headers: { Authorization: `Bearer ${TOKENS[botId]}` } },
+  })
   const client = new McpClient({ name: `spike-bc-${botId}`, version: '0.0.1' })
   await client.connect(transport)
   return { client, transport }
@@ -98,6 +117,7 @@ beforeAll(async () => {
        ON CONFLICT (agent_id) DO UPDATE SET status='idle', last_seen_at=now()`,
       [id],
     )
+    await seedBearerKey(pg, id)
   }
   await pg.query(
     `INSERT INTO channels (id, org_id, type, name, members, created_by)
@@ -122,6 +142,8 @@ afterAll(async () => {
     await pg.query(`DELETE FROM agent_messages WHERE author_id LIKE $1 OR channel_id = $2`, [`${PREFIX}%`, CANARY_CHANNEL])
     await pg.query(`DELETE FROM channel_routing_policy WHERE channel_id = $1`, [CANARY_CHANNEL])
     await pg.query(`DELETE FROM channels WHERE id = $1`, [CANARY_CHANNEL])
+    await pg.query(`DELETE FROM agent_identity_keys WHERE agent_id LIKE $1`, [`${PREFIX}%`])
+    await pg.query(`DELETE FROM audit_log WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.end()
   }
@@ -150,7 +172,7 @@ describe('ADR-029R Spike B — restart / reconnect', () => {
         },
         body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list' }),
       })
-      expect(res.status).toBe(400)
+      expect(res.status).toBe(404)
     } finally {
       await second.transport.terminateSession().catch(() => {})
       await second.client.close()
@@ -189,7 +211,7 @@ describe('ADR-029R Spike B — restart / reconnect', () => {
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 100, method: 'tools/list' }),
     })
-    expect(stale.status).toBe(400)
+    expect(stale.status).toBe(404)
 
     // Both bots re-establish fresh sessions and work.
     const a2 = await connectClient(BOT_A)
