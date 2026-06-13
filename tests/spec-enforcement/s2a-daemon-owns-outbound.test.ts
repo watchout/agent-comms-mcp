@@ -35,6 +35,7 @@ const SERVER_SRC =
   + readFileSync(join(REPO_ROOT, 'adapters', 'outbound-consumer.ts'), 'utf-8')
   + '\n'
   + readFileSync(join(REPO_ROOT, 'adapters', 'discord-client.ts'), 'utf-8')
+const STARTUP_SAFETY_TEST_SRC = readFileSync(join(REPO_ROOT, 'tests', 'startup-safety.test.ts'), 'utf-8')
 
 /**
  * Slice a top-level `(async) function name(...)` body up to (but not
@@ -149,7 +150,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
       if (codexBacked.has(session)) {
         const trimmed = command.trimStart()
         expect(trimmed).toMatch(/^codex\s+--dangerously-bypass-approvals-and-sandbox/)
-        expect(trimmed).toContain("mcp_servers.agent-comms.enabled=false")
+        expect(trimmed).not.toContain('mcp_servers.agent-comms')
         expect(trimmed).toContain(`mcp_servers.aun.env.AGENT_ID="${agentId}"`)
         expect(trimmed).toContain(`mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="${agentId}"`)
         expect(trimmed).toContain('mcp_servers.aun.env.DATABASE_URL="postgresql:///agent_comms?host=/tmp"')
@@ -172,18 +173,25 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(line!).toMatch(/^\s*DEFAULT_CMD\s*=\s*["']claude\s+--mcp-config/)
   })
 
-  test('10. restart-bot.sh avoids accepting Codex update prompts during automated restarts', () => {
+  test('10. restart-bot.sh skips Codex update prompts without submitting the normal start screen', () => {
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
+    const step4 = script.slice(
+      script.indexOf('# Step 4: Create new session and start Claude Code'),
+      script.indexOf('# Step 5: Wait for a Codex update prompt'),
+    )
     const step5 = script.slice(
-      script.indexOf('# Step 5: Wait for TUI prompt and auto-confirm'),
+      script.indexOf('# Step 5: Wait for a Codex update prompt'),
       script.indexOf('echo "[restart-bot] ${SESSION} started'),
     )
 
-    expect(step5).toContain('tmux capture-pane -pt "$SESSION"')
+    expect(step4).toContain('TMUX_TARGET="${SESSION}:0.0"')
+    expect(step4).toContain('tmux send-keys -t "$TMUX_TARGET" -l "$CLAUDE_CMD"')
+    expect(step5).toContain('tmux capture-pane -pt "$TMUX_TARGET"')
     expect(step5).toContain("grep -qE '(^|[[:space:]])codex([[:space:]]|$)'")
     expect(step5).toContain('grep -q "Update now"')
-    expect(step5).toContain('tmux send-keys -t "$SESSION" 2 Enter')
-    expect(step5).toContain('tmux send-keys -t "$SESSION" Enter')
+    expect(step5).toContain('tmux send-keys -t "$TMUX_TARGET" 2 Enter')
+    expect(step5).not.toContain('else')
+    expect(step5).not.toContain('tmux send-keys -t "$TMUX_TARGET" Enter')
   })
 
   test('10b. sync-mcp-config.sh pins identity, DB socket, and server checkout', () => {
@@ -208,6 +216,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).toContain('PROFILE_SOURCE="agents.profile"')
     expect(script).toContain("agent_type NOT IN ('human', 'system')")
     expect(script).toContain("mcp_servers.aun.enabled=true")
+    expect(script).not.toContain('mcp_servers.agent-comms')
     expect(script).toContain('disabled_at IS NULL')
     expect(script).toContain("status IS DISTINCT FROM 'disabled'")
     expect(script).toContain('DB profile lookup is required')
@@ -227,6 +236,21 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).not.toContain("agent_type <> 'human'")
   })
 
+  test('10d. restart-bot.sh runs startup safety preflight before tmux or port mutation', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'restart-bot.sh'), 'utf-8')
+    const preflightIdx = script.indexOf('startup-safety-preflight.ts')
+    const dryRunIdx = script.indexOf('AGENT_COMMS_RESTART_DRY_RUN')
+    const cleanupIdx = script.indexOf('cleanup-orphan-ports.sh')
+    const killSessionIdx = script.indexOf('tmux kill-session')
+
+    expect(preflightIdx).toBeGreaterThan(-1)
+    expect(preflightIdx).toBeLessThan(dryRunIdx)
+    expect(preflightIdx).toBeLessThan(cleanupIdx)
+    expect(preflightIdx).toBeLessThan(killSessionIdx)
+    expect(script).toContain('--codex-post-start-enter-policy')
+    expect(script).toContain('update_prompt_only')
+  })
+
   test('11. watchdog.sh reads DB profiles only and does not use registry commands', () => {
     const script = readFileSync(join(REPO_ROOT, 'scripts', 'watchdog.sh'), 'utf-8')
     expect(script).toContain('DB `agents` profiles are the only source of truth')
@@ -244,6 +268,16 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(script).not.toContain('BOT_REGISTRY')
     expect(script).not.toContain('DEFAULT_CMD')
     expect(script).not.toContain('dangerously-load-development-channels')
+  })
+
+  test('11b. aun-watchdog delegates recovery to startup-safety restart script, not blind tmux Enter', () => {
+    const watchdog = readFileSync(join(REPO_ROOT, 'bin', 'aun-watchdog.ts'), 'utf-8')
+    const attemptRestart = sliceFn(watchdog, 'attemptRestart')
+
+    expect(attemptRestart).toContain("spawn('bash', [RESTART_SCRIPT, sessionName]")
+    expect(attemptRestart).not.toContain('send-keys')
+    expect(watchdog).toContain('startup-safety preflight')
+    expect(watchdog).toContain('must not send')
   })
 
   test('12. stdio postConnect registers AGENT_ID → shared discord in discordClients Map', () => {
@@ -288,6 +322,7 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(loader).toContain("status IS DISTINCT FROM 'disabled'")
     expect(loader).toContain('database required because agents table is SSOT')
     expect(SERVER_SRC).toContain('mcp_servers.aun.enabled=true')
+    expect(SERVER_SRC).not.toContain('mcp_servers.agent-comms.enabled=false')
     expect(SERVER_SRC).toContain('process.env.AGENT_COMMS_DATABASE_URL ?? config.database_url ?? DEFAULT_AUN_DATABASE_URL')
     expect(SERVER_SRC).not.toContain('bot-registry.compat')
     expect(SERVER_SRC).not.toContain('loadBotRegistryFile')
@@ -298,6 +333,51 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     const handler = SERVER_SRC.slice(SERVER_SRC.indexOf("if (name === 'restart_bot')"), SERVER_SRC.indexOf("if (name === 'cleanup_ports')"))
     expect(handler).toContain('await loadBotRegistry()')
     expect(handler).toContain('bot profile inventory')
+  })
+
+  test('13bb. MCP lifecycle restart sends Codex commands literally and avoids normal-screen Enter', () => {
+    const fn = sliceFn(SERVER_SRC, 'restartBotSession')
+    expect(fn).toContain('const tmuxTarget = `${entry.session}:0.0`')
+    expect(fn).toContain("tmuxExec(['send-keys', '-t', tmuxTarget, '-l', entry.command])")
+    expect(fn).toContain("tmuxExec(['send-keys', '-t', tmuxTarget, 'Enter'])")
+    expect(fn).toContain("paneText.includes('Update now')")
+    expect(fn).toContain("tmuxExec(['send-keys', '-t', tmuxTarget, '2', 'Enter'])")
+    expect(fn).not.toContain("tmuxExec(['send-keys', '-t', entry.session, 'Enter'])")
+  })
+
+  test('13bbb. MCP lifecycle restart uses startup safety preflight before tmux mutation', () => {
+    const fn = sliceFn(SERVER_SRC, 'restartBotSession')
+    const safetyIdx = fn.indexOf('evaluateStartupSafety')
+    const tmuxEvidenceIdx = fn.indexOf('tmuxRuntimeEvidence: collectStartupTmuxRuntimeEvidence(entry.session)')
+    const killIdx = fn.indexOf("tmuxExec(['kill-session'")
+    const newSessionIdx = fn.indexOf("tmuxExec(['new-session'")
+
+    expect(SERVER_SRC).toContain("from './core/startup-safety'")
+    expect(SERVER_SRC).toContain("from './core/tmux-runtime-inspector'")
+    expect(safetyIdx).toBeGreaterThan(-1)
+    expect(tmuxEvidenceIdx).toBeGreaterThan(safetyIdx)
+    expect(tmuxEvidenceIdx).toBeLessThan(killIdx)
+    expect(safetyIdx).toBeLessThan(killIdx)
+    expect(safetyIdx).toBeLessThan(newSessionIdx)
+  })
+
+  test('13bbbb. MCP lifecycle restart fail-closes tmux evidence before kill-session', () => {
+    const helper = sliceFn(SERVER_SRC, 'collectStartupTmuxRuntimeEvidence')
+    const fn = sliceFn(SERVER_SRC, 'restartBotSession')
+    const safetyIdx = fn.indexOf('evaluateStartupSafety')
+    const tmuxEvidenceIdx = fn.indexOf('tmuxRuntimeEvidence: collectStartupTmuxRuntimeEvidence(entry.session)')
+    const throwIdx = fn.indexOf('throw new Error(`STARTUP_SAFETY_BLOCKED')
+    const killIdx = fn.indexOf("tmuxExec(['kill-session'")
+
+    expect(helper).toContain("tmuxExec(['list-panes', '-t', sessionName")
+    expect(helper).toContain('parseProcessList')
+    expect(helper).toContain('observeTmuxRuntime')
+    expect(STARTUP_SAFETY_TEST_SRC).toContain('tmux_session_bound_to_different_agent')
+    expect(safetyIdx).toBeGreaterThan(-1)
+    expect(tmuxEvidenceIdx).toBeGreaterThan(safetyIdx)
+    expect(throwIdx).toBeGreaterThan(safetyIdx)
+    expect(tmuxEvidenceIdx).toBeLessThan(killIdx)
+    expect(throwIdx).toBeLessThan(killIdx)
   })
 
   test('13c. wake-daemon session resolvers use the enabled DB bot profile predicate', () => {

@@ -13,8 +13,10 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 REQUESTED_SESSION="${1:?Usage: restart-bot.sh <session-name-or-agent-id>}"
 SESSION="$REQUESTED_SESSION"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_CMD="claude --mcp-config .mcp.json --dangerously-skip-permissions"
 DEFAULT_AUN_DATABASE_URL="postgresql:///agent_comms?host=/tmp"
+BUN_BIN="${AGENT_COMMS_BUN_COMMAND:-/Users/yuji/.bun/bin/bun}"
 PROFILE_SOURCE=""
 
 # Load .mcp.json sync helper (ensures AGENT_ID/PORT/STATE_DIR match registry)
@@ -24,14 +26,11 @@ build_profile_command() {
   local agent_id="$1" session="$2" port="$3" runtime_engine="${4:-}"
   local database_url="${AGENT_COMMS_DATABASE_URL:-${DATABASE_URL:-$DEFAULT_AUN_DATABASE_URL}}"
   local state_dir="/Users/yuji/.claude/channels/${session}"
-  local repo_root
-  repo_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
-  local server_path="${AGENT_COMMS_SERVER_PATH:-${repo_root}/server.ts}"
-  local bun_command="${AGENT_COMMS_BUN_COMMAND:-/Users/yuji/.bun/bin/bun}"
+  local server_path="${AGENT_COMMS_SERVER_PATH:-${REPO_ROOT}/server.ts}"
+  local bun_command="$BUN_BIN"
   case "$(printf '%s' "$runtime_engine" | tr '[:upper:]' '[:lower:]')" in
     codex)
       CLAUDE_CMD="codex --dangerously-bypass-approvals-and-sandbox"
-      CLAUDE_CMD+=" -c 'mcp_servers.agent-comms.enabled=false'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.enabled=true'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.command=\"${bun_command}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.args=[\"run\",\"${server_path}\"]'"
@@ -112,6 +111,15 @@ echo "[restart-bot] Agent: ${AGENT_ID:-unknown}"
 echo "[restart-bot] Port: ${PORT:-none}"
 echo "[restart-bot] Command: ${CLAUDE_CMD}"
 
+"$BUN_BIN" "${SCRIPT_DIR}/startup-safety-preflight.ts" \
+  --agent-id "${AGENT_ID:-}" \
+  --expected-agent-id "${AGENT_ID:-}" \
+  --session "${SESSION:-}" \
+  --port "${PORT:-}" \
+  --command "$CLAUDE_CMD" \
+  --launcher-root "$REPO_ROOT" \
+  --codex-post-start-enter-policy update_prompt_only
+
 if [ "${AGENT_COMMS_RESTART_DRY_RUN:-0}" = "1" ]; then
   echo "[restart-bot] Dry run requested; no tmux or port changes made"
   exit 0
@@ -137,17 +145,19 @@ fi
 
 # Step 4: Create new session and start Claude Code
 tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR_EXPANDED"
-tmux send-keys -t "$SESSION" "$CLAUDE_CMD" Enter
+TMUX_TARGET="${SESSION}:0.0"
+tmux send-keys -t "$TMUX_TARGET" -l "$CLAUDE_CMD"
+tmux send-keys -t "$TMUX_TARGET" Enter
 
-# Step 5: Wait for TUI prompt and auto-confirm
+# Step 5: Wait for a Codex update prompt and explicitly skip it.
+# Do not send an extra Enter on the normal Codex start screen: in Codex 0.139
+# that can submit the highlighted suggestion and end the just-started session.
 sleep 3
-PANE_TEXT=$(tmux capture-pane -pt "$SESSION" -S -40 2>/dev/null || true)
+PANE_TEXT=$(tmux capture-pane -pt "$TMUX_TARGET" -S -40 2>/dev/null || true)
 if printf '%s\n' "$CLAUDE_CMD" | grep -qE '(^|[[:space:]])codex([[:space:]]|$)' \
   && printf '%s\n' "$PANE_TEXT" | grep -q "Update now"; then
   # Codex update prompts default to updating; choose the non-update option.
-  tmux send-keys -t "$SESSION" 2 Enter
-else
-  tmux send-keys -t "$SESSION" Enter
+  tmux send-keys -t "$TMUX_TARGET" 2 Enter
 fi
 
 echo "[restart-bot] ${SESSION} started in ${PROJECT_DIR_EXPANDED}"

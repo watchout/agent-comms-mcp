@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { findCrashedAgents, isRateLimited, loadDbProfileSessions, recordRestart, rateLimit } from '../../bin/aun-watchdog'
+import { commandHasAgentId, findCrashedAgents, findRuntimeProfileIssues, isRateLimited, loadDbProfileSessions, recordRestart, rateLimit } from '../../bin/aun-watchdog'
 
 // Issue #278 (§E + §G-1) — watchdog daemon behavioral fixtures.
 //
@@ -142,5 +142,126 @@ dbDescribe('test_watchdog — Issue #278 §E + §G-1 detection + rate limit', ()
       port: '19001',
       source: 'agents.profile',
     })
+  })
+})
+
+// ── findRuntimeProfileIssues unit tests (mock liveness checks) ───────────────
+
+describe('findRuntimeProfileIssues — runtime profile health checks', () => {
+  type WatchdogSession = { session: string; projectDir: string; port: string; source: 'agents.profile' }
+
+  function makeRegistry(entries: [string, WatchdogSession][]): Map<string, WatchdogSession> {
+    return new Map(entries)
+  }
+
+  const allHealthy = {
+    hasTmuxSession: (_s: string) => true,
+    portHasExpectedAgent: (_p: string, _a: string) => true,
+  }
+  const noSession = {
+    hasTmuxSession: (_s: string) => false,
+    portHasExpectedAgent: (_p: string, _a: string) => true,
+  }
+  const wrongAgent = {
+    hasTmuxSession: (_s: string) => true,
+    portHasExpectedAgent: (_p: string, _a: string) => false,
+  }
+
+  test('empty registry → no issues', () => {
+    const issues = findRuntimeProfileIssues(new Map(), allHealthy)
+    expect(issues).toHaveLength(0)
+  })
+
+  test('all sessions healthy → no issues', () => {
+    const registry = makeRegistry([
+      ['aun', { session: 'discord-aun', projectDir: '/tmp', port: '8811', source: 'agents.profile' }],
+      ['vice', { session: 'discord-vice', projectDir: '/tmp', port: '8812', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, allHealthy)
+    expect(issues).toHaveLength(0)
+  })
+
+  test('missing tmux session → tmux_session_missing issue', () => {
+    const registry = makeRegistry([
+      ['aun', { session: 'discord-aun', projectDir: '/tmp', port: '8811', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, noSession)
+    expect(issues).toHaveLength(1)
+    expect(issues[0].agentId).toBe('aun')
+    expect(issues[0].session).toBe('discord-aun')
+    expect(issues[0].reason).toBe('tmux_session_missing')
+    expect(issues[0].detail).toContain('discord-aun')
+  })
+
+  test('port without expected agent → port_missing_expected_agent issue', () => {
+    const registry = makeRegistry([
+      ['pfaun', { session: 'pfaun', projectDir: '/tmp', port: '8820', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, wrongAgent)
+    expect(issues).toHaveLength(1)
+    expect(issues[0].agentId).toBe('pfaun')
+    expect(issues[0].reason).toBe('port_missing_expected_agent')
+    expect(issues[0].detail).toContain('8820')
+    expect(issues[0].detail).toContain('pfaun')
+  })
+
+  test('missing session takes priority over port check (no duplicate issue)', () => {
+    const mixedChecks = {
+      hasTmuxSession: (_s: string) => false,
+      portHasExpectedAgent: (_p: string, _a: string) => false,
+    }
+    const registry = makeRegistry([
+      ['bot', { session: 'discord-bot', projectDir: '/tmp', port: '9001', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, mixedChecks)
+    expect(issues).toHaveLength(1)
+    expect(issues[0].reason).toBe('tmux_session_missing')
+  })
+
+  test('agent with no port skips port check', () => {
+    const registry = makeRegistry([
+      ['bot', { session: 'discord-bot', projectDir: '/tmp', port: '', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, wrongAgent)
+    expect(issues).toHaveLength(0)
+  })
+
+  test('agent with no session is skipped', () => {
+    const registry = makeRegistry([
+      ['bot', { session: '', projectDir: '/tmp', port: '9001', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, noSession)
+    expect(issues).toHaveLength(0)
+  })
+
+  test('multiple agents — only unhealthy ones flagged', () => {
+    const checks = {
+      hasTmuxSession: (s: string) => s !== 'pfaun',
+      portHasExpectedAgent: (_p: string, _a: string) => true,
+    }
+    const registry = makeRegistry([
+      ['aun', { session: 'discord-aun', projectDir: '/tmp', port: '8811', source: 'agents.profile' }],
+      ['pfaun', { session: 'pfaun', projectDir: '/tmp', port: '8820', source: 'agents.profile' }],
+    ])
+    const issues = findRuntimeProfileIssues(registry, checks)
+    expect(issues).toHaveLength(1)
+    expect(issues[0].agentId).toBe('pfaun')
+  })
+})
+
+describe('commandHasAgentId — exact env assignment matching', () => {
+  test('matches unquoted and quoted AGENT_ID assignments', () => {
+    expect(commandHasAgentId('/opt/homebrew/bin/bun run server.ts AGENT_ID=codex-cto DATABASE_URL=postgresql:///agent_comms', 'codex-cto')).toBe(true)
+    expect(commandHasAgentId('/opt/homebrew/bin/bun run server.ts AGENT_ID="codex-aun"', 'codex-aun')).toBe(true)
+    expect(commandHasAgentId("/opt/homebrew/bin/bun run server.ts AGENT_ID='agent-com-dev'", 'agent-com-dev')).toBe(true)
+  })
+
+  test('does not treat expected-agent env vars or config keys as the actual AGENT_ID', () => {
+    expect(commandHasAgentId('/opt/homebrew/bin/bun run server.ts AGENT_COM_EXPECTED_AGENT_ID=codex-cto DATABASE_URL=postgresql:///agent_comms', 'codex-cto')).toBe(false)
+    expect(commandHasAgentId('node codex -c mcp_servers.aun.env.AGENT_ID="codex-aun"', 'codex-aun')).toBe(false)
+  })
+
+  test('does not match a different actual AGENT_ID', () => {
+    expect(commandHasAgentId('/opt/homebrew/bin/bun run server.ts AGENT_COM_EXPECTED_AGENT_ID=codex-cto AGENT_ID=cto', 'codex-cto')).toBe(false)
   })
 })
