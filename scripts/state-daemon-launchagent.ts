@@ -16,6 +16,7 @@ type ParsedArgs = {
   command: 'restore' | 'preflight' | 'prune' | 'help'
   execute: boolean
   noBootstrap: boolean
+  extraEnv: Record<string, string>
   commit?: string
   restoreRoot?: string
   launchAgentsDir?: string
@@ -41,6 +42,9 @@ Usage:
      --github-work-labels <canary:label>
      --github-work-owner-allowlist <agent>
      --github-token-file <path>]
+  bun scripts/state-daemon-launchagent.ts restore --commit <sha>
+    --enable-queue-work-scheduler --agent-allowlist <agent>
+    --queue-work-runtime codex-exec [--execute]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
   bun scripts/state-daemon-launchagent.ts prune [--restore-root <path>] [--keep N] [--execute]
 
@@ -60,6 +64,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     command,
     execute: false,
     noBootstrap: false,
+    extraEnv: {},
     githubWorkPullerEnabled: false,
     githubWorkWritebackEnabled: false,
   }
@@ -92,6 +97,19 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
     else if (arg === '--github-work-writeback-enabled') args.githubWorkWritebackEnabled = true
     else if (arg === '--github-token-file') args.githubTokenFile = next()
+    else if (arg === '--agent-allowlist') args.extraEnv.STATE_DAEMON_AGENT_ALLOWLIST = next()
+    else if (arg === '--enable-queue-work-scheduler') args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '1'
+    else if (arg === '--queue-work-runtime') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RUNTIME = next()
+    else if (arg === '--queue-work-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_COMMAND = next()
+    else if (arg === '--queue-work-args-json') args.extraEnv.STATE_DAEMON_QUEUE_WORK_ARGS_JSON = next()
+    else if (arg === '--queue-work-timeout-ms') args.extraEnv.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS = next()
+    else if (arg === '--queue-work-finalize') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FINALIZE = '1'
+    else if (arg === '--queue-work-codex-executable') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_EXECUTABLE = next()
+    else if (arg === '--queue-work-codex-output-schema') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA = next()
+    else if (arg === '--queue-work-codex-sandbox') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = next()
+    else if (arg === '--queue-work-codex-model') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL = next()
+    else if (arg === '--queue-work-codex-profile') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE = next()
+    else if (arg === '--queue-work-codex-ignore-rules') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES = '1'
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
@@ -159,12 +177,12 @@ function ensureCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): v
   }
 }
 
-function verifyCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>, extraEnv: Record<string, string>): void {
+function verifyCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): void {
   mkdirSync(plan.logsDir, { recursive: true })
   mkdirSync(dirname(plan.buildOutfile), { recursive: true })
   run('bun', ['install', '--frozen-lockfile', '--no-summary'], plan.checkoutPath)
   run('bun', ['build', '--target', 'bun', 'bin/state-daemon.ts', '--outfile', plan.buildOutfile], plan.checkoutPath)
-  const rendered = renderStateDaemonLaunchAgentPlist(plan, extraEnv)
+  const rendered = renderStateDaemonLaunchAgentPlist(plan)
   const validation = validateStateDaemonLaunchAgentConfig(parseStateDaemonLaunchAgentPlist(rendered))
   if (!validation.ok) {
     throw new Error(`generated LaunchAgent failed preflight:\n${JSON.stringify(validation, null, 2)}`)
@@ -184,23 +202,24 @@ function bootstrap(plistPath: string): void {
 
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
+  const extraEnv = { ...args.extraEnv, ...githubWorkPullerEnvFromArgs(args) }
   const plan = buildStateDaemonRestorePlan({
     commit: args.commit,
     restoreRoot: args.restoreRoot,
     launchAgentsDir: args.launchAgentsDir,
     bunPath: args.bunPath,
     databaseUrl: args.databaseUrl,
+    extraEnv,
   })
-  const extraEnv = githubWorkPullerEnvFromArgs(args)
   if (!args.execute) {
     process.stdout.write(`${JSON.stringify({ dry_run: true, plan, extraEnv }, null, 2)}\n`)
     return
   }
 
   ensureCheckout(plan)
-  verifyCheckout(plan, extraEnv)
+  verifyCheckout(plan)
   mkdirSync(dirname(plan.plistPath), { recursive: true })
-  writeFileSync(plan.tempPlistPath, renderStateDaemonLaunchAgentPlist(plan, extraEnv), 'utf8')
+  writeFileSync(plan.tempPlistPath, renderStateDaemonLaunchAgentPlist(plan), 'utf8')
   const installedPreflight = validateStateDaemonLaunchAgentConfig(
     parseStateDaemonLaunchAgentPlist(readFileSync(plan.tempPlistPath, 'utf8')),
   )

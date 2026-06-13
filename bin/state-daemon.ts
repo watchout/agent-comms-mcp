@@ -202,6 +202,20 @@ class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     if (env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS && !env.AUN_QUEUE_WORK_TIMEOUT_MS) {
       env.AUN_QUEUE_WORK_TIMEOUT_MS = env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS
     }
+    for (const key of [
+      'CODEX_EXECUTABLE',
+      'CODEX_OUTPUT_SCHEMA',
+      'CODEX_SANDBOX',
+      'CODEX_MODEL',
+      'CODEX_PROFILE',
+      'CODEX_EPHEMERAL',
+      'CODEX_IGNORE_RULES',
+      'CODEX_TIMEOUT_MS',
+    ]) {
+      const stateKey = `STATE_DAEMON_QUEUE_WORK_${key}`
+      const aunKey = `AUN_QUEUE_WORK_${key}`
+      if (env[stateKey] && !env[aunKey]) env[aunKey] = env[stateKey]
+    }
     return env
   }
 

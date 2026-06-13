@@ -286,6 +286,118 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(out.extraEnv.GITHUB_TOKEN).toBeUndefined()
   })
 
+  test('queue-work scheduler activation fails closed without a single-agent allowlist and runtime', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+      },
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors.map((err) => err.code)).toEqual(expect.arrayContaining([
+      'queue_work_scheduler_requires_single_agent_allowlist',
+      'queue_work_runtime_unconfigured',
+    ]))
+  })
+
+  test('queue-work scheduler codex-exec activation requires the result schema before launchd load', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+      },
+    })
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'queue_work_codex_schema_missing',
+        path: join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json'),
+      }),
+    ]))
+  })
+
+  test('queue-work scheduler codex-exec activation passes with exact qa allowlist and schema', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+      },
+    })
+    const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath, schemaPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(true)
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBe('qa')
+    expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RUNTIME).toBe('codex-exec')
+  })
+
+  test('restore helper dry-run merges GitHub puller and queue-work activation env', () => {
+    const tokenFile = '/Users/yuji/.config/agent-comms/github-work-token'
+    const proc = Bun.spawnSync([
+      'bun',
+      'scripts/state-daemon-launchagent.ts',
+      'restore',
+      '--commit',
+      '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      '--github-work-puller-enabled',
+      '--github-work-repos',
+      'watchout/agent-comms-mcp',
+      '--github-work-labels',
+      'canary:github-work-puller',
+      '--github-work-owner-allowlist',
+      'agent-com-dev',
+      '--github-token-file',
+      tokenFile,
+      '--enable-queue-work-scheduler',
+      '--agent-allowlist',
+      'qa',
+      '--queue-work-runtime',
+      'codex-exec',
+      '--queue-work-finalize',
+    ], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0)
+    const out = JSON.parse(proc.stdout.toString())
+    expect(out.extraEnv).toMatchObject({
+      STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED: '1',
+      STATE_DAEMON_GITHUB_TOKEN_FILE: tokenFile,
+      STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+      STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+      STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+      STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+    })
+    expect(out.plan.extraEnv).toMatchObject(out.extraEnv)
+  })
+
   test('restore verification build artifact does not dirty an existing checkout for repeat restore', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'state-daemon-restore-repeat-'))
     try {
@@ -382,7 +494,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
   test('restore helper verifies checkout/build and preflight before atomic plist replace and launchd bootstrap', () => {
     const src = readFileSync(join(REPO, 'scripts', 'state-daemon-launchagent.ts'), 'utf8')
     const ensureCheckout = src.indexOf('ensureCheckout(plan)')
-    const verifyCheckout = src.indexOf('verifyCheckout(plan, extraEnv)')
+    const verifyCheckout = src.indexOf('verifyCheckout(plan)')
     const stagedPreflight = src.indexOf('const installedPreflight = validateStateDaemonLaunchAgentConfig')
     const rename = src.indexOf('renameSync(plan.tempPlistPath, plan.plistPath)')
     const bootstrap = src.indexOf('bootstrap(plan.plistPath)')
