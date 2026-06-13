@@ -11,6 +11,26 @@ Use this skill to enforce IYASAKA Company Dev OS role boundaries.
 
 `spec -> arc -> repo-specific implementation bot -> audit -> qa -> check -> cto when high-risk`
 
+## Operating Model
+
+Company Dev OS in this repository is GitHub-first / AUN-accelerated.
+
+- GitHub issues and PRs are the durable SSOT for task state, role handoff,
+  acceptance criteria, decisions, GO/NO-GO, rework instructions, and completion
+  evidence.
+- AUN is used for notification, acceleration, queue delivery, runtime evidence,
+  and bot-to-bot assistance.
+- AUN queue IDs, ACKs, Discord projection, TUI visibility, and green CI are not
+  completion evidence by themselves.
+- Every implementation/review handoff must reference a GitHub issue or PR URL.
+- If AUN cannot deliver a role handoff, record the handoff in GitHub, notify
+  through any available channel, and repair the AUN route separately. Do not
+  normalize human relay as the operating pattern.
+- Repo-specific implementation bots may prepare the next approved
+  implementation slice while independent review is pending. Merge,
+  production/runtime activation, and protected live canaries remain gated by the
+  required audit/qa/check/cto roles.
+
 ## Universal Rules
 
 - 1 bot = 1 role = 1 LLM.
