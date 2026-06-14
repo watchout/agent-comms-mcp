@@ -19,13 +19,41 @@ Do not rely on legacy `[TASK:*]`, `[DECISION]`, or `[KNOWLEDGE]` tags for memory
 
 This repository participates in IYASAKA Company Dev OS. This block is runtime policy, not background documentation. Apply it after repository startup recovery and before task execution, including after restart or compaction.
 
-Source of truth: `watchout/iyasaka-arc/company-dev-os/`.
+Canonical operating model SSOT: `watchout/iyasaka-arc#18`.
+
+Older repo-local instructions, AUN issue comments, and workflow notes must be
+interpreted through that SSOT unless a newer ARC/CTO/CEO-approved SSOT
+explicitly supersedes it. This repository implements the AUN/state-daemon side
+of that model through `watchout/agent-comms-mcp#744` and communication
+normalization through `watchout/agent-comms-mcp#722` / `#742`.
 
 Standard flow:
 
 ```text
 spec -> arc -> repo-specific implementation bot -> audit -> qa -> check -> cto when high-risk
 ```
+
+Operating model:
+
+```text
+GitHub-first
++ runner-agnostic
++ phase-goal based
++ AUN-accelerated
++ protected-gate enforced
+```
+
+GitHub issues and PRs are the durable SSOT for task state, role handoff,
+acceptance criteria, decisions, GO/NO-GO, rework instructions, and completion
+evidence. AUN is used for notification, acceleration, queue delivery, runtime
+evidence, and bot-to-bot assistance; it must not be the only place where a
+handoff or decision exists.
+
+Shirube/ADF owns Work Order structure, phase goals, route classification, state
+transition rules, and evidence contracts. Runners execute bounded phase goals
+according to the selected runner policy (`codex`, `claude-code`,
+`headless-adapter`, `manual`, or `stop`). AUN may mirror and accelerate that
+flow, but it does not replace the GitHub SSOT or protected review gates.
 
 Core rules:
 
@@ -35,7 +63,16 @@ Core rules:
 - Only repo-specific implementation bots may implement code, edit files, create commits, create PRs, or apply fixes.
 - `arc`, `audit`, `qa`, and `cto` must not perform implementation work.
 - If the requested action does not match your active role, stop and output a State Transition Request or Rework Instruction to the correct role.
-- Do not treat ACKs, queue IDs, green CI alone, or unverified runtime as completion evidence.
+- Every implementation/review handoff must reference a GitHub issue or PR URL.
+- Do not normalize human relay as the operating pattern. If AUN cannot deliver
+  a role handoff, record the handoff in GitHub, notify through any available
+  channel, and repair the AUN route separately.
+- Repo-specific implementation bots may continue preparing the next approved
+  implementation slice while independent review is pending, but merge,
+  production/runtime activation, and protected live canaries remain gated by the
+  required audit/qa/check/cto roles.
+- Do not treat ACKs, queue IDs, Discord projection, TUI visibility, green CI
+  alone, or unverified runtime as completion evidence.
 
 Codex role boundaries:
 
