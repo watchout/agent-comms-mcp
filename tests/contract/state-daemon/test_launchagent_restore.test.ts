@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  buildGithubWorkPullerLaunchAgentEnv,
   buildStateDaemonRestorePlan,
   parseStateDaemonLaunchAgentPlist,
   planStateDaemonRestorePrune,
@@ -172,6 +173,119 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(result.ok).toBe(true)
   })
 
+  test('bounded GitHub work puller LaunchAgent env uses a token file and exact canary scope', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const tokenFile = '/Users/yuji/.config/agent-comms/github-work-token'
+    const extraEnv = buildGithubWorkPullerLaunchAgentEnv({
+      enabled: true,
+      repos: ['watchout/agent-comms-mcp'],
+      labels: ['canary:github-work-puller'],
+      ownerAllowlist: ['agent-com-dev'],
+      intervalMs: 120_000,
+      writebackEnabled: true,
+      tokenFile,
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan, extraEnv))
+    const result = validateStateDaemonLaunchAgentConfig(config, {
+      probe: probe([plan.bunPath, plan.entryPath, tokenFile], [plan.checkoutPath]),
+    })
+
+    expect(extraEnv).toMatchObject({
+      STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED: '1',
+      STATE_DAEMON_GITHUB_WORK_REPOS: 'watchout/agent-comms-mcp',
+      STATE_DAEMON_GITHUB_WORK_LABELS: 'canary:github-work-puller',
+      STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST: 'agent-com-dev',
+      STATE_DAEMON_GITHUB_WORK_INTERVAL_MS: '120000',
+      STATE_DAEMON_GITHUB_WORK_WRITEBACK_ENABLED: '1',
+      STATE_DAEMON_GITHUB_TOKEN_FILE: tokenFile,
+    })
+    expect(extraEnv).not.toHaveProperty('STATE_DAEMON_GITHUB_TOKEN')
+    expect(extraEnv).not.toHaveProperty('GITHUB_TOKEN')
+    expect(result.ok).toBe(true)
+  })
+
+  test('bounded GitHub work puller LaunchAgent activation fails closed on broad or unsafe config', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const tokenFile = '/Users/yuji/.config/agent-comms/github-work-token'
+    const baseEnv = {
+      STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED: '1',
+      STATE_DAEMON_GITHUB_WORK_REPOS: 'watchout/agent-comms-mcp',
+      STATE_DAEMON_GITHUB_WORK_LABELS: 'canary:github-work-puller',
+      STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST: 'agent-com-dev',
+      STATE_DAEMON_GITHUB_TOKEN_FILE: tokenFile,
+    }
+    const cases: Array<[Record<string, string | undefined>, string]> = [
+      [{ STATE_DAEMON_GITHUB_WORK_REPOS: 'watchout/agent-comms-mcp,watchout/iyasaka-arc' }, 'github_work_puller_requires_single_repo'],
+      [{ STATE_DAEMON_GITHUB_WORK_LABELS: 'needs:impl' }, 'github_work_puller_requires_single_canary_label'],
+      [{ STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST: 'agent-com-dev,codex-audit' }, 'github_work_puller_requires_single_owner_allowlist'],
+      [{ STATE_DAEMON_GITHUB_TOKEN_FILE: undefined }, 'github_work_puller_token_file_required'],
+      [{ STATE_DAEMON_GITHUB_TOKEN: 'raw-token' }, 'github_token_embedded_in_launchagent'],
+    ]
+
+    for (const [patch, expectedCode] of cases) {
+      const env = { ...baseEnv, ...patch }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete env[key as keyof typeof env]
+      }
+      const result = validateStateDaemonLaunchAgentConfig(
+        parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan, env as Record<string, string>)),
+        { probe: probe([plan.bunPath, plan.entryPath, tokenFile], [plan.checkoutPath]) },
+      )
+      expect(result.ok).toBe(false)
+      expect(result.errors.map((err) => err.code)).toContain(expectedCode)
+    }
+  })
+
+  test('restore helper dry-run renders bounded GitHub work puller env without writing token values', () => {
+    const tokenFile = '/Users/yuji/.config/agent-comms/github-work-token'
+    const proc = Bun.spawnSync([
+      'bun',
+      'scripts/state-daemon-launchagent.ts',
+      'restore',
+      '--commit',
+      '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      '--github-work-puller-enabled',
+      '--github-work-repos',
+      'watchout/agent-comms-mcp',
+      '--github-work-labels',
+      'canary:github-work-puller',
+      '--github-work-owner-allowlist',
+      'agent-com-dev',
+      '--github-work-interval-ms',
+      '120000',
+      '--github-work-writeback-enabled',
+      '--github-token-file',
+      tokenFile,
+    ], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0)
+    const out = JSON.parse(proc.stdout.toString())
+    expect(out.dry_run).toBe(true)
+    expect(out.extraEnv).toMatchObject({
+      STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED: '1',
+      STATE_DAEMON_GITHUB_WORK_REPOS: 'watchout/agent-comms-mcp',
+      STATE_DAEMON_GITHUB_WORK_LABELS: 'canary:github-work-puller',
+      STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST: 'agent-com-dev',
+      STATE_DAEMON_GITHUB_WORK_WRITEBACK_ENABLED: '1',
+      STATE_DAEMON_GITHUB_TOKEN_FILE: tokenFile,
+    })
+    expect(proc.stdout.toString()).not.toContain('raw-token')
+    expect(out.extraEnv.STATE_DAEMON_GITHUB_TOKEN).toBeUndefined()
+    expect(out.extraEnv.GITHUB_TOKEN).toBeUndefined()
+  })
+
   test('restore verification build artifact does not dirty an existing checkout for repeat restore', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'state-daemon-restore-repeat-'))
     try {
@@ -268,7 +382,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
   test('restore helper verifies checkout/build and preflight before atomic plist replace and launchd bootstrap', () => {
     const src = readFileSync(join(REPO, 'scripts', 'state-daemon-launchagent.ts'), 'utf8')
     const ensureCheckout = src.indexOf('ensureCheckout(plan)')
-    const verifyCheckout = src.indexOf('verifyCheckout(plan)')
+    const verifyCheckout = src.indexOf('verifyCheckout(plan, extraEnv)')
     const stagedPreflight = src.indexOf('const installedPreflight = validateStateDaemonLaunchAgentConfig')
     const rename = src.indexOf('renameSync(plan.tempPlistPath, plan.plistPath)')
     const bootstrap = src.indexOf('bootstrap(plan.plistPath)')

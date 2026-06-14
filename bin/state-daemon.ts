@@ -24,6 +24,7 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
 import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
@@ -221,6 +222,19 @@ function queueWorkSchedulerEnabled(env: NodeJS.ProcessEnv = process.env): boolea
   return raw === '1' || raw?.toLowerCase() === 'true'
 }
 
+export function resolveGithubTokenFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  readTokenFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
+): string | undefined {
+  const tokenFile = env.STATE_DAEMON_GITHUB_TOKEN_FILE?.trim()
+  if (tokenFile) {
+    const token = readTokenFile(tokenFile).trim()
+    return token || undefined
+  }
+  const token = (env.STATE_DAEMON_GITHUB_TOKEN ?? env.GITHUB_TOKEN)?.trim()
+  return token || undefined
+}
+
 // ── env → config mapping ─────────────────────────────────────────────────────
 function loadConfig(): Partial<StateDaemonConfig> {
   const cfg: Partial<StateDaemonConfig> = {}
@@ -312,7 +326,7 @@ export async function main(): Promise<void> {
       ? new StateDaemonGithubWorkPuller({
         db,
         client: new RestGithubWorkClient({
-          token: process.env.STATE_DAEMON_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN,
+          token: resolveGithubTokenFromEnv(process.env),
         }),
         config: githubConfig,
       })
