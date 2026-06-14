@@ -50,8 +50,8 @@ export interface QueueWorkResult {
   schema_version: typeof QUEUE_WORK_RESULT_VERSION
   ok: boolean
   summary: string
-  reply?: string
-  evidence?: unknown[]
+  reply?: string | null
+  evidence?: string[]
   next_action: QueueWorkNextAction
 }
 

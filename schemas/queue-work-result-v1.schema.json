@@ -3,9 +3,10 @@
   "$id": "https://agent-comms-mcp.local/schemas/queue-work-result-v1.schema.json",
   "title": "AUN queue_work_result_v1",
   "type": "object",
-  "required": ["schema_version", "ok", "summary", "next_action"],
+  "required": ["schema_version", "ok", "summary", "reply", "evidence", "next_action"],
   "properties": {
     "schema_version": {
+      "type": "string",
       "const": "queue_work_result_v1"
     },
     "ok": {
@@ -16,14 +17,18 @@
       "minLength": 1
     },
     "reply": {
-      "type": "string"
+      "type": ["string", "null"]
     },
     "evidence": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "next_action": {
+      "type": "string",
       "enum": ["reply", "close", "none", "retry"]
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

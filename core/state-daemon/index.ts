@@ -87,6 +87,7 @@ import {
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
+const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
@@ -336,6 +337,12 @@ export class StateDaemon {
     const expired = await this.fetchReceivedExpired()
     for (const row of expired) {
       result.scanned++
+      if (!this.queueWorkScheduler && this.isQueueWorkSchedulerClaim(row)) {
+        this.metrics.inc('state_daemon_queue_work_actions_total', {
+          result: 'scheduler_claim_without_scheduler_skipped',
+        })
+        continue
+      }
       const action = this.planAction(row, null, false, this.clock.now())
       this.recordQueueAction(action, row)
       const memoryReady = await this.checkMemoryReadyGate(row, action)
@@ -886,6 +893,11 @@ export class StateDaemon {
       payload,
       content: payload.content,
     })
+  }
+
+  private isQueueWorkSchedulerClaim(row: QueueRow): boolean {
+    const payload = parseQueuePayload(row.payload)
+    return payload.receive_claim?.source === QUEUE_WORK_SCHEDULER_SOURCE
   }
 
   private async tryCompleteScopedOutNoReply(event: QueueEvent): Promise<boolean> {

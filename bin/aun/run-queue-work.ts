@@ -105,10 +105,13 @@ class EchoRuntimeAdapter implements LlmRuntimeAdapter {
   }
 }
 
-interface ExecResult {
+export interface ExecResult {
   status: number
   stdout: string
   stderr: string
+  errorMessage?: string
+  signal?: string | null
+  killed?: boolean
 }
 
 /**
@@ -129,12 +132,24 @@ function execFileAsync(
       maxBuffer: opts.maxBuffer,
       encoding: 'utf-8',
     }, (err, stdout, stderr) => {
+      const execErr = err as NodeJS.ErrnoException & {
+        code?: unknown
+        signal?: string | null
+        killed?: boolean
+      }
       const status = err == null
         ? 0
-        : typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === 'number'
-          ? (err as { code: number }).code
+        : typeof execErr.code === 'number'
+          ? execErr.code
           : 1
-      resolvePromise({ status, stdout: stdout ?? '', stderr: stderr ?? '' })
+      resolvePromise({
+        status,
+        stdout: stdout ?? '',
+        stderr: stderr ?? '',
+        errorMessage: err ? execErr.message : undefined,
+        signal: execErr.signal ?? null,
+        killed: execErr.killed,
+      })
     })
     if (opts.input !== undefined && child.stdin) {
       child.stdin.write(opts.input)
@@ -186,6 +201,35 @@ function parseQueueWorkResultJson(raw: string): QueueWorkResult {
     }
     throw new Error('codex exec final message was not JSON')
   }
+}
+
+function snippet(label: string, value: string | undefined): string {
+  const trimmed = (value ?? '').trim()
+  if (!trimmed) return `${label}=<empty>`
+  return `${label}=${JSON.stringify(trimmed.slice(0, 1000))}`
+}
+
+export function describeCodexExecFailure(input: {
+  result: ExecResult
+  outputLastMessagePath: string
+}): string {
+  let finalMessage = ''
+  try {
+    if (existsSync(input.outputLastMessagePath)) {
+      finalMessage = readFileSync(input.outputLastMessagePath, 'utf8')
+    }
+  } catch {
+    finalMessage = '<unreadable>'
+  }
+  return [
+    `codex exec failed status=${input.result.status}`,
+    input.result.signal ? `signal=${input.result.signal}` : null,
+    input.result.killed ? 'killed=true' : null,
+    input.result.errorMessage ? snippet('error', input.result.errorMessage) : null,
+    snippet('stderr', input.result.stderr),
+    snippet('stdout', input.result.stdout),
+    finalMessage ? snippet('final_message', finalMessage) : 'final_message=<missing>',
+  ].filter(Boolean).join(' ')
 }
 
 export function buildCodexExecQueueWorkCommand(input: {
@@ -274,7 +318,10 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         maxBuffer: 1024 * 1024 * 20,
       })
       if (child.status !== 0) {
-        throw new Error(`codex exec failed status=${child.status} stderr=${child.stderr.slice(0, 1000)}`)
+        throw new Error(describeCodexExecFailure({
+          result: child,
+          outputLastMessagePath,
+        }))
       }
       if (!existsSync(outputLastMessagePath)) {
         throw new Error('codex exec did not write --output-last-message')

@@ -398,6 +398,33 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(out.plan.extraEnv).toMatchObject(out.extraEnv)
   })
 
+  test('restore helper dry-run can render bounded queue-work rollback env', () => {
+    const proc = Bun.spawnSync([
+      'bun',
+      'scripts/state-daemon-launchagent.ts',
+      'restore',
+      '--commit',
+      '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      '--agent-allowlist',
+      'qa',
+      '--disable-codex-runner',
+    ], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0)
+    const out = JSON.parse(proc.stdout.toString())
+    expect(out.dry_run).toBe(true)
+    expect(out.extraEnv).toMatchObject({
+      STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+      STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
+    })
+    expect(out.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED).toBeUndefined()
+    expect(out.plan.extraEnv).toMatchObject(out.extraEnv)
+  })
+
   test('restore verification build artifact does not dirty an existing checkout for repeat restore', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'state-daemon-restore-repeat-'))
     try {

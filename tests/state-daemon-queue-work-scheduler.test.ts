@@ -114,6 +114,29 @@ class PendingLlmDb implements DBClient {
   }
 }
 
+class ExpiredSchedulerClaimDb implements DBClient {
+  updates: Array<{ sql: string; params?: unknown[] }> = []
+
+  constructor(private readonly row: any) {}
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('FROM message_queue mq') && sql.includes("mq.status IN ('received', 'in_progress')") && sql.includes('mq.claim_expires_at <')) {
+      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+    }
+    if (sql.includes('FROM message_queue mq') && sql.includes("mq.status IN ('received', 'in_progress')")) {
+      return { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.includes('FROM message_queue mq') && sql.includes("mq.status='pending'")) {
+      return { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.trim().startsWith('UPDATE')) {
+      this.updates.push({ sql, params })
+      return { rows: [] as T[], rowCount: 0 }
+    }
+    return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
 describe('state_daemon queue work scheduler boundary', () => {
   test('received queue events schedule the runner without using tmux wake', async () => {
     const calls: Array<{ queueId: number; agentId: string }> = []
@@ -292,6 +315,53 @@ describe('state_daemon queue work scheduler boundary', () => {
       })).toBe(1)
     } finally {
       releasePending()
+      await daemon.stop()
+    }
+  })
+
+  test('scheduler-owned expired rows are not reclaimed into legacy runner when scheduler is disabled', async () => {
+    const row = {
+      id: 492,
+      agent_id: 'qa',
+      status: 'received',
+      message_id: 'msg-492',
+      payload: JSON.stringify({
+        content: 'canary',
+        receive_claim: {
+          mode: 'targeted-receive',
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'qa',
+          queue_id: '492',
+        },
+      }),
+      claim_expires_at: new Date('2026-05-07T23:59:00.000Z'),
+      created_at: new Date('2026-05-07T23:58:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const db = new ExpiredSchedulerClaimDb(row)
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-05-08T00:00:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      config: { codexRunnerEnabled: true, agentAllowlist: ['qa'] },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+
+      expect(result.scanned).toBe(1)
+      expect(result.reclaimed).toBe(0)
+      expect(db.updates).toEqual([])
+      expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+        result: 'scheduler_claim_without_scheduler_skipped',
+      })).toBe(1)
+    } finally {
       await daemon.stop()
     }
   })
