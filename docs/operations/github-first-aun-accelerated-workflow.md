@@ -1,19 +1,42 @@
 # GitHub-First / AUN-Accelerated Workflow
 
-Issue: #742
+Canonical SSOT: `watchout/iyasaka-arc#18`
+
+Repo adoption / continuation issue: `watchout/agent-comms-mcp#742`
+
+AUN/state-daemon implementation issue: `watchout/agent-comms-mcp#744`
 
 ## Purpose
 
 AUN development must continue even when AUN delivery is degraded. The operating
-model is GitHub-first / AUN-accelerated:
+model is:
+
+```text
+GitHub-first
++ runner-agnostic
++ phase-goal based
++ AUN-accelerated
++ protected-gate enforced
+```
 
 - GitHub issues and PRs are the durable source of truth for task state, role
   handoff, acceptance criteria, decisions, rework instructions, GO/NO-GO, and
   completion evidence.
+- Shirube/ADF owns Work Order structure, phase goals, route classification,
+  state transitions, and evidence contracts.
+- Runners execute bounded phase goals according to runner policy. Codex, Claude
+  Code, headless adapters, governed manual execution, and stop lanes are
+  selected by policy rather than hard-coded into the workflow.
 - AUN is an acceleration and evidence surface: notification, queue delivery,
   runtime evidence, and bot-to-bot assist.
 - AUN queue IDs, ACKs, Discord projection, TUI visibility, and green CI are not
   completion evidence by themselves.
+
+`watchout/agent-comms-mcp#744` implements the AUN/state-daemon side of
+`watchout/iyasaka-arc#18`: supervised non-cron GitHub work discovery,
+runner-policy aware dispatch, duplicate suppression, restart recovery,
+protected stop gates, and GitHub evidence writeback. It must keep AUN as an
+acceleration/evidence mirror, not the SSOT.
 
 ## Required Rule
 
@@ -44,6 +67,7 @@ Repo-specific implementation bots may continue preparing the next approved
 implementation slice while independent review is pending, provided that:
 
 - the next slice has a GitHub issue or PR URL
+- the slice is a bounded phase goal or links to one
 - the slice has explicit scope and acceptance criteria
 - no review role is skipped
 - no merge, production/runtime activation, protected canary, or rollout occurs

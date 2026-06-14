@@ -13,11 +13,29 @@ Use this skill to enforce IYASAKA Company Dev OS role boundaries.
 
 ## Operating Model
 
-Company Dev OS in this repository is GitHub-first / AUN-accelerated.
+Canonical operating model SSOT: `watchout/iyasaka-arc#18`.
+
+Company Dev OS in this repository is:
+
+```text
+GitHub-first
++ runner-agnostic
++ phase-goal based
++ AUN-accelerated
++ protected-gate enforced
+```
+
+This repository implements the AUN/state-daemon side of the model through
+`watchout/agent-comms-mcp#744` and communication normalization through
+`watchout/agent-comms-mcp#722` / `#742`.
 
 - GitHub issues and PRs are the durable SSOT for task state, role handoff,
   acceptance criteria, decisions, GO/NO-GO, rework instructions, and completion
   evidence.
+- Shirube/ADF owns Work Order structure, phase goals, route classification,
+  state transitions, and evidence contracts.
+- Runners execute bounded phase goals according to runner policy. Codex is one
+  runner, not the architecture boundary.
 - AUN is used for notification, acceleration, queue delivery, runtime evidence,
   and bot-to-bot assistance.
 - AUN queue IDs, ACKs, Discord projection, TUI visibility, and green CI are not
