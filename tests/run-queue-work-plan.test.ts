@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import {
   buildCodexExecQueueWorkCommand,
   buildRunQueueWorkPlan,
+  describeCodexExecFailure,
   runQueueWork,
 } from '../bin/aun/run-queue-work'
 
@@ -105,5 +107,44 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(command.stdin).toContain('Return only JSON matching queue_work_result_v1')
     expect(command.stdin).toContain('"queue_id":"42"')
     expect(command.stdin).toContain('Do not call next, inbox')
+  })
+
+  test('codex-exec failure diagnostics include stdout and final-message when stderr is empty', () => {
+    const detail = describeCodexExecFailure({
+      result: {
+        status: 1,
+        stdout: '{"error":"schema rejected"}\n',
+        stderr: '',
+        errorMessage: 'Command failed: codex exec',
+      },
+      outputLastMessagePath: '/tmp/aun-queue-work-missing-final-message.json',
+    })
+
+    expect(detail).toContain('status=1')
+    expect(detail).toContain('stderr=<empty>')
+    expect(detail).toContain('stdout=')
+    expect(detail).toContain('schema rejected')
+    expect(detail).toContain('error=')
+    expect(detail).toContain('final_message=<missing>')
+  })
+
+  test('packaged queue-work result schema is Codex structured-output compatible', () => {
+    const schema = JSON.parse(readFileSync(new URL('../schemas/queue-work-result-v1.schema.json', import.meta.url), 'utf8'))
+
+    expect(schema.additionalProperties).toBe(false)
+    expect(schema.required).toEqual(['schema_version', 'ok', 'summary', 'reply', 'evidence', 'next_action'])
+    expect(schema.properties.schema_version).toMatchObject({
+      type: 'string',
+      const: 'queue_work_result_v1',
+    })
+    expect(schema.properties.reply.type).toEqual(['string', 'null'])
+    expect(schema.properties.evidence).toMatchObject({
+      type: 'array',
+      items: { type: 'string' },
+    })
+    expect(schema.properties.next_action).toMatchObject({
+      type: 'string',
+      enum: ['reply', 'close', 'none', 'retry'],
+    })
   })
 })

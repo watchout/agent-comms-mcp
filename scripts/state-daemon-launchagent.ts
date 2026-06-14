@@ -45,6 +45,8 @@ Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --enable-queue-work-scheduler --agent-allowlist <agent>
     --queue-work-runtime codex-exec [--execute]
+  bun scripts/state-daemon-launchagent.ts restore --commit <sha>
+    --agent-allowlist <agent> --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
   bun scripts/state-daemon-launchagent.ts prune [--restore-root <path>] [--keep N] [--execute]
 
@@ -98,6 +100,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--github-work-writeback-enabled') args.githubWorkWritebackEnabled = true
     else if (arg === '--github-token-file') args.githubTokenFile = next()
     else if (arg === '--agent-allowlist') args.extraEnv.STATE_DAEMON_AGENT_ALLOWLIST = next()
+    else if (arg === '--disable-codex-runner') args.extraEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED = '0'
     else if (arg === '--enable-queue-work-scheduler') args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '1'
     else if (arg === '--queue-work-runtime') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RUNTIME = next()
     else if (arg === '--queue-work-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_COMMAND = next()
