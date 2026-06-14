@@ -40,6 +40,7 @@ import {
   type AlertSink,
   type Clock,
   type CodexRunnerInvoker,
+  type GithubWorkPuller,
   type HostRuntimeInvoker,
   type QueueWorkScheduler,
   type DBClient,
@@ -134,6 +135,7 @@ export class StateDaemon {
   private readonly codexRunner: CodexRunnerInvoker | null
   private readonly hostRuntimeInvoker: HostRuntimeInvoker | null
   private readonly queueWorkScheduler: QueueWorkScheduler | null
+  private readonly githubWorkPuller: GithubWorkPuller | null
   private readonly clock: Clock
   private readonly metrics: Metrics
   private readonly alert: AlertSink
@@ -148,6 +150,7 @@ export class StateDaemon {
   private dbErrorStreak = 0
   private readonly inflightWakes = new Set<Promise<boolean>>()
   private readonly inflightQueueWork = new Map<string, Promise<void>>()
+  private githubWorkPullerInFlight: Promise<void> | null = null
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
   constructor(deps: StateDaemonDeps) {
@@ -157,6 +160,7 @@ export class StateDaemon {
     this.codexRunner = deps.codexRunner ?? null
     this.hostRuntimeInvoker = deps.hostRuntimeInvoker ?? null
     this.queueWorkScheduler = deps.queueWorkScheduler ?? null
+    this.githubWorkPuller = deps.githubWorkPuller ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
@@ -236,6 +240,20 @@ export class StateDaemon {
         this.config.gcIntervalMs,
       ),
     )
+    if (this.config.githubWorkPullerEnabled) {
+      if (!this.githubWorkPuller) {
+        this.metrics.inc('state_daemon_github_work_puller_actions_total', { result: 'missing_dependency' })
+        void this.alert.alert('github work puller enabled but no puller dependency is configured')
+      } else {
+        this.scheduleGithubWorkPuller('startup')
+        this.intervalHandles.push(
+          setInterval(
+            () => this.scheduleGithubWorkPuller('interval'),
+            this.config.githubWorkPullerIntervalMs,
+          ),
+        )
+      }
+    }
   }
 
   async stop(): Promise<void> {
@@ -245,11 +263,12 @@ export class StateDaemon {
     this.intervalHandles.length = 0
     // Wait up to 5s for in-flight wake jobs to finish (§1.2 invariants).
     const deadline = this.clock.now().getTime() + 5000
-    while ((this.inflightWakes.size > 0 || this.inflightQueueWork.size > 0) && this.clock.now().getTime() < deadline) {
+    while ((this.inflightWakes.size > 0 || this.inflightQueueWork.size > 0 || this.githubWorkPullerInFlight) && this.clock.now().getTime() < deadline) {
       await Promise.race([
         Promise.all([
           ...Array.from(this.inflightWakes),
           ...Array.from(this.inflightQueueWork.values()),
+          ...(this.githubWorkPullerInFlight ? [this.githubWorkPullerInFlight] : []),
         ]),
         new Promise((r) => setTimeout(r, 50)),
       ])
@@ -818,6 +837,36 @@ export class StateDaemon {
     this.inflightQueueWork.set(key, promise)
   }
 
+  private scheduleGithubWorkPuller(trigger: 'startup' | 'interval'): void {
+    if (!this.githubWorkPuller) return
+    if (this.githubWorkPullerInFlight) {
+      this.metrics.inc('state_daemon_github_work_puller_actions_total', { result: 'dedup_skipped', trigger })
+      return
+    }
+    const startedAt = this.clock.now().getTime()
+    this.metrics.inc('state_daemon_github_work_puller_actions_total', { result: 'poll_started', trigger })
+    const promise = this.githubWorkPuller.pollOnce()
+      .then((result) => {
+        this.metrics.inc('state_daemon_github_work_puller_actions_total', { result: 'poll_completed', trigger })
+        this.metrics.gaugeSet('state_daemon_github_work_puller_scanned', result.scanned)
+        this.metrics.gaugeSet('state_daemon_github_work_puller_matched', result.matched)
+        this.metrics.gaugeSet('state_daemon_github_work_puller_queued', result.queued)
+        this.metrics.gaugeSet('state_daemon_github_work_puller_duplicate_suppressed', result.duplicateSuppressed)
+        this.metrics.gaugeSet('state_daemon_github_work_puller_blocked', result.blocked)
+        this.metrics.gaugeSet('state_daemon_github_work_puller_dispatch_failed', result.dispatchFailed)
+        this.metrics.observe('state_daemon_github_work_puller_duration_ms', this.clock.now().getTime() - startedAt, { trigger })
+      })
+      .catch((err) => {
+        const message = (err as Error).message ?? String(err)
+        this.metrics.inc('state_daemon_github_work_puller_actions_total', { result: 'poll_error', trigger })
+        void this.alert.alert(`github work puller failed (${trigger}): ${message}`)
+      })
+      .finally(() => {
+        this.githubWorkPullerInFlight = null
+      })
+    this.githubWorkPullerInFlight = promise
+  }
+
   private requesterFromPayload(payload: unknown): string | null {
     if (!payload) return null
     try {
@@ -1276,6 +1325,12 @@ export class StateDaemon {
   /** Direct entry for test fixtures that simulate pg_notify without a real LISTEN. */
   async __testHandleEvent(event: QueueEvent): Promise<void> {
     return this.handleQueueEvent(event)
+  }
+
+  /** Direct entry for #744 GitHub work puller overlap tests. */
+  async __testRunGithubWorkPuller(trigger: 'startup' | 'interval' = 'interval'): Promise<void> {
+    this.scheduleGithubWorkPuller(trigger)
+    await Promise.resolve()
   }
 
   /** Access to wake pool for capacity tests. */

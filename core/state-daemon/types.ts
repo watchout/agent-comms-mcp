@@ -85,6 +85,19 @@ export interface StateDaemonConfig {
   agentDenylist: string[] | null
 
   /**
+   * #744 GitHub-first autonomous work discovery. Disabled by default because
+   * it touches governance routing and queue lifecycle. When enabled, the
+   * state-daemon supervises an internal non-cron worker that discovers GitHub
+   * work and writes AUN queue notifications whose canonical instruction is the
+   * GitHub URL.
+   */
+  githubWorkPullerEnabled: boolean
+  githubWorkPullerIntervalMs: number
+  githubWorkPullerRepos: string[] | null
+  githubWorkPullerLabels: string[] | null
+  githubWorkPullerOwnerAllowlist: string[] | null
+
+  /**
    * Test-only scope guard. When set, every queue / agents query the daemon
    * issues is filtered to `agent_id LIKE prefix||'%'`. Production MUST leave
    * this `null` so the daemon scans the full fleet — the field exists only so
@@ -137,6 +150,11 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   memoryReadyProject: 'agent-comms-mcp',
   agentAllowlist: null,
   agentDenylist: null,
+  githubWorkPullerEnabled: false,
+  githubWorkPullerIntervalMs: 120_000,
+  githubWorkPullerRepos: null,
+  githubWorkPullerLabels: null,
+  githubWorkPullerOwnerAllowlist: null,
 }
 
 /**
@@ -305,6 +323,18 @@ export interface QueueWorkScheduler {
   runReceived(input: { queueId: number; agentId: string }): Promise<void>
 }
 
+/** #744 supervised GitHub work puller; implementation lives outside StateDaemon. */
+export interface GithubWorkPuller {
+  pollOnce(): Promise<{
+    scanned: number
+    matched: number
+    queued: number
+    duplicateSuppressed: number
+    blocked: number
+    dispatchFailed: number
+  }>
+}
+
 export interface StateDaemonDeps {
   db: DBClient
   pgListen: PgListenClient
@@ -312,6 +342,7 @@ export interface StateDaemonDeps {
   codexRunner?: CodexRunnerInvoker
   hostRuntimeInvoker?: HostRuntimeInvoker
   queueWorkScheduler?: QueueWorkScheduler
+  githubWorkPuller?: GithubWorkPuller
   clock: Clock
   metrics: Metrics
   alert: AlertSink

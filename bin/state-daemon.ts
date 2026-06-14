@@ -27,6 +27,12 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
 import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
+import {
+  githubWorkPullerEnabled,
+  loadGithubWorkPullerConfigFromEnv,
+  RestGithubWorkClient,
+  StateDaemonGithubWorkPuller,
+} from '../core/state-daemon/github-work-puller'
 import { receiveTargeted } from './aun/receive'
 import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
 import type {
@@ -269,6 +275,11 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
   set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
+  set('githubWorkPullerEnabled', bool('STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED') ?? false)
+  set('githubWorkPullerIntervalMs', num('STATE_DAEMON_GITHUB_WORK_INTERVAL_MS'))
+  set('githubWorkPullerRepos', csv('STATE_DAEMON_GITHUB_WORK_REPOS'))
+  set('githubWorkPullerLabels', csv('STATE_DAEMON_GITHUB_WORK_LABELS'))
+  set('githubWorkPullerOwnerAllowlist', csv('STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST'))
   return cfg
 }
 
@@ -276,19 +287,40 @@ export async function main(): Promise<void> {
   const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const queryClient = new Client({ connectionString: connStr })
   await queryClient.connect()
+  const db = new PgClientAdapter(queryClient)
+  const config = loadConfig()
+  const githubConfig = loadGithubWorkPullerConfigFromEnv(process.env)
+  if (config.githubWorkPullerRepos && config.githubWorkPullerRepos.length > 0) {
+    githubConfig.repos = config.githubWorkPullerRepos
+  }
+  if (config.githubWorkPullerLabels && config.githubWorkPullerLabels.length > 0) {
+    githubConfig.labels = config.githubWorkPullerLabels
+  }
+  if (config.githubWorkPullerOwnerAllowlist && config.githubWorkPullerOwnerAllowlist.length > 0) {
+    githubConfig.ownerAllowlist = config.githubWorkPullerOwnerAllowlist
+  }
 
   const daemon = new StateDaemon({
-    db: new PgClientAdapter(queryClient),
+    db,
     pgListen: new PgNotifyListenClient(connStr),
     tmux: new TmuxShellAdapter(),
     codexRunner: new ExecFileCodexRunnerInvoker(process.cwd()),
     queueWorkScheduler: queueWorkSchedulerEnabled()
       ? new QueueWorkRunnerScheduler(process.env, process.cwd())
       : undefined,
+    githubWorkPuller: githubWorkPullerEnabled(process.env)
+      ? new StateDaemonGithubWorkPuller({
+        db,
+        client: new RestGithubWorkClient({
+          token: process.env.STATE_DAEMON_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN,
+        }),
+        config: githubConfig,
+      })
+      : undefined,
     clock: { now: () => new Date() },
     metrics: new StdoutMetrics(),
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),
-    config: loadConfig(),
+    config,
   })
 
   let stopping = false
