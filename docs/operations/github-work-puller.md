@@ -72,10 +72,16 @@ matches configured labels such as:
 
 - `needs:arc`
 - `needs:impl`
+- `needs:implementation`
+- `needs:rework`
 - `needs:audit`
+- `needs:l1-audit`
+- `needs:l2-audit`
 - `needs:qa`
 - `needs:check`
 - `needs:cto`
+- `needs:l3-review`
+- `needs:ceo-approval`
 - `owner:<agent-or-role>`
 - `route:fast`
 - `route:protected`
@@ -97,6 +103,13 @@ prevents an unresolved item from accumulating one puller comment per poll.
 
 Protected routes resolve to `stop_lane`; they are surfaced but not approved,
 merged, deployed, live-activated, or executed as autonomous work.
+
+PR conveyor labels are normalized before owner resolution:
+
+- `needs:l1-audit` / `needs:l2-audit` -> role `audit`, owner `codex-audit`
+- `needs:l3-review` -> role `cto`, owner `codex-cto`
+- `needs:ceo-approval` -> role `ceo`, owner `ceo`
+- `needs:rework` -> role `implementation`, owner `agent-com-dev`
 
 ## Evidence
 

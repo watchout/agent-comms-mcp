@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   classifyGithubWorkItem,
+  DEFAULT_GITHUB_WORK_PULLER_LABELS,
   DEFAULT_ROLE_OWNER_MAP,
   GITHUB_WORK_WRITEBACK_MARKER,
   RestGithubWorkClient,
@@ -160,6 +161,56 @@ describe('GitHub work puller planner', () => {
     expect(classification.protected).toBe(true)
     expect(classification.runnerPolicy).toBe('stop_lane')
     expect(classification.autonomousExecutionAllowed).toBe(false)
+    expect(classification.dispatchable).toBe(true)
+  })
+
+  test('PR conveyor L2 audit label resolves to codex-audit instead of missing owner', () => {
+    const classification = classifyGithubWorkItem(item({
+      kind: 'pull_request',
+      number: 750,
+      url: 'https://github.com/watchout/agent-comms-mcp/pull/750',
+      labels: ['needs:l2-audit', 'audit:l2-pending', 'state:impl-l2'],
+    }), {
+      ...config,
+      labels: DEFAULT_GITHUB_WORK_PULLER_LABELS,
+    })
+
+    expect(classification.labelMatches).toEqual(['needs:l2-audit'])
+    expect(classification.role).toBe('audit')
+    expect(classification.owner).toBe('codex-audit')
+    expect(classification.route).toBe('protected')
+    expect(classification.runnerPolicy).toBe('stop_lane')
+    expect(classification.dispatchable).toBe(true)
+  })
+
+  test('PR conveyor L3 review label resolves to protected CTO review', () => {
+    const classification = classifyGithubWorkItem(item({
+      labels: ['needs:l3-review', 'state:impl-l3'],
+    }), {
+      ...config,
+      labels: DEFAULT_GITHUB_WORK_PULLER_LABELS,
+    })
+
+    expect(classification.labelMatches).toEqual(['needs:l3-review'])
+    expect(classification.role).toBe('cto')
+    expect(classification.owner).toBe('codex-cto')
+    expect(classification.protected).toBe(true)
+    expect(classification.runnerPolicy).toBe('stop_lane')
+    expect(classification.dispatchable).toBe(true)
+  })
+
+  test('PR conveyor rework label resolves back to implementation owner', () => {
+    const classification = classifyGithubWorkItem(item({
+      labels: ['needs:rework', 'state:rework'],
+    }), {
+      ...config,
+      labels: DEFAULT_GITHUB_WORK_PULLER_LABELS,
+    })
+
+    expect(classification.labelMatches).toEqual(['needs:rework'])
+    expect(classification.role).toBe('implementation')
+    expect(classification.owner).toBe('agent-com-dev')
+    expect(classification.route).toBe('manual')
     expect(classification.dispatchable).toBe(true)
   })
 })

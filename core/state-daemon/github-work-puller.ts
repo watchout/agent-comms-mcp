@@ -100,12 +100,32 @@ export const DEFAULT_ROLE_OWNER_MAP: Record<string, string> = {
   arc: 'codex-aun',
   impl: 'agent-com-dev',
   implementation: 'agent-com-dev',
+  rework: 'agent-com-dev',
   audit: 'codex-audit',
+  'l1-audit': 'codex-audit',
+  'l2-audit': 'codex-audit',
   qa: 'qa',
   check: 'check',
   cto: 'codex-cto',
+  'l3-review': 'codex-cto',
   ceo: 'ceo',
+  'ceo-approval': 'ceo',
 }
+
+export const DEFAULT_GITHUB_WORK_PULLER_LABELS = [
+  'needs:arc',
+  'needs:impl',
+  'needs:implementation',
+  'needs:rework',
+  'needs:audit',
+  'needs:l1-audit',
+  'needs:l2-audit',
+  'needs:qa',
+  'needs:check',
+  'needs:cto',
+  'needs:l3-review',
+  'needs:ceo-approval',
+]
 
 export function parseGithubWorkPullerCsv(value: string | undefined): string[] | null {
   if (!value) return null
@@ -140,14 +160,7 @@ export function loadGithubWorkPullerConfigFromEnv(
   const interval = Number(env.STATE_DAEMON_GITHUB_WORK_INTERVAL_MS)
   return {
     repos: parseGithubWorkPullerCsv(env.STATE_DAEMON_GITHUB_WORK_REPOS) ?? [],
-    labels: parseGithubWorkPullerCsv(env.STATE_DAEMON_GITHUB_WORK_LABELS) ?? [
-      'needs:arc',
-      'needs:impl',
-      'needs:audit',
-      'needs:qa',
-      'needs:check',
-      'needs:cto',
-    ],
+    labels: parseGithubWorkPullerCsv(env.STATE_DAEMON_GITHUB_WORK_LABELS) ?? DEFAULT_GITHUB_WORK_PULLER_LABELS,
     ownerAllowlist: parseGithubWorkPullerCsv(env.STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST),
     roleOwnerMap: parseGithubWorkPullerRoleMap(env.STATE_DAEMON_GITHUB_WORK_ROLE_OWNER_MAP_JSON),
     intervalMs: Number.isFinite(interval) && interval > 0
@@ -169,9 +182,12 @@ export function classifyGithubWorkItem(
   const normalized = labels.map(normalizeLabelValue)
   const configuredLabels = new Set(config.labels.map(normalizeLabelValue))
   const labelMatches = labels.filter((label) => configuredLabels.has(normalizeLabelValue(label)))
-  const role = firstPrefixed(normalized, ROLE_LABEL_PREFIX)
+  const rawRole = firstPrefixed(normalized, ROLE_LABEL_PREFIX)
+  const role = normalizeGithubWorkRole(rawRole)
   const ownerFromLabel = firstPrefixed(labels, OWNER_LABEL_PREFIX)
-  const ownerFromRole = role ? config.roleOwnerMap[role] ?? null : null
+  const ownerFromRole = rawRole
+    ? config.roleOwnerMap[rawRole] ?? (role ? config.roleOwnerMap[role] ?? null : null)
+    : null
   const owner = ownerFromLabel ?? ownerFromRole
   const routeLabel = firstPrefixed(normalized, ROUTE_LABEL_PREFIX)
   const blockedLabels = labels.filter((label) => normalizeLabelValue(label).startsWith(BLOCKED_LABEL_PREFIX))
@@ -750,6 +766,22 @@ function firstPrefixed(labels: string[], prefix: string): string | null {
     }
   }
   return null
+}
+
+export function normalizeGithubWorkRole(role: string | null): string | null {
+  switch (role) {
+    case 'l1-audit':
+    case 'l2-audit':
+      return 'audit'
+    case 'l3-review':
+      return 'cto'
+    case 'ceo-approval':
+      return 'ceo'
+    case 'rework':
+      return 'implementation'
+    default:
+      return role
+  }
 }
 
 function normalizeLabelValue(value: string): string {
