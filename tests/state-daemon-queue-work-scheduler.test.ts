@@ -13,13 +13,28 @@ class SingleRowDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
-    if (sql.includes('FROM message_queue WHERE id = $1')) {
+    if (
+      sql.includes('FROM message_queue WHERE id = $1')
+      || (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1'))
+    ) {
       if (String(this.row.id) === String(params?.[0])) {
         return { rows: [{ ...this.row }] as T[], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
     }
     return { rows: [], rowCount: 0 }
+  }
+}
+
+class RecordingDb implements DBClient {
+  queries: Array<{ sql: string; params?: unknown[] }> = []
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    this.queries.push({ sql, params })
+    if (sql.includes('count(*)::int AS n')) {
+      return { rows: [{ n: 0 }] as T[], rowCount: 1 }
+    }
+    return { rows: [] as T[], rowCount: 0 }
   }
 }
 
@@ -316,6 +331,135 @@ describe('state_daemon queue work scheduler boundary', () => {
     } finally {
       releasePending()
       await daemon.stop()
+    }
+  })
+
+  test('queue-work fence skips pre-existing received residue for the same allowlisted agent', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runReceived(input) {
+        calls.push(input)
+      },
+    }
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new SingleRowDb({
+        id: 120245,
+        agent_id: 'qa',
+        status: 'received',
+        message_id: 'ab20f921-4b99-4392-960a-673ee834292a',
+        payload: JSON.stringify({
+          content: 'previous canary residue',
+          receive_claim: {
+            source: 'state-daemon-queue-work-scheduler',
+          },
+        }),
+        claim_expires_at: new Date('2026-06-15T00:00:30.000Z'),
+        created_at: new Date('2026-06-14T08:46:57.674Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T00:00:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+      config: {
+        agentAllowlist: ['qa'],
+        queueWorkFenceMessageIds: ['fresh-canary-message-id'],
+        queueWorkFenceCreatedAfter: '2026-06-15T00:00:00.000Z',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: 120245,
+        agent_id: 'qa',
+        status: 'received',
+        claim_expires_at: '2026-06-15T00:00:30.000Z',
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([])
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'queue_work_fence_skipped',
+      path: 'notify',
+    })).toBe(1)
+  })
+
+  test('queue-work fence is applied to claim heartbeat refresh SQL', async () => {
+    const db = new RecordingDb()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T00:00:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived() {},
+      },
+      config: {
+        agentAllowlist: ['qa'],
+        queueWorkFenceMessageIds: ['fresh-canary-message-id'],
+        queueWorkFenceCreatedAfter: '2026-06-15T00:00:00.000Z',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.refreshClaims()
+    } finally {
+      await daemon.stop()
+    }
+
+    const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+    const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+    expect(update?.sql).toContain('mq.message_id = ANY')
+    expect(update?.sql).toContain('mq.created_at >=')
+    expect(skipped?.sql).toContain('mq.message_id = ANY')
+    expect(skipped?.sql).toContain('mq.created_at >=')
+  })
+
+  test('queue-work fence is applied to sweep fetch SQL', async () => {
+    const db = new RecordingDb()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T00:00:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived() {},
+      },
+      config: {
+        agentAllowlist: ['qa'],
+        queueWorkFenceMessageIds: ['fresh-canary-message-id'],
+        queueWorkFenceCreatedAfter: '2026-06-15T00:00:00.000Z',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.sweepStale()
+    } finally {
+      await daemon.stop()
+    }
+
+    const queueSelects = db.queries
+      .filter((query) => query.sql.includes('FROM message_queue mq'))
+      .filter((query) => query.sql.includes("mq.status='pending'") || query.sql.includes("mq.status IN ('received', 'in_progress')"))
+    expect(queueSelects.length).toBeGreaterThanOrEqual(3)
+    for (const query of queueSelects) {
+      expect(query.sql).toContain('mq.message_id = ANY')
+      expect(query.sql).toContain('mq.created_at >=')
     }
   })
 

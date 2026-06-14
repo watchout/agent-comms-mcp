@@ -304,6 +304,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(result.errors.map((err) => err.code)).toEqual(expect.arrayContaining([
       'queue_work_scheduler_requires_single_agent_allowlist',
       'queue_work_runtime_unconfigured',
+      'queue_work_scheduler_requires_canary_fence',
     ]))
   })
 
@@ -316,6 +317,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
         STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
         STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
         STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
       },
     })
     const result = validateStateDaemonLaunchAgentConfig(
@@ -342,6 +344,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
         STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
         STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
         STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
       },
     })
     const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
@@ -354,6 +357,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
     expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBe('qa')
     expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RUNTIME).toBe('codex-exec')
+    expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS).toBe('msg-canary')
   })
 
   test('restore helper dry-run merges GitHub puller and queue-work activation env', () => {
@@ -379,6 +383,8 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       '--queue-work-runtime',
       'codex-exec',
       '--queue-work-finalize',
+      '--queue-work-fence-message-ids',
+      'msg-canary',
     ], {
       cwd: REPO,
       stdout: 'pipe',
@@ -394,6 +400,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
       STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
       STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+      STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
     })
     expect(out.plan.extraEnv).toMatchObject(out.extraEnv)
   })

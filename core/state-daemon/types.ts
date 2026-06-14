@@ -85,6 +85,15 @@ export interface StateDaemonConfig {
   agentDenylist: string[] | null
 
   /**
+   * Optional queue-work fence for bounded canaries. When configured, daemon
+   * queue-work/claim-refresh paths must ignore queue rows that do not match
+   * the exact queue id, message id, and/or created_at lower bound.
+   */
+  queueWorkFenceQueueIds: number[] | null
+  queueWorkFenceMessageIds: string[] | null
+  queueWorkFenceCreatedAfter: string | null
+
+  /**
    * #744 GitHub-first autonomous work discovery. Disabled by default because
    * it touches governance routing and queue lifecycle. When enabled, the
    * state-daemon supervises an internal non-cron worker that discovers GitHub
@@ -150,6 +159,9 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   memoryReadyProject: 'agent-comms-mcp',
   agentAllowlist: null,
   agentDenylist: null,
+  queueWorkFenceQueueIds: null,
+  queueWorkFenceMessageIds: null,
+  queueWorkFenceCreatedAfter: null,
   githubWorkPullerEnabled: false,
   githubWorkPullerIntervalMs: 120_000,
   githubWorkPullerRepos: null,
