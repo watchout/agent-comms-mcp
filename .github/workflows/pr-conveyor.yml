@@ -1,0 +1,71 @@
+name: PR Conveyor Label Controller
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+      head:
+        description: Expected exact 40-character PR head SHA
+        required: true
+      transition:
+        description: Conveyor transition
+        required: true
+        type: choice
+        options:
+          - impl-to-l2
+          - l2-pass
+          - needs-rework
+          - check-pass
+          - cto-go
+          - blocked
+      evidence_url:
+        description: GitHub issue/PR/comment URL carrying durable evidence
+        required: false
+      execute:
+        description: Apply labels after exact-head verification
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  transition:
+    name: Exact-head conveyor transition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Plan or apply PR conveyor labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr }}
+          EXPECTED_HEAD: ${{ inputs.head }}
+          TRANSITION: ${{ inputs.transition }}
+          EVIDENCE_URL: ${{ inputs.evidence_url }}
+          EXECUTE: ${{ inputs.execute }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          args=(
+            scripts/pr-conveyor.ts
+            --repo "$REPOSITORY"
+            --pr "$PR_NUMBER"
+            --head "$EXPECTED_HEAD"
+            --transition "$TRANSITION"
+          )
+          if [ -n "$EVIDENCE_URL" ]; then
+            args+=(--evidence-url "$EVIDENCE_URL")
+          fi
+          if [ "$EXECUTE" = "true" ]; then
+            args+=(--execute)
+          fi
+          bun "${args[@]}"
