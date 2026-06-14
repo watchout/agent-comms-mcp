@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { dirname, resolve } from 'node:path'
 import {
   STATE_DAEMON_LAUNCH_AGENT_LABEL,
+  buildGithubWorkPullerLaunchAgentEnv,
   buildStateDaemonRestorePlan,
   listStateDaemonRestoreCheckouts,
   parseStateDaemonLaunchAgentPlist,
@@ -22,6 +23,13 @@ type ParsedArgs = {
   bunPath?: string
   databaseUrl?: string
   keep?: number
+  githubWorkPullerEnabled: boolean
+  githubWorkRepos?: string
+  githubWorkLabels?: string
+  githubWorkOwnerAllowlist?: string
+  githubWorkIntervalMs?: number
+  githubWorkWritebackEnabled: boolean
+  githubTokenFile?: string
 }
 
 function usage(): string {
@@ -29,6 +37,10 @@ function usage(): string {
 
 Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha> [--execute] [--no-bootstrap]
+    [--github-work-puller-enabled --github-work-repos <owner/repo>
+     --github-work-labels <canary:label>
+     --github-work-owner-allowlist <agent>
+     --github-token-file <path>]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
   bun scripts/state-daemon-launchagent.ts prune [--restore-root <path>] [--keep N] [--execute]
 
@@ -44,7 +56,13 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (!['restore', 'preflight', 'prune', 'help'].includes(command)) {
     throw new Error(`unknown command: ${command}`)
   }
-  const args: ParsedArgs = { command, execute: false, noBootstrap: false }
+  const args: ParsedArgs = {
+    command,
+    execute: false,
+    noBootstrap: false,
+    githubWorkPullerEnabled: false,
+    githubWorkWritebackEnabled: false,
+  }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
     const next = () => {
@@ -61,6 +79,19 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--plist') args.plist = next()
     else if (arg === '--bun') args.bunPath = next()
     else if (arg === '--database-url') args.databaseUrl = next()
+    else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
+    else if (arg === '--github-work-repos') args.githubWorkRepos = next()
+    else if (arg === '--github-work-labels') args.githubWorkLabels = next()
+    else if (arg === '--github-work-owner-allowlist') args.githubWorkOwnerAllowlist = next()
+    else if (arg === '--github-work-interval-ms') {
+      const value = next()
+      if (!/^\d+$/.test(value) || Number.parseInt(value, 10) <= 0) {
+        throw new Error('--github-work-interval-ms requires a positive integer')
+      }
+      args.githubWorkIntervalMs = Number.parseInt(value, 10)
+    }
+    else if (arg === '--github-work-writeback-enabled') args.githubWorkWritebackEnabled = true
+    else if (arg === '--github-token-file') args.githubTokenFile = next()
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
@@ -95,6 +126,23 @@ function readOutput(command: string, args: string[], cwd?: string): string {
   return proc.stdout.toString().trim()
 }
 
+function csvArg(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined
+  return value.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function githubWorkPullerEnvFromArgs(args: ParsedArgs): Record<string, string> {
+  return buildGithubWorkPullerLaunchAgentEnv({
+    enabled: args.githubWorkPullerEnabled,
+    repos: csvArg(args.githubWorkRepos),
+    labels: csvArg(args.githubWorkLabels),
+    ownerAllowlist: csvArg(args.githubWorkOwnerAllowlist),
+    intervalMs: args.githubWorkIntervalMs,
+    writebackEnabled: args.githubWorkWritebackEnabled,
+    tokenFile: args.githubTokenFile,
+  })
+}
+
 function ensureCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): void {
   mkdirSync(plan.restoreRoot, { recursive: true })
   if (!existsSync(plan.checkoutPath)) {
@@ -111,12 +159,12 @@ function ensureCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): v
   }
 }
 
-function verifyCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): void {
+function verifyCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>, extraEnv: Record<string, string>): void {
   mkdirSync(plan.logsDir, { recursive: true })
   mkdirSync(dirname(plan.buildOutfile), { recursive: true })
   run('bun', ['install', '--frozen-lockfile', '--no-summary'], plan.checkoutPath)
   run('bun', ['build', '--target', 'bun', 'bin/state-daemon.ts', '--outfile', plan.buildOutfile], plan.checkoutPath)
-  const rendered = renderStateDaemonLaunchAgentPlist(plan)
+  const rendered = renderStateDaemonLaunchAgentPlist(plan, extraEnv)
   const validation = validateStateDaemonLaunchAgentConfig(parseStateDaemonLaunchAgentPlist(rendered))
   if (!validation.ok) {
     throw new Error(`generated LaunchAgent failed preflight:\n${JSON.stringify(validation, null, 2)}`)
@@ -143,15 +191,16 @@ function commandRestore(args: ParsedArgs): void {
     bunPath: args.bunPath,
     databaseUrl: args.databaseUrl,
   })
+  const extraEnv = githubWorkPullerEnvFromArgs(args)
   if (!args.execute) {
-    process.stdout.write(`${JSON.stringify({ dry_run: true, plan }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ dry_run: true, plan, extraEnv }, null, 2)}\n`)
     return
   }
 
   ensureCheckout(plan)
-  verifyCheckout(plan)
+  verifyCheckout(plan, extraEnv)
   mkdirSync(dirname(plan.plistPath), { recursive: true })
-  writeFileSync(plan.tempPlistPath, renderStateDaemonLaunchAgentPlist(plan), 'utf8')
+  writeFileSync(plan.tempPlistPath, renderStateDaemonLaunchAgentPlist(plan, extraEnv), 'utf8')
   const installedPreflight = validateStateDaemonLaunchAgentConfig(
     parseStateDaemonLaunchAgentPlist(readFileSync(plan.tempPlistPath, 'utf8')),
   )
@@ -160,7 +209,7 @@ function commandRestore(args: ParsedArgs): void {
   }
   renameSync(plan.tempPlistPath, plan.plistPath)
   if (!args.noBootstrap) bootstrap(plan.plistPath)
-  process.stdout.write(`${JSON.stringify({ ok: true, plan, bootstrapped: !args.noBootstrap }, null, 2)}\n`)
+  process.stdout.write(`${JSON.stringify({ ok: true, plan, extraEnv, bootstrapped: !args.noBootstrap }, null, 2)}\n`)
 }
 
 function commandPreflight(args: ParsedArgs): void {

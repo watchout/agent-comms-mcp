@@ -31,6 +31,16 @@ export type StateDaemonRestorePlan = {
   agentDenylist: string
 }
 
+export type StateDaemonGithubWorkPullerActivationOptions = {
+  enabled: boolean
+  repos?: string[]
+  labels?: string[]
+  ownerAllowlist?: string[]
+  intervalMs?: number
+  writebackEnabled?: boolean
+  tokenFile?: string | null
+}
+
 export type StateDaemonPreflightIssue = {
   code: string
   message: string
@@ -234,6 +244,58 @@ ${envXml}
 `
 }
 
+function normalizeCsvValues(values: string[] | undefined): string[] {
+  return (values ?? []).map((value) => value.trim()).filter(Boolean)
+}
+
+function parseCsvValue(value: string | undefined): string[] {
+  if (!value) return []
+  return value.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function isCanaryLabel(label: string): boolean {
+  return label.trim().toLowerCase().startsWith('canary:')
+}
+
+export function buildGithubWorkPullerLaunchAgentEnv(
+  options: StateDaemonGithubWorkPullerActivationOptions,
+): Record<string, string> {
+  if (!options.enabled) return {}
+  const repos = normalizeCsvValues(options.repos)
+  const labels = normalizeCsvValues(options.labels)
+  const ownerAllowlist = normalizeCsvValues(options.ownerAllowlist)
+  const tokenFile = options.tokenFile?.trim()
+  if (repos.length !== 1) {
+    throw new Error('bounded GitHub work puller activation requires exactly one repo')
+  }
+  if (labels.length !== 1 || !isCanaryLabel(labels[0])) {
+    throw new Error('bounded GitHub work puller activation requires exactly one canary:* label')
+  }
+  if (ownerAllowlist.length !== 1) {
+    throw new Error('bounded GitHub work puller activation requires exactly one owner allowlist entry')
+  }
+  if (!tokenFile) {
+    throw new Error('bounded GitHub work puller activation requires --github-token-file')
+  }
+  const env: Record<string, string> = {
+    STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED: '1',
+    STATE_DAEMON_GITHUB_WORK_REPOS: repos.join(','),
+    STATE_DAEMON_GITHUB_WORK_LABELS: labels.join(','),
+    STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST: ownerAllowlist.join(','),
+    STATE_DAEMON_GITHUB_TOKEN_FILE: resolve(tokenFile),
+  }
+  if (options.intervalMs !== undefined) {
+    if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
+      throw new Error('bounded GitHub work puller activation requires a positive interval')
+    }
+    env.STATE_DAEMON_GITHUB_WORK_INTERVAL_MS = String(Math.round(options.intervalMs))
+  }
+  if (options.writebackEnabled) {
+    env.STATE_DAEMON_GITHUB_WORK_WRITEBACK_ENABLED = '1'
+  }
+  return env
+}
+
 export function validateStateDaemonLaunchAgentConfig(
   config: StateDaemonLaunchAgentConfig,
   options: {
@@ -265,6 +327,7 @@ export function validateStateDaemonLaunchAgentConfig(
   const workingDirectory = config.workingDirectory
   const restoreRoot = options.restoreRoot ?? config.environmentVariables.STATE_DAEMON_RESTORE_ROOT ?? null
   const restoreOwned = config.environmentVariables.STATE_DAEMON_RESTORE_MANAGED === '1'
+  const env = config.environmentVariables
 
   if (config.label !== STATE_DAEMON_LAUNCH_AGENT_LABEL) {
     errors.push({
@@ -336,6 +399,56 @@ export function validateStateDaemonLaunchAgentConfig(
       message: 'ProgramArguments[1] is outside WorkingDirectory; verify the artifact/check-out ownership contract',
       path: entry,
     })
+  }
+
+  if (env.STATE_DAEMON_GITHUB_TOKEN || env.GITHUB_TOKEN) {
+    errors.push({
+      code: 'github_token_embedded_in_launchagent',
+      message: 'LaunchAgent must not embed raw GitHub token values; use STATE_DAEMON_GITHUB_TOKEN_FILE',
+    })
+  }
+
+  if (env.STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED === '1') {
+    const repos = parseCsvValue(env.STATE_DAEMON_GITHUB_WORK_REPOS)
+    const labels = parseCsvValue(env.STATE_DAEMON_GITHUB_WORK_LABELS)
+    const ownerAllowlist = parseCsvValue(env.STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST)
+    const tokenFile = env.STATE_DAEMON_GITHUB_TOKEN_FILE?.trim()
+    if (repos.length !== 1) {
+      errors.push({
+        code: 'github_work_puller_requires_single_repo',
+        message: 'Bounded GitHub work puller LaunchAgent activation requires exactly one repo',
+      })
+    }
+    if (labels.length !== 1 || !isCanaryLabel(labels[0] ?? '')) {
+      errors.push({
+        code: 'github_work_puller_requires_single_canary_label',
+        message: 'Bounded GitHub work puller LaunchAgent activation requires exactly one canary:* label',
+      })
+    }
+    if (ownerAllowlist.length !== 1) {
+      errors.push({
+        code: 'github_work_puller_requires_single_owner_allowlist',
+        message: 'Bounded GitHub work puller LaunchAgent activation requires exactly one owner allowlist entry',
+      })
+    }
+    if (!tokenFile) {
+      errors.push({
+        code: 'github_work_puller_token_file_required',
+        message: 'Bounded GitHub work puller LaunchAgent activation requires STATE_DAEMON_GITHUB_TOKEN_FILE',
+      })
+    } else if (!probe.exists(tokenFile)) {
+      errors.push({
+        code: 'github_work_puller_token_file_missing',
+        message: 'STATE_DAEMON_GITHUB_TOKEN_FILE does not exist',
+        path: tokenFile,
+      })
+    } else if (!probe.isFile(tokenFile)) {
+      errors.push({
+        code: 'github_work_puller_token_file_not_file',
+        message: 'STATE_DAEMON_GITHUB_TOKEN_FILE must point to a regular file',
+        path: tokenFile,
+      })
+    }
   }
 
   return { ok: errors.length === 0, errors, warnings }

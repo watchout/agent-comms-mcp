@@ -27,7 +27,43 @@ Optional scope:
 - `STATE_DAEMON_GITHUB_WORK_INTERVAL_MS=120000`
 - `STATE_DAEMON_GITHUB_WORK_ROLE_OWNER_MAP_JSON='{"impl":"agent-com-dev"}'`
 - `STATE_DAEMON_GITHUB_WORK_WRITEBACK_ENABLED=1`
-- `STATE_DAEMON_GITHUB_TOKEN` or `GITHUB_TOKEN`
+- `STATE_DAEMON_GITHUB_TOKEN_FILE=/path/to/token`
+
+One-shot diagnostics may still use `STATE_DAEMON_GITHUB_TOKEN` or
+`GITHUB_TOKEN`, but reviewed persistent LaunchAgent activation must use
+`STATE_DAEMON_GITHUB_TOKEN_FILE`. LaunchAgent preflight rejects raw GitHub token
+values in plist environment variables.
+
+## Persistent Activation Profile
+
+Persistent activation is intentionally narrower than the general worker
+configuration. The restore helper only permits a bounded canary profile:
+
+- exactly one repository
+- exactly one `canary:*` label
+- exactly one owner allowlist entry
+- token supplied by `STATE_DAEMON_GITHUB_TOKEN_FILE`
+- dry-run by default
+
+Example dry-run:
+
+```bash
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit <exact-main-merge-sha> \
+  --github-work-puller-enabled \
+  --github-work-repos watchout/agent-comms-mcp \
+  --github-work-labels canary:github-work-puller \
+  --github-work-owner-allowlist agent-com-dev \
+  --github-work-interval-ms 120000 \
+  --github-work-writeback-enabled \
+  --github-token-file ~/.config/agent-comms/github-work-token
+```
+
+The dry-run output may include the token file path, but must not include the
+token value. `--execute` performs checkout verification, build, generated plist
+preflight, staged plist preflight, atomic plist replace, and launchd bootstrap.
+Do not use `--execute` without a fresh protected CTO authorization for the exact
+commit, repo, label, owner, token file path, rollback, and post-start evidence.
 
 ## Behavior
 
@@ -85,6 +121,30 @@ Queue payloads carry:
 If GitHub writeback is enabled, the worker posts dispatch evidence to the
 GitHub issue/PR. Writeback failure does not hide the work item; it is recorded
 as degraded evidence.
+
+## #747 Canary Residue
+
+The bounded one-shot canary for #746 intentionally left one evidence row:
+
+- GitHub issue: `watchout/agent-comms-mcp#747`
+- queue row: `message_queue.id=120138`
+- status at acceptance: `pending`
+
+Treat this row as evidence residue unless a separate governed cleanup or normal
+processing path is approved. Do not bulk-close or drain it as part of persistent
+puller activation.
+
+## Rollback
+
+If persistent activation is later approved and the puller misroutes, duplicates,
+writes back unexpectedly, or touches protected lanes incorrectly:
+
+1. Restore the LaunchAgent without the GitHub work puller env or unset
+   `STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED`.
+2. Preserve queue, audit, GitHub comments, and daemon logs.
+3. Do not bulk-close queue rows.
+4. Do not combine rollback with #722 scheduler activation, Discord recovery, or
+   fleet repair.
 
 ## Non-Goals
 
