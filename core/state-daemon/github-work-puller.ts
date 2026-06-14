@@ -291,21 +291,28 @@ export class RestGithubWorkClient implements GithubWorkClient {
   ): Promise<{ lastActivityId: string | null; cursor: string }> {
     const candidates: GithubActivityCandidate[] = []
     if (raw?.comments_url && Number(raw.comments) > 0) {
-      const url = new URL(String(raw.comments_url))
       const perPage = 100
-      url.searchParams.set('per_page', String(perPage))
-      url.searchParams.set('page', String(Math.max(1, Math.ceil(Number(raw.comments) / perPage))))
-      const comments = await this.githubFetch<any[]>(url)
-      for (const comment of comments) {
-        if (isGithubWorkPullerWritebackBody(comment?.body)) continue
-        const id = comment?.node_id ?? comment?.id
-        if (id == null) continue
-        const at = String(comment?.updated_at ?? comment?.created_at ?? '')
-        candidates.push({
-          id: `comment:${String(id)}`,
-          cursor: `comment:${String(id)}@${at}`,
-          at,
-        })
+      const lastPage = Math.max(1, Math.ceil(Number(raw.comments) / perPage))
+      for (let page = lastPage; page >= 1; page -= 1) {
+        const url = new URL(String(raw.comments_url))
+        url.searchParams.set('per_page', String(perPage))
+        url.searchParams.set('page', String(page))
+        const comments = await this.githubFetch<any[]>(url)
+        const pageCandidates = comments
+          .filter((comment) => !isGithubWorkPullerWritebackBody(comment?.body))
+          .map((comment): GithubActivityCandidate | null => {
+            const id = comment?.node_id ?? comment?.id
+            if (id == null) return null
+            const at = String(comment?.updated_at ?? comment?.created_at ?? '')
+            return {
+              id: `comment:${String(id)}`,
+              cursor: `comment:${String(id)}@${at}`,
+              at,
+            }
+          })
+          .filter((candidate): candidate is GithubActivityCandidate => candidate !== null)
+        candidates.push(...pageCandidates)
+        if (pageCandidates.length > 0) break
       }
     }
     if (raw?.pull_request) {

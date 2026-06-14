@@ -356,6 +356,71 @@ describe('StateDaemonGithubWorkPuller dispatch', () => {
 })
 
 describe('RestGithubWorkClient', () => {
+  test('walks back comment pages when the last page only contains puller writeback', async () => {
+    const db = new FakeDispatchDb()
+    const calls: Array<{ url: string; method: string; body?: string }> = []
+    let issuePolls = 0
+    const fetchImpl = async (url: URL | RequestInfo, init?: RequestInit): Promise<Response> => {
+      const rawUrl = String(url)
+      const method = init?.method ?? 'GET'
+      calls.push({ url: rawUrl, method, body: typeof init?.body === 'string' ? init.body : undefined })
+      if (rawUrl.includes('/issues?')) {
+        issuePolls += 1
+        return Response.json([{
+          number: 744,
+          node_id: 'ISSUE_NODE',
+          title: 'work item',
+          html_url: 'https://github.com/watchout/agent-comms-mcp/issues/744',
+          created_at: '2026-06-14T01:00:00Z',
+          updated_at: issuePolls === 1 ? '2026-06-14T01:06:51Z' : '2026-06-14T01:08:00Z',
+          labels: [{ name: 'needs:impl' }, { name: 'owner:agent-com-dev' }],
+          body: phaseGoalBody(),
+          user: { login: 'watchout' },
+          comments: issuePolls === 1 ? 100 : 101,
+          comments_url: 'https://api.github.com/repos/watchout/agent-comms-mcp/issues/744/comments',
+        }])
+      }
+      if (method === 'POST' && rawUrl.endsWith('/issues/744/comments')) {
+        return Response.json({ id: 1 })
+      }
+      if (rawUrl.includes('/comments?')) {
+        const page = new URL(rawUrl).searchParams.get('page')
+        if (page === '2') {
+          return Response.json([{
+            node_id: 'COMMENT_SELF_101',
+            body: `${GITHUB_WORK_WRITEBACK_MARKER}\n\nStatus: queued`,
+            created_at: '2026-06-14T01:08:00Z',
+            updated_at: '2026-06-14T01:08:00Z',
+          }])
+        }
+        return Response.json([{
+          node_id: 'COMMENT_EXTERNAL_100',
+          body: 'external update before writeback',
+          created_at: '2026-06-14T01:06:51Z',
+          updated_at: '2026-06-14T01:06:51Z',
+        }])
+      }
+      return new Response('not found', { status: 404, statusText: 'not found' })
+    }
+    const client = new RestGithubWorkClient({ fetchImpl, token: 'token', perRepoLimit: 5 })
+    const puller = new StateDaemonGithubWorkPuller({
+      db,
+      client,
+      config: { ...config, githubWritebackEnabled: true },
+    })
+
+    expect((await puller.pollOnce()).queued).toBe(1)
+    const second = await puller.pollOnce()
+
+    expect(second.duplicateSuppressed).toBe(1)
+    expect(second.queued).toBe(0)
+    expect(db.queueRows).toHaveLength(1)
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(calls
+      .filter((call) => call.method === 'GET' && call.url.includes('/comments?'))
+      .map((call) => new URL(call.url).searchParams.get('page'))).toEqual(['1', '2', '1'])
+  })
+
   test('fetches open issue/PR work, activity cursor, and optional writeback without relying on AUN', async () => {
     const calls: Array<{ url: string; method: string; body?: string }> = []
     const fetchImpl = async (url: URL | RequestInfo, init?: RequestInit): Promise<Response> => {
