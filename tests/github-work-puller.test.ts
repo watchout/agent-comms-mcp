@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   classifyGithubWorkItem,
   DEFAULT_ROLE_OWNER_MAP,
+  GITHUB_WORK_WRITEBACK_MARKER,
   RestGithubWorkClient,
   StateDaemonGithubWorkPuller,
   type GithubWorkClient,
@@ -16,11 +17,19 @@ class FakeGithubClient implements GithubWorkClient {
     queueId: string | null
     url: string
   }> = []
+  private calls = 0
 
-  constructor(private readonly items: GithubWorkItem[]) {}
+  constructor(private readonly items: GithubWorkItem[] | GithubWorkItem[][]) {}
 
   async listOpenWorkItems(): Promise<GithubWorkItem[]> {
-    return this.items
+    const first = this.items[0]
+    if (Array.isArray(first)) {
+      const polls = this.items as GithubWorkItem[][]
+      const index = Math.min(this.calls, polls.length - 1)
+      this.calls += 1
+      return polls[index]
+    }
+    return this.items as GithubWorkItem[]
   }
 
   async writeDispatchEvidence(input: Parameters<NonNullable<GithubWorkClient['writeDispatchEvidence']>>[0]): Promise<void> {
@@ -49,6 +58,16 @@ class FakeDispatchDb implements DBClient {
       const exists = this.audits.some((audit) => {
         return audit.event_type === 'github_work.dispatch_attempt'
           && audit.detail.fingerprint === fingerprint
+      })
+      return { rows: (exists ? [{ ok: 1 }] : []) as T[], rowCount: exists ? 1 : 0 }
+    }
+    if (sql.includes('FROM audit_log') && sql.includes("event_type = 'github_work.blocked'")) {
+      const fingerprint = String(params?.[0])
+      const blocker = String(params?.[1] ?? '')
+      const exists = this.audits.some((audit) => {
+        return audit.event_type === 'github_work.blocked'
+          && audit.detail.fingerprint === fingerprint
+          && String(audit.detail.blocker ?? '') === blocker
       })
       return { rows: (exists ? [{ ok: 1 }] : []) as T[], rowCount: exists ? 1 : 0 }
     }
@@ -228,6 +247,63 @@ describe('StateDaemonGithubWorkPuller dispatch', () => {
     expect(audit?.detail.writeback_status).toBe('ok')
   })
 
+  test('does not redispatch or re-writeback when only the puller writeback changes GitHub activity', async () => {
+    const db = new FakeDispatchDb()
+    const stableCursor = 'content:phase-goal|activity:comment:HUMAN@2026-06-14T01:06:51Z'
+    const client = new FakeGithubClient([
+      [item({
+        updatedAt: '2026-06-14T01:06:51Z',
+        lastActivityId: 'comment:HUMAN',
+        activityCursor: stableCursor,
+      })],
+      [item({
+        updatedAt: '2026-06-14T01:08:00Z',
+        lastActivityId: 'comment:AUN_WRITEBACK',
+        activityCursor: stableCursor,
+      })],
+    ])
+    const puller = new StateDaemonGithubWorkPuller({
+      db,
+      client,
+      config: { ...config, githubWritebackEnabled: true },
+    })
+
+    expect((await puller.pollOnce()).queued).toBe(1)
+    const second = await puller.pollOnce()
+
+    expect(second.duplicateSuppressed).toBe(1)
+    expect(second.queued).toBe(0)
+    expect(db.queueRows).toHaveLength(1)
+    expect(client.writebacks).toHaveLength(1)
+    expect(db.audits.filter((row) => row.event_type === 'github_work.writeback')).toHaveLength(1)
+  })
+
+  test('allows a real external GitHub update to dispatch after a previous writeback', async () => {
+    const db = new FakeDispatchDb()
+    const client = new FakeGithubClient([
+      [item({
+        activityCursor: 'content:phase-goal|activity:comment:HUMAN@2026-06-14T01:06:51Z',
+      })],
+      [item({
+        updatedAt: '2026-06-14T01:10:00Z',
+        lastActivityId: 'comment:EXTERNAL_FOLLOWUP',
+        activityCursor: 'content:phase-goal|activity:comment:EXTERNAL_FOLLOWUP@2026-06-14T01:10:00Z',
+      })],
+    ])
+    const puller = new StateDaemonGithubWorkPuller({
+      db,
+      client,
+      config: { ...config, githubWritebackEnabled: true },
+    })
+
+    expect((await puller.pollOnce()).queued).toBe(1)
+    expect((await puller.pollOnce()).queued).toBe(1)
+
+    expect(db.queueRows).toHaveLength(2)
+    expect(client.writebacks).toHaveLength(2)
+    expect(new Set(db.queueRows.map((row) => row.payload.fingerprint))).toHaveProperty('size', 2)
+  })
+
   test('blocks unresolved owner instead of falling back to unsafe prompt injection', async () => {
     const db = new FakeDispatchDb()
     const puller = new StateDaemonGithubWorkPuller({
@@ -245,6 +321,38 @@ describe('StateDaemonGithubWorkPuller dispatch', () => {
     const audit = db.audits.find((row) => row.event_type === 'github_work.blocked')
     expect(audit?.detail.blocker).toBe('missing_owner')
   })
+
+  test('suppresses repeated blocked writeback for the same GitHub fingerprint', async () => {
+    const db = new FakeDispatchDb()
+    const client = new FakeGithubClient([
+      [item({
+        labels: ['needs:unknown-role'],
+        activityCursor: 'content:blocked|base:issue',
+      })],
+      [item({
+        labels: ['needs:unknown-role'],
+        updatedAt: '2026-06-14T01:09:00Z',
+        lastActivityId: 'comment:AUN_WRITEBACK',
+        activityCursor: 'content:blocked|base:issue',
+      })],
+    ])
+    const puller = new StateDaemonGithubWorkPuller({
+      db,
+      client,
+      config: {
+        ...config,
+        labels: ['needs:unknown-role'],
+        githubWritebackEnabled: true,
+      },
+    })
+
+    expect((await puller.pollOnce()).blocked).toBe(1)
+    const second = await puller.pollOnce()
+
+    expect(second.duplicateSuppressed).toBe(1)
+    expect(client.writebacks).toHaveLength(1)
+    expect(db.audits.filter((row) => row.event_type === 'github_work.blocked')).toHaveLength(1)
+  })
 })
 
 describe('RestGithubWorkClient', () => {
@@ -259,6 +367,7 @@ describe('RestGithubWorkClient', () => {
           node_id: 'ISSUE_NODE',
           title: 'work item',
           html_url: 'https://github.com/watchout/agent-comms-mcp/issues/744',
+          created_at: '2026-06-14T01:00:00Z',
           updated_at: '2026-06-14T01:06:51Z',
           labels: [{ name: 'needs:impl' }, { name: 'owner:agent-com-dev' }],
           body: phaseGoalBody(),
@@ -269,10 +378,26 @@ describe('RestGithubWorkClient', () => {
         }])
       }
       if (rawUrl.includes('/comments?')) {
-        return Response.json([{ node_id: 'COMMENT_NODE_2' }])
+        return Response.json([
+          {
+            node_id: 'COMMENT_NODE_1',
+            body: 'external update',
+            created_at: '2026-06-14T01:07:00Z',
+            updated_at: '2026-06-14T01:07:00Z',
+          },
+          {
+            node_id: 'COMMENT_SELF',
+            body: `${GITHUB_WORK_WRITEBACK_MARKER}\n\nStatus: queued`,
+            created_at: '2026-06-14T01:08:00Z',
+            updated_at: '2026-06-14T01:08:00Z',
+          },
+        ])
       }
       if (rawUrl.includes('/pulls/744/reviews')) {
-        return Response.json([{ node_id: 'REVIEW_NODE_1' }])
+        return Response.json([{
+          node_id: 'REVIEW_NODE_1',
+          submitted_at: '2026-06-14T01:06:30Z',
+        }])
       }
       if (rawUrl.endsWith('/issues/744/comments')) {
         return Response.json({ id: 1 })
@@ -284,7 +409,9 @@ describe('RestGithubWorkClient', () => {
     const items = await client.listOpenWorkItems(config)
 
     expect(items).toHaveLength(1)
-    expect(items[0].lastActivityId).toBe('comment:COMMENT_NODE_2|review:REVIEW_NODE_1')
+    expect(items[0].lastActivityId).toBe('comment:COMMENT_NODE_1')
+    expect(items[0].activityCursor).toContain('comment:COMMENT_NODE_1@2026-06-14T01:07:00Z')
+    expect(items[0].activityCursor).not.toContain('COMMENT_SELF')
 
     const classification = classifyGithubWorkItem(items[0], config)
     await client.writeDispatchEvidence?.({

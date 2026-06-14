@@ -17,11 +17,13 @@ export interface GithubWorkItem {
   nodeId: string
   title: string
   url: string
+  createdAt?: string | null
   updatedAt: string
   labels: string[]
   body?: string | null
   author?: string | null
   lastActivityId?: string | null
+  activityCursor?: string | null
 }
 
 export interface GithubWorkPullerConfig {
@@ -78,6 +80,12 @@ export interface GithubWorkWritebackInput {
   error?: string
 }
 
+interface GithubActivityCandidate {
+  id: string
+  cursor: string
+  at: string
+}
+
 const ROLE_LABEL_PREFIX = 'needs:'
 const OWNER_LABEL_PREFIX = 'owner:'
 const ROUTE_LABEL_PREFIX = 'route:'
@@ -85,6 +93,7 @@ const RUNNER_LABEL_PREFIX = 'runner:'
 const BLOCKED_LABEL_PREFIX = 'blocked:'
 
 export const DEFAULT_GITHUB_WORK_PULLER_INTERVAL_MS = 120_000
+export const GITHUB_WORK_WRITEBACK_MARKER = '## AUN GitHub Work Puller Evidence'
 
 export const DEFAULT_ROLE_OWNER_MAP: Record<string, string> = {
   spec: 'codex-aun',
@@ -208,10 +217,19 @@ export function githubWorkFingerprint(item: GithubWorkItem): string {
     item.kind,
     item.nodeId,
     item.number,
-    item.updatedAt,
-    item.lastActivityId ?? '',
+    githubWorkActivityCursor(item),
   ].join('\0')
   return createHash('sha256').update(raw).digest('hex')
+}
+
+export function githubWorkActivityCursor(item: GithubWorkItem): string {
+  const explicit = item.activityCursor?.trim()
+  if (explicit) return explicit
+  return [
+    `updated:${item.updatedAt}`,
+    `last:${item.lastActivityId ?? ''}`,
+    `content:${githubWorkContentSignature(item)}`,
+  ].join('|')
 }
 
 export class RestGithubWorkClient implements GithubWorkClient {
@@ -245,9 +263,12 @@ export class RestGithubWorkClient implements GithubWorkClient {
       if (!item) continue
       if (!hasConfiguredLabel(item, config)) continue
       try {
-        item.lastActivityId = await this.fetchLastActivityId(repo, entry)
+        const activity = await this.fetchActivityCursor(repo, item, entry)
+        item.lastActivityId = activity.lastActivityId
+        item.activityCursor = activity.cursor
       } catch {
         item.lastActivityId = null
+        item.activityCursor = buildGithubWorkActivityCursor(item, null)
       }
       out.push(item)
     }
@@ -263,26 +284,50 @@ export class RestGithubWorkClient implements GithubWorkClient {
     })
   }
 
-  private async fetchLastActivityId(repo: string, raw: any): Promise<string | null> {
-    const ids: string[] = []
+  private async fetchActivityCursor(
+    repo: string,
+    item: GithubWorkItem,
+    raw: any,
+  ): Promise<{ lastActivityId: string | null; cursor: string }> {
+    const candidates: GithubActivityCandidate[] = []
     if (raw?.comments_url && Number(raw.comments) > 0) {
       const url = new URL(String(raw.comments_url))
-      url.searchParams.set('per_page', '1')
-      url.searchParams.set('page', String(Number(raw.comments)))
+      const perPage = 100
+      url.searchParams.set('per_page', String(perPage))
+      url.searchParams.set('page', String(Math.max(1, Math.ceil(Number(raw.comments) / perPage))))
       const comments = await this.githubFetch<any[]>(url)
-      const last = comments[0]
-      const id = last?.node_id ?? last?.id
-      if (id != null) ids.push(`comment:${String(id)}`)
+      for (const comment of comments) {
+        if (isGithubWorkPullerWritebackBody(comment?.body)) continue
+        const id = comment?.node_id ?? comment?.id
+        if (id == null) continue
+        const at = String(comment?.updated_at ?? comment?.created_at ?? '')
+        candidates.push({
+          id: `comment:${String(id)}`,
+          cursor: `comment:${String(id)}@${at}`,
+          at,
+        })
+      }
     }
     if (raw?.pull_request) {
       const reviewsUrl = new URL(`https://api.github.com/repos/${repo}/pulls/${Number(raw.number)}/reviews`)
       reviewsUrl.searchParams.set('per_page', '100')
       const reviews = await this.githubFetch<any[]>(reviewsUrl)
-      const last = reviews[reviews.length - 1]
-      const id = last?.node_id ?? last?.id
-      if (id != null) ids.push(`review:${String(id)}`)
+      for (const review of reviews) {
+        const id = review?.node_id ?? review?.id
+        if (id == null) continue
+        const at = String(review?.submitted_at ?? review?.updated_at ?? '')
+        candidates.push({
+          id: `review:${String(id)}`,
+          cursor: `review:${String(id)}@${at}`,
+          at,
+        })
+      }
     }
-    return ids.length > 0 ? ids.join('|') : null
+    const last = latestGithubActivity(candidates)
+    return {
+      lastActivityId: last?.id ?? null,
+      cursor: buildGithubWorkActivityCursor(item, last?.cursor ?? null),
+    }
   }
 
   private async githubFetch<T>(url: URL, init: RequestInit = {}): Promise<T> {
@@ -333,16 +378,45 @@ export class StateDaemonGithubWorkPuller {
   }
 
   private async dispatch(classification: GithubWorkClassification): Promise<GithubWorkDispatchResult> {
+    const db = this.deps.db
+
     if (!classification.dispatchable || !classification.owner) {
-      await this.insertAudit('github_work.blocked', classification, null, {
-        blocker: classification.dispatchBlocker,
-      })
-      const result: GithubWorkDispatchResult = { classification, status: 'blocked', queueId: null }
-      await this.maybeWriteback(result)
-      return result
+      try {
+        await db.query('BEGIN')
+        await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [classification.fingerprint])
+        const existing = await db.query(
+          `SELECT 1 FROM audit_log
+            WHERE event_type = 'github_work.blocked'
+              AND detail->>'fingerprint' = $1
+              AND COALESCE(detail->>'blocker', '') = $2
+            LIMIT 1`,
+          [classification.fingerprint, classification.dispatchBlocker ?? ''],
+        )
+        if ((existing.rowCount ?? existing.rows.length) > 0) {
+          await db.query('COMMIT')
+          return { classification, status: 'duplicate_suppressed', queueId: null }
+        }
+        await this.insertAudit('github_work.blocked', classification, null, {
+          blocker: classification.dispatchBlocker,
+        })
+        await db.query('COMMIT')
+        const result: GithubWorkDispatchResult = { classification, status: 'blocked', queueId: null }
+        await this.maybeWriteback(result)
+        return result
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        const message = err instanceof Error ? err.message : String(err)
+        const result: GithubWorkDispatchResult = {
+          classification,
+          status: 'dispatch_failed',
+          queueId: null,
+          error: message,
+        }
+        await this.maybeWriteback(result)
+        return result
+      }
     }
 
-    const db = this.deps.db
     try {
       await db.query('BEGIN')
       await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [classification.fingerprint])
@@ -428,6 +502,7 @@ export class StateDaemonGithubWorkPuller {
         url: item.url,
         updated_at: item.updatedAt,
         last_activity_id: item.lastActivityId ?? null,
+        activity_cursor: githubWorkActivityCursor(item),
       },
       github_url: item.url,
       role: classification.role,
@@ -468,6 +543,7 @@ export class StateDaemonGithubWorkPuller {
           github_url: classification.item.url,
           updated_at: classification.item.updatedAt,
           last_activity_id: classification.item.lastActivityId ?? null,
+          activity_cursor: githubWorkActivityCursor(classification.item),
           fingerprint: classification.fingerprint,
           role: classification.role,
           owner: classification.owner,
@@ -508,7 +584,7 @@ export function renderGithubWorkNotification(classification: GithubWorkClassific
 export function renderGithubWorkWriteback(input: GithubWorkWritebackInput): string {
   const c = input.classification
   const lines = [
-    '## AUN GitHub Work Puller Evidence',
+    GITHUB_WORK_WRITEBACK_MARKER,
     '',
     `Source: state-daemon-github-work-puller`,
     `Status: ${input.status}`,
@@ -543,12 +619,54 @@ function fromRestIssue(repo: string, raw: any): GithubWorkItem | null {
     nodeId: String(raw.node_id ?? `${repo}#${number}`),
     title: String(raw.title ?? ''),
     url: String(raw.html_url ?? `https://github.com/${repo}/issues/${number}`),
+    createdAt: String(raw.created_at ?? raw.updated_at ?? new Date(0).toISOString()),
     updatedAt: String(raw.updated_at ?? new Date(0).toISOString()),
     labels,
     body: typeof raw.body === 'string' ? raw.body : null,
     author: typeof raw.user?.login === 'string' ? raw.user.login : null,
-    lastActivityId: raw.comments ? `comments:${raw.comments}` : null,
+    lastActivityId: null,
   }
+}
+
+function buildGithubWorkActivityCursor(item: GithubWorkItem, externalActivityCursor: string | null): string {
+  const base = item.createdAt ?? item.updatedAt
+  return [
+    `content:${githubWorkContentSignature(item)}`,
+    externalActivityCursor ?? `base:${item.nodeId}:${base}`,
+  ].join('|')
+}
+
+function githubWorkContentSignature(item: GithubWorkItem): string {
+  const labels = item.labels
+    .map(normalizeLabelValue)
+    .sort()
+    .join(',')
+  return createHash('sha256')
+    .update([
+      item.title,
+      item.body ?? '',
+      labels,
+    ].join('\0'))
+    .digest('hex')
+    .slice(0, 24)
+}
+
+function latestGithubActivity(candidates: GithubActivityCandidate[]): GithubActivityCandidate | null {
+  let latest: GithubActivityCandidate | null = null
+  let latestTime = Number.NEGATIVE_INFINITY
+  for (const candidate of candidates) {
+    const time = Date.parse(candidate.at)
+    const comparable = Number.isFinite(time) ? time : 0
+    if (!latest || comparable >= latestTime) {
+      latest = candidate
+      latestTime = comparable
+    }
+  }
+  return latest
+}
+
+function isGithubWorkPullerWritebackBody(body: unknown): boolean {
+  return typeof body === 'string' && body.includes(GITHUB_WORK_WRITEBACK_MARKER)
 }
 
 function summarizeTick(scanned: number, results: GithubWorkDispatchResult[]): GithubWorkPullerTickResult {

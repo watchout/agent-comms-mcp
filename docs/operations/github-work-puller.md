@@ -50,7 +50,14 @@ matches configured labels such as:
 Matched work is classified into role, owner, route, and runner policy. The
 worker writes an AUN queue notification containing the GitHub URL and records
 `audit_log` evidence. Duplicate dispatch is suppressed across restarts by the
-GitHub fingerprint recorded in `audit_log`.
+GitHub fingerprint recorded in `audit_log`. The fingerprint uses an activity
+cursor that excludes the worker's own optional GitHub writeback comments, so
+writeback evidence cannot become the next dispatch trigger. External issue/PR
+changes, label/body/title changes, human comments, and PR reviews still advance
+the cursor.
+
+Blocked items are also fingerprint-deduplicated before optional writeback. This
+prevents an unresolved item from accumulating one puller comment per poll.
 
 Protected routes resolve to `stop_lane`; they are surfaced but not approved,
 merged, deployed, live-activated, or executed as autonomous work.
