@@ -29,6 +29,7 @@ export type StateDaemonRestorePlan = {
   bunPath: string
   databaseUrl: string
   agentDenylist: string
+  extraEnv: Record<string, string>
 }
 
 export type StateDaemonGithubWorkPullerActivationOptions = {
@@ -150,6 +151,7 @@ export function buildStateDaemonRestorePlan(options: {
   bunPath?: string
   databaseUrl?: string
   agentDenylist?: string
+  extraEnv?: Record<string, string>
   pid?: number
 }): StateDaemonRestorePlan {
   const commit = options.commit.trim()
@@ -175,10 +177,12 @@ export function buildStateDaemonRestorePlan(options: {
     bunPath: options.bunPath ?? DEFAULT_STATE_DAEMON_BUN_PATH,
     databaseUrl: options.databaseUrl ?? DEFAULT_STATE_DAEMON_DATABASE_URL,
     agentDenylist: options.agentDenylist ?? DEFAULT_STATE_DAEMON_DENYLIST,
+    extraEnv: options.extraEnv ?? {},
   }
 }
 
 export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, extraEnv: Record<string, string> = {}): string {
+  const mergedExtraEnv = { ...plan.extraEnv, ...extraEnv }
   const env: Record<string, string> = {
     NODE_ENV: 'production',
     DATABASE_URL: plan.databaseUrl,
@@ -192,9 +196,9 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
     PGUSER: process.env.PGUSER ?? process.env.USER ?? 'yuji',
     USER: process.env.USER ?? 'yuji',
     PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-    ...extraEnv,
+    ...mergedExtraEnv,
   }
-  delete env.STATE_DAEMON_AGENT_ALLOWLIST
+  if (!mergedExtraEnv.STATE_DAEMON_AGENT_ALLOWLIST) delete env.STATE_DAEMON_AGENT_ALLOWLIST
 
   const envXml = Object.entries(env)
     .map(([key, value]) => `    <key>${xmlEscape(key)}</key>\n    <string>${xmlEscape(value)}</string>`)
@@ -448,6 +452,50 @@ export function validateStateDaemonLaunchAgentConfig(
         message: 'STATE_DAEMON_GITHUB_TOKEN_FILE must point to a regular file',
         path: tokenFile,
       })
+    }
+  }
+
+  const queueWorkSchedulerEnabled =
+    env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED === '1'
+    || env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED?.toLowerCase() === 'true'
+  if (queueWorkSchedulerEnabled) {
+    const allowlist = (env.STATE_DAEMON_AGENT_ALLOWLIST ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (allowlist.length !== 1) {
+      errors.push({
+        code: 'queue_work_scheduler_requires_single_agent_allowlist',
+        message: 'Queue-work scheduler activation must specify exactly one STATE_DAEMON_AGENT_ALLOWLIST entry for bounded canary launch.',
+      })
+    }
+
+    const runtime = env.STATE_DAEMON_QUEUE_WORK_RUNTIME ?? env.AUN_QUEUE_WORK_RUNTIME
+    const command = env.STATE_DAEMON_QUEUE_WORK_COMMAND ?? env.AUN_QUEUE_WORK_COMMAND
+    const effectiveRuntime = runtime ?? (command ? 'command-json' : null)
+    if (!effectiveRuntime) {
+      errors.push({
+        code: 'queue_work_runtime_unconfigured',
+        message: 'Queue-work scheduler activation requires STATE_DAEMON_QUEUE_WORK_RUNTIME or STATE_DAEMON_QUEUE_WORK_COMMAND before launch.',
+      })
+    }
+    if (effectiveRuntime === 'command-json' && !command) {
+      errors.push({
+        code: 'queue_work_command_missing',
+        message: 'STATE_DAEMON_QUEUE_WORK_RUNTIME=command-json requires STATE_DAEMON_QUEUE_WORK_COMMAND.',
+      })
+    }
+    if (effectiveRuntime === 'codex-exec') {
+      const schemaPath = env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
+        ?? env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
+        ?? (workingDirectory ? join(workingDirectory, 'schemas', 'queue-work-result-v1.schema.json') : null)
+      if (!schemaPath || !probe.exists(schemaPath) || !probe.isFile(schemaPath)) {
+        errors.push({
+          code: 'queue_work_codex_schema_missing',
+          message: 'STATE_DAEMON_QUEUE_WORK_RUNTIME=codex-exec requires a readable queue_work_result_v1 schema file.',
+          path: schemaPath ?? undefined,
+        })
+      }
     }
   }
 

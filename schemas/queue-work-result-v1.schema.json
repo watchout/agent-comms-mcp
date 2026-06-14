@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-comms-mcp.local/schemas/queue-work-result-v1.schema.json",
+  "title": "AUN queue_work_result_v1",
+  "type": "object",
+  "required": ["schema_version", "ok", "summary", "next_action"],
+  "properties": {
+    "schema_version": {
+      "const": "queue_work_result_v1"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reply": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array"
+    },
+    "next_action": {
+      "enum": ["reply", "close", "none", "retry"]
+    }
+  },
+  "additionalProperties": true
+}

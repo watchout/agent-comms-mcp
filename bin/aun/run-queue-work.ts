@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process'
-import { resolve } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { createDbAdapter } from '../../core/db'
 import {
   QUEUE_WORK_RESULT_VERSION,
@@ -63,11 +65,13 @@ function parseArgs(argv: string[]): RunQueueWorkOptions {
 
 export function buildRunQueueWorkPlan(opts: RunQueueWorkOptions = {}): RunQueueWorkPlan {
   const env = opts.env ?? process.env
+  const envRuntime = env.AUN_QUEUE_WORK_RUNTIME ?? env.STATE_DAEMON_QUEUE_WORK_RUNTIME
+  const envCommand = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
   return {
     repoRoot: opts.cwd ?? repoRoot(),
     agent_id: opts.agentId ?? env.AGENT_ID ?? null,
     queue_id: opts.queueId ?? null,
-    runtime: opts.runtime ?? env.AUN_QUEUE_WORK_RUNTIME ?? (env.AUN_QUEUE_WORK_COMMAND ? 'command-json' : 'unconfigured'),
+    runtime: opts.runtime ?? envRuntime ?? (envCommand ? 'command-json' : 'unconfigured'),
     invocation_source: opts.invocationSource ?? env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? null,
     expected_claim_source: opts.expectedClaimSource ?? env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE ?? null,
     finalize: !!opts.finalize,
@@ -139,6 +143,149 @@ function execFileAsync(
   })
 }
 
+export interface CodexExecQueueWorkCommand {
+  command: string
+  args: string[]
+  stdin: string
+  outputLastMessagePath: string
+  schemaPath: string
+}
+
+function truthyEnv(value: string | undefined): boolean {
+  return value === '1' || value?.toLowerCase() === 'true'
+}
+
+function defaultQueueWorkResultSchemaPath(cwd: string): string {
+  return resolve(cwd, 'schemas', 'queue-work-result-v1.schema.json')
+}
+
+function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
+  return [
+    'You are the AUN queue-work runtime adapter for one exact queue row.',
+    'Return only JSON matching queue_work_result_v1.',
+    'Do not call next, inbox, processing, done, send, repair commands, tmux, or Discord.',
+    'Do not inspect unrelated queue rows.',
+    'If reply_contract.required is false, use next_action "close" and omit reply.',
+    'If reply_contract.required is true and you can answer, use next_action "reply" with reply text.',
+    'If you cannot safely complete the work, return ok=false with next_action "retry" and a concise summary.',
+    '',
+    JSON.stringify(envelope),
+  ].join('\n')
+}
+
+function parseQueueWorkResultJson(raw: string): QueueWorkResult {
+  const trimmed = raw.trim()
+  if (!trimmed) throw new Error('codex exec produced an empty final message')
+  try {
+    return JSON.parse(trimmed) as QueueWorkResult
+  } catch {
+    const start = trimmed.indexOf('{')
+    const end = trimmed.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      return JSON.parse(trimmed.slice(start, end + 1)) as QueueWorkResult
+    }
+    throw new Error('codex exec final message was not JSON')
+  }
+}
+
+export function buildCodexExecQueueWorkCommand(input: {
+  envelope: QueueWorkEnvelope
+  cwd: string
+  env: NodeJS.ProcessEnv
+  outputLastMessagePath: string
+}): CodexExecQueueWorkCommand {
+  const schemaPath = resolve(
+    input.env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
+      ?? defaultQueueWorkResultSchemaPath(input.cwd),
+  )
+  const sandbox = input.env.AUN_QUEUE_WORK_CODEX_SANDBOX
+    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX
+    ?? 'read-only'
+  const command = input.env.AUN_QUEUE_WORK_CODEX_EXECUTABLE
+    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_EXECUTABLE
+    ?? 'codex'
+  const args = [
+    'exec',
+    '--json',
+    '--output-schema', schemaPath,
+    '--output-last-message', input.outputLastMessagePath,
+    '--sandbox', sandbox,
+    '--cd', input.cwd,
+  ]
+  const profile = input.env.AUN_QUEUE_WORK_CODEX_PROFILE
+    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE
+  if (profile) args.push('--profile', profile)
+  const model = input.env.AUN_QUEUE_WORK_CODEX_MODEL
+    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL
+  if (model) args.push('--model', model)
+  if ((input.env.AUN_QUEUE_WORK_CODEX_EPHEMERAL ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_EPHEMERAL) !== '0') {
+    args.push('--ephemeral')
+  }
+  if (truthyEnv(input.env.AUN_QUEUE_WORK_CODEX_IGNORE_RULES ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES)) {
+    args.push('--ignore-rules')
+  }
+  args.push('-')
+
+  return {
+    command,
+    args,
+    stdin: queueWorkPrompt(input.envelope),
+    outputLastMessagePath: input.outputLastMessagePath,
+    schemaPath,
+  }
+}
+
+class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
+  runtime_id = 'codex-exec'
+  capabilities = {
+    input: 'stdin_context',
+    output: 'schema_json',
+    supportsBareMode: true,
+    supportsResume: false,
+    supportsToolAllowlist: false,
+    supportsSandbox: true,
+    supportsUsageMetadata: true,
+  } as const
+
+  constructor(
+    private readonly cwd: string,
+    private readonly env: NodeJS.ProcessEnv,
+  ) {}
+
+  async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-queue-work-codex-'))
+    const outputLastMessagePath = join(dir, 'final-message.json')
+    try {
+      const plan = buildCodexExecQueueWorkCommand({
+        envelope,
+        cwd: this.cwd,
+        env: this.env,
+        outputLastMessagePath,
+      })
+      if (!existsSync(plan.schemaPath)) {
+        throw new Error(`queue work result schema missing: ${plan.schemaPath}`)
+      }
+      const child = await execFileAsync(plan.command, plan.args, {
+        cwd: this.cwd,
+        env: this.env,
+        input: plan.stdin,
+        timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
+        maxBuffer: 1024 * 1024 * 20,
+      })
+      if (child.status !== 0) {
+        throw new Error(`codex exec failed status=${child.status} stderr=${child.stderr.slice(0, 1000)}`)
+      }
+      if (!existsSync(outputLastMessagePath)) {
+        throw new Error('codex exec did not write --output-last-message')
+      }
+      return parseQueueWorkResultJson(readFileSync(outputLastMessagePath, 'utf8'))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+}
+
 class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'command-json'
   capabilities = {
@@ -180,7 +327,7 @@ class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
 }
 
 function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
-  const raw = env.AUN_QUEUE_WORK_ARGS_JSON
+  const raw = env.AUN_QUEUE_WORK_ARGS_JSON ?? env.STATE_DAEMON_QUEUE_WORK_ARGS_JSON
   if (!raw) return []
   const parsed = JSON.parse(raw)
   if (!Array.isArray(parsed) || parsed.some((v) => typeof v !== 'string')) {
@@ -191,8 +338,9 @@ function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
 
 function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
+  if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.repoRoot, env)
   if (plan.runtime === 'command-json') {
-    const command = env.AUN_QUEUE_WORK_COMMAND
+    const command = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
     if (!command) {
       throw new Error('AUN_QUEUE_WORK_COMMAND is required when runtime=command-json')
     }
