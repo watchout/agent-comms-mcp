@@ -10,6 +10,7 @@ import {
   protectedPathsFromLaunchAgentPlists,
   renderStateDaemonLaunchAgentPlist,
   validateStateDaemonLaunchAgentConfig,
+  validateQueueWorkCanaryResiduePreflight,
 } from '../../../core/state-daemon/launchagent'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
@@ -33,6 +34,17 @@ function probe(existingFiles: string[], existingDirs: string[], executableFiles:
     isDirectory: (path: string) => dirs.has(path),
     isFile: (path: string) => files.has(path),
     isExecutable: (path: string) => executable.has(path),
+  }
+}
+
+class RecordingResidueDb {
+  readonly queries: Array<{ sql: string; params?: unknown[] }> = []
+
+  constructor(private readonly rows: Array<Record<string, unknown>>) {}
+
+  async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    this.queries.push({ sql, params })
+    return { rows: this.rows as T[], rowCount: this.rows.length }
   }
 }
 
@@ -360,6 +372,69 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS).toBe('msg-canary')
   })
 
+  test('queue-work scheduler canary residue preflight blocks non-fenced target residue before launchd mutation', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: '85b7fa6f-d60a-4ebb-90da-9c53bf15e840',
+        STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-06-15T08:18:34Z',
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 120245,
+      agent_id: 'qa',
+      message_id: 'ab20f921-4b99-4392-960a-673ee834292a',
+      status: 'pending',
+      created_at: '2026-06-14T08:46:57.674Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(result.ok).toBe(false)
+    expect(result.residues.map((row) => row.id)).toEqual([120245])
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'queue_work_canary_non_fenced_nonterminal_rows',
+      }),
+    ]))
+    expect(db.queries[0]?.sql).toContain("mq.status IN ('pending', 'received', 'in_progress')")
+    expect(db.queries[0]?.sql).toContain('AND NOT (COALESCE(mq.message_id = ANY')
+    expect(db.queries[0]?.sql).toContain('mq.created_at >=')
+  })
+
+  test('queue-work scheduler canary residue preflight passes when only fenced rows are visible', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: '85b7fa6f-d60a-4ebb-90da-9c53bf15e840',
+        STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-06-15T08:18:34Z',
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(result.ok).toBe(true)
+    expect(result.errors).toEqual([])
+    expect(result.residues).toEqual([])
+  })
+
   test('restore helper dry-run merges GitHub puller and queue-work activation env', () => {
     const tokenFile = '/Users/yuji/.config/agent-comms/github-work-token'
     const proc = Bun.spawnSync([
@@ -530,13 +605,15 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     const ensureCheckout = src.indexOf('ensureCheckout(plan)')
     const verifyCheckout = src.indexOf('verifyCheckout(plan)')
     const stagedPreflight = src.indexOf('const installedPreflight = validateStateDaemonLaunchAgentConfig')
+    const residuePreflight = src.indexOf('completeRestoreAfterQueueWorkCanaryResiduePreflight(stagedConfig')
     const rename = src.indexOf('renameSync(plan.tempPlistPath, plan.plistPath)')
     const bootstrap = src.indexOf('bootstrap(plan.plistPath)')
 
     expect(ensureCheckout).toBeGreaterThan(-1)
     expect(verifyCheckout).toBeGreaterThan(ensureCheckout)
     expect(stagedPreflight).toBeGreaterThan(verifyCheckout)
-    expect(rename).toBeGreaterThan(stagedPreflight)
+    expect(residuePreflight).toBeGreaterThan(stagedPreflight)
+    expect(rename).toBeGreaterThan(residuePreflight)
     expect(bootstrap).toBeGreaterThan(rename)
   })
 })
