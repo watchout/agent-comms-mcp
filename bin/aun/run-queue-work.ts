@@ -132,11 +132,11 @@ function execFileAsync(
       maxBuffer: opts.maxBuffer,
       encoding: 'utf-8',
     }, (err, stdout, stderr) => {
-      const execErr = err as NodeJS.ErrnoException & {
+      const execErr = err as (NodeJS.ErrnoException & {
         code?: unknown
         signal?: string | null
         killed?: boolean
-      }
+      }) | null
       const status = err == null
         ? 0
         : typeof execErr.code === 'number'
@@ -146,9 +146,9 @@ function execFileAsync(
         status,
         stdout: stdout ?? '',
         stderr: stderr ?? '',
-        errorMessage: err ? execErr.message : undefined,
-        signal: execErr.signal ?? null,
-        killed: execErr.killed,
+        errorMessage: execErr ? execErr.message : undefined,
+        signal: execErr?.signal ?? null,
+        killed: execErr?.killed,
       })
     })
     if (opts.input !== undefined && child.stdin) {

@@ -128,6 +128,15 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(detail).toContain('final_message=<missing>')
   })
 
+  test('execFileAsync successful child exit path is null-safe', () => {
+    const source = readFileSync(new URL('../bin/aun/run-queue-work.ts', import.meta.url), 'utf8')
+
+    expect(source).toContain('signal: execErr?.signal ?? null')
+    expect(source).toContain('killed: execErr?.killed')
+    expect(source).not.toContain('signal: execErr.signal ?? null')
+    expect(source).not.toContain('killed: execErr.killed')
+  })
+
   test('packaged queue-work result schema is Codex structured-output compatible', () => {
     const schema = JSON.parse(readFileSync(new URL('../schemas/queue-work-result-v1.schema.json', import.meta.url), 'utf8'))
 
