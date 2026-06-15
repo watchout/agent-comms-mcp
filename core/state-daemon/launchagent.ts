@@ -54,6 +54,28 @@ export type StateDaemonPreflightResult = {
   warnings: StateDaemonPreflightIssue[]
 }
 
+export type QueueWorkCanaryResidueRow = {
+  id: number | string
+  agent_id: string
+  message_id: string | null
+  status: string
+  created_at: string | Date
+  claimed_by: string | null
+  claimed_at: string | Date | null
+  claim_expires_at: string | Date | null
+}
+
+export type QueueWorkCanaryResidueDb = {
+  query<T = Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[]; rowCount?: number | null }>
+}
+
+export type QueueWorkCanaryResiduePreflightResult = StateDaemonPreflightResult & {
+  residues: QueueWorkCanaryResidueRow[]
+}
+
 export type PathProbe = {
   exists(path: string): boolean
   isDirectory(path: string): boolean
@@ -261,6 +283,11 @@ function isCanaryLabel(label: string): boolean {
   return label.trim().toLowerCase().startsWith('canary:')
 }
 
+export function queueWorkSchedulerLaunchAgentEnabled(env: Record<string, string>): boolean {
+  const value = env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED
+  return value === '1' || value?.toLowerCase() === 'true'
+}
+
 export function buildGithubWorkPullerLaunchAgentEnv(
   options: StateDaemonGithubWorkPullerActivationOptions,
 ): Record<string, string> {
@@ -455,9 +482,7 @@ export function validateStateDaemonLaunchAgentConfig(
     }
   }
 
-  const queueWorkSchedulerEnabled =
-    env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED === '1'
-    || env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED?.toLowerCase() === 'true'
+  const queueWorkSchedulerEnabled = queueWorkSchedulerLaunchAgentEnabled(env)
   if (queueWorkSchedulerEnabled) {
     const allowlist = (env.STATE_DAEMON_AGENT_ALLOWLIST ?? '')
       .split(',')
@@ -528,6 +553,88 @@ export function validateStateDaemonLaunchAgentConfig(
   }
 
   return { ok: errors.length === 0, errors, warnings }
+}
+
+function queueWorkFenceConditionsFromEnv(env: Record<string, string>, params: unknown[], alias: string): string[] {
+  const conditions: string[] = []
+  const fenceQueueIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS)
+  const fenceMessageIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
+  const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+  if (fenceQueueIds.length > 0) {
+    params.push(fenceQueueIds.map((item) => Number.parseInt(item, 10)))
+    conditions.push(`COALESCE(${alias}.id = ANY($${params.length}::bigint[]), false)`)
+  }
+  if (fenceMessageIds.length > 0) {
+    params.push(fenceMessageIds)
+    conditions.push(`COALESCE(${alias}.message_id = ANY($${params.length}::text[]), false)`)
+  }
+  if (fenceCreatedAfter) {
+    params.push(fenceCreatedAfter)
+    conditions.push(`COALESCE(${alias}.created_at >= $${params.length}::timestamptz, false)`)
+  }
+  return conditions
+}
+
+export async function validateQueueWorkCanaryResiduePreflight(
+  db: QueueWorkCanaryResidueDb,
+  env: Record<string, string>,
+  options: { limit?: number } = {},
+): Promise<QueueWorkCanaryResiduePreflightResult> {
+  const errors: StateDaemonPreflightIssue[] = []
+  const warnings: StateDaemonPreflightIssue[] = []
+  if (!queueWorkSchedulerLaunchAgentEnabled(env)) {
+    return { ok: true, errors, warnings, residues: [] }
+  }
+
+  const allowlist = parseCsvValue(env.STATE_DAEMON_AGENT_ALLOWLIST)
+  const fenceQueueIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS)
+  const fenceMessageIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
+  const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+  if (
+    allowlist.length !== 1
+    || (fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter)
+    || fenceQueueIds.some((item) => !/^[1-9]\d*$/.test(item))
+    || (fenceCreatedAfter && !Number.isFinite(Date.parse(fenceCreatedAfter)))
+  ) {
+    return { ok: true, errors, warnings, residues: [] }
+  }
+
+  const params: unknown[] = [allowlist[0]]
+  const fenceConditions = queueWorkFenceConditionsFromEnv(env, params, 'mq')
+  if (fenceConditions.length === 0) {
+    return { ok: true, errors, warnings, residues: [] }
+  }
+  const limit = options.limit ?? 20
+  params.push(limit)
+  try {
+    const result = await db.query<QueueWorkCanaryResidueRow>(
+      `SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.created_at,
+              mq.claimed_by, mq.claimed_at, mq.claim_expires_at
+         FROM message_queue mq
+        WHERE mq.agent_id = $1
+          AND mq.status IN ('pending', 'received', 'in_progress')
+          AND NOT (${fenceConditions.join(' AND ')})
+        ORDER BY mq.created_at ASC, mq.id ASC
+        LIMIT $${params.length}`,
+      params,
+    )
+    const residues = result.rows ?? []
+    if (residues.length > 0) {
+      errors.push({
+        code: 'queue_work_canary_non_fenced_nonterminal_rows',
+        message: `Queue-work scheduler canary activation requires zero non-fenced non-terminal rows for ${allowlist[0]}; found ${residues.length}: ${
+          residues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
+        }. Close or explicitly govern residue teardown before LaunchAgent mutation.`,
+      })
+    }
+    return { ok: errors.length === 0, errors, warnings, residues }
+  } catch (err) {
+    errors.push({
+      code: 'queue_work_canary_residue_preflight_db_error',
+      message: `Queue-work scheduler canary residue preflight failed; refusing LaunchAgent mutation: ${err instanceof Error ? err.message : String(err)}`,
+    })
+    return { ok: false, errors, warnings, residues: [] }
+  }
 }
 
 export function protectedPathsFromLaunchAgentPlists(plists: string[]): string[] {

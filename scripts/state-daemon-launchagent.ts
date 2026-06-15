@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { Client } from 'pg'
 import {
   STATE_DAEMON_LAUNCH_AGENT_LABEL,
   buildGithubWorkPullerLaunchAgentEnv,
@@ -8,8 +9,11 @@ import {
   listStateDaemonRestoreCheckouts,
   parseStateDaemonLaunchAgentPlist,
   planStateDaemonRestorePrune,
+  queueWorkSchedulerLaunchAgentEnabled,
   renderStateDaemonLaunchAgentPlist,
   validateStateDaemonLaunchAgentConfig,
+  validateQueueWorkCanaryResiduePreflight,
+  type StateDaemonLaunchAgentConfig,
 } from '../core/state-daemon/launchagent'
 
 type ParsedArgs = {
@@ -207,6 +211,23 @@ function bootstrap(plistPath: string): void {
   run('launchctl', ['kickstart', '-k', `${domain}/${STATE_DAEMON_LAUNCH_AGENT_LABEL}`])
 }
 
+async function runQueueWorkCanaryResiduePreflight(
+  config: StateDaemonLaunchAgentConfig,
+  databaseUrl: string,
+): Promise<void> {
+  if (!queueWorkSchedulerLaunchAgentEnabled(config.environmentVariables)) return
+  const client = new Client({ connectionString: databaseUrl })
+  await client.connect()
+  try {
+    const result = await validateQueueWorkCanaryResiduePreflight(client, config.environmentVariables)
+    if (!result.ok) {
+      throw new Error(`queue-work canary residue preflight failed:\n${JSON.stringify(result, null, 2)}`)
+    }
+  } finally {
+    await client.end()
+  }
+}
+
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
   const extraEnv = { ...args.extraEnv, ...githubWorkPullerEnvFromArgs(args) }
@@ -227,12 +248,38 @@ function commandRestore(args: ParsedArgs): void {
   verifyCheckout(plan)
   mkdirSync(dirname(plan.plistPath), { recursive: true })
   writeFileSync(plan.tempPlistPath, renderStateDaemonLaunchAgentPlist(plan), 'utf8')
-  const installedPreflight = validateStateDaemonLaunchAgentConfig(
-    parseStateDaemonLaunchAgentPlist(readFileSync(plan.tempPlistPath, 'utf8')),
-  )
+  const stagedConfig = parseStateDaemonLaunchAgentPlist(readFileSync(plan.tempPlistPath, 'utf8'))
+  const installedPreflight = validateStateDaemonLaunchAgentConfig(stagedConfig)
   if (!installedPreflight.ok) {
     throw new Error(`staged LaunchAgent failed preflight:\n${JSON.stringify(installedPreflight, null, 2)}`)
   }
+  if (queueWorkSchedulerLaunchAgentEnabled(stagedConfig.environmentVariables)) {
+    void completeRestoreAfterQueueWorkCanaryResiduePreflight(stagedConfig, plan, args, extraEnv)
+    return
+  }
+  finishRestore(plan, args, extraEnv)
+}
+
+async function completeRestoreAfterQueueWorkCanaryResiduePreflight(
+  config: StateDaemonLaunchAgentConfig,
+  plan: ReturnType<typeof buildStateDaemonRestorePlan>,
+  args: ParsedArgs,
+  extraEnv: Record<string, string>,
+): Promise<void> {
+  try {
+    await runQueueWorkCanaryResiduePreflight(config, plan.databaseUrl)
+    finishRestore(plan, args, extraEnv)
+  } catch (err) {
+    process.stderr.write(`state-daemon-launchagent: ${err instanceof Error ? err.message : String(err)}\n`)
+    process.exitCode = 1
+  }
+}
+
+function finishRestore(
+  plan: ReturnType<typeof buildStateDaemonRestorePlan>,
+  args: ParsedArgs,
+  extraEnv: Record<string, string>,
+): void {
   renameSync(plan.tempPlistPath, plan.plistPath)
   if (!args.noBootstrap) bootstrap(plan.plistPath)
   process.stdout.write(`${JSON.stringify({ ok: true, plan, extraEnv, bootstrapped: !args.noBootstrap }, null, 2)}\n`)
