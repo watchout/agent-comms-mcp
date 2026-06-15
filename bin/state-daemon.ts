@@ -270,6 +270,14 @@ function loadConfig(): Partial<StateDaemonConfig> {
     const values = v.split(',').map((s) => s.trim()).filter(Boolean)
     return values.length > 0 ? values : undefined
   }
+  const csvNum = (k: string) => {
+    const values = csv(k)
+    if (!values) return undefined
+    const parsed = values
+      .map((value) => Number.parseInt(value, 10))
+      .filter((value) => Number.isFinite(value) && value > 0)
+    return parsed.length > 0 ? parsed : undefined
+  }
   const set = <K extends keyof StateDaemonConfig>(k: K, v: StateDaemonConfig[K] | undefined) => {
     if (v !== undefined) (cfg as any)[k] = v
   }
@@ -303,6 +311,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
   set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
+  set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))
+  set('queueWorkFenceMessageIds', csv('STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS'))
+  set('queueWorkFenceCreatedAfter', str('STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER'))
   set('githubWorkPullerEnabled', bool('STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED') ?? false)
   set('githubWorkPullerIntervalMs', num('STATE_DAEMON_GITHUB_WORK_INTERVAL_MS'))
   set('githubWorkPullerRepos', csv('STATE_DAEMON_GITHUB_WORK_REPOS'))

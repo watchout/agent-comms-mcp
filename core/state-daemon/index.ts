@@ -288,32 +288,37 @@ export class StateDaemon {
   async handleQueueEvent(event: QueueEvent): Promise<void> {
     if (this.status !== 'running') return
     if (!this.isAgentInScope(event.agent_id)) {
+      if (this.queueWorkFenceConfigured()) {
+        this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
+        this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: 'notify_scope' })
+        return
+      }
       const handled = await this.tryCompleteScopedOutNoReply(event)
       if (!handled) this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
       return
     }
 
+    let row: QueueRow | null = null
+    if (this.queueWorkFenceConfigured()) {
+      row = await this.fetchQueueRowById(event.id)
+      if (!row || !this.isQueueWorkFenceInScope(row)) {
+        this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: 'notify' })
+        return
+      }
+    }
+
     // For received events, the pg_notify payload already contains the data we
-    // need. Dispatch to queueWorkScheduler immediately without a DB roundtrip.
-    if (event.status === 'received' && this.queueWorkScheduler) {
+    // need unless a bounded canary fence requires exact row inspection first.
+    if ((row?.status ?? event.status) === 'received' && this.queueWorkScheduler) {
       this.scheduleQueueWorkRunner(
         'received',
-        { id: event.id, agent_id: event.agent_id } as QueueRow,
+        row ?? { id: event.id, agent_id: event.agent_id } as QueueRow,
         () => this.queueWorkScheduler!.runReceived({ queueId: event.id, agentId: event.agent_id }),
       )
       return
     }
 
-    const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
-              mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
-         FROM message_queue mq
-         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
-        WHERE mq.id = $1`,
-      [event.id],
-    )
-    const row = rows[0]
+    row = row ?? await this.fetchQueueRowById(event.id)
     if (!row) return // row may have been deleted
 
     if (row.status === 'pending' || row.status === 'received') {
@@ -458,6 +463,7 @@ export class StateDaemon {
     const now = this.clock.now()
     const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec]
     sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
     const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
 
@@ -472,6 +478,7 @@ export class StateDaemon {
            OR mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
          )`
     skippedSql += this.agentScopeClause(skippedParams, 'mq.agent_id')
+    skippedSql += this.queueWorkFenceClause(skippedParams, 'mq')
     const skippedRows = await this.dbQuery<{ n: number }>(skippedSql, skippedParams)
     const skipped = Number(skippedRows.rows[0]?.n ?? 0)
     if (skipped > 0) {
@@ -826,6 +833,10 @@ export class StateDaemon {
     row: QueueRow,
     run: () => Promise<void>,
   ): void {
+    if (this.queueWorkFenceConfigured() && !this.isQueueWorkFenceInScope(row)) {
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: phase })
+      return
+    }
     const key = String(row.id)
     if (this.inflightQueueWork.has(key)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_dedup_skipped` })
@@ -898,6 +909,62 @@ export class StateDaemon {
   private isQueueWorkSchedulerClaim(row: QueueRow): boolean {
     const payload = parseQueuePayload(row.payload)
     return payload.receive_claim?.source === QUEUE_WORK_SCHEDULER_SOURCE
+  }
+
+  private queueWorkFenceConfigured(): boolean {
+    return !!(
+      this.config.queueWorkFenceQueueIds?.length
+      || this.config.queueWorkFenceMessageIds?.length
+      || this.config.queueWorkFenceCreatedAfter
+    )
+  }
+
+  private isQueueWorkFenceInScope(row: QueueRow): boolean {
+    const queueIds = this.config.queueWorkFenceQueueIds
+    if (queueIds?.length && !queueIds.includes(Number(row.id))) return false
+    const messageIds = this.config.queueWorkFenceMessageIds
+    if (messageIds?.length && (!row.message_id || !messageIds.includes(row.message_id))) return false
+    const createdAfter = this.config.queueWorkFenceCreatedAfter
+    if (createdAfter) {
+      const fenceTime = Date.parse(createdAfter)
+      const rowTime = new Date(row.created_at as unknown as string | Date).getTime()
+      if (!Number.isFinite(fenceTime) || !Number.isFinite(rowTime) || rowTime < fenceTime) return false
+    }
+    return true
+  }
+
+  private queueWorkFenceClause(params: unknown[], alias: string): string {
+    if (!this.queueWorkFenceConfigured()) return ''
+    let sql = ''
+    const queueIds = this.config.queueWorkFenceQueueIds
+    if (queueIds?.length) {
+      params.push(queueIds)
+      sql += ` AND ${alias}.id = ANY($${params.length}::bigint[])`
+    }
+    const messageIds = this.config.queueWorkFenceMessageIds
+    if (messageIds?.length) {
+      params.push(messageIds)
+      sql += ` AND ${alias}.message_id = ANY($${params.length}::text[])`
+    }
+    const createdAfter = this.config.queueWorkFenceCreatedAfter
+    if (createdAfter) {
+      params.push(createdAfter)
+      sql += ` AND ${alias}.created_at >= $${params.length}::timestamptz`
+    }
+    return sql
+  }
+
+  private async fetchQueueRowById(id: number): Promise<QueueRow | null> {
+    const { rows } = await this.dbQuery<QueueRow>(
+      `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.id = $1`,
+      [id],
+    )
+    return rows[0] ?? null
   }
 
   private async tryCompleteScopedOutNoReply(event: QueueEvent): Promise<boolean> {
@@ -1258,6 +1325,7 @@ export class StateDaemon {
         WHERE mq.status='pending'
           AND mq.created_at < $1::timestamptz - ($2)::interval`
     sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
     sql += ` ORDER BY mq.created_at LIMIT $3`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
@@ -1273,6 +1341,7 @@ export class StateDaemon {
           AND mq.claim_expires_at < $1::timestamptz`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
     sql += ` ORDER BY mq.claim_expires_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
@@ -1288,6 +1357,7 @@ export class StateDaemon {
           AND (mq.claim_expires_at IS NULL OR mq.claim_expires_at >= $1::timestamptz)`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
     sql += ` ORDER BY mq.created_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows

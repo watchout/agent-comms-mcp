@@ -470,6 +470,34 @@ export function validateStateDaemonLaunchAgentConfig(
       })
     }
 
+    const fenceQueueIds = (env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    const fenceMessageIds = (env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+    if (fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
+      errors.push({
+        code: 'queue_work_scheduler_requires_canary_fence',
+        message: 'Queue-work scheduler activation must specify a queue-work fence so existing non-terminal rows cannot be processed by a bounded canary.',
+      })
+    }
+    if (fenceQueueIds.some((item) => !/^[1-9]\d*$/.test(item))) {
+      errors.push({
+        code: 'queue_work_fence_queue_ids_invalid',
+        message: 'STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS must contain positive integer queue ids.',
+      })
+    }
+    if (fenceCreatedAfter && !Number.isFinite(Date.parse(fenceCreatedAfter))) {
+      errors.push({
+        code: 'queue_work_fence_created_after_invalid',
+        message: 'STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER must be a valid timestamp.',
+      })
+    }
+
     const runtime = env.STATE_DAEMON_QUEUE_WORK_RUNTIME ?? env.AUN_QUEUE_WORK_RUNTIME
     const command = env.STATE_DAEMON_QUEUE_WORK_COMMAND ?? env.AUN_QUEUE_WORK_COMMAND
     const effectiveRuntime = runtime ?? (command ? 'command-json' : null)

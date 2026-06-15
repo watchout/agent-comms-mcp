@@ -44,7 +44,8 @@ Usage:
      --github-token-file <path>]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --enable-queue-work-scheduler --agent-allowlist <agent>
-    --queue-work-runtime codex-exec [--execute]
+    --queue-work-runtime codex-exec --queue-work-fence-message-ids <id>
+    [--queue-work-fence-created-after <iso>] [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --agent-allowlist <agent> --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
@@ -113,6 +114,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-codex-model') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL = next()
     else if (arg === '--queue-work-codex-profile') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE = next()
     else if (arg === '--queue-work-codex-ignore-rules') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES = '1'
+    else if (arg === '--queue-work-fence-queue-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS = next()
+    else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
+    else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
