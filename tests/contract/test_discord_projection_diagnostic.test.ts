@@ -286,9 +286,15 @@ describe('#604 Discord projection diagnostic', () => {
     expect(report.contract.runtime_delivery_status_contract).toBe('drift')
     expect(report.contract.runtime_login_credential_statuses).toEqual(['active', 'registered'])
     expect(report.contract.delivery_credential_statuses).toEqual(['active'])
+    expect(report.primary_blocker).toMatchObject({
+      code: 'SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE',
+      repair_hint: 'Promote the sender Discord credential to active only after token identity and channel write permission are verified.',
+    })
     expect(text).toContain('Credential contract: drift')
     expect(text).toContain('Runtime login statuses: active, registered')
     expect(text).toContain('Delivery statuses: active')
+    expect(text).toContain('Primary blocker: SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE')
+    expect(text).toContain('Primary repair: Promote the sender Discord credential to active only after token identity and channel write permission are verified.')
     expect(text).toContain('Effective delivery owner: blocked:CREDENTIAL_NOT_DELIVERY_ELIGIBLE')
   })
 
@@ -361,6 +367,47 @@ describe('#604 Discord projection diagnostic', () => {
       source: 'derived_single_connector',
       consumerAgentId: 'aun',
     })
+  })
+
+  test('text output shows sender credential status when selected consumer is AUN', async () => {
+    const db = mockProjectionDb({
+      bindingDeliveryAgents: ['codex-cto'],
+      eligibleDeliveryAgents: ['aun'],
+      credentialStatusByAgent: { 'codex-cto': 'registered', aun: 'active' },
+      agents: {
+        aun: mockAgent('aun'),
+        'codex-cto': mockAgent('codex-cto', { discordId: 'cto-discord-id' }),
+        ceo: mockAgent('ceo', { agentType: 'human', discordId: 'ceo-discord-id' }),
+      },
+    })
+
+    const report = await buildDiscordProjectionDiagnosticReport(db, {
+      ...scope,
+      fallbackAllowed: true,
+    }, {
+      now: new Date('2026-06-02T00:02:15.000Z'),
+    })
+    const text = formatDiscordProjectionDiagnosticText(report)
+
+    expect(report.ok).toBe(false)
+    expect(report.decision).toMatchObject({
+      consumer_agent_id: 'aun',
+      credential_status: 'active',
+    })
+    expect(report.evidence.sender_direct).toMatchObject({
+      agent_id: 'codex-cto',
+      credential_status: 'registered',
+      provider_write_capability: 'unknown',
+    })
+    expect(report.primary_blocker).toMatchObject({
+      code: 'SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE',
+    })
+    expect(text).toContain('Consumer: aun')
+    expect(text).toContain('Credential status: active')
+    expect(text).toContain('Sender credential status: registered')
+    expect(text).toContain('Sender provider write: unknown')
+    expect(text).toContain('Primary blocker: SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE')
+    expect(text).toContain('Repair: Promote the sender Discord credential to active only after token identity and channel write permission are verified.')
   })
 
   test('fallback allowance does not turn unknown sender credential evidence into success', async () => {
