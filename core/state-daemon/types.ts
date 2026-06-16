@@ -92,6 +92,11 @@ export interface StateDaemonConfig {
   queueWorkFenceQueueIds: number[] | null
   queueWorkFenceMessageIds: string[] | null
   queueWorkFenceCreatedAfter: string | null
+  /**
+   * Governed #758 residue rows that must be preserved as evidence and must
+   * never be claimed, refreshed, reclaimed, or scheduled by queue-work.
+   */
+  queueWorkResidueExcludedQueueIds: number[] | null
 
   /**
    * #744 GitHub-first autonomous work discovery. Disabled by default because
@@ -162,6 +167,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   queueWorkFenceQueueIds: null,
   queueWorkFenceMessageIds: null,
   queueWorkFenceCreatedAfter: null,
+  queueWorkResidueExcludedQueueIds: null,
   githubWorkPullerEnabled: false,
   githubWorkPullerIntervalMs: 120_000,
   githubWorkPullerRepos: null,

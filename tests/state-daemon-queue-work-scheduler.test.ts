@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { join } from 'node:path'
+import { loadQueueWorkResidueExcludedQueueIds } from '../bin/state-daemon'
 import { StateDaemon } from '../core/state-daemon'
 import type { DBClient, QueueWorkScheduler } from '../core/state-daemon/types'
 import {
@@ -8,6 +10,8 @@ import {
   FakePgListen,
   FakeTmux,
 } from './contract/state-daemon/fakes'
+
+const REPO = join(import.meta.dir, '..')
 
 class SingleRowDb implements DBClient {
   constructor(private readonly row: any) {}
@@ -393,6 +397,63 @@ describe('state_daemon queue work scheduler boundary', () => {
     })).toBe(1)
   })
 
+  test('queue-work residue exclusion skips policy-preserved received rows before runner invocation', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runReceived(input) {
+        calls.push(input)
+      },
+    }
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new SingleRowDb({
+        id: 121744,
+        agent_id: 'secretary',
+        status: 'received',
+        message_id: '51647a24-0bfe-4efc-8cc8-2c795069bbf0',
+        payload: JSON.stringify({
+          content: 'incomplete canary residue',
+          receive_claim: {
+            source: 'state-daemon-queue-work-scheduler',
+          },
+        }),
+        claim_expires_at: new Date('2026-06-15T00:00:30.000Z'),
+        created_at: new Date('2026-06-15T10:51:34.000Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T00:00:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+      config: {
+        queueWorkResidueExcludedQueueIds: [121744],
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: 121744,
+        agent_id: 'secretary',
+        status: 'received',
+        claim_expires_at: '2026-06-15T00:00:30.000Z',
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([])
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'queue_work_residue_excluded',
+      path: 'notify',
+    })).toBe(1)
+  })
+
   test('queue-work fence is applied to claim heartbeat refresh SQL', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
@@ -425,6 +486,37 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(update?.sql).toContain('mq.created_at >=')
     expect(skipped?.sql).toContain('mq.message_id = ANY')
     expect(skipped?.sql).toContain('mq.created_at >=')
+  })
+
+  test('queue-work residue exclusion is applied to claim heartbeat refresh SQL', async () => {
+    const db = new RecordingDb()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T00:00:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived() {},
+      },
+      config: {
+        agentAllowlist: ['secretary'],
+        queueWorkResidueExcludedQueueIds: [121744],
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.refreshClaims()
+    } finally {
+      await daemon.stop()
+    }
+
+    const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+    const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+    expect(update?.sql).toContain('NOT (mq.id = ANY')
+    expect(skipped?.sql).toContain('NOT (mq.id = ANY')
   })
 
   test('queue-work fence is applied to sweep fetch SQL', async () => {
@@ -461,6 +553,53 @@ describe('state_daemon queue work scheduler boundary', () => {
       expect(query.sql).toContain('mq.message_id = ANY')
       expect(query.sql).toContain('mq.created_at >=')
     }
+  })
+
+  test('queue-work residue exclusion is applied to sweep fetch SQL', async () => {
+    const db = new RecordingDb()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T00:00:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived() {},
+      },
+      config: {
+        agentAllowlist: ['secretary'],
+        queueWorkResidueExcludedQueueIds: [121744],
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.sweepStale()
+    } finally {
+      await daemon.stop()
+    }
+
+    const queueSelects = db.queries
+      .filter((query) => query.sql.includes('FROM message_queue mq'))
+      .filter((query) => query.sql.includes("mq.status='pending'") || query.sql.includes("mq.status IN ('received', 'in_progress')"))
+    expect(queueSelects.length).toBeGreaterThanOrEqual(3)
+    for (const query of queueSelects) {
+      expect(query.sql).toContain('NOT (mq.id = ANY')
+    }
+  })
+
+  test('state-daemon loads residue exclusion ids from the governed policy file', () => {
+    expect(loadQueueWorkResidueExcludedQueueIds({
+      STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS: '42',
+      STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: join(REPO, 'config', 'queue-work-residue-policy.json'),
+    } as NodeJS.ProcessEnv)).toEqual([42, 120138, 120245, 121744])
+  })
+
+  test('state-daemon fails closed on invalid manual residue exclusion ids', () => {
+    expect(() => loadQueueWorkResidueExcludedQueueIds({
+      STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS: '121744,not-a-number',
+    } as NodeJS.ProcessEnv)).toThrow('STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS')
   })
 
   test('scheduler-owned expired rows are not reclaimed into legacy runner when scheduler is disabled', async () => {
