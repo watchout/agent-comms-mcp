@@ -299,9 +299,14 @@ export class StateDaemon {
     }
 
     let row: QueueRow | null = null
-    if (this.queueWorkFenceConfigured()) {
+    if (this.queueWorkFenceConfigured() || this.queueWorkResidueExclusionConfigured()) {
       row = await this.fetchQueueRowById(event.id)
-      if (!row || !this.isQueueWorkFenceInScope(row)) {
+      if (!row) return
+      if (this.isQueueWorkResidueExcluded(row)) {
+        this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'notify' })
+        return
+      }
+      if (this.queueWorkFenceConfigured() && !this.isQueueWorkFenceInScope(row)) {
         this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: 'notify' })
         return
       }
@@ -464,6 +469,7 @@ export class StateDaemon {
     const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
     const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
 
@@ -479,6 +485,7 @@ export class StateDaemon {
          )`
     skippedSql += this.agentScopeClause(skippedParams, 'mq.agent_id')
     skippedSql += this.queueWorkFenceClause(skippedParams, 'mq')
+    skippedSql += this.queueWorkResidueExclusionClause(skippedParams, 'mq')
     const skippedRows = await this.dbQuery<{ n: number }>(skippedSql, skippedParams)
     const skipped = Number(skippedRows.rows[0]?.n ?? 0)
     if (skipped > 0) {
@@ -533,6 +540,10 @@ export class StateDaemon {
    * or explicit operator repair.
    */
   private async runWakeIfNotSuppressed(row: QueueRow): Promise<boolean> {
+    if (this.isQueueWorkResidueExcluded(row)) {
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'wake' })
+      return false
+    }
     const now = this.clock.now()
     // v0.9 sub-PR 2 §1.3a stall gate: evaluated before typed action
     // execution. If any of the three layers reports a stall the wake is
@@ -641,14 +652,14 @@ export class StateDaemon {
     }
     let hasActiveClaim = false
     if (bot) {
-      const activeClaims = await this.dbQuery(
-        `SELECT 1 FROM message_queue
-          WHERE agent_id=$1
-            AND claimed_by=$1
-            AND status IN ('received', 'in_progress')
-          LIMIT 1`,
-        [row.agent_id],
-      )
+      const activeClaimParams: unknown[] = [row.agent_id]
+      let activeClaimSql = `SELECT 1 FROM message_queue mq
+          WHERE mq.agent_id=$1
+            AND mq.claimed_by=$1
+            AND mq.status IN ('received', 'in_progress')`
+      activeClaimSql += this.queueWorkResidueExclusionClause(activeClaimParams, 'mq')
+      activeClaimSql += ' LIMIT 1'
+      const activeClaims = await this.dbQuery(activeClaimSql, activeClaimParams)
       hasActiveClaim = activeClaims.rows.length > 0
     }
 
@@ -833,6 +844,10 @@ export class StateDaemon {
     row: QueueRow,
     run: () => Promise<void>,
   ): void {
+    if (this.isQueueWorkResidueExcluded(row)) {
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: phase })
+      return
+    }
     if (this.queueWorkFenceConfigured() && !this.isQueueWorkFenceInScope(row)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: phase })
       return
@@ -919,6 +934,15 @@ export class StateDaemon {
     )
   }
 
+  private queueWorkResidueExclusionConfigured(): boolean {
+    return !!this.config.queueWorkResidueExcludedQueueIds?.length
+  }
+
+  private isQueueWorkResidueExcluded(row: QueueRow): boolean {
+    const queueIds = this.config.queueWorkResidueExcludedQueueIds
+    return !!queueIds?.length && queueIds.includes(Number(row.id))
+  }
+
   private isQueueWorkFenceInScope(row: QueueRow): boolean {
     const queueIds = this.config.queueWorkFenceQueueIds
     if (queueIds?.length && !queueIds.includes(Number(row.id))) return false
@@ -954,6 +978,13 @@ export class StateDaemon {
     return sql
   }
 
+  private queueWorkResidueExclusionClause(params: unknown[], alias: string): string {
+    const queueIds = this.config.queueWorkResidueExcludedQueueIds
+    if (!queueIds?.length) return ''
+    params.push(queueIds)
+    return ` AND NOT (${alias}.id = ANY($${params.length}::bigint[]))`
+  }
+
   private async fetchQueueRowById(id: number): Promise<QueueRow | null> {
     const { rows } = await this.dbQuery<QueueRow>(
       `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
@@ -980,10 +1011,15 @@ export class StateDaemon {
     )
     const row = rows[0]
     if (!row || (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress')) return false
+    if (this.isQueueWorkResidueExcluded(row)) {
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'scoped_out_no_reply' })
+      return false
+    }
     return this.completeNoReplyIfRequired(row)
   }
 
   private async completeNoReplyIfRequired(row: QueueRow): Promise<boolean> {
+    if (this.isQueueWorkResidueExcluded(row)) return false
     if (!this.config.codexRunnerAutoCompleteNoReply) return false
     if (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress') return false
     const decision = this.noReplyDecisionForRow(row)
@@ -1326,6 +1362,7 @@ export class StateDaemon {
           AND mq.created_at < $1::timestamptz - ($2)::interval`
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
     sql += ` ORDER BY mq.created_at LIMIT $3`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
@@ -1342,6 +1379,7 @@ export class StateDaemon {
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
     sql += ` ORDER BY mq.claim_expires_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
@@ -1358,6 +1396,7 @@ export class StateDaemon {
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
     sql += ` ORDER BY mq.created_at LIMIT $2`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows

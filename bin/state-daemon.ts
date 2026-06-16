@@ -34,6 +34,10 @@ import {
   RestGithubWorkClient,
   StateDaemonGithubWorkPuller,
 } from '../core/state-daemon/github-work-puller'
+import {
+  loadQueueWorkResiduePolicyFile,
+  queueWorkResidueExcludedQueueIds,
+} from '../core/state-daemon/queue-work-residue-policy'
 import { receiveTargeted } from './aun/receive'
 import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
 import type {
@@ -236,6 +240,29 @@ function queueWorkSchedulerEnabled(env: NodeJS.ProcessEnv = process.env): boolea
   return raw === '1' || raw?.toLowerCase() === 'true'
 }
 
+export function loadQueueWorkResidueExcludedQueueIds(env: NodeJS.ProcessEnv = process.env): number[] | undefined {
+  const values = new Set<number>()
+  const rawIds = env.STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS
+  if (rawIds) {
+    for (const value of rawIds.split(',').map((part) => part.trim()).filter(Boolean)) {
+      const parsed = Number.parseInt(value, 10)
+      if (!Number.isInteger(parsed) || parsed <= 0 || String(parsed) !== value) {
+        throw new Error('STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS must contain positive integer queue ids')
+      }
+      values.add(parsed)
+    }
+  }
+
+  const policyFile = env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE?.trim()
+  if (policyFile) {
+    for (const queueId of queueWorkResidueExcludedQueueIds(loadQueueWorkResiduePolicyFile(policyFile))) {
+      values.add(queueId)
+    }
+  }
+
+  return values.size > 0 ? Array.from(values).sort((a, b) => a - b) : undefined
+}
+
 export function resolveGithubTokenFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   readTokenFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
@@ -314,6 +341,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))
   set('queueWorkFenceMessageIds', csv('STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS'))
   set('queueWorkFenceCreatedAfter', str('STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER'))
+  set('queueWorkResidueExcludedQueueIds', loadQueueWorkResidueExcludedQueueIds(process.env))
   set('githubWorkPullerEnabled', bool('STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED') ?? false)
   set('githubWorkPullerIntervalMs', num('STATE_DAEMON_GITHUB_WORK_INTERVAL_MS'))
   set('githubWorkPullerRepos', csv('STATE_DAEMON_GITHUB_WORK_REPOS'))
