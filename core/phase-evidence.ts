@@ -298,7 +298,7 @@ function asNumber(value: unknown): number | null {
 }
 
 function extractGithubUrl(text: string): string | null {
-  return text.match(/https:\/\/github\.com\/[^\s)]+/)?.[0] ?? null
+  return text.match(/https:\/\/github\.com\/[^\s)]+/)?.[0]?.replace(/[.,;:]+$/g, '') ?? null
 }
 
 function inferPhase(text: string, fallback: string | null): string | null {

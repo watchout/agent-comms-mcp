@@ -282,6 +282,23 @@ describe('phase handoff queue parser', () => {
       exactHead: HEAD,
     })
   })
+
+  test('trims sentence punctuation from extracted GitHub URLs', () => {
+    const handoff = parsePhaseHandoffQueueRow({
+      id: 121868,
+      agent_id: 'devauditor',
+      status: 'pending',
+      payload: {
+        content: [
+          'PR #767 L1 audit request updated.',
+          `New exact head: ${HEAD}.`,
+          'GitHub SSOT instruction: https://github.com/watchout/agent-comms-mcp/pull/767#issuecomment-4724500337.',
+        ].join(' '),
+      },
+    })
+
+    expect(handoff?.sourceUrl).toBe('https://github.com/watchout/agent-comms-mcp/pull/767#issuecomment-4724500337')
+  })
 })
 
 describe('GitHub/AUN phase reconciliation', () => {
