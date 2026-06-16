@@ -1,0 +1,44 @@
+{
+  "schema_version": "queue_work_residue_policy_v1",
+  "issue": "https://github.com/watchout/agent-comms-mcp/issues/758",
+  "entries": [
+    {
+      "queue_id": 120138,
+      "agent_id": "agent-com-dev",
+      "message_id": null,
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/758",
+      "expected_status": ["pending"],
+      "expected_payload_source": "state-daemon-github-work-puller-canary",
+      "notes": "GitHub work puller canary residue for #747. Preserve as immutable evidence; not queue-work scheduler work."
+    },
+    {
+      "queue_id": 120245,
+      "agent_id": "qa",
+      "message_id": "ab20f921-4b99-4392-960a-673ee834292a",
+      "classification": "preserve_failed_scheduler_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/722#issuecomment-4701251174",
+      "expected_status": ["pending"],
+      "expected_receive_claim_source": "state-daemon-queue-work-scheduler",
+      "expected_runner_invocation_source": "state-daemon-queue-work-scheduler",
+      "expected_runner_error_code": "ADAPTER_ERROR",
+      "notes": "Failed qa scheduler canary evidence. Preserve only; retry requires a fresh row/message id."
+    },
+    {
+      "queue_id": 121744,
+      "agent_id": "secretary",
+      "message_id": "51647a24-0bfe-4efc-8cc8-2c795069bbf0",
+      "classification": "preserve_incomplete_scheduler_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/722#issuecomment-4707320147",
+      "expected_status": ["in_progress"],
+      "expected_receive_claim_source": "state-daemon-queue-work-scheduler",
+      "notes": "Incomplete secretary scheduler canary evidence. Preserve only; terminal close requires separate exact-row authorization."
+    }
+  ]
+}
