@@ -37,6 +37,7 @@
     "db/",
     "bin/",
     "schemas/",
+    "config/queue-work-residue-policy.json",
     "hooks/",
     "config.example.json",
     "LICENSE",
