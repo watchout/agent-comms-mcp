@@ -176,6 +176,31 @@ describe('conveyor phase evidence parser', () => {
     ])
   })
 
+  test('ignores phase result examples inside fenced code blocks', () => {
+    const evidence = parseConveyorPhaseEvidenceComment({
+      body: [
+        'Required output example:',
+        '',
+        '```text',
+        '<!-- conveyor:audit-result/v1 -->',
+        'repo: watchout/agent-comms-mcp',
+        'pr: 767',
+        'role: audit',
+        'audit_level: L1',
+        'phase: l1_audit',
+        'verdict: PASS | NO-GO | HOLD',
+        `exact_head: ${HEAD}`,
+        'source_handoff_url: https://github.com/watchout/agent-comms-mcp/pull/767#issuecomment-handoff',
+        'required_fixes: none | <concrete required fixes>',
+        'next_role: l2auditor | agent-com-dev',
+        'non_scope: no live activation',
+        '```',
+      ].join('\n'),
+    })
+
+    expect(evidence).toBeNull()
+  })
+
   test('surfaces invalid phase evidence as a reconciliation warning', () => {
     const report = reconcileWithGithub({
       repo: REPO,

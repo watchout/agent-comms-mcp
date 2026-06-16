@@ -171,6 +171,10 @@ function normalizeVerdict(raw: string | null): ConveyorVerdict {
   return 'UNKNOWN'
 }
 
+function stripFencedCodeBlocks(body: string): string {
+  return body.replace(/```[\s\S]*?```/g, '').replace(/~~~[\s\S]*?~~~/g, '')
+}
+
 function extractMarker(body: string): ConveyorEvidenceMarker | null {
   const html = body.match(/<!--\s*conveyor:([a-z-]+\/v1)\s*-->/i)?.[1]
   const line = body.match(/^\s*conveyor:\s*([a-z-]+\/v1)\s*$/im)?.[1]
@@ -225,9 +229,10 @@ function validateEvidence(evidence: Omit<ConveyorPhaseEvidence, 'missingRequired
 }
 
 export function parseConveyorPhaseEvidenceComment(comment: PhaseEvidenceComment): ConveyorPhaseEvidence | null {
-  const marker = extractMarker(comment.body)
+  const parseableBody = stripFencedCodeBlocks(comment.body)
+  const marker = extractMarker(parseableBody)
   if (!marker) return null
-  const values = parseKeyValues(comment.body)
+  const values = parseKeyValues(parseableBody)
   const roleRaw = firstValue(values, ['role'])
   const role = roleRaw && ['audit', 'qa', 'check', 'cto'].includes(roleRaw.toLowerCase())
     ? roleRaw.toLowerCase() as ConveyorEvidenceRole
