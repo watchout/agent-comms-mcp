@@ -13,6 +13,7 @@ import {
   renderStateDaemonLaunchAgentPlist,
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
+  loadQueueWorkResiduePolicyFromEnv,
   type StateDaemonLaunchAgentConfig,
 } from '../core/state-daemon/launchagent'
 
@@ -49,7 +50,8 @@ Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --enable-queue-work-scheduler --agent-allowlist <agent>
     --queue-work-runtime codex-exec --queue-work-fence-message-ids <id>
-    [--queue-work-fence-created-after <iso>] [--execute]
+    [--queue-work-fence-created-after <iso>]
+    [--queue-work-residue-policy-file <path>] [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --agent-allowlist <agent> --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
@@ -121,6 +123,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-fence-queue-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS = next()
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
+    else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = resolve(next())
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
@@ -219,7 +222,9 @@ async function runQueueWorkCanaryResiduePreflight(
   const client = new Client({ connectionString: databaseUrl })
   await client.connect()
   try {
-    const result = await validateQueueWorkCanaryResiduePreflight(client, config.environmentVariables)
+    const result = await validateQueueWorkCanaryResiduePreflight(client, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFromEnv(config.environmentVariables),
+    })
     if (!result.ok) {
       throw new Error(`queue-work canary residue preflight failed:\n${JSON.stringify(result, null, 2)}`)
     }

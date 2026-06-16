@@ -12,6 +12,7 @@ import {
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
 } from '../../../core/state-daemon/launchagent'
+import { loadQueueWorkResiduePolicyFile } from '../../../core/state-daemon/queue-work-residue-policy'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
 
@@ -45,6 +46,20 @@ class RecordingResidueDb {
   async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
     this.queries.push({ sql, params })
     return { rows: this.rows as T[], rowCount: this.rows.length }
+  }
+}
+
+const RESIDUE_POLICY_FILE = join(REPO, 'config', 'queue-work-residue-policy.json')
+
+function queueWorkResidueEnv(agentId: string, withPolicy: boolean): Record<string, string> {
+  return {
+    STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+    STATE_DAEMON_AGENT_ALLOWLIST: agentId,
+    STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+    STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+    STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'fresh-canary-message-id',
+    STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-06-15T00:00:00Z',
+    ...(withPolicy ? { STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: RESIDUE_POLICY_FILE } : {}),
   }
 }
 
@@ -372,7 +387,65 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS).toBe('msg-canary')
   })
 
-  test('queue-work scheduler canary residue preflight blocks non-fenced target residue before launchd mutation', async () => {
+  test('queue-work scheduler activation fails closed when residue policy file is missing', () => {
+    const policyPath = '/Users/yuji/.agent-comms/state-daemon/residue-policy.json'
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'fresh-canary-message-id',
+        STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: policyPath,
+      },
+    })
+    const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath, schemaPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'queue_work_residue_policy_file_missing',
+        path: policyPath,
+      }),
+    ]))
+  })
+
+  test('queue-work scheduler activation fails closed when residue policy path is not a file', () => {
+    const policyPath = '/Users/yuji/.agent-comms/state-daemon/residue-policy'
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'fresh-canary-message-id',
+        STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: policyPath,
+      },
+    })
+    const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath, schemaPath], [plan.checkoutPath, policyPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'queue_work_residue_policy_file_not_file',
+        path: policyPath,
+      }),
+    ]))
+  })
+
+  test('queue-work scheduler canary residue preflight blocks non-fenced target residue without policy before launchd mutation', async () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
@@ -391,6 +464,13 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       id: 120245,
       agent_id: 'qa',
       message_id: 'ab20f921-4b99-4392-960a-673ee834292a',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+        runner_error: {
+          code: 'ADAPTER_ERROR',
+          invocation_source: 'state-daemon-queue-work-scheduler',
+        },
+      }),
       status: 'pending',
       created_at: '2026-06-14T08:46:57.674Z',
       claimed_by: null,
@@ -404,12 +484,287 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(result.residues.map((row) => row.id)).toEqual([120245])
     expect(result.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        code: 'queue_work_canary_non_fenced_nonterminal_rows',
+        code: 'queue_work_residue_policy_missing',
       }),
     ]))
     expect(db.queries[0]?.sql).toContain("mq.status IN ('pending', 'received', 'in_progress')")
     expect(db.queries[0]?.sql).toContain('AND NOT (COALESCE(mq.message_id = ANY')
     expect(db.queries[0]?.sql).toContain('mq.created_at >=')
+  })
+
+  test('queue-work scheduler canary residue preflight passes for exact policy-classified residue', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: '85b7fa6f-d60a-4ebb-90da-9c53bf15e840',
+        STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-06-15T08:18:34Z',
+        STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: join(REPO, 'config', 'queue-work-residue-policy.json'),
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 120245,
+      agent_id: 'qa',
+      message_id: 'ab20f921-4b99-4392-960a-673ee834292a',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+        runner_error: {
+          code: 'ADAPTER_ERROR',
+          invocation_source: 'state-daemon-queue-work-scheduler',
+        },
+      }),
+      status: 'pending',
+      created_at: '2026-06-14T08:46:57.674Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFile(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.errors).toEqual([])
+    expect(result.residues.map((row) => row.id)).toEqual([120245])
+  })
+
+  test('queue-work scheduler canary residue preflight fails closed on policy identity drift', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'fresh-canary-message-id',
+        STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: join(REPO, 'config', 'queue-work-residue-policy.json'),
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 120245,
+      agent_id: 'qa',
+      message_id: 'drifted-message-id',
+      payload: JSON.stringify({
+        receive_claim: { source: 'manual-next' },
+        runner_error: {
+          code: 'OTHER',
+          invocation_source: 'manual-next',
+        },
+      }),
+      status: 'pending',
+      created_at: '2026-06-14T08:46:57.674Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFile(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'queue_work_residue_policy_mismatch',
+      }),
+    ]))
+    expect(result.errors[0]?.message).toContain('message_id expected ab20f921-4b99-4392-960a-673ee834292a')
+  })
+
+  test('queue-work scheduler canary residue preflight blocks 120138 GitHub puller residue without policy', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: queueWorkResidueEnv('agent-com-dev', false),
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 120138,
+      agent_id: 'agent-com-dev',
+      message_id: null,
+      payload: JSON.stringify({ source: 'state-daemon-github-work-puller-canary' }),
+      status: 'pending',
+      created_at: '2026-06-14T08:00:00.000Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(result.ok).toBe(false)
+    expect(result.residues.map((row) => row.id)).toEqual([120138])
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_residue_policy_missing' }),
+    ]))
+  })
+
+  test('queue-work scheduler canary residue preflight passes for exact 120138 GitHub puller residue', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: queueWorkResidueEnv('agent-com-dev', true),
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 120138,
+      agent_id: 'agent-com-dev',
+      message_id: null,
+      payload: JSON.stringify({ source: 'state-daemon-github-work-puller-canary' }),
+      status: 'pending',
+      created_at: '2026-06-14T08:00:00.000Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFile(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.errors).toEqual([])
+    expect(result.residues.map((row) => row.id)).toEqual([120138])
+  })
+
+  test('queue-work scheduler canary residue preflight fails closed on 120138 identity drift', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: queueWorkResidueEnv('agent-com-dev', true),
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 120138,
+      agent_id: 'agent-com-dev',
+      message_id: 'drifted-message-id',
+      payload: JSON.stringify({ source: 'manual-dispatch' }),
+      status: 'pending',
+      created_at: '2026-06-14T08:00:00.000Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFile(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_residue_policy_mismatch' }),
+    ]))
+    expect(result.errors[0]?.message).toContain('message_id expected null')
+    expect(result.errors[0]?.message).toContain('payload.source expected state-daemon-github-work-puller-canary')
+  })
+
+  test('queue-work scheduler canary residue preflight blocks 121744 incomplete scheduler residue without policy', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: queueWorkResidueEnv('secretary', false),
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 121744,
+      agent_id: 'secretary',
+      message_id: '51647a24-0bfe-4efc-8cc8-2c795069bbf0',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+      }),
+      status: 'in_progress',
+      created_at: '2026-06-15T10:51:34.000Z',
+      claimed_by: 'secretary',
+      claimed_at: '2026-06-15T10:51:35.000Z',
+      claim_expires_at: '2026-06-15T10:52:35.000Z',
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(result.ok).toBe(false)
+    expect(result.residues.map((row) => row.id)).toEqual([121744])
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_residue_policy_missing' }),
+    ]))
+  })
+
+  test('queue-work scheduler canary residue preflight passes for exact 121744 incomplete scheduler residue', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: queueWorkResidueEnv('secretary', true),
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 121744,
+      agent_id: 'secretary',
+      message_id: '51647a24-0bfe-4efc-8cc8-2c795069bbf0',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+      }),
+      status: 'in_progress',
+      created_at: '2026-06-15T10:51:34.000Z',
+      claimed_by: 'secretary',
+      claimed_at: '2026-06-15T10:51:35.000Z',
+      claim_expires_at: '2026-06-15T10:52:35.000Z',
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFile(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.errors).toEqual([])
+    expect(result.residues.map((row) => row.id)).toEqual([121744])
+  })
+
+  test('queue-work scheduler canary residue preflight fails closed on 121744 status message and source drift', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: queueWorkResidueEnv('secretary', true),
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 121744,
+      agent_id: 'secretary',
+      message_id: 'drifted-message-id',
+      payload: JSON.stringify({
+        receive_claim: { source: 'manual-next' },
+      }),
+      status: 'received',
+      created_at: '2026-06-15T10:51:34.000Z',
+      claimed_by: 'secretary',
+      claimed_at: '2026-06-15T10:51:35.000Z',
+      claim_expires_at: '2026-06-15T10:52:35.000Z',
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables, {
+      residuePolicy: loadQueueWorkResiduePolicyFile(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE),
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_residue_policy_mismatch' }),
+    ]))
+    expect(result.errors[0]?.message).toContain('status expected one of in_progress')
+    expect(result.errors[0]?.message).toContain('message_id expected 51647a24-0bfe-4efc-8cc8-2c795069bbf0')
+    expect(result.errors[0]?.message).toContain('receive_claim.source expected state-daemon-queue-work-scheduler')
   })
 
   test('queue-work scheduler canary residue preflight passes when only fenced rows are visible', async () => {

@@ -1,6 +1,12 @@
 import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
+import {
+  classifyQueueWorkResidueRows,
+  loadQueueWorkResiduePolicyFile,
+  type QueueWorkResiduePolicy,
+  type QueueWorkResidueRow,
+} from './queue-work-residue-policy'
 
 export const STATE_DAEMON_LAUNCH_AGENT_LABEL = 'com.agent-comms.state-daemon'
 export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist`
@@ -58,6 +64,7 @@ export type QueueWorkCanaryResidueRow = {
   id: number | string
   agent_id: string
   message_id: string | null
+  payload?: string | null
   status: string
   created_at: string | Date
   claimed_by: string | null
@@ -74,6 +81,11 @@ export type QueueWorkCanaryResidueDb = {
 
 export type QueueWorkCanaryResiduePreflightResult = StateDaemonPreflightResult & {
   residues: QueueWorkCanaryResidueRow[]
+}
+
+export type QueueWorkResiduePolicyPreflightOptions = {
+  limit?: number
+  residuePolicy?: QueueWorkResiduePolicy | null
 }
 
 export type PathProbe = {
@@ -522,6 +534,22 @@ export function validateStateDaemonLaunchAgentConfig(
         message: 'STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER must be a valid timestamp.',
       })
     }
+    const residuePolicyFile = env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE?.trim()
+    if (residuePolicyFile) {
+      if (!probe.exists(residuePolicyFile)) {
+        errors.push({
+          code: 'queue_work_residue_policy_file_missing',
+          message: 'STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE does not exist.',
+          path: residuePolicyFile,
+        })
+      } else if (!probe.isFile(residuePolicyFile)) {
+        errors.push({
+          code: 'queue_work_residue_policy_file_not_file',
+          message: 'STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE must point to a regular file.',
+          path: residuePolicyFile,
+        })
+      }
+    }
 
     const runtime = env.STATE_DAEMON_QUEUE_WORK_RUNTIME ?? env.AUN_QUEUE_WORK_RUNTIME
     const command = env.STATE_DAEMON_QUEUE_WORK_COMMAND ?? env.AUN_QUEUE_WORK_COMMAND
@@ -575,10 +603,15 @@ function queueWorkFenceConditionsFromEnv(env: Record<string, string>, params: un
   return conditions
 }
 
+export function loadQueueWorkResiduePolicyFromEnv(env: Record<string, string>): QueueWorkResiduePolicy | null {
+  const policyFile = env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE?.trim()
+  return policyFile ? loadQueueWorkResiduePolicyFile(policyFile) : null
+}
+
 export async function validateQueueWorkCanaryResiduePreflight(
   db: QueueWorkCanaryResidueDb,
   env: Record<string, string>,
-  options: { limit?: number } = {},
+  options: QueueWorkResiduePolicyPreflightOptions = {},
 ): Promise<QueueWorkCanaryResiduePreflightResult> {
   const errors: StateDaemonPreflightIssue[] = []
   const warnings: StateDaemonPreflightIssue[] = []
@@ -608,7 +641,7 @@ export async function validateQueueWorkCanaryResiduePreflight(
   params.push(limit)
   try {
     const result = await db.query<QueueWorkCanaryResidueRow>(
-      `SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.created_at,
+      `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.created_at,
               mq.claimed_by, mq.claimed_at, mq.claim_expires_at
          FROM message_queue mq
         WHERE mq.agent_id = $1
@@ -620,12 +653,25 @@ export async function validateQueueWorkCanaryResiduePreflight(
     )
     const residues = result.rows ?? []
     if (residues.length > 0) {
-      errors.push({
-        code: 'queue_work_canary_non_fenced_nonterminal_rows',
-        message: `Queue-work scheduler canary activation requires zero non-fenced non-terminal rows for ${allowlist[0]}; found ${residues.length}: ${
-          residues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
-        }. Close or explicitly govern residue teardown before LaunchAgent mutation.`,
-      })
+      if (!options.residuePolicy) {
+        errors.push({
+          code: 'queue_work_residue_policy_missing',
+          message: `Queue-work scheduler activation found ${residues.length} non-fenced non-terminal row(s) for ${allowlist[0]} but no STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE was provided: ${
+            residues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
+          }. Provide an exact-row governed residue policy or close/rework under separate authorization before LaunchAgent mutation.`,
+        })
+      } else {
+        const policyReport = classifyQueueWorkResidueRows(
+          options.residuePolicy,
+          residues as QueueWorkResidueRow[],
+        )
+        for (const blocker of policyReport.blockers) {
+          errors.push({
+            code: blocker.code,
+            message: `${blocker.message}${blocker.mismatches?.length ? `: ${blocker.mismatches.join('; ')}` : ''}`,
+          })
+        }
+      }
     }
     return { ok: errors.length === 0, errors, warnings, residues }
   } catch (err) {
