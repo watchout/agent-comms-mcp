@@ -88,6 +88,8 @@ import {
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
+const QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY = 'queue_work_runner_error_recovery'
+const QUEUE_WORK_RUNNER_ERROR_FAILED_REASON = 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED'
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
@@ -343,9 +345,19 @@ export class StateDaemon {
       scanned: 0, rewoken: 0, reclaimed: 0, abandonReset: 0, permanentlyFailed: 0, durationMs: 0, budgetWarn: false,
     }
 
+    const runnerErrorRows = this.queueWorkScheduler ? await this.fetchQueueWorkRunnerErrorRows() : []
+    const runnerErrorIds = new Set(runnerErrorRows.map((row) => row.id))
+    for (const row of runnerErrorRows) {
+      result.scanned++
+      const recovered = await this.recoverQueueWorkRunnerErrorRow(row)
+      if (recovered === 'reclaimed') result.reclaimed++
+      if (recovered === 'failed') result.permanentlyFailed++
+    }
+
     // priority order per T15: row 3 (received-expired) > row 2 (pending-stale)
     const expired = await this.fetchReceivedExpired()
     for (const row of expired) {
+      if (runnerErrorIds.has(row.id)) continue
       result.scanned++
       if (!this.queueWorkScheduler && this.isQueueWorkSchedulerClaim(row)) {
         this.metrics.inc('state_daemon_queue_work_actions_total', {
@@ -366,6 +378,7 @@ export class StateDaemon {
 
     const observed = await this.fetchObservableWork()
     for (const row of observed) {
+      if (runnerErrorIds.has(row.id)) continue
       if (expired.some((e) => e.id === row.id)) continue
       result.scanned++
       if (row.status === 'received') {
@@ -379,6 +392,7 @@ export class StateDaemon {
     const stale = await this.fetchPendingStale()
     for (const row of stale) {
       // Skip if same row was already handled as received-expired this tick
+      if (runnerErrorIds.has(row.id)) continue
       if (expired.some((e) => e.id === row.id)) continue
       result.scanned++
       const acted = await this.runWakeIfNotSuppressed(row)
@@ -457,6 +471,7 @@ export class StateDaemon {
               last_heartbeat_at = $1::timestamptz
         WHERE mq.status IN ('received', 'in_progress')
           AND mq.claim_expires_at > $1::timestamptz
+          AND mq.payload NOT LIKE '%"runner_error"%'
           AND mq.claimed_by = mq.agent_id
           AND mq.claimed_at IS NOT NULL
           AND mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
@@ -705,6 +720,84 @@ export class StateDaemon {
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
     // After reclaim, observe the pending row without prompt injection.
     await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null })
+  }
+
+  private async recoverQueueWorkRunnerErrorRow(row: QueueRow): Promise<'reclaimed' | 'failed' | 'skipped'> {
+    const payload = parseQueuePayload(row.payload)
+    if (!payload.runner_error) return 'skipped'
+
+    const recovery = payload[QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]
+    const previousAttempts = typeof recovery === 'object' && recovery !== null
+      ? Number((recovery as { attempts?: unknown }).attempts ?? 0)
+      : 0
+    const attempts = Number.isFinite(previousAttempts) && previousAttempts > 0
+      ? Math.floor(previousAttempts)
+      : 0
+    const maxReclaims = Math.max(0, this.config.queueWorkRunnerErrorMaxReclaims)
+    const now = this.clock.now()
+
+    if (attempts >= maxReclaims) {
+      const failedPayload = JSON.stringify({
+        ...payload,
+        [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
+          attempts,
+          max_reclaims: maxReclaims,
+          last_action: 'failed',
+          last_at: now.toISOString(),
+          source: QUEUE_WORK_SCHEDULER_SOURCE,
+          reason: QUEUE_WORK_RUNNER_ERROR_FAILED_REASON,
+        },
+      })
+      const updated = await this.dbQuery(
+        `UPDATE message_queue
+            SET status='failed',
+                failed_reason=$2,
+                done_at=$3,
+                payload=$4,
+                claimed_by=NULL,
+                claimed_at=NULL,
+                claim_expires_at=NULL,
+                last_heartbeat_at=NULL
+          WHERE id=$1
+            AND status='in_progress'
+            AND payload LIKE '%"runner_error"%'`,
+        [row.id, QUEUE_WORK_RUNNER_ERROR_FAILED_REASON, now, failedPayload],
+      )
+      if (updated.rowCount !== 1) return 'skipped'
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'runner_error_failed' })
+      await this.alert.alert(
+        `queue work runner_error exhausted for ${row.agent_id} queue_id=${row.id}; marked failed`,
+      )
+      return 'failed'
+    }
+
+    const nextAttempts = attempts + 1
+    const reclaimedPayload = JSON.stringify({
+      ...payload,
+      [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
+        attempts: nextAttempts,
+        max_reclaims: maxReclaims,
+        last_action: 'reclaimed',
+        last_at: now.toISOString(),
+        source: QUEUE_WORK_SCHEDULER_SOURCE,
+      },
+    })
+    const updated = await this.dbQuery(
+      `UPDATE message_queue
+          SET status='pending',
+              payload=$2,
+              claimed_by=NULL,
+              claimed_at=NULL,
+              claim_expires_at=NULL,
+              last_heartbeat_at=NULL
+        WHERE id=$1
+          AND status='in_progress'
+          AND payload LIKE '%"runner_error"%'`,
+      [row.id, reclaimedPayload],
+    )
+    if (updated.rowCount !== 1) return 'skipped'
+    this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'runner_error_reclaimed' })
+    return 'reclaimed'
   }
 
   private recordQueueAction(action: PlannedQueueAction, row: QueueRow): void {
@@ -1381,6 +1474,22 @@ export class StateDaemon {
     sql += this.queueWorkFenceClause(params, 'mq')
     sql += this.queueWorkResidueExclusionClause(params, 'mq')
     sql += ` ORDER BY mq.claim_expires_at LIMIT $2`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
+    return rows
+  }
+
+  private async fetchQueueWorkRunnerErrorRows(): Promise<QueueRow[]> {
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status='in_progress'
+          AND mq.payload LIKE '%"runner_error"%'`
+    const params: unknown[] = [this.config.batchLimit]
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
+    sql += ` ORDER BY COALESCE(mq.claim_expires_at, mq.created_at), mq.created_at LIMIT $1`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
