@@ -143,6 +143,7 @@ export type QueueWorkFinalizeOutcome =
         | 'MISSING_RUNNER_RESULT'
         | 'MISSING_REPLY'
         | 'MISSING_REPLY_SENDER'
+        | 'RETRY_NOT_IMPLEMENTED'
         | 'FINALIZE_RACE'
       queue_id?: string
       status?: string
@@ -544,6 +545,17 @@ export async function finalizeDoneQueueWork(
         mention: envelope.reply_contract.mention,
       })
       return closeDirectly(sent.message_id ?? null, 'REPLIED')
+    }
+
+    if (result.next_action === 'retry') {
+      await db.query('ROLLBACK')
+      committed = true
+      return {
+        ok: false,
+        code: 'RETRY_NOT_IMPLEMENTED',
+        queue_id: queueIdOf(row),
+        detail: 'next_action=retry is accepted by the result schema but retry finalization is not implemented',
+      }
     }
 
     return closeDirectly(null, 'CLOSED')

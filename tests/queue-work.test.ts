@@ -421,4 +421,49 @@ describe('finalizeDoneQueueWork', () => {
     })
     expect(db.row.status).toBe('replied')
   })
+
+  test('does not terminal-close retry results until retry semantics exist', async () => {
+    const row = receivedRow({
+      status: 'done',
+      payload: JSON.stringify({
+        channel_id: 'audit',
+        author_id: 'codex-cto',
+        content: 'Audit PR #489',
+        runner_result: okResult({
+          ok: false,
+          reply: null,
+          next_action: 'retry',
+          summary: 'runtime could not complete safely',
+        }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+    let sendCount = 0
+    const replySender: QueueReplySender = {
+      async sendReply() {
+        sendCount += 1
+        return { message_id: 'reply-should-not-exist' }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      replySender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'RETRY_NOT_IMPLEMENTED',
+      queue_id: '42',
+    })
+    expect(sendCount).toBe(0)
+    expect(db.calls.map((call) => call.sql)).toEqual([
+      'BEGIN',
+      expect.stringContaining('FOR UPDATE'),
+      'ROLLBACK',
+    ])
+    expect(db.row.status).toBe('done')
+    expect(db.row.replied_with).toBeUndefined()
+  })
 })
