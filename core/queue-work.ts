@@ -437,93 +437,118 @@ export async function finalizeDoneQueueWork(
   db: QueueWorkDb,
   opts: FinalizeDoneQueueWorkOptions,
 ): Promise<QueueWorkFinalizeOutcome> {
-  const selected = await db.query<QueueWorkRow>(
-    `SELECT id, agent_id, message_id, payload, status, priority, created_at,
-            claimed_by, claimed_at, claim_expires_at
-       FROM message_queue
-      WHERE id = $1
-      FOR UPDATE`,
-    [opts.queueId],
-  )
-  const row = selected.rows[0]
-  if (!row) return { ok: false, code: 'NO_DONE_ROW', queue_id: String(opts.queueId) }
-  if (row.status === 'replied') {
-    return {
-      ok: true,
-      code: 'ALREADY_REPLIED',
-      queue_id: queueIdOf(row),
-      replied_with: null,
-    }
-  }
-  if (row.status !== 'done') {
-    return {
-      ok: false,
-      code: 'INVALID_STATE',
-      queue_id: queueIdOf(row),
-      status: row.status,
-    }
-  }
-
-  const payload = parsePayload(row.payload)
-  const result = payload.runner_result as QueueWorkResult | undefined
-  if (!resultLooksValid(result)) {
-    return {
-      ok: false,
-      code: 'MISSING_RUNNER_RESULT',
-      queue_id: queueIdOf(row),
-    }
-  }
-
-  const closeDirectly = async (
-    repliedWith: string | null,
-    code: 'REPLIED' | 'CLOSED',
-  ): Promise<QueueWorkFinalizeOutcome> => {
-    const closedAt = opts.now?.() ?? new Date()
-    const updated = await db.query<{ id: string | number }>(
-      `UPDATE message_queue
-          SET status = 'replied',
-              replied_at = $2,
-              replied_with = $3,
-              claimed_by = NULL,
-              claimed_at = NULL,
-              claim_expires_at = NULL
+  await db.query('BEGIN')
+  let committed = false
+  try {
+    const selected = await db.query<QueueWorkRow>(
+      `SELECT id, agent_id, message_id, payload, status, priority, created_at,
+              claimed_by, claimed_at, claim_expires_at
+         FROM message_queue
         WHERE id = $1
-          AND status = 'done'
-        RETURNING id`,
-      [row.id, closedAt, repliedWith],
+        FOR UPDATE`,
+      [opts.queueId],
     )
-    if (rowCount(updated) === 0) {
+    const row = selected.rows[0]
+    if (!row) {
+      await db.query('ROLLBACK')
+      committed = true
+      return { ok: false, code: 'NO_DONE_ROW', queue_id: String(opts.queueId) }
+    }
+    if (row.status === 'replied') {
+      await db.query('ROLLBACK')
+      committed = true
+      return {
+        ok: true,
+        code: 'ALREADY_REPLIED',
+        queue_id: queueIdOf(row),
+        replied_with: null,
+      }
+    }
+    if (row.status !== 'done') {
+      await db.query('ROLLBACK')
+      committed = true
       return {
         ok: false,
-        code: 'FINALIZE_RACE' as const,
+        code: 'INVALID_STATE',
+        queue_id: queueIdOf(row),
+        status: row.status,
+      }
+    }
+
+    const payload = parsePayload(row.payload)
+    const result = payload.runner_result as QueueWorkResult | undefined
+    if (!resultLooksValid(result)) {
+      await db.query('ROLLBACK')
+      committed = true
+      return {
+        ok: false,
+        code: 'MISSING_RUNNER_RESULT',
         queue_id: queueIdOf(row),
       }
     }
-    return {
-      ok: true,
-      code,
-      queue_id: queueIdOf(row),
-      replied_with: repliedWith,
-    }
-  }
 
-  if (result.next_action === 'reply') {
-    if (!result.reply || result.reply.trim().length === 0) {
-      return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
+    const closeDirectly = async (
+      repliedWith: string | null,
+      code: 'REPLIED' | 'CLOSED',
+    ): Promise<QueueWorkFinalizeOutcome> => {
+      const closedAt = opts.now?.() ?? new Date()
+      const updated = await db.query<{ id: string | number }>(
+        `UPDATE message_queue
+            SET status = 'replied',
+                replied_at = $2,
+                replied_with = $3,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                claim_expires_at = NULL
+          WHERE id = $1
+            AND status = 'done'
+          RETURNING id`,
+        [row.id, closedAt, repliedWith],
+      )
+      if (rowCount(updated) === 0) {
+        await db.query('ROLLBACK')
+        committed = true
+        return {
+          ok: false,
+          code: 'FINALIZE_RACE' as const,
+          queue_id: queueIdOf(row),
+        }
+      }
+      await db.query('COMMIT')
+      committed = true
+      return {
+        ok: true,
+        code,
+        queue_id: queueIdOf(row),
+        replied_with: repliedWith,
+      }
     }
-    if (!opts.replySender) {
-      return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
-    }
-    const envelope = buildQueueWorkEnvelope(row)
-    const sent = await opts.replySender.sendReply({
-      queue_id: queueIdOf(row),
-      agent_id: row.agent_id,
-      message_id: row.message_id,
-      content: result.reply,
-      mention: envelope.reply_contract.mention,
-    })
-    return closeDirectly(sent.message_id ?? null, 'REPLIED')
-  }
 
-  return closeDirectly(null, 'CLOSED')
+    if (result.next_action === 'reply') {
+      if (!result.reply || result.reply.trim().length === 0) {
+        await db.query('ROLLBACK')
+        committed = true
+        return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
+      }
+      if (!opts.replySender) {
+        await db.query('ROLLBACK')
+        committed = true
+        return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
+      }
+      const envelope = buildQueueWorkEnvelope(row)
+      const sent = await opts.replySender.sendReply({
+        queue_id: queueIdOf(row),
+        agent_id: row.agent_id,
+        message_id: row.message_id,
+        content: result.reply,
+        mention: envelope.reply_contract.mention,
+      })
+      return closeDirectly(sent.message_id ?? null, 'REPLIED')
+    }
+
+    return closeDirectly(null, 'CLOSED')
+  } catch (err) {
+    if (!committed) await db.query('ROLLBACK').catch(() => {})
+    throw err
+  }
 }
