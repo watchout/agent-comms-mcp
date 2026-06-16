@@ -70,6 +70,12 @@ import {
   formatStateDaemonLaunchAgentReadinessText,
 } from '../core/state-daemon-launchagent-readiness'
 import {
+  buildStateDaemonCanaryResultVerificationReport,
+  buildStateDaemonCanaryPreflightReport,
+  formatStateDaemonCanaryResultVerificationText,
+  formatStateDaemonCanaryPreflightText,
+} from '../core/state-daemon-canary-preflight'
+import {
   assertMessageQueueStatusVocabularyCompatible,
   formatMessageQueueStatusCodeDrift,
   isDbCodeDriftError,
@@ -4466,8 +4472,8 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
 }
 
 async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness') {
-    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness> ...')
+  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'canary-preflight' && subcommand !== 'canary-verify') {
+    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness|canary-preflight|canary-verify> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
@@ -4477,6 +4483,10 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
+        : subcommand === 'canary-preflight'
+          ? 'Usage: agent-com state-daemon canary-preflight --agent-id <id> [--expected-commit <sha>] [--require-scheduler-enabled] [--expected-denylist <csv>] [--format json|text]'
+        : subcommand === 'canary-verify'
+          ? 'Usage: agent-com state-daemon canary-verify --agent-id <id> --queue-id <id> [--message-id <uuid>] [--claim-source <source>] [--invocation-source <source>] [--allowlist <csv>] [--format json|text]'
         : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
     process.exit(2)
   }
@@ -4527,6 +4537,68 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       const report = buildQueueProcessingReadinessReport(rows, inspectStateDaemonRuntime())
       if (format === 'text') {
         process.stdout.write(formatQueueProcessingReadinessText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = 1
+    } finally {
+      await db.end()
+    }
+    return
+  }
+  if (subcommand === 'canary-preflight') {
+    const agentId = flags['agent-id']
+    if (!agentId) {
+      console.error('Usage: agent-com state-daemon canary-preflight --agent-id <id> [--expected-commit <sha>] [--require-scheduler-enabled] [--expected-denylist <csv>] [--format json|text]')
+      process.exit(2)
+    }
+    const db = await getDb()
+    try {
+      const snapshots = collectRuntimeCleanupSnapshots()
+      const runtimeCleanupReport = await buildRuntimeCleanupReport((db as any).__adapter, {
+        staleMinutes: parsePositiveIntFlag(flags['stale-minutes'], 15, 'stale-minutes'),
+        tmuxPanes: snapshots.tmuxPanes,
+        portListeners: snapshots.portListeners,
+      }, true)
+      const report = await buildStateDaemonCanaryPreflightReport((db as any).__adapter, {
+        targetAgentId: agentId,
+        expectedCommit: flags['expected-commit'] ?? null,
+        expectedDenylist: parseCsvFlag(flags['expected-denylist']) ?? null,
+        requireSchedulerEnabled: hasFlag(flags, 'require-scheduler-enabled') && flagEnabled(flags['require-scheduler-enabled']),
+        requireExactAllowlist: hasFlag(flags, 'require-exact-allowlist') ? flagEnabled(flags['require-exact-allowlist']) : true,
+        plistPath: flags['plist-path'] ?? null,
+        runtimeCleanupReport,
+      })
+      if (format === 'text') {
+        process.stdout.write(formatStateDaemonCanaryPreflightText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = 1
+    } finally {
+      await db.end()
+    }
+    return
+  }
+  if (subcommand === 'canary-verify') {
+    const agentId = flags['agent-id']
+    const queueId = flags['queue-id']
+    if (!agentId || !queueId) {
+      console.error('Usage: agent-com state-daemon canary-verify --agent-id <id> --queue-id <id> [--message-id <uuid>] [--claim-source <source>] [--invocation-source <source>] [--allowlist <csv>] [--format json|text]')
+      process.exit(2)
+    }
+    const db = await getDb()
+    try {
+      const report = await buildStateDaemonCanaryResultVerificationReport((db as any).__adapter, {
+        agentId,
+        queueId,
+        messageId: flags['message-id'] ?? null,
+        claimSource: flags['claim-source'] ?? undefined,
+        invocationSource: flags['invocation-source'] ?? undefined,
+        allowlist: parseCsvFlag(flags.allowlist) ?? [agentId],
+      })
+      if (format === 'text') {
+        process.stdout.write(formatStateDaemonCanaryResultVerificationText(report))
       } else {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       }
@@ -5923,6 +5995,10 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
+  state-daemon canary-preflight --agent-id <id> [--expected-commit <sha>] [--require-scheduler-enabled] [--expected-denylist <csv>] [--format json|text]
+                                                       — read-only #742 bounded #722 canary evidence bundle; no row insert, restart, launchctl, Discord, or fleet mutation
+  state-daemon canary-verify --agent-id <id> --queue-id <id> [--message-id <uuid>] [--claim-source <source>] [--invocation-source <source>] [--allowlist <csv>] [--format json|text]
+                                                       — read-only #742 post-canary DB-primary verifier; no queue claim, terminal close, restart, launchctl, Discord, or fleet mutation
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
