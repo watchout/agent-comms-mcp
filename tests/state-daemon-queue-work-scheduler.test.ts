@@ -167,6 +167,12 @@ class RunnerErrorSweepDb implements DBClient {
       && sql.includes("mq.status='in_progress'")
       && sql.includes('runner_error')
     ) {
+      const excludedIds = (params ?? [])
+        .filter((param): param is number[] => Array.isArray(param) && param.every((item) => typeof item === 'number'))
+        .flat()
+      if (excludedIds.includes(Number(this.row?.id))) {
+        return { rows: [] as T[], rowCount: 0 }
+      }
       if (this.row?.status === 'in_progress') {
         return { rows: [{ ...this.row }] as T[], rowCount: 1 }
       }
@@ -735,6 +741,61 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
   })
 
+  test('runner_error recovery does not reclaim policy-preserved residue rows', async () => {
+    const db = new RunnerErrorSweepDb({
+      id: 121744,
+      agent_id: 'secretary',
+      status: 'in_progress',
+      message_id: '51647a24-0bfe-4efc-8cc8-2c795069bbf0',
+      payload: JSON.stringify({
+        content: 'incomplete canary residue',
+        receive_claim: {
+          source: 'state-daemon-queue-work-scheduler',
+        },
+        runner_error: {
+          invocation_source: 'state-daemon-queue-work-scheduler',
+          message: 'adapter failed',
+        },
+      }),
+      claim_expires_at: new Date('2026-06-15T10:55:00.000Z'),
+      claimed_by: 'secretary',
+      claimed_at: new Date('2026-06-15T10:51:34.000Z'),
+      created_at: new Date('2026-06-15T10:51:34.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: new Date('2026-06-15T10:52:00.000Z'),
+    })
+    const alert = new FakeAlertSink()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-15T11:00:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert,
+      queueWorkScheduler: {
+        async runReceived() {},
+      },
+      config: {
+        agentAllowlist: ['secretary'],
+        queueWorkResidueExcludedQueueIds: [121744],
+      },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+
+      expect(result.scanned).toBe(0)
+      expect(result.reclaimed).toBe(0)
+      expect(result.permanentlyFailed).toBe(0)
+      expect(db.row.status).toBe('in_progress')
+      expect(db.updates).toEqual([])
+      expect(alert.alerts).toEqual([])
+    } finally {
+      await daemon.stop()
+    }
+  })
+
   test('queue-work fence is applied to sweep fetch SQL', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
@@ -798,8 +859,12 @@ describe('state_daemon queue work scheduler boundary', () => {
 
     const queueSelects = db.queries
       .filter((query) => query.sql.includes('FROM message_queue mq'))
-      .filter((query) => query.sql.includes("mq.status='pending'") || query.sql.includes("mq.status IN ('received', 'in_progress')"))
-    expect(queueSelects.length).toBeGreaterThanOrEqual(3)
+      .filter((query) => (
+        query.sql.includes("mq.status='pending'")
+        || query.sql.includes("mq.status IN ('received', 'in_progress')")
+        || (query.sql.includes("mq.status='in_progress'") && query.sql.includes('runner_error'))
+      ))
+    expect(queueSelects.length).toBeGreaterThanOrEqual(4)
     for (const query of queueSelects) {
       expect(query.sql).toContain('NOT (mq.id = ANY')
     }

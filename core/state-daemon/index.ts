@@ -1489,6 +1489,7 @@ export class StateDaemon {
     const params: unknown[] = [this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
     sql += ` ORDER BY COALESCE(mq.claim_expires_at, mq.created_at), mq.created_at LIMIT $1`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
