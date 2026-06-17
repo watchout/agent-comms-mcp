@@ -33,6 +33,8 @@ const REQUIRED_REPORTS: GateReportName[] = [
   'install-plan',
 ]
 
+const REPORT_MAX_BUFFER_BYTES = 64 * 1024 * 1024
+
 export interface GatePackOptions {
   outputDir: string
   databaseUrl: string
@@ -390,6 +392,7 @@ export function runReport(command: GateCommand, repoRoot: string): unknown {
   const result = spawnSync(command.command, command.args, {
     cwd: repoRoot,
     encoding: 'utf8',
+    maxBuffer: REPORT_MAX_BUFFER_BYTES,
     env: {
       ...process.env,
       ...(command.env ?? {}),

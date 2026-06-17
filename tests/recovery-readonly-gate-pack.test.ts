@@ -23,6 +23,8 @@ const REPORTS: GateReportName[] = [
   'install-plan',
 ]
 
+const CLASSIFY_PR_PATH = join(import.meta.dir, '..', 'scripts', 'classify-pr.sh')
+
 function options(overrides: Partial<GatePackOptions> = {}): GatePackOptions {
   return {
     outputDir: '/tmp/aun-readonly-gate-evidence',
@@ -301,6 +303,41 @@ describe('#602 recovery read-only gate pack', () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
+  })
+
+  test('large JSON reports are captured without buffer false failure', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'aun-readonly-gate-pack-'))
+    try {
+      const outputFile = join(tmp, 'fleet-readiness.json')
+      const report = runReport({
+        report: 'fleet-readiness',
+        outputFile,
+        command: 'bun',
+        args: [
+          '-e',
+          'const payload = "x".repeat(2 * 1024 * 1024); console.log(JSON.stringify({ ok: true, go_no_go: "GO", mutation_performed: false, restart_performed: false, payload }));',
+        ],
+      }, process.cwd()) as Record<string, unknown>
+      const stored = JSON.parse(readFileSync(outputFile, 'utf8'))
+
+      expect(report.command_error).toBeUndefined()
+      expect(report).toMatchObject({
+        ok: true,
+        go_no_go: 'GO',
+        mutation_performed: false,
+        restart_performed: false,
+      })
+      expect(typeof report.payload).toBe('string')
+      expect((report.payload as string).length).toBe(2 * 1024 * 1024)
+      expect(stored).toMatchObject(report)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('recovery gate pack changes require protected PR routing', () => {
+    const classifier = readFileSync(CLASSIFY_PR_PATH, 'utf8')
+    expect(classifier).toContain('recovery-readonly-gate-pack')
   })
 
   test('diagnostic NO-GO JSON with exit 1 is preserved as report evidence', () => {
