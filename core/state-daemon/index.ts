@@ -652,17 +652,24 @@ export class StateDaemon {
         agent: bot,
       })
       if (!surface.actionable) {
-        if (surface.deterministic_non_actionable) {
-          this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
-          return this.completeNonActionableIfRequired(row, surface)
+        if (this.shouldAllowExactFencedQueueWorkPending(row, surface)) {
+          this.metrics.inc('state_daemon_queue_work_actions_total', {
+            result: 'pending_routing_bypass',
+            message_type: surface.message_type,
+          })
+        } else {
+          if (surface.deterministic_non_actionable) {
+            this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
+            return this.completeNonActionableIfRequired(row, surface)
+          }
+          this.recordQueueAction({ kind: 'routing_hold', terminal: false }, row)
+          this.metrics.inc('state_daemon_wake_actions_total', {
+            result: 'routing_non_actionable_held',
+            message_type: surface.message_type,
+            route_reason: surface.routing.route_reason,
+          })
+          return false
         }
-        this.recordQueueAction({ kind: 'routing_hold', terminal: false }, row)
-        this.metrics.inc('state_daemon_wake_actions_total', {
-          result: 'routing_non_actionable_held',
-          message_type: surface.message_type,
-          route_reason: surface.routing.route_reason,
-        })
-        return false
       }
     }
     let hasActiveClaim = false
@@ -1048,6 +1055,17 @@ export class StateDaemon {
       if (!Number.isFinite(fenceTime) || !Number.isFinite(rowTime) || rowTime < fenceTime) return false
     }
     return true
+  }
+
+  private shouldAllowExactFencedQueueWorkPending(row: QueueRow, surface: QueueSurfaceClassification): boolean {
+    return !!(
+      this.queueWorkScheduler?.runPending
+      && row.status === 'pending'
+      && !surface.deterministic_non_actionable
+      && this.queueWorkFenceConfigured()
+      && !this.isQueueWorkResidueExcluded(row)
+      && this.isQueueWorkFenceInScope(row)
+    )
   }
 
   private queueWorkFenceClause(params: unknown[], alias: string): string {

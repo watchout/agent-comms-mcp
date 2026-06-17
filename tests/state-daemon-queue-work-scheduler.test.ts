@@ -122,7 +122,7 @@ class PendingLlmDb implements DBClient {
           completed_at: '2026-05-07T23:55:00.000Z',
           evidence_path: null,
           evidence_log_id: null,
-          valid_until: '2026-05-08T01:00:00.000Z',
+          valid_until: '2030-05-08T01:00:00.000Z',
           source: 'wasurezu_boot_recovery',
           metadata: {},
         }] as T[],
@@ -316,6 +316,130 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(tmux.sentKeys).toEqual([])
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'pending_runner_invoked',
+    })).toBe(1)
+  })
+
+  test('exact-fenced phase handoff canaries bypass routing hold and use pending scheduler', async () => {
+    const agentId = 'l2auditor'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input)
+      },
+    }
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, {
+        id: 121926,
+        agent_id: agentId,
+        status: 'pending',
+        message_id: 'b7ef5baa-2562-45ae-a52d-1fca0503e4c3',
+        payload: JSON.stringify({
+          author_id: 'agent-com-dev',
+          content: 'PR #773 L2 audit required',
+          message_type: 'phase_handoff',
+          source: 'cli-notify',
+        }),
+        claim_expires_at: null,
+        created_at: new Date('2026-06-17T03:13:09.088Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-17T03:14:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+      config: {
+        codexRunnerEnabled: true,
+        queueWorkFenceQueueIds: [121926],
+        queueWorkFenceMessageIds: ['b7ef5baa-2562-45ae-a52d-1fca0503e4c3'],
+        queueWorkFenceCreatedAfter: '2026-06-17T03:13:09.088Z',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 121926,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 121926, agentId }])
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'pending_routing_bypass',
+      message_type: 'phase_handoff',
+    })).toBe(1)
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'pending_runner_invoked',
+    })).toBe(1)
+    expect(metrics.countInc('state_daemon_wake_actions_total', {
+      result: 'routing_non_actionable_held',
+      message_type: 'phase_handoff',
+    })).toBe(0)
+  })
+
+  test('non-fenced phase handoff rows remain routing-held before pending scheduler', async () => {
+    const agentId = 'l2auditor'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input)
+      },
+    }
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, {
+        id: 121927,
+        agent_id: agentId,
+        status: 'pending',
+        message_id: 'msg-121927',
+        payload: JSON.stringify({
+          author_id: 'agent-com-dev',
+          content: 'unfenced phase handoff',
+          message_type: 'phase_handoff',
+          source: 'cli-notify',
+        }),
+        claim_expires_at: null,
+        created_at: new Date('2026-06-17T03:13:09.088Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-06-17T03:14:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+      config: { codexRunnerEnabled: true },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 121927,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([])
+    expect(metrics.countInc('state_daemon_wake_actions_total', {
+      result: 'routing_non_actionable_held',
+      message_type: 'phase_handoff',
     })).toBe(1)
   })
 
