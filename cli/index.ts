@@ -70,6 +70,10 @@ import {
   formatStateDaemonLaunchAgentReadinessText,
 } from '../core/state-daemon-launchagent-readiness'
 import {
+  buildQueueWorkActivationPlan,
+  formatQueueWorkActivationPlanText,
+} from '../core/state-daemon/queue-work-activation-plan'
+import {
   assertMessageQueueStatusVocabularyCompatible,
   formatMessageQueueStatusCodeDrift,
   isDbCodeDriftError,
@@ -4466,8 +4470,8 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
 }
 
 async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness') {
-    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness> ...')
+  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-activation-plan') {
+    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness|queue-work-activation-plan> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
@@ -4477,7 +4481,9 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
-        : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
+        : subcommand === 'queue-work-activation-plan'
+          ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--format json|text]'
+          : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
     process.exit(2)
   }
   if (subcommand === 'install-plan') {
@@ -4527,6 +4533,38 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       const report = buildQueueProcessingReadinessReport(rows, inspectStateDaemonRuntime())
       if (format === 'text') {
         process.stdout.write(formatQueueProcessingReadinessText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = 1
+    } finally {
+      await db.end()
+    }
+    return
+  }
+  if (subcommand === 'queue-work-activation-plan') {
+    if (hasFlag(flags, 'execute')) {
+      console.error('Error: state-daemon queue-work-activation-plan is read-only; execution requires a separate approved restore command')
+      process.exit(2)
+    }
+    const agentId = flags['agent-id']
+    const commit = flags.commit
+    if (!agentId || !commit) {
+      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--format json|text]')
+      process.exit(2)
+    }
+    const db = await getDb()
+    try {
+      const report = await buildQueueWorkActivationPlan(db.__adapter, {
+        agentId,
+        queueId: flags['queue-id'],
+        commit,
+        runtime: flags.runtime ?? flags['queue-work-runtime'],
+        queueWorkCommand: flags.command ?? flags['queue-work-command'],
+        residuePolicyFile: flags['residue-policy-file'] ?? flags['queue-work-residue-policy-file'],
+      })
+      if (format === 'text') {
+        process.stdout.write(formatQueueWorkActivationPlanText(report))
       } else {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       }
@@ -5923,6 +5961,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
+  state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--format json|text]
+                                                       — read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics
   queue preflight [--gate all|runtime|projection] [--agent-id <id>] [--stale-minutes 15] [--format json|text]
