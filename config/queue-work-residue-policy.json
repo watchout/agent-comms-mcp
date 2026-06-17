@@ -99,6 +99,18 @@
       "expected_status": ["pending"],
       "expected_payload_source": "cli-notify",
       "notes": "Superseded PR #773 L2 audit handoff residue before Layer 0 final PASS evidence. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later l2auditor canaries."
+    },
+    {
+      "queue_id": 121938,
+      "agent_id": "l2auditor",
+      "message_id": "e717e0c6-549a-45e8-ba39-73b26f99c11a",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/775#issuecomment-4725963035",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "PR #775 L2 handoff delivery residue. PR #775 merged by CI after green checks; preserve as GitHub/AUN delivery evidence and exclude from later exact-row l2auditor activation canaries."
     }
   ]
 }
