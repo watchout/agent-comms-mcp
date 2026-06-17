@@ -35,6 +35,7 @@ export interface BotStatusDbRow {
   heartbeat_ok: boolean
   pending_count: number
   oldest_pending_at: string | null
+  active_claim_count: number
   health_state: BotHealthState
   active_connector_count: number
   runtime_linked_connector_count: number
@@ -46,11 +47,15 @@ export interface BotStatusDbRow {
 
 const QUERY = `
   WITH queue_status AS (
-    SELECT agent_id,
-           COUNT(id) FILTER (WHERE status = 'pending') AS pending_count,
-           MIN(created_at) FILTER (WHERE status = 'pending') AS oldest_pending_at
-      FROM message_queue
-     GROUP BY agent_id
+    SELECT mq.agent_id,
+           COUNT(mq.id) FILTER (WHERE mq.status = 'pending') AS pending_count,
+           MIN(mq.created_at) FILTER (WHERE mq.status = 'pending') AS oldest_pending_at,
+           COUNT(mq.id) FILTER (
+             WHERE mq.status IN ('received', 'in_progress')
+               AND mq.claimed_by = mq.agent_id
+           ) AS active_claim_count
+      FROM message_queue mq
+     GROUP BY mq.agent_id
   ),
   endpoint_status AS (
     SELECT ci.agent_id,
@@ -78,6 +83,7 @@ const QUERY = `
          (a.last_seen_at > NOW() - INTERVAL '60 seconds') AS heartbeat_ok,
          COALESCE(q.pending_count, 0) AS pending_count,
          q.oldest_pending_at,
+         COALESCE(q.active_claim_count, 0) AS active_claim_count,
          CASE
            WHEN a.last_seen_at IS NULL THEN 'offline'
            -- Order matters: busy_stuck must be checked before crashed, otherwise
@@ -118,6 +124,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     heartbeat_ok: boolean
     pending_count: string | number
     oldest_pending_at: Date | null
+    active_claim_count: string | number
     health_state: BotHealthState
     active_connector_count: string | number
     runtime_linked_connector_count: string | number
@@ -135,6 +142,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
       heartbeat_ok: Boolean(row.heartbeat_ok),
       pending_count: parseCount(row.pending_count),
       oldest_pending_at: row.oldest_pending_at ? row.oldest_pending_at.toISOString() : null,
+      active_claim_count: parseCount(row.active_claim_count),
       health_state: row.health_state,
       active_connector_count: parseCount(row.active_connector_count),
       runtime_linked_connector_count: parseCount(row.runtime_linked_connector_count),

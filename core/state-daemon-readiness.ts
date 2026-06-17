@@ -44,6 +44,8 @@ export interface StateDaemonRuntimeReadiness {
   }
   environment: {
     database_url: string | null
+    codex_runner_enabled: string | null
+    queue_work_scheduler_enabled: string | null
     agent_allowlist: string | null
     agent_denylist: string | null
   }
@@ -131,6 +133,15 @@ export interface QueueProcessingReadinessReport {
     pending_total: number
     active_claim_total: number
     wake_state_counts: Record<QueueWakeState, number>
+    codex_runner_enabled: boolean
+    queue_work_scheduler_enabled: boolean
+    runner_enabled: boolean
+    agent_scope_blockers: Array<{
+      agent_id: string
+      pending_count: number
+      active_claim_count: number
+      blocker_codes: string[]
+    }>
     stuck_agents: Array<{
       agent_id: string
       queue_wake_state: QueueWakeState
@@ -256,6 +267,12 @@ function parseCsv(raw: string | null | undefined): string[] {
   return raw.split(',').map((part) => part.trim()).filter(Boolean)
 }
 
+function envEnabled(raw: string | null | undefined): boolean {
+  if (!raw) return false
+  const normalized = raw.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+
 function isInactiveStatus(status: string | null): boolean {
   return status === 'disabled' || status === 'offline' || status === 'retired'
 }
@@ -291,6 +308,7 @@ function parseLaunchctlPrint(output: string): {
   workingDirectory: string | null
   stdoutPath: string | null
   stderrPath: string | null
+  environment: Record<string, string>
 } {
   const state = output.match(/\bstate = ([^\n]+)/)?.[1]?.trim() ?? null
   const pidRaw = output.match(/\bpid = (\d+)/)?.[1]
@@ -306,7 +324,20 @@ function parseLaunchctlPrint(output: string): {
     workingDirectory: output.match(/\bworking directory = ([^\n]+)/)?.[1]?.trim() ?? null,
     stdoutPath: output.match(/\bstdout path = ([^\n]+)/)?.[1]?.trim() ?? null,
     stderrPath: output.match(/\bstderr path = ([^\n]+)/)?.[1]?.trim() ?? null,
+    environment: parseLaunchctlEnvironment(output),
   }
+}
+
+function parseLaunchctlEnvironment(output: string): Record<string, string> {
+  const match = output.match(/(?:^|\n)\s*environment = \{\n([\s\S]*?)\n\s*\}/)
+  if (!match) return {}
+  const env: Record<string, string> = {}
+  for (const pair of match[1].matchAll(/^\s*([^=\n]+?)\s*=>\s*(.*?)\s*$/gm)) {
+    const key = pair[1].trim()
+    const value = pair[2].trim()
+    if (key) env[key] = value
+  }
+  return env
 }
 
 export function fingerprintFatalStderr(stderrTail: string): string | null {
@@ -361,6 +392,7 @@ export function inspectStateDaemonRuntime(options: StateDaemonRuntimeOptions = {
   let workingDirectory = plistText ? xmlKeyValue(plistText, 'WorkingDirectory') : null
   let stdoutPath = plistText ? xmlKeyValue(plistText, 'StandardOutPath') : null
   let stderrPath = plistText ? xmlKeyValue(plistText, 'StandardErrorPath') : null
+  let launchctlEnv: Record<string, string> = {}
 
   let launchdAvailable = true
   let loaded: boolean | null = null
@@ -380,6 +412,7 @@ export function inspectStateDaemonRuntime(options: StateDaemonRuntimeOptions = {
     workingDirectory = parsed.workingDirectory ?? workingDirectory
     stdoutPath = parsed.stdoutPath ?? stdoutPath
     stderrPath = parsed.stderrPath ?? stderrPath
+    launchctlEnv = parsed.environment
   } catch (err) {
     launchdAvailable = (err as NodeJS.ErrnoException).code !== 'ENOENT'
     loaded = plistText ? false : null
@@ -441,9 +474,11 @@ export function inspectStateDaemonRuntime(options: StateDaemonRuntimeOptions = {
       plist_path: plistText ? plistPath : null,
     },
     environment: {
-      database_url: plistEnv.DATABASE_URL ?? null,
-      agent_allowlist: plistEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? null,
-      agent_denylist: plistEnv.STATE_DAEMON_AGENT_DENYLIST ?? null,
+      database_url: launchctlEnv.DATABASE_URL ?? plistEnv.DATABASE_URL ?? null,
+      codex_runner_enabled: launchctlEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED ?? plistEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED ?? null,
+      queue_work_scheduler_enabled: launchctlEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED ?? plistEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED ?? null,
+      agent_allowlist: launchctlEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? plistEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? null,
+      agent_denylist: launchctlEnv.STATE_DAEMON_AGENT_DENYLIST ?? plistEnv.STATE_DAEMON_AGENT_DENYLIST ?? null,
     },
     stderr: {
       path: stderrPath,
@@ -747,14 +782,21 @@ export function summarizeQueueWakeStates(rows: Iterable<BotStatusDbRow>): {
   }
   const stuck_agents: Array<{ agent_id: string; queue_wake_state: QueueWakeState; pending_count: number; oldest_pending_at: string | null; active_claim_count: number }> = []
   for (const row of rows) {
-    counts[row.queue_wake_state]++
-    if (row.queue_wake_state === 'idle_pending_no_wake_progress' || row.queue_wake_state === 'busy_active_pending_growth') {
+    const legacyWakeState = (row as BotStatusDbRow & { queue_wake_state?: QueueWakeState }).queue_wake_state
+    const queueWakeState = legacyWakeState && legacyWakeState in counts
+      ? legacyWakeState
+      : row.pending_count > 0
+        ? 'pending_observed'
+        : 'none'
+    const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
+    counts[queueWakeState]++
+    if (queueWakeState === 'idle_pending_no_wake_progress' || queueWakeState === 'busy_active_pending_growth') {
       stuck_agents.push({
         agent_id: row.agent_id,
-        queue_wake_state: row.queue_wake_state,
+        queue_wake_state: queueWakeState,
         pending_count: row.pending_count,
         oldest_pending_at: row.oldest_pending_at,
-        active_claim_count: row.active_claim_count,
+        active_claim_count: activeClaimCount,
       })
     }
   }
@@ -809,12 +851,60 @@ export function buildQueueProcessingReadinessReport(
       evidence: agent,
     }))
   }
+  const allowlist = parseCsv(runtime.environment.agent_allowlist)
+  const denylist = parseCsv(runtime.environment.agent_denylist)
+  const codexRunnerEnabled = envEnabled(runtime.environment.codex_runner_enabled)
+  const queueWorkSchedulerEnabled = envEnabled(runtime.environment.queue_work_scheduler_enabled)
+  const runnerEnabled = codexRunnerEnabled || queueWorkSchedulerEnabled
+  const agentScopeBlockers: QueueProcessingReadinessReport['queue_processing_readiness']['agent_scope_blockers'] = []
+  const addQueueBlockerCode = (code: string) => {
+    if (!queueBlockerCodes.includes(code)) queueBlockerCodes.push(code)
+  }
+
+  for (const row of rowList) {
+    const blockerCodes: string[] = []
+    const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
+    if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
+    if (allowlist.length > 0 && !allowlist.includes(row.agent_id)) blockerCodes.push('STATE_DAEMON_AGENT_NOT_ALLOWLISTED')
+    if (denylist.includes(row.agent_id)) blockerCodes.push('STATE_DAEMON_AGENT_DENYLISTED')
+    if (blockerCodes.length === 0) continue
+
+    agentScopeBlockers.push({
+      agent_id: row.agent_id,
+      pending_count: row.pending_count,
+      active_claim_count: activeClaimCount,
+      blocker_codes: blockerCodes,
+    })
+    for (const code of blockerCodes) {
+      addQueueBlockerCode(code)
+      const message =
+        code === 'STATE_DAEMON_RUNNER_DISABLED'
+          ? 'state-daemon has no autonomous queue runner enabled for target queue processing'
+          : code === 'STATE_DAEMON_AGENT_NOT_ALLOWLISTED'
+            ? 'state-daemon agent allowlist excludes the target agent'
+            : 'state-daemon agent denylist excludes the target agent'
+      blockers.push(readinessFinding(code, 'blocker', message, {
+        agent_id: row.agent_id,
+        evidence: {
+          pending_count: row.pending_count,
+          active_claim_count: activeClaimCount,
+          codex_runner_enabled: runtime.environment.codex_runner_enabled,
+          queue_work_scheduler_enabled: runtime.environment.queue_work_scheduler_enabled,
+          agent_allowlist: runtime.environment.agent_allowlist,
+          agent_denylist: runtime.environment.agent_denylist,
+        },
+      }))
+    }
+  }
   if (rowList.length === 0) {
     warnings.push(readinessFinding('NO_AGENT_STATUS_ROWS', 'warning', 'no agent status rows were returned for queue-processing readiness'))
   }
 
   const pendingTotal = rowList.reduce((sum, row) => sum + row.pending_count, 0)
-  const activeClaimTotal = rowList.reduce((sum, row) => sum + row.active_claim_count, 0)
+  const activeClaimTotal = rowList.reduce(
+    (sum, row) => sum + ((row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0),
+    0,
+  )
   const transportReady = transportBlockerCodes.length === 0
   const queueReady = queueBlockerCodes.length === 0
   const ok = transportReady && queueReady
@@ -840,6 +930,10 @@ export function buildQueueProcessingReadinessReport(
       pending_total: pendingTotal,
       active_claim_total: activeClaimTotal,
       wake_state_counts: wakeSummary.counts,
+      codex_runner_enabled: codexRunnerEnabled,
+      queue_work_scheduler_enabled: queueWorkSchedulerEnabled,
+      runner_enabled: runnerEnabled,
+      agent_scope_blockers: agentScopeBlockers,
       stuck_agents: wakeSummary.stuck_agents,
       blocker_codes: queueBlockerCodes,
     },
@@ -886,6 +980,7 @@ export function formatQueueProcessingReadinessText(report: QueueProcessingReadin
     `Result: ${report.go_no_go}`,
     `Transport: ready=${report.transport_readiness.ready} status=${report.transport_readiness.state_daemon_status} loaded=${String(report.transport_readiness.launchd_loaded)} running=${String(report.transport_readiness.launchd_running)} pid=${report.transport_readiness.pid ?? '-'}`,
     `Queue: ready=${report.queue_processing_readiness.ready} agents=${report.queue_processing_readiness.total_agents} pending=${report.queue_processing_readiness.pending_total} active_claims=${report.queue_processing_readiness.active_claim_total}`,
+    `Runners: ready=${report.queue_processing_readiness.runner_enabled} codex=${report.queue_processing_readiness.codex_runner_enabled} queue_work_scheduler=${report.queue_processing_readiness.queue_work_scheduler_enabled}`,
     `Wake states: ${Object.entries(report.queue_processing_readiness.wake_state_counts).map(([state, count]) => `${state}=${count}`).join(', ')}`,
     `Mutation performed: ${report.mutation_performed}`,
     `Restart performed: ${report.restart_performed}`,
