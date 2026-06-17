@@ -550,6 +550,62 @@ describe('finalizeDoneQueueWork', () => {
     })
   })
 
+  test('GitHub-backed handoff finalization fails closed when mediated sender returns no posted URL', async () => {
+    const writeback = {
+      mode: 'github_issue_comment' as const,
+      repo: 'watchout/agent-comms-mcp',
+      issue_number: 779,
+      body: [
+        '<!-- aun:l2-audit/v1 -->',
+        'repo: watchout/agent-comms-mcp',
+        'pr: 779',
+        'role: l2auditor',
+        'source_queue_id: 42',
+        'source_message_id: msg-1',
+        'verdict: PASS',
+      ].join('\n'),
+      evidence: ['exact_head:abc123'],
+    }
+    const row = githubBackedHandoffRow({
+      status: 'done',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+        message_type: 'phase_handoff',
+        runner_result: okResult({ reply: null, next_action: 'close', writeback }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+    const writebackSender: QueueWorkWritebackSender = {
+      async sendWriteback() {
+        return {
+          posted_with: null,
+          body_sha256: 'a'.repeat(64),
+        }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'WRITEBACK_FAILED',
+      queue_id: '42',
+      detail: 'mediated writeback sender did not return posted_with',
+    })
+    expect(db.row.status).toBe('done')
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.writeback_result).toBeUndefined()
+    expect(payload.finalizer_error).toMatchObject({
+      code: 'WRITEBACK_FAILED',
+      detail: 'mediated writeback sender did not return posted_with',
+    })
+  })
+
   test('does not terminal-close retry results until retry semantics exist', async () => {
     const row = receivedRow({
       status: 'done',

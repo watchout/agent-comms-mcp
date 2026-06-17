@@ -708,7 +708,13 @@ export async function finalizeDoneQueueWork(
       if (!sent) {
         return failClosed('WRITEBACK_FAILED', 'mediated writeback sender failed')
       }
-      writebackPostedWith = sent.posted_with ?? null
+      const postedWith = typeof sent.posted_with === 'string' && sent.posted_with.trim().length > 0
+        ? sent.posted_with.trim()
+        : null
+      if (!postedWith) {
+        return failClosed('WRITEBACK_FAILED', 'mediated writeback sender did not return posted_with')
+      }
+      writebackPostedWith = postedWith
       writebackBodySha256 = sent.body_sha256 ?? result.writeback.body_sha256 ?? null
     }
 
