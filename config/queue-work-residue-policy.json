@@ -51,6 +51,54 @@
       "expected_status": ["pending"],
       "expected_payload_source": "cli-notify",
       "notes": "Obsolete PR #765 check handoff residue. PR #765 merged at 2026-06-17T00:36:58Z with merge commit 96119595801eedc4d2c49d200e11a10b33081f3f. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later check canaries."
+    },
+    {
+      "queue_id": 121839,
+      "agent_id": "l2auditor",
+      "message_id": "7016c340-2351-4e2b-9242-e04c05ba19e1",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/764",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Obsolete PR #764 L2 re-audit handoff residue. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later l2auditor canaries."
+    },
+    {
+      "queue_id": 121876,
+      "agent_id": "l2auditor",
+      "message_id": "0794ce90-bddf-4487-be97-e208eb7735bb",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/769",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Obsolete PR #769 L2 audit handoff residue. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later l2auditor canaries."
+    },
+    {
+      "queue_id": 121919,
+      "agent_id": "l2auditor",
+      "message_id": "549bf0c9-424a-467c-a214-cecd80e08a1d",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/773#issuecomment-4725279311",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Superseded PR #773 L2 audit handoff residue for old head ba54527328d84124e5e67741f47b60b0727ed510. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later l2auditor canaries."
+    },
+    {
+      "queue_id": 121924,
+      "agent_id": "l2auditor",
+      "message_id": "2a932426-6cf3-4eb3-b99a-be999ec9c7f8",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/773#issuecomment-4725513025",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Superseded PR #773 L2 audit handoff residue before Layer 0 final PASS evidence. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later l2auditor canaries."
     }
   ]
 }
