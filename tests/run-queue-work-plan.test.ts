@@ -148,7 +148,7 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     const schema = JSON.parse(readFileSync(new URL('../schemas/queue-work-result-v1.schema.json', import.meta.url), 'utf8'))
 
     expect(schema.additionalProperties).toBe(false)
-    expect(schema.required).toEqual(['schema_version', 'ok', 'summary', 'reply', 'evidence', 'writeback', 'next_action'])
+    expect(schema.required).toEqual(['schema_version', 'ok', 'summary', 'reply', 'evidence', 'next_action'])
     expect(schema.properties.schema_version).toMatchObject({
       type: 'string',
       const: 'queue_work_result_v1',

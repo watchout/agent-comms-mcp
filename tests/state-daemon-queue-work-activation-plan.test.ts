@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { DbAdapter } from '../core/db'
 import {
   buildQueueWorkActivationPlan,
@@ -41,6 +44,14 @@ class FakeDb implements DbAdapter {
   }
 
   async close(): Promise<void> {}
+}
+
+function probeCommand(body: string = 'echo \'{"ok":true,"summary":"probe passed"}\''): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'queue-work-posting-probe-'))
+  const path = join(dir, 'probe.sh')
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, 'utf8')
+  chmodSync(path, 0o755)
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 function row(patch: Partial<Record<string, unknown>> = {}) {
@@ -167,34 +178,66 @@ describe('queue-work activation planner', () => {
   })
 
   test('allows GitHub-backed role handoffs only with an explicit mediated posting command', async () => {
+    const command = probeCommand()
     const db = new FakeDb({ 121926: [githubHandoffRow()] })
-    const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'l2auditor',
-      queueId: '121926',
-      commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
-      githubWritebackMode: 'mediated',
-      mediatedPostingCommand: '/repo/scripts/post-github-comment',
-      mediatedPostingArgsJson: '["--dry-run"]',
-    })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'l2auditor',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: command.path,
+        mediatedPostingArgsJson: '["--allow-repo","watchout/agent-comms-mcp"]',
+      })
 
-    expect(report.ok).toBe(true)
-    expect(report.handoff_contract).toMatchObject({
-      kind: 'github_backed_role_handoff',
-      github_backed: true,
-      posting_mode: 'mediated',
-    })
-    expect(report.activation_env).toMatchObject({
-      STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT: 'github_backed_role_handoff',
-      STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE: 'mediated',
-      STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND: '/repo/scripts/post-github-comment',
-      STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON: '["--dry-run"]',
-    })
-    expect(report.execute_command).toEqual(expect.arrayContaining([
-      '--queue-work-github-writeback-mode',
-      'mediated',
-      '--queue-work-mediated-posting-command',
-      '/repo/scripts/post-github-comment',
-    ]))
+      expect(report.ok).toBe(true)
+      expect(report.handoff_contract).toMatchObject({
+        kind: 'github_backed_role_handoff',
+        github_backed: true,
+        posting_mode: 'mediated',
+      })
+      expect(report.mediated_posting).toMatchObject({
+        command_path: command.path,
+        command_present: true,
+        command_probe: 'passed',
+      })
+      expect(report.activation_env).toMatchObject({
+        STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT: 'github_backed_role_handoff',
+        STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE: 'mediated',
+        STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND: command.path,
+        STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON: '["--allow-repo","watchout/agent-comms-mcp"]',
+      })
+      expect(report.execute_command).toEqual(expect.arrayContaining([
+        '--queue-work-github-writeback-mode',
+        'mediated',
+        '--queue-work-mediated-posting-command',
+        command.path,
+      ]))
+    } finally {
+      command.cleanup()
+    }
+  })
+
+  test('blocks GitHub-backed role handoffs when mediated posting probe fails', async () => {
+    const command = probeCommand('echo \'{"ok":false,"summary":"token missing"}\'; exit 1')
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'l2auditor',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: command.path,
+      })
+
+      expect(report.ok).toBe(false)
+      expect(report.go_no_go).toBe('NO_GO')
+      expect(report.mediated_posting.command_probe).toBe('failed')
+      expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_mediated_posting_command_probe_failed')
+      expect(report.execute_command).toEqual([])
+    } finally {
+      command.cleanup()
+    }
   })
 
   test('uses the existing residue preflight before producing executable commands', async () => {

@@ -11,6 +11,8 @@ import {
   type QueueReplySender,
   type QueueWorkEnvelope,
   type QueueWorkGithubIssueCommentWriteback,
+  type QueueWorkHandoffContract,
+  type QueueWorkRuntimeResultSummary,
   type QueueWorkResult,
   type QueueWorkWritebackSender,
 } from '../../core/queue-work'
@@ -188,7 +190,7 @@ function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
     'Do not post to GitHub directly.',
     'Do not inspect unrelated queue rows.',
     'If handoff_contract.github_backed is true, include writeback.mode="github_issue_comment" with repo, issue_number, body, and evidence. The trusted wrapper will post it.',
-    'If handoff_contract.github_backed is false, set writeback to null.',
+    'If handoff_contract.github_backed is false, omit writeback or set it to null.',
     'If reply_contract.required is false, use next_action "close" and omit reply.',
     'If reply_contract.required is true and you can answer, use next_action "reply" with reply text.',
     'If you cannot safely complete the work, return ok=false with next_action "retry" and a concise summary.',
@@ -451,7 +453,9 @@ interface MediatedPostingRequest {
   queue_id: string
   agent_id: string
   message_id: string | null
+  handoff_contract: QueueWorkHandoffContract
   writeback: QueueWorkGithubIssueCommentWriteback
+  runtime_result_summary: QueueWorkRuntimeResultSummary
 }
 
 class MediatedPostingCommandSender implements QueueWorkWritebackSender {
@@ -466,14 +470,18 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
     queue_id: string
     agent_id: string
     message_id: string | null
+    handoff_contract: QueueWorkHandoffContract
     writeback: QueueWorkGithubIssueCommentWriteback
-  }): Promise<{ posted_with?: string | null }> {
+    runtime_result_summary: QueueWorkRuntimeResultSummary
+  }): Promise<{ posted_with?: string | null; body_sha256?: string | null }> {
     const request: MediatedPostingRequest = {
       schema_version: 'queue_work_mediated_posting_request_v1',
       queue_id: input.queue_id,
       agent_id: input.agent_id,
       message_id: input.message_id,
+      handoff_contract: input.handoff_contract,
       writeback: input.writeback,
+      runtime_result_summary: input.runtime_result_summary,
     }
     const child = await execFileAsync(this.command, this.args, {
       cwd: this.repoRoot,
@@ -498,7 +506,10 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
     if (parsed.ok === false) {
       throw new Error(`mediated posting command returned ok=false: ${JSON.stringify(parsed).slice(0, 1000)}`)
     }
-    return { posted_with: typeof parsed.posted_with === 'string' ? parsed.posted_with : null }
+    return {
+      posted_with: typeof parsed.posted_with === 'string' ? parsed.posted_with : null,
+      body_sha256: typeof parsed.body_sha256 === 'string' ? parsed.body_sha256 : null,
+    }
   }
 }
 

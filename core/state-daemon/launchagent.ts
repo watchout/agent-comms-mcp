@@ -623,6 +623,12 @@ export function validateStateDaemonLaunchAgentConfig(
           message: 'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND must point to a regular file.',
           path: mediatedPostingCommand,
         })
+      } else if (!probe.isExecutable(mediatedPostingCommand)) {
+        errors.push({
+          code: 'queue_work_mediated_posting_command_not_executable',
+          message: 'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND must be executable.',
+          path: mediatedPostingCommand,
+        })
       }
       const postingArgsJson = env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON
         ?? env.AUN_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON

@@ -53,6 +53,7 @@ Usage:
     [--queue-work-fence-created-after <iso>]
     [--queue-work-github-writeback-mode mediated]
     [--queue-work-mediated-posting-command <path>]
+    [--github-token-file <path>]
     [--queue-work-residue-policy-file <path>] [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --agent-allowlist <agent> --disable-codex-runner [--execute]
@@ -182,6 +183,10 @@ function githubWorkPullerEnvFromArgs(args: ParsedArgs): Record<string, string> {
   })
 }
 
+function githubTokenFileEnvFromArgs(args: ParsedArgs): Record<string, string> {
+  return args.githubTokenFile ? { STATE_DAEMON_GITHUB_TOKEN_FILE: resolve(args.githubTokenFile) } : {}
+}
+
 function ensureCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): void {
   mkdirSync(plan.restoreRoot, { recursive: true })
   if (!existsSync(plan.checkoutPath)) {
@@ -242,7 +247,11 @@ async function runQueueWorkCanaryResiduePreflight(
 
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
-  const extraEnv = { ...args.extraEnv, ...githubWorkPullerEnvFromArgs(args) }
+  const extraEnv = {
+    ...args.extraEnv,
+    ...githubTokenFileEnvFromArgs(args),
+    ...githubWorkPullerEnvFromArgs(args),
+  }
   const plan = buildStateDaemonRestorePlan({
     commit: args.commit,
     restoreRoot: args.restoreRoot,

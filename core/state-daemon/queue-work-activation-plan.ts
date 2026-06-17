@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import type { DbAdapter } from '../db'
 import {
@@ -41,6 +42,13 @@ export interface QueueWorkActivationFinding {
   evidence?: Record<string, unknown>
 }
 
+export interface QueueWorkActivationMediatedPostingReadiness {
+  command_path: string | null
+  command_present: boolean
+  command_probe: 'not_required' | 'not_run' | 'passed' | 'failed'
+  summary?: string | null
+}
+
 export interface QueueWorkActivationPlanReport {
   ok: boolean
   go_no_go: 'GO' | 'NO_GO'
@@ -65,6 +73,7 @@ export interface QueueWorkActivationPlanReport {
   }
   activation_env: Record<string, string>
   handoff_contract: QueueWorkHandoffContract | null
+  mediated_posting: QueueWorkActivationMediatedPostingReadiness
   dry_run_command: string[]
   execute_command: string[]
   blockers: QueueWorkActivationFinding[]
@@ -86,6 +95,26 @@ type QueueRow = {
 const DEFAULT_RESIDUE_POLICY_FILE = 'config/queue-work-residue-policy.json'
 const DEFAULT_CODEX_OUTPUT_SCHEMA = 'schemas/queue-work-result-v1.schema.json'
 const SUPPORTED_RUNTIMES = new Set(['codex-exec', 'echo', 'command-json'])
+
+function execFileJson(
+  command: string,
+  args: string[],
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise) => {
+    execFile(command, args, {
+      encoding: 'utf-8',
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      const execErr = err as (NodeJS.ErrnoException & { code?: unknown }) | null
+      resolvePromise({
+        status: err == null ? 0 : typeof execErr.code === 'number' ? execErr.code : 1,
+        stdout: stdout ?? '',
+        stderr: stderr ?? '',
+      })
+    })
+  })
+}
 
 function normalizeText(value: string | null | undefined): string | null {
   const trimmed = value?.trim()
@@ -239,6 +268,12 @@ function emptyReport(options: QueueWorkActivationPlanOptions, blockers: QueueWor
     },
     activation_env: {},
     handoff_contract: null,
+    mediated_posting: {
+      command_path: normalizeText(options.mediatedPostingCommand ?? null),
+      command_present: false,
+      command_probe: 'not_run',
+      summary: null,
+    },
     dry_run_command: [],
     execute_command: [],
     blockers,
@@ -272,6 +307,12 @@ export async function buildQueueWorkActivationPlan(
   const mediatedPostingArgsJson = normalizeText(options.mediatedPostingArgsJson ?? null)
   const blockers: QueueWorkActivationFinding[] = []
   const warnings: QueueWorkActivationFinding[] = []
+  const mediatedPostingReadiness: QueueWorkActivationMediatedPostingReadiness = {
+    command_path: mediatedPostingCommand,
+    command_present: mediatedPostingCommand ? existsSync(mediatedPostingCommand) : false,
+    command_probe: 'not_run',
+    summary: null,
+  }
 
   if (!agentId) {
     blockers.push({ code: 'agent_id_required', message: 'Queue-work activation planning requires --agent-id.' })
@@ -386,6 +427,7 @@ export async function buildQueueWorkActivationPlan(
       ...emptyReport(options, blockers),
       generated_at: generatedAt,
       candidate,
+      mediated_posting: mediatedPostingReadiness,
       warnings,
     }
   }
@@ -412,6 +454,49 @@ export async function buildQueueWorkActivationPlan(
       code: 'queue_work_mediated_posting_command_required',
       message: 'GitHub-backed mediated queue-work handoffs require --queue-work-mediated-posting-command.',
     })
+  }
+  if (handoffContract.github_backed && mediatedPostingCommand && !existsSync(mediatedPostingCommand)) {
+    blockers.push({
+      code: 'queue_work_mediated_posting_command_not_found',
+      message: '--queue-work-mediated-posting-command must point to an existing first-class posting wrapper.',
+      evidence: { path: mediatedPostingCommand },
+    })
+  }
+  if (
+    handoffContract.github_backed &&
+    handoffContract.posting_mode === 'mediated' &&
+    mediatedPostingCommand &&
+    blockers.length === 0
+  ) {
+    const probeArgs = mediatedPostingArgsJson ? JSON.parse(mediatedPostingArgsJson) as string[] : []
+    const probe = await execFileJson(mediatedPostingCommand, [...probeArgs, '--probe'])
+    try {
+      const parsed = JSON.parse(probe.stdout || '{}')
+      if (probe.status === 0 && parsed.ok === true) {
+        mediatedPostingReadiness.command_probe = 'passed'
+        mediatedPostingReadiness.summary = typeof parsed.summary === 'string' ? parsed.summary : null
+      } else {
+        mediatedPostingReadiness.command_probe = 'failed'
+        mediatedPostingReadiness.summary = typeof parsed.summary === 'string'
+          ? parsed.summary
+          : probe.stderr.slice(0, 500)
+        blockers.push({
+          code: 'queue_work_mediated_posting_command_probe_failed',
+          message: 'Mediated posting command --probe failed.',
+          evidence: { status: probe.status, summary: mediatedPostingReadiness.summary },
+        })
+      }
+    } catch {
+      mediatedPostingReadiness.command_probe = 'failed'
+      mediatedPostingReadiness.summary = 'probe did not return JSON'
+      blockers.push({
+        code: 'queue_work_mediated_posting_command_probe_invalid',
+        message: 'Mediated posting command --probe must return JSON.',
+      })
+    }
+  }
+  if (!handoffContract.github_backed) {
+    mediatedPostingReadiness.command_probe = 'not_required'
   }
 
   const residuePolicyFile = options.residuePolicyFile === undefined
@@ -471,6 +556,7 @@ export async function buildQueueWorkActivationPlan(
     },
     candidate,
     handoff_contract: handoffContract,
+    mediated_posting: mediatedPostingReadiness,
     policy: {
       read_only: true,
       no_db_mutation: true,
@@ -499,6 +585,7 @@ export function formatQueueWorkActivationPlanText(report: QueueWorkActivationPla
     `Target: agent=${report.target.agent_id ?? '(missing)'} queue=${report.target.queue_id ?? report.candidate?.queue_id ?? '(auto)'} commit=${report.target.commit ?? '(missing)'} runtime=${report.target.runtime}`,
     `Candidate: ${report.candidate ? `${report.candidate.queue_id}:${report.candidate.agent_id}:${report.candidate.status}:${report.candidate.message_id ?? '(no-message-id)'}` : '(none)'}`,
     `Handoff contract: ${report.handoff_contract ? `${report.handoff_contract.kind} posting=${report.handoff_contract.posting_mode}` : '(none)'}`,
+    `Mediated posting: command_present=${report.mediated_posting.command_present} command_probe=${report.mediated_posting.command_probe}`,
     `Mutation performed: ${report.mutation_performed}`,
     `Restart performed: ${report.restart_performed}`,
     `Execute requires separate approval: ${report.policy.execute_requires_separate_approval}`,

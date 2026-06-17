@@ -3,7 +3,7 @@
   "$id": "https://agent-comms-mcp.local/schemas/queue-work-result-v1.schema.json",
   "title": "AUN queue_work_result_v1",
   "type": "object",
-  "required": ["schema_version", "ok", "summary", "reply", "evidence", "writeback", "next_action"],
+  "required": ["schema_version", "ok", "summary", "reply", "evidence", "next_action"],
   "properties": {
     "schema_version": {
       "type": "string",
@@ -50,6 +50,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
         }
       },
       "additionalProperties": false

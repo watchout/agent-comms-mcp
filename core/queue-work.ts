@@ -64,6 +64,8 @@ export interface QueueWorkGithubIssueCommentWriteback {
   issue_number: number
   body: string
   evidence?: string[]
+  idempotency_key?: string
+  body_sha256?: string
 }
 
 export interface QueueWorkResult {
@@ -97,8 +99,17 @@ export interface QueueWorkWritebackSender {
     queue_id: string
     agent_id: string
     message_id: string | null
+    handoff_contract: QueueWorkHandoffContract
     writeback: QueueWorkGithubIssueCommentWriteback
-  }): Promise<{ posted_with?: string | null }>
+    runtime_result_summary: QueueWorkRuntimeResultSummary
+  }): Promise<{ posted_with?: string | null; body_sha256?: string | null }>
+}
+
+export interface QueueWorkRuntimeResultSummary {
+  ok: boolean
+  summary: string
+  next_action: QueueWorkNextAction
+  evidence: string[]
 }
 
 export interface QueueWorkDb {
@@ -176,6 +187,7 @@ export type QueueWorkFinalizeOutcome =
         | 'MISSING_REPLY_SENDER'
         | 'MISSING_WRITEBACK'
         | 'MISSING_WRITEBACK_SENDER'
+        | 'WRITEBACK_FAILED'
         | 'RETRY_NOT_IMPLEMENTED'
         | 'FINALIZE_RACE'
       queue_id?: string
@@ -264,7 +276,9 @@ function writebackLooksValid(value: unknown): value is QueueWorkGithubIssueComme
     (
       writeback.evidence === undefined ||
       (Array.isArray(writeback.evidence) && writeback.evidence.every((item) => typeof item === 'string'))
-    )
+    ) &&
+    (writeback.idempotency_key === undefined || (typeof writeback.idempotency_key === 'string' && writeback.idempotency_key.trim().length > 0)) &&
+    (writeback.body_sha256 === undefined || (typeof writeback.body_sha256 === 'string' && /^[a-f0-9]{64}$/.test(writeback.body_sha256)))
   )
 }
 
@@ -592,20 +606,32 @@ export async function finalizeDoneQueueWork(
       repliedWith: string | null,
       code: 'REPLIED' | 'CLOSED' | 'WRITEBACK_POSTED',
       writebackPostedWith?: string | null,
+      writebackBodySha256?: string | null,
     ): Promise<QueueWorkFinalizeOutcome> => {
       const closedAt = opts.now?.() ?? new Date()
+      const nextPayload = writebackPostedWith
+        ? JSON.stringify({
+            ...payload,
+            writeback_result: {
+              posted_with: writebackPostedWith,
+              body_sha256: writebackBodySha256 ?? null,
+              completed_at: closedAt.toISOString(),
+            },
+          })
+        : row.payload
       const updated = await db.query<{ id: string | number }>(
         `UPDATE message_queue
             SET status = 'replied',
                 replied_at = $2,
                 replied_with = $3,
+                payload = $4,
                 claimed_by = NULL,
                 claimed_at = NULL,
                 claim_expires_at = NULL
           WHERE id = $1
             AND status = 'done'
           RETURNING id`,
-        [row.id, closedAt, repliedWith],
+        [row.id, closedAt, repliedWith, nextPayload],
       )
       if (rowCount(updated) === 0) {
         await db.query('ROLLBACK')
@@ -627,29 +653,63 @@ export async function finalizeDoneQueueWork(
       }
     }
 
+    const failClosed = async (
+      code: Extract<QueueWorkFinalizeOutcome, { ok: false }>['code'],
+      detail?: string,
+    ): Promise<QueueWorkFinalizeOutcome> => {
+      const failedAt = opts.now?.() ?? new Date()
+      const nextPayload = JSON.stringify({
+        ...payload,
+        finalizer_error: {
+          code,
+          detail: detail ?? null,
+          failed_at: failedAt.toISOString(),
+        },
+      })
+      await db.query(
+        `UPDATE message_queue
+            SET payload = $2,
+                last_heartbeat_at = $3
+          WHERE id = $1
+            AND status = 'done'`,
+        [row.id, nextPayload, failedAt],
+      )
+      await db.query('COMMIT')
+      committed = true
+      return { ok: false, code, queue_id: queueIdOf(row), detail }
+    }
+
     const handoffContract = detectQueueWorkHandoffContract({
       agentId: row.agent_id,
       payload: row.payload,
     })
     let writebackPostedWith: string | null = null
+    let writebackBodySha256: string | null = null
     if (handoffContract.github_backed) {
       if (!result.writeback) {
-        await db.query('ROLLBACK')
-        committed = true
-        return { ok: false, code: 'MISSING_WRITEBACK', queue_id: queueIdOf(row) }
+        return failClosed('MISSING_WRITEBACK')
       }
       if (!opts.writebackSender) {
-        await db.query('ROLLBACK')
-        committed = true
-        return { ok: false, code: 'MISSING_WRITEBACK_SENDER', queue_id: queueIdOf(row) }
+        return failClosed('MISSING_WRITEBACK_SENDER')
       }
       const sent = await opts.writebackSender.sendWriteback({
         queue_id: queueIdOf(row),
         agent_id: row.agent_id,
         message_id: row.message_id,
+        handoff_contract: handoffContract,
         writeback: result.writeback,
-      })
+        runtime_result_summary: {
+          ok: result.ok,
+          summary: result.summary,
+          next_action: result.next_action,
+          evidence: result.evidence ?? [],
+        },
+      }).catch((err) => null)
+      if (!sent) {
+        return failClosed('WRITEBACK_FAILED', 'mediated writeback sender failed')
+      }
       writebackPostedWith = sent.posted_with ?? null
+      writebackBodySha256 = sent.body_sha256 ?? result.writeback.body_sha256 ?? null
     }
 
     if (result.next_action === 'reply') {
@@ -671,7 +731,7 @@ export async function finalizeDoneQueueWork(
         content: result.reply,
         mention: envelope.reply_contract.mention,
       })
-      return closeDirectly(sent.message_id ?? null, 'REPLIED', writebackPostedWith)
+      return closeDirectly(sent.message_id ?? null, 'REPLIED', writebackPostedWith, writebackBodySha256)
     }
 
     if (result.next_action === 'retry') {
@@ -689,6 +749,7 @@ export async function finalizeDoneQueueWork(
       writebackPostedWith,
       writebackPostedWith ? 'WRITEBACK_POSTED' : 'CLOSED',
       writebackPostedWith,
+      writebackBodySha256,
     )
   } catch (err) {
     if (!committed) await db.query('ROLLBACK').catch(() => {})
