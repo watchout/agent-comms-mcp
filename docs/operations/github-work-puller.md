@@ -104,10 +104,14 @@ prevents an unresolved item from accumulating one puller comment per poll.
 Protected routes resolve to `stop_lane`; they are surfaced but not approved,
 merged, deployed, live-activated, or executed as autonomous work.
 
-PR conveyor labels are normalized before owner resolution:
+PR conveyor labels are normalized before owner resolution. The canonical
+standard route is `audit -> QA -> check -> CTO when high-risk`; `needs:l3-review`
+is retained only as a compatibility label for older PR conveyor runs.
 
 - `needs:l1-audit` / `needs:l2-audit` -> role `audit`, owner `codex-audit`
-- `needs:l3-review` -> role `cto`, owner `codex-cto`
+- `needs:qa` -> role `qa`, owner `qa`
+- `needs:check` -> role `check`, owner `check`
+- `needs:cto` / `needs:l3-review` -> role `cto`, owner `codex-cto`
 - `needs:ceo-approval` -> role `ceo`, owner `ceo`
 - `needs:rework` -> role `implementation`, owner `agent-com-dev`
 
