@@ -44,6 +44,12 @@ export type RecoveryReadinessBlockerCode =
   | 'PROJECTION_NO_ELIGIBLE_DELIVERY_CONSUMER'
   | 'PROJECTION_DIRECT_DELIVERY_MISMATCH'
   | 'PROJECTION_FALLBACK_DISALLOWED'
+  | 'COMPLETE_RECOVERY_UNTESTED'
+  | 'COMPLETE_RECOVERY_QUEUE_ROW_MISSING'
+  | 'COMPLETE_RECOVERY_PENDING_UNCLAIMED'
+  | 'COMPLETE_RECOVERY_REPORT_ONLY'
+  | 'COMPLETE_RECOVERY_NOT_PROCESSED'
+  | 'COMPLETE_RECOVERY_DURABLE_EVIDENCE_MISSING'
 
 export type RecoveryReadinessComponent =
   | 'scope'
@@ -51,6 +57,7 @@ export type RecoveryReadinessComponent =
   | 'launchagent'
   | 'queue'
   | 'projection'
+  | 'complete_recovery'
 
 export type RecoveryReadinessBlocker = {
   code: RecoveryReadinessBlockerCode
@@ -78,6 +85,25 @@ export type RecoveryProjectionCheckScope = {
   expectedConsumerSource?: ProjectionConsumerSource | null
   allow_fallback?: boolean
   allowFallback?: boolean
+}
+
+export type CompleteRecoveryRequiredRoleScope = {
+  name?: string
+  role?: string
+  agent_id?: string
+  agentId?: string
+  queue_id?: string | number
+  queueId?: string | number
+  message_id?: string
+  messageId?: string
+  durable_evidence_urls?: string[]
+  durableEvidenceUrls?: string[]
+  known_exclusion?: boolean
+  knownExclusion?: boolean
+  exclusion_reason?: string
+  exclusionReason?: string
+  require_github_writeback?: boolean
+  requireGithubWriteback?: boolean
 }
 
 export type RecoveryReadinessScope = {
@@ -111,6 +137,14 @@ export type RecoveryReadinessScope = {
   }
   projection_checks?: RecoveryProjectionCheckScope[]
   projectionChecks?: RecoveryProjectionCheckScope[]
+  complete_recovery?: {
+    enabled?: boolean
+    slo_seconds?: number
+    sloSeconds?: number
+    required_roles?: CompleteRecoveryRequiredRoleScope[]
+    requiredRoles?: CompleteRecoveryRequiredRoleScope[]
+  }
+  completeRecovery?: RecoveryReadinessScope['complete_recovery']
 }
 
 export type RecoveryReadinessOptions = {
@@ -183,6 +217,37 @@ export type RecoveryProjectionReadiness = {
   blocker_codes: RecoveryReadinessBlockerCode[]
 }
 
+export type CompleteRecoveryGateStatus = 'PASS' | 'FAIL' | 'BLOCKED' | 'UNTESTED' | 'EXCLUDED'
+
+export type CompleteRecoveryRoleResult = {
+  name: string
+  role: string
+  agent_id: string
+  status: CompleteRecoveryGateStatus
+  queue_id: string | number | null
+  message_id: string | null
+  queue_status: string | null
+  claimed_by: string | null
+  claimed_at: string | null
+  processed_at: string | null
+  durable_evidence_urls: string[]
+  blocker_codes: RecoveryReadinessBlockerCode[]
+  evidence: Record<string, unknown>
+}
+
+export type CompleteRecoveryReadiness = {
+  enabled: boolean
+  slo_seconds: number
+  summary: {
+    pass: number
+    fail: number
+    blocked: number
+    untested: number
+    excluded: number
+  }
+  role_results: CompleteRecoveryRoleResult[]
+}
+
 export type RecoveryReadinessReport = {
   ok: boolean
   go_no_go: 'GO' | 'NO_GO'
@@ -218,6 +283,7 @@ export type RecoveryReadinessReport = {
   launchagent: RecoveryLaunchAgentReadiness
   queue_readiness: RecoveryQueueReadiness
   projection_readiness: RecoveryProjectionReadiness[]
+  complete_recovery: CompleteRecoveryReadiness
   blockers: RecoveryReadinessBlocker[]
   recommended_next_commands: string[]
   mutation_performed: false
@@ -252,10 +318,64 @@ function optionString(primary: unknown, fallback: unknown = null): string | null
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return value
+  if (typeof value !== 'string' || value.trim().length === 0) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function optionNumber(primary: unknown, fallback: unknown = null): string | number | null {
+  const value = primary ?? fallback
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  return null
+}
+
+function stringArray(primary: unknown, fallback: unknown = []): string[] {
+  const raw = Array.isArray(primary) ? primary : (Array.isArray(fallback) ? fallback : [])
+  return uniqueStrings(raw)
+}
+
 function normalizeProjectionChecks(scope: RecoveryReadinessScope): RecoveryProjectionCheckScope[] {
   const raw = scope.projection_checks ?? scope.projectionChecks
   if (Array.isArray(raw) && raw.length > 0) return raw
   return [DEFAULT_PROJECTION_CHECK]
+}
+
+function normalizeCompleteRecoveryScope(scope: RecoveryReadinessScope) {
+  const raw = scope.complete_recovery ?? scope.completeRecovery
+  const enabled = raw?.enabled === true
+  const roles = raw?.required_roles ?? raw?.requiredRoles ?? []
+  return {
+    enabled,
+    slo_seconds: numericMinutes(raw?.slo_seconds ?? raw?.sloSeconds, 0) || 300,
+    required_roles: Array.isArray(roles) ? roles : [],
+  }
+}
+
+function normalizeCompleteRecoveryRole(raw: CompleteRecoveryRequiredRoleScope, index: number) {
+  const role = optionString(raw.role) ?? optionString(raw.name) ?? `role-${index + 1}`
+  const agentId = optionString(raw.agent_id, raw.agentId) ?? role
+  return {
+    name: optionString(raw.name) ?? role,
+    role,
+    agent_id: agentId,
+    queue_id: optionNumber(raw.queue_id, raw.queueId),
+    message_id: optionString(raw.message_id, raw.messageId),
+    durable_evidence_urls: stringArray(raw.durable_evidence_urls, raw.durableEvidenceUrls),
+    known_exclusion: Boolean(raw.known_exclusion ?? raw.knownExclusion ?? false),
+    exclusion_reason: optionString(raw.exclusion_reason, raw.exclusionReason),
+    require_github_writeback: Boolean(raw.require_github_writeback ?? raw.requireGithubWriteback ?? false),
+  }
 }
 
 function projectionCheckName(check: RecoveryProjectionCheckScope, index: number): string {
@@ -633,6 +753,282 @@ async function buildProjectionReadiness(
   }
 }
 
+async function fetchCompleteRecoveryQueueRow(
+  db: Queryable,
+  role: ReturnType<typeof normalizeCompleteRecoveryRole>,
+): Promise<Record<string, unknown> | null> {
+  if (role.queue_id !== null) {
+    const result = await db.query(
+      `SELECT id, agent_id, message_id, payload, status, created_at, read_at,
+              claimed_by, claimed_at, claim_expires_at, done_at, replied_at,
+              replied_with, failed_reason
+         FROM message_queue
+        WHERE id = $1
+        LIMIT 1`,
+      [role.queue_id],
+    )
+    return result.rows[0] ?? null
+  }
+  if (role.message_id) {
+    const result = await db.query(
+      `SELECT id, agent_id, message_id, payload, status, created_at, read_at,
+              claimed_by, claimed_at, claim_expires_at, done_at, replied_at,
+              replied_with, failed_reason
+         FROM message_queue
+        WHERE message_id = $1
+          AND agent_id = $2
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [role.message_id, role.agent_id],
+    )
+    return result.rows[0] ?? null
+  }
+  return null
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  }
+  return null
+}
+
+function githubUrlsFromUnknown(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return /^https:\/\/github\.com\/\S+/i.test(value.trim()) ? [value.trim()] : []
+  }
+  if (Array.isArray(value)) return value.flatMap(githubUrlsFromUnknown)
+  if (!isRecord(value)) return []
+  return Object.values(value).flatMap(githubUrlsFromUnknown)
+}
+
+function durableEvidenceUrlsFromQueueRow(row: Record<string, unknown>, seed: string[]): string[] {
+  const payload = parseJsonObject(row.payload)
+  const writebackResult = isRecord(payload.writeback_result) ? payload.writeback_result : {}
+  const runnerResult = isRecord(payload.runner_result) ? payload.runner_result : {}
+  return uniqueStrings([
+    ...seed,
+    ...githubUrlsFromUnknown(writebackResult.posted_with),
+    ...githubUrlsFromUnknown(writebackResult),
+    ...githubUrlsFromUnknown(runnerResult.evidence),
+    ...githubUrlsFromUnknown(runnerResult.writeback),
+    ...githubUrlsFromUnknown(payload.github_issue_url),
+    ...githubUrlsFromUnknown(payload.github_pr_url),
+  ])
+}
+
+function completeRecoveryBlocker(
+  code: RecoveryReadinessBlockerCode,
+  role: ReturnType<typeof normalizeCompleteRecoveryRole>,
+  row: Record<string, unknown> | null,
+  evidence: Record<string, unknown>,
+): RecoveryReadinessBlocker {
+  return {
+    code,
+    component: 'complete_recovery',
+    subject_type: 'complete_recovery_role',
+    subject_id: role.name,
+    queue_ids: row?.id !== undefined && row?.id !== null ? [row.id as string | number] : [],
+    message_ids: typeof row?.message_id === 'string'
+      ? [row.message_id]
+      : (role.message_id ? [role.message_id] : []),
+    evidence: {
+      role: role.role,
+      agent_id: role.agent_id,
+      queue_id: role.queue_id,
+      message_id: role.message_id,
+      ...evidence,
+    },
+  }
+}
+
+function completeRecoveryResultFromBlocker(
+  role: ReturnType<typeof normalizeCompleteRecoveryRole>,
+  row: Record<string, unknown> | null,
+  status: CompleteRecoveryGateStatus,
+  blockerCodes: RecoveryReadinessBlockerCode[],
+  durableEvidenceUrls: string[],
+  evidence: Record<string, unknown>,
+): CompleteRecoveryRoleResult {
+  return {
+    name: role.name,
+    role: role.role,
+    agent_id: role.agent_id,
+    status,
+    queue_id: (row?.id as string | number | null | undefined) ?? role.queue_id,
+    message_id: firstString(row?.message_id, role.message_id),
+    queue_status: firstString(row?.status),
+    claimed_by: firstString(row?.claimed_by),
+    claimed_at: firstString(row?.claimed_at),
+    processed_at: firstString(row?.replied_at, row?.done_at),
+    durable_evidence_urls: durableEvidenceUrls,
+    blocker_codes: blockerCodes,
+    evidence,
+  }
+}
+
+async function evaluateCompleteRecoveryRole(
+  db: Queryable,
+  role: ReturnType<typeof normalizeCompleteRecoveryRole>,
+): Promise<{ result: CompleteRecoveryRoleResult; blockers: RecoveryReadinessBlocker[] }> {
+  if (role.known_exclusion) {
+    return {
+      result: completeRecoveryResultFromBlocker(role, null, 'EXCLUDED', [], role.durable_evidence_urls, {
+        exclusion_reason: role.exclusion_reason,
+      }),
+      blockers: [],
+    }
+  }
+
+  if (role.queue_id === null && !role.message_id) {
+    const code = 'COMPLETE_RECOVERY_UNTESTED' as const
+    const evidence = { reason: 'no queue_id or message_id evidence was supplied' }
+    return {
+      result: completeRecoveryResultFromBlocker(role, null, 'UNTESTED', [code], role.durable_evidence_urls, evidence),
+      blockers: [completeRecoveryBlocker(code, role, null, evidence)],
+    }
+  }
+
+  const row = await fetchCompleteRecoveryQueueRow(db, role)
+  if (!row) {
+    const code = 'COMPLETE_RECOVERY_QUEUE_ROW_MISSING' as const
+    const evidence = { reason: 'referenced queue row was not found' }
+    return {
+      result: completeRecoveryResultFromBlocker(role, null, 'BLOCKED', [code], role.durable_evidence_urls, evidence),
+      blockers: [completeRecoveryBlocker(code, role, null, evidence)],
+    }
+  }
+
+  const payload = parseJsonObject(row.payload)
+  const messageType = firstString(payload.message_type) ?? '(unknown)'
+  const queueStatus = firstString(row.status) ?? '(unknown)'
+  const durableEvidenceUrls = durableEvidenceUrlsFromQueueRow(row, role.durable_evidence_urls)
+  const baseEvidence = {
+    queue_status: queueStatus,
+    message_type: messageType,
+    claimed_by: row.claimed_by ?? null,
+    claimed_at: row.claimed_at ?? null,
+    claim_expires_at: row.claim_expires_at ?? null,
+    done_at: row.done_at ?? null,
+    replied_at: row.replied_at ?? null,
+    durable_evidence_urls: durableEvidenceUrls,
+  }
+
+  if (messageType === 'chat' || messageType === 'notice' || messageType === 'projection' || messageType === 'report') {
+    const code = 'COMPLETE_RECOVERY_REPORT_ONLY' as const
+    const evidence = { ...baseEvidence, reason: 'message_type is deliver-only / non-actionable evidence' }
+    return {
+      result: completeRecoveryResultFromBlocker(role, row, 'FAIL', [code], durableEvidenceUrls, evidence),
+      blockers: [completeRecoveryBlocker(code, role, row, evidence)],
+    }
+  }
+
+  if (queueStatus === 'pending' || queueStatus === 'read') {
+    const code = 'COMPLETE_RECOVERY_PENDING_UNCLAIMED' as const
+    const evidence = { ...baseEvidence, reason: 'queue row has not been claimed or processed' }
+    return {
+      result: completeRecoveryResultFromBlocker(role, row, 'FAIL', [code], durableEvidenceUrls, evidence),
+      blockers: [completeRecoveryBlocker(code, role, row, evidence)],
+    }
+  }
+
+  if (queueStatus === 'received' || queueStatus === 'in_progress') {
+    const code = 'COMPLETE_RECOVERY_NOT_PROCESSED' as const
+    const evidence = { ...baseEvidence, reason: 'queue row is claimed but has no terminal processed evidence' }
+    return {
+      result: completeRecoveryResultFromBlocker(role, row, 'BLOCKED', [code], durableEvidenceUrls, evidence),
+      blockers: [completeRecoveryBlocker(code, role, row, evidence)],
+    }
+  }
+
+  const payloadHasRunnerResult = isRecord(payload.runner_result)
+  const payloadHasWritebackResult = isRecord(payload.writeback_result)
+  const processed = Boolean(row.claimed_at) && (
+    Boolean(row.done_at)
+    || Boolean(row.replied_at)
+    || payloadHasRunnerResult
+    || payloadHasWritebackResult
+  )
+  if (!processed || queueStatus === 'failed' || queueStatus === 'skipped') {
+    const code = 'COMPLETE_RECOVERY_NOT_PROCESSED' as const
+    const evidence = { ...baseEvidence, reason: 'terminal row does not prove successful bot processing' }
+    return {
+      result: completeRecoveryResultFromBlocker(role, row, 'FAIL', [code], durableEvidenceUrls, evidence),
+      blockers: [completeRecoveryBlocker(code, role, row, evidence)],
+    }
+  }
+
+  if (durableEvidenceUrls.length === 0 || role.require_github_writeback) {
+    const hasGithubEvidence = durableEvidenceUrls.some((url) => /^https:\/\/github\.com\/\S+/i.test(url))
+    if (!hasGithubEvidence) {
+      const code = 'COMPLETE_RECOVERY_DURABLE_EVIDENCE_MISSING' as const
+      const evidence = { ...baseEvidence, reason: 'processed row has no durable GitHub evidence URL' }
+      return {
+        result: completeRecoveryResultFromBlocker(role, row, 'FAIL', [code], durableEvidenceUrls, evidence),
+        blockers: [completeRecoveryBlocker(code, role, row, evidence)],
+      }
+    }
+  }
+
+  return {
+    result: completeRecoveryResultFromBlocker(role, row, 'PASS', [], durableEvidenceUrls, baseEvidence),
+    blockers: [],
+  }
+}
+
+async function buildCompleteRecoveryReadiness(
+  db: Queryable,
+  scope: RecoveryReadinessScope,
+): Promise<{ readiness: CompleteRecoveryReadiness; blockers: RecoveryReadinessBlocker[] }> {
+  const completeScope = normalizeCompleteRecoveryScope(scope)
+  if (!completeScope.enabled) {
+    return {
+      readiness: {
+        enabled: false,
+        slo_seconds: completeScope.slo_seconds,
+        summary: { pass: 0, fail: 0, blocked: 0, untested: 0, excluded: 0 },
+        role_results: [],
+      },
+      blockers: [],
+    }
+  }
+
+  if (completeScope.required_roles.length === 0) {
+    const role = normalizeCompleteRecoveryRole({ role: 'complete-recovery' }, 0)
+    const code = 'COMPLETE_RECOVERY_UNTESTED' as const
+    const evidence = { reason: 'complete_recovery.enabled=true but required_roles is empty' }
+    return {
+      readiness: {
+        enabled: true,
+        slo_seconds: completeScope.slo_seconds,
+        summary: { pass: 0, fail: 0, blocked: 0, untested: 1, excluded: 0 },
+        role_results: [completeRecoveryResultFromBlocker(role, null, 'UNTESTED', [code], [], evidence)],
+      },
+      blockers: [completeRecoveryBlocker(code, role, null, evidence)],
+    }
+  }
+
+  const evaluated = await Promise.all(completeScope.required_roles
+    .map((raw, index) => evaluateCompleteRecoveryRole(db, normalizeCompleteRecoveryRole(raw, index))))
+  const roleResults = evaluated.map((item) => item.result)
+  const summary = {
+    pass: roleResults.filter((item) => item.status === 'PASS').length,
+    fail: roleResults.filter((item) => item.status === 'FAIL').length,
+    blocked: roleResults.filter((item) => item.status === 'BLOCKED').length,
+    untested: roleResults.filter((item) => item.status === 'UNTESTED').length,
+    excluded: roleResults.filter((item) => item.status === 'EXCLUDED').length,
+  }
+  return {
+    readiness: {
+      enabled: true,
+      slo_seconds: completeScope.slo_seconds,
+      summary,
+      role_results: roleResults,
+    },
+    blockers: evaluated.flatMap((item) => item.blockers),
+  }
+}
+
 function recommendedCommands(report: {
   scopeAgentIds: string[]
   plistPath: string | null
@@ -647,6 +1043,9 @@ function recommendedCommands(report: {
   }
   if (report.blockers.some((blocker) => blocker.component === 'projection')) {
     commands.push('agent-com diagnose-projection --channel 1487368919613444156 --from codex-cto --to ceo --format json')
+  }
+  if (report.blockers.some((blocker) => blocker.component === 'complete_recovery')) {
+    commands.push('agent-com recovery readiness --scope-file <complete-recovery-scope.json> --format json')
   }
   return Array.from(new Set(commands))
 }
@@ -677,11 +1076,13 @@ export async function buildRecoveryReadinessReport(
     .filter((blocker): blocker is RecoveryReadinessBlocker => blocker !== null)
   const launch = buildLaunchAgentReadiness(scope, options)
   const projection = await Promise.all(projectionChecks.map((check) => buildProjectionReadiness(db, check)))
+  const completeRecovery = await buildCompleteRecoveryReadiness(db, scope)
   const blockers = [
     ...activationScopeBlockers(scope, projectionChecks),
     ...cp70Blockers,
     ...launch.blockers,
     ...projection.flatMap((item) => item.blockers),
+    ...completeRecovery.blockers,
   ]
   const agents = uniqueStrings([...uniqueStrings(scope.agents), ...scopeAgentIds])
   const channels = uniqueStrings([...uniqueStrings(scope.channels), ...projectionChecks.map((check) => check.channel_id)])
@@ -721,6 +1122,7 @@ export async function buildRecoveryReadinessReport(
     launchagent: launch.readiness,
     queue_readiness: queueReadinessFromCp70(scopeAgentIds, cp70Reports),
     projection_readiness: projection.map((item) => item.readiness),
+    complete_recovery: completeRecovery.readiness,
     blockers,
     recommended_next_commands: recommendedCommands({
       scopeAgentIds,
@@ -744,6 +1146,7 @@ export function formatRecoveryReadinessText(report: RecoveryReadinessReport): st
     `LaunchAgent: ${report.launchagent.runtime.status} loaded=${String(report.launchagent.runtime.launchd.loaded)} running=${String(report.launchagent.runtime.launchd.running)}`,
     `Queue pending backlog: ${report.queue_readiness.pending_backlog.total}`,
     `Projection checks: ${report.projection_readiness.map((item) => `${item.name}=${item.ok ? 'ok' : item.blocker_codes.join('|')}`).join(', ') || '(none)'}`,
+    `Complete recovery: ${report.complete_recovery.enabled ? `pass=${report.complete_recovery.summary.pass} fail=${report.complete_recovery.summary.fail} blocked=${report.complete_recovery.summary.blocked} untested=${report.complete_recovery.summary.untested} excluded=${report.complete_recovery.summary.excluded}` : 'disabled'}`,
     '',
     'Blockers:',
     ...(report.blockers.length === 0

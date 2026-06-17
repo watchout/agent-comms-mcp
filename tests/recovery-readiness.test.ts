@@ -146,6 +146,7 @@ function mockDb(options: {
   readOnlyDeliveryAgents?: string[]
   eligibleDeliveryAgents?: string[]
   agents?: Record<string, any>
+  completeRecoveryRows?: any[]
 } = {}) {
   const bindingAgents = new Set(options.bindingDeliveryAgents ?? ['codex-cto'])
   const readOnlyAgents = new Set(options.readOnlyDeliveryAgents ?? [])
@@ -189,6 +190,19 @@ function mockDb(options: {
       if (sql.includes("'agent_messages.metadata'")) return { rows: [] }
       if (sql.includes("'message_queue.active'")) return { rows: filteredRows(options.staleActiveRows, params) }
       if (sql.includes("'message_queue.baton'")) return { rows: [] }
+      if (sql.includes('FROM message_queue') && sql.includes('WHERE id = $1')) {
+        const queueId = params?.[0]
+        return { rows: (options.completeRecoveryRows ?? []).filter((row) => String(row.id) === String(queueId)).slice(0, 1) }
+      }
+      if (sql.includes('FROM message_queue') && sql.includes('WHERE message_id = $1')) {
+        const messageId = params?.[0]
+        const agentId = params?.[1]
+        return {
+          rows: (options.completeRecoveryRows ?? [])
+            .filter((row) => row.message_id === messageId && row.agent_id === agentId)
+            .slice(0, 1),
+        }
+      }
       if (sql.includes('channel_routing_policy')) return { rows: [] }
       if (sql.includes('thread_adapters')) return { rows: [] }
       if (sql.includes('channel_adapters')) {
@@ -242,6 +256,49 @@ function mockDb(options: {
     },
   }
   return db
+}
+
+function completeRecoveryScope(queueId: number, overrides: Record<string, unknown> = {}): RecoveryReadinessScope {
+  return scope({
+    agents: ['aun'],
+    projection_checks: [{
+      channel_id: '1487368919613444156',
+      sender_agent_id: 'agent-com-dev',
+      recipient_agent_ids: ['aun'],
+      expected_consumer_agent_id: 'agent-com-dev',
+      expected_consumer_source: 'sender_token_evidence',
+    }],
+    complete_recovery: {
+      enabled: true,
+      slo_seconds: 60,
+      required_roles: [{
+        role: 'aun',
+        agent_id: 'aun',
+        queue_id: queueId,
+        ...overrides,
+      }],
+    },
+  })
+}
+
+function completeRecoveryRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 122772,
+    agent_id: 'aun',
+    message_id: 'message-122772',
+    payload: JSON.stringify({ message_type: 'instruction' }),
+    status: 'pending',
+    created_at: '2026-06-01T00:00:00.000Z',
+    read_at: null,
+    claimed_by: null,
+    claimed_at: null,
+    claim_expires_at: null,
+    done_at: null,
+    replied_at: null,
+    replied_with: null,
+    failed_reason: null,
+    ...overrides,
+  }
 }
 
 const cleanOptions = {
@@ -480,6 +537,89 @@ describe('CP-80 recovery readiness', () => {
     })
     expect(text).toContain('CP-80 Recovery Readiness')
     expect(text).toContain('Result: GO')
+  })
+
+  test('complete recovery gate fails pending unclaimed live evidence', async () => {
+    setRoutingConfig({})
+    const report = await buildRecoveryReadinessReport(mockDb({
+      bindingDeliveryAgents: ['agent-com-dev'],
+      agents: { 'agent-com-dev': mockAgent('agent-com-dev') },
+      completeRecoveryRows: [completeRecoveryRow()],
+    }), completeRecoveryScope(122772, {
+      durable_evidence_urls: ['https://github.com/watchout/agent-comms-mcp/issues/715#issuecomment-1'],
+    }), cleanOptions)
+
+    expect(report.ok).toBe(false)
+    expect(report.complete_recovery.summary).toMatchObject({ fail: 1, pass: 0 })
+    expect(report.complete_recovery.role_results[0]).toMatchObject({
+      status: 'FAIL',
+      queue_id: 122772,
+      queue_status: 'pending',
+      blocker_codes: ['COMPLETE_RECOVERY_PENDING_UNCLAIMED'],
+    })
+    expect(report.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'COMPLETE_RECOVERY_PENDING_UNCLAIMED',
+        component: 'complete_recovery',
+        queue_ids: [122772],
+      }),
+    ]))
+  })
+
+  test('complete recovery gate rejects processed rows without durable evidence URL', async () => {
+    setRoutingConfig({})
+    const report = await buildRecoveryReadinessReport(mockDb({
+      bindingDeliveryAgents: ['agent-com-dev'],
+      agents: { 'agent-com-dev': mockAgent('agent-com-dev') },
+      completeRecoveryRows: [completeRecoveryRow({
+        status: 'replied',
+        claimed_by: 'aun',
+        claimed_at: '2026-06-01T00:00:01.000Z',
+        replied_at: '2026-06-01T00:00:03.000Z',
+        payload: JSON.stringify({
+          message_type: 'instruction',
+          runner_result: { ok: true, summary: 'processed' },
+        }),
+      })],
+    }), completeRecoveryScope(122772), cleanOptions)
+
+    expect(report.ok).toBe(false)
+    expect(report.complete_recovery.role_results[0]).toMatchObject({
+      status: 'FAIL',
+      blocker_codes: ['COMPLETE_RECOVERY_DURABLE_EVIDENCE_MISSING'],
+    })
+  })
+
+  test('complete recovery gate passes only claimed processed durable evidence', async () => {
+    setRoutingConfig({})
+    const report = await buildRecoveryReadinessReport(mockDb({
+      bindingDeliveryAgents: ['agent-com-dev'],
+      agents: { 'agent-com-dev': mockAgent('agent-com-dev') },
+      completeRecoveryRows: [completeRecoveryRow({
+        status: 'replied',
+        claimed_by: 'aun',
+        claimed_at: '2026-06-01T00:00:01.000Z',
+        replied_at: '2026-06-01T00:00:03.000Z',
+        payload: JSON.stringify({
+          message_type: 'instruction',
+          runner_result: { ok: true, summary: 'processed' },
+          writeback_result: {
+            posted_with: 'https://github.com/watchout/agent-comms-mcp/issues/715#issuecomment-2',
+            body_sha256: 'a'.repeat(64),
+          },
+        }),
+      })],
+    }), completeRecoveryScope(122772, {
+      require_github_writeback: true,
+    }), cleanOptions)
+
+    expect(report.ok).toBe(true)
+    expect(report.complete_recovery.summary).toMatchObject({ pass: 1, fail: 0, blocked: 0, untested: 0 })
+    expect(report.complete_recovery.role_results[0]).toMatchObject({
+      status: 'PASS',
+      queue_id: 122772,
+      durable_evidence_urls: ['https://github.com/watchout/agent-comms-mcp/issues/715#issuecomment-2'],
+    })
   })
 
   test('recovery readiness source has no activation or FIFO-drain call path', () => {
