@@ -81,18 +81,64 @@ function row121873(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRo
   }
 }
 
+const L2AUDITOR_OBSOLETE_ROWS = [
+  {
+    id: 121839,
+    message_id: '7016c340-2351-4e2b-9242-e04c05ba19e1',
+    message_type: 'chat',
+  },
+  {
+    id: 121876,
+    message_id: '0794ce90-bddf-4487-be97-e208eb7735bb',
+    message_type: 'phase_handoff',
+  },
+  {
+    id: 121919,
+    message_id: '549bf0c9-424a-467c-a214-cecd80e08a1d',
+    message_type: 'phase_handoff',
+  },
+  {
+    id: 121924,
+    message_id: '2a932426-6cf3-4eb3-b99a-be999ec9c7f8',
+    message_type: 'phase_handoff',
+  },
+] as const
+
+function rowL2AuditorObsolete(
+  item: typeof L2AUDITOR_OBSOLETE_ROWS[number],
+  patch: Partial<QueueWorkResidueRow> = {},
+): QueueWorkResidueRow {
+  return {
+    id: item.id,
+    agent_id: 'l2auditor',
+    message_id: item.message_id,
+    status: 'pending',
+    payload: JSON.stringify({
+      source: 'cli-notify',
+      message_type: item.message_type,
+    }),
+    ...patch,
+  }
+}
+
 describe('#758 queue-work residue policy model', () => {
   test('repo policy validates and exposes exact excluded queue ids', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
 
     expect(policy.schema_version).toBe('queue_work_residue_policy_v1')
-    expect(queueWorkResidueExcludedQueueIds(policy)).toEqual([120138, 120245, 121744, 121873])
-    expect(policy.entries.map((entry) => entry.authorized_action)).toEqual([
-      'preserve_only',
-      'preserve_only',
-      'preserve_only',
-      'preserve_only',
+    expect(queueWorkResidueExcludedQueueIds(policy)).toEqual([
+      120138,
+      120245,
+      121744,
+      121839,
+      121873,
+      121876,
+      121919,
+      121924,
     ])
+    expect(policy.entries.map((entry) => entry.authorized_action)).toEqual(
+      Array.from({ length: policy.entries.length }, () => 'preserve_only'),
+    )
   })
 
   test('parser rejects duplicate queue_id entries', () => {
@@ -177,14 +223,43 @@ describe('#758 queue-work residue policy model', () => {
     expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
   })
 
+  test('obsolete l2auditor handoffs match only exact pending cli-notify evidence', () => {
+    const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
+
+    for (const item of L2AUDITOR_OBSOLETE_ROWS) {
+      const entry = policy.entries.find((candidate) => candidate.queue_id === item.id)!
+      expect(matchQueueWorkResiduePolicyEntry(entry, rowL2AuditorObsolete(item)).matched).toBe(true)
+
+      const drifted = matchQueueWorkResiduePolicyEntry(entry, rowL2AuditorObsolete(item, {
+        agent_id: 'qa',
+        status: 'replied',
+        payload: JSON.stringify({ source: 'state-daemon-queue-work-scheduler' }),
+      }))
+      expect(drifted.matched).toBe(false)
+      expect(drifted.mismatches.join('\n')).toContain('agent_id expected l2auditor')
+      expect(drifted.mismatches.join('\n')).toContain('status expected one of pending')
+      expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
+    }
+  })
+
   test('classifier reports exact matches, unclassified rows, missing entries, and mismatches', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
-    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873()], {
+    const l2Rows = L2AUDITOR_OBSOLETE_ROWS.map((item) => rowL2AuditorObsolete(item))
+    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows], {
       requirePolicyRows: true,
     })
 
     expect(passing.ok).toBe(true)
-    expect(passing.classifications.map((item) => item.queue_id)).toEqual([120138, 120245, 121744, 121873])
+    expect(passing.classifications.map((item) => item.queue_id)).toEqual([
+      120138,
+      120245,
+      121744,
+      121873,
+      121839,
+      121876,
+      121919,
+      121924,
+    ])
 
     const failing = classifyQueueWorkResidueRows(policy, [
       row120138(),
