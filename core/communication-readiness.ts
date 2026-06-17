@@ -9,6 +9,7 @@ import type { StateDaemonRuntimeReadiness } from './state-daemon-readiness'
 
 type GoNoGo = 'GO' | 'NO_GO'
 type Severity = 'blocker' | 'warning'
+export type CommunicationReadinessMode = 'complete' | 'queue-consumer'
 
 export type CommunicationReadinessFinding = {
   code: string
@@ -45,6 +46,7 @@ export type CommunicationReadinessReport = {
   generated_at: string
   issue_ref: '#722'
   options: {
+    mode: CommunicationReadinessMode
     agent_ids: string[]
     stale_pending_minutes: number
     runtime_stale_minutes: number
@@ -94,6 +96,7 @@ export type CommunicationReadinessReport = {
 }
 
 export type CommunicationReadinessOptions = {
+  mode?: CommunicationReadinessMode
   agentIds?: string[] | null
   stalePendingMinutes?: number
   runtimeStaleMinutes?: number
@@ -160,6 +163,8 @@ export function buildCommunicationReadinessReport(
   options: CommunicationReadinessOptions = {},
 ): CommunicationReadinessReport {
   const now = options.now ?? new Date()
+  const mode = options.mode ?? 'complete'
+  const completeMode = mode === 'complete'
   const stalePendingMinutes = options.stalePendingMinutes ?? 15
   const runtimeStaleMinutes = options.runtimeStaleMinutes ?? runtimeInventory.options.stale_minutes
   const agentIds = [...new Set((options.agentIds ?? []).filter(Boolean))]
@@ -278,7 +283,7 @@ export function buildCommunicationReadinessReport(
     }
 
     const runtimeFreshness = runtime?.freshness ?? null
-    if ((activeEnabled || openQueue) && runtimeFreshness !== 'fresh') {
+    if (completeMode && (activeEnabled || openQueue) && runtimeFreshness !== 'fresh') {
       addUnique(blockerCodes, 'RUNTIME_NOT_FRESH')
       blockers.push(finding('RUNTIME_NOT_FRESH', 'blocker', 'agent runtime evidence is not fresh for communication processing', {
         agent_id: row.agent_id,
@@ -293,7 +298,7 @@ export function buildCommunicationReadinessReport(
     }
 
     const hasActiveConnector = row.active_connector_count > 0 || connectors.some((connector) => connector.status === 'active')
-    if ((activeEnabled || openQueue) && hasActiveConnector && row.endpoint_lease_state !== 'ok') {
+    if (completeMode && (activeEnabled || openQueue) && hasActiveConnector && row.endpoint_lease_state !== 'ok') {
       addUnique(blockerCodes, 'ENDPOINT_LEASE_NOT_READY')
       blockers.push(finding('ENDPOINT_LEASE_NOT_READY', 'blocker', 'active connector endpoint lease is not ready', {
         agent_id: row.agent_id,
@@ -328,7 +333,7 @@ export function buildCommunicationReadinessReport(
     }
   })
 
-  const policyGaps = relevantPolicyGaps(runtimeInventory.policy_gaps, agentIds)
+  const policyGaps = completeMode ? relevantPolicyGaps(runtimeInventory.policy_gaps, agentIds) : []
   for (const gap of policyGaps) {
     blockers.push(finding('OUTBOUND_POLICY_GAP', 'blocker', 'outbound channel policy does not match active connector binding evidence', {
       evidence: {
@@ -358,6 +363,7 @@ export function buildCommunicationReadinessReport(
     generated_at: now.toISOString(),
     issue_ref: '#722',
     options: {
+      mode,
       agent_ids: agentIds,
       stale_pending_minutes: stalePendingMinutes,
       runtime_stale_minutes: runtimeStaleMinutes,
@@ -403,7 +409,12 @@ export function buildCommunicationReadinessReport(
     warnings,
     recommended_next_commands: ok
       ? []
-      : [
+      : mode === 'queue-consumer'
+        ? [
+            'Keep live activation blocked until protected review authorizes an exact target/fence.',
+            'Use complete mode separately before claiming Discord or endpoint readiness.',
+          ]
+        : [
           'Keep live activation blocked until protected review authorizes an exact target/fence.',
           'Repair or explicitly exclude reported communication blockers before broad rollout.',
         ],
@@ -417,6 +428,7 @@ export function formatCommunicationReadinessText(report: CommunicationReadinessR
     'AUN Communication Readiness',
     `Generated: ${report.generated_at}`,
     `Result: ${report.go_no_go}`,
+    `Mode: ${report.options.mode}`,
     `Scope: ${report.options.agent_ids.length > 0 ? report.options.agent_ids.join(',') : 'all agents'}`,
     `State daemon: status=${report.state_daemon.status} runner=${report.state_daemon.runner_enabled} codex=${report.state_daemon.codex_runner_enabled} queue_work_scheduler=${report.state_daemon.queue_work_scheduler_enabled}`,
     `Queue: agents=${report.summary.agents} open_agents=${report.summary.agents_with_open_queue} pending=${report.summary.pending_total} active_claims=${report.summary.active_claim_total}`,

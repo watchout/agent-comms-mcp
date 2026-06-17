@@ -185,6 +185,7 @@ describe('#722 communication readiness', () => {
 
     expect(report.ok).toBe(true)
     expect(report.go_no_go).toBe('GO')
+    expect(report.options.mode).toBe('complete')
     expect(report.summary.blockers).toBe(0)
     expect(report.state_daemon.runner_enabled).toBe(true)
     expect(report.policy).toMatchObject({
@@ -298,6 +299,50 @@ describe('#722 communication readiness', () => {
     expect(report.agents[0].blocker_codes).toContain('RUNTIME_NOT_FRESH')
   })
 
+  test('queue-consumer mode separates DB-primary blockers from runtime and endpoint readiness', () => {
+    const report = buildCommunicationReadinessReport(
+      [
+        botStatus({
+          active_endpoint_lease_count: 0,
+          endpoint_lease_state: 'missing_lease',
+        }),
+      ],
+      runtimeInventory({
+        agents: [runtimeAgent({
+          freshness: 'stale',
+          last_seen_at: '2026-06-17T09:00:00.000Z',
+          warnings: ['runtime_stale'],
+        })],
+        connectors: [connector({
+          runtime_freshness: 'stale',
+          warnings: ['connector_runtime_stale'],
+        })],
+      }),
+      stateDaemon({
+        environment: {
+          database_url: 'postgresql:///agent_comms',
+          codex_runner_enabled: '0',
+          queue_work_scheduler_enabled: null,
+          agent_allowlist: null,
+          agent_denylist: null,
+        },
+      }),
+      {
+        mode: 'queue-consumer',
+        agentIds: ['kodama'],
+        now: new Date('2026-06-17T10:01:00.000Z'),
+      },
+    )
+
+    expect(report.ok).toBe(false)
+    expect(report.options.mode).toBe('queue-consumer')
+    expect(report.state_daemon.blocker_codes).toEqual(['STATE_DAEMON_RUNNER_DISABLED'])
+    expect(report.agents[0].blocker_codes).toEqual([])
+    expect(report.blockers.map((blocker) => blocker.code)).toEqual(['STATE_DAEMON_RUNNER_DISABLED'])
+    expect(report.summary.runtime_blocked_agents).toBe(0)
+    expect(report.summary.endpoint_lease_blocked_agents).toBe(0)
+  })
+
   test('text formatter exposes read-only evidence without implying live activation', () => {
     const report = buildCommunicationReadinessReport(
       [botStatus()],
@@ -308,6 +353,7 @@ describe('#722 communication readiness', () => {
     const text = formatCommunicationReadinessText(report)
 
     expect(text).toContain('AUN Communication Readiness')
+    expect(text).toContain('Mode: complete')
     expect(text).toContain('State daemon: status=ok')
     expect(text).toContain('Mutation performed: false')
     expect(text).toContain('Restart performed: false')

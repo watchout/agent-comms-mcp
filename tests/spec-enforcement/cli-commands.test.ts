@@ -190,6 +190,7 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/subcommand === 'communication-readiness'[\s\S]*?buildCommunicationReadinessReport/)
     expect(CLI_SRC).toMatch(/subcommand === 'communication-readiness'[\s\S]*?formatCommunicationReadinessText/)
     expect(CLI_SRC).toMatch(/state-daemon communication-readiness \[--agent-id <id>\]/)
+    expect(CLI_SRC).toMatch(/--mode complete\|queue-consumer/)
   })
   test("'state-daemon queue-work-activation-plan' invokes the read-only exact-row planner", () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?buildQueueWorkActivationPlan/)
@@ -765,7 +766,9 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
 
   test('help documents state-daemon all-bot communication readiness diagnostic', () => {
     expect(CLI_SRC).toMatch(/state-daemon communication-readiness \[--agent-id <id>\]/)
-    expect(CLI_SRC).toMatch(/read-only all-bot communication readiness; combines queue, runtime, connector, and policy blockers/)
+    expect(CLI_SRC).toMatch(/read-only bot communication readiness; separates DB-primary queue consumer blockers from complete runtime\/endpoint blockers/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/mode: CommunicationReadinessMode/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/mode === 'complete'/)
     expect(COMMUNICATION_READINESS_SRC).toMatch(/issue_ref: '#722'/)
     expect(COMMUNICATION_READINESS_SRC).toMatch(/ACTIVE_PENDING_OVER_SLO/)
     expect(COMMUNICATION_READINESS_SRC).toMatch(/RUNTIME_NOT_FRESH/)

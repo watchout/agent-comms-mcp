@@ -4486,7 +4486,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
         : subcommand === 'communication-readiness'
-          ? 'Usage: agent-com state-daemon communication-readiness [--agent-id <id>] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]'
+          ? 'Usage: agent-com state-daemon communication-readiness [--agent-id <id>] [--mode complete|queue-consumer] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]'
         : subcommand === 'queue-work-activation-plan'
           ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]'
           : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
@@ -4553,6 +4553,11 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     try {
       const statusRows = await fetchBotStatusFromDb(db as any)
       const agentIds = parseCsvFlag(flags['agent-id'] ?? flags['agent-ids']) ?? []
+      const mode = flags.mode ?? 'complete'
+      if (mode !== 'complete' && mode !== 'queue-consumer') {
+        console.error('Usage: agent-com state-daemon communication-readiness [--agent-id <id>] [--mode complete|queue-consumer] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]')
+        process.exit(2)
+      }
       const stalePendingMinutes = parsePositiveIntFlag(flags['stale-pending-minutes'], 15, 'stale-pending-minutes')
       const runtimeStaleMinutes = parsePositiveIntFlag(flags['runtime-stale-minutes'], 15, 'runtime-stale-minutes')
       const inventory = await buildRuntimeInventoryReport((db as any).__adapter, {
@@ -4564,7 +4569,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
         statusRows.values(),
         inventory,
         inspectStateDaemonRuntime(),
-        { agentIds, stalePendingMinutes, runtimeStaleMinutes },
+        { mode, agentIds, stalePendingMinutes, runtimeStaleMinutes },
       )
       if (format === 'text') {
         process.stdout.write(formatCommunicationReadinessText(report))
@@ -5999,8 +6004,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
-  state-daemon communication-readiness [--agent-id <id>] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]
-                                                       — read-only all-bot communication readiness; combines queue, runtime, connector, and policy blockers
+  state-daemon communication-readiness [--agent-id <id>] [--mode complete|queue-consumer] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]
+                                                       — read-only bot communication readiness; separates DB-primary queue consumer blockers from complete runtime/endpoint blockers
   state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]
                                                        — read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
