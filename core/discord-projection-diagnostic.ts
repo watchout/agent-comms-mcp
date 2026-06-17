@@ -41,6 +41,7 @@ export interface DiscordProjectionDiagnosticFinding {
   consumer_source?: ProjectionConsumerSource
   fallback_reason?: string | null
   evidence?: Record<string, unknown>
+  repair_hint?: string
 }
 
 export interface DiscordProjectionEvidenceSummary {
@@ -106,6 +107,7 @@ export interface DiscordProjectionDiagnosticReport {
     selected_consumer: DiscordProjectionEvidenceSummary
   }
   contract: DiscordProjectionCredentialContract
+  primary_blocker: DiscordProjectionDiagnosticFinding | null
   blockers: DiscordProjectionDiagnosticFinding[]
   warnings: DiscordProjectionDiagnosticFinding[]
   policy: {
@@ -244,7 +246,12 @@ function finding(
   message: string,
   extra: Omit<DiscordProjectionDiagnosticFinding, 'code' | 'severity' | 'message'> = {},
 ): DiscordProjectionDiagnosticFinding {
-  return { code, severity, message, ...extra }
+  const item: DiscordProjectionDiagnosticFinding = { code, severity, message, ...extra }
+  if (!item.repair_hint) {
+    const hint = repairHintFor(code)
+    if (hint) item.repair_hint = hint
+  }
+  return item
 }
 
 function credentialContract(): DiscordProjectionCredentialContract {
@@ -261,6 +268,62 @@ function credentialContract(): DiscordProjectionCredentialContract {
     selected_delivery_evidence_required: true,
     no_live_discord_write: true,
   }
+}
+
+function repairHintFor(code: string): string | null {
+  switch (code) {
+    case 'SENDER_CREDENTIAL_UNKNOWN':
+      return 'Register and verify the sender Discord connector credential before expecting direct delivery.'
+    case 'SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE':
+      return 'Promote the sender Discord credential to active only after token identity and channel write permission are verified.'
+    case 'SENDER_WRITE_EVIDENCE_MISSING':
+      return 'Add or repair the sender outbound channel binding and provider write access evidence.'
+    case 'SELECTED_DELIVERY_EVIDENCE_INCOMPLETE':
+      return 'Repair the selected delivery consumer credential, connector, binding, and provider write evidence before enabling projection.'
+    case 'FALLBACK_NOT_ALLOWED':
+      return 'Either repair sender direct delivery evidence or explicitly permit fallback in channel policy for this channel.'
+    case 'FALLBACK_POLICY_DENIED':
+      return 'Fallback is denied by policy; repair direct delivery evidence or add an explicit governed fallback policy.'
+    case 'DIRECT_DELIVERY_MISMATCH':
+      return 'Inspect sender direct evidence first; fallback must not mask a missing or unusable sender delivery path.'
+    case 'USABLE_SENDER_FELL_BACK_TO_ROUTER':
+      return 'Keep sender direct delivery selected when sender credential, binding, and write evidence are usable.'
+    case 'NO_ELIGIBLE_DELIVERY_CONSUMER':
+      return 'Create one eligible Discord delivery connector with active credential, outbound binding, and write access.'
+    case 'NO_DISCORD_ADAPTER_MAPPING':
+      return 'Add the Discord channel adapter mapping before testing projection delivery.'
+    default:
+      return null
+  }
+}
+
+function blockerPriority(code: string): number {
+  switch (code) {
+    case 'SENDER_CREDENTIAL_UNKNOWN':
+    case 'SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE':
+      return 10
+    case 'SENDER_WRITE_EVIDENCE_MISSING':
+      return 20
+    case 'SELECTED_DELIVERY_EVIDENCE_INCOMPLETE':
+      return 30
+    case 'NO_DISCORD_ADAPTER_MAPPING':
+    case 'NO_ELIGIBLE_DELIVERY_CONSUMER':
+      return 40
+    case 'USABLE_SENDER_FELL_BACK_TO_ROUTER':
+      return 50
+    case 'FALLBACK_NOT_ALLOWED':
+    case 'FALLBACK_POLICY_DENIED':
+      return 60
+    case 'DIRECT_DELIVERY_MISMATCH':
+      return 70
+    default:
+      return 100
+  }
+}
+
+function primaryBlockerFor(blockers: DiscordProjectionDiagnosticFinding[]): DiscordProjectionDiagnosticFinding | null {
+  if (blockers.length === 0) return null
+  return [...blockers].sort((a, b) => blockerPriority(a.code) - blockerPriority(b.code))[0] ?? null
 }
 
 export async function buildDiscordProjectionDiagnosticReport(
@@ -384,6 +447,7 @@ export async function buildDiscordProjectionDiagnosticReport(
     }))
   }
 
+  const primaryBlocker = primaryBlockerFor(blockers)
   const ok = blockers.length === 0
   return {
     ok,
@@ -428,6 +492,7 @@ export async function buildDiscordProjectionDiagnosticReport(
       selected_consumer: selectedConsumer,
     },
     contract: credentialContract(),
+    primary_blocker: primaryBlocker,
     blockers,
     warnings,
     policy: {
@@ -461,6 +526,10 @@ export function formatDiscordProjectionDiagnosticText(report: DiscordProjectionD
     `Provider write: ${report.decision.provider_write_capability}`,
     `Binding: ${report.decision.channel_binding_id ?? '(none)'}`,
     `Connector: ${report.decision.delivery_connector_instance_id ?? '(none)'}`,
+    `Sender credential status: ${report.evidence.sender_direct.credential_status ?? '(unknown)'}`,
+    `Sender provider write: ${report.evidence.sender_direct.provider_write_capability}`,
+    `Sender binding: ${report.evidence.sender_direct.channel_binding_id ?? '(none)'}`,
+    `Sender connector: ${report.evidence.sender_direct.connector_instance_id ?? '(none)'}`,
     `Credential contract: ${report.contract.runtime_delivery_status_contract}`,
     `Runtime login statuses: ${report.contract.runtime_login_credential_statuses.join(', ')}`,
     `Delivery statuses: ${report.contract.delivery_credential_statuses.join(', ')}`,
@@ -468,13 +537,16 @@ export function formatDiscordProjectionDiagnosticText(report: DiscordProjectionD
     `Fallback allowed: ${report.decision.fallback_allowed ? 'true' : 'false'}`,
     `Fallback reason: ${report.decision.fallback_reason ?? '(none)'}`,
     `Effective delivery owner: ${report.effective_delivery_owner.ok ? `ok:${report.effective_delivery_owner.source}` : `blocked:${report.effective_delivery_owner.code}`}`,
+    `Primary blocker: ${report.primary_blocker ? `${report.primary_blocker.code}: ${report.primary_blocker.message}` : '(none)'}`,
+    `Primary repair: ${report.primary_blocker?.repair_hint ?? '(none)'}`,
     `Mutation performed: ${report.mutation_performed ? 'true' : 'false'}`,
   ]
 
   if (report.blockers.length > 0) {
     lines.push('', 'Blockers:')
     for (const blocker of report.blockers) {
-      lines.push(`- ${blocker.code}: ${blocker.message}`)
+      const repair = blocker.repair_hint ? ` Repair: ${blocker.repair_hint}` : ''
+      lines.push(`- ${blocker.code}: ${blocker.message}${repair}`)
     }
   }
   if (report.warnings.length > 0) {
