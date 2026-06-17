@@ -9,6 +9,7 @@ import {
   type QueueWorkDb,
   type QueueWorkEnvelope,
   type QueueWorkResult,
+  type QueueWorkWritebackSender,
 } from '../core/queue-work'
 
 const capabilities = {
@@ -50,7 +51,7 @@ class FakeQueueDb implements QueueWorkDb {
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('runner_error') || sql.includes('last_heartbeat_at = $3')) {
-      if (this.row && String(this.row.id) === String(params?.[0]) && this.row.status === 'in_progress') {
+      if (this.row && String(this.row.id) === String(params?.[0]) && (this.row.status === 'in_progress' || this.row.status === 'done')) {
         this.row.payload = params?.[1]
         this.row.last_heartbeat_at = params?.[2]
         return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
@@ -71,6 +72,7 @@ class FakeQueueDb implements QueueWorkDb {
         this.row.status = 'replied'
         this.row.replied_at = params?.[1]
         this.row.replied_with = params?.[2]
+        if (params?.[3] !== undefined) this.row.payload = params?.[3]
         this.row.claimed_by = null
         this.row.claimed_at = null
         this.row.claim_expires_at = null
@@ -102,6 +104,18 @@ function receivedRow(overrides: Record<string, unknown> = {}) {
     claim_expires_at: '2026-05-21T00:05:01.000Z',
     ...overrides,
   }
+}
+
+function githubBackedHandoffRow(overrides: Record<string, unknown> = {}) {
+  return receivedRow({
+    agent_id: 'l2auditor',
+    payload: JSON.stringify({
+      author_id: 'codex-cto',
+      content: 'L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+      message_type: 'phase_handoff',
+    }),
+    ...overrides,
+  })
 }
 
 function okResult(overrides: Partial<QueueWorkResult> = {}): QueueWorkResult {
@@ -139,7 +153,27 @@ describe('queue work envelope', () => {
         do_not_call_inbox: true,
         return_schema: 'queue_work_result_v1',
       },
+      handoff_contract: {
+        kind: 'plain_queue_work',
+        github_backed: false,
+        posting_mode: 'none',
+      },
     })
+  })
+
+  test('detects GitHub-backed phase handoff rows without echoing payload in planner-facing fields', () => {
+    const envelope = buildQueueWorkEnvelope(githubBackedHandoffRow())
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      github_backed: true,
+      required_writebacks: ['github_issue_comment'],
+      posting_mode: 'none',
+    })
+    expect(envelope.handoff_contract.detected_from).toEqual(expect.arrayContaining([
+      'message_type:phase_handoff',
+      'github_url',
+    ]))
   })
 })
 
@@ -420,6 +454,156 @@ describe('finalizeDoneQueueWork', () => {
       replied_with: null,
     })
     expect(db.row.status).toBe('replied')
+  })
+
+  test('GitHub-backed handoff results require a structured mediated writeback', async () => {
+    const row = githubBackedHandoffRow({
+      status: 'done',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+        message_type: 'phase_handoff',
+        runner_result: okResult({ reply: null, next_action: 'close' }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'MISSING_WRITEBACK',
+      queue_id: '42',
+    })
+    expect(db.row.status).toBe('done')
+    expect(JSON.parse(db.row.payload).finalizer_error).toMatchObject({
+      code: 'MISSING_WRITEBACK',
+    })
+  })
+
+  test('GitHub-backed handoff finalization delegates posting to a mediated sender', async () => {
+    const writeback = {
+      mode: 'github_issue_comment' as const,
+      repo: 'watchout/agent-comms-mcp',
+      issue_number: 779,
+      body: [
+        '<!-- aun:l2-audit/v1 -->',
+        'repo: watchout/agent-comms-mcp',
+        'pr: 779',
+        'role: l2auditor',
+        'source_queue_id: 42',
+        'source_message_id: msg-1',
+        'verdict: PASS',
+      ].join('\n'),
+      evidence: ['exact_head:abc123'],
+    }
+    const row = githubBackedHandoffRow({
+      status: 'done',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+        message_type: 'phase_handoff',
+        runner_result: okResult({ reply: null, next_action: 'close', writeback }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+    const posted: unknown[] = []
+    const writebackSender: QueueWorkWritebackSender = {
+      async sendWriteback(input) {
+        posted.push(input)
+        return {
+          posted_with: 'https://github.com/watchout/agent-comms-mcp/pull/779#issuecomment-1',
+          body_sha256: 'a'.repeat(64),
+        }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      code: 'WRITEBACK_POSTED',
+      queue_id: '42',
+      replied_with: 'https://github.com/watchout/agent-comms-mcp/pull/779#issuecomment-1',
+      writeback_posted_with: 'https://github.com/watchout/agent-comms-mcp/pull/779#issuecomment-1',
+    })
+    expect(posted).toEqual([
+      expect.objectContaining({
+        queue_id: '42',
+        agent_id: 'l2auditor',
+        handoff_contract: expect.objectContaining({ kind: 'github_backed_role_handoff' }),
+        writeback,
+        runtime_result_summary: expect.objectContaining({ summary: 'completed', next_action: 'close' }),
+      }),
+    ])
+    expect(db.row.status).toBe('replied')
+    expect(JSON.parse(db.row.payload).writeback_result).toMatchObject({
+      posted_with: 'https://github.com/watchout/agent-comms-mcp/pull/779#issuecomment-1',
+      body_sha256: 'a'.repeat(64),
+    })
+  })
+
+  test('GitHub-backed handoff finalization fails closed when mediated sender returns no posted URL', async () => {
+    const writeback = {
+      mode: 'github_issue_comment' as const,
+      repo: 'watchout/agent-comms-mcp',
+      issue_number: 779,
+      body: [
+        '<!-- aun:l2-audit/v1 -->',
+        'repo: watchout/agent-comms-mcp',
+        'pr: 779',
+        'role: l2auditor',
+        'source_queue_id: 42',
+        'source_message_id: msg-1',
+        'verdict: PASS',
+      ].join('\n'),
+      evidence: ['exact_head:abc123'],
+    }
+    const row = githubBackedHandoffRow({
+      status: 'done',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+        message_type: 'phase_handoff',
+        runner_result: okResult({ reply: null, next_action: 'close', writeback }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+    const writebackSender: QueueWorkWritebackSender = {
+      async sendWriteback() {
+        return {
+          posted_with: null,
+          body_sha256: 'a'.repeat(64),
+        }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'WRITEBACK_FAILED',
+      queue_id: '42',
+      detail: 'mediated writeback sender did not return posted_with',
+    })
+    expect(db.row.status).toBe('done')
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.writeback_result).toBeUndefined()
+    expect(payload.finalizer_error).toMatchObject({
+      code: 'WRITEBACK_FAILED',
+      detail: 'mediated writeback sender did not return posted_with',
+    })
   })
 
   test('does not terminal-close retry results until retry semantics exist', async () => {

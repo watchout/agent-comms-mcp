@@ -51,6 +51,9 @@ Usage:
     --enable-queue-work-scheduler --agent-allowlist <agent>
     --queue-work-runtime codex-exec --queue-work-fence-message-ids <id>
     [--queue-work-fence-created-after <iso>]
+    [--queue-work-github-writeback-mode mediated]
+    [--queue-work-mediated-posting-command <path>]
+    [--github-token-file <path>]
     [--queue-work-residue-policy-file <path>] [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --agent-allowlist <agent> --disable-codex-runner [--execute]
@@ -120,6 +123,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-codex-model') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL = next()
     else if (arg === '--queue-work-codex-profile') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE = next()
     else if (arg === '--queue-work-codex-ignore-rules') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES = '1'
+    else if (arg === '--queue-work-handoff-contract') args.extraEnv.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = next()
+    else if (arg === '--queue-work-github-writeback-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = next()
+    else if (arg === '--queue-work-mediated-posting-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND = resolve(next())
+    else if (arg === '--queue-work-mediated-posting-args-json') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = next()
+    else if (arg === '--queue-work-mediated-posting-timeout-ms') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_TIMEOUT_MS = next()
     else if (arg === '--queue-work-fence-queue-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS = next()
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
@@ -173,6 +181,10 @@ function githubWorkPullerEnvFromArgs(args: ParsedArgs): Record<string, string> {
     writebackEnabled: args.githubWorkWritebackEnabled,
     tokenFile: args.githubTokenFile,
   })
+}
+
+function githubTokenFileEnvFromArgs(args: ParsedArgs): Record<string, string> {
+  return args.githubTokenFile ? { STATE_DAEMON_GITHUB_TOKEN_FILE: resolve(args.githubTokenFile) } : {}
 }
 
 function ensureCheckout(plan: ReturnType<typeof buildStateDaemonRestorePlan>): void {
@@ -235,7 +247,11 @@ async function runQueueWorkCanaryResiduePreflight(
 
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
-  const extraEnv = { ...args.extraEnv, ...githubWorkPullerEnvFromArgs(args) }
+  const extraEnv = {
+    ...args.extraEnv,
+    ...githubTokenFileEnvFromArgs(args),
+    ...githubWorkPullerEnvFromArgs(args),
+  }
   const plan = buildStateDaemonRestorePlan({
     commit: args.commit,
     restoreRoot: args.restoreRoot,

@@ -4482,7 +4482,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
         : subcommand === 'queue-work-activation-plan'
-          ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--format json|text]'
+          ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]'
           : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
     process.exit(2)
   }
@@ -4550,7 +4550,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     const agentId = flags['agent-id']
     const commit = flags.commit
     if (!agentId || !commit) {
-      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--format json|text]')
+      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]')
       process.exit(2)
     }
     const db = await getDb()
@@ -4562,6 +4562,9 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
         runtime: flags.runtime ?? flags['queue-work-runtime'],
         queueWorkCommand: flags.command ?? flags['queue-work-command'],
         residuePolicyFile: flags['residue-policy-file'] ?? flags['queue-work-residue-policy-file'],
+        githubWritebackMode: flags['github-writeback-mode'] ?? flags['queue-work-github-writeback-mode'],
+        mediatedPostingCommand: flags['mediated-posting-command'] ?? flags['queue-work-mediated-posting-command'],
+        mediatedPostingArgsJson: flags['mediated-posting-args-json'] ?? flags['queue-work-mediated-posting-args-json'],
       })
       if (format === 'text') {
         process.stdout.write(formatQueueWorkActivationPlanText(report))
@@ -5961,7 +5964,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
-  state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--format json|text]
+  state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]
                                                        — read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics

@@ -89,6 +89,13 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
           do_not_call_inbox: true,
           return_schema: 'queue_work_result_v1',
         },
+        handoff_contract: {
+          kind: 'plain_queue_work',
+          github_backed: false,
+          required_writebacks: [],
+          posting_mode: 'none',
+          detected_from: [],
+        },
       },
     })
 
@@ -150,6 +157,10 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(schema.properties.evidence).toMatchObject({
       type: 'array',
       items: { type: 'string' },
+    })
+    expect(schema.properties.writeback).toMatchObject({
+      type: ['object', 'null'],
+      required: ['mode', 'repo', 'issue_number', 'body'],
     })
     expect(schema.properties.next_action).toMatchObject({
       type: 'string',

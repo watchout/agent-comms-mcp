@@ -1,5 +1,11 @@
+import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import type { DbAdapter } from '../db'
+import {
+  detectQueueWorkHandoffContract,
+  type QueueWorkHandoffContract,
+  type QueueWorkWritebackMode,
+} from '../queue-work'
 import {
   loadQueueWorkResiduePolicyFromEnv,
   validateQueueWorkCanaryResiduePreflight,
@@ -15,6 +21,9 @@ export interface QueueWorkActivationPlanOptions {
   runtime?: string | null
   queueWorkCommand?: string | null
   residuePolicyFile?: string | null
+  githubWritebackMode?: string | null
+  mediatedPostingCommand?: string | null
+  mediatedPostingArgsJson?: string | null
   now?: () => Date
 }
 
@@ -31,6 +40,13 @@ export interface QueueWorkActivationFinding {
   code: string
   message: string
   evidence?: Record<string, unknown>
+}
+
+export interface QueueWorkActivationMediatedPostingReadiness {
+  command_path: string | null
+  command_present: boolean
+  command_probe: 'not_required' | 'not_run' | 'passed' | 'failed'
+  summary?: string | null
 }
 
 export interface QueueWorkActivationPlanReport {
@@ -56,6 +72,8 @@ export interface QueueWorkActivationPlanReport {
     execute_requires_separate_approval: true
   }
   activation_env: Record<string, string>
+  handoff_contract: QueueWorkHandoffContract | null
+  mediated_posting: QueueWorkActivationMediatedPostingReadiness
   dry_run_command: string[]
   execute_command: string[]
   blockers: QueueWorkActivationFinding[]
@@ -71,11 +89,32 @@ type QueueRow = {
   status: string
   created_at?: string | Date | null
   priority?: string | number | null
+  payload?: string | null
 }
 
 const DEFAULT_RESIDUE_POLICY_FILE = 'config/queue-work-residue-policy.json'
 const DEFAULT_CODEX_OUTPUT_SCHEMA = 'schemas/queue-work-result-v1.schema.json'
 const SUPPORTED_RUNTIMES = new Set(['codex-exec', 'echo', 'command-json'])
+
+function execFileJson(
+  command: string,
+  args: string[],
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise) => {
+    execFile(command, args, {
+      encoding: 'utf-8',
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      const execErr = err as (NodeJS.ErrnoException & { code?: unknown }) | null
+      resolvePromise({
+        status: err == null ? 0 : typeof execErr.code === 'number' ? execErr.code : 1,
+        stdout: stdout ?? '',
+        stderr: stderr ?? '',
+      })
+    })
+  })
+}
 
 function normalizeText(value: string | null | undefined): string | null {
   const trimmed = value?.trim()
@@ -118,6 +157,9 @@ function buildActivationEnv(
   runtime: QueueWorkActivationRuntime | string,
   residuePolicyFile: string | null,
   queueWorkCommand: string | null,
+  handoffContract: QueueWorkHandoffContract,
+  mediatedPostingCommand: string | null,
+  mediatedPostingArgsJson: string | null,
 ): Record<string, string> {
   const env: Record<string, string> = {
     STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
@@ -130,6 +172,16 @@ function buildActivationEnv(
   if (candidate.message_id) env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = candidate.message_id
   if (candidate.created_at) env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = candidate.created_at
   if (residuePolicyFile) env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = residuePolicyFile
+  env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = handoffContract.kind
+  if (handoffContract.github_backed) {
+    env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = handoffContract.posting_mode
+  }
+  if (mediatedPostingCommand) {
+    env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND = mediatedPostingCommand
+  }
+  if (mediatedPostingArgsJson) {
+    env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = mediatedPostingArgsJson
+  }
   if (runtime === 'codex-exec') {
     env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA = DEFAULT_CODEX_OUTPUT_SCHEMA
     env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
@@ -175,6 +227,18 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   if (env.STATE_DAEMON_QUEUE_WORK_COMMAND) {
     command.push('--queue-work-command', env.STATE_DAEMON_QUEUE_WORK_COMMAND)
   }
+  if (env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT) {
+    command.push('--queue-work-handoff-contract', env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT)
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE) {
+    command.push('--queue-work-github-writeback-mode', env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE)
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND) {
+    command.push('--queue-work-mediated-posting-command', env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND)
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON) {
+    command.push('--queue-work-mediated-posting-args-json', env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON)
+  }
   if (execute) command.push('--execute')
   return command
 }
@@ -203,6 +267,13 @@ function emptyReport(options: QueueWorkActivationPlanOptions, blockers: QueueWor
       execute_requires_separate_approval: true,
     },
     activation_env: {},
+    handoff_contract: null,
+    mediated_posting: {
+      command_path: normalizeText(options.mediatedPostingCommand ?? null),
+      command_present: false,
+      command_probe: 'not_run',
+      summary: null,
+    },
     dry_run_command: [],
     execute_command: [],
     blockers,
@@ -231,8 +302,17 @@ export async function buildQueueWorkActivationPlan(
   const commit = normalizeText(options.commit ?? null)
   const runtime = normalizeText(options.runtime ?? null) ?? 'codex-exec'
   const queueWorkCommand = normalizeText(options.queueWorkCommand ?? null)
+  const githubWritebackMode = normalizeText(options.githubWritebackMode ?? null) ?? 'none'
+  const mediatedPostingCommand = normalizeText(options.mediatedPostingCommand ?? null)
+  const mediatedPostingArgsJson = normalizeText(options.mediatedPostingArgsJson ?? null)
   const blockers: QueueWorkActivationFinding[] = []
   const warnings: QueueWorkActivationFinding[] = []
+  const mediatedPostingReadiness: QueueWorkActivationMediatedPostingReadiness = {
+    command_path: mediatedPostingCommand,
+    command_present: mediatedPostingCommand ? existsSync(mediatedPostingCommand) : false,
+    command_probe: 'not_run',
+    summary: null,
+  }
 
   if (!agentId) {
     blockers.push({ code: 'agent_id_required', message: 'Queue-work activation planning requires --agent-id.' })
@@ -253,12 +333,33 @@ export async function buildQueueWorkActivationPlan(
       message: 'STATE_DAEMON_QUEUE_WORK_RUNTIME=command-json requires --queue-work-command.',
     })
   }
+  if (!['none', 'mediated'].includes(githubWritebackMode)) {
+    blockers.push({
+      code: 'queue_work_github_writeback_mode_invalid',
+      message: 'Queue-work GitHub writeback mode must be none or mediated.',
+      evidence: { github_writeback_mode: githubWritebackMode },
+    })
+  }
+  if (mediatedPostingArgsJson) {
+    try {
+      const parsed = JSON.parse(mediatedPostingArgsJson)
+      if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+        throw new Error('not string array')
+      }
+    } catch {
+      blockers.push({
+        code: 'queue_work_mediated_posting_args_invalid',
+        message: '--queue-work-mediated-posting-args-json must be a JSON string array.',
+      })
+    }
+  }
   if (blockers.length > 0 || !agentId || !commit) return emptyReport(options, blockers)
 
   let candidate: QueueWorkActivationCandidate | null = null
+  let candidatePayload: string | null = null
   if (queueId) {
     const rows = await db.query<QueueRow>(
-      `SELECT id, agent_id, message_id, status, created_at, priority
+      `SELECT id, agent_id, message_id, status, created_at, priority, payload
          FROM message_queue
         WHERE id = $1
         LIMIT 1`,
@@ -272,10 +373,11 @@ export async function buildQueueWorkActivationPlan(
       })
     } else {
       candidate = normalizeQueueRow(rows[0])
+      candidatePayload = normalizeText(rows[0].payload ?? null)
     }
   } else {
     const rows = await db.query<QueueRow>(
-      `SELECT id, agent_id, message_id, status, created_at, priority
+      `SELECT id, agent_id, message_id, status, created_at, priority, payload
          FROM message_queue
         WHERE agent_id = $1
           AND status = 'pending'
@@ -297,6 +399,7 @@ export async function buildQueueWorkActivationPlan(
       })
     } else {
       candidate = normalizeQueueRow(rows[0])
+      candidatePayload = normalizeText(rows[0].payload ?? null)
       warnings.push({
         code: 'queue_id_auto_selected',
         message: 'A single pending queue row was auto-selected; exact --queue-id is preferred for live canaries.',
@@ -324,14 +427,90 @@ export async function buildQueueWorkActivationPlan(
       ...emptyReport(options, blockers),
       generated_at: generatedAt,
       candidate,
+      mediated_posting: mediatedPostingReadiness,
       warnings,
     }
+  }
+
+  const handoffContract = detectQueueWorkHandoffContract({
+    agentId: candidate.agent_id,
+    payload: candidatePayload ?? '{}',
+    postingMode: githubWritebackMode as QueueWorkWritebackMode,
+  })
+
+  if (handoffContract.github_backed && handoffContract.posting_mode !== 'mediated') {
+    blockers.push({
+      code: 'queue_work_github_handoff_requires_mediated_posting',
+      message: 'GitHub-backed role handoffs require mediated posting; read-only codex-exec must not post GitHub evidence directly.',
+      evidence: {
+        runtime,
+        github_writeback_mode: handoffContract.posting_mode,
+        detected_from: handoffContract.detected_from,
+      },
+    })
+  }
+  if (handoffContract.github_backed && !mediatedPostingCommand) {
+    blockers.push({
+      code: 'queue_work_mediated_posting_command_required',
+      message: 'GitHub-backed mediated queue-work handoffs require --queue-work-mediated-posting-command.',
+    })
+  }
+  if (handoffContract.github_backed && mediatedPostingCommand && !existsSync(mediatedPostingCommand)) {
+    blockers.push({
+      code: 'queue_work_mediated_posting_command_not_found',
+      message: '--queue-work-mediated-posting-command must point to an existing first-class posting wrapper.',
+      evidence: { path: mediatedPostingCommand },
+    })
+  }
+  if (
+    handoffContract.github_backed &&
+    handoffContract.posting_mode === 'mediated' &&
+    mediatedPostingCommand &&
+    blockers.length === 0
+  ) {
+    const probeArgs = mediatedPostingArgsJson ? JSON.parse(mediatedPostingArgsJson) as string[] : []
+    const probe = await execFileJson(mediatedPostingCommand, [...probeArgs, '--probe'])
+    try {
+      const parsed = JSON.parse(probe.stdout || '{}')
+      if (probe.status === 0 && parsed.ok === true) {
+        mediatedPostingReadiness.command_probe = 'passed'
+        mediatedPostingReadiness.summary = typeof parsed.summary === 'string' ? parsed.summary : null
+      } else {
+        mediatedPostingReadiness.command_probe = 'failed'
+        mediatedPostingReadiness.summary = typeof parsed.summary === 'string'
+          ? parsed.summary
+          : probe.stderr.slice(0, 500)
+        blockers.push({
+          code: 'queue_work_mediated_posting_command_probe_failed',
+          message: 'Mediated posting command --probe failed.',
+          evidence: { status: probe.status, summary: mediatedPostingReadiness.summary },
+        })
+      }
+    } catch {
+      mediatedPostingReadiness.command_probe = 'failed'
+      mediatedPostingReadiness.summary = 'probe did not return JSON'
+      blockers.push({
+        code: 'queue_work_mediated_posting_command_probe_invalid',
+        message: 'Mediated posting command --probe must return JSON.',
+      })
+    }
+  }
+  if (!handoffContract.github_backed) {
+    mediatedPostingReadiness.command_probe = 'not_required'
   }
 
   const residuePolicyFile = options.residuePolicyFile === undefined
     ? defaultResiduePolicyFile()
     : normalizeText(options.residuePolicyFile)
-  const activationEnv = buildActivationEnv(candidate, runtime, residuePolicyFile, queueWorkCommand)
+  const activationEnv = buildActivationEnv(
+    candidate,
+    runtime,
+    residuePolicyFile,
+    queueWorkCommand,
+    handoffContract,
+    mediatedPostingCommand,
+    mediatedPostingArgsJson,
+  )
   let residuePolicy = null
   try {
     residuePolicy = loadQueueWorkResiduePolicyFromEnv(activationEnv)
@@ -376,6 +555,8 @@ export async function buildQueueWorkActivationPlan(
       runtime,
     },
     candidate,
+    handoff_contract: handoffContract,
+    mediated_posting: mediatedPostingReadiness,
     policy: {
       read_only: true,
       no_db_mutation: true,
@@ -403,6 +584,8 @@ export function formatQueueWorkActivationPlanText(report: QueueWorkActivationPla
     `Generated: ${report.generated_at}`,
     `Target: agent=${report.target.agent_id ?? '(missing)'} queue=${report.target.queue_id ?? report.candidate?.queue_id ?? '(auto)'} commit=${report.target.commit ?? '(missing)'} runtime=${report.target.runtime}`,
     `Candidate: ${report.candidate ? `${report.candidate.queue_id}:${report.candidate.agent_id}:${report.candidate.status}:${report.candidate.message_id ?? '(no-message-id)'}` : '(none)'}`,
+    `Handoff contract: ${report.handoff_contract ? `${report.handoff_contract.kind} posting=${report.handoff_contract.posting_mode}` : '(none)'}`,
+    `Mediated posting: command_present=${report.mediated_posting.command_present} command_probe=${report.mediated_posting.command_probe}`,
     `Mutation performed: ${report.mutation_performed}`,
     `Restart performed: ${report.restart_performed}`,
     `Execute requires separate approval: ${report.policy.execute_requires_separate_approval}`,

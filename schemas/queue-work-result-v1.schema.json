@@ -25,6 +25,43 @@
         "type": "string"
       }
     },
+    "writeback": {
+      "type": ["object", "null"],
+      "required": ["mode", "repo", "issue_number", "body"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "const": "github_issue_comment"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/[^/\\s]+$"
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "next_action": {
       "type": "string",
       "enum": ["reply", "close", "none", "retry"]

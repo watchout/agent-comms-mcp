@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { DbAdapter } from '../core/db'
 import {
   buildQueueWorkActivationPlan,
@@ -43,6 +46,14 @@ class FakeDb implements DbAdapter {
   async close(): Promise<void> {}
 }
 
+function probeCommand(body: string = 'echo \'{"ok":true,"summary":"probe passed"}\''): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'queue-work-posting-probe-'))
+  const path = join(dir, 'probe.sh')
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, 'utf8')
+  chmodSync(path, 0o755)
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
 function row(patch: Partial<Record<string, unknown>> = {}) {
   return {
     id: 121877,
@@ -54,6 +65,19 @@ function row(patch: Partial<Record<string, unknown>> = {}) {
     payload: '{"secret":"must-not-print"}',
     ...patch,
   }
+}
+
+function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
+  return row({
+    id: 121926,
+    agent_id: 'l2auditor',
+    message_id: 'msg-121926',
+    payload: JSON.stringify({
+      message_type: 'phase_handoff',
+      content: 'PR #779 L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+    }),
+    ...patch,
+  })
 }
 
 describe('queue-work activation planner', () => {
@@ -128,6 +152,92 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_row_not_pending')
     expect(report.candidate?.status).toBe('in_progress')
+  })
+
+  test('blocks GitHub-backed role handoffs when codex-exec has no mediated posting contract', async () => {
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'l2auditor',
+      queueId: '121926',
+      commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      github_backed: true,
+      posting_mode: 'none',
+    })
+    expect(report.blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
+      'queue_work_github_handoff_requires_mediated_posting',
+      'queue_work_mediated_posting_command_required',
+    ]))
+    expect(report.dry_run_command).toEqual([])
+    expect(report.execute_command).toEqual([])
+  })
+
+  test('allows GitHub-backed role handoffs only with an explicit mediated posting command', async () => {
+    const command = probeCommand()
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'l2auditor',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: command.path,
+        mediatedPostingArgsJson: '["--allow-repo","watchout/agent-comms-mcp"]',
+      })
+
+      expect(report.ok).toBe(true)
+      expect(report.handoff_contract).toMatchObject({
+        kind: 'github_backed_role_handoff',
+        github_backed: true,
+        posting_mode: 'mediated',
+      })
+      expect(report.mediated_posting).toMatchObject({
+        command_path: command.path,
+        command_present: true,
+        command_probe: 'passed',
+      })
+      expect(report.activation_env).toMatchObject({
+        STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT: 'github_backed_role_handoff',
+        STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE: 'mediated',
+        STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND: command.path,
+        STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON: '["--allow-repo","watchout/agent-comms-mcp"]',
+      })
+      expect(report.execute_command).toEqual(expect.arrayContaining([
+        '--queue-work-github-writeback-mode',
+        'mediated',
+        '--queue-work-mediated-posting-command',
+        command.path,
+      ]))
+    } finally {
+      command.cleanup()
+    }
+  })
+
+  test('blocks GitHub-backed role handoffs when mediated posting probe fails', async () => {
+    const command = probeCommand('echo \'{"ok":false,"summary":"token missing"}\'; exit 1')
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'l2auditor',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: command.path,
+      })
+
+      expect(report.ok).toBe(false)
+      expect(report.go_no_go).toBe('NO_GO')
+      expect(report.mediated_posting.command_probe).toBe('failed')
+      expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_mediated_posting_command_probe_failed')
+      expect(report.execute_command).toEqual([])
+    } finally {
+      command.cleanup()
+    }
   })
 
   test('uses the existing residue preflight before producing executable commands', async () => {
