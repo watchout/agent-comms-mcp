@@ -102,6 +102,11 @@ const L2AUDITOR_OBSOLETE_ROWS = [
     message_id: '2a932426-6cf3-4eb3-b99a-be999ec9c7f8',
     message_type: 'phase_handoff',
   },
+  {
+    id: 121938,
+    message_id: 'e717e0c6-549a-45e8-ba39-73b26f99c11a',
+    message_type: 'phase_handoff',
+  },
 ] as const
 
 function rowL2AuditorObsolete(
@@ -135,6 +140,7 @@ describe('#758 queue-work residue policy model', () => {
       121876,
       121919,
       121924,
+      121938,
     ])
     expect(policy.entries.map((entry) => entry.authorized_action)).toEqual(
       Array.from({ length: policy.entries.length }, () => 'preserve_only'),
@@ -259,6 +265,7 @@ describe('#758 queue-work residue policy model', () => {
       121876,
       121919,
       121924,
+      121938,
     ])
 
     const failing = classifyQueueWorkResidueRows(policy, [
