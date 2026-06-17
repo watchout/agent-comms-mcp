@@ -39,6 +39,18 @@
       "expected_status": ["in_progress"],
       "expected_receive_claim_source": "state-daemon-queue-work-scheduler",
       "notes": "Incomplete secretary scheduler canary evidence. Preserve only; terminal close requires separate exact-row authorization."
+    },
+    {
+      "queue_id": 121873,
+      "agent_id": "check",
+      "message_id": "b12a0c4d-aee3-4238-8cb4-5f7703f0dd8e",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/765",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Obsolete PR #765 check handoff residue. PR #765 merged at 2026-06-17T00:36:58Z with merge commit 96119595801eedc4d2c49d200e11a10b33081f3f. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later check canaries."
     }
   ]
 }

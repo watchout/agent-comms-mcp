@@ -67,13 +67,28 @@ function row121744(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRo
   }
 }
 
+function row121873(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRow {
+  return {
+    id: 121873,
+    agent_id: 'check',
+    message_id: 'b12a0c4d-aee3-4238-8cb4-5f7703f0dd8e',
+    status: 'pending',
+    payload: JSON.stringify({
+      source: 'cli-notify',
+      message_type: 'phase_handoff',
+    }),
+    ...patch,
+  }
+}
+
 describe('#758 queue-work residue policy model', () => {
   test('repo policy validates and exposes exact excluded queue ids', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
 
     expect(policy.schema_version).toBe('queue_work_residue_policy_v1')
-    expect(queueWorkResidueExcludedQueueIds(policy)).toEqual([120138, 120245, 121744])
+    expect(queueWorkResidueExcludedQueueIds(policy)).toEqual([120138, 120245, 121744, 121873])
     expect(policy.entries.map((entry) => entry.authorized_action)).toEqual([
+      'preserve_only',
       'preserve_only',
       'preserve_only',
       'preserve_only',
@@ -147,14 +162,29 @@ describe('#758 queue-work residue policy model', () => {
     expect(terminal.mismatches.join('\n')).toContain('status expected one of in_progress')
   })
 
+  test('121873 obsolete PR #765 check handoff matches only exact pending cli-notify evidence', () => {
+    const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
+    const entry = policy.entries.find((candidate) => candidate.queue_id === 121873)!
+
+    expect(matchQueueWorkResiduePolicyEntry(entry, row121873()).matched).toBe(true)
+
+    const drifted = matchQueueWorkResiduePolicyEntry(entry, row121873({
+      status: 'replied',
+      payload: JSON.stringify({ source: 'state-daemon-queue-work-scheduler' }),
+    }))
+    expect(drifted.matched).toBe(false)
+    expect(drifted.mismatches.join('\n')).toContain('status expected one of pending')
+    expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
+  })
+
   test('classifier reports exact matches, unclassified rows, missing entries, and mismatches', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
-    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744()], {
+    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873()], {
       requirePolicyRows: true,
     })
 
     expect(passing.ok).toBe(true)
-    expect(passing.classifications.map((item) => item.queue_id)).toEqual([120138, 120245, 121744])
+    expect(passing.classifications.map((item) => item.queue_id)).toEqual([120138, 120245, 121744, 121873])
 
     const failing = classifyQueueWorkResidueRows(policy, [
       row120138(),

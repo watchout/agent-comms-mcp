@@ -44,6 +44,7 @@ const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts
 const FULL_CHANNEL_SMOKE_PATH = join(REPO_ROOT, 'core', 'full-channel-smoke.ts')
 const STATE_DAEMON_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-readiness.ts')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-launchagent-readiness.ts')
+const STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_PATH = join(REPO_ROOT, 'core', 'state-daemon', 'queue-work-activation-plan.ts')
 const LOCAL_SUPERVISOR_ADAPTER_PATH = join(REPO_ROOT, 'core', 'local-supervisor-adapter.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
@@ -64,6 +65,7 @@ const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const FULL_CHANNEL_SMOKE_SRC = readFileSync(FULL_CHANNEL_SMOKE_PATH, 'utf-8')
 const STATE_DAEMON_READINESS_SRC = readFileSync(STATE_DAEMON_READINESS_PATH, 'utf-8')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_SRC = readFileSync(STATE_DAEMON_LAUNCHAGENT_READINESS_PATH, 'utf-8')
+const STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC = readFileSync(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_PATH, 'utf-8')
 const LOCAL_SUPERVISOR_ADAPTER_SRC = readFileSync(LOCAL_SUPERVISOR_ADAPTER_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
@@ -171,7 +173,7 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/async function stateDaemonCommand[\s\S]*?buildStateDaemonLaunchAgentReadinessReport/)
   })
   test("'state-daemon install-plan' invokes the dry-run local supervisor install planner", () => {
-    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness'/)
+    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-activation-plan'/)
     expect(CLI_SRC).toMatch(/subcommand === 'install-plan'[\s\S]*?buildLocalLaunchdInstallDryRunPlan/)
     expect(CLI_SRC).toMatch(/state-daemon install-plan is dry-run only/)
   })
@@ -179,6 +181,11 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?fetchBotStatusFromDb/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?buildQueueProcessingReadinessReport/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?formatQueueProcessingReadinessText/)
+  })
+  test("'state-daemon queue-work-activation-plan' invokes the read-only exact-row planner", () => {
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?buildQueueWorkActivationPlan/)
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?formatQueueWorkActivationPlanText/)
+    expect(CLI_SRC).toMatch(/queue-work-activation-plan is read-only/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -745,6 +752,18 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_live_smoke: true/)
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/QUEUE_WAKE_STUCK/)
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/STATE_DAEMON_TRANSPORT_NOT_READY/)
+  })
+
+  test('help documents state-daemon exact-row queue-work activation planner', () => {
+    expect(CLI_SRC).toMatch(/state-daemon queue-work-activation-plan --agent-id <id> --commit <sha>/)
+    expect(CLI_SRC).toMatch(/read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/issue_ref: '#603'/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/no_db_mutation: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/no_state_daemon_restart: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/no_launchctl_mutation: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/execute_requires_separate_approval: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/queue_id_required_for_multiple_pending/)
+    expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/validateQueueWorkCanaryResiduePreflight/)
   })
 
   test('queue wake smoke is bounded, approval-gated, and does not drain or terminalize rows', () => {
