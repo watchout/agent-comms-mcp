@@ -778,6 +778,11 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(COMMUNICATION_READINESS_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
   })
 
+  test('communication readiness changes require protected PR routing', () => {
+    const classifier = readFileSync(join(REPO_ROOT, 'scripts', 'classify-pr.sh'), 'utf8')
+    expect(classifier).toMatch(/core\/communication-readiness\\\./)
+  })
+
   test('help documents state-daemon exact-row queue-work activation planner', () => {
     expect(CLI_SRC).toMatch(/state-daemon queue-work-activation-plan --agent-id <id> --commit <sha>/)
     expect(CLI_SRC).toMatch(/read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart/)
