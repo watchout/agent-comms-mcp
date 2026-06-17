@@ -6,8 +6,8 @@ Issue: https://github.com/watchout/agent-comms-mcp/issues/758
 
 #722 proved one bounded `state-daemon-queue-work-scheduler` path with
 `message_queue.id=121745` for `kodama`. Before broader scheduler rollout, old
-non-terminal evidence rows must be classified by exact row identity so future
-activation cannot silently process stale work.
+evidence rows that could be confused with scheduler work must be classified by
+exact row identity so future activation cannot silently process stale work.
 
 This policy is not cleanup authorization. It preserves known evidence and gives
 later preflight/runtime code a machine-readable way to fail closed.
@@ -20,6 +20,11 @@ pre-existing non-terminal residue in scheduler scope is one of:
 - exact-fenced fresh work for the current activation;
 - exact-row classified by governed residue policy;
 - already terminal.
+
+Policy entries may also preserve exact identity for terminalized rows that were
+previously non-terminal canary or handoff residue. In that case the pinned
+status must match the current terminal status so future drift still fails
+closed.
 
 Broad time windows are not sufficient. `created_after` can define an activation
 epoch, but preserved residue is authorized only by exact `queue_id` plus
@@ -52,9 +57,15 @@ closed with a mismatch instead of assuming the row is safe.
 
 | queue_id | Classification | Action |
 |---:|---|---|
-| `120138` | `preserve_immutable_evidence` | Preserve GitHub work puller canary evidence. Exclude from queue-work scheduler selection. |
-| `120245` | `preserve_failed_scheduler_evidence` | Preserve failed `qa` scheduler evidence. Do not retry this row. Fresh retry must use a fresh row/message id. |
+| `120138` | `preserve_immutable_evidence` | Preserve terminalized GitHub work puller canary evidence. Exclude from queue-work scheduler selection. |
+| `120245` | `preserve_failed_scheduler_evidence` | Preserve terminalized failed `qa` scheduler evidence. Do not retry this row. Fresh retry must use a fresh row/message id. |
 | `121744` | `preserve_incomplete_scheduler_evidence` | Preserve incomplete `secretary` scheduler evidence. Exclude from scheduler selection, claim refresh, reclaim, and runner invocation. |
+| `121839` | `preserve_immutable_evidence` | Preserve terminalized obsolete PR #764 L2 re-audit handoff evidence. |
+| `121873` | `preserve_immutable_evidence` | Preserve obsolete PR #765 check handoff evidence. |
+| `121876` | `preserve_immutable_evidence` | Preserve obsolete PR #769 L2 handoff evidence. |
+| `121919` | `preserve_immutable_evidence` | Preserve superseded PR #773 L2 handoff evidence for old head `ba54527328d84124e5e67741f47b60b0727ed510`. |
+| `121924` | `preserve_immutable_evidence` | Preserve superseded PR #773 L2 handoff evidence for updated head `f251afe5aa28672500828059ec26f61684ace5ca`. |
+| `121938` | `preserve_immutable_evidence` | Preserve PR #775 L2 handoff delivery evidence. |
 
 `121745` is terminal `replied` and is not a residue policy entry.
 

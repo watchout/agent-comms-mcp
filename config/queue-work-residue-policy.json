@@ -10,9 +10,9 @@
       "scheduler_action": "exclude",
       "authorized_action": "preserve_only",
       "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/758",
-      "expected_status": ["pending"],
+      "expected_status": ["skipped"],
       "expected_payload_source": "state-daemon-github-work-puller-canary",
-      "notes": "GitHub work puller canary residue for #747. Preserve as immutable evidence; not queue-work scheduler work."
+      "notes": "GitHub work puller canary residue for #747. The row has since been terminalized as skipped; preserve as immutable evidence and never treat it as queue-work scheduler work."
     },
     {
       "queue_id": 120245,
@@ -22,11 +22,11 @@
       "scheduler_action": "exclude",
       "authorized_action": "preserve_only",
       "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/722#issuecomment-4701251174",
-      "expected_status": ["pending"],
+      "expected_status": ["skipped"],
       "expected_receive_claim_source": "state-daemon-queue-work-scheduler",
       "expected_runner_invocation_source": "state-daemon-queue-work-scheduler",
       "expected_runner_error_code": "ADAPTER_ERROR",
-      "notes": "Failed qa scheduler canary evidence. Preserve only; retry requires a fresh row/message id."
+      "notes": "Failed qa scheduler canary evidence. The row has since been terminalized as skipped; preserve only and require any retry to use a fresh row/message id."
     },
     {
       "queue_id": 121744,
@@ -60,9 +60,9 @@
       "scheduler_action": "exclude",
       "authorized_action": "preserve_only",
       "evidence_ref": "https://github.com/watchout/agent-comms-mcp/pull/764",
-      "expected_status": ["pending"],
+      "expected_status": ["skipped"],
       "expected_payload_source": "cli-notify",
-      "notes": "Obsolete PR #764 L2 re-audit handoff residue. Preserve as GitHub/AUN delivery evidence; do not let queue-work scheduler process it during later l2auditor canaries."
+      "notes": "Obsolete PR #764 L2 re-audit handoff residue. The row has since been terminalized as skipped; preserve as GitHub/AUN delivery evidence and do not let queue-work scheduler process it during later l2auditor canaries."
     },
     {
       "queue_id": 121876,

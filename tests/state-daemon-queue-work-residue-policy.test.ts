@@ -22,7 +22,7 @@ function row120138(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRo
     id: 120138,
     agent_id: 'agent-com-dev',
     message_id: null,
-    status: 'pending',
+    status: 'skipped',
     payload: JSON.stringify({
       source: 'state-daemon-github-work-puller-canary',
       message_type: 'github_work',
@@ -37,7 +37,7 @@ function row120245(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRo
     id: 120245,
     agent_id: 'qa',
     message_id: 'ab20f921-4b99-4392-960a-673ee834292a',
-    status: 'pending',
+    status: 'skipped',
     payload: JSON.stringify({
       receive_claim: {
         source: 'state-daemon-queue-work-scheduler',
@@ -86,26 +86,31 @@ const L2AUDITOR_OBSOLETE_ROWS = [
     id: 121839,
     message_id: '7016c340-2351-4e2b-9242-e04c05ba19e1',
     message_type: 'chat',
+    status: 'skipped',
   },
   {
     id: 121876,
     message_id: '0794ce90-bddf-4487-be97-e208eb7735bb',
     message_type: 'phase_handoff',
+    status: 'pending',
   },
   {
     id: 121919,
     message_id: '549bf0c9-424a-467c-a214-cecd80e08a1d',
     message_type: 'phase_handoff',
+    status: 'pending',
   },
   {
     id: 121924,
     message_id: '2a932426-6cf3-4eb3-b99a-be999ec9c7f8',
     message_type: 'phase_handoff',
+    status: 'pending',
   },
   {
     id: 121938,
     message_id: 'e717e0c6-549a-45e8-ba39-73b26f99c11a',
     message_type: 'phase_handoff',
+    status: 'pending',
   },
 ] as const
 
@@ -117,7 +122,7 @@ function rowL2AuditorObsolete(
     id: item.id,
     agent_id: 'l2auditor',
     message_id: item.message_id,
-    status: 'pending',
+    status: item.status,
     payload: JSON.stringify({
       source: 'cli-notify',
       message_type: item.message_type,
@@ -164,7 +169,7 @@ describe('#758 queue-work residue policy model', () => {
     expect(() => parseQueueWorkResiduePolicy(invalidAction)).toThrow('unsupported scheduler_action')
   })
 
-  test('120138 matches only exact queue id, agent id, null message id, and GitHub canary source', () => {
+  test('120138 matches only exact skipped row identity and GitHub canary source', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
     const entry = policy.entries.find((candidate) => candidate.queue_id === 120138)!
 
@@ -181,7 +186,7 @@ describe('#758 queue-work residue policy model', () => {
     expect(wrongSource.mismatches.join('\n')).toContain('payload.source expected state-daemon-github-work-puller-canary')
   })
 
-  test('120245 rejects message id, agent, runner source, and ADAPTER_ERROR drift', () => {
+  test('120245 matches only exact skipped failed scheduler evidence', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
     const entry = policy.entries.find((candidate) => candidate.queue_id === 120245)!
 
@@ -229,7 +234,7 @@ describe('#758 queue-work residue policy model', () => {
     expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
   })
 
-  test('obsolete l2auditor handoffs match only exact pending cli-notify evidence', () => {
+  test('obsolete l2auditor handoffs match only exact current-status cli-notify evidence', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
 
     for (const item of L2AUDITOR_OBSOLETE_ROWS) {
@@ -243,7 +248,7 @@ describe('#758 queue-work residue policy model', () => {
       }))
       expect(drifted.matched).toBe(false)
       expect(drifted.mismatches.join('\n')).toContain('agent_id expected l2auditor')
-      expect(drifted.mismatches.join('\n')).toContain('status expected one of pending')
+      expect(drifted.mismatches.join('\n')).toContain(`status expected one of ${item.status}`)
       expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
     }
   })
