@@ -65,7 +65,10 @@ closed with a mismatch instead of assuming the row is safe.
 | `121876` | `preserve_immutable_evidence` | Preserve obsolete PR #769 L2 handoff evidence. |
 | `121919` | `preserve_immutable_evidence` | Preserve superseded PR #773 L2 handoff evidence for old head `ba54527328d84124e5e67741f47b60b0727ed510`. |
 | `121924` | `preserve_immutable_evidence` | Preserve superseded PR #773 L2 handoff evidence for updated head `f251afe5aa28672500828059ec26f61684ace5ca`. |
+| `121926` | `preserve_failed_scheduler_evidence` | Preserve failed #774 l2auditor exact-row queue-work canary evidence. Do not retry this row without separate exact-row CTO authorization. |
 | `121938` | `preserve_immutable_evidence` | Preserve PR #775 L2 handoff delivery evidence. |
+| `122584` | `preserve_immutable_evidence` | Preserve superseded PR #780 L2 audit handoff evidence for pre-rework head `76f6708def5d1aca99683f25c6283da4fc1cca80`. |
+| `122762` | `preserve_immutable_evidence` | Preserve superseded PR #780 L2 re-audit handoff evidence for head `9276f541af5973b9ea182ca67643a41a4b26d9db`. |
 
 `121745` is terminal `replied` and is not a residue policy entry.
 

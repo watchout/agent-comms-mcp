@@ -112,6 +112,18 @@ const L2AUDITOR_OBSOLETE_ROWS = [
     message_type: 'phase_handoff',
     status: 'pending',
   },
+  {
+    id: 122584,
+    message_id: '25317833-7daf-4b77-90b3-cd9b92ff4880',
+    message_type: 'instruction',
+    status: 'pending',
+  },
+  {
+    id: 122762,
+    message_id: 'bc9f07b3-fde9-4cc1-8069-2863667c4863',
+    message_type: 'instruction',
+    status: 'pending',
+  },
 ] as const
 
 function rowL2AuditorObsolete(
@@ -131,6 +143,30 @@ function rowL2AuditorObsolete(
   }
 }
 
+function row121926(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRow {
+  return {
+    id: 121926,
+    agent_id: 'l2auditor',
+    message_id: 'b7ef5baa-2562-45ae-a52d-1fca0503e4c3',
+    status: 'in_progress',
+    payload: JSON.stringify({
+      source: 'cli-notify',
+      message_type: 'phase_handoff',
+      receive_claim: {
+        source: 'state-daemon-queue-work-scheduler',
+      },
+      runner_error: {
+        code: 'ADAPTER_ERROR',
+        invocation_source: 'state-daemon-queue-work-scheduler',
+      },
+      queue_work_runner_error_recovery: {
+        attempts: 2,
+      },
+    }),
+    ...patch,
+  }
+}
+
 describe('#758 queue-work residue policy model', () => {
   test('repo policy validates and exposes exact excluded queue ids', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
@@ -145,7 +181,10 @@ describe('#758 queue-work residue policy model', () => {
       121876,
       121919,
       121924,
+      121926,
       121938,
+      122584,
+      122762,
     ])
     expect(policy.entries.map((entry) => entry.authorized_action)).toEqual(
       Array.from({ length: policy.entries.length }, () => 'preserve_only'),
@@ -253,24 +292,49 @@ describe('#758 queue-work residue policy model', () => {
     }
   })
 
+  test('121926 failed l2auditor scheduler canary matches only exact in_progress runner evidence', () => {
+    const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
+    const entry = policy.entries.find((candidate) => candidate.queue_id === 121926)!
+
+    expect(matchQueueWorkResiduePolicyEntry(entry, row121926()).matched).toBe(true)
+
+    const drifted = matchQueueWorkResiduePolicyEntry(entry, row121926({
+      status: 'pending',
+      payload: JSON.stringify({
+        source: 'cli-notify',
+        message_type: 'phase_handoff',
+        receive_claim: { source: 'manual-next' },
+        runner_error: { code: 'OTHER', invocation_source: 'manual-next' },
+      }),
+    }))
+    expect(drifted.matched).toBe(false)
+    expect(drifted.mismatches.join('\n')).toContain('status expected one of in_progress')
+    expect(drifted.mismatches.join('\n')).toContain('receive_claim.source expected state-daemon-queue-work-scheduler')
+    expect(drifted.mismatches.join('\n')).toContain('runner invocation_source expected state-daemon-queue-work-scheduler')
+    expect(drifted.mismatches.join('\n')).toContain('runner_error.code expected ADAPTER_ERROR')
+  })
+
   test('classifier reports exact matches, unclassified rows, missing entries, and mismatches', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
     const l2Rows = L2AUDITOR_OBSOLETE_ROWS.map((item) => rowL2AuditorObsolete(item))
-    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows], {
+    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows, row121926()], {
       requirePolicyRows: true,
     })
 
     expect(passing.ok).toBe(true)
-    expect(passing.classifications.map((item) => item.queue_id)).toEqual([
+    expect(passing.classifications.map((item) => item.queue_id).sort((left, right) => left - right)).toEqual([
       120138,
       120245,
       121744,
-      121873,
       121839,
+      121873,
       121876,
       121919,
       121924,
+      121926,
       121938,
+      122584,
+      122762,
     ])
 
     const failing = classifyQueueWorkResidueRows(policy, [
