@@ -163,6 +163,8 @@ function runtimeReadiness(overrides: Partial<StateDaemonRuntimeReadiness> = {}):
     },
     environment: {
       database_url: 'postgresql:///agent_comms?host=/tmp',
+      codex_runner_enabled: '1',
+      queue_work_scheduler_enabled: null,
       agent_allowlist: null,
       agent_denylist: null,
     },
@@ -257,8 +259,52 @@ describe('state-daemon readiness diagnostics', () => {
     expect(readiness.process.pid).toBe(123)
     expect(readiness.paths.script).toContain('bin/state-daemon.ts')
     expect(readiness.process.cwd).toBe('/private/tmp/agent-comms-state-daemon')
+    expect(readiness.environment.codex_runner_enabled).toBeNull()
     expect(readiness.stderr.fatal_fingerprint).toContain('Module not found')
     expect(readiness.status).toBe('degraded')
+  })
+
+  test('runtime inspection uses live launchctl environment over plist environment', () => {
+    const readiness = inspectStateDaemonRuntime({
+      label: 'com.agent-comms.state-daemon',
+      plistPath: '/tmp/state-daemon.plist',
+      execFileSync: ((cmd: string) => {
+        if (cmd === 'launchctl') {
+          return [
+            'state = running',
+            'pid = 123',
+            'program = /Users/yuji/.bun/bin/bun',
+            'arguments = {',
+            '  /Users/yuji/.bun/bin/bun',
+            '  /checkout/bin/state-daemon.ts',
+            '}',
+            'environment = {',
+            '  STATE_DAEMON_CODEX_RUNNER_ENABLED => 0',
+            '  STATE_DAEMON_AGENT_ALLOWLIST => kodama',
+            '  STATE_DAEMON_AGENT_DENYLIST => ceo,test',
+            '  DATABASE_URL => postgresql:///agent_comms?host=/tmp',
+            '}',
+          ].join('\n')
+        }
+        if (cmd === 'ps') return '123 /Users/yuji/.bun/bin/bun /checkout/bin/state-daemon.ts\n'
+        if (cmd === 'lsof') return 'p123\nfcwd\nn/checkout\n'
+        throw new Error(`unexpected ${cmd}`)
+      }) as any,
+      existsSync: ((path: string) => path === '/tmp/state-daemon.plist') as any,
+      readFileSync: (() => [
+        '<plist><dict><key>EnvironmentVariables</key><dict>',
+        '<key>STATE_DAEMON_CODEX_RUNNER_ENABLED</key><string>1</string>',
+        '<key>STATE_DAEMON_AGENT_ALLOWLIST</key><string>qa</string>',
+        '</dict></dict></plist>',
+      ].join('')) as any,
+      statSync: (() => ({ size: 0 })) as any,
+      getuid: () => 501,
+      homedir: () => '/Users/yuji',
+    })
+
+    expect(readiness.environment.codex_runner_enabled).toBe('0')
+    expect(readiness.environment.agent_allowlist).toBe('kodama')
+    expect(readiness.environment.agent_denylist).toBe('ceo,test')
   })
 })
 
@@ -319,6 +365,58 @@ describe('#603 queue-processing readiness', () => {
     expect(report.transport_readiness.blocker_codes).toEqual(['STATE_DAEMON_TRANSPORT_NOT_READY'])
     expect(report.queue_processing_readiness.ready).toBe(true)
     expect(report.queue_processing_readiness.blocker_codes).toEqual([])
+  })
+
+  test('fails closed when live daemon cannot run or scope target queue agents', () => {
+    const report = buildQueueProcessingReadinessReport([
+      botStatusRow({
+        agent_id: 'check',
+        pending_count: 2,
+        oldest_pending_at: '2026-06-02T00:00:00.000Z',
+      }),
+    ], runtimeReadiness({
+      environment: {
+        database_url: 'postgresql:///agent_comms?host=/tmp',
+        codex_runner_enabled: '0',
+        queue_work_scheduler_enabled: null,
+        agent_allowlist: 'kodama',
+        agent_denylist: 'ceo,test',
+      },
+    }), { now: new Date('2026-06-02T00:02:30.000Z') })
+
+    expect(report.ok).toBe(false)
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.queue_processing_readiness.runner_enabled).toBe(false)
+    expect(report.queue_processing_readiness.agent_scope_blockers).toEqual([{
+      agent_id: 'check',
+      pending_count: 2,
+      active_claim_count: 0,
+      blocker_codes: ['STATE_DAEMON_RUNNER_DISABLED', 'STATE_DAEMON_AGENT_NOT_ALLOWLISTED'],
+    }])
+    expect(report.queue_processing_readiness.blocker_codes).toEqual([
+      'STATE_DAEMON_RUNNER_DISABLED',
+      'STATE_DAEMON_AGENT_NOT_ALLOWLISTED',
+    ])
+  })
+
+  test('normalizes current bot_status rows without legacy wake-state fields', () => {
+    const row = {
+      ...botStatusRow({
+        agent_id: 'check',
+        pending_count: 2,
+      }),
+    } as any
+    delete row.queue_wake_state
+    const report = buildQueueProcessingReadinessReport([row], runtimeReadiness(), {
+      now: new Date('2026-06-02T00:02:45.000Z'),
+    })
+    const text = formatQueueProcessingReadinessText(report)
+
+    expect(report.ok).toBe(true)
+    expect(report.queue_processing_readiness.active_claim_total).toBe(0)
+    expect(report.queue_processing_readiness.wake_state_counts.pending_observed).toBe(1)
+    expect(text).not.toContain('NaN')
+    expect(text).toContain('Runners: ready=true')
   })
 
   test('text formatter exposes both transport and queue readiness without implying live smoke', () => {
