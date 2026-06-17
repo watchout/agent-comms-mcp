@@ -387,6 +387,59 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS).toBe('msg-canary')
   })
 
+  test('queue-work GitHub-backed handoff activation fails closed without mediated posting', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'l2auditor',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
+        STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT: 'github_backed_role_handoff',
+      },
+    })
+    const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath, schemaPath], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_github_handoff_requires_mediated_posting' }),
+      expect.objectContaining({ code: 'queue_work_mediated_posting_command_missing' }),
+    ]))
+  })
+
+  test('queue-work GitHub-backed handoff activation passes with explicit mediated posting command', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'l2auditor',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
+        STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT: 'github_backed_role_handoff',
+        STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE: 'mediated',
+        STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND: '/Users/yuji/bin/agent-comms-post-github-comment',
+      },
+    })
+    const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
+    const postingCommand = '/Users/yuji/bin/agent-comms-post-github-comment'
+    const result = validateStateDaemonLaunchAgentConfig(
+      parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)),
+      { probe: probe([plan.bunPath, plan.entryPath, schemaPath, postingCommand], [plan.checkoutPath]) },
+    )
+
+    expect(result.ok).toBe(true)
+  })
+
   test('queue-work scheduler activation fails closed when residue policy file is missing', () => {
     const policyPath = '/Users/yuji/.agent-comms/state-daemon/residue-policy.json'
     const plan = buildStateDaemonRestorePlan({

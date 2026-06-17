@@ -554,6 +554,15 @@ export function validateStateDaemonLaunchAgentConfig(
     const runtime = env.STATE_DAEMON_QUEUE_WORK_RUNTIME ?? env.AUN_QUEUE_WORK_RUNTIME
     const command = env.STATE_DAEMON_QUEUE_WORK_COMMAND ?? env.AUN_QUEUE_WORK_COMMAND
     const effectiveRuntime = runtime ?? (command ? 'command-json' : null)
+    const handoffContract = env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT
+      ?? env.AUN_QUEUE_WORK_HANDOFF_CONTRACT
+      ?? null
+    const githubWritebackMode = env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE
+      ?? env.AUN_QUEUE_WORK_GITHUB_WRITEBACK_MODE
+      ?? null
+    const mediatedPostingCommand = env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND
+      ?? env.AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND
+      ?? null
     if (!effectiveRuntime) {
       errors.push({
         code: 'queue_work_runtime_unconfigured',
@@ -576,6 +585,59 @@ export function validateStateDaemonLaunchAgentConfig(
           message: 'STATE_DAEMON_QUEUE_WORK_RUNTIME=codex-exec requires a readable queue_work_result_v1 schema file.',
           path: schemaPath ?? undefined,
         })
+      }
+    }
+    if (handoffContract && !['plain_queue_work', 'github_backed_role_handoff'].includes(handoffContract)) {
+      errors.push({
+        code: 'queue_work_handoff_contract_invalid',
+        message: 'STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT must be plain_queue_work or github_backed_role_handoff.',
+      })
+    }
+    if (githubWritebackMode && !['none', 'mediated'].includes(githubWritebackMode)) {
+      errors.push({
+        code: 'queue_work_github_writeback_mode_invalid',
+        message: 'STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE must be none or mediated.',
+      })
+    }
+    if (handoffContract === 'github_backed_role_handoff') {
+      if (githubWritebackMode !== 'mediated') {
+        errors.push({
+          code: 'queue_work_github_handoff_requires_mediated_posting',
+          message: 'GitHub-backed queue-work handoffs require STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE=mediated before activation.',
+        })
+      }
+      if (!mediatedPostingCommand) {
+        errors.push({
+          code: 'queue_work_mediated_posting_command_missing',
+          message: 'GitHub-backed mediated queue-work handoffs require STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND.',
+        })
+      } else if (!probe.exists(mediatedPostingCommand)) {
+        errors.push({
+          code: 'queue_work_mediated_posting_command_not_found',
+          message: 'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND does not exist.',
+          path: mediatedPostingCommand,
+        })
+      } else if (!probe.isFile(mediatedPostingCommand)) {
+        errors.push({
+          code: 'queue_work_mediated_posting_command_not_file',
+          message: 'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND must point to a regular file.',
+          path: mediatedPostingCommand,
+        })
+      }
+      const postingArgsJson = env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON
+        ?? env.AUN_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON
+      if (postingArgsJson) {
+        try {
+          const parsed = JSON.parse(postingArgsJson)
+          if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+            throw new Error('not string array')
+          }
+        } catch {
+          errors.push({
+            code: 'queue_work_mediated_posting_args_invalid',
+            message: 'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON must be a JSON string array.',
+          })
+        }
       }
     }
   }

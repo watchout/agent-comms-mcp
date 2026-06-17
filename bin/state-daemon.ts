@@ -215,6 +215,11 @@ class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       'CODEX_EPHEMERAL',
       'CODEX_IGNORE_RULES',
       'CODEX_TIMEOUT_MS',
+      'GITHUB_WRITEBACK_MODE',
+      'MEDIATED_POSTING_COMMAND',
+      'MEDIATED_POSTING_ARGS_JSON',
+      'MEDIATED_POSTING_TIMEOUT_MS',
+      'HANDOFF_CONTRACT',
     ]) {
       const stateKey = `STATE_DAEMON_QUEUE_WORK_${key}`
       const aunKey = `AUN_QUEUE_WORK_${key}`

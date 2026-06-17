@@ -10,7 +10,9 @@ import {
   type LlmRuntimeAdapter,
   type QueueReplySender,
   type QueueWorkEnvelope,
+  type QueueWorkGithubIssueCommentWriteback,
   type QueueWorkResult,
+  type QueueWorkWritebackSender,
 } from '../../core/queue-work'
 
 export interface RunQueueWorkOptions {
@@ -33,6 +35,7 @@ export interface RunQueueWorkPlan {
   invocation_source: string | null
   expected_claim_source: string | null
   finalize: boolean
+  github_writeback_mode: string | null
   adapter_contract: 'queue_work_envelope_v1_stdin_to_queue_work_result_v1_stdout'
 }
 
@@ -75,6 +78,9 @@ export function buildRunQueueWorkPlan(opts: RunQueueWorkOptions = {}): RunQueueW
     invocation_source: opts.invocationSource ?? env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? null,
     expected_claim_source: opts.expectedClaimSource ?? env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE ?? null,
     finalize: !!opts.finalize,
+    github_writeback_mode: env.AUN_QUEUE_WORK_GITHUB_WRITEBACK_MODE
+      ?? env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE
+      ?? null,
     adapter_contract: 'queue_work_envelope_v1_stdin_to_queue_work_result_v1_stdout',
   }
 }
@@ -179,7 +185,10 @@ function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
     'You are the AUN queue-work runtime adapter for one exact queue row.',
     'Return only JSON matching queue_work_result_v1.',
     'Do not call next, inbox, processing, done, send, repair commands, tmux, or Discord.',
+    'Do not post to GitHub directly.',
     'Do not inspect unrelated queue rows.',
+    'If handoff_contract.github_backed is true, include writeback.mode="github_issue_comment" with repo, issue_number, body, and evidence. The trusted wrapper will post it.',
+    'If handoff_contract.github_backed is false, set writeback to null.',
     'If reply_contract.required is false, use next_action "close" and omit reply.',
     'If reply_contract.required is true and you can answer, use next_action "reply" with reply text.',
     'If you cannot safely complete the work, return ok=false with next_action "retry" and a concise summary.',
@@ -437,6 +446,78 @@ class AgentComCliReplySender implements QueueReplySender {
   }
 }
 
+interface MediatedPostingRequest {
+  schema_version: 'queue_work_mediated_posting_request_v1'
+  queue_id: string
+  agent_id: string
+  message_id: string | null
+  writeback: QueueWorkGithubIssueCommentWriteback
+}
+
+class MediatedPostingCommandSender implements QueueWorkWritebackSender {
+  constructor(
+    private readonly command: string,
+    private readonly args: string[],
+    private readonly repoRoot: string,
+    private readonly env: NodeJS.ProcessEnv,
+  ) {}
+
+  async sendWriteback(input: {
+    queue_id: string
+    agent_id: string
+    message_id: string | null
+    writeback: QueueWorkGithubIssueCommentWriteback
+  }): Promise<{ posted_with?: string | null }> {
+    const request: MediatedPostingRequest = {
+      schema_version: 'queue_work_mediated_posting_request_v1',
+      queue_id: input.queue_id,
+      agent_id: input.agent_id,
+      message_id: input.message_id,
+      writeback: input.writeback,
+    }
+    const child = await execFileAsync(this.command, this.args, {
+      cwd: this.repoRoot,
+      env: {
+        ...this.env,
+        AGENT_ID: input.agent_id,
+        AGENT_COM_EXPECTED_AGENT_ID: input.agent_id,
+      },
+      input: JSON.stringify(request) + '\n',
+      timeout: Number.parseInt(
+        this.env.AUN_QUEUE_WORK_MEDIATED_POSTING_TIMEOUT_MS
+          ?? this.env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_TIMEOUT_MS
+          ?? '120000',
+        10,
+      ),
+      maxBuffer: 1024 * 1024 * 5,
+    })
+    if (child.status !== 0) {
+      throw new Error(`mediated posting command failed status=${child.status} stderr=${child.stderr.slice(0, 1000)}`)
+    }
+    const parsed = JSON.parse(child.stdout || '{}')
+    if (parsed.ok === false) {
+      throw new Error(`mediated posting command returned ok=false: ${JSON.stringify(parsed).slice(0, 1000)}`)
+    }
+    return { posted_with: typeof parsed.posted_with === 'string' ? parsed.posted_with : null }
+  }
+}
+
+function createWritebackSender(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): QueueWorkWritebackSender | undefined {
+  if (plan.github_writeback_mode !== 'mediated') return undefined
+  const command = env.AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND
+    ?? env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND
+  if (!command) {
+    throw new Error('AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND is required when github_writeback_mode=mediated')
+  }
+  const rawArgs = env.AUN_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON
+    ?? env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON
+  const args = rawArgs ? JSON.parse(rawArgs) : []
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) {
+    throw new Error('AUN_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON must be a JSON string array')
+  }
+  return new MediatedPostingCommandSender(command, args, plan.repoRoot, env)
+}
+
 export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQueueWorkCliResult> {
   const env = opts.env ?? process.env
   const plan = buildRunQueueWorkPlan(opts)
@@ -459,6 +540,7 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
   }
 
   try {
+    const writebackSender = createWritebackSender(plan, env)
     const runner = await runReceivedQueueWork(legacyDb, {
       queueId: plan.queue_id ?? undefined,
       agentId: plan.agent_id ?? undefined,
@@ -471,6 +553,7 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
       finalizer = await finalizeDoneQueueWork(legacyDb, {
         queueId: runner.queue_id,
         replySender: new AgentComCliReplySender(plan.repoRoot, env),
+        writebackSender,
       })
     }
     return {

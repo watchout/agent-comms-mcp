@@ -56,6 +56,19 @@ function row(patch: Partial<Record<string, unknown>> = {}) {
   }
 }
 
+function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
+  return row({
+    id: 121926,
+    agent_id: 'l2auditor',
+    message_id: 'msg-121926',
+    payload: JSON.stringify({
+      message_type: 'phase_handoff',
+      content: 'PR #779 L2 audit required. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/779',
+    }),
+    ...patch,
+  })
+}
+
 describe('queue-work activation planner', () => {
   test('builds an exact-row read-only restore command without echoing payload', async () => {
     const db = new FakeDb({ 121877: [row()] })
@@ -128,6 +141,60 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_row_not_pending')
     expect(report.candidate?.status).toBe('in_progress')
+  })
+
+  test('blocks GitHub-backed role handoffs when codex-exec has no mediated posting contract', async () => {
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'l2auditor',
+      queueId: '121926',
+      commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      github_backed: true,
+      posting_mode: 'none',
+    })
+    expect(report.blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
+      'queue_work_github_handoff_requires_mediated_posting',
+      'queue_work_mediated_posting_command_required',
+    ]))
+    expect(report.dry_run_command).toEqual([])
+    expect(report.execute_command).toEqual([])
+  })
+
+  test('allows GitHub-backed role handoffs only with an explicit mediated posting command', async () => {
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'l2auditor',
+      queueId: '121926',
+      commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+      githubWritebackMode: 'mediated',
+      mediatedPostingCommand: '/repo/scripts/post-github-comment',
+      mediatedPostingArgsJson: '["--dry-run"]',
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      github_backed: true,
+      posting_mode: 'mediated',
+    })
+    expect(report.activation_env).toMatchObject({
+      STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT: 'github_backed_role_handoff',
+      STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE: 'mediated',
+      STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND: '/repo/scripts/post-github-comment',
+      STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON: '["--dry-run"]',
+    })
+    expect(report.execute_command).toEqual(expect.arrayContaining([
+      '--queue-work-github-writeback-mode',
+      'mediated',
+      '--queue-work-mediated-posting-command',
+      '/repo/scripts/post-github-comment',
+    ]))
   })
 
   test('uses the existing residue preflight before producing executable commands', async () => {
