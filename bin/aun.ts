@@ -17,6 +17,7 @@
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
+ *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -33,6 +34,7 @@ import { codexRunnerTick } from './aun/codex-runner'
 import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
+import { runtimeV2 } from './aun/runtime-v2'
 
 function printHelp(): void {
   const lines = [
@@ -53,6 +55,7 @@ function printHelp(): void {
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
+    '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -297,7 +300,8 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'done' &&
     subcommand !== 'record-no-reply' &&
     subcommand !== 'renew-claim' &&
-    subcommand !== 'memory-ready-bootstrap'
+    subcommand !== 'memory-ready-bootstrap' &&
+    subcommand !== 'runtime-v2'
   ) return run(argv)
 
   if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
@@ -366,6 +370,29 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     if (res.stdout) process.stdout.write(res.stdout)
     if (res.stderr) process.stderr.write(res.stderr)
     return res.code
+  }
+
+  if (subcommand === 'runtime-v2') {
+    let claimTtlSeconds: number | undefined
+    if (flags['claim-ttl-seconds'] !== undefined) {
+      if (typeof flags['claim-ttl-seconds'] !== 'string') {
+        process.stderr.write('Error [AUN_RUNTIME_V2_INVALID]: --claim-ttl-seconds requires a value\n')
+        return 2
+      }
+      claimTtlSeconds = Number(flags['claim-ttl-seconds'])
+    }
+    const res = await runtimeV2({
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+      messageId: typeof flags['message-id'] === 'string' ? (flags['message-id'] as string) : undefined,
+      createdAfter: typeof flags['created-after'] === 'string' ? (flags['created-after'] as string) : undefined,
+      runtime: typeof flags.runtime === 'string' ? (flags.runtime as string) : undefined,
+      claimTtlSeconds,
+      finalize: !!flags.finalize,
+      dryRun: !!flags['dry-run'],
+    })
+    process.stdout.write(JSON.stringify(res, null, 2) + '\n')
+    return res.ok ? 0 : 1
   }
 
   if (subcommand === 'reconcile') {
