@@ -17,7 +17,7 @@
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
- *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
+ *   - aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -55,7 +55,7 @@ function printHelp(): void {
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
-    '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
+    '  aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',

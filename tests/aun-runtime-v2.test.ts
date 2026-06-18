@@ -119,11 +119,11 @@ class FakeAunRuntimeDb implements QueueWorkDb {
   }
 }
 
-function pendingKodamaRow(overrides: Record<string, unknown> = {}) {
+function pendingRuntimeRow(agentId = 'kodama', overrides: Record<string, unknown> = {}) {
   return {
     id: 1001,
-    agent_id: 'kodama',
-    message_id: 'msg-kodama-1',
+    agent_id: agentId,
+    message_id: `msg-${agentId}-1`,
     status: 'pending',
     payload: JSON.stringify({
       channel_id: 'aun-v2-canary',
@@ -142,6 +142,10 @@ function pendingKodamaRow(overrides: Record<string, unknown> = {}) {
     claim_expires_at: null,
     ...overrides,
   }
+}
+
+function pendingKodamaRow(overrides: Record<string, unknown> = {}) {
+  return pendingRuntimeRow('kodama', overrides)
 }
 
 function closeResult(overrides: Partial<QueueWorkResult> = {}): QueueWorkResult {
@@ -171,7 +175,34 @@ describe('AUN runtime v2 planner', () => {
       invocation_source: AUN_RUNTIME_V2_CLAIM_SOURCE,
       expected_claim_source: AUN_RUNTIME_V2_CLAIM_SOURCE,
       live_activation: false,
+      policy_id: 'aun-runtime-v2-pr-a-allowlist',
+      policy_version: '2026-06-18.pr-a',
+      policy_source: 'watchout/agent-comms-mcp#792',
+      policy_agent_mode: 'live',
+      live_agent_ids: ['kodama'],
     })
+    expect(plan.allowed_agent_ids).toContain('arc')
+    expect(plan.allowed_agent_ids).toContain('agent-com-dev')
+    expect(plan.allowed_agent_ids).not.toContain('l2auditor')
+    expect(plan.allowed_agent_ids).not.toContain('devauditor')
+  })
+
+  test('allows policy-listed non-kodama dry-run planning but marks it dry-run only', () => {
+    const plan = buildAunRuntimeV2Plan({
+      agentId: 'arc',
+      env: {
+        AUN_RUNTIME_V2_ALLOWED_AGENT_ID: 'l2auditor',
+      } as NodeJS.ProcessEnv,
+    })
+
+    expect(plan).toMatchObject({
+      agent_id: 'arc',
+      allowed_agent_id: 'kodama',
+      policy_id: 'aun-runtime-v2-pr-a-allowlist',
+      policy_agent_mode: 'dry_run',
+      live_agent_ids: ['kodama'],
+    })
+    expect(plan.allowed_agent_ids).toContain('arc')
   })
 
   test('ignores env and imported allowed-agent override attempts', () => {
@@ -186,7 +217,9 @@ describe('AUN runtime v2 planner', () => {
     expect(plan).toMatchObject({
       agent_id: 'l2auditor',
       allowed_agent_id: 'kodama',
+      policy_agent_mode: 'not_allowed',
     })
+    expect(plan.allowed_agent_ids).not.toContain('l2auditor')
   })
 })
 
@@ -226,6 +259,67 @@ describe('runAunRuntimeV2', () => {
     expect(outcome).toMatchObject({
       ok: false,
       code: 'TARGET_AGENT_NOT_ALLOWED',
+    })
+    expect(db.calls).toEqual([])
+    expect(db.rows[0].status).toBe('pending')
+  })
+
+  test('dry-runs a policy-listed non-kodama candidate without mutation', async () => {
+    const db = new FakeAunRuntimeDb([pendingRuntimeRow('arc')])
+
+    const outcome = await runAunRuntimeV2(db, {
+      agentId: 'arc',
+      dryRun: true,
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      dry_run: true,
+      code: 'DRY_RUN',
+      plan: {
+        agent_id: 'arc',
+        policy_agent_mode: 'dry_run',
+        live_agent_ids: ['kodama'],
+      },
+      candidate: {
+        queue_id: '1001',
+        agent_id: 'arc',
+        status: 'pending',
+      },
+    })
+    expect(db.rows[0].status).toBe('pending')
+    expect(db.calls.some((call) => call.sql.includes('UPDATE message_queue'))).toBe(false)
+  })
+
+  test('rejects policy-listed non-kodama live attempts before touching the DB', async () => {
+    const db = new FakeAunRuntimeDb([pendingRuntimeRow('codex-cto')])
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fake-runtime',
+      capabilities,
+      async invoke() {
+        throw new Error('must not invoke adapter')
+      },
+    }
+
+    const outcome = await runAunRuntimeV2(db, {
+      agentId: 'codex-cto',
+      queueId: '1001',
+      messageId: 'msg-codex-cto-1',
+      createdAfter: '2026-06-18T00:00:00.000Z',
+      adapter,
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      dry_run: false,
+      code: 'TARGET_AGENT_NOT_LIVE_CAPABLE',
+      plan: {
+        agent_id: 'codex-cto',
+        policy_agent_mode: 'dry_run',
+        live_agent_ids: ['kodama'],
+      },
     })
     expect(db.calls).toEqual([])
     expect(db.rows[0].status).toBe('pending')

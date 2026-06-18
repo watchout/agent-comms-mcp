@@ -8,6 +8,7 @@ import {
   buildAunRuntimeV2Plan,
   runAunRuntimeV2,
   validateAunRuntimeV2ExecutionFence,
+  validateAunRuntimeV2LiveCapability,
   validateAunRuntimeV2Plan,
   type AunRuntimeV2Options,
   type AunRuntimeV2Outcome,
@@ -341,6 +342,15 @@ export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<Runtime
         dry_run: false,
         plan,
         error: validFence.detail,
+      }
+    }
+    const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
+    if (!validLiveAgent.ok) {
+      return {
+        ok: false,
+        dry_run: false,
+        plan,
+        error: validLiveAgent.detail,
       }
     }
   }

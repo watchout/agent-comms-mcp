@@ -37,6 +37,7 @@
     "db/",
     "bin/",
     "schemas/",
+    "config/aun-runtime-v2-policy.json",
     "config/queue-work-residue-policy.json",
     "hooks/",
     "config.example.json",
