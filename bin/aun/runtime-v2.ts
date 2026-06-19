@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createDbAdapter } from '../../core/db'
+import { createDbAdapter, PgAdapter, SqliteAdapter, type DbAdapter } from '../../core/db'
 import {
   AUN_RUNTIME_V2_CLAIM_SOURCE,
   buildAunRuntimeV2Plan,
@@ -13,6 +13,12 @@ import {
   type AunRuntimeV2Outcome,
   type AunRuntimeV2Plan,
 } from '../../core/aun-runtime-v2'
+import {
+  buildAunRuntimeV2ReadOnlyPlan,
+  validateAunRuntimeV2ReadOnlyPlanArgs,
+  type AunRuntimeV2ReadOnlyPlan,
+  type AunRuntimeV2ReadOnlyPlanError,
+} from '../../core/aun-runtime-v2-plan'
 import {
   buildCodexExecQueueWorkCommand,
   describeCodexExecFailure,
@@ -28,6 +34,7 @@ import {
 } from '../../core/queue-work'
 
 export interface RuntimeV2CliOptions extends AunRuntimeV2Options {
+  mode?: 'execute' | 'plan'
   format?: 'json'
 }
 
@@ -39,11 +46,18 @@ export interface RuntimeV2CliResult {
   error?: string
 }
 
+export interface RuntimeV2PlanCliResult {
+  ok: boolean
+  code: number
+  result: AunRuntimeV2ReadOnlyPlan | AunRuntimeV2ReadOnlyPlanError
+}
+
 function parseArgs(argv: string[]): RuntimeV2CliOptions {
   const out: RuntimeV2CliOptions = {}
   for (let i = 2; i < argv.length; i++) {
     const tok = argv[i]
     if (tok === 'runtime-v2') continue
+    if (tok === 'plan') out.mode = 'plan'
     if (tok === '--agent-id') out.agentId = argv[++i]
     else if (tok === '--queue-id') out.queueId = argv[++i]
     else if (tok === '--message-id') out.messageId = argv[++i]
@@ -52,6 +66,7 @@ function parseArgs(argv: string[]): RuntimeV2CliOptions {
     else if (tok === '--claim-ttl-seconds') out.claimTtlSeconds = Number(argv[++i])
     else if (tok === '--finalize') out.finalize = true
     else if (tok === '--dry-run') out.dryRun = true
+    else if (tok === '--json') out.format = 'json'
     else if (tok === '--format') out.format = argv[++i] as 'json'
   }
   return out
@@ -315,6 +330,90 @@ function toLegacyDb(db: ReturnType<typeof createDbAdapter>) {
   }
 }
 
+const MUTATION_SQL = /\b(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|REINDEX|CLUSTER|CALL|DO)\b/i
+
+function toReadOnlyLegacyDb(db: DbAdapter) {
+  return {
+    async query<T = any>(sql: string, params?: unknown[]) {
+      if (MUTATION_SQL.test(sql)) {
+        throw new Error(`runtime-v2 plan attempted non-read SQL: ${sql.trim().slice(0, 80)}`)
+      }
+      const rows = await db.query<T>(sql, params as any[])
+      return { rows, rowCount: rows.length }
+    },
+  }
+}
+
+function createReadOnlyPlanDbAdapter(env: NodeJS.ProcessEnv): DbAdapter {
+  const dbType = env.AGENT_COM_DB || (env.DATABASE_URL ? 'postgres' : 'sqlite')
+  if (dbType === 'postgres' || dbType === 'postgresql') {
+    return new PgAdapter(env.DATABASE_URL)
+  }
+  const dbPath = env.AGENT_COM_SQLITE_PATH ?? './agent-com.db'
+  return new SqliteAdapter(dbPath, { readonly: true, create: false })
+}
+
+export async function runtimeV2Plan(opts: RuntimeV2CliOptions = {}): Promise<RuntimeV2PlanCliResult> {
+  const env = opts.env ?? process.env
+  if (opts.format !== 'json') {
+    return {
+      ok: false,
+      code: 2,
+      result: {
+        error: 'invalid_arguments',
+        message: 'aun runtime-v2 plan requires --json',
+      },
+    }
+  }
+
+  const args = validateAunRuntimeV2ReadOnlyPlanArgs({
+    agentId: opts.agentId,
+    queueId: opts.queueId,
+    messageId: opts.messageId,
+    createdAfter: opts.createdAfter,
+    env,
+    now: opts.now,
+  })
+  if (!args.ok) {
+    return { ok: false, code: args.error.error === 'db_unreachable' ? 1 : 2, result: args.error }
+  }
+
+  let db: DbAdapter
+  try {
+    db = createReadOnlyPlanDbAdapter(env)
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      result: {
+        error: 'db_unreachable',
+        message: (err as Error).message ?? String(err),
+      },
+    }
+  }
+
+  try {
+    const result = await buildAunRuntimeV2ReadOnlyPlan(toReadOnlyLegacyDb(db), {
+      agentId: opts.agentId,
+      queueId: opts.queueId,
+      messageId: opts.messageId,
+      createdAfter: opts.createdAfter,
+      env,
+      now: opts.now,
+    })
+    if ('error' in result) {
+      return {
+        ok: false,
+        code: result.error === 'invalid_arguments' || result.error === 'fence_required' ? 2 : 1,
+        result,
+      }
+    }
+    return { ok: true, code: 0, result }
+  } finally {
+    await db.close()
+  }
+}
+
 export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<RuntimeV2CliResult> {
   const env = opts.env ?? process.env
   const cwd = opts.cwd ?? repoRoot()
@@ -378,7 +477,14 @@ export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<Runtime
 }
 
 async function main(): Promise<void> {
-  const result = await runtimeV2(parseArgs(process.argv))
+  const opts = parseArgs(process.argv)
+  if (opts.mode === 'plan') {
+    const result = await runtimeV2Plan(opts)
+    process.stdout.write(JSON.stringify(result.result, null, 2) + '\n')
+    process.exit(result.code)
+  }
+
+  const result = await runtimeV2(opts)
   process.stdout.write(JSON.stringify(result, null, 2) + '\n')
   process.exit(result.ok ? 0 : 1)
 }

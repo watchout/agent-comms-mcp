@@ -17,6 +17,7 @@
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
+ *   - aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json
  *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
@@ -34,7 +35,7 @@ import { codexRunnerTick } from './aun/codex-runner'
 import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
-import { runtimeV2 } from './aun/runtime-v2'
+import { runtimeV2, runtimeV2Plan } from './aun/runtime-v2'
 
 function printHelp(): void {
   const lines = [
@@ -55,6 +56,7 @@ function printHelp(): void {
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
+    '  aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json',
     '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
@@ -288,7 +290,7 @@ export function run(argv: string[] = process.argv): number {
 }
 
 export async function runAsync(argv: string[] = process.argv): Promise<number> {
-  const { subcommand, flags } = parseArgs(argv)
+  const { subcommand, flags, extras } = parseArgs(argv)
   if (
     !((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') &&
     subcommand !== 'diagnose-receive' &&
@@ -373,6 +375,19 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
   }
 
   if (subcommand === 'runtime-v2') {
+    if (extras[0] === 'plan') {
+      const res = await runtimeV2Plan({
+        mode: 'plan',
+        format: flags.json ? 'json' : undefined,
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+        messageId: typeof flags['message-id'] === 'string' ? (flags['message-id'] as string) : undefined,
+        createdAfter: typeof flags['created-after'] === 'string' ? (flags['created-after'] as string) : undefined,
+      })
+      process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
+      return res.code
+    }
+
     let claimTtlSeconds: number | undefined
     if (flags['claim-ttl-seconds'] !== undefined) {
       if (typeof flags['claim-ttl-seconds'] !== 'string') {
