@@ -317,6 +317,14 @@ async function selectPendingCandidate(
   return selected.rows[0] ?? null
 }
 
+export async function selectAunRuntimeV2CandidateRow(
+  db: QueueWorkDb,
+  plan: AunRuntimeV2Plan,
+  lock = false,
+): Promise<QueueWorkRow | null> {
+  return selectPendingCandidate(db, plan, lock)
+}
+
 function validateCandidate(
   plan: AunRuntimeV2Plan,
   row: QueueWorkRow | null,

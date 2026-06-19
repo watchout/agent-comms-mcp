@@ -42,10 +42,15 @@ function reorderParams(sql: string, params: any[]): { sql: string; params: any[]
 export class SqliteAdapter implements DbAdapter {
   private db: Database
 
-  constructor(path?: string) {
+  constructor(path?: string, options: { readonly?: boolean; create?: boolean } = {}) {
     const dbPath = path ?? process.env.AGENT_COM_SQLITE_PATH ?? './agent-com.db'
-    this.db = new Database(dbPath, { create: true })
-    this.db.exec('PRAGMA journal_mode = WAL')
+    this.db = new Database(dbPath, {
+      create: options.create ?? !options.readonly,
+      readonly: options.readonly ?? false,
+    })
+    if (!options.readonly) {
+      this.db.exec('PRAGMA journal_mode = WAL')
+    }
     this.db.exec('PRAGMA foreign_keys = ON')
     this.db.exec('PRAGMA busy_timeout = 5000')
   }
