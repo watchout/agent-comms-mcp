@@ -1,29 +1,67 @@
 schema_version: shirube-cell/v1
-status: draft_candidate
-cell_id: CELL-MCP-006
-title: Audit log policy
+CELL-ID: CELL-MCP-006
+SPEC-ID: SPEC-MCP-GOV-001
 risk_tier: R2
-repo_id: watchout/agent-comms-mcp
-objective: Draft audit log and evidence sink policy for queue, runtime, delivery, waiver, and gate decisions.
-scope:
-  allowed_paths:
-    - .shirube/**
-    - docs/**
-    - README.md
-  forbidden_paths:
-    - bin/**
-    - core/**
-    - cli/**
-    - server.ts
-    - .github/workflows/**
+goal: Draft audit log and evidence sink policy for queue, runtime, delivery, waiver, and gate decisions.
+covered_req_ids:
+  - REQ-MCP-GOV-003
+  - SEC-MCP-GOV-001
+dependencies:
+  - CELL-MCP-GOV-001
+allowed_paths:
+  - .shirube/**
+  - docs/**
+  - README.md
+forbidden_paths:
+  - .env
+  - secrets/**
+  - bin/**
+  - cli/**
+  - core/**
+  - server.ts
+  - .github/workflows/**
+acceptance_criteria:
+  - id: AC-MCP-006-001
+    statement: Required audit events are identified for future behavior-changing Cells.
+    linked_req_ids:
+      - REQ-MCP-GOV-003
+  - id: AC-MCP-006-002
+    statement: GitHub-native durable evidence sinks are documented.
+    linked_req_ids:
+      - SEC-MCP-GOV-001
+required_tests:
+  - TEST-MCP-GOV-001
+  - TEST-MCP-GOV-002
+required_evidence:
+  - changed files
+  - yaml parse results
+  - scope confirmation
+  - Shirube command review result
 non_goals:
   - No audit table migration.
   - No runtime audit writer change.
   - No post-merge workflow change.
-acceptance_criteria:
-  - Required audit events are identified.
-  - GitHub-native durable evidence sinks are documented.
-  - Enforcement remains warn-only.
-required_gates:
-  - Shirube command review
-  - repository owner/domain designer confirmation
+stop_conditions:
+  - Implementation would touch forbidden_paths.
+  - Audit log storage or writer behavior would change.
+  - Post-merge workflow or evidence enforcement would change.
+waiver_refs: []
+execution_contract:
+  canonical_term: Goal-directed bounded execution
+  shorthand: Goal-mode Implementation
+  allowed_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - existing lightweight smoke checks
+  forbidden_commands:
+    - git push --force
+    - destructive production commands
+    - active workflow or branch protection mutation
+  handoff_conditions:
+    - Shirube command review
+    - repository owner/domain designer confirmation
+  completion_evidence:
+    - changed files
+    - commands run
+    - validation results
+    - next required gate
