@@ -1,6 +1,6 @@
 schema_version: shirube-repo-spec/v1
 repo_id: watchout/agent-comms-mcp
-owner: TODO_REPO_OWNER
+owner: watchout
 purpose: "Draft/unconfirmed premise: agent-comms-mcp provides MCP tools, CLI surfaces, queue/runtime diagnostics, and durable evidence helpers for agent-to-agent communication. This scaffold is warn-only and does not authorize runtime, workflow, ruleset, or production behavior changes."
 scope:
   - MCP tool and CLI implementation for agent communication.
@@ -27,12 +27,12 @@ development_flow:
   - Test
   - Evidence
 roles:
-  repo_owner: TODO_REPO_OWNER
-  release_owner: TODO_RELEASE_OWNER
-  security_owner: TODO_SECURITY_OWNER
-  evidence_owner: TODO_EVIDENCE_OWNER
-  domain_designer: TODO_DOMAIN_DESIGNER
-  shirube_command_owner: TODO_SHIRUBE_COMMAND_OWNER
+  repo_owner: watchout
+  release_owner: codex-cto
+  security_owner: codex-cto
+  evidence_owner: agent-com-dev
+  domain_designer: arc
+  shirube_command_owner: arc
 boundaries:
   allowed_paths:
     - ".shirube/**"
@@ -71,7 +71,7 @@ required_gates:
   - "R3 owner/security/CTO approval for production activation, external delivery changes, secret/ruleset changes, or runtime supervisor changes."
   - "Feature Spec -> Cell -> Impl artifacts before behavior-changing MCP or agent communication work."
   - "post_merge_mechanical_verification appropriate to risk tier before completion claims."
-risk_tier_defaults: R2
+risk_tier_defaults: R3
 standards:
   soc2:
     - Security
@@ -87,3 +87,13 @@ standards:
 ai_usage_classification: agentic
 agent_policy_ref: ".shirube/agent-policy.yaml"
 evidence_ledger_ref: ".shirube/evidence/"
+shared_terminology:
+  agent_id: "論理エージェント identity（正本）。Discord/token/session/pid は evidence であり identity でない"
+  runtime: "仕事を実行する実体（codex / claude / remote worker）"
+  connector: "外部送受信（Discord / Slack / MCP transport / GitHub writeback）"
+  message_delivery_conversation: "message=論理発話 / delivery=提示の永続試行 / conversation=関連作業スレッド"
+  baton: "応答責任。1 conversation = 1 active baton。claim + lease + fencing で実現する"
+  claim_lease_fencing: "claim=queue 行取得 / lease=占有期限 / fencing_token=stale 排除"
+  agent_turn: "baton 保持者の1回の実行"
+  typed_outcome: "reply / handoff / no_reply / close（自由文から推論しない）"
+  projection: "Discord / GitHub 等への投影（identity/完了の authority でない）"
