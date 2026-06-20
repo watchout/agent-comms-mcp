@@ -1,0 +1,67 @@
+schema_version: shirube-cell/v1
+CELL-ID: CELL-MCP-001
+SPEC-ID: SPEC-MCP-GOV-001
+risk_tier: R2
+goal: Draft a registry schema policy for MCP tools, agent identities, runtime surfaces, and evidence anchors.
+covered_req_ids:
+  - REQ-MCP-GOV-003
+  - DATA-MCP-GOV-001
+dependencies:
+  - CELL-MCP-GOV-001
+allowed_paths:
+  - .shirube/**
+  - docs/**
+  - README.md
+forbidden_paths:
+  - .env
+  - secrets/**
+  - bin/**
+  - cli/**
+  - core/**
+  - server.ts
+  - .github/workflows/**
+acceptance_criteria:
+  - id: AC-MCP-001-001
+    statement: Registry entities and ownership boundaries are documented.
+    linked_req_ids:
+      - DATA-MCP-GOV-001
+  - id: AC-MCP-001-002
+    statement: Required evidence fields are identified without enabling enforcement.
+    linked_req_ids:
+      - REQ-MCP-GOV-003
+required_tests:
+  - TEST-MCP-GOV-001
+  - TEST-MCP-GOV-002
+required_evidence:
+  - changed files
+  - yaml parse results
+  - scope confirmation
+  - Shirube command review result
+non_goals:
+  - No runtime registry implementation.
+  - No active validation enforcement.
+  - No migration or DB schema change.
+stop_conditions:
+  - Implementation would touch forbidden_paths.
+  - Runtime registry behavior would change.
+  - Required owner confirmation is missing for authoritative boundary decisions.
+waiver_refs: []
+execution_contract:
+  canonical_term: Goal-directed bounded execution
+  shorthand: Goal-mode Implementation
+  allowed_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - existing lightweight smoke checks
+  forbidden_commands:
+    - git push --force
+    - destructive production commands
+    - active workflow or branch protection mutation
+  handoff_conditions:
+    - Shirube command review
+    - repository owner/domain designer confirmation
+  completion_evidence:
+    - changed files
+    - commands run
+    - validation results
+    - next required gate

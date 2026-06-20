@@ -1,0 +1,89 @@
+schema_version: shirube-repo-spec/v1
+repo_id: watchout/agent-comms-mcp
+owner: TODO_REPO_OWNER
+purpose: "Draft/unconfirmed premise: agent-comms-mcp provides MCP tools, CLI surfaces, queue/runtime diagnostics, and durable evidence helpers for agent-to-agent communication. This scaffold is warn-only and does not authorize runtime, workflow, ruleset, or production behavior changes."
+scope:
+  - MCP tool and CLI implementation for agent communication.
+  - Agent message queue storage and state transition helpers.
+  - Runtime liveness, readiness, delivery diagnostics, and evidence emission.
+  - AUN integration surfaces that transport or accelerate GitHub-backed work without replacing GitHub as source of truth.
+non_goals:
+  - Own Shirube work governance, phase goals, merge authority, release decisions, or production Go/No-Go.
+  - Replace GitHub issues, pull requests, reviews, checks, comments, or workflow artifacts as durable evidence sinks.
+  - Bypass independent audit, QA, check, CTO, or human maintainer gates.
+  - Enable required Shirube checks, branch protection, rulesets, deployment, or runtime automation from this scaffold.
+  - Treat this draft repo spec as authoritative before repository owner/domain designer confirmation.
+design_principles:
+  - "Development unit is Cell, not PR."
+  - "Canonical chain is Spec -> Cell -> Impl -> Code -> Test -> Evidence."
+  - "GitHub is the durable source of truth; AUN may notify, accelerate, and collect evidence but must not be the only decision record."
+  - "Read-only planning and diagnostics should precede behavior-changing runtime, queue, delivery, or state-daemon actions."
+  - "Shirube v1 risk tiers are R0 through R3; production activation, secret/ruleset changes, and external delivery changes are R3 plus explicit owner, security, and CTO approval requirements."
+development_flow:
+  - Spec
+  - Cell
+  - Impl
+  - Code
+  - Test
+  - Evidence
+roles:
+  repo_owner: TODO_REPO_OWNER
+  release_owner: TODO_RELEASE_OWNER
+  security_owner: TODO_SECURITY_OWNER
+  evidence_owner: TODO_EVIDENCE_OWNER
+  domain_designer: TODO_DOMAIN_DESIGNER
+  shirube_command_owner: TODO_SHIRUBE_COMMAND_OWNER
+boundaries:
+  allowed_paths:
+    - ".shirube/**"
+    - "docs/**"
+    - "README.md"
+  forbidden_paths:
+    - ".env"
+    - "secrets/**"
+    - "bin/**"
+    - "cli/**"
+    - "core/**"
+    - "server.ts"
+    - ".github/workflows/**"
+    - "deploy/**"
+  data_boundaries:
+    - "PostgreSQL or SQLite rows for agent messages, queues, runtime instances, leases, audits, and evidence are protected resources."
+    - "Read-only diagnostic access is allowed for planning/readiness evidence when the active Cell permits it."
+    - "Queue claim ownership, lease state, lifecycle state, runtime supervisor state, and delivery state are mutation-capable resources requiring an approved Cell and exact fences."
+    - "Credentials, provider tokens, production database rows, and secret material require explicit owner/security approval."
+  dependency_boundaries:
+    - "watchout/ai-dev-framework#431 is the rollout SSOT for Shirube governance adoption."
+    - "Feature Specs, Cells, Impl handoffs, audits, and post-merge evidence must be traceable through GitHub-native durable sinks."
+    - "External repository mutation, provider account changes, and global organization ruleset changes are out of scope for this repo scaffold."
+  forbidden_actions:
+    - "Do not change runtime, MCP, queue, state-daemon, LaunchAgent, provider delivery, or deployment behavior in this scaffold."
+    - "Do not modify active GitHub workflows, required checks, branch protection, or rulesets in this scaffold."
+    - "Do not activate AUN, multi-agent automation, or external dispatch from this scaffold."
+    - "Do not weaken auth, permission, privacy, audit, or evidence controls."
+    - "Do not treat ACKs, queue IDs, Discord projection, TUI visibility, green CI alone, or unverified runtime as completion evidence."
+required_gates:
+  - "warn_only_scope_check: changed paths must remain under .shirube/**, docs/**, or README.md for this scaffold."
+  - "git_diff_check"
+  - "yaml_parse_check_for_shirube_yaml"
+  - "Shirube command review"
+  - "repository owner/domain designer confirmation before repo-spec is authoritative"
+  - "R3 owner/security/CTO approval for production activation, external delivery changes, secret/ruleset changes, or runtime supervisor changes."
+  - "Feature Spec -> Cell -> Impl artifacts before behavior-changing MCP or agent communication work."
+  - "post_merge_mechanical_verification appropriate to risk tier before completion claims."
+risk_tier_defaults: R2
+standards:
+  soc2:
+    - Security
+    - Availability
+    - Processing Integrity
+    - Confidentiality
+    - Privacy
+  iso_iec_42001: "Applicable as the AI management overlay for agent/tool permission boundaries, human oversight, evidence-based change control, and post-merge verification."
+  engineering_references:
+    - NIST_SSDF
+    - OWASP_LLM_TOP_10
+    - SLSA
+ai_usage_classification: agentic
+agent_policy_ref: ".shirube/agent-policy.yaml"
+evidence_ledger_ref: ".shirube/evidence/"
