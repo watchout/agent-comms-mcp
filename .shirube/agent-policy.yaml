@@ -1,0 +1,130 @@
+schema_version: shirube-agent-policy/v1
+status: draft_unconfirmed
+repo_id: watchout/agent-comms-mcp
+mode: warn_only
+
+policy_summary: >
+  Draft agent/tool policy for agent-comms-mcp. This file is scaffold-only and
+  does not authorize runtime behavior, workflow enforcement, production changes,
+  or gate bypasses.
+
+roles:
+  spec:
+    may:
+      - write feature goals and acceptance criteria
+      - define Cell scope and evidence requirements
+    must_not:
+      - implement code
+      - self-approve implementation
+  arc:
+    may:
+      - design architecture and implementation breakdowns
+      - define target modules and test strategy
+    must_not:
+      - implement code
+      - merge or approve production activation
+  implementation_bot:
+    may:
+      - edit approved files within an approved Cell
+      - add focused tests
+      - create implementation handoff evidence
+    must_not:
+      - expand scope without approval
+      - self-approve audit, QA, check, CTO, or merge
+  audit:
+    may:
+      - inspect diffs, tests, contracts, and risk
+      - issue PASS, CHANGES_REQUIRED, BLOCK, or NO_GO
+    must_not:
+      - fix the code it audits
+  qa:
+    may:
+      - verify setup, commands, scenarios, logs, and failure modes
+    must_not:
+      - implement fixes
+      - treat unverified runtime as completion evidence
+  check:
+    may:
+      - verify procedural gates, evidence completeness, and route classification
+    must_not:
+      - perform implementation fixes
+  cto:
+    may:
+      - issue high-risk GO, CONDITIONAL_GO, or NO_GO
+      - define rollback and accepted-debt requirements
+    must_not:
+      - implement changes
+
+tool_classes:
+  allowed_without_extra_approval:
+    - name: read_only_repo_inspection
+      examples:
+        - git_diff
+        - file_read
+        - static_search
+    - name: local_validation
+      examples:
+        - unit_tests
+        - contract_tests
+        - git_diff_check
+    - name: github_evidence_comment
+      examples:
+        - implementation_handoff
+        - post_merge_evidence
+  review_required:
+    - name: db_or_queue_mutation
+      required_gate: approved_Cell_plus_independent_review
+    - name: runtime_supervisor_change
+      required_gate: CTO_or_designated_runtime_owner_GO
+    - name: outbound_delivery_change
+      required_gate: audit_QA_check_and_owner_GO
+    - name: schema_or_migration_change
+      required_gate: migration_review_and_rollback_plan
+    - name: workflow_or_check_change
+      required_gate: Shirube_command_review
+  forbidden_before_owner_confirmation:
+    - branch_protection_change
+    - ruleset_change
+    - secret_rotation
+    - production_deployment
+    - external_repo_mutation
+    - required_check_activation
+    - live_multi_agent_automation_activation
+
+execution_rules:
+  source_of_truth: GitHub issue or pull request instructions.
+  chat_only_state: not_completion_evidence
+  default_gate_mode: warn_only
+  exact_scope_required: true
+  owner_confirmation_required_for_repo_spec: true
+  behavior_changing_work_requires:
+    - confirmed_repo_spec
+    - Feature_Spec
+    - Cell
+    - Impl
+    - independent_audit
+    - QA_or_check_as_required
+    - risk_tier_appropriate_approval
+
+evidence_requirements:
+  implementation_handoff:
+    - issue_or_pr_url
+    - changed_files
+    - validation_commands
+    - known_risks
+    - next_required_gate
+  merge_or_release:
+    - exact_head_sha
+    - check_summary
+    - reviewer_or_owner_GO
+    - merge_actor
+    - post_merge_verification_result
+
+waiver_policy:
+  status: draft
+  rule: Waivers require explicit owner, scope, expiry, reason, and compensating controls.
+  not_allowed_for:
+    - secret_exposure
+    - unauthorized_production_mutation
+    - branch_protection_bypass_without_human_authority
+    - missing_identity_or_agent_boundary

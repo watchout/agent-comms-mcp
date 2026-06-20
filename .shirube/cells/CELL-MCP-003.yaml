@@ -1,0 +1,29 @@
+schema_version: shirube-cell/v1
+status: draft_candidate
+cell_id: CELL-MCP-003
+title: Invocation review policy
+risk_tier: R2
+repo_id: watchout/agent-comms-mcp
+objective: Draft the policy for when MCP/tool invocations require review, exact fences, or human approval.
+scope:
+  allowed_paths:
+    - .shirube/**
+    - docs/**
+    - README.md
+  forbidden_paths:
+    - bin/**
+    - core/**
+    - cli/**
+    - server.ts
+    - .github/workflows/**
+non_goals:
+  - No live invocation blocking.
+  - No queue claim behavior change.
+  - No state-daemon or runtime supervisor change.
+acceptance_criteria:
+  - Invocation classes map to required evidence and gates.
+  - Exact-fence expectations are documented for mutation-capable operations.
+  - Enforcement remains warn-only.
+required_gates:
+  - Shirube command review
+  - repository owner/domain designer confirmation
