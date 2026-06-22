@@ -14,7 +14,7 @@ This document turns the AUN V2 design into an execution contract that a Codex ag
 Goal:
 
 ```text
-A Codex agent can take the next approved Shirube V3 Cell, implement it, test it, and prepare the next Cell without guessing architecture intent.
+A Codex agent can take the next approved Shirube V3 Cell, implement it, test it, and prepare the next Cell without guessing architecture intent, file names, field names, test requirements, or stop conditions.
 ```
 
 This document is not runtime implementation. It defines the contract for autonomous implementation.
@@ -27,10 +27,11 @@ Codex must use sources in this order:
 1. docs/design/V2_CLEAN_CORE_CONTRACT.md
 2. docs/design/REBOOT_CHARTER_RECONCILIATION.md
 3. docs/design/V2_DELETION_MAP.md
-4. docs/design/V2_CODEX_BUILD_PLAN.md
-5. docs/design/V2_ENTERPRISE_ADOPTION_GATE.md
-6. docs/decision-backlog.md
-7. existing V1 code, only as adapter input
+4. docs/design/V2_CODEX_SOLO_EXECUTION_CONTRACT.md
+5. docs/design/V2_CODEX_BUILD_PLAN.md
+6. docs/design/V2_ENTERPRISE_ADOPTION_GATE.md
+7. docs/decision-backlog.md
+8. existing V1 code, only as adapter input
 ```
 
 If existing V1 code conflicts with the V2 clean core contract, the V2 contract wins for new V2 code.
@@ -58,7 +59,8 @@ Codex must stop when any of the following are true:
 - implementation would require connector send/write;
 - implementation would require AUN to decide Shirube Done, merge, or production state;
 - post-merge evidence would require a follow-up repo-file commit;
-- tests require external credentials.
+- tests require external credentials;
+- the file count would exceed the Cell limit and no split is defined.
 ```
 
 ## 4. Cell packet format
@@ -108,6 +110,7 @@ json_output: required for CLI surfaces
 external_services_in_tests: forbidden
 production_db_in_tests: forbidden
 provider_send_in_tests: forbidden
+max_files_per_cell_pr: 6
 ```
 
 Default validation commands:
@@ -131,6 +134,7 @@ schema_files:
   typed_outcome: schemas/aun-v2/typed-outcome.schema.json
   terminal_evidence: schemas/aun-v2/terminal-evidence.schema.json
   audit_event: schemas/aun-v2/audit-event.schema.json
+  post_merge_evidence: schemas/aun-v2/post-merge-evidence.schema.json
 
 fixtures:
   valid: tests/fixtures/aun-v2/valid/<name>.json
@@ -152,28 +156,31 @@ cli:
 
 ```text
 AUN-V2-001 architecture docs
-  -> AUN-V2-002 schemas + fixtures
-    -> AUN-V2-003 schema validator
-      -> AUN-V2-004 V1 message_queue read-only adapter
-        -> AUN-V2-005 V2 read-only planner
-          -> AUN-V2-006 synthetic claim
-            -> AUN-V2-007 terminal evidence validator
-              -> AUN-V2-008 post-merge evidence sink schema
-                -> AUN-V2-009 one-agent canary planner
-                  -> AUN-V2-010 live canary executor, protected
+  -> AUN-V2-002A identity/conversation/baton/claim schemas
+    -> AUN-V2-002B runtime/outcome/evidence/audit schemas
+      -> AUN-V2-003 schema validator
+        -> AUN-V2-004 V1 message_queue read-only adapter
+          -> AUN-V2-005 V2 read-only planner
+            -> AUN-V2-006 synthetic claim
+              -> AUN-V2-007 terminal evidence validator
+                -> AUN-V2-008 post-merge evidence sink schema
+                  -> AUN-V2-009 one-agent canary planner
+                    -> AUN-V2-010 live canary executor, protected
 ```
 
 No Cell may skip its dependency unless a Design Consolidation record explicitly supersedes the graph.
 
 ## 8. Detailed Cell specs
 
-### AUN-V2-002: Schemas and fixtures
+### AUN-V2-002A: Identity / conversation / baton / claim schemas
 
 ```yaml
 risk_route: R1_schema_or_test_only
-goal: Define V2 clean core schemas and example fixtures.
+goal: Define the V2 ownership and claim schemas that prevent identity and responsibility drift.
 non_scope:
   - no TypeScript runtime validator
+  - no runtime task schema
+  - no terminal evidence schema
   - no DB access
   - no adapter
   - no CLI
@@ -182,22 +189,53 @@ output_files:
   - schemas/aun-v2/conversation.schema.json
   - schemas/aun-v2/baton.schema.json
   - schemas/aun-v2/claim.schema.json
+  - tests/fixtures/aun-v2/valid/minimal-baton-claim.json
+  - tests/fixtures/aun-v2/invalid/observer-as-owner.json
+acceptance:
+  - every schema declares schema_version
+  - agent schema makes agent_id logical identity
+  - conversation schema supports active_baton_id
+  - baton schema distinguishes owner_agent_id from observer_agent_ids
+  - claim schema requires lease_expires_at and fencing_token
+  - observer-as-owner invalid fixture is documented
+  - no V1 queue-work terms are canonical schema names
+validation_commands:
+  - git diff --check
+next_cell: AUN-V2-002B
+```
+
+### AUN-V2-002B: Runtime task / typed outcome / terminal evidence / audit schemas
+
+```yaml
+risk_route: R1_schema_or_test_only
+goal: Define execution, outcome, terminal evidence, and audit schemas without making provider output the authority.
+non_scope:
+  - no TypeScript runtime validator
+  - no DB access
+  - no adapter
+  - no CLI
+input_files:
+  - schemas/aun-v2/agent.schema.json
+  - schemas/aun-v2/conversation.schema.json
+  - schemas/aun-v2/baton.schema.json
+  - schemas/aun-v2/claim.schema.json
+output_files:
   - schemas/aun-v2/runtime-task.schema.json
   - schemas/aun-v2/typed-outcome.schema.json
   - schemas/aun-v2/terminal-evidence.schema.json
   - schemas/aun-v2/audit-event.schema.json
   - tests/fixtures/aun-v2/valid/minimal-terminal-reply.json
-  - tests/fixtures/aun-v2/valid/handoff.json
   - tests/fixtures/aun-v2/invalid/done-without-outcome.json
-  - tests/fixtures/aun-v2/invalid/observer-as-owner.json
 acceptance:
   - every schema declares schema_version
   - terminal evidence requires typed outcome
-  - claim requires lease_expires_at and fencing_token
-  - observer-as-owner invalid fixture is documented
-  - no V1 queue-work terms are canonical schema names
+  - typed outcome uses semantic_outcome plus outcome_reason
+  - terminal evidence does not treat projection_refs as authority
+  - audit event reserves prev_hash, event_hash, cost_ref, redaction_ref, and attestation_ref
+  - done-without-outcome invalid fixture is documented
 validation_commands:
   - git diff --check
+next_cell: AUN-V2-003
 ```
 
 ### AUN-V2-003: Schema validator
@@ -221,6 +259,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-schema-validator.test.ts
   - git diff --check
+next_cell: AUN-V2-004
 ```
 
 ### AUN-V2-004: V1 message_queue read-only adapter
@@ -243,6 +282,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-message-queue-readonly.test.ts
   - git diff --check
+next_cell: AUN-V2-005
 ```
 
 ### AUN-V2-005: V2 read-only planner
@@ -265,6 +305,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-planner.test.ts
   - git diff --check
+next_cell: AUN-V2-006
 ```
 
 ### AUN-V2-006: Synthetic claim
@@ -285,6 +326,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-claim-synthetic.test.ts
   - git diff --check
+next_cell: AUN-V2-007
 ```
 
 ### AUN-V2-007: Terminal evidence validator
@@ -304,6 +346,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-terminal-evidence.test.ts
   - git diff --check
+next_cell: AUN-V2-008
 ```
 
 ### AUN-V2-008: Post-merge evidence sink schema
@@ -323,6 +366,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-post-merge-evidence.test.ts
   - git diff --check
+next_cell: AUN-V2-009
 ```
 
 ### AUN-V2-009: One-agent canary planner
@@ -343,6 +387,7 @@ acceptance:
 validation_commands:
   - bun test tests/aun-v2-canary-plan.test.ts
   - git diff --check
+next_cell: AUN-V2-010
 ```
 
 ### AUN-V2-010: Live canary executor
@@ -353,7 +398,7 @@ goal: Execute one exact-fenced canary behind explicit approval.
 status: blocked until separate protected Cell Intake Gate
 acceptance:
   - must not start from PR-001
-  - must not start before AUN-V2-002 through AUN-V2-009 pass
+  - must not start before AUN-V2-002A through AUN-V2-009 pass
   - must have release/operator approval
   - must produce post-run evidence URL
 ```
@@ -394,6 +439,6 @@ source_design:
 
 ## 10. Success criteria for this contract
 
-This contract is successful when a Codex agent can implement AUN-V2-002 through AUN-V2-009 without asking what files to create, what fields are canonical, what tests are required, or when to stop.
+This contract is successful when a Codex agent can implement AUN-V2-002A through AUN-V2-009 without asking what files to create, what fields are canonical, what tests are required, how to validate, or when to stop.
 
 Human review remains required for protected Cell authorization and semantic changes to the V2 contract.
