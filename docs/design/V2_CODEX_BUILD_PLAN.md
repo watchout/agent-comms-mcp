@@ -4,14 +4,16 @@
 
 Date: 2026-06-22  
 Status: PR-001 design consolidation draft  
-Scope: Codex-friendly implementation plan for AUN V2  
+Scope: Codex-friendly implementation plan for AUN V2 under Shirube V3  
 Implementation allowed from this document: false
 
 ## 1. Purpose
 
 AUN V2 must be implementable quickly by Codex without reintroducing broad, low-signal refactors.
 
-The unit of work is a small, contract-focused PR.
+The unit of work is a small, contract-focused **Shirube V3 Cell**.
+
+AUN V2 does not define an independent work-governance conveyor. AUN V2 implementation work must be represented through `watchout/ai-dev-framework` Shirube V3 Phase / Cell / Gate concepts.
 
 ## 2. Build principle
 
@@ -24,27 +26,66 @@ One-agent exact-fenced canary fifth.
 Only then expand policy.
 ```
 
-No PR should mix broad refactor, migration, runtime behavior, and governance changes.
+No Cell should mix broad refactor, migration, runtime behavior, and governance changes.
 
-## 3. PR size limits
+## 2A. Shirube V3 execution assumption
+
+AUN V2 implementation assumes Shirube V3 is the controlling execution framework.
+
+```text
+Shirube V3 provides:
+  - Phase / Cell modeling
+  - Design Consolidation Gate
+  - Cell Intake Gate
+  - Goal Mode handoff
+  - Machine Gate
+  - Narrow Verification
+  - Cell Done
+  - Phase Completion Gate
+
+AUN V2 provides:
+  - runtime authorization contracts
+  - V2 core schemas
+  - V1 compatibility adapters
+  - operational evidence contracts
+  - runtime/projection/recovery implementation details
+```
+
+If a Shirube V3 CLI command is not available yet, the Cell may use structured repository records and/or structured GitHub-native evidence sinks, but the semantics must still match Shirube V3.
+
+## 2B. High-speed Cell rule
+
+The fastest acceptable implementation path is:
+
+```text
+one Cell = one contract delta = one narrow PR = one focused validation packet
+```
+
+Codex should optimize for many small mergeable Cells, not large mixed refactors.
+
+AUN-specific PR names may be used for readability, but the authoritative planning unit is the Shirube V3 Cell.
+
+## 3. PR / Cell size limits
 
 Default limits:
 
 ```yaml
-max_files_per_pr: 6
-max_new_runtime_behaviors_per_pr: 1
-max_schema_domains_per_pr: 1
-max_migration_files_per_pr: 1
-max_adapter_boundaries_per_pr: 1
+max_files_per_cell_pr: 6
+max_new_runtime_behaviors_per_cell: 1
+max_schema_domains_per_cell: 1
+max_migration_files_per_cell: 1
+max_adapter_boundaries_per_cell: 1
 ```
 
 Exceeding these limits requires a Design Consolidation note and explicit reason.
 
 ## 4. Required PR body sections
 
-Every V2 PR must include:
+Every V2 Cell PR must include:
 
 ```markdown
+## Shirube V3 Cell
+
 ## V2 Contract Delta
 
 ## V1 Compatibility Boundary
@@ -104,6 +145,7 @@ R3_protected_runtime:
     - synthetic fixture
     - rollback plan
     - no production DB mutation
+    - Shirube V3 Cell Intake Gate evidence
 
 R4_live_activation:
   default: blocked
@@ -112,11 +154,12 @@ R4_live_activation:
     - one-agent allowlist
     - exact queue/message/time fence
     - post-run evidence
+    - Shirube V3 protected Cell authorization
 ```
 
 ## 6. Forbidden PR patterns
 
-Codex must not produce PRs that:
+Codex must not produce Cell PRs that:
 
 - rewrite broad directories without a contract delta;
 - mix docs, migration, runtime mutation, and connector send behavior;
@@ -127,11 +170,12 @@ Codex must not produce PRs that:
 - make AUN own Shirube gate verdict, Done, merge, or production authority;
 - require post-merge facts to be committed by follow-up repo-file PR;
 - mutate production DB in tests;
-- rely on Discord/tmux transcript reading as pass evidence.
+- rely on Discord/tmux transcript reading as pass evidence;
+- bypass Shirube V3 Cell Intake for protected runtime work.
 
-## 7. V2 PR sequence
+## 7. V2 Cell sequence
 
-### PR-001: Clean rebuild architecture
+### Cell AUN-V2-001: Clean rebuild architecture
 
 Files:
 
@@ -147,7 +191,7 @@ docs/decision-backlog.md
 
 No code change.
 
-### PR-002: V2 schemas and examples
+### Cell AUN-V2-002: V2 schemas and examples
 
 Files:
 
@@ -162,7 +206,7 @@ tests/fixtures/aun-v2/*.json
 
 No runtime behavior.
 
-### PR-003: V2 schema validator
+### Cell AUN-V2-003: V2 schema validator
 
 Files:
 
@@ -174,7 +218,7 @@ tests/aun-v2-schema-validator.test.ts
 
 No DB mutation.
 
-### PR-004: V1 message queue read-only adapter
+### Cell AUN-V2-004: V1 message queue read-only adapter
 
 Files:
 
@@ -185,7 +229,7 @@ tests/aun-v2-message-queue-readonly.test.ts
 
 No mutation.
 
-### PR-005: V2 read-only planner
+### Cell AUN-V2-005: V2 read-only planner
 
 Files:
 
@@ -197,7 +241,7 @@ tests/aun-v2-planner.test.ts
 
 No mutation.
 
-### PR-006: V2 synthetic claim
+### Cell AUN-V2-006: V2 synthetic claim
 
 Files:
 
@@ -208,7 +252,7 @@ tests/aun-v2-claim-synthetic.test.ts
 
 Test fixtures only.
 
-### PR-007: V2 terminal evidence validator
+### Cell AUN-V2-007: V2 terminal evidence validator
 
 Files:
 
@@ -219,7 +263,7 @@ tests/aun-v2-terminal-evidence.test.ts
 
 No live projection.
 
-### PR-008: GitHub-native post-merge evidence sink schema
+### Cell AUN-V2-008: GitHub-native post-merge evidence sink schema
 
 Files:
 
@@ -231,7 +275,7 @@ tests/aun-v2-post-merge-evidence.test.ts
 
 No follow-up repo-file evidence requirement.
 
-### PR-009: One-agent exact-fenced canary planner
+### Cell AUN-V2-009: One-agent exact-fenced canary planner
 
 Files:
 
@@ -243,11 +287,11 @@ tests/aun-v2-canary-plan.test.ts
 
 Read-only.
 
-### PR-010: Live canary executor behind explicit gate
+### Cell AUN-V2-010: Live canary executor behind explicit gate
 
-Protected. Requires separate approval.
+Protected. Requires separate Shirube V3 protected Cell approval.
 
-## 8. Required tests per PR type
+## 8. Required tests per Cell type
 
 ```yaml
 docs_only:
@@ -283,13 +327,15 @@ live_canary:
 ## 9. Codex handoff prompt template
 
 ```text
-You are implementing AUN V2. Use only the contract in docs/design/V2_CLEAN_CORE_CONTRACT.md.
+You are implementing AUN V2 as a Shirube V3 Cell.
+Use only the contract in docs/design/V2_CLEAN_CORE_CONTRACT.md.
 Do not import V1 queue-work types as canonical V2 types.
 Use V1 only through the named adapter boundary.
-Keep this PR within the declared file limit.
+Keep this Cell PR within the declared file limit.
 Do not mutate live DB.
 Do not create provider output as completion authority.
-Return changed files, contract delta, tests, and non-scope.
+Do not claim Shirube Cell Done from AUN runtime evidence alone.
+Return changed files, contract delta, tests, evidence, and non-scope.
 ```
 
 ## 10. Stop conditions for Codex
@@ -301,4 +347,5 @@ Codex must stop and request design review if:
 - terminal state needs new semantic outcome;
 - adapter output is lossy without documented mapping;
 - test requires live Discord/GitHub/DB access;
-- post-merge evidence requires a committed follow-up file.
+- post-merge evidence requires a committed follow-up file;
+- a protected runtime change lacks Shirube V3 Cell Intake evidence.
