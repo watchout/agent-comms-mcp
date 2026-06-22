@@ -2,9 +2,9 @@
 
 # AUN V2 Clean Core Contract
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: AUN V2 clean core contract  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: AUN V2 clean core contract
 Implementation allowed from this document: false
 
 ## 1. Purpose

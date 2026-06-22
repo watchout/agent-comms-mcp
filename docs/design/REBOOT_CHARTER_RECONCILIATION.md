@@ -2,10 +2,10 @@
 
 # AUN V2 Charter Reconciliation
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: communication charter ↔ AUN V2 clean core reconciliation  
-Parent issue: #794  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: communication charter ↔ AUN V2 clean core reconciliation
+Parent issue: #794
 Implementation allowed from this document: false
 
 ## 1. Layer relationship

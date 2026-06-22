@@ -2,9 +2,9 @@
 
 # AUN V2 Enterprise Adoption Gate
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: enterprise-readiness criteria for AUN V2  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: enterprise-readiness criteria for AUN V2
 Implementation allowed from this document: false
 
 ## 1. Purpose

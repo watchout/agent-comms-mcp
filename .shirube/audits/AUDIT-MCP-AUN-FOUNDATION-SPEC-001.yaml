@@ -1,0 +1,49 @@
+schema_version: shirube-audit/v1
+AUDIT-ID: AUDIT-MCP-AUN-FOUNDATION-SPEC-001
+SPEC-ID: SPEC-MCP-AUN-V2V3-FOUNDATION-001
+CELL-ID: CELL-MCP-AUN-FOUNDATION-001
+audit_type: spec_premise_review_record
+risk_tier: R2
+status: pending_independent_review
+formal_gate_decision: not_granted
+prepared_by: implementation_bot
+review_required_by:
+  - Shirube command reviewer
+  - repository owner
+  - domain designer
+scope:
+  - Verify the foundation premise covers issue #802 required content.
+  - Verify the premise preserves the #794 AUN V2 clean rebuild design basis.
+  - Verify risk tiers use Shirube v1 R0-R3 only.
+  - Verify #801 remains HOLD_DRAFT future registry policy material.
+checks:
+  - id: SPEC-AUDIT-001
+    statement: V2/V3 target state is defined.
+    evidence_ref: SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+    status: prepared_for_review
+  - id: SPEC-AUDIT-002
+    statement: Legacy, fallback, projection, and transitional classifications are documented.
+    evidence_ref: SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+    status: prepared_for_review
+  - id: SPEC-AUDIT-003
+    statement: Surface boundaries and GitHub SSOT boundary are documented.
+    evidence_ref: SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+    status: prepared_for_review
+  - id: SPEC-AUDIT-004
+    statement: Decision authority and agent decision limits are documented.
+    evidence_ref: SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+    status: prepared_for_review
+  - id: SPEC-AUDIT-005
+    statement: Risk-tier mapping uses R0-R3 only.
+    evidence_ref: SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+    status: prepared_for_review
+  - id: SPEC-AUDIT-006
+    statement: #801 treatment is explicit.
+    evidence_ref: SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+    status: prepared_for_review
+blocked_actions:
+  - Marking PR #805 ready before review.
+  - Merging PR #805 from this Cell.
+  - Marking #801 ready or merging #801.
+  - Runtime, queue, provider delivery, MCP/tool, workflow, ruleset, secret, or AUN activation changes.
+next_gate: Shirube command review and repository owner/domain-designer review

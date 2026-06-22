@@ -2,9 +2,9 @@
 
 # AUN V2 Codex Solo Execution Contract
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: make AUN V2 implementable by Codex without human interpretation drift  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: make AUN V2 implementable by Codex without human interpretation drift
 Implementation allowed from this document: false
 
 ## 1. Purpose
@@ -69,7 +69,7 @@ Every autonomous Codex Cell must have this packet before implementation:
 
 ```yaml
 cell_id: AUN-V2-XXX
-risk_route: R0_docs_only | R1_schema_or_test_only | R2_read_only_planner | R3_protected_runtime | R4_live_activation
+risk_route: R0_docs_only | R1_schema_or_test_only | R2_read_only_planner | R3_protected_runtime | R3_live_activation_with_approval
 design_refs:
   - docs/design/V2_CLEAN_CORE_CONTRACT.md
   - docs/design/V2_CODEX_SOLO_EXECUTION_CONTRACT.md
@@ -393,13 +393,13 @@ next_cell: AUN-V2-010
 ### AUN-V2-010: Live canary executor
 
 ```yaml
-risk_route: R4_live_activation
+risk_route: R3_live_activation_with_approval
 goal: Execute one exact-fenced canary behind explicit approval.
 status: blocked until separate protected Cell Intake Gate
 acceptance:
   - must not start from PR-001
   - must not start before AUN-V2-002A through AUN-V2-009 pass
-  - must have release/operator approval
+  - must have human maintainer, release owner, security owner, CTO, and operator approval
   - must produce post-run evidence URL
 ```
 
@@ -411,7 +411,7 @@ acceptance:
 ## Shirube V3 Cell
 
 cell_id: AUN-V2-XXX
-risk_route: R0|R1|R2|R3|R4
+risk_route: R0|R1|R2|R3
 source_design:
 - docs/design/V2_CLEAN_CORE_CONTRACT.md
 - docs/design/V2_CODEX_SOLO_EXECUTION_CONTRACT.md

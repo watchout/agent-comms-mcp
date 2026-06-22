@@ -2,9 +2,9 @@
 
 # AUN V2 Deletion Map
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: remove or isolate V1 concepts from AUN V2  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: remove or isolate V1 concepts from AUN V2
 Implementation allowed from this document: false
 
 ## 1. Purpose

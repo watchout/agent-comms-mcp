@@ -2,15 +2,15 @@
 
 # AUN V2 Decision Backlog
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: open decisions for AUN V2 clean rebuild under Shirube V3  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: open decisions for AUN V2 clean rebuild under Shirube V3
 Implementation allowed from this document: false
 
 ## DB-REBOOT-001: Shirube V3 sequencing dependency
 
-Status: open  
-Owner: Shirube owner + AUN architecture owner + CTO  
+Status: open
+Owner: Shirube owner + AUN architecture owner + CTO
 Blocks: SSOT freeze, automated work dispatch, runtime-generated implementation Cells
 
 ### Question
@@ -41,8 +41,8 @@ Map every AUN V2 implementation slice to a Shirube V3 Cell before implementation
 
 ## DB-REBOOT-002: Shirube post-merge evidence sink dependency
 
-Status: open  
-Owner: Shirube owner + AUN architecture owner + CTO  
+Status: open
+Owner: Shirube owner + AUN architecture owner + CTO
 Blocks: Cell Done automation, Phase Completion Gate integration, AUN/Shirube evidence handoff design
 
 ### Question
@@ -67,8 +67,8 @@ Use a structured GitHub comment, artifact, or check-run URL as canonical post-me
 
 ## DB-REBOOT-003: V2 schema persistence target
 
-Status: open  
-Owner: AUN architecture owner  
+Status: open
+Owner: AUN architecture owner
 Blocks: database migration planning
 
 ### Question
@@ -83,8 +83,8 @@ Start with JSON schemas and read-only projections from V1 data. Add V2 tables on
 
 ## DB-REBOOT-004: `done` terminal vocabulary
 
-Status: open  
-Owner: AUN architecture owner + charter owner  
+Status: open
+Owner: AUN architecture owner + charter owner
 Blocks: queue terminal-state contract freeze
 
 ### Question
@@ -99,8 +99,8 @@ Allow `done` only as a terminal storage state. Non-terminal turn completion must
 
 ## DB-REBOOT-005: Semantic outcome model
 
-Status: open  
-Owner: AUN architecture owner + charter owner  
+Status: open
+Owner: AUN architecture owner + charter owner
 Blocks: terminal evidence schema
 
 ### Question
@@ -115,8 +115,8 @@ Use `semantic_outcome=fail` for communication-level failure, and reserve precise
 
 ## DB-REBOOT-006: V1 compatibility adapter boundaries
 
-Status: open  
-Owner: AUN architecture owner  
+Status: open
+Owner: AUN architecture owner
 Blocks: first V1 adapter PR
 
 ### Question
@@ -131,8 +131,8 @@ Allow read-only adapters for `message_queue`, `agent_messages`, runtime evidence
 
 ## DB-REBOOT-007: Enterprise reservation implementation timing
 
-Status: open  
-Owner: AUN architecture owner + CTO  
+Status: open
+Owner: AUN architecture owner + CTO
 Blocks: enterprise adoption gate PASS
 
 ### Question
@@ -147,8 +147,8 @@ Reserve fields in schema for FinOps, tamper evidence, DLP/redaction, and identit
 
 ## DB-REBOOT-008: Live canary authorization
 
-Status: open  
-Owner: release owner + AUN operator  
+Status: open
+Owner: release owner + AUN operator
 Blocks: first live V2 mutation
 
 ### Question
@@ -163,8 +163,8 @@ Require exact queue/message/time fence, one-agent allowlist, dry-run planner PAS
 
 ## DB-REBOOT-009: Shirube V3 high-speed Cell execution contract
 
-Status: open  
-Owner: Shirube owner + AUN architecture owner  
+Status: open
+Owner: Shirube owner + AUN architecture owner
 Blocks: Codex implementation prompt standardization
 
 ### Question
@@ -193,4 +193,4 @@ Rollback / revert plan
 
 ### Default safe policy
 
-Use the lightweight packet for R0/R1/R2 Cells. Require full protected Cell Intake evidence for R3/R4 runtime, connector, queue, or migration changes.
+Use the lightweight packet for R0/R1/R2 Cells. Require full protected Cell Intake evidence for R3 runtime, connector, queue, migration, or live activation changes. Live activation remains R3 protected runtime activation requiring human maintainer, release owner, security owner, CTO, and operator approval.

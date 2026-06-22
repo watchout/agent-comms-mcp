@@ -1,0 +1,43 @@
+schema_version: shirube-audit/v1
+AUDIT-ID: AUDIT-MCP-AUN-FOUNDATION-IMPL-001
+IMPL-ID: IMPL-MCP-AUN-FOUNDATION-001
+SPEC-ID: SPEC-MCP-AUN-V2V3-FOUNDATION-001
+CELL-ID: CELL-MCP-AUN-FOUNDATION-001
+audit_type: implementation_scope_review_record
+risk_tier: R2
+status: pending_independent_review
+formal_gate_decision: not_granted
+prepared_by: implementation_bot
+review_required_by:
+  - Shirube command reviewer
+  - repository owner
+  - domain designer
+scope:
+  - Verify changed paths remain inside allowed paths.
+  - Verify no runtime, workflow, package, secret, queue, provider, DB, or AUN activation paths are changed.
+  - Verify out-of-range risk-tier terminology is absent from newly added #802/#794 foundation docs.
+  - Verify validation results are reported before handoff.
+checks:
+  - id: IMPL-AUDIT-001
+    statement: Only `.shirube/**` and `docs/**` are changed by this Cell.
+    status: passed_local_validation
+  - id: IMPL-AUDIT-002
+    statement: "`git diff --check` passes."
+    status: passed_local_validation
+  - id: IMPL-AUDIT-003
+    statement: "`.shirube/**/*.yaml` parses as YAML."
+    status: passed_local_validation
+  - id: IMPL-AUDIT-004
+    statement: Existing breaking-change script is run if available.
+    status: passed_local_validation
+  - id: IMPL-AUDIT-005
+    statement: PR #805 remains draft after push.
+    status: pending_after_push
+blocked_actions:
+  - Runtime code edits.
+  - Workflow edits.
+  - Package or dependency edits.
+  - Secrets access.
+  - AUN activation.
+  - Merge or ready-for-review transition.
+next_gate: Shirube command review

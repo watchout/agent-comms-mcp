@@ -1,0 +1,133 @@
+schema_version: shirube-cell/v1
+CELL-ID: CELL-MCP-AUN-FOUNDATION-001
+SPEC-ID: SPEC-MCP-AUN-V2V3-FOUNDATION-001
+risk_tier: R2
+goal: Define the AUN V2/V3 foundation premise before behavior-changing implementation Cells begin.
+covered_req_ids:
+  - REQ-MCP-AUN-FOUNDATION-001
+  - REQ-MCP-AUN-FOUNDATION-002
+  - REQ-MCP-AUN-FOUNDATION-003
+  - REQ-MCP-AUN-FOUNDATION-004
+  - REQ-MCP-AUN-FOUNDATION-005
+  - REQ-MCP-AUN-FOUNDATION-006
+  - REQ-MCP-AUN-FOUNDATION-007
+  - REQ-MCP-AUN-FOUNDATION-008
+  - REQ-MCP-AUN-FOUNDATION-009
+  - REQ-MCP-AUN-FOUNDATION-010
+  - REQ-MCP-AUN-FOUNDATION-011
+dependencies:
+  - SPEC-MCP-GOV-001
+allowed_paths:
+  - .shirube/**
+  - docs/**
+  - README.md
+forbidden_paths:
+  - .env
+  - secrets/**
+  - bin/**
+  - cli/**
+  - core/**
+  - src/**
+  - server.ts
+  - scripts/**
+  - .github/workflows/**
+  - package.json
+  - package-lock.json
+  - bun.lockb
+  - pnpm-lock.yaml
+  - deploy/**
+acceptance_criteria:
+  - id: AC-MCP-AUN-FOUNDATION-001
+    statement: AUN V2/V3 target state is defined as a clean core plus V1 compatibility edge.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-001
+  - id: AC-MCP-AUN-FOUNDATION-002
+    statement: Legacy, fallback, projection, and transitional repository areas are classified.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-002
+  - id: AC-MCP-AUN-FOUNDATION-003
+    statement: Surface boundaries are documented for AUN core, Discord, tmux, TUI, provider, MCP, CLI, queue, runtime, GitHub, and state daemon.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-003
+  - id: AC-MCP-AUN-FOUNDATION-004
+    statement: GitHub source-of-truth boundary is explicit.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-004
+  - id: AC-MCP-AUN-FOUNDATION-005
+    statement: Identity, runtime, queue, connector, delivery, evidence, and audit models are documented.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-005
+  - id: AC-MCP-AUN-FOUNDATION-006
+    statement: Decision authority and agent decision boundaries are documented.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-006
+      - REQ-MCP-AUN-FOUNDATION-008
+  - id: AC-MCP-AUN-FOUNDATION-007
+    statement: Risk-tier mapping uses Shirube v1 R0-R3 only.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-007
+  - id: AC-MCP-AUN-FOUNDATION-008
+    statement: Repository inventory plan exists.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-009
+  - id: AC-MCP-AUN-FOUNDATION-009
+    statement: Preconditions before behavior-changing runtime, MCP/tool, queue, state-daemon, provider delivery, or AUN activation work are explicit.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-010
+  - id: AC-MCP-AUN-FOUNDATION-010
+    statement: "#801 treatment is explicitly stated as HOLD_DRAFT future registry policy material."
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-011
+required_tests:
+  - TEST-MCP-AUN-FOUNDATION-001
+  - TEST-MCP-AUN-FOUNDATION-002
+  - TEST-MCP-AUN-FOUNDATION-003
+required_evidence:
+  - changed files
+  - git diff --check result
+  - YAML parse result for .shirube/**/*.yaml
+  - detect-breaking-changes result if available
+  - exact head SHA
+  - PR draft state
+non_goals:
+  - No runtime code changes.
+  - No MCP/tool behavior changes.
+  - No queue mutation.
+  - No state-daemon changes.
+  - No provider delivery changes.
+  - No DB migration.
+  - No secret access.
+  - No workflow changes.
+  - No AUN activation.
+  - No #801 ready-for-review transition or merge.
+stop_conditions:
+  - Required changes would touch forbidden paths.
+  - Any implementation behavior change is needed to satisfy this Cell.
+  - R3 protected work is requested without human maintainer, release owner, security owner, CTO, and operator approval.
+  - The PR would need to be marked ready or merged from this Cell.
+waiver_refs: []
+execution_contract:
+  canonical_term: AUN V2/V3 foundation premise
+  shorthand: Foundation premise Cell
+  allowed_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bash scripts/detect-breaking-changes.sh origin/main if available
+    - gh pr edit for PR body metadata
+    - git push to existing PR branch
+  forbidden_commands:
+    - git push --force
+    - destructive production commands
+    - active workflow mutation
+    - branch protection or ruleset mutation
+    - AUN activation
+  handoff_conditions:
+    - Shirube command review
+    - repository owner/domain-designer review
+    - later human maintainer merge authorization
+  completion_evidence:
+    - changed files
+    - commands run
+    - validation results
+    - pushed head SHA
+    - next required gate

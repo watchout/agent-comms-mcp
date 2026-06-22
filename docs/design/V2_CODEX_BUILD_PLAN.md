@@ -2,9 +2,9 @@
 
 # AUN V2 Codex Build Plan
 
-Date: 2026-06-22  
-Status: PR-001 design consolidation draft  
-Scope: Codex-friendly implementation plan for AUN V2 under Shirube V3  
+Date: 2026-06-22
+Status: PR-001 design consolidation draft
+Scope: Codex-friendly implementation plan for AUN V2 under Shirube V3
 Implementation allowed from this document: false
 
 ## 1. Purpose
@@ -147,9 +147,14 @@ R3_protected_runtime:
     - no production DB mutation
     - Shirube V3 Cell Intake Gate evidence
 
-R4_live_activation:
+R3_live_activation_with_approval:
   default: blocked
   requires:
+    - R3 protected Cell Intake evidence
+    - human maintainer approval
+    - release owner approval
+    - security owner approval
+    - CTO approval
     - explicit operator approval
     - one-agent allowlist
     - exact queue/message/time fence
