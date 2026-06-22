@@ -77,7 +77,7 @@ max_migration_files_per_cell: 1
 max_adapter_boundaries_per_cell: 1
 ```
 
-Exceeding these limits requires a Design Consolidation note and explicit reason.
+A Cell that would exceed these limits must be split before Codex implementation. PR-001 deliberately splits the initial schema work into `AUN-V2-002A` and `AUN-V2-002B` so Codex does not need to decide how to shrink the work.
 
 ## 4. Required PR body sections
 
@@ -185,13 +185,14 @@ docs/design/REBOOT_CHARTER_RECONCILIATION.md
 docs/design/V2_CLEAN_CORE_CONTRACT.md
 docs/design/V2_DELETION_MAP.md
 docs/design/V2_CODEX_BUILD_PLAN.md
+docs/design/V2_CODEX_SOLO_EXECUTION_CONTRACT.md
 docs/design/V2_ENTERPRISE_ADOPTION_GATE.md
 docs/decision-backlog.md
 ```
 
 No code change.
 
-### Cell AUN-V2-002: V2 schemas and examples
+### Cell AUN-V2-002A: Identity / conversation / baton / claim schemas
 
 Files:
 
@@ -200,8 +201,23 @@ schemas/aun-v2/agent.schema.json
 schemas/aun-v2/conversation.schema.json
 schemas/aun-v2/baton.schema.json
 schemas/aun-v2/claim.schema.json
+tests/fixtures/aun-v2/valid/minimal-baton-claim.json
+tests/fixtures/aun-v2/invalid/observer-as-owner.json
+```
+
+No runtime behavior.
+
+### Cell AUN-V2-002B: Runtime task / outcome / terminal evidence / audit schemas
+
+Files:
+
+```text
+schemas/aun-v2/runtime-task.schema.json
+schemas/aun-v2/typed-outcome.schema.json
 schemas/aun-v2/terminal-evidence.schema.json
-tests/fixtures/aun-v2/*.json
+schemas/aun-v2/audit-event.schema.json
+tests/fixtures/aun-v2/valid/minimal-terminal-reply.json
+tests/fixtures/aun-v2/invalid/done-without-outcome.json
 ```
 
 No runtime behavior.
