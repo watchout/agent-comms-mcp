@@ -4,10 +4,10 @@
 
 Date: 2026-06-22  
 Status: PR-001 design consolidation draft  
-Scope: open decisions for AUN V2 clean rebuild  
+Scope: open decisions for AUN V2 clean rebuild under Shirube V3  
 Implementation allowed from this document: false
 
-## DB-REBOOT-001: Shirube sequencing dependency
+## DB-REBOOT-001: Shirube V3 sequencing dependency
 
 Status: open  
 Owner: Shirube owner + AUN architecture owner + CTO  
@@ -15,19 +15,27 @@ Blocks: SSOT freeze, automated work dispatch, runtime-generated implementation C
 
 ### Question
 
-Which Shirube capabilities are available for AUN reboot execution now?
+Which Shirube V3 capabilities are available for AUN reboot execution now?
 
 ### Known risk
 
-The AUN reboot references Shirube-style `retrofit`, `plan`, `run`, `audit`, and Cell gates, but the current Shirube bootstrap may only support a narrower preflight-lite / Cell intake path.
+AUN V2 implementation is intended to run under `watchout/ai-dev-framework` Shirube V3, but some CLI automation may lag the accepted V3 semantics.
+
+If AUN assumes unavailable commands such as `retrofit`, `plan`, `run`, or full automated Cell dispatch, implementation may stall or create parallel AUN-specific governance.
+
+### Required direction
+
+AUN V2 must use Shirube V3 as the governing execution model.
+
+AUN must not create its own replacement for Shirube V3 Phase / Cell / Gate / Done semantics.
 
 ### Default safe policy
 
-Treat PR-001 and PR-002 as manual Design Consolidation Cells. Do not require unimplemented Shirube automation before the framework confirms availability.
+Treat PR-001 and early schema/read-only work as Shirube V3 Design Consolidation / Cell Intake records represented by repository docs and structured GitHub-native evidence sinks where CLI automation is not yet available.
 
 ### Required resolution
 
-Map AUN V2 PR slices to Shirube Cell Plan / Design Consolidation / Cell Intake records before implementation Cells begin.
+Map every AUN V2 implementation slice to a Shirube V3 Cell before implementation begins.
 
 ---
 
@@ -150,3 +158,39 @@ What exact approval and evidence are required before a one-agent V2 canary mutat
 ### Default safe policy
 
 Require exact queue/message/time fence, one-agent allowlist, dry-run planner PASS, rollback plan, and structured post-run evidence URL.
+
+---
+
+## DB-REBOOT-009: Shirube V3 high-speed Cell execution contract
+
+Status: open  
+Owner: Shirube owner + AUN architecture owner  
+Blocks: Codex implementation prompt standardization
+
+### Question
+
+What is the exact minimum record packet needed for a high-speed AUN V2 Codex Cell under Shirube V3?
+
+### Known risk
+
+If every small Codex PR requires heavy manual ceremony, AUN V2 will slow down. If the ceremony is skipped, AUN may fork the governance model or lose evidence discipline.
+
+### Required direction
+
+Define a lightweight Shirube V3 Cell packet for AUN V2:
+
+```text
+Cell ID
+Design source
+Contract delta
+V1 compatibility boundary
+Risk route
+Validation commands
+Evidence sink
+Non-scope
+Rollback / revert plan
+```
+
+### Default safe policy
+
+Use the lightweight packet for R0/R1/R2 Cells. Require full protected Cell Intake evidence for R3/R4 runtime, connector, queue, or migration changes.
