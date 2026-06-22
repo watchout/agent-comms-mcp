@@ -66,7 +66,53 @@ Governance boundary:
 
 AUN must not become a second Shirube governance state machine.
 
-## 4. V2 clean core layers
+## 4. Shirube V3 execution assumption
+
+AUN V2 implementation is expected to run under `watchout/ai-dev-framework` Shirube V3.
+
+This means AUN V2 does not define its own implementation governance lifecycle. AUN V2 supplies product/runtime/evidence contracts; Shirube V3 supplies the development governance envelope.
+
+```text
+Shirube V3 owns:
+  - Phase / Cell modeling
+  - Design Consolidation Gate
+  - Cell Intake Gate
+  - Goal Mode handoff
+  - Machine Gate
+  - Narrow Verification
+  - Cell Done
+  - Phase Completion Gate
+  - merge / release / production authority semantics
+
+AUN V2 owns:
+  - runtime authorization contract
+  - claim / lease / fence contract
+  - connector / projection evidence contract
+  - operational audit evidence contract
+  - V1 compatibility adapter contract
+```
+
+Every AUN V2 implementation PR after PR-001 must be expressible as a Shirube V3 Cell.
+
+AUN V2 PR sequencing is therefore not a separate governance engine. It is an implementation-friendly projection of Shirube V3 Cells.
+
+### 4.1 High-speed implementation mode
+
+AUN V2 should optimize for fast Codex execution, but only inside the Shirube V3 boundaries:
+
+```text
+Design Consolidation accepted
+-> Cell Intake accepted
+-> one small Codex implementation Cell
+-> exact-head Machine Gate
+-> Narrow Verification
+-> merge by release authority
+-> structured post-merge evidence sink
+```
+
+If Shirube V3 CLI automation is not yet available for a step, the step may be represented by structured repository docs or structured GitHub-native evidence sinks, but the semantics must still match Shirube V3.
+
+## 5. V2 clean core layers
 
 ```text
 AUN V2 Clean Core
@@ -129,7 +175,7 @@ AUN V2 Clean Core
     └── attestation_ref
 ```
 
-## 5. V1 compatibility edge
+## 6. V1 compatibility edge
 
 V1 compatibility is allowed only through explicit adapters.
 
@@ -148,7 +194,7 @@ tmux/session/process evidence  Runtime evidence adapter
 
 V1 compatibility must not define V2 core semantics.
 
-## 6. Non-negotiable V2 invariants
+## 7. Non-negotiable V2 invariants
 
 1. `agent_id` is logical identity.
 2. Runtime identity is not agent identity.
@@ -162,8 +208,9 @@ V1 compatibility must not define V2 core semantics.
 10. Post-merge evidence must not require a follow-up repository-file commit.
 11. Shirube owns work governance, Cell Done semantics, merge authority, and production authority.
 12. AUN owns runtime authorization, queue claim, lease, fencing, connector binding, projection evidence, and operational audit.
+13. AUN implementation progress must be represented as Shirube V3 Cells, not as a separate AUN governance conveyor.
 
-## 7. Required PR-001 documents
+## 8. Required PR-001 documents
 
 PR-001 must include these files:
 
@@ -179,7 +226,7 @@ docs/decision-backlog.md
 
 No runtime behavior changes are allowed in PR-001.
 
-## 8. V2 implementation gate
+## 9. V2 implementation gate
 
 V2 implementation is blocked until the following are true:
 
@@ -188,20 +235,21 @@ V2 implementation is blocked until the following are true:
 - V1 deletion map exists;
 - Codex build plan exists;
 - enterprise adoption gate exists;
+- Shirube V3 execution assumption is recorded;
 - Shirube post-merge evidence sink dependency is recorded;
 - outcome vocabulary is unified;
 - AUN/Shirube governance boundary is explicit.
 
-## 9. First implementation direction after PR-001
+## 10. First implementation direction after PR-001
 
-After PR-001 is accepted, implementation must start with read-only and schema-only slices:
+After PR-001 is accepted, implementation must start with read-only and schema-only Shirube V3 Cells:
 
 ```text
-PR-002: V2 schemas and fixture examples
-PR-003: V2 contract validator, no DB mutation
-PR-004: V1 message_queue -> V2 input adapter, read-only
-PR-005: V2 planner output for one synthetic queue row
-PR-006: V2 claim simulation using test fixture only
+Cell AUN-V2-002: V2 schemas and fixture examples
+Cell AUN-V2-003: V2 contract validator, no DB mutation
+Cell AUN-V2-004: V1 message_queue -> V2 input adapter, read-only
+Cell AUN-V2-005: V2 planner output for one synthetic queue row
+Cell AUN-V2-006: V2 claim simulation using test fixture only
 ```
 
-No live runtime expansion is allowed before the V2 core contract passes the enterprise adoption gate.
+No live runtime expansion is allowed before the V2 core contract passes the enterprise adoption gate and the corresponding Shirube V3 Cell Intake Gate.
