@@ -220,6 +220,7 @@ docs/design/REBOOT_CHARTER_RECONCILIATION.md
 docs/design/V2_CLEAN_CORE_CONTRACT.md
 docs/design/V2_DELETION_MAP.md
 docs/design/V2_CODEX_BUILD_PLAN.md
+docs/design/V2_CODEX_SOLO_EXECUTION_CONTRACT.md
 docs/design/V2_ENTERPRISE_ADOPTION_GATE.md
 docs/decision-backlog.md
 ```
@@ -234,6 +235,7 @@ V2 implementation is blocked until the following are true:
 - V2 clean core contract exists;
 - V1 deletion map exists;
 - Codex build plan exists;
+- Codex solo execution contract exists;
 - enterprise adoption gate exists;
 - Shirube V3 execution assumption is recorded;
 - Shirube post-merge evidence sink dependency is recorded;
@@ -245,8 +247,9 @@ V2 implementation is blocked until the following are true:
 After PR-001 is accepted, implementation must start with read-only and schema-only Shirube V3 Cells:
 
 ```text
-Cell AUN-V2-002: V2 schemas and fixture examples
-Cell AUN-V2-003: V2 contract validator, no DB mutation
+Cell AUN-V2-002A: identity / conversation / baton / claim schemas and fixtures
+Cell AUN-V2-002B: runtime task / typed outcome / terminal evidence / audit schemas and fixtures
+Cell AUN-V2-003: V2 schema validator, no DB mutation
 Cell AUN-V2-004: V1 message_queue -> V2 input adapter, read-only
 Cell AUN-V2-005: V2 planner output for one synthetic queue row
 Cell AUN-V2-006: V2 claim simulation using test fixture only
