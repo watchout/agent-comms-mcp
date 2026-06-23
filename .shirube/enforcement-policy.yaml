@@ -48,6 +48,17 @@ merge_policy:
     - route is not ceo-approval
     - owner-exact-head-approved label is present
     - shirube-full-adoption label is present
+workflow_trigger_policy:
+  required_pull_request_activity_types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+    - converted_to_draft
+    - labeled
+    - unlabeled
+    - edited
+  reason: "Layer 0 must rerun when draft state, labels, or PR metadata can affect owner exact-head authorization."
 protected_surfaces:
   runtime_code: R3
   MCP_tool_behavior: R3

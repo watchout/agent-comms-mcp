@@ -13,6 +13,7 @@ status:
   branch_protection: active_required_status_check_layer0
   rulesets: available_empty_not_used
   required_check_settings: active_layer0_machine_gate
+  pull_request_transition_rerun_gate: active_for_ready_label_and_edit_events
 allowed_next_phases:
   - SHIRUBE_COMMAND_REVIEW
   - OWNER_DOMAIN_DESIGNER_REVIEW
@@ -31,6 +32,15 @@ completion_definition:
   full_github_settings_enforcement: true_for_branch_protection_required_checks
   required_status_check_context:
     - Layer 0 — machine gate
+  required_pull_request_activity_types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+    - converted_to_draft
+    - labeled
+    - unlabeled
+    - edited
 required_before_merge:
   - Shirube command review for this exact head
   - Repository owner/domain-designer confirmation

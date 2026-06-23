@@ -19,6 +19,15 @@ name: PR Checks (Layer 0 + route classification)
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+      - edited
   push:
     branches: [main]
 

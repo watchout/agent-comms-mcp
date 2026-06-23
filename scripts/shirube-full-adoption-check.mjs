@@ -49,6 +49,16 @@ requireExisting(".shirube/lifecycle-state.yaml");
 requireExisting(".shirube/specs/SPEC-MCP-SHIRUBE-FULL-ADOPTION-001.md");
 requireExisting(".shirube/cells/CELL-MCP-SHIRUBE-FULL-ADOPTION-001.yaml");
 requireExisting(".github/pull_request_template.md");
+requirePullRequestTypes(".github/workflows/pr-checks.yml", [
+  "opened",
+  "synchronize",
+  "reopened",
+  "ready_for_review",
+  "converted_to_draft",
+  "labeled",
+  "unlabeled",
+  "edited",
+]);
 
 if (pr) {
   requirePrBodyText([
@@ -282,6 +292,24 @@ function requirePrBodyText(needles) {
   for (const needle of needles) {
     if (!body.includes(needle)) errors.push(`PR body must include ${needle}.`);
   }
+}
+
+function requirePullRequestTypes(filePath, requiredTypes) {
+  const text = readText(filePath);
+  if (!text) {
+    errors.push(`Required workflow is missing or empty: ${filePath}`);
+    return;
+  }
+  for (const activityType of requiredTypes) {
+    const pattern = new RegExp(`^\\s*-\\s*${escapeRegExp(activityType)}\\s*$`, "mu");
+    if (!pattern.test(text)) {
+      errors.push(`${filePath} pull_request.types must include ${activityType}.`);
+    }
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function matchesAny(filePath, patterns) {

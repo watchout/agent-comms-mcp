@@ -33,6 +33,7 @@ The goal is to stop subject drift before implementation by making the target rep
 | REQ-MCP-SHIRUBE-FULL-005 | Add PR template fields for Shirube controls and post-merge evidence. |
 | REQ-MCP-SHIRUBE-FULL-006 | Require `Layer 0 — machine gate` through branch protection required status checks. |
 | REQ-MCP-SHIRUBE-FULL-007 | Require a machine-verifiable owner exact-head decision artifact before non-draft merge handling. |
+| REQ-MCP-SHIRUBE-FULL-008 | Rerun required Layer 0 on PR state and metadata transitions that affect owner authorization. |
 
 ## Acceptance Criteria
 
@@ -42,6 +43,7 @@ The goal is to stop subject drift before implementation by making the target rep
 | AC-MCP-SHIRUBE-FULL-002 | REQ-MCP-SHIRUBE-FULL-002 REQ-MCP-SHIRUBE-FULL-004 REQ-MCP-SHIRUBE-FULL-007 | Auto-merge requires non-draft state, owner exact-head labels, and a machine-verified owner decision artifact; CI green alone is insufficient. |
 | AC-MCP-SHIRUBE-FULL-003 | REQ-MCP-SHIRUBE-FULL-005 | New PRs receive a Shirube metadata and evidence template. |
 | AC-MCP-SHIRUBE-FULL-004 | REQ-MCP-SHIRUBE-FULL-006 | Branch protection requires `Layer 0 — machine gate`, which includes the Shirube gate. |
+| AC-MCP-SHIRUBE-FULL-005 | REQ-MCP-SHIRUBE-FULL-008 | The workflow explicitly subscribes to `ready_for_review`, `converted_to_draft`, `labeled`, `unlabeled`, and `edited` in addition to the default PR activity types. |
 
 ## Test Plan
 
@@ -51,6 +53,7 @@ The goal is to stop subject drift before implementation by making the target rep
 | TEST-MCP-SHIRUBE-FULL-002 | AC-MCP-SHIRUBE-FULL-002 | Verify `.github/workflows/pr-checks.yml` auto-merge condition requires non-draft and owner exact-head labels, and verify the gate rejects non-draft PRs without a matching owner decision comment. |
 | TEST-MCP-SHIRUBE-FULL-003 | AC-MCP-SHIRUBE-FULL-003 AC-MCP-SHIRUBE-FULL-004 | Run `git diff --check` and YAML parse for `.shirube/**/*.yaml`. |
 | TEST-MCP-SHIRUBE-FULL-004 | AC-MCP-SHIRUBE-FULL-004 | Verify GitHub branch protection required status checks include `Layer 0 — machine gate`. |
+| TEST-MCP-SHIRUBE-FULL-005 | AC-MCP-SHIRUBE-FULL-005 | Verify `scripts/shirube-full-adoption-check.mjs` rejects missing required `pull_request.types`. |
 
 ## Review Gate
 

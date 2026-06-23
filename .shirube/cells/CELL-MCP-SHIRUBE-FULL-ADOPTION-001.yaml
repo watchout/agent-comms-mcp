@@ -11,6 +11,7 @@ covered_req_ids:
   - REQ-MCP-SHIRUBE-FULL-005
   - REQ-MCP-SHIRUBE-FULL-006
   - REQ-MCP-SHIRUBE-FULL-007
+  - REQ-MCP-SHIRUBE-FULL-008
 dependencies:
   - SPEC-MCP-AUN-V2V3-FOUNDATION-001
 allowed_paths:
@@ -57,11 +58,16 @@ acceptance_criteria:
     statement: Branch protection requires Layer 0 machine gate and Layer 0 includes the Shirube full-adoption gate.
     linked_req_ids:
       - REQ-MCP-SHIRUBE-FULL-006
+  - id: AC-MCP-SHIRUBE-FULL-005
+    statement: Required Layer 0 reruns on PR ready/draft, label, and edit transitions that affect owner authorization.
+    linked_req_ids:
+      - REQ-MCP-SHIRUBE-FULL-008
 required_tests:
   - TEST-MCP-SHIRUBE-FULL-001
   - TEST-MCP-SHIRUBE-FULL-002
   - TEST-MCP-SHIRUBE-FULL-003
   - TEST-MCP-SHIRUBE-FULL-004
+  - TEST-MCP-SHIRUBE-FULL-005
 required_evidence:
   - changed files
   - context reset result
@@ -72,6 +78,7 @@ required_evidence:
   - detect-breaking-changes result
   - remote PR checks result
   - branch protection required status checks result
+  - pull_request activity type coverage result
 non_goals:
   - No AUN runtime implementation.
   - No MCP/tool behavior change.
