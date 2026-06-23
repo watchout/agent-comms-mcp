@@ -1,0 +1,37 @@
+schema_version: shirube-lifecycle-state/v1
+target_repo: watchout/agent-comms-mcp
+target_pr: 805
+current_phase: FULL_OVERLAY_ADOPTION_ACTIVE_IN_PR
+current_head: recorded_in_pr_body_exact_head_sha
+primary_subject: AUN V2/V3 foundation premise plus Shirube full adoption overlay
+status:
+  repo_local_overlay: active_in_pr
+  workflow_hard_gate: active_in_pr
+  pr_template: active_in_pr
+  owner_exact_head_merge_policy: active_in_pr
+  branch_protection: not_available_via_current_github_plan_or_private_repo
+  rulesets: not_available_via_current_github_plan_or_private_repo
+  required_check_settings: not_available_via_current_github_plan_or_private_repo
+allowed_next_phases:
+  - SHIRUBE_COMMAND_REVIEW
+  - OWNER_DOMAIN_DESIGNER_REVIEW
+  - HUMAN_MAINTAINER_EXACT_HEAD_AUTHORIZATION
+blocked_phases:
+  - AUN_RUNTIME_IMPLEMENTATION
+  - MCP_TOOL_BEHAVIOR_CHANGE
+  - QUEUE_MUTATION
+  - STATE_DAEMON_CHANGE
+  - PROVIDER_DELIVERY_CHANGE
+  - DB_MIGRATION
+  - SECRET_ACCESS
+  - AUN_ACTIVATION
+completion_definition:
+  full_adoption_in_repo_files: true
+  full_github_settings_enforcement: false
+  reason_full_github_settings_enforcement_false: GitHub branch protection/rulesets APIs returned plan/private-repo 403.
+required_before_merge:
+  - Shirube command review for this exact head
+  - Repository owner/domain-designer confirmation
+  - Human maintainer exact-head authorization
+  - PR remains non-draft only after approval
+  - Post-merge evidence plan confirmed

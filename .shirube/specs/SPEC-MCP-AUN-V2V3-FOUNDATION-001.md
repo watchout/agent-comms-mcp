@@ -16,7 +16,7 @@ Create the repository-level premise layer required before behavior-changing AUN 
 
 ## Full-Application Execution Context
 
-This Cell is now treated as a full Shirube application planning boundary for `watchout/agent-comms-mcp`, not as a loose partial-adoption conversation.
+This Cell is now paired with `CELL-MCP-SHIRUBE-FULL-ADOPTION-001` and treated as a full Shirube application boundary for `watchout/agent-comms-mcp`, not as a loose partial-adoption conversation.
 
 Before any implementation step, the implementation bot must report:
 
@@ -40,7 +40,7 @@ Support repositories are classified as follows:
 | `watchout/omotenasuai-control` | Control source only | Control-source material may inform governance patterns but is not the agent-com implementation target. |
 | OmotenasuAI product repos | Not current target unless explicitly assigned | Do not implement product runtime, DB, API, UI, workflow, or deployment work from this AUN PR. |
 
-Partial Gate Pack evidence may inform this PR, but behavior-changing AUN implementation must not begin until full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence are present.
+Partial Gate Pack evidence may inform history, but behavior-changing AUN implementation must not begin until full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence are present.
 
 ## Non-goals
 
@@ -53,7 +53,7 @@ Partial Gate Pack evidence may inform this PR, but behavior-changing AUN impleme
 - No database migration.
 - No secret or credential access.
 - No dependency or package changes.
-- No active GitHub workflow changes.
+- No AUN runtime workflow activation beyond Shirube repository-local PR gating.
 - No branch protection, ruleset, or required-check changes.
 - No AUN activation.
 - No multi-agent automation activation.

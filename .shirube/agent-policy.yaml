@@ -5,6 +5,7 @@ permission_boundary:
     - git diff --check
     - ruby YAML.parse for .shirube/**/*.yaml
     - existing lightweight smoke checks
+    - node scripts/shirube-full-adoption-check.mjs
     - git status
     - git diff
   forbidden_commands:
@@ -16,6 +17,9 @@ permission_boundary:
     - .shirube/**
     - docs/**
     - README.md
+    - .github/pull_request_template.md
+    - .github/workflows/pr-checks.yml
+    - scripts/shirube-full-adoption-check.mjs
   forbidden_paths:
     - .env
     - secrets/**
@@ -23,7 +27,7 @@ permission_boundary:
     - cli/**
     - core/**
     - server.ts
-    - .github/workflows/**
+    - .github/workflows/** except .github/workflows/pr-checks.yml for CELL-MCP-SHIRUBE-FULL-ADOPTION-001
     - deploy/**
   allowed_mcp_tools:
     - read_only_repo_inspection
@@ -182,9 +186,8 @@ execution_contract:
     - next required gate
   non_goals:
     - No runtime behavior changes.
-    - No active workflow changes.
-    - No required checks.
-    - No branch protection or ruleset changes.
+    - No AUN runtime behavior changes.
+    - No direct branch protection or ruleset changes when GitHub API/plan blocks them.
     - No AUN activation.
   stop_conditions:
     - Any change outside allowed_paths is required.

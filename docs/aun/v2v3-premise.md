@@ -30,7 +30,7 @@ primary_target_pr: 805
 primary_development_subject: AUN V2/V3 foundation premise and later AUN implementation Cells
 ```
 
-The operating posture is now full Shirube application before AUN implementation, not loose partial adoption. Partial Gate Pack evidence may inform this PR, but behavior-changing AUN implementation must wait for full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence.
+The operating posture is now full Shirube application before AUN implementation, not loose partial adoption. The repo-local workflow gate, PR template, enforcement policy, and lifecycle state are part of the adoption. Behavior-changing AUN implementation must wait for full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence.
 
 Before implementation, the bot must report `pwd`, git root, origin remote, branch, `HEAD`, current work order, target repo, support repos, and changed files. If the actual repo is not `watchout/agent-comms-mcp`, implementation stops.
 

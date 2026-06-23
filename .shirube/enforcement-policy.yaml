@@ -1,0 +1,75 @@
+schema_version: shirube-enforcement-policy/v1
+policy_id: ENFORCEMENT-MCP-SHIRUBE-FULL-ADOPTION-001
+target_repo: watchout/agent-comms-mcp
+status: active_repo_overlay
+mode: workflow_hard_gate_with_owner_observed_merge
+primary_target_repo: watchout/agent-comms-mcp
+support_repos:
+  watchout/ai-dev-framework: framework_feedback_support_only
+  watchout/omotenasuai-control: control_source_only
+  omotenasuai_product_repos: not_current_target_unless_explicitly_assigned
+required_pr_controls:
+  - control_source
+  - scope
+  - non_scope
+  - allowed_paths
+  - forbidden_paths
+  - protected_surface_declaration
+  - exact_head_sha
+  - validation_evidence
+  - owner_decision
+  - post_merge_evidence
+merge_policy:
+  ci_green_alone_is_merge_ready: false
+  draft_pr_must_not_merge: true
+  owner_exact_head_required: true
+  non_draft_required_labels:
+    - owner-exact-head-approved
+    - shirube-full-adoption
+  auto_merge_allowed_only_when:
+    - PR is not draft
+    - Layer 0 succeeds
+    - route is not ceo-approval
+    - owner-exact-head-approved label is present
+    - shirube-full-adoption label is present
+protected_surfaces:
+  runtime_code: R3
+  MCP_tool_behavior: R3
+  queue_mutation: R3
+  state_daemon: R3
+  provider_delivery: R3
+  database_migration: R3
+  secrets: R3
+  active_workflows: R3
+  branch_protection: R3
+  rulesets: R3
+  required_checks: R3
+  AUN_activation: R3
+github_settings:
+  branch_protection_api_status: blocked_by_github_plan_or_private_repo
+  rulesets_api_status: blocked_by_github_plan_or_private_repo
+  observed_error: "Upgrade to GitHub Pro or make this repository public to enable this feature."
+  repo_local_enforcement_substitute:
+    - .github/workflows/pr-checks.yml
+    - scripts/shirube-full-adoption-check.mjs
+evidence_requirements:
+  context_reset:
+    - pwd
+    - git_root
+    - origin_remote
+    - current_branch
+    - HEAD
+    - current_work_order
+    - target_repo
+    - support_repos
+    - changed_files
+  validation:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bash scripts/detect-breaking-changes.sh origin/main
+    - bun test --timeout 30000
+  post_merge:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

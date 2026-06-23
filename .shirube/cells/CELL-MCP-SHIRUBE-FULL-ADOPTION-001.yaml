@@ -1,0 +1,101 @@
+schema_version: shirube-cell/v1
+CELL-ID: CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+SPEC-ID: SPEC-MCP-SHIRUBE-FULL-ADOPTION-001
+risk_tier: R3
+goal: Complete repository-local Shirube full adoption overlay for agent-comms-mcp.
+covered_req_ids:
+  - REQ-MCP-SHIRUBE-FULL-001
+  - REQ-MCP-SHIRUBE-FULL-002
+  - REQ-MCP-SHIRUBE-FULL-003
+  - REQ-MCP-SHIRUBE-FULL-004
+  - REQ-MCP-SHIRUBE-FULL-005
+  - REQ-MCP-SHIRUBE-FULL-006
+dependencies:
+  - SPEC-MCP-AUN-V2V3-FOUNDATION-001
+allowed_paths:
+  - .shirube/**
+  - .github/workflows/pr-checks.yml
+  - .github/pull_request_template.md
+  - scripts/shirube-full-adoption-check.mjs
+  - docs/**
+  - README.md
+forbidden_paths:
+  - .env
+  - .env.*
+  - secrets/**
+  - server.ts
+  - core/**
+  - cli/**
+  - bin/**
+  - entrypoints/**
+  - adapters/**
+  - db/**
+  - hooks/**
+  - package.json
+  - bun.lockb
+  - package-lock.json
+  - pnpm-lock.yaml
+  - deploy/**
+acceptance_criteria:
+  - id: AC-MCP-SHIRUBE-FULL-001
+    statement: Workflow gate verifies primary target repo and support repo classifications.
+    linked_req_ids:
+      - REQ-MCP-SHIRUBE-FULL-001
+      - REQ-MCP-SHIRUBE-FULL-003
+  - id: AC-MCP-SHIRUBE-FULL-002
+    statement: Auto-merge no longer runs on CI green alone and requires owner exact-head labels.
+    linked_req_ids:
+      - REQ-MCP-SHIRUBE-FULL-002
+      - REQ-MCP-SHIRUBE-FULL-004
+  - id: AC-MCP-SHIRUBE-FULL-003
+    statement: Pull request template includes Shirube metadata, scope, protected surfaces, validation, owner decision, and post-merge evidence sections.
+    linked_req_ids:
+      - REQ-MCP-SHIRUBE-FULL-005
+  - id: AC-MCP-SHIRUBE-FULL-004
+    statement: Enforcement policy records GitHub branch protection/ruleset API unavailability and repo-local workflow enforcement substitute.
+    linked_req_ids:
+      - REQ-MCP-SHIRUBE-FULL-006
+required_tests:
+  - TEST-MCP-SHIRUBE-FULL-001
+  - TEST-MCP-SHIRUBE-FULL-002
+  - TEST-MCP-SHIRUBE-FULL-003
+required_evidence:
+  - changed files
+  - context reset result
+  - git diff --check result
+  - YAML parse result
+  - shirube full-adoption gate result
+  - detect-breaking-changes result
+  - remote PR checks result
+non_goals:
+  - No AUN runtime implementation.
+  - No MCP/tool behavior change.
+  - No queue, state-daemon, provider, DB, secret, or deployment change.
+  - No direct branch protection/ruleset mutation when GitHub blocks the API.
+stop_conditions:
+  - Actual git repository is not watchout/agent-comms-mcp.
+  - A runtime/product protected file must change.
+  - Branch protection or ruleset API mutation is attempted after GitHub reports plan/private-repo 403.
+  - PR is marked ready or merge-ready without owner exact-head authorization.
+waiver_refs: []
+execution_contract:
+  canonical_term: Shirube full adoption overlay
+  allowed_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - node scripts/shirube-full-adoption-check.mjs
+    - bash scripts/detect-breaking-changes.sh origin/main
+    - bun test --timeout 30000
+    - gh pr edit for PR body metadata
+    - git push to existing PR branch
+  forbidden_commands:
+    - git push --force
+    - destructive production commands
+    - AUN activation
+    - production deploy
+    - secret access
+  completion_evidence:
+    - pushed head SHA
+    - local validation results
+    - remote validation results
+    - branch protection/ruleset API result

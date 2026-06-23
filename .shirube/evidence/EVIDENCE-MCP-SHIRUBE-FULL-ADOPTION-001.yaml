@@ -1,0 +1,29 @@
+schema_version: shirube-evidence/v1
+EVIDENCE-ID: EVIDENCE-MCP-SHIRUBE-FULL-ADOPTION-001
+CELL-ID: CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+SPEC-ID: SPEC-MCP-SHIRUBE-FULL-ADOPTION-001
+target_repo: watchout/agent-comms-mcp
+target_pr: 805
+target_head: recorded_in_pr_body_exact_head_sha
+evidence_type: implementation_validation
+scope:
+  allowed_paths:
+    - .shirube/**
+    - .github/workflows/pr-checks.yml
+    - .github/pull_request_template.md
+    - scripts/shirube-full-adoption-check.mjs
+    - docs/**
+    - README.md
+  forbidden_runtime_paths_unchanged: true
+github_settings_probe:
+  branch_protection_api: blocked_by_github_plan_or_private_repo
+  rulesets_api: blocked_by_github_plan_or_private_repo
+  observed_error: "Upgrade to GitHub Pro or make this repository public to enable this feature."
+validation_commands:
+  - git diff --check origin/main...HEAD
+  - YAML parse for .shirube/**/*.yaml
+  - node scripts/shirube-full-adoption-check.mjs
+  - bash scripts/detect-breaking-changes.sh origin/main
+  - bun test --timeout 30000
+results: []
+next_gate: Shirube command review and human maintainer exact-head authorization

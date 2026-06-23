@@ -1,7 +1,7 @@
 schema_version: shirube-repo-spec/v1
 repo_id: watchout/agent-comms-mcp
 owner: watchout
-purpose: "Draft/unconfirmed premise: agent-comms-mcp provides MCP tools, CLI surfaces, queue/runtime diagnostics, and durable evidence helpers for agent-to-agent communication. This full-application planning overlay does not authorize runtime, workflow, ruleset, or production behavior changes."
+purpose: "Confirmed full-adoption premise: agent-comms-mcp provides MCP tools, CLI surfaces, queue/runtime diagnostics, and durable evidence helpers for agent-to-agent communication. Shirube full adoption is active in repository files and workflow gates; this does not authorize AUN runtime, queue, provider, DB, secret, deployment, branch-protection, ruleset, or production activation work."
 scope:
   - MCP tool and CLI implementation for agent communication.
   - Agent message queue storage and state transition helpers.
@@ -58,13 +58,13 @@ boundaries:
     - "External repository mutation, provider account changes, and global organization ruleset changes are out of scope for this repo scaffold."
   forbidden_actions:
     - "Do not change runtime, MCP, queue, state-daemon, LaunchAgent, provider delivery, or deployment behavior in this scaffold."
-    - "Do not modify active GitHub workflows, required checks, branch protection, or rulesets in this scaffold."
+    - "Do not modify branch protection or rulesets unless the GitHub plan/API permits it and human maintainer exact-head authorization exists."
     - "Do not activate AUN, multi-agent automation, or external dispatch from this scaffold."
     - "Do not weaken auth, permission, privacy, audit, or evidence controls."
     - "Do not treat ACKs, queue IDs, Discord projection, TUI visibility, green CI alone, or unverified runtime as completion evidence."
 required_gates:
   - "execution_context_reset_check: before any implementation, report pwd, git root, origin, branch, HEAD, current work order, target repo, support repos, and changed files."
-  - "warn_only_scope_check: changed paths must remain under .shirube/**, docs/**, or README.md for this scaffold."
+  - "shirube_full_adoption_gate: PR workflow must verify target repo, support repo classifications, exact-head metadata, and owner gate requirements."
   - "git_diff_check"
   - "yaml_parse_check_for_shirube_yaml"
   - "Shirube command review"
@@ -136,7 +136,13 @@ execution_context:
     - merge_ready_claim_requested_without_human_maintainer_exact_head_authorization
 
 shirube_application_posture:
-  mode: full_overlay_required_before_aun_implementation
+  mode: full_overlay_active_in_repo_files
   partial_pilot_allowed_for_behavior_changing_work: false
-  note: "Partial Gate Pack evidence may inform this PR, but later AUN implementation Cells require full target-repo context, SPEC/CELL/IMPL/audit/evidence, exact-head owner authorization, and post-merge evidence."
-  no_enforcement_change_in_this_pr: true
+  workflow_gate: .github/workflows/pr-checks.yml
+  gate_script: scripts/shirube-full-adoption-check.mjs
+  enforcement_policy_ref: .shirube/enforcement-policy.yaml
+  lifecycle_state_ref: .shirube/lifecycle-state.yaml
+  note: "Later AUN implementation Cells require full target-repo context, SPEC/CELL/IMPL/audit/evidence, exact-head owner authorization, and post-merge evidence."
+  github_settings_enforcement:
+    branch_protection: unavailable_current_plan_or_private_repo
+    rulesets: unavailable_current_plan_or_private_repo
