@@ -23,6 +23,22 @@ merge_policy:
   ci_green_alone_is_merge_ready: false
   draft_pr_must_not_merge: true
   owner_exact_head_required: true
+  machine_verified_owner_decision_required_before_non_draft: true
+  owner_decision_artifact:
+    schema_version: shirube-owner-decision/v1
+    location: PR issue comment
+    required_fields:
+      - target_repo
+      - target_pr
+      - exact_head_sha
+      - verdict
+      - actor
+      - decision_ref
+    machine_checks:
+      - exact_head_sha equals current PR head SHA
+      - actor equals GitHub comment author
+      - decision_ref equals GitHub comment URL
+      - comment author association is OWNER, MEMBER, or COLLABORATOR
   non_draft_required_labels:
     - owner-exact-head-approved
     - shirube-full-adoption
@@ -46,12 +62,16 @@ protected_surfaces:
   required_checks: R3
   AUN_activation: R3
 github_settings:
-  branch_protection_api_status: blocked_by_github_plan_or_private_repo
-  rulesets_api_status: blocked_by_github_plan_or_private_repo
-  observed_error: "Upgrade to GitHub Pro or make this repository public to enable this feature."
-  repo_local_enforcement_substitute:
-    - .github/workflows/pr-checks.yml
-    - scripts/shirube-full-adoption-check.mjs
+  branch_protection_api_status: available
+  required_status_checks:
+    strict: true
+    contexts:
+      - Layer 0 — machine gate
+  rulesets_api_status: available_empty_not_used
+  repo_local_enforcement:
+    required_by_branch_protection:
+      - .github/workflows/pr-checks.yml
+      - scripts/shirube-full-adoption-check.mjs
 evidence_requirements:
   context_reset:
     - pwd

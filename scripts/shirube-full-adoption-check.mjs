@@ -8,6 +8,7 @@ const changedFilesPath = stringArg(args["changed-files"]);
 const changedFiles = readChangedFiles(changedFilesPath);
 const event = readJsonIfPresent(eventPath);
 const pr = event?.pull_request ?? null;
+const prNumber = Number(pr?.number ?? event?.number ?? process.env.GITHUB_PR_NUMBER ?? 0);
 const body = String(pr?.body ?? "");
 const labels = new Set((pr?.labels ?? []).map((label) => String(label.name ?? "")));
 const headSha = String(pr?.head?.sha ?? process.env.GITHUB_SHA ?? "");
@@ -71,6 +72,7 @@ if (pr) {
     if (!labels.has("shirube-full-adoption")) {
       errors.push("Non-draft PRs require label shirube-full-adoption.");
     }
+    await requireOwnerDecisionArtifact();
   }
 }
 
@@ -105,6 +107,115 @@ if (errors.length > 0) {
 }
 
 console.log("Shirube full-adoption gate passed.");
+
+async function requireOwnerDecisionArtifact() {
+  const comments = await loadIssueComments();
+  const decisions = comments
+    .map(parseOwnerDecisionComment)
+    .filter(Boolean);
+  const exactDecision = decisions.find((decision) => {
+    return decision.schema_version === "shirube-owner-decision/v1"
+      && decision.target_repo === repo
+      && String(decision.target_pr) === String(prNumber)
+      && decision.exact_head_sha === headSha
+      && decision.verdict === "APPROVED_EXACT_HEAD"
+      && decision.actor === decision.commentAuthor
+      && decision.decision_ref === decision.commentUrl
+      && ["OWNER", "MEMBER", "COLLABORATOR"].includes(decision.authorAssociation);
+  });
+
+  if (!exactDecision) {
+    errors.push(
+      [
+        "Non-draft PRs require a machine-verifiable shirube_owner_decision comment for the current exact head.",
+        `Expected schema_version=shirube-owner-decision/v1, target_repo=${repo}, target_pr=${prNumber}, exact_head_sha=${headSha}, verdict=APPROVED_EXACT_HEAD, actor equal to the comment author, and decision_ref equal to the comment URL.`,
+      ].join(" "),
+    );
+  }
+}
+
+async function loadIssueComments() {
+  const commentsPath = stringArg(args.comments) ?? process.env.SHIRUBE_PR_COMMENTS_PATH ?? "";
+  if (commentsPath) {
+    const parsed = readJsonIfPresent(commentsPath);
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.comments)) return parsed.comments;
+    errors.push(`Owner decision comments file is not an array or { comments: [] }: ${commentsPath}`);
+    return [];
+  }
+
+  const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? "";
+  if (!token || !repo || !prNumber) {
+    errors.push("Non-draft PRs require GITHUB_TOKEN/GH_TOKEN and PR number to verify owner decision comments.");
+    return [];
+  }
+
+  const comments = [];
+  let url = `https://api.github.com/repos/${repo}/issues/${prNumber}/comments?per_page=100`;
+  while (url) {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+    if (!response.ok) {
+      const responseText = await response.text();
+      errors.push(`Failed to load PR comments for owner decision verification: HTTP ${response.status} ${responseText}`);
+      return [];
+    }
+    const page = await response.json();
+    if (!Array.isArray(page)) {
+      errors.push("GitHub issue comments response was not an array.");
+      return [];
+    }
+    comments.push(...page);
+    url = nextLink(response.headers.get("link"));
+  }
+  return comments;
+}
+
+function parseOwnerDecisionComment(comment) {
+  const text = String(comment?.body ?? "");
+  if (!text.includes("shirube_owner_decision:")) return null;
+
+  const fields = {};
+  for (const line of text.split(/\r?\n/u)) {
+    const match = line.match(/^\s{0,4}([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/u);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    fields[key] = cleanScalar(rawValue);
+  }
+
+  return {
+    schema_version: fields.schema_version,
+    target_repo: fields.target_repo,
+    target_pr: fields.target_pr,
+    exact_head_sha: fields.exact_head_sha,
+    verdict: fields.verdict,
+    actor: fields.actor,
+    decision_ref: fields.decision_ref,
+    commentAuthor: String(comment?.user?.login ?? ""),
+    authorAssociation: String(comment?.author_association ?? ""),
+    commentUrl: String(comment?.html_url ?? ""),
+  };
+}
+
+function cleanScalar(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^["'`]|["'`]$/gu, "");
+}
+
+function nextLink(linkHeader) {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(",")) {
+    const match = part.match(/<([^>]+)>;\s*rel="next"/u);
+    if (match) return match[1];
+  }
+  return null;
+}
 
 function parseArgs(argv) {
   const parsed = {};

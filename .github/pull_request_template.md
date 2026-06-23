@@ -53,6 +53,19 @@ exact_head_sha:
 decision_ref:
 ```
 
+For non-draft or merge handling, post a separate owner decision comment and make `decision_ref` equal that comment URL:
+
+```yaml
+shirube_owner_decision:
+  schema_version: shirube-owner-decision/v1
+  target_repo: watchout/agent-comms-mcp
+  target_pr: <PR number>
+  exact_head_sha: <current PR head SHA>
+  verdict: APPROVED_EXACT_HEAD
+  actor: <GitHub comment author>
+  decision_ref: <this GitHub comment URL>
+```
+
 ## Post-Merge Evidence
 
 ```text

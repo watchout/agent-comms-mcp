@@ -10,6 +10,7 @@ covered_req_ids:
   - REQ-MCP-SHIRUBE-FULL-004
   - REQ-MCP-SHIRUBE-FULL-005
   - REQ-MCP-SHIRUBE-FULL-006
+  - REQ-MCP-SHIRUBE-FULL-007
 dependencies:
   - SPEC-MCP-AUN-V2V3-FOUNDATION-001
 allowed_paths:
@@ -43,39 +44,43 @@ acceptance_criteria:
       - REQ-MCP-SHIRUBE-FULL-001
       - REQ-MCP-SHIRUBE-FULL-003
   - id: AC-MCP-SHIRUBE-FULL-002
-    statement: Auto-merge no longer runs on CI green alone and requires owner exact-head labels.
+    statement: Auto-merge no longer runs on CI green alone and Layer 0 requires owner exact-head labels plus a machine-verified owner decision artifact before non-draft handling.
     linked_req_ids:
       - REQ-MCP-SHIRUBE-FULL-002
       - REQ-MCP-SHIRUBE-FULL-004
+      - REQ-MCP-SHIRUBE-FULL-007
   - id: AC-MCP-SHIRUBE-FULL-003
     statement: Pull request template includes Shirube metadata, scope, protected surfaces, validation, owner decision, and post-merge evidence sections.
     linked_req_ids:
       - REQ-MCP-SHIRUBE-FULL-005
   - id: AC-MCP-SHIRUBE-FULL-004
-    statement: Enforcement policy records GitHub branch protection/ruleset API unavailability and repo-local workflow enforcement substitute.
+    statement: Branch protection requires Layer 0 machine gate and Layer 0 includes the Shirube full-adoption gate.
     linked_req_ids:
       - REQ-MCP-SHIRUBE-FULL-006
 required_tests:
   - TEST-MCP-SHIRUBE-FULL-001
   - TEST-MCP-SHIRUBE-FULL-002
   - TEST-MCP-SHIRUBE-FULL-003
+  - TEST-MCP-SHIRUBE-FULL-004
 required_evidence:
   - changed files
   - context reset result
   - git diff --check result
   - YAML parse result
   - shirube full-adoption gate result
+  - non-draft owner decision artifact rejection/acceptance result
   - detect-breaking-changes result
   - remote PR checks result
+  - branch protection required status checks result
 non_goals:
   - No AUN runtime implementation.
   - No MCP/tool behavior change.
   - No queue, state-daemon, provider, DB, secret, or deployment change.
-  - No direct branch protection/ruleset mutation when GitHub blocks the API.
+  - No ruleset mutation when branch protection required checks provide the active merge gate.
 stop_conditions:
   - Actual git repository is not watchout/agent-comms-mcp.
   - A runtime/product protected file must change.
-  - Branch protection or ruleset API mutation is attempted after GitHub reports plan/private-repo 403.
+  - Ruleset mutation is attempted without a separate owner/security/CTO approval.
   - PR is marked ready or merge-ready without owner exact-head authorization.
 waiver_refs: []
 execution_contract:
@@ -84,6 +89,7 @@ execution_contract:
     - git diff --check
     - YAML parse for .shirube/**/*.yaml
     - node scripts/shirube-full-adoption-check.mjs
+    - gh api repos/watchout/agent-comms-mcp/branches/main/protection/required_status_checks
     - bash scripts/detect-breaking-changes.sh origin/main
     - bun test --timeout 30000
     - gh pr edit for PR body metadata

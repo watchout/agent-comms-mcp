@@ -1,5 +1,7 @@
 schema_version: shirube-control-handoff/rapid-lite/v1
 mode: rapid-lite
+superseded_by: CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+superseded_reason: "Rapid/Lite report-only handoff is retained as historical input. Current PR #805 control is the R3 full-adoption cell with active workflow gate and branch-protection required Layer 0."
 profile: hotel-lite
 control_handoff_id: CH-MCP-805-V3-RAPID-LITE-PILOT-001
 parent_ssot: https://github.com/watchout/ai-dev-framework/issues/458
@@ -43,7 +45,7 @@ execution_context:
     - omotenasuai_product_repo_is_treated_as_current_target_without_explicit_assignment
 
 shirube_application_posture:
-  mode: full_overlay_required_before_aun_implementation
+  mode: superseded_by_full_overlay_active_in_repo_files
   partial_pilot_allowed_for_behavior_changing_work: false
   framework_support_refs:
     - https://github.com/watchout/ai-dev-framework/issues/431
@@ -52,6 +54,7 @@ shirube_application_posture:
     - https://github.com/watchout/ai-dev-framework/pull/488
 
 rps_scope:
+  status: superseded_historical_report_only_input
   shirube_owns:
     - report-only review of foundation premise artifacts
     - structural handoff, path, validation, and evidence checks
@@ -64,8 +67,8 @@ rps_scope:
     - provider delivery
     - database migration
     - secret or credential access
-    - workflow enforcement
-    - branch protection or rulesets
+    - runtime workflow enforcement outside CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+    - branch protection or rulesets outside CELL-MCP-SHIRUBE-FULL-ADOPTION-001
     - AUN activation
     - merge authority
 
@@ -73,7 +76,7 @@ escalation_route: "If any protected runtime, queue, provider, workflow, ruleset,
 
 acceptance_criteria:
   - PR remains draft during report-only pilot.
-  - Changed files remain inside .shirube/** and docs/**.
+  - Changed files remain inside the full-adoption cell allowed paths.
   - No runtime, workflow, ruleset, branch protection, package, lockfile, DB, secret, queue, state-daemon, provider delivery, or AUN activation changes occur.
   - Report-only findings are posted as evidence before Shirube command review.
 
@@ -111,7 +114,7 @@ cell:
   CELL-ID: CELL-MCP-AUN-FOUNDATION-001
   cell_type: scaffold
   risk_class: R2
-  goal: Apply Shirube V3 Rapid/Lite report-only pilot to the AUN V2/V3 foundation premise PR.
+  goal: Historical Rapid/Lite report-only pilot input, superseded by CELL-MCP-SHIRUBE-FULL-ADOPTION-001.
   non_scope:
     - runtime code changes
     - MCP/tool behavior changes
@@ -120,9 +123,9 @@ cell:
     - provider delivery changes
     - database migration
     - secret access
-    - workflow changes
-    - branch protection or ruleset changes
-    - required check activation
+    - workflow changes outside CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+    - branch protection or ruleset changes outside CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+    - required check activation outside CELL-MCP-SHIRUBE-FULL-ADOPTION-001
     - AUN activation
     - ready-for-review transition
     - merge authorization
@@ -136,8 +139,8 @@ cell:
     - core/**
     - src/**
     - server.ts
-    - scripts/**
-    - .github/workflows/**
+    - scripts/** except scripts/shirube-full-adoption-check.mjs
+    - .github/workflows/** except .github/workflows/pr-checks.yml
     - package.json
     - package-lock.json
     - bun.lockb
