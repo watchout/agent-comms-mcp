@@ -20,6 +20,28 @@ It should answer, from structured evidence:
 
 V2 is the clean core. V3 is the governed Shirube Cell rollout model.
 
+## Full Shirube Application Posture
+
+This repository is the primary target for this work:
+
+```yaml
+primary_target_repo: watchout/agent-comms-mcp
+primary_target_pr: 805
+primary_development_subject: AUN V2/V3 foundation premise and later AUN implementation Cells
+```
+
+The operating posture is now full Shirube application before AUN implementation, not loose partial adoption. Partial Gate Pack evidence may inform this PR, but behavior-changing AUN implementation must wait for full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence.
+
+Before implementation, the bot must report `pwd`, git root, origin remote, branch, `HEAD`, current work order, target repo, support repos, and changed files. If the actual repo is not `watchout/agent-comms-mcp`, implementation stops.
+
+Support repositories are not implementation targets:
+
+| Repository | Classification | Boundary |
+| --- | --- | --- |
+| `watchout/ai-dev-framework` | Framework feedback/support only | Shirube framework issues and PRs, including #431, #458, #487, and #488, do not become the current implementation target. |
+| `watchout/omotenasuai-control` | Control source only | Control-source material may inform governance patterns, but it is not the agent-com implementation target. |
+| OmotenasuAI product repos | Not current target unless explicitly assigned | Product runtime, DB, API, UI, workflow, and deployment work are out of scope for this AUN PR. |
+
 ## Core Premise
 
 AUN V2 must not be a surface refactor of V1 queue-work, Discord, tmux, and state-daemon paths.

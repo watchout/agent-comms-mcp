@@ -17,6 +17,40 @@ next_role: shirube_command_review
 spec_review_state: ready_for_report_only_pilot
 owner_confirmation_required: false
 
+execution_context:
+  primary_target_repo: watchout/agent-comms-mcp
+  primary_target_pr: 805
+  primary_development_subject: AUN V2/V3 foundation premise
+  current_work_order: Full Shirube application posture for agent-com scope; no runtime implementation in this PR.
+  support_repos:
+    watchout/ai-dev-framework: framework_feedback_support_only
+    watchout/omotenasuai-control: control_source_only
+    omotenasuai_product_repos: not_current_target_unless_explicitly_assigned
+  mandatory_reset_before_implementation:
+    - pwd
+    - git_root
+    - origin_remote
+    - current_branch
+    - HEAD
+    - current_work_order
+    - target_repo
+    - support_repos
+    - changed_files
+  stop_if:
+    - actual_repo_is_not_watchout_agent_comms_mcp
+    - support_repo_pr_is_treated_as_current_implementation_target
+    - ADF_488_is_treated_as_current_implementation_target
+    - omotenasuai_product_repo_is_treated_as_current_target_without_explicit_assignment
+
+shirube_application_posture:
+  mode: full_overlay_required_before_aun_implementation
+  partial_pilot_allowed_for_behavior_changing_work: false
+  framework_support_refs:
+    - https://github.com/watchout/ai-dev-framework/issues/431
+    - https://github.com/watchout/ai-dev-framework/issues/458
+    - https://github.com/watchout/ai-dev-framework/issues/487
+    - https://github.com/watchout/ai-dev-framework/pull/488
+
 rps_scope:
   shirube_owns:
     - report-only review of foundation premise artifacts
@@ -61,6 +95,7 @@ validation:
     - validation_results
     - owner_decision
     - rapid_lite_report_result
+    - execution_context_reset_result
 
 owner_decision:
   required_before_merge: true
@@ -121,6 +156,8 @@ cell:
     - missing or placeholder validation evidence
     - owner decision missing
     - runtime implementation requested
+    - execution context target repo mismatch
+    - framework support repo treated as primary target
   authorized_next_cells: []
 
 implementation_boundary:

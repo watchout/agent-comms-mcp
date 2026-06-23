@@ -14,6 +14,34 @@ This Feature Spec satisfies the foundation premise requested by issue #802 while
 
 Create the repository-level premise layer required before behavior-changing AUN V2 implementation Cells begin. This spec defines what AUN becomes in V2/V3, what remains legacy or transitional, where authority lives, which decisions agents may make, and which preconditions must be met before runtime, queue, provider delivery, MCP/tool behavior, or AUN activation work starts.
 
+## Full-Application Execution Context
+
+This Cell is now treated as a full Shirube application planning boundary for `watchout/agent-comms-mcp`, not as a loose partial-adoption conversation.
+
+Before any implementation step, the implementation bot must report:
+
+- `pwd`;
+- git root;
+- origin remote;
+- current branch;
+- `HEAD`;
+- current work order;
+- target repo;
+- support repos;
+- changed files.
+
+The target repo for this Cell is `watchout/agent-comms-mcp`. If the actual git repository is not `watchout/agent-comms-mcp`, implementation must stop.
+
+Support repositories are classified as follows:
+
+| Repository | Classification | Boundary |
+| --- | --- | --- |
+| `watchout/ai-dev-framework` | Framework feedback/support only | Shirube framework issues and PRs, including #431, #458, #487, and #488, do not become the current implementation target for this Cell. |
+| `watchout/omotenasuai-control` | Control source only | Control-source material may inform governance patterns but is not the agent-com implementation target. |
+| OmotenasuAI product repos | Not current target unless explicitly assigned | Do not implement product runtime, DB, API, UI, workflow, or deployment work from this AUN PR. |
+
+Partial Gate Pack evidence may inform this PR, but behavior-changing AUN implementation must not begin until full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence are present.
+
 ## Non-goals
 
 - No runtime code changes.
@@ -217,6 +245,7 @@ It may be revised later after the V2/V3 premise and inventory gates pass.
 | REQ-MCP-AUN-FOUNDATION-009 | Define repository inventory plan before implementation. |
 | REQ-MCP-AUN-FOUNDATION-010 | Define preconditions before runtime, MCP/tool, queue/runtime/state-daemon, provider delivery, or AUN activation work begins. |
 | REQ-MCP-AUN-FOUNDATION-011 | State #801 treatment. |
+| REQ-MCP-AUN-FOUNDATION-012 | Define full-application execution context so support repos and control repos cannot become the current implementation target by drift. |
 
 ## Acceptance Criteria
 
@@ -232,6 +261,7 @@ It may be revised later after the V2/V3 premise and inventory gates pass.
 | AC-MCP-AUN-FOUNDATION-008 | REQ-MCP-AUN-FOUNDATION-009 | Repository inventory plan exists. |
 | AC-MCP-AUN-FOUNDATION-009 | REQ-MCP-AUN-FOUNDATION-010 | Preconditions before behavior-changing work are explicit. |
 | AC-MCP-AUN-FOUNDATION-010 | REQ-MCP-AUN-FOUNDATION-011 | #801 treatment is explicitly stated. |
+| AC-MCP-AUN-FOUNDATION-011 | REQ-MCP-AUN-FOUNDATION-012 | Primary target repo, support repo classifications, mandatory context reset fields, and stop conditions are explicit. |
 
 ## Test Plan
 
@@ -240,6 +270,7 @@ It may be revised later after the V2/V3 premise and inventory gates pass.
 | TEST-MCP-AUN-FOUNDATION-001 | AC-MCP-AUN-FOUNDATION-007 | Run `git diff --check`. |
 | TEST-MCP-AUN-FOUNDATION-002 | AC-MCP-AUN-FOUNDATION-001 AC-MCP-AUN-FOUNDATION-010 | Parse `.shirube/**/*.yaml` as YAML. |
 | TEST-MCP-AUN-FOUNDATION-003 | AC-MCP-AUN-FOUNDATION-001 AC-MCP-AUN-FOUNDATION-010 | Run `bash scripts/detect-breaking-changes.sh origin/main` if available without modifying dependencies or scripts. |
+| TEST-MCP-AUN-FOUNDATION-004 | AC-MCP-AUN-FOUNDATION-011 | Report context reset fields and confirm actual repo is `watchout/agent-comms-mcp` before implementation. |
 
 ## Rollback Plan
 

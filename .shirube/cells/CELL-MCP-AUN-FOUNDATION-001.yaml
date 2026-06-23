@@ -15,6 +15,7 @@ covered_req_ids:
   - REQ-MCP-AUN-FOUNDATION-009
   - REQ-MCP-AUN-FOUNDATION-010
   - REQ-MCP-AUN-FOUNDATION-011
+  - REQ-MCP-AUN-FOUNDATION-012
 dependencies:
   - SPEC-MCP-GOV-001
 allowed_paths:
@@ -78,10 +79,15 @@ acceptance_criteria:
     statement: "#801 treatment is explicitly stated as HOLD_DRAFT future registry policy material."
     linked_req_ids:
       - REQ-MCP-AUN-FOUNDATION-011
+  - id: AC-MCP-AUN-FOUNDATION-011
+    statement: Primary target repo, support repo classifications, mandatory context reset fields, and stop conditions are explicit.
+    linked_req_ids:
+      - REQ-MCP-AUN-FOUNDATION-012
 required_tests:
   - TEST-MCP-AUN-FOUNDATION-001
   - TEST-MCP-AUN-FOUNDATION-002
   - TEST-MCP-AUN-FOUNDATION-003
+  - TEST-MCP-AUN-FOUNDATION-004
 required_evidence:
   - changed files
   - git diff --check result
@@ -89,6 +95,7 @@ required_evidence:
   - detect-breaking-changes result if available
   - exact head SHA
   - PR draft state
+  - execution context reset result
 non_goals:
   - No runtime code changes.
   - No MCP/tool behavior changes.
@@ -105,6 +112,8 @@ stop_conditions:
   - Any implementation behavior change is needed to satisfy this Cell.
   - R3 protected work is requested without human maintainer, release owner, security owner, CTO, and operator approval.
   - The PR would need to be marked ready or merged from this Cell.
+  - Actual git repository is not watchout/agent-comms-mcp.
+  - A support repository or control repository is treated as the current implementation target.
 waiver_refs: []
 execution_contract:
   canonical_term: AUN V2/V3 foundation premise
@@ -115,6 +124,7 @@ execution_contract:
     - bash scripts/detect-breaking-changes.sh origin/main if available
     - gh pr edit for PR body metadata
     - git push to existing PR branch
+    - pwd, git rev-parse, git remote, git branch, and git status for context reset reporting
   forbidden_commands:
     - git push --force
     - destructive production commands
@@ -131,3 +141,4 @@ execution_contract:
     - validation results
     - pushed head SHA
     - next required gate
+    - confirmed target repository context
