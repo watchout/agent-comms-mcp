@@ -14,13 +14,27 @@ name: PR Checks (Layer 0 + route classification)
 #   - Yellow finding → annotation only (async issue creation on post-merge)
 #
 # Route enforcement:
-#   route:fast-merge   → Layer 0 green = merge OK
-#   route:ceo-approval → Layer 0 green + CTO + CEO = merge OK
+#   route:fast-merge   → Layer 0 green + non-draft + owner exact-head labels
+#   route:ceo-approval → Layer 0 green + CTO/CEO/human maintainer handling
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+      - edited
   push:
     branches: [main]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   # ── Layer 0: Machine gate ────────────────────────────────────────────────
@@ -102,8 +116,19 @@ jobs:
             echo "::warning::route:ceo-approval detected — this PR requires CEO approval before merge."
             echo "::warning::$(jq -r '.reasons | join(", ")' route.json)"
           else
-            echo "::notice::route:fast-merge — CI green = merge ready (CTO async review)"
+            echo "::notice::route:fast-merge — CI green still requires Shirube/owner exact-head controls before merge."
           fi
+
+      - name: Shirube full-adoption gate
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git diff --name-only origin/main...HEAD > changed-files.txt
+          node scripts/shirube-full-adoption-check.mjs \
+            --repo "${{ github.repository }}" \
+            --event "$GITHUB_EVENT_PATH" \
+            --changed-files changed-files.txt
 
       - name: Run full test suite
         run: bun test --timeout 30000
@@ -116,16 +141,19 @@ jobs:
           path: route.json
           retention-days: 7
 
-  # ── Auto-merge (fast-merge route, CI green = merge) ─────────────────────
-  # route:fast-merge + all Layer 0 checks pass → squash-merge immediately.
-  # No human in the loop. CTO reviews post-merge audit artifacts async.
-  # route:ceo-approval PRs are skipped here — CEO/CTO approve click triggers merge.
+  # ── Auto-merge (owner exact-head gated) ─────────────────────────────────
+  # route:fast-merge + all Layer 0 checks pass is not sufficient.
+  # The PR must be non-draft and carry owner exact-head adoption labels.
+  # route:ceo-approval PRs are skipped here for human maintainer handling.
   auto-merge:
-    name: Auto-merge (CI green)
+    name: Auto-merge (owner exact-head gated)
     runs-on: ubuntu-latest
     needs: [layer0]
     if: |
       github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'owner-exact-head-approved') &&
+      contains(github.event.pull_request.labels.*.name, 'shirube-full-adoption') &&
       needs.layer0.result == 'success' &&
       needs.layer0.outputs.route != 'ceo-approval'
     permissions:

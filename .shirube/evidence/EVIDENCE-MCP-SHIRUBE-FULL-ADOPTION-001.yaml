@@ -1,0 +1,45 @@
+schema_version: shirube-evidence/v1
+EVIDENCE-ID: EVIDENCE-MCP-SHIRUBE-FULL-ADOPTION-001
+CELL-ID: CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+SPEC-ID: SPEC-MCP-SHIRUBE-FULL-ADOPTION-001
+target_repo: watchout/agent-comms-mcp
+target_pr: 805
+target_head: recorded_in_pr_body_exact_head_sha
+evidence_type: implementation_validation
+scope:
+  allowed_paths:
+    - .shirube/**
+    - .github/workflows/pr-checks.yml
+    - .github/pull_request_template.md
+    - scripts/shirube-full-adoption-check.mjs
+    - docs/**
+    - README.md
+  forbidden_runtime_paths_unchanged: true
+github_settings_probe:
+  branch_protection_api: available
+  required_status_checks:
+    strict: true
+    contexts:
+      - Layer 0 — machine gate
+  rulesets_api: available_empty_not_used
+workflow_trigger_policy:
+  pull_request_types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+    - converted_to_draft
+    - labeled
+    - unlabeled
+    - edited
+validation_commands:
+  - git diff --check origin/main...HEAD
+  - YAML parse for .shirube/**/*.yaml
+  - node scripts/shirube-full-adoption-check.mjs
+  - node scripts/shirube-full-adoption-check.mjs non-draft owner decision artifact rejection/acceptance fixtures
+  - node scripts/shirube-full-adoption-check.mjs pull_request activity type coverage
+  - gh api repos/watchout/agent-comms-mcp/branches/main/protection/required_status_checks
+  - bash scripts/detect-breaking-changes.sh origin/main
+  - bun test --timeout 30000
+results: []
+next_gate: Shirube command review and human maintainer exact-head authorization

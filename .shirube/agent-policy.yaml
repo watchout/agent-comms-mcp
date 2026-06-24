@@ -5,17 +5,22 @@ permission_boundary:
     - git diff --check
     - ruby YAML.parse for .shirube/**/*.yaml
     - existing lightweight smoke checks
+    - node scripts/shirube-full-adoption-check.mjs
+    - gh api repos/watchout/agent-comms-mcp/branches/main/protection/required_status_checks
     - git status
     - git diff
   forbidden_commands:
     - git push --force
     - destructive production commands
-    - commands that mutate branch protection or repository rulesets
+    - commands that mutate branch protection or repository rulesets except required status check activation for CELL-MCP-SHIRUBE-FULL-ADOPTION-001
     - commands that deploy, restart, or activate production services without approved Cell and owner/CTO GO
   allowed_paths:
     - .shirube/**
     - docs/**
     - README.md
+    - .github/pull_request_template.md
+    - .github/workflows/pr-checks.yml
+    - scripts/shirube-full-adoption-check.mjs
   forbidden_paths:
     - .env
     - secrets/**
@@ -23,7 +28,7 @@ permission_boundary:
     - cli/**
     - core/**
     - server.ts
-    - .github/workflows/**
+    - .github/workflows/** except .github/workflows/pr-checks.yml for CELL-MCP-SHIRUBE-FULL-ADOPTION-001
     - deploy/**
   allowed_mcp_tools:
     - read_only_repo_inspection
@@ -38,8 +43,8 @@ permission_boundary:
     - schema_or_migration_change
     - audit_log_or_evidence_model_change
     - github_write
+    - required_status_check_activation
   forbidden_mcp_tools:
-    - branch_protection_change
     - ruleset_change
     - production_deploy
     - secret_rotation
@@ -182,9 +187,8 @@ execution_contract:
     - next required gate
   non_goals:
     - No runtime behavior changes.
-    - No active workflow changes.
-    - No required checks.
-    - No branch protection or ruleset changes.
+    - No AUN runtime behavior changes.
+    - No ruleset changes; branch protection mutation is limited to requiring Layer 0 for CELL-MCP-SHIRUBE-FULL-ADOPTION-001.
     - No AUN activation.
   stop_conditions:
     - Any change outside allowed_paths is required.

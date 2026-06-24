@@ -1,0 +1,49 @@
+schema_version: shirube-lifecycle-state/v1
+target_repo: watchout/agent-comms-mcp
+target_pr: 805
+current_phase: FULL_OVERLAY_ADOPTION_ACTIVE_IN_PR
+current_head: recorded_in_pr_body_exact_head_sha
+primary_subject: AUN V2/V3 foundation premise plus Shirube full adoption overlay
+status:
+  repo_local_overlay: active_in_pr
+  workflow_hard_gate: active_in_pr
+  pr_template: active_in_pr
+  owner_exact_head_merge_policy: active_in_pr
+  owner_exact_head_decision_artifact_gate: active_for_non_draft
+  branch_protection: active_required_status_check_layer0
+  rulesets: available_empty_not_used
+  required_check_settings: active_layer0_machine_gate
+  pull_request_transition_rerun_gate: active_for_ready_label_and_edit_events
+allowed_next_phases:
+  - SHIRUBE_COMMAND_REVIEW
+  - OWNER_DOMAIN_DESIGNER_REVIEW
+  - HUMAN_MAINTAINER_EXACT_HEAD_AUTHORIZATION
+blocked_phases:
+  - AUN_RUNTIME_IMPLEMENTATION
+  - MCP_TOOL_BEHAVIOR_CHANGE
+  - QUEUE_MUTATION
+  - STATE_DAEMON_CHANGE
+  - PROVIDER_DELIVERY_CHANGE
+  - DB_MIGRATION
+  - SECRET_ACCESS
+  - AUN_ACTIVATION
+completion_definition:
+  full_adoption_in_repo_files: true
+  full_github_settings_enforcement: true_for_branch_protection_required_checks
+  required_status_check_context:
+    - Layer 0 — machine gate
+  required_pull_request_activity_types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+    - converted_to_draft
+    - labeled
+    - unlabeled
+    - edited
+required_before_merge:
+  - Shirube command review for this exact head
+  - Repository owner/domain-designer confirmation
+  - Human maintainer exact-head authorization
+  - PR remains non-draft only after approval
+  - Post-merge evidence plan confirmed

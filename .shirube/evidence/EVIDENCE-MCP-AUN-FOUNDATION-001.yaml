@@ -1,0 +1,59 @@
+schema_version: shirube-evidence/v1
+EVIDENCE-ID: EVIDENCE-MCP-AUN-FOUNDATION-001
+TRACE-ID: TRACE-MCP-AUN-FOUNDATION-001
+TEST-MAP-ID: TEST-MAP-MCP-AUN-FOUNDATION-001
+CONTRACT-ID: CONTRACT-MCP-AUN-FOUNDATION-001
+SPEC-ID: SPEC-MCP-AUN-V2V3-FOUNDATION-001
+CELL-ID: CELL-MCP-AUN-FOUNDATION-001
+IMPL-ID: IMPL-MCP-AUN-FOUNDATION-001
+risk_tier: R2
+pr: 805
+branch: codex/794-v2-clean-rebuild-architecture
+evidence_type: foundation_premise_validation
+scope:
+  allowed_paths:
+    - .shirube/**
+    - docs/**
+    - README.md
+  forbidden_paths:
+    - bin/**
+    - cli/**
+    - core/**
+    - src/**
+    - server.ts
+    - scripts/**
+    - .github/workflows/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - deploy/**
+    - .env
+    - secrets/**
+artifacts:
+  feature_spec: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+  cell: .shirube/cells/CELL-MCP-AUN-FOUNDATION-001.yaml
+  impl: .shirube/impls/IMPL-MCP-AUN-FOUNDATION-001.md
+  spec_audit: .shirube/audits/AUDIT-MCP-AUN-FOUNDATION-SPEC-001.yaml
+  impl_audit: .shirube/audits/AUDIT-MCP-AUN-FOUNDATION-IMPL-001.yaml
+  premise_doc: docs/aun/v2v3-premise.md
+validation:
+  git_diff_check:
+    command: git diff --check
+    status: passed_local_validation
+  yaml_parse:
+    command: ruby -ryaml -e 'Dir[".shirube/**/*.yaml"].sort.each { |f| YAML.load_file(f); puts f }'
+    status: passed_local_validation
+  breaking_change_check:
+    command: bash scripts/detect-breaking-changes.sh origin/main
+    status: passed_docs_only_skipped
+  remote_pr_checks:
+    status: pending_after_push
+handoff:
+  pr_must_remain_draft: true
+  next_gate: Shirube command review and repository owner/domain-designer review
+  merge_authorization_required_later: true
+notes:
+  - PR #805 is the foundation premise and design-consolidation PR for #802 and #794.
+  - PR #805 is not implementation-complete AUN V2.
+  - #801 remains HOLD_DRAFT and future registry policy material.
