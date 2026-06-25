@@ -1,0 +1,42 @@
+name: Shirube Rapid/Lite Gates Report
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  shirube-rapid-lite-gates-report:
+    name: Shirube Rapid/Lite Gates Report
+    uses: "watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@8b8c5f186aba209ca0e2be299d48e80292a0990b"
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    with:
+      framework_ref: "watchout/ai-dev-framework@8b8c5f186aba209ca0e2be299d48e80292a0990b"
+      profile: hotel-lite
+      report_only: true
+      pr_body: "${{ github.event.pull_request.body || '' }}"
+      changed_files: ""
+      execution_context_ref: .shirube/execution-context.yaml
+      adoption_plan_ref: .shirube/adoption-intake.yaml
+      lifecycle_state_ref: .shirube/lifecycle-state.yaml
+      handoff_ref: .shirube/control-handoffs/CH-001.yaml
+      validation_evidence_ref: ""
+      owner_decision_ref: ""
+      enforcement_policy_ref: .shirube/enforcement-policy.yaml
+      audit_checklist_ref: ""
+      structured_audit_ref: ""
+      audit_machine_evidence_ref: ""

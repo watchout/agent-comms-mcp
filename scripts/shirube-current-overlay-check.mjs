@@ -14,6 +14,7 @@ const labels = new Set((pr?.labels ?? []).map((label) => String(label.name ?? ""
 const headSha = String(pr?.head?.sha ?? process.env.GITHUB_SHA ?? "");
 const errors = [];
 const warnings = [];
+
 const forbiddenRuntimePatterns = [
   /^server\.ts$/u,
   /^core\//u,
@@ -33,22 +34,100 @@ const forbiddenRuntimePatterns = [
   /^deploy\//u,
 ];
 
-const requiredRepoSpecText = readText(".shirube/repo-spec.yaml");
+const requiredArtifacts = [
+  ".shirube/repo-spec.yaml",
+  ".shirube/execution-context.yaml",
+  ".shirube/adoption-intake.yaml",
+  ".shirube/existing-state-scan.yaml",
+  ".shirube/control-handoffs/CH-001.yaml",
+  ".shirube/lifecycle-state.yaml",
+  ".shirube/enforcement-policy.yaml",
+  ".shirube/control-state-completeness.yaml",
+  ".shirube/source-mirrors/control-issue.yaml",
+  "docs/shirube/README.md",
+  ".github/workflows/shirube-rapid-lite-gates-report.yml",
+  ".github/pull_request_template.md",
+];
+
+const obsoleteArtifacts = [
+  ".shirube/cells/CELL-MCP-SHIRUBE-FULL-ADOPTION-001.yaml",
+  ".shirube/evidence/EVIDENCE-MCP-SHIRUBE-FULL-ADOPTION-001.yaml",
+  ".shirube/impls/IMPL-MCP-SHIRUBE-FULL-ADOPTION-001.md",
+  ".shirube/specs/SPEC-MCP-SHIRUBE-FULL-ADOPTION-001.md",
+  ".shirube/rapid-lite/CONTROL-HANDOFF-MCP-805.yaml",
+];
+
 requireEqual("target repo", repo, "watchout/agent-comms-mcp");
-requireText(".shirube/repo-spec.yaml", requiredRepoSpecText, [
-  "primary_target_repo: watchout/agent-comms-mcp",
-  "framework_feedback_support_only",
-  "control_source_only",
-  "not_current_target_unless_explicitly_assigned",
-  "mode: full_overlay_active_in_repo_files",
-  "partial_pilot_allowed_for_behavior_changing_work: false",
+for (const artifact of requiredArtifacts) requireExisting(artifact);
+for (const artifact of obsoleteArtifacts) requireAbsent(artifact);
+
+requireText(".shirube/repo-spec.yaml", [
+  "schema_version: shirube-repo-spec/v1",
+  'repo: "watchout/agent-comms-mcp"',
+  'primary_control_source: "watchout/agent-comms-mcp#802"',
+  "mirror_is_truth: false",
+  "llm_final_authority: false",
+  "owner_confirmation_required: true",
+  ".github/workflows/shirube-rapid-lite-gates-report.yml",
 ]);
 
-requireExisting(".shirube/enforcement-policy.yaml");
-requireExisting(".shirube/lifecycle-state.yaml");
-requireExisting(".shirube/specs/SPEC-MCP-SHIRUBE-FULL-ADOPTION-001.md");
-requireExisting(".shirube/cells/CELL-MCP-SHIRUBE-FULL-ADOPTION-001.yaml");
-requireExisting(".github/pull_request_template.md");
+requireText(".shirube/execution-context.yaml", [
+  "schema_version: shirube-execution-context/v1",
+  "mode: rapid_lite_overlay_adoption",
+  "repo: watchout/agent-comms-mcp",
+  "relation: primary",
+  "relation: framework_support",
+  "relation: same_repo_control_source",
+  "llm_final_authority_forbidden: true",
+]);
+
+requireText(".shirube/control-handoffs/CH-001.yaml", [
+  "schema_version: shirube-control-handoff/rapid-lite/v1",
+  "mode: rapid-lite",
+  "profile: hotel-lite",
+  "framework_ref: watchout/ai-dev-framework@",
+  "CELL-ID: CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001",
+  "required_before_merge: true",
+  "committed_pending_policy_only: true",
+  ".github/workflows/shirube-rapid-lite-gates-report.yml",
+]);
+requireRegex(".shirube/control-handoffs/CH-001.yaml", /framework_ref: watchout\/ai-dev-framework@[a-f0-9]{40}\b/u, "framework_ref must be pinned to a 40-character ADF SHA.");
+
+requireText(".shirube/enforcement-policy.yaml", [
+  "schema_version: shirube-enforcement-policy/v1",
+  "mode: report_only",
+  "owner_observed: true",
+  "enabled: false",
+  "unchanged: true",
+  "required check activation",
+  "runtime/API/DB/package/deploy behavior",
+]);
+
+requireText(".shirube/lifecycle-state.yaml", [
+  "schema_version: shirube-lifecycle-state/rapid-lite/v1",
+  "mode: rapid-lite",
+  "profile: hotel-lite",
+  "current_phase: HANDOFF_READY",
+  "owner_must_not_merge_until_exact_head_decision: true",
+]);
+
+requireText(".github/workflows/shirube-rapid-lite-gates-report.yml", [
+  "name: Shirube Rapid/Lite Gates Report",
+  "uses: \"watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@",
+  "report_only: true",
+  "validation_evidence_ref: \"\"",
+  "owner_decision_ref: \"\"",
+]);
+requireRegex(".github/workflows/shirube-rapid-lite-gates-report.yml", /uses: "watchout\/ai-dev-framework\/\.github\/workflows\/shirube-rapid-lite-reusable\.yml@[a-f0-9]{40}"/u, "Rapid/Lite workflow caller must use a pinned ADF SHA.");
+requirePullRequestTypes(".github/workflows/shirube-rapid-lite-gates-report.yml", [
+  "opened",
+  "synchronize",
+  "reopened",
+  "ready_for_review",
+  "edited",
+  "labeled",
+  "unlabeled",
+]);
 requirePullRequestTypes(".github/workflows/pr-checks.yml", [
   "opened",
   "synchronize",
@@ -63,7 +142,6 @@ requirePullRequestTypes(".github/workflows/pr-checks.yml", [
 if (pr) {
   requirePrBodyText([
     "CELL-ID:",
-    "SPEC-ID:",
     "Risk Tier:",
     "Allowed paths",
     "Protected surfaces",
@@ -79,8 +157,8 @@ if (pr) {
     if (!labels.has("owner-exact-head-approved")) {
       errors.push("Non-draft PRs require label owner-exact-head-approved.");
     }
-    if (!labels.has("shirube-full-adoption")) {
-      errors.push("Non-draft PRs require label shirube-full-adoption.");
+    if (!labels.has("shirube-current-overlay")) {
+      errors.push("Non-draft PRs require label shirube-current-overlay.");
     }
     await requireOwnerDecisionArtifact();
   }
@@ -93,8 +171,8 @@ for (const file of changedFiles) {
 }
 
 if (pr && changedFiles.some((file) => file.startsWith(".github/workflows/"))) {
-  if (!body.includes("CELL-MCP-SHIRUBE-FULL-ADOPTION-001")) {
-    errors.push("Workflow changes require CELL-MCP-SHIRUBE-FULL-ADOPTION-001 in the PR body.");
+  if (!body.includes("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001")) {
+    errors.push("Workflow changes require CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001 in the PR body.");
   }
   if (!body.includes("Risk Tier: R3")) {
     errors.push("Workflow changes require Risk Tier: R3 in the PR body.");
@@ -116,7 +194,7 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log("Shirube full-adoption gate passed.");
+console.log("Shirube current-overlay gate passed.");
 
 async function requireOwnerDecisionArtifact() {
   const comments = await loadIssueComments();
@@ -274,11 +352,18 @@ function requireEqual(name, actual, expected) {
 
 function requireExisting(filePath) {
   if (!existsSync(filePath)) {
-    errors.push(`Required Shirube full-adoption artifact is missing: ${filePath}`);
+    errors.push(`Required Shirube current-overlay artifact is missing: ${filePath}`);
   }
 }
 
-function requireText(filePath, text, needles) {
+function requireAbsent(filePath) {
+  if (existsSync(filePath)) {
+    errors.push(`Obsolete Shirube full-adoption artifact must be removed: ${filePath}`);
+  }
+}
+
+function requireText(filePath, needles) {
+  const text = readText(filePath);
   if (!text) {
     errors.push(`Required file is missing or empty: ${filePath}`);
     return;
@@ -286,6 +371,15 @@ function requireText(filePath, text, needles) {
   for (const needle of needles) {
     if (!text.includes(needle)) errors.push(`${filePath} must include ${needle}.`);
   }
+}
+
+function requireRegex(filePath, pattern, message) {
+  const text = readText(filePath);
+  if (!text) {
+    errors.push(`Required file is missing or empty: ${filePath}`);
+    return;
+  }
+  if (!pattern.test(text)) errors.push(`${filePath}: ${message}`);
 }
 
 function requirePrBodyText(needles) {

@@ -1,0 +1,46 @@
+schema_version: shirube-control-state-completeness-config/v1
+control_state_id: CONTROL-STATE-AGENT-COMMS-MCP-001
+mode: rapid-lite
+profile: hotel-lite
+repo: watchout/agent-comms-mcp
+framework_ref: watchout/ai-dev-framework@8b8c5f186aba209ca0e2be299d48e80292a0990b
+required_inventory:
+  - execution_context_report
+  - repo_spec
+  - source_mirror
+  - adoption_report
+  - lifecycle_report
+  - gate_contract_report
+  - design_rule_report
+  - enforcement_policy_report
+  - handoff
+  - validation_evidence
+  - owner_exact_head_decision
+  - post_merge_evidence_before_complete
+allowed_protected_surfaces:
+  - none
+  - runtime code
+  - api
+  - database
+  - migrations
+  - secrets
+  - active workflows
+  - required checks
+  - branch protection
+  - rulesets
+  - production
+rules:
+  execution_context_required: true
+  report_failures_are_blocking: true
+  blocked_gate_prevents_lifecycle_progress: true
+  owner_decision_exact_head_required: true
+  full_control_claim_requires_full_readiness: true
+  post_merge_evidence_required_before_complete: true
+  adoption_pr_must_not_mix_runtime_or_package_changes: true
+non_scope:
+  - required check activation
+  - branch protection mutation
+  - ruleset mutation
+  - runtime behavior change
+  - package or lockfile change
+  - external repository mutation

@@ -1,150 +1,112 @@
 schema_version: shirube-repo-spec/v1
-repo_id: watchout/agent-comms-mcp
-owner: watchout
-purpose: "Confirmed full-adoption premise: agent-comms-mcp provides MCP tools, CLI surfaces, queue/runtime diagnostics, and durable evidence helpers for agent-to-agent communication. Shirube full adoption is active in repository files and workflow gates; this does not authorize AUN runtime, queue, provider, DB, secret, deployment, branch-protection, ruleset, or production activation work."
+repo: "watchout/agent-comms-mcp"
+repo_id: "watchout/agent-comms-mcp"
+owner: "watchout"
+canonical_core: "watchout/agent-comms-mcp@<PINNED_TARGET_HEAD>"
+purpose: >
+  Adopt Shirube Rapid/Lite as a report-only control-plane overlay for AgentCommsMcp
+  while keeping product runtime, API, DB, package, deploy, required checks, branch
+  protection, and rulesets out of this adoption PR.
 scope:
-  - MCP tool and CLI implementation for agent communication.
-  - Agent message queue storage and state transition helpers.
-  - Runtime liveness, readiness, delivery diagnostics, and evidence emission.
-  - AUN integration surfaces that transport or accelerate GitHub-backed work without replacing GitHub as source of truth.
+  - Repo-local Shirube overlay metadata.
+  - "Source mirror of watchout/agent-comms-mcp#802."
+  - Report-only owner-observed control policy.
+  - Optional report-only thin workflow caller pinned to ADF.
+  - Repo-local Layer 0 gate alignment with the current Shirube overlay.
 non_goals:
-  - Own Shirube work governance, phase goals, merge authority, release decisions, or production Go/No-Go.
-  - Replace GitHub issues, pull requests, reviews, checks, comments, or workflow artifacts as durable evidence sinks.
-  - Bypass independent audit, QA, check, CTO, or human maintainer gates.
-  - Enable required Shirube checks, branch protection, rulesets, deployment, or runtime automation from this scaffold.
-  - Treat this draft repo spec as authoritative before repository owner/domain designer confirmation.
+  - Runtime code changes are not part of this adoption pack.
+  - API handlers, DB schema, migrations, package files, deploy files, branch protection, rulesets, and required checks are not changed by this pack.
+  - LLM output is never final authority.
+  - This pack does not claim final framework readiness, enforcement, full-control readiness, or protected-check status.
 design_principles:
-  - "Development unit is Cell, not PR."
-  - "Canonical chain is Spec -> Cell -> Impl -> Code -> Test -> Evidence."
-  - "GitHub is the durable source of truth; AUN may notify, accelerate, and collect evidence but must not be the only decision record."
-  - "Read-only planning and diagnostics should precede behavior-changing runtime, queue, delivery, or state-daemon actions."
-  - "Shirube v1 risk tiers are R0 through R3; production activation, secret/ruleset changes, and external delivery changes are R3 plus explicit owner, security, and CTO approval requirements."
-development_flow:
-  - Spec
-  - Cell
-  - Impl
-  - Code
-  - Test
-  - Evidence
-roles:
-  repo_owner: watchout
-  release_owner: codex-cto
-  security_owner: codex-cto
-  evidence_owner: agent-com-dev
-  domain_designer: arc
-  shirube_command_owner: arc
-boundaries:
-  allowed_paths:
-    - ".shirube/**"
-    - "docs/**"
-    - "README.md"
-  forbidden_paths:
-    - ".env"
-    - "secrets/**"
-    - "bin/**"
-    - "cli/**"
-    - "core/**"
-    - "server.ts"
-    - ".github/workflows/**"
-    - "deploy/**"
-  data_boundaries:
-    - "PostgreSQL or SQLite rows for agent messages, queues, runtime instances, leases, audits, and evidence are protected resources."
-    - "Read-only diagnostic access is allowed for planning/readiness evidence when the active Cell permits it."
-    - "Queue claim ownership, lease state, lifecycle state, runtime supervisor state, and delivery state are mutation-capable resources requiring an approved Cell and exact fences."
-    - "Credentials, provider tokens, production database rows, and secret material require explicit owner/security approval."
-  dependency_boundaries:
-    - "watchout/ai-dev-framework#431 and #458 are Shirube governance/control references; #487/#488 are framework support for Gate Pack Bridge exact-head evidence and are not this repository's implementation target."
-    - "Feature Specs, Cells, Impl handoffs, audits, and post-merge evidence must be traceable through GitHub-native durable sinks."
-    - "External repository mutation, provider account changes, and global organization ruleset changes are out of scope for this repo scaffold."
-  forbidden_actions:
-    - "Do not change runtime, MCP, queue, state-daemon, LaunchAgent, provider delivery, or deployment behavior in this scaffold."
-    - "Do not modify branch protection or rulesets unless the GitHub plan/API permits it and human maintainer exact-head authorization exists."
-    - "Do not activate AUN, multi-agent automation, or external dispatch from this scaffold."
-    - "Do not weaken auth, permission, privacy, audit, or evidence controls."
-    - "Do not treat ACKs, queue IDs, Discord projection, TUI visibility, green CI alone, or unverified runtime as completion evidence."
+  - Machine-readable evidence is primary.
+  - GitHub Control issue/comment evidence may be mirrored but the mirror is not independent truth.
+  - Owner exact-head decision is required before merge when a gate would block.
+  - Adoption PRs must not mix runtime, API, DB, package, deploy, branch protection, ruleset, or required-check changes.
+development_flow: docs/standards/shirube-ai-development-governance-standard-v1.md
 required_gates:
-  - "execution_context_reset_check: before any implementation, report pwd, git root, origin, branch, HEAD, current work order, target repo, support repos, and changed files."
-  - "shirube_full_adoption_gate: PR workflow must verify target repo, support repo classifications, exact-head metadata, and owner gate requirements."
-  - "git_diff_check"
-  - "yaml_parse_check_for_shirube_yaml"
-  - "Shirube command review"
-  - "repository owner/domain designer confirmation before repo-spec is authoritative"
-  - "R3 owner/security/CTO approval for production activation, external delivery changes, secret/ruleset changes, or runtime supervisor changes."
-  - "Feature Spec -> Cell -> Impl artifacts before behavior-changing MCP or agent communication work."
-  - "post_merge_mechanical_verification appropriate to risk tier before completion claims."
-risk_tier_defaults: R3
-standards:
-  soc2:
-    - Security
-    - Availability
-    - Processing Integrity
-    - Confidentiality
-    - Privacy
-  iso_iec_42001: "Applicable as the AI management overlay for agent/tool permission boundaries, human oversight, evidence-based change control, and post-merge verification."
-  engineering_references:
-    - NIST_SSDF
-    - OWASP_LLM_TOP_10
-    - SLSA
-ai_usage_classification: agentic
-agent_policy_ref: ".shirube/agent-policy.yaml"
-evidence_ledger_ref: ".shirube/evidence/"
-shared_terminology:
-  agent_id: "論理エージェント identity（正本）。Discord/token/session/pid は evidence であり identity でない"
-  runtime: "仕事を実行する実体（codex / claude / remote worker）"
-  connector: "外部送受信（Discord / Slack / MCP transport / GitHub writeback）"
-  message_delivery_conversation: "message=論理発話 / delivery=提示の永続試行 / conversation=関連作業スレッド"
-  baton: "応答責任。1 conversation = 1 active baton。claim + lease + fencing で実現する"
-  claim_lease_fencing: "claim=queue 行取得 / lease=占有期限 / fencing_token=stale 排除"
-  agent_turn: "baton 保持者の1回の実行"
-  typed_outcome: "reply / handoff / no_reply / close（自由文から推論しない）"
-  projection: "Discord / GitHub 等への投影（identity/完了の authority でない）"
-
-execution_context:
-  primary_target_repo: watchout/agent-comms-mcp
-  primary_target_pr: 805
-  primary_development_subject: "AUN V2/V3 foundation premise and later AUN implementation Cells."
-  current_work_order: "Full Shirube application posture for agent-com scope; no runtime implementation in this PR."
-  support_repos:
-    watchout/ai-dev-framework:
-      classification: framework_feedback_support_only
-      refs:
-        - https://github.com/watchout/ai-dev-framework/issues/431
-        - https://github.com/watchout/ai-dev-framework/issues/458
-        - https://github.com/watchout/ai-dev-framework/issues/487
-        - https://github.com/watchout/ai-dev-framework/pull/488
-      rule: "Framework support work must not become the current implementation target for this bot."
-    watchout/omotenasuai-control:
-      classification: control_source_only
-      rule: "Control-source material may inform governance patterns but is not the agent-com implementation target."
-    omotenasuai_product_repos:
-      classification: not_current_target_unless_explicitly_assigned
-      rule: "Do not implement product repo runtime, DB, API, UI, workflow, or deployment work from this AUN PR."
-  mandatory_reset_before_implementation:
-    - pwd
-    - git_root
-    - origin_remote
-    - current_branch
-    - HEAD
-    - current_work_order
-    - target_repo
-    - support_repos
-    - changed_files
-  stop_if:
-    - actual_repo_is_not_watchout_agent_comms_mcp
-    - current_work_order_points_to_framework_or_product_repo
-    - support_repo_pr_is_treated_as_primary_target
-    - merge_ready_claim_requested_without_human_maintainer_exact_head_authorization
-
-shirube_application_posture:
-  mode: full_overlay_active_in_repo_files
-  partial_pilot_allowed_for_behavior_changing_work: false
-  workflow_gate: .github/workflows/pr-checks.yml
-  gate_script: scripts/shirube-full-adoption-check.mjs
-  enforcement_policy_ref: .shirube/enforcement-policy.yaml
-  lifecycle_state_ref: .shirube/lifecycle-state.yaml
-  note: "Later AUN implementation Cells require full target-repo context, SPEC/CELL/IMPL/audit/evidence, exact-head owner authorization, and post-merge evidence."
-  github_settings_enforcement:
-    branch_protection: active_required_status_check_layer0
-    rulesets: available_empty_not_used
-    required_status_checks:
-      - Layer 0 — machine gate
+  - execution_context
+  - adoption
+  - lifecycle
+  - gate_contract
+  - design_rules
+  - enforcement_policy
+  - control_state_completeness
+source_of_truth_policy:
+  primary_control_source: "watchout/agent-comms-mcp#802"
+  source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+  mirror_is_truth: false
+  llm_final_authority: false
+  owner_confirmation_required: true
+rps_id: "RPS-AGENT-COMMS-MCP-001"
+rps_scope:
+  repo_owns:
+    - "AgentCommsMcp repo-local implementation and evidence after explicit handoff."
+    - Repo-local Shirube overlay artifacts under .shirube/**.
+  repo_does_not_own:
+    - ADF framework scripts and standards.
+    - Control-source issue authority.
+    - External repo mutation.
+    - Branch protection, rulesets, required checks, and production activation in this slice.
+protected_surfaces:
+  declared:
+    - runtime code
+    - api
+    - database
+    - migrations
+    - secrets
+    - active workflows
+    - required checks
+    - branch protection
+    - rulesets
+    - production
+confirmation_evidence:
+  rps_readiness:
+    required: true
+    authority_role: owner
+    authority_actor: watchout
+    verdict: CONFIRMED
+    evidence_refs:
+      - https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+required_evidence:
+  adoption:
+    - .shirube/execution-context.yaml
+    - .shirube/adoption-intake.yaml
+    - .shirube/existing-state-scan.yaml
+    - .shirube/repo-spec.yaml
+    - .shirube/source-mirrors/control-issue.yaml
+  merge:
+    - validation evidence
+    - owner exact-head decision
+    - control-state completeness report
+  post_merge:
+    - merge commit
+    - merged_at
+    - post-merge evidence before COMPLETE
+agent_permission_boundary:
+  allowed_paths:
+    - .shirube/**
+    - docs/shirube/**
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+    - .github/workflows/pr-checks.yml
+    - scripts/shirube-current-overlay-check.mjs
+    - scripts/shirube-full-adoption-check.mjs
+  forbidden_paths:
+    - scripts/shirube/**
+    - src/**
+    - app/**
+    - api/**
+    - lib/**
+    - db/**
+    - migrations/**
+    - package.json
+    - package-lock.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .env*
+    - deploy/**
+  allowed_commands: []
+  forbidden_commands: []
+  allowed_mcp_tools: []
+  approval_required_mcp_tools: []
+  forbidden_mcp_tools: []

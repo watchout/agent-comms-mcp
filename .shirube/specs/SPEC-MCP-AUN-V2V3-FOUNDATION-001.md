@@ -14,9 +14,9 @@ This Feature Spec satisfies the foundation premise requested by issue #802 while
 
 Create the repository-level premise layer required before behavior-changing AUN V2 implementation Cells begin. This spec defines what AUN becomes in V2/V3, what remains legacy or transitional, where authority lives, which decisions agents may make, and which preconditions must be met before runtime, queue, provider delivery, MCP/tool behavior, or AUN activation work starts.
 
-## Full-Application Execution Context
+## Current Overlay Execution Context
 
-This Cell is now paired with `CELL-MCP-SHIRUBE-FULL-ADOPTION-001` and treated as a full Shirube application boundary for `watchout/agent-comms-mcp`, not as a loose partial-adoption conversation.
+This Cell is governed by the current Shirube Rapid/Lite overlay boundary for `watchout/agent-comms-mcp`, not by the older repository-local artifact set.
 
 Before any implementation step, the implementation bot must report:
 
@@ -40,7 +40,7 @@ Support repositories are classified as follows:
 | `watchout/omotenasuai-control` | Control source only | Control-source material may inform governance patterns but is not the agent-com implementation target. |
 | OmotenasuAI product repos | Not current target unless explicitly assigned | Do not implement product runtime, DB, API, UI, workflow, or deployment work from this AUN PR. |
 
-Partial Gate Pack evidence may inform history, but behavior-changing AUN implementation must not begin until full target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence are present.
+Partial Gate Pack evidence may inform history, but behavior-changing AUN implementation must not begin until target-repo context, SPEC, CELL, IMPL, audit, evidence, exact-head owner authorization, and post-merge evidence are present under the current Shirube overlay.
 
 ## Non-goals
 
