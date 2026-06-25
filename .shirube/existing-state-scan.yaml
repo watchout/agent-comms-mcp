@@ -1,0 +1,26 @@
+schema_version: shirube-existing-state-scan/v1
+scan_id: EXISTING-STATE-AGENT-COMMS-MCP-001
+repo: watchout/agent-comms-mcp
+observed_at: 2026-06-25T02:00:01Z
+source_control_ref: watchout/agent-comms-mcp#802
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+classification:
+  current_status: PARTIAL_SHIRUBE_PILOT
+  target_status_after_merge: RAPID_LITE_REPORT_ONLY
+  disposition: retrofit_accelerate
+specs:
+  - path: https://github.com/watchout/agent-comms-mcp/issues/802
+    status: mirrored_control_source
+    authority: control_source_snapshot
+implementation:
+  - path: runtime/product code
+    status: not_scanned_by_renderer
+tests:
+  - path: repository tests
+    status: not_scanned_by_renderer
+legacy_sources: []
+known_drift: []
+unsafe_changes: []
+llm_truth_claims: []
+unknowns:
+  - Runtime/API/DB/package/deploy surfaces require owner-specific scan before product work.

@@ -1,0 +1,72 @@
+schema_version: shirube-execution-context/v1
+mode: rapid_lite_overlay_adoption
+profile: hotel-lite
+primary:
+  repo: watchout/agent-comms-mcp
+  product: AgentCommsMcp
+  work_order: watchout/agent-comms-mcp#802
+  pr: watchout/agent-comms-mcp#<PR_NUMBER_PENDING>
+active_role: dev
+roles:
+  lead:
+    allowed:
+      - read_control_source
+      - define_scope
+      - create_handoff
+      - request_review
+      - file_framework_feedback
+    forbidden:
+      - implement_product_change
+      - approve_merge
+      - claim_merge_ready_without_owner
+  dev:
+    allowed:
+      - inspect_repo
+      - implement_allowed_paths
+      - run_validation
+      - produce_impl_evidence
+    forbidden:
+      - change_scope_without_handoff
+      - edit_forbidden_paths
+      - approve_merge
+      - claim_audit_pass
+      - claim_merge_ready_without_owner
+repo_relations:
+  - repo: watchout/agent-comms-mcp
+    relation: primary
+    allowed:
+      - inspect_repo
+      - implement_allowed_paths
+      - run_validation
+      - produce_impl_evidence
+    forbidden:
+      - approve_merge
+      - self_approve
+  - repo: watchout/ai-dev-framework
+    relation: framework_support
+    allowed:
+      - read
+      - cite
+      - file_feedback
+    forbidden:
+      - implementation_target
+      - merge_ready_claim
+  - repo: watchout/agent-comms-mcp
+    relation: same_repo_control_source
+    control_issue_ref: watchout/agent-comms-mcp#802
+    allowed:
+      - read
+      - cite
+      - mirror_snapshot
+    forbidden:
+      - implementation_target
+      - merge_decision
+common_contract:
+  primary_repo_required: true
+  work_order_required: true
+  active_role_required: true
+  exact_head_required_for_merge_ready: true
+  owner_decision_required_for_merge_ready: true
+  llm_final_authority_forbidden: true
+  support_repo_as_target_forbidden: true
+  control_repo_as_target_forbidden: true

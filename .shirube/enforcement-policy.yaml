@@ -1,106 +1,43 @@
 schema_version: shirube-enforcement-policy/v1
-policy_id: ENFORCEMENT-MCP-SHIRUBE-FULL-ADOPTION-001
-target_repo: watchout/agent-comms-mcp
-status: active_repo_overlay
-mode: workflow_hard_gate_with_owner_observed_merge
-primary_target_repo: watchout/agent-comms-mcp
-support_repos:
-  watchout/ai-dev-framework: framework_feedback_support_only
-  watchout/omotenasuai-control: control_source_only
-  omotenasuai_product_repos: not_current_target_unless_explicitly_assigned
-required_pr_controls:
-  - control_source
-  - scope
-  - non_scope
-  - allowed_paths
-  - forbidden_paths
-  - protected_surface_declaration
-  - exact_head_sha
-  - validation_evidence
-  - owner_decision
-  - post_merge_evidence
-merge_policy:
-  ci_green_alone_is_merge_ready: false
-  draft_pr_must_not_merge: true
-  owner_exact_head_required: true
-  machine_verified_owner_decision_required_before_non_draft: true
-  owner_decision_artifact:
-    schema_version: shirube-owner-decision/v1
-    location: PR issue comment
-    required_fields:
-      - target_repo
-      - target_pr
-      - exact_head_sha
-      - verdict
-      - actor
-      - decision_ref
-    machine_checks:
-      - exact_head_sha equals current PR head SHA
-      - actor equals GitHub comment author
-      - decision_ref equals GitHub comment URL
-      - comment author association is OWNER, MEMBER, or COLLABORATOR
-  non_draft_required_labels:
-    - owner-exact-head-approved
-    - shirube-full-adoption
-  auto_merge_allowed_only_when:
-    - PR is not draft
-    - Layer 0 succeeds
-    - route is not ceo-approval
-    - owner-exact-head-approved label is present
-    - shirube-full-adoption label is present
-workflow_trigger_policy:
-  required_pull_request_activity_types:
-    - opened
-    - synchronize
-    - reopened
-    - ready_for_review
-    - converted_to_draft
-    - labeled
-    - unlabeled
-    - edited
-  reason: "Layer 0 must rerun when draft state, labels, or PR metadata can affect owner exact-head authorization."
-protected_surfaces:
-  runtime_code: R3
-  MCP_tool_behavior: R3
-  queue_mutation: R3
-  state_daemon: R3
-  provider_delivery: R3
-  database_migration: R3
-  secrets: R3
-  active_workflows: R3
-  branch_protection: R3
-  rulesets: R3
-  required_checks: R3
-  AUN_activation: R3
-github_settings:
-  branch_protection_api_status: available
-  required_status_checks:
-    strict: true
-    contexts:
-      - Layer 0 — machine gate
-  rulesets_api_status: available_empty_not_used
-  repo_local_enforcement:
-    required_by_branch_protection:
-      - .github/workflows/pr-checks.yml
-      - scripts/shirube-full-adoption-check.mjs
-evidence_requirements:
-  context_reset:
-    - pwd
-    - git_root
-    - origin_remote
-    - current_branch
-    - HEAD
-    - current_work_order
-    - target_repo
-    - support_repos
-    - changed_files
-  validation:
-    - git diff --check
-    - YAML parse for .shirube/**/*.yaml
-    - bash scripts/detect-breaking-changes.sh origin/main
-    - bun test --timeout 30000
-  post_merge:
-    - merge_commit
-    - merged_at
-    - post_merge_smoke_or_NA
-    - next_step
+policy_id: ENFORCEMENT-POLICY-AGENT-COMMS-MCP-001
+repo: watchout/agent-comms-mcp
+mode: report_only
+profile: hotel-lite
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+updated_at: 2026-06-25T02:00:01Z
+stale_after_days: 90
+owner_observed: true
+owner:
+  role: repo_owner
+  actor: watchout
+required_checks:
+  enabled: false
+branch_protection:
+  unchanged: true
+rulesets:
+  unchanged: true
+calibration:
+  started_at: 2026-06-25T02:00:01Z
+  minimum_prs: 3
+  false_positive_review_required: true
+report_only_semantics:
+  aggregate_would_block_sets_owner_must_not_merge: true
+  ci_should_fail: false
+  owner_must_not_merge_without_exception: true
+promotion:
+  from: report_only
+  next:
+    - owner_block
+    - ci_hard_block
+    - required_check
+  required_evidence:
+    - stable report-only findings
+    - owner accepts warning/block policy
+    - explicit protected-settings Cell before required checks
+non_scope:
+  - branch protection mutation
+  - ruleset mutation
+  - required check activation
+  - CI hard-blocking
+  - external repository mutation
+  - runtime/API/DB/package/deploy behavior

@@ -119,13 +119,13 @@ jobs:
             echo "::notice::route:fast-merge — CI green still requires Shirube/owner exact-head controls before merge."
           fi
 
-      - name: Shirube full-adoption gate
+      - name: Shirube current-overlay gate
         if: github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git diff --name-only origin/main...HEAD > changed-files.txt
-          node scripts/shirube-full-adoption-check.mjs \
+          node scripts/shirube-current-overlay-check.mjs \
             --repo "${{ github.repository }}" \
             --event "$GITHUB_EVENT_PATH" \
             --changed-files changed-files.txt
@@ -143,7 +143,7 @@ jobs:
 
   # ── Auto-merge (owner exact-head gated) ─────────────────────────────────
   # route:fast-merge + all Layer 0 checks pass is not sufficient.
-  # The PR must be non-draft and carry owner exact-head adoption labels.
+  # The PR must be non-draft and carry owner exact-head current-overlay labels.
   # route:ceo-approval PRs are skipped here for human maintainer handling.
   auto-merge:
     name: Auto-merge (owner exact-head gated)
@@ -153,7 +153,7 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.draft == false &&
       contains(github.event.pull_request.labels.*.name, 'owner-exact-head-approved') &&
-      contains(github.event.pull_request.labels.*.name, 'shirube-full-adoption') &&
+      contains(github.event.pull_request.labels.*.name, 'shirube-current-overlay') &&
       needs.layer0.result == 'success' &&
       needs.layer0.outputs.route != 'ceo-approval'
     permissions:

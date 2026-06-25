@@ -1,0 +1,134 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-001
+parent_ssot: watchout/agent-comms-mcp#802
+matrix_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+matrix_location_in_framework: .shirube/gate-contracts/shirube-v3-rapid-lite-gate-contract-matrix.yaml
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/repo-spec.yaml
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/802
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: owner_review
+protected_surfaces:
+  - active workflows
+rps_scope:
+  shirube_owns:
+    - Report-only control-plane overlay metadata in this repository.
+  shirube_does_not_own:
+    - Runtime/API/DB/product behavior in this adoption PR.
+    - Required checks, branch protection, rulesets, deploy, production, or package files in this adoption PR.
+cell:
+  CELL-ID: CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001
+  cell_type: adoption_overlay
+  risk_class: R2
+  goal: Install the current Shirube Rapid/Lite overlay for AgentCommsMcp and replace the older repo-local gate assumptions.
+  governance_route: R3 owner-reviewed workflow/gate alignment because pr-checks.yml is touched.
+  non_scope:
+    - runtime code
+    - API handlers
+    - DB schema or migrations
+    - package or lockfile changes
+    - active workflow changes outside pr-checks.yml and the generated report-only thin caller
+    - required check activation
+    - branch protection or ruleset mutation
+    - production or deploy changes
+    - external repository mutation
+  allowed_paths:
+    - .shirube/**
+    - docs/shirube/**
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+    - .github/workflows/pr-checks.yml
+    - scripts/shirube-current-overlay-check.mjs
+    - scripts/shirube-full-adoption-check.mjs
+  forbidden_paths:
+    - scripts/shirube/**
+    - src/**
+    - app/**
+    - api/**
+    - lib/**
+    - db/**
+    - migrations/**
+    - package.json
+    - package-lock.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .env*
+    - deploy/**
+    - deployment/**
+    - '**/branch-protection/**'
+    - '**/ruleset/**'
+  protected_surfaces:
+    declared:
+      - runtime code
+      - api
+      - database
+      - migrations
+      - secrets
+      - active workflows
+      - required checks
+      - branch protection
+      - rulesets
+      - production
+    touched: true
+  stop_conditions:
+    - changed file outside allowed_paths
+    - forbidden path touched
+    - runtime/API/DB/package/deploy change appears in adoption PR
+    - exact-head owner decision missing before merge
+    - control-state completeness blocks
+implementation_boundary:
+  summary: Render and commit target repo overlay metadata only.
+  expected_pr_count: 1
+  forbidden_operations:
+    - copy ADF scripts into target repo
+    - merge
+    - approve
+    - branch protection mutation
+    - ruleset mutation
+    - required check activation
+    - production or deploy mutation
+    - runtime/API/DB/package mutation
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - owner_decision
+    - control_state_completeness_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - APPROVED_PILOT_EXCEPTION
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
+    - no_unresolved_follow_up_blocker
+legacy_source_boundary:
+  legacy_sources_may_inform: true
+  legacy_sources_are_truth: false
+  required_current_truth_ref: watchout/agent-comms-mcp#802

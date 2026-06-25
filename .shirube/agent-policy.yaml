@@ -5,14 +5,14 @@ permission_boundary:
     - git diff --check
     - ruby YAML.parse for .shirube/**/*.yaml
     - existing lightweight smoke checks
-    - node scripts/shirube-full-adoption-check.mjs
+    - node scripts/shirube-current-overlay-check.mjs
     - gh api repos/watchout/agent-comms-mcp/branches/main/protection/required_status_checks
     - git status
     - git diff
   forbidden_commands:
     - git push --force
     - destructive production commands
-    - commands that mutate branch protection or repository rulesets except required status check activation for CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+    - commands that mutate branch protection, repository rulesets, or required status checks
     - commands that deploy, restart, or activate production services without approved Cell and owner/CTO GO
   allowed_paths:
     - .shirube/**
@@ -20,7 +20,7 @@ permission_boundary:
     - README.md
     - .github/pull_request_template.md
     - .github/workflows/pr-checks.yml
-    - scripts/shirube-full-adoption-check.mjs
+    - scripts/shirube-current-overlay-check.mjs
   forbidden_paths:
     - .env
     - secrets/**
@@ -28,7 +28,7 @@ permission_boundary:
     - cli/**
     - core/**
     - server.ts
-    - .github/workflows/** except .github/workflows/pr-checks.yml for CELL-MCP-SHIRUBE-FULL-ADOPTION-001
+    - .github/workflows/** except .github/workflows/pr-checks.yml and .github/workflows/shirube-rapid-lite-gates-report.yml for CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001
     - deploy/**
   allowed_mcp_tools:
     - read_only_repo_inspection
@@ -188,7 +188,7 @@ execution_contract:
   non_goals:
     - No runtime behavior changes.
     - No AUN runtime behavior changes.
-    - No ruleset changes; branch protection mutation is limited to requiring Layer 0 for CELL-MCP-SHIRUBE-FULL-ADOPTION-001.
+    - No ruleset, branch protection, or required-check mutation in the current Rapid/Lite overlay adoption slice.
     - No AUN activation.
   stop_conditions:
     - Any change outside allowed_paths is required.

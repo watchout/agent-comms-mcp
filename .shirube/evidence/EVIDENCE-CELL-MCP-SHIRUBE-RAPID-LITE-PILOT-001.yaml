@@ -1,0 +1,115 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001
+target_repo: watchout/agent-comms-mcp
+target_pr: 813
+pr_head_sha: null
+head_binding: workflow_actual_head_and_pr_body_exact_head
+prepared_from_head_sha: f31f2cb3ca486e918053ac882af47ad009d8b252
+cell_id: CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001
+implementation_actor: codex-implementation-bot
+evidence_scope: rapid_lite_overlay_adoption_pre_implementation_audit
+not_structured_audit: true
+owner_decision_status: pending
+control_state_completeness_status: blocked_until_structured_audit_and_owner_decision
+changed_files_count: 22
+changed_files:
+  - .github/workflows/pr-checks.yml
+  - .github/workflows/shirube-rapid-lite-gates-report.yml
+  - .shirube/adoption-intake.yaml
+  - .shirube/agent-policy.yaml
+  - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
+  - .shirube/cells/CELL-MCP-SHIRUBE-FULL-ADOPTION-001.yaml
+  - .shirube/control-handoffs/CH-001.yaml
+  - .shirube/control-state-completeness.yaml
+  - .shirube/enforcement-policy.yaml
+  - .shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
+  - .shirube/evidence/EVIDENCE-MCP-SHIRUBE-FULL-ADOPTION-001.yaml
+  - .shirube/execution-context.yaml
+  - .shirube/existing-state-scan.yaml
+  - .shirube/impls/IMPL-MCP-SHIRUBE-FULL-ADOPTION-001.md
+  - .shirube/lifecycle-state.yaml
+  - .shirube/rapid-lite/CONTROL-HANDOFF-MCP-805.yaml
+  - .shirube/repo-spec.yaml
+  - .shirube/source-mirrors/control-issue.yaml
+  - .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+  - .shirube/specs/SPEC-MCP-SHIRUBE-FULL-ADOPTION-001.md
+  - docs/shirube/README.md
+  - scripts/shirube-current-overlay-check.mjs
+diff_scope_report:
+  result: PASS
+  evidence_refs:
+    - changed_files
+    - diff_scope_report
+  allowed_paths_checked:
+    - .shirube/**
+    - docs/shirube/**
+    - .github/workflows/pr-checks.yml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+    - scripts/shirube-current-overlay-check.mjs
+    - scripts/shirube-full-adoption-check.mjs
+  forbidden_paths_checked:
+    - scripts/shirube/**
+    - src/**
+    - app/**
+    - api/**
+    - lib/**
+    - db/**
+    - migrations/**
+    - package.json
+    - package-lock.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .env*
+    - deploy/**
+    - deployment/**
+    - "**/branch-protection/**"
+    - "**/ruleset/**"
+  forbidden_path_result: PASS
+protected_surface_declaration:
+  result: PASS
+  evidence_refs:
+    - protected_surface_declaration
+    - authority_boundary_review
+  active_workflows_touched: true
+  report_only_workflow: true
+  required_checks_changed: false
+  branch_protection_changed: false
+  rulesets_changed: false
+  runtime_code_changed: false
+  api_changed: false
+  database_changed: false
+  migrations_changed: false
+  secrets_changed: false
+  deploy_changed: false
+  aun_activation_changed: false
+authority_boundary_review:
+  result: PASS
+  evidence_refs:
+    - authority_boundary_review
+  implementation_actor: codex-implementation-bot
+  reviewer_must_differ_from_implementation_actor: true
+  owner_exact_head_decision_required_before_merge: true
+  implementation_bot_must_not_self_author_structured_audit: true
+commands:
+  - command: git diff --check
+    result: PASS
+  - command: YAML parse for .shirube/**/*.yaml
+    result: PASS
+  - command: node --check scripts/shirube-current-overlay-check.mjs
+    result: PASS
+  - command: node scripts/shirube-current-overlay-check.mjs --repo watchout/agent-comms-mcp --changed-files /tmp/current-overlay-all-files.txt
+    result: PASS
+  - command: check-audit-checklist without structured audit
+    result: BLOCKED_EXPECTED
+    details: 27 required audit checklist items are unanswered until an independent reviewer supplies shirube-structured-audit/v1 for the current exact head.
+validation_refs:
+  - PR_head_SHA
+  - changed_files
+  - validation_commands
+  - validation_results
+  - diff_scope_report
+  - protected_surface_declaration
+  - authority_boundary_review
+notes:
+  - This evidence is machine evidence for the independent pre-implementation audit.
+  - It is not an audit decision and does not approve merge, draft removal, owner decision, or AUN activation.
