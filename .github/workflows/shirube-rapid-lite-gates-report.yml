@@ -17,15 +17,39 @@ permissions:
   issues: write
 
 jobs:
+  collect-shirube-pr-inputs:
+    name: Collect Shirube PR inputs
+    runs-on: ubuntu-latest
+    outputs:
+      structured_audit_comment_ref: ${{ steps.refs.outputs.structured_audit_comment_ref }}
+    steps:
+      - name: Extract comment-backed audit ref
+        id: refs
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+          const body = event.pull_request?.body || "";
+          const match = body.match(/(?:^|\n)\s*structured_audit_comment_ref\s*:\s*([^\s`'"]+)/i);
+          const value = match?.[1]?.trim() || "";
+          const supported =
+            /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:pull|issues)\/\d+#issuecomment-\d+$/.test(value) ||
+            /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value) ||
+            /^github-comment:\/\/[^/]+\/[^/]+\/(?:pull|issues)\/\d+#issuecomment-\d+$/.test(value) ||
+            /^github-comment:\/\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `structured_audit_comment_ref=${supported ? value : ""}\n`);
+          NODE
+
   shirube-rapid-lite-gates-report:
     name: Shirube Rapid/Lite Gates Report
-    uses: "watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@8b8c5f186aba209ca0e2be299d48e80292a0990b"
+    needs: collect-shirube-pr-inputs
+    uses: "watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@465db4863eb1fb5e248df74d46b29889da06cfc4"
     permissions:
       contents: read
       pull-requests: write
       issues: write
     with:
-      framework_ref: "watchout/ai-dev-framework@8b8c5f186aba209ca0e2be299d48e80292a0990b"
+      framework_ref: "watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4"
       profile: hotel-lite
       report_only: true
       pr_body: "${{ github.event.pull_request.body || '' }}"
@@ -39,4 +63,5 @@ jobs:
       enforcement_policy_ref: .shirube/enforcement-policy.yaml
       audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
       structured_audit_ref: ""
+      structured_audit_comment_ref: ${{ needs.collect-shirube-pr-inputs.outputs.structured_audit_comment_ref }}
       audit_machine_evidence_ref: .shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml

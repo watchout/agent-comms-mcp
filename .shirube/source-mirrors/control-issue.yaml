@@ -6,7 +6,7 @@ issue_number: 802
 source_url: https://github.com/watchout/agent-comms-mcp/issues/802
 target_repo: watchout/agent-comms-mcp
 product: AgentCommsMcp
-framework_ref: watchout/ai-dev-framework@8b8c5f186aba209ca0e2be299d48e80292a0990b
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
 fetched_at: 2026-06-25T02:00:01Z
 sha256: 10cfe97d8a720a66e6f0bdfc60b91a87674584f886c54b18a8de5412c6538c65
 mirror_is_truth: false

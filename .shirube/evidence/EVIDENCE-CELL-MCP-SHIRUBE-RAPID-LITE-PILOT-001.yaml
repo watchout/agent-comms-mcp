@@ -101,7 +101,7 @@ commands:
     result: PASS
   - command: check-audit-checklist without structured audit
     result: BLOCKED_EXPECTED
-    details: 27 required audit checklist items are unanswered until an independent reviewer supplies shirube-structured-audit/v1.
+    details: 27 required audit checklist items are unanswered until an independent reviewer supplies shirube-structured-audit/v1 for the current exact head.
 validation_refs:
   - PR_head_SHA
   - changed_files

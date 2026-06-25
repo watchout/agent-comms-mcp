@@ -3,7 +3,7 @@ policy_id: ENFORCEMENT-POLICY-AGENT-COMMS-MCP-001
 repo: watchout/agent-comms-mcp
 mode: report_only
 profile: hotel-lite
-framework_ref: watchout/ai-dev-framework@8b8c5f186aba209ca0e2be299d48e80292a0990b
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
 updated_at: 2026-06-25T02:00:01Z
 stale_after_days: 90
 owner_observed: true
