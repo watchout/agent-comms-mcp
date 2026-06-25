@@ -47,6 +47,7 @@ jobs:
             auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
             auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
           };
+          const primaryCellId = body.match(/(?:^|\n)\s*CELL-ID\s*:\s*([^\s`'"]+)/i)?.[1]?.trim() || "";
           const implementationRoutes = [
             {
               cellId: "CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001",
@@ -55,7 +56,7 @@ jobs:
               auditMachineEvidenceRef: "",
             },
           ];
-          const route = implementationRoutes.find((candidate) => body.includes(candidate.cellId)) || defaultRoute;
+          const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `structured_audit_comment_ref=${supported ? value : ""}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `handoff_ref=${route.handoffRef}\n`);
