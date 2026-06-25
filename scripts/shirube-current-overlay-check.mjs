@@ -14,8 +14,9 @@ const labels = new Set((pr?.labels ?? []).map((label) => String(label.name ?? ""
 const headSha = String(pr?.head?.sha ?? process.env.GITHUB_SHA ?? "");
 const errors = [];
 const warnings = [];
+const isRapidLiteAdoptionPr = body.includes("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001");
 
-const forbiddenRuntimePatterns = [
+const adoptionForbiddenRuntimePatterns = [
   /^server\.ts$/u,
   /^core\//u,
   /^cli\//u,
@@ -164,9 +165,11 @@ if (pr) {
   }
 }
 
-for (const file of changedFiles) {
-  if (matchesAny(file, forbiddenRuntimePatterns)) {
-    errors.push(`${file} is a runtime/product protected file; this adoption PR must not change it.`);
+if (isRapidLiteAdoptionPr) {
+  for (const file of changedFiles) {
+    if (matchesAny(file, adoptionForbiddenRuntimePatterns)) {
+      errors.push(`${file} is a runtime/product protected file; this adoption PR must not change it.`);
+    }
   }
 }
 
