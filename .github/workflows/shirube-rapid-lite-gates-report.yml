@@ -39,4 +39,4 @@ jobs:
       enforcement_policy_ref: .shirube/enforcement-policy.yaml
       audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
       structured_audit_ref: ""
-      audit_machine_evidence_ref: ""
+      audit_machine_evidence_ref: .shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
