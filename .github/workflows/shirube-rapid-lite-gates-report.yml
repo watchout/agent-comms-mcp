@@ -37,6 +37,6 @@ jobs:
       validation_evidence_ref: ""
       owner_decision_ref: ""
       enforcement_policy_ref: .shirube/enforcement-policy.yaml
-      audit_checklist_ref: ""
+      audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
       structured_audit_ref: ""
       audit_machine_evidence_ref: ""

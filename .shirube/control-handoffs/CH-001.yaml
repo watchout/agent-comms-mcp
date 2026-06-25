@@ -17,6 +17,7 @@ source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
 owner:
   role: repo_owner
   actor: watchout
+implementation_actor: codex-implementation-bot
 next_role: owner_review
 protected_surfaces:
   - active workflows
