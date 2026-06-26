@@ -366,6 +366,22 @@ function createReadOnlyPlanDbAdapter(env: NodeJS.ProcessEnv): DbAdapter {
   return new SqliteAdapter(dbPath, { readonly: true, create: false })
 }
 
+interface RuntimeV2DbUnreachableError {
+  error: 'db_unreachable'
+  message: string
+}
+
+function dbUnreachableError(err: unknown): RuntimeV2DbUnreachableError {
+  return {
+    error: 'db_unreachable',
+    message: (err as Error).message ?? String(err),
+  }
+}
+
+function claimDbUnreachableError(err: unknown): RuntimeV2DbUnreachableError {
+  return dbUnreachableError(err)
+}
+
 export async function runtimeV2Plan(opts: RuntimeV2CliOptions = {}): Promise<RuntimeV2PlanCliResult> {
   const env = opts.env ?? process.env
   if (opts.format !== 'json') {
@@ -398,10 +414,7 @@ export async function runtimeV2Plan(opts: RuntimeV2CliOptions = {}): Promise<Run
     return {
       ok: false,
       code: 1,
-      result: {
-        error: 'db_unreachable',
-        message: (err as Error).message ?? String(err),
-      },
+      result: dbUnreachableError(err),
     }
   }
 
@@ -462,10 +475,7 @@ export async function runtimeV2ClaimDryRun(
     return {
       ok: false,
       code: 1,
-      result: {
-        error: 'db_unreachable',
-        message: (err as Error).message ?? String(err),
-      },
+      result: claimDbUnreachableError(err),
     }
   }
 
