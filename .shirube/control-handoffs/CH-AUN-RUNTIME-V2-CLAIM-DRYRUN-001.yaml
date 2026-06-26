@@ -53,6 +53,7 @@ cell:
     - bin/aun/runtime-v2.ts
     - core/aun-runtime-v2-claim-plan.ts
     - tests/aun-runtime-v2-claim-plan.test.ts
+    - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml
   forbidden_paths:
     - server.ts
     - cli/**
@@ -95,12 +96,12 @@ implementation_boundary:
     - provider delivery
     - state-daemon mutation
     - AUN activation
+acceptance_criteria:
+  - CLI rejects missing --dry-run before DB open.
+  - CLI requires --json and exact queue/message/created-after fence.
+  - "Dry-run emits planned mutation metadata and applied_mutations: [] without writing queue state."
+  - Existing runtime-v2 live claim/execute mutation path remains unchanged.
 validation:
-  acceptance_criteria:
-    - CLI rejects missing --dry-run before DB open.
-    - CLI requires --json and exact queue/message/created-after fence.
-    - "Dry-run emits planned mutation metadata and applied_mutations: [] without writing queue state."
-    - Existing runtime-v2 live claim/execute mutation path remains unchanged.
   required_commands:
     - git diff --check
     - YAML parse for .shirube/**/*.yaml
