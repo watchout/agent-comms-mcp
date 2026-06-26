@@ -6,6 +6,9 @@ parent_ssot: watchout/agent-comms-mcp#794
 framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
 repo_spec_ref: .shirube/repo-spec.yaml
 premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
 repo: watchout/agent-comms-mcp
 repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
 source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
@@ -15,8 +18,13 @@ owner:
 implementation_actor: codex-implementation-bot
 next_role: independent_audit
 protected_surfaces:
-  - runtime dry-run CLI surface
-  - queue row read/evaluation
+  - runtime code
+  - database
+  - active workflows
+protected_surface_details:
+  - runtime-v2 CLI dry-run surface only; no live claim or AUN activation.
+  - queue row read/evaluation through read-only DB access only; no schema, migration, lease write, or mutation.
+  - Report-only Rapid/Lite route metadata may be wired for this Cell; no required checks, branch protection, or rulesets.
 rps_scope:
   shirube_owns:
     - Report-only gate routing for this implementation Cell.
@@ -38,7 +46,7 @@ cell:
     - state-daemon behavior
     - provider delivery
     - MCP/tool behavior
-    - active workflow changes
+    - active workflow behavior beyond report-only route metadata wiring
     - required check activation
     - branch protection or ruleset mutation
     - AUN activation
@@ -47,12 +55,15 @@ cell:
     - bin/aun/runtime-v2.ts
     - core/aun-runtime-v2-claim-plan.ts
     - tests/aun-runtime-v2-claim-plan.test.ts
+    - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
   forbidden_paths:
     - server.ts
     - cli/**
     - adapters/**
     - db/**
-    - .github/workflows/**
     - package.json
     - package-lock.json
     - bun.lockb
@@ -62,9 +73,14 @@ cell:
     - deploy/**
   protected_surfaces:
     declared:
-      - runtime dry-run CLI surface
-      - queue row read/evaluation
+      - runtime code
+      - database
+      - active workflows
     touched: true
+    details:
+      - runtime-v2 CLI dry-run surface only; no live claim or AUN activation.
+      - queue row read/evaluation through read-only DB access only; no schema, migration, lease write, or mutation.
+      - Report-only Rapid/Lite route metadata wiring only; no required checks, branch protection, or ruleset mutation.
   stop_conditions:
     - live claim is required
     - queue mutation is required
@@ -86,6 +102,11 @@ implementation_boundary:
     - provider delivery
     - state-daemon mutation
     - AUN activation
+acceptance_criteria:
+  - CLI rejects missing --dry-run before DB open.
+  - CLI requires --json and exact queue/message/created-after fence.
+  - "Dry-run emits planned mutation metadata and applied_mutations: [] without writing queue state."
+  - Existing runtime-v2 live claim/execute mutation path remains unchanged.
 validation:
   required_commands:
     - git diff --check
@@ -96,7 +117,7 @@ validation:
     - changed_files
     - validation_commands
     - validation_results
-    - independent_audit_result
+    - audit_checklist_report
 owner_decision:
   required_before_merge: true
   evidence_source: external_owner_decision_comment_or_workflow_input

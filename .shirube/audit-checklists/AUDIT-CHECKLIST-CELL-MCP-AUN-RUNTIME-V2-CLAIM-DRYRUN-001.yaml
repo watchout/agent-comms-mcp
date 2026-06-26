@@ -1,0 +1,25 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml"
+  cell_id: "CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001"
+  pr: 817
+  runtime_pr: 796
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "codex-implementation-bot"
+  audit_model: "comment_backed_structured_audit"
+  structured_audit_comment_ref: "https://github.com/watchout/agent-comms-mcp/pull/817#issuecomment-4807035218"
+items:
+  - item_id: "AUDIT-AUN-DRYRUN-ROUTE-001"
+    source: "comment_backed_structured_audit"
+    verification_method: "semantic"
+    required: false
+    prompt: "Confirm the comment-backed structured audit resolves for the exact PR head and does not synthesize owner approval or merge authorization."
+    expected_evidence:
+      - "structured_audit_comment_ref"
+      - "structured-audit-ref-resolution"
+      - "gate_result"
+notes:
+  - "This checklist is a route artifact for the #817 metadata PR."
+  - "The independent audit decision remains the comment-backed shirube-structured-audit/v1 record."
+  - "Owner exact-head decision and merge authorization remain separate."
