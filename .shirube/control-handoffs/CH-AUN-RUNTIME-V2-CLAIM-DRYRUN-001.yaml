@@ -6,6 +6,9 @@ parent_ssot: watchout/agent-comms-mcp#794
 framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
 repo_spec_ref: .shirube/repo-spec.yaml
 premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
 repo: watchout/agent-comms-mcp
 repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
 source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
@@ -15,8 +18,11 @@ owner:
 implementation_actor: codex-implementation-bot
 next_role: independent_audit
 protected_surfaces:
-  - runtime dry-run CLI surface
-  - queue row read/evaluation
+  - runtime code
+  - database
+protected_surface_details:
+  - runtime-v2 CLI dry-run surface only; no live claim or AUN activation.
+  - queue row read/evaluation through read-only DB access only; no schema, migration, lease write, or mutation.
 rps_scope:
   shirube_owns:
     - Report-only gate routing for this implementation Cell.
@@ -62,9 +68,12 @@ cell:
     - deploy/**
   protected_surfaces:
     declared:
-      - runtime dry-run CLI surface
-      - queue row read/evaluation
+      - runtime code
+      - database
     touched: true
+    details:
+      - runtime-v2 CLI dry-run surface only; no live claim or AUN activation.
+      - queue row read/evaluation through read-only DB access only; no schema, migration, lease write, or mutation.
   stop_conditions:
     - live claim is required
     - queue mutation is required
@@ -87,6 +96,11 @@ implementation_boundary:
     - state-daemon mutation
     - AUN activation
 validation:
+  acceptance_criteria:
+    - CLI rejects missing --dry-run before DB open.
+    - CLI requires --json and exact queue/message/created-after fence.
+    - "Dry-run emits planned mutation metadata and applied_mutations: [] without writing queue state."
+    - Existing runtime-v2 live claim/execute mutation path remains unchanged.
   required_commands:
     - git diff --check
     - YAML parse for .shirube/**/*.yaml
