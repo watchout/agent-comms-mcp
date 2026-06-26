@@ -18,6 +18,7 @@
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
  *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
  *   - aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json
+ *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
  *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
@@ -35,7 +36,7 @@ import { codexRunnerTick } from './aun/codex-runner'
 import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
-import { runtimeV2, runtimeV2Plan } from './aun/runtime-v2'
+import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2Plan } from './aun/runtime-v2'
 
 function printHelp(): void {
   const lines = [
@@ -57,6 +58,7 @@ function printHelp(): void {
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
     '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
     '  aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json',
+    '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
     '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
@@ -383,6 +385,19 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
         queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
         messageId: typeof flags['message-id'] === 'string' ? (flags['message-id'] as string) : undefined,
         createdAfter: typeof flags['created-after'] === 'string' ? (flags['created-after'] as string) : undefined,
+      })
+      process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
+      return res.code
+    }
+    if (extras[0] === 'claim') {
+      const res = await runtimeV2ClaimDryRun({
+        mode: 'claim',
+        format: flags.json ? 'json' : undefined,
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        queueId: typeof flags['queue-id'] === 'string' ? (flags['queue-id'] as string) : undefined,
+        messageId: typeof flags['message-id'] === 'string' ? (flags['message-id'] as string) : undefined,
+        createdAfter: typeof flags['created-after'] === 'string' ? (flags['created-after'] as string) : undefined,
+        dryRun: !!flags['dry-run'],
       })
       process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
       return res.code

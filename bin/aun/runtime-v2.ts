@@ -20,6 +20,12 @@ import {
   type AunRuntimeV2ReadOnlyPlanError,
 } from '../../core/aun-runtime-v2-plan'
 import {
+  buildAunRuntimeV2ClaimDryRun,
+  validateAunRuntimeV2ClaimDryRunArgs,
+  type AunRuntimeV2ClaimDryRun,
+  type AunRuntimeV2ClaimDryRunError,
+} from '../../core/aun-runtime-v2-claim-plan'
+import {
   buildCodexExecQueueWorkCommand,
   describeCodexExecFailure,
   repoRoot,
@@ -34,7 +40,7 @@ import {
 } from '../../core/queue-work'
 
 export interface RuntimeV2CliOptions extends AunRuntimeV2Options {
-  mode?: 'execute' | 'plan'
+  mode?: 'execute' | 'plan' | 'claim'
   format?: 'json'
 }
 
@@ -52,12 +58,19 @@ export interface RuntimeV2PlanCliResult {
   result: AunRuntimeV2ReadOnlyPlan | AunRuntimeV2ReadOnlyPlanError
 }
 
+export interface RuntimeV2ClaimDryRunCliResult {
+  ok: boolean
+  code: number
+  result: AunRuntimeV2ClaimDryRun | AunRuntimeV2ClaimDryRunError
+}
+
 function parseArgs(argv: string[]): RuntimeV2CliOptions {
   const out: RuntimeV2CliOptions = {}
   for (let i = 2; i < argv.length; i++) {
     const tok = argv[i]
     if (tok === 'runtime-v2') continue
     if (tok === 'plan') out.mode = 'plan'
+    if (tok === 'claim') out.mode = 'claim'
     if (tok === '--agent-id') out.agentId = argv[++i]
     else if (tok === '--queue-id') out.queueId = argv[++i]
     else if (tok === '--message-id') out.messageId = argv[++i]
@@ -353,6 +366,22 @@ function createReadOnlyPlanDbAdapter(env: NodeJS.ProcessEnv): DbAdapter {
   return new SqliteAdapter(dbPath, { readonly: true, create: false })
 }
 
+interface RuntimeV2DbUnreachableError {
+  error: 'db_unreachable'
+  message: string
+}
+
+function dbUnreachableError(err: unknown): RuntimeV2DbUnreachableError {
+  return {
+    error: 'db_unreachable',
+    message: (err as Error).message ?? String(err),
+  }
+}
+
+function claimDbUnreachableError(err: unknown): RuntimeV2DbUnreachableError {
+  return dbUnreachableError(err)
+}
+
 export async function runtimeV2Plan(opts: RuntimeV2CliOptions = {}): Promise<RuntimeV2PlanCliResult> {
   const env = opts.env ?? process.env
   if (opts.format !== 'json') {
@@ -385,10 +414,7 @@ export async function runtimeV2Plan(opts: RuntimeV2CliOptions = {}): Promise<Run
     return {
       ok: false,
       code: 1,
-      result: {
-        error: 'db_unreachable',
-        message: (err as Error).message ?? String(err),
-      },
+      result: dbUnreachableError(err),
     }
   }
 
@@ -405,6 +431,68 @@ export async function runtimeV2Plan(opts: RuntimeV2CliOptions = {}): Promise<Run
       return {
         ok: false,
         code: result.error === 'invalid_arguments' || result.error === 'fence_required' ? 2 : 1,
+        result,
+      }
+    }
+    return { ok: true, code: 0, result }
+  } finally {
+    await db.close()
+  }
+}
+
+export async function runtimeV2ClaimDryRun(
+  opts: RuntimeV2CliOptions = {},
+): Promise<RuntimeV2ClaimDryRunCliResult> {
+  const env = opts.env ?? process.env
+  if (opts.format !== 'json') {
+    return {
+      ok: false,
+      code: 2,
+      result: {
+        error: 'invalid_arguments',
+        message: 'aun runtime-v2 claim --dry-run requires --json',
+      },
+    }
+  }
+
+  const args = validateAunRuntimeV2ClaimDryRunArgs({
+    agentId: opts.agentId,
+    queueId: opts.queueId,
+    messageId: opts.messageId,
+    createdAfter: opts.createdAfter,
+    env,
+    now: opts.now,
+    dryRun: opts.dryRun,
+  })
+  if (!args.ok) {
+    return { ok: false, code: 2, result: args.error }
+  }
+
+  let db: DbAdapter
+  try {
+    db = createReadOnlyPlanDbAdapter(env)
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      result: claimDbUnreachableError(err),
+    }
+  }
+
+  try {
+    const result = await buildAunRuntimeV2ClaimDryRun(toReadOnlyLegacyDb(db), {
+      agentId: opts.agentId,
+      queueId: opts.queueId,
+      messageId: opts.messageId,
+      createdAfter: opts.createdAfter,
+      env,
+      now: opts.now,
+      dryRun: opts.dryRun,
+    })
+    if ('error' in result) {
+      return {
+        ok: false,
+        code: result.error === 'db_unreachable' ? 1 : 2,
         result,
       }
     }
@@ -480,6 +568,11 @@ async function main(): Promise<void> {
   const opts = parseArgs(process.argv)
   if (opts.mode === 'plan') {
     const result = await runtimeV2Plan(opts)
+    process.stdout.write(JSON.stringify(result.result, null, 2) + '\n')
+    process.exit(result.code)
+  }
+  if (opts.mode === 'claim') {
+    const result = await runtimeV2ClaimDryRun(opts)
     process.stdout.write(JSON.stringify(result.result, null, 2) + '\n')
     process.exit(result.code)
   }
