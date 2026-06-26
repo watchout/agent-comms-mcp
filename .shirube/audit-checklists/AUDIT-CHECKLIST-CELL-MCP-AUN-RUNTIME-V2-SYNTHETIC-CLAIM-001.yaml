@@ -9,7 +9,7 @@ source:
 items:
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-001"
     source: "handoff_acceptance"
-    verification_method: "test_and_code_review"
+    verification_method: "semantic"
     required: true
     prompt: "Confirm claim requires baton_id, owner_agent_id, runtime_instance_id, lease_expires_at, and fencing_token."
     expected_evidence:
@@ -17,7 +17,7 @@ items:
       - "tests/aun-runtime-v2-synthetic-claim.test.ts"
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-002"
     source: "handoff_acceptance"
-    verification_method: "test_and_code_review"
+    verification_method: "semantic"
     required: true
     prompt: "Confirm duplicate active claim is blocked."
     expected_evidence:
@@ -25,7 +25,7 @@ items:
       - "tests/aun-runtime-v2-synthetic-claim.test.ts"
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-003"
     source: "handoff_acceptance"
-    verification_method: "test_and_code_review"
+    verification_method: "semantic"
     required: true
     prompt: "Confirm expired claim replacement requires explicit policy."
     expected_evidence:
@@ -33,7 +33,7 @@ items:
       - "allow_expired_lease_replacement"
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-004"
     source: "handoff_acceptance"
-    verification_method: "test_and_code_review"
+    verification_method: "semantic"
     required: true
     prompt: "Confirm observer agent cannot claim as owner."
     expected_evidence:
@@ -41,7 +41,7 @@ items:
       - "observer_agent_ids"
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-005"
     source: "handoff_acceptance"
-    verification_method: "test_and_code_review"
+    verification_method: "semantic"
     required: true
     prompt: "Confirm stale holder and wrong fencing_token cannot finalize."
     expected_evidence:
@@ -49,7 +49,7 @@ items:
       - "fencing_token_mismatch"
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-006"
     source: "protected_surface_boundary"
-    verification_method: "diff_review"
+    verification_method: "semantic"
     required: true
     prompt: "Confirm this PR does not perform live claim, production DB mutation, state-daemon change, provider delivery, MCP/tool behavior change, CLI surface change, or AUN activation."
     expected_evidence:
@@ -58,7 +58,7 @@ items:
       - "no CLI file changes"
   - item_id: "AUDIT-AUN-SYNTH-CLAIM-007"
     source: "validation"
-    verification_method: "command_output"
+    verification_method: "executable"
     required: true
     prompt: "Confirm required local validation passed."
     expected_evidence:
@@ -66,5 +66,7 @@ items:
       - "YAML parse for .shirube/**/*.yaml"
       - "focused bun test command"
 notes:
+  - "Current gate-supported verification_method values are semantic and executable."
+  - "This checklist is for the future runtime-v2 synthetic claim implementation PR after the route metadata lands."
   - "Owner exact-head decision and merge authorization remain separate."
   - "This checklist does not approve ready, merge, production mutation, or AUN activation."

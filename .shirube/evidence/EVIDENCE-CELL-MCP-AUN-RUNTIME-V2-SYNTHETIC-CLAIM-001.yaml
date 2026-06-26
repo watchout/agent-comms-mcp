@@ -26,5 +26,6 @@ evidence_refs:
   - "audit_checklist_report"
 notes:
   - "This is machine evidence for route-level control-state completeness only."
+  - "PR #818 is audited as a Rapid/Lite pilot route-metadata PR; the synthetic claim checklist is intended for the later runtime-v2 synthetic claim implementation PR."
   - "Implementation tests and structured audit evidence must be supplied by the runtime-v2 synthetic claim implementation PR."
   - "It does not approve merge, remove draft, authorize owner decision, run live claim, mutate production DB, or activate AUN."
