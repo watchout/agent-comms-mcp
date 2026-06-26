@@ -1,0 +1,35 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 817
+runtime_pr: 796
+cell_id: "CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "runtime_v2_claim_dryrun_route_metadata"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+structured_audit_comment_ref: "https://github.com/watchout/agent-comms-mcp/pull/817#issuecomment-4807035218"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml"
+commands:
+  - command: "git diff --check"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS"
+  - command: "bash scripts/classify-pr.sh origin/main --json"
+    result: "PASS"
+  - command: "bash scripts/detect-breaking-changes.sh origin/main"
+    result: "PASS"
+validation_results:
+  - "PASS"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+  - "structured_audit_comment_ref"
+  - "structured-audit-ref-resolution"
+  - "https://github.com/watchout/agent-comms-mcp/pull/817#issuecomment-4807035218"
+notes:
+  - "This is machine evidence for route-level control-state completeness."
+  - "It does not approve merge, remove draft, authorize owner decision, or activate AUN."
