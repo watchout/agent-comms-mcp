@@ -1,0 +1,139 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: independent_audit
+protected_surfaces:
+  - runtime code
+  - active workflows
+protected_surface_details:
+  - Synthetic runtime-v2 claim mechanics only; no live claim, production DB mutation, provider delivery, or AUN activation.
+  - In-memory fixture-backed claim and finalization checks only.
+  - Report-only Rapid/Lite route metadata may be wired for this Cell; no required checks, branch protection, or rulesets.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this implementation Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+  shirube_does_not_own:
+    - Live queue mutation in this Cell.
+    - Lease writes to production DB, DB migrations, provider delivery, state-daemon behavior, branch protection, rulesets, or AUN activation.
+cell:
+  CELL-ID: CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001
+  cell_type: implementation
+  risk_class: R2
+  goal: Add synthetic runtime-v2 claim mechanics that prove baton ownership, lease, and fencing behavior without production DB mutation.
+  governance_route: R2 synthetic implementation with independent audit before owner exact-head decision.
+  non_scope:
+    - live claim
+    - production queue mutation
+    - lease write to production DB
+    - DB schema or migration
+    - state-daemon behavior
+    - provider delivery
+    - MCP/tool behavior
+    - CLI command surface
+    - active workflow behavior beyond report-only route metadata wiring
+    - required check activation
+    - branch protection or ruleset mutation
+    - AUN activation
+  allowed_paths:
+    - core/aun-runtime-v2-synthetic-claim.ts
+    - tests/aun-runtime-v2-synthetic-claim.test.ts
+    - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - bin/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - runtime code
+      - active workflows
+    touched: true
+    details:
+      - Synthetic runtime-v2 claim mechanics only; no live claim or AUN activation.
+      - In-memory fixture-backed claim and finalization checks only; production_mutations must remain empty.
+      - Report-only Rapid/Lite route metadata wiring only; no required checks, branch protection, or ruleset mutation.
+  stop_conditions:
+    - live claim is required
+    - production DB mutation is required
+    - DB schema or migration is required
+    - state-daemon, provider, or MCP/tool behavior change is required
+    - CLI surface is required
+    - independent audit fails
+implementation_boundary:
+  summary: Add synthetic claim and finalization mechanics for runtime-v2 without production mutation.
+  expected_pr_count: 1
+  forbidden_operations:
+    - merge
+    - approve
+    - draft removal
+    - live claim
+    - production queue mutation
+    - lease write to production DB
+    - DB migration
+    - provider delivery
+    - state-daemon mutation
+    - AUN activation
+acceptance_criteria:
+  - Claim requires baton_id, owner_agent_id, runtime_instance_id, lease_expires_at, and fencing_token.
+  - Duplicate active claim is blocked.
+  - Expired claim replacement requires explicit policy.
+  - Observer agent cannot claim as owner.
+  - Stale holder cannot finalize.
+  - Wrong fencing_token cannot finalize.
+  - Synthetic mutations are limited to in-memory fixture state and production_mutations remains empty.
+  - Existing runtime-v2 live claim/execute mutation path remains unchanged.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun test tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
