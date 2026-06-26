@@ -22,6 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       structured_audit_comment_ref: ${{ steps.refs.outputs.structured_audit_comment_ref }}
+      handoff_ref: ${{ steps.refs.outputs.handoff_ref }}
+      audit_checklist_ref: ${{ steps.refs.outputs.audit_checklist_ref }}
+      audit_machine_evidence_ref: ${{ steps.refs.outputs.audit_machine_evidence_ref }}
+      route_cell_id: ${{ steps.refs.outputs.route_cell_id }}
     steps:
       - name: Extract comment-backed audit ref
         id: refs
@@ -37,7 +41,28 @@ jobs:
             /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value) ||
             /^github-comment:\/\/[^/]+\/[^/]+\/(?:pull|issues)\/\d+#issuecomment-\d+$/.test(value) ||
             /^github-comment:\/\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value);
+          const defaultRoute = {
+            cellId: "CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001",
+            handoffRef: ".shirube/control-handoffs/CH-001.yaml",
+            auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
+            auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
+          };
+          const primaryCellId = body.match(/(?:^|\n)\s*CELL-ID\s*:\s*([^\s`'"]+)/i)?.[1]?.trim() || "";
+          const implementationRoutes = [
+            {
+              cellId: "CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001",
+              handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml",
+              auditChecklistRef: "",
+              auditMachineEvidenceRef: "",
+            },
+          ];
+          const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
+
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `structured_audit_comment_ref=${supported ? value : ""}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `handoff_ref=${route.handoffRef}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `audit_checklist_ref=${route.auditChecklistRef}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `audit_machine_evidence_ref=${route.auditMachineEvidenceRef}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `route_cell_id=${route.cellId}\n`);
           NODE
 
   shirube-rapid-lite-gates-report:
@@ -57,11 +82,11 @@ jobs:
       execution_context_ref: .shirube/execution-context.yaml
       adoption_plan_ref: .shirube/adoption-intake.yaml
       lifecycle_state_ref: .shirube/lifecycle-state.yaml
-      handoff_ref: .shirube/control-handoffs/CH-001.yaml
+      handoff_ref: ${{ needs.collect-shirube-pr-inputs.outputs.handoff_ref }}
       validation_evidence_ref: ""
       owner_decision_ref: ""
       enforcement_policy_ref: .shirube/enforcement-policy.yaml
-      audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
+      audit_checklist_ref: ${{ needs.collect-shirube-pr-inputs.outputs.audit_checklist_ref }}
       structured_audit_ref: ""
       structured_audit_comment_ref: ${{ needs.collect-shirube-pr-inputs.outputs.structured_audit_comment_ref }}
-      audit_machine_evidence_ref: .shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml
+      audit_machine_evidence_ref: ${{ needs.collect-shirube-pr-inputs.outputs.audit_machine_evidence_ref }}
