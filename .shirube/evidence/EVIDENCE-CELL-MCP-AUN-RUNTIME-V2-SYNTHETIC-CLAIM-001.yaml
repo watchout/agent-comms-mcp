@@ -1,0 +1,31 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: null
+cell_id: "CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "runtime_v2_synthetic_claim_route_metadata"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml"
+commands:
+  - command: "git diff --check"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS: parsed 28 yaml files"
+  - command: "node scripts/shirube-current-overlay-check.mjs with staged route metadata files"
+    result: "PASS"
+validation_results:
+  - "PASS"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This is machine evidence for route-level control-state completeness only."
+  - "PR #818 is audited as a Rapid/Lite pilot route-metadata PR; the synthetic claim checklist is intended for the later runtime-v2 synthetic claim implementation PR."
+  - "Implementation tests and structured audit evidence must be supplied by the runtime-v2 synthetic claim implementation PR."
+  - "It does not approve merge, remove draft, authorize owner decision, run live claim, mutate production DB, or activate AUN."
