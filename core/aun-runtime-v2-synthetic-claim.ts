@@ -1,22 +1,41 @@
 export const AUN_RUNTIME_V2_SYNTHETIC_CLAIM_SCHEMA_VERSION = 'aun-runtime-v2-synthetic-claim/v1' as const
 export const AUN_RUNTIME_V2_SYNTHETIC_FINALIZE_SCHEMA_VERSION = 'aun-runtime-v2-synthetic-finalize/v1' as const
 
-const CLAIM_REASON = {
+const BATON_STATE = {
+  open: 'open',
   claimed: 'claimed',
-  invalidClaimRequest: 'invalid_claim_request',
+  finalized: 'finalized',
+} as const
+
+const MUTATION_OP = {
+  claimBaton: 'claim_baton',
+  replaceExpiredClaim: 'replace_expired_claim',
+  finalizeClaim: 'finalize_claim',
+} as const
+
+const SYNTHETIC_MUTATION_SCOPE = 'synthetic_in_memory' as const
+
+const COMMON_REASON = {
   batonNotFound: 'baton_not_found',
   ownerMismatch: 'owner_mismatch',
+} as const
+
+const CLAIM_REASON = {
+  claimed: BATON_STATE.claimed,
+  invalidClaimRequest: 'invalid_claim_request',
+  batonNotFound: COMMON_REASON.batonNotFound,
+  ownerMismatch: COMMON_REASON.ownerMismatch,
   observerCannotClaimAsOwner: 'observer_cannot_claim_as_owner',
   activeClaimExists: 'active_claim_exists',
   expiredClaimRequiresPolicy: 'expired_claim_requires_policy',
 } as const
 
 const FINALIZE_REASON = {
-  finalized: 'finalized',
+  finalized: BATON_STATE.finalized,
   invalidFinalizeRequest: 'invalid_finalize_request',
-  batonNotFound: 'baton_not_found',
+  batonNotFound: COMMON_REASON.batonNotFound,
   claimNotActive: 'claim_not_active',
-  ownerMismatch: 'owner_mismatch',
+  ownerMismatch: COMMON_REASON.ownerMismatch,
   runtimeInstanceMismatch: 'runtime_instance_mismatch',
   fencingTokenMismatch: 'fencing_token_mismatch',
   leaseExpired: 'lease_expired',
@@ -40,7 +59,7 @@ export interface AunRuntimeV2SyntheticBaton {
   baton_id: string
   owner_agent_id: string
   observer_agent_ids?: string[]
-  state?: 'open' | 'claimed' | 'finalized'
+  state?: (typeof BATON_STATE)[keyof typeof BATON_STATE]
   active_claim?: AunRuntimeV2SyntheticClaim | null
 }
 
@@ -63,8 +82,8 @@ export interface AunRuntimeV2SyntheticFinalizeRequest {
 }
 
 export interface AunRuntimeV2SyntheticMutation {
-  op: 'claim_baton' | 'replace_expired_claim' | 'finalize_claim'
-  scope: 'synthetic_in_memory'
+  op: (typeof MUTATION_OP)[keyof typeof MUTATION_OP]
+  scope: typeof SYNTHETIC_MUTATION_SCOPE
   baton_id: string
   claim_id?: string
 }
@@ -261,7 +280,7 @@ export class AunRuntimeV2SyntheticClaimStore {
     }
     this.batons.set(batonId, {
       ...baton,
-      state: 'claimed',
+      state: BATON_STATE.claimed,
       active_claim: nextClaim,
     })
 
@@ -277,8 +296,8 @@ export class AunRuntimeV2SyntheticClaimStore {
         reason_code: CLAIM_REASON.claimed,
         active_claim: cloneClaim(nextClaim),
         synthetic_mutations: [{
-          op: activeClaimExpired ? 'replace_expired_claim' : 'claim_baton',
-          scope: 'synthetic_in_memory',
+          op: activeClaimExpired ? MUTATION_OP.replaceExpiredClaim : MUTATION_OP.claimBaton,
+          scope: SYNTHETIC_MUTATION_SCOPE,
           baton_id: batonId,
           claim_id: nextClaim.claim_id,
         }],
@@ -334,7 +353,7 @@ export class AunRuntimeV2SyntheticClaimStore {
 
     this.batons.set(batonId, {
       ...baton,
-      state: 'finalized',
+      state: BATON_STATE.finalized,
       active_claim: null,
     })
 
@@ -344,8 +363,8 @@ export class AunRuntimeV2SyntheticClaimStore {
         finalized: true,
         reason_code: FINALIZE_REASON.finalized,
         synthetic_mutations: [{
-          op: 'finalize_claim',
-          scope: 'synthetic_in_memory',
+          op: MUTATION_OP.finalizeClaim,
+          scope: SYNTHETIC_MUTATION_SCOPE,
           baton_id: batonId,
           claim_id: activeClaim.claim_id,
         }],
