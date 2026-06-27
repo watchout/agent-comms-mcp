@@ -1,7 +1,7 @@
 schema_version: "shirube-machine-evidence/v1"
 evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001"
 target_repo: "watchout/agent-comms-mcp"
-target_pr: null
+target_pr: 820
 cell_id: "CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001"
 implementation_actor: "codex-implementation-bot"
 evidence_scope: "runtime_v2_synthetic_claim_implementation"

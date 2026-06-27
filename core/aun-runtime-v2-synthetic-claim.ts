@@ -1,24 +1,30 @@
 export const AUN_RUNTIME_V2_SYNTHETIC_CLAIM_SCHEMA_VERSION = 'aun-runtime-v2-synthetic-claim/v1' as const
 export const AUN_RUNTIME_V2_SYNTHETIC_FINALIZE_SCHEMA_VERSION = 'aun-runtime-v2-synthetic-finalize/v1' as const
 
-export type AunRuntimeV2SyntheticClaimReasonCode =
-  | 'claimed'
-  | 'invalid_claim_request'
-  | 'baton_not_found'
-  | 'owner_mismatch'
-  | 'observer_cannot_claim_as_owner'
-  | 'active_claim_exists'
-  | 'expired_claim_requires_policy'
+const CLAIM_REASON = {
+  claimed: 'claimed',
+  invalidClaimRequest: 'invalid_claim_request',
+  batonNotFound: 'baton_not_found',
+  ownerMismatch: 'owner_mismatch',
+  observerCannotClaimAsOwner: 'observer_cannot_claim_as_owner',
+  activeClaimExists: 'active_claim_exists',
+  expiredClaimRequiresPolicy: 'expired_claim_requires_policy',
+} as const
 
-export type AunRuntimeV2SyntheticFinalizeReasonCode =
-  | 'finalized'
-  | 'invalid_finalize_request'
-  | 'baton_not_found'
-  | 'claim_not_active'
-  | 'owner_mismatch'
-  | 'runtime_instance_mismatch'
-  | 'fencing_token_mismatch'
-  | 'lease_expired'
+const FINALIZE_REASON = {
+  finalized: 'finalized',
+  invalidFinalizeRequest: 'invalid_finalize_request',
+  batonNotFound: 'baton_not_found',
+  claimNotActive: 'claim_not_active',
+  ownerMismatch: 'owner_mismatch',
+  runtimeInstanceMismatch: 'runtime_instance_mismatch',
+  fencingTokenMismatch: 'fencing_token_mismatch',
+  leaseExpired: 'lease_expired',
+} as const
+
+export type AunRuntimeV2SyntheticClaimReasonCode = (typeof CLAIM_REASON)[keyof typeof CLAIM_REASON]
+
+export type AunRuntimeV2SyntheticFinalizeReasonCode = (typeof FINALIZE_REASON)[keyof typeof FINALIZE_REASON]
 
 export interface AunRuntimeV2SyntheticClaim {
   claim_id: string
@@ -63,14 +69,16 @@ export interface AunRuntimeV2SyntheticMutation {
   claim_id?: string
 }
 
+export interface AunRuntimeV2SyntheticTarget {
+  baton_id: string | null
+  owner_agent_id: string | null
+  runtime_instance_id: string | null
+}
+
 export interface AunRuntimeV2SyntheticClaimResult {
   schema_version: typeof AUN_RUNTIME_V2_SYNTHETIC_CLAIM_SCHEMA_VERSION
   generated_at: string
-  target: {
-    baton_id: string | null
-    owner_agent_id: string | null
-    runtime_instance_id: string | null
-  }
+  target: AunRuntimeV2SyntheticTarget
   evaluation: {
     baton_found: boolean
     owner_matches: boolean
@@ -94,11 +102,7 @@ export interface AunRuntimeV2SyntheticClaimResult {
 export interface AunRuntimeV2SyntheticFinalizeResult {
   schema_version: typeof AUN_RUNTIME_V2_SYNTHETIC_FINALIZE_SCHEMA_VERSION
   generated_at: string
-  target: {
-    baton_id: string | null
-    owner_agent_id: string | null
-    runtime_instance_id: string | null
-  }
+  target: AunRuntimeV2SyntheticTarget
   evaluation: {
     baton_found: boolean
     active_claim_present: boolean
@@ -141,6 +145,18 @@ function dateMs(value: string | null | undefined): number | null {
 function generatedAt(requestNow: (() => Date) | undefined): { now: Date; iso: string } {
   const now = requestNow?.() ?? new Date()
   return { now, iso: now.toISOString() }
+}
+
+function targetFromIds(input: {
+  batonId: string | null
+  ownerAgentId: string | null
+  runtimeInstanceId: string | null
+}): AunRuntimeV2SyntheticTarget {
+  return {
+    baton_id: input.batonId,
+    owner_agent_id: input.ownerAgentId,
+    runtime_instance_id: input.runtimeInstanceId,
+  }
 }
 
 function claimId(input: {
@@ -195,11 +211,7 @@ export class AunRuntimeV2SyntheticClaimStore {
     const base = (): Omit<AunRuntimeV2SyntheticClaimResult, 'claim'> => ({
       schema_version: AUN_RUNTIME_V2_SYNTHETIC_CLAIM_SCHEMA_VERSION,
       generated_at: iso,
-      target: {
-        baton_id: batonId,
-        owner_agent_id: ownerAgentId,
-        runtime_instance_id: runtimeInstanceId,
-      },
+      target: targetFromIds({ batonId, ownerAgentId, runtimeInstanceId }),
       evaluation: {
         baton_found: !!baton,
         owner_matches: !!baton && ownerAgentId === baton.owner_agent_id,
@@ -228,14 +240,14 @@ export class AunRuntimeV2SyntheticClaimStore {
     })
 
     if (!batonId || !ownerAgentId || !runtimeInstanceId || !leaseExpiresAt || !leaseValid || !fencingToken) {
-      return blocked('invalid_claim_request', null)
+      return blocked(CLAIM_REASON.invalidClaimRequest, null)
     }
-    if (!baton) return blocked('baton_not_found', null)
-    if (observerIsRequester) return blocked('observer_cannot_claim_as_owner')
-    if (ownerAgentId !== baton.owner_agent_id) return blocked('owner_mismatch')
-    if (activeClaim && !activeClaimExpired) return blocked('active_claim_exists')
+    if (!baton) return blocked(CLAIM_REASON.batonNotFound, null)
+    if (observerIsRequester) return blocked(CLAIM_REASON.observerCannotClaimAsOwner)
+    if (ownerAgentId !== baton.owner_agent_id) return blocked(CLAIM_REASON.ownerMismatch)
+    if (activeClaim && !activeClaimExpired) return blocked(CLAIM_REASON.activeClaimExists)
     if (activeClaimExpired && request.allow_expired_lease_replacement !== true) {
-      return blocked('expired_claim_requires_policy')
+      return blocked(CLAIM_REASON.expiredClaimRequiresPolicy)
     }
 
     const nextClaim: AunRuntimeV2SyntheticClaim = {
@@ -262,7 +274,7 @@ export class AunRuntimeV2SyntheticClaimStore {
       },
       claim: {
         claimed: true,
-        reason_code: 'claimed',
+        reason_code: CLAIM_REASON.claimed,
         active_claim: cloneClaim(nextClaim),
         synthetic_mutations: [{
           op: activeClaimExpired ? 'replace_expired_claim' : 'claim_baton',
@@ -288,11 +300,7 @@ export class AunRuntimeV2SyntheticClaimStore {
     const base = (): Omit<AunRuntimeV2SyntheticFinalizeResult, 'finalization'> => ({
       schema_version: AUN_RUNTIME_V2_SYNTHETIC_FINALIZE_SCHEMA_VERSION,
       generated_at: iso,
-      target: {
-        baton_id: batonId,
-        owner_agent_id: ownerAgentId,
-        runtime_instance_id: runtimeInstanceId,
-      },
+      target: targetFromIds({ batonId, ownerAgentId, runtimeInstanceId }),
       evaluation: {
         baton_found: !!baton,
         active_claim_present: !!activeClaim,
@@ -315,14 +323,14 @@ export class AunRuntimeV2SyntheticClaimStore {
     })
 
     if (!batonId || !ownerAgentId || !runtimeInstanceId || !fencingToken) {
-      return blocked('invalid_finalize_request')
+      return blocked(FINALIZE_REASON.invalidFinalizeRequest)
     }
-    if (!baton) return blocked('baton_not_found')
-    if (!activeClaim) return blocked('claim_not_active')
-    if (ownerAgentId !== activeClaim.owner_agent_id) return blocked('owner_mismatch')
-    if (runtimeInstanceId !== activeClaim.runtime_instance_id) return blocked('runtime_instance_mismatch')
-    if (fencingToken !== activeClaim.fencing_token) return blocked('fencing_token_mismatch')
-    if (!leaseActive) return blocked('lease_expired')
+    if (!baton) return blocked(FINALIZE_REASON.batonNotFound)
+    if (!activeClaim) return blocked(FINALIZE_REASON.claimNotActive)
+    if (ownerAgentId !== activeClaim.owner_agent_id) return blocked(FINALIZE_REASON.ownerMismatch)
+    if (runtimeInstanceId !== activeClaim.runtime_instance_id) return blocked(FINALIZE_REASON.runtimeInstanceMismatch)
+    if (fencingToken !== activeClaim.fencing_token) return blocked(FINALIZE_REASON.fencingTokenMismatch)
+    if (!leaseActive) return blocked(FINALIZE_REASON.leaseExpired)
 
     this.batons.set(batonId, {
       ...baton,
@@ -334,7 +342,7 @@ export class AunRuntimeV2SyntheticClaimStore {
       ...base(),
       finalization: {
         finalized: true,
-        reason_code: 'finalized',
+        reason_code: FINALIZE_REASON.finalized,
         synthetic_mutations: [{
           op: 'finalize_claim',
           scope: 'synthetic_in_memory',
