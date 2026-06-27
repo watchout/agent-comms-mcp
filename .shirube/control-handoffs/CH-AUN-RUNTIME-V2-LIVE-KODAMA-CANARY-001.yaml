@@ -1,0 +1,144 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: independent_audit
+protected_surfaces:
+  - runtime code
+  - database
+  - active workflows
+protected_surface_details:
+  - Runtime-v2 kodama-only live canary implementation route only.
+  - Future implementation may add exact-fenced live claim code, but this route metadata PR does not execute live claim or mutate production DB.
+  - Report-only Rapid/Lite route metadata may be wired for this Cell; no required checks, branch protection, or rulesets.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this implementation Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+    - Audit checklist coverage for the kodama-only live canary implementation PR.
+  shirube_does_not_own:
+    - Production live canary execution without a separate exact-head protected-surface authorization.
+    - Fleet rollout, allowlist expansion, default enable, DB migration, provider delivery, state-daemon behavior, branch protection, rulesets, or AUN activation.
+cell:
+  CELL-ID: CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001
+  cell_type: implementation
+  risk_class: R3
+  goal: Add the smallest kodama-only runtime-v2 live claim canary implementation after read-only plan, claim dry-run, and synthetic claim have merged.
+  governance_route: R3 protected live canary implementation with independent audit and owner exact-head authorization before ready or merge handling.
+  non_scope:
+    - running a production live claim during implementation
+    - fleet rollout
+    - policy allowlist expansion beyond kodama
+    - default enable
+    - DB schema or migration
+    - state-daemon behavior
+    - provider delivery
+    - MCP/tool behavior
+    - required check activation
+    - branch protection or ruleset mutation
+    - AUN activation
+  allowed_paths:
+    - bin/aun.ts
+    - bin/aun/runtime-v2.ts
+    - core/aun-runtime-v2-live-claim.ts
+    - tests/aun-runtime-v2-live-claim.test.ts
+    - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - runtime code
+      - database
+      - active workflows
+    touched: true
+    details:
+      - Future implementation must be kodama-only and exact-fenced.
+      - Future implementation must require explicit live-canary intent and must not broaden runtime-v2 to other agents.
+      - This route metadata PR only wires report-only routing; it does not execute a live claim.
+  stop_conditions:
+    - implementation requires non-kodama agent support
+    - implementation requires production live claim execution during tests
+    - exact queue_id, message_id, and created_after fences cannot be enforced before mutation
+    - missing live-canary authorization cannot fail closed before mutation
+    - DB schema or migration is required
+    - state-daemon, provider, MCP/tool behavior, or AUN activation is required
+    - independent audit fails
+implementation_boundary:
+  summary: Add kodama-only exact-fenced live claim canary mechanics for runtime-v2 without running production live claim in the PR.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - production live claim execution
+    - fleet rollout
+    - allowlist expansion beyond kodama
+    - DB migration
+    - provider delivery
+    - state-daemon mutation
+    - AUN activation
+acceptance_criteria:
+  - CLI rejects non-kodama agents before DB open.
+  - CLI requires --json and exact queue_id, message_id, and created_after fence.
+  - CLI requires explicit live-canary authorization flag before any mutation path can run.
+  - Live claim implementation reuses dry-run/read-only evaluation and fails closed unless the target is claimable.
+  - Live claim mutation is atomic and bounded to the exact fenced queue row.
+  - Successful live canary result records claim owner/source evidence compatible with existing queue-work expected claim source.
+  - Stale holder, wrong fence, non-pending row, runtime-not-alive, and conflicting claim cases do not mutate.
+  - Tests use isolated fixture DB only and never production DB.
+  - Existing #788 queue-work runner behavior remains compatible.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun test tests/aun-runtime-v2-live-claim.test.ts tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
