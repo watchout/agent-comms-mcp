@@ -1,10 +1,10 @@
 schema_version: "shirube-machine-evidence/v1"
 evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001"
 target_repo: "watchout/agent-comms-mcp"
-target_pr: null
+target_pr: 820
 cell_id: "CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001"
 implementation_actor: "codex-implementation-bot"
-evidence_scope: "runtime_v2_synthetic_claim_route_metadata"
+evidence_scope: "runtime_v2_synthetic_claim_implementation"
 not_structured_audit: true
 owner_decision_required_before_merge: true
 handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml"
@@ -14,8 +14,8 @@ commands:
     result: "PASS"
   - command: "YAML parse for .shirube/**/*.yaml"
     result: "PASS: parsed 28 yaml files"
-  - command: "node scripts/shirube-current-overlay-check.mjs with staged route metadata files"
-    result: "PASS"
+  - command: "bun test tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts"
+    result: "PASS: 60 pass / 0 fail"
 validation_results:
   - "PASS"
 evidence_refs:
@@ -25,7 +25,6 @@ evidence_refs:
   - "validation_results"
   - "audit_checklist_report"
 notes:
-  - "This is machine evidence for route-level control-state completeness only."
-  - "PR #818 is audited as a Rapid/Lite pilot route-metadata PR; the synthetic claim checklist is intended for the later runtime-v2 synthetic claim implementation PR."
-  - "Implementation tests and structured audit evidence must be supplied by the runtime-v2 synthetic claim implementation PR."
-  - "It does not approve merge, remove draft, authorize owner decision, run live claim, mutate production DB, or activate AUN."
+  - "This is machine evidence for the runtime-v2 synthetic claim implementation PR."
+  - "It is not a structured audit and does not approve merge, remove draft, authorize owner decision, run live claim, mutate production DB, or activate AUN."
+  - "Implementation remains synthetic and in-memory; production_mutations must remain empty."
