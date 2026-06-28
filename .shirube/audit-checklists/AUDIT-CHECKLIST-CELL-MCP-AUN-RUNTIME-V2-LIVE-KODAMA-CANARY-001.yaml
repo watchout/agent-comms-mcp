@@ -1,0 +1,75 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml"
+  cell_id: "CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "codex-implementation-bot"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-001"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm live claim implementation is kodama-only and rejects non-kodama agents before DB open or mutation."
+    expected_evidence:
+      - "core/aun-runtime-v2-live-claim.ts"
+      - "tests/aun-runtime-v2-live-claim.test.ts"
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-002"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm exact queue_id, message_id, and created_after fences are required before mutation."
+    expected_evidence:
+      - "fence_required"
+      - "queue_id"
+      - "message_id"
+      - "created_after"
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-003"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm explicit live-canary authorization is required and missing authorization fails closed before mutation."
+    expected_evidence:
+      - "live_canary_not_authorized"
+      - "tests/aun-runtime-v2-live-claim.test.ts"
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-004"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm live claim reuses dry-run/read-only evaluation and only mutates when the target is claimable."
+    expected_evidence:
+      - "buildAunRuntimeV2ReadOnlyPlan"
+      - "claimable"
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-005"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm stale holder, wrong fence, non-pending row, runtime-not-alive, and conflicting claim cases do not mutate."
+    expected_evidence:
+      - "not_pending"
+      - "runtime_not_alive"
+      - "conflicting_active_claim"
+      - "fence_mismatch"
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-006"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm this PR does not run production live claim, expand allowlist beyond kodama, change DB schema, activate state-daemon/provider/MCP behavior, or activate AUN."
+    expected_evidence:
+      - "changed_files"
+      - "non_scope_confirmed"
+  - item_id: "AUDIT-AUN-LIVE-KODAMA-007"
+    source: "validation"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm required local validation passed."
+    expected_evidence:
+      - "git diff --check"
+      - "YAML parse for .shirube/**/*.yaml"
+      - "focused bun test command"
+notes:
+  - "Current gate-supported verification_method values are semantic and executable."
+  - "This checklist is for the future runtime-v2 kodama-only live canary implementation PR after the route metadata lands."
+  - "Owner exact-head decision and merge authorization remain separate."
+  - "This checklist does not approve ready, merge, production live claim execution, or AUN activation."

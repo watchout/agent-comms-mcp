@@ -1,0 +1,30 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 822
+cell_id: "CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "runtime_v2_live_kodama_canary_route_metadata"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml"
+commands:
+  - command: "git diff --check"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS: parsed 31 yaml files"
+  - command: "node scripts/shirube-current-overlay-check.mjs"
+    result: "PASS"
+validation_results:
+  - "PASS"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This is route metadata evidence for the runtime-v2 kodama-only live canary implementation Cell."
+  - "It is not a structured audit and does not approve merge, remove draft, authorize owner decision, run live claim, mutate production DB, or activate AUN."
+  - "The future implementation PR must remain kodama-only, exact-fenced, and independently audited before owner exact-head handling."
