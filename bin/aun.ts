@@ -19,6 +19,7 @@
  *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
  *   - aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json
  *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
+ *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
  *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
@@ -36,7 +37,7 @@ import { codexRunnerTick } from './aun/codex-runner'
 import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
-import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2Plan } from './aun/runtime-v2'
+import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
 
 function printHelp(): void {
   const lines = [
@@ -59,6 +60,7 @@ function printHelp(): void {
     '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
     '  aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json',
     '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
+    '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
     '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
@@ -390,7 +392,15 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
       return res.code
     }
     if (extras[0] === 'claim') {
-      const res = await runtimeV2ClaimDryRun({
+      let claimTtlSeconds: number | undefined
+      if (flags['claim-ttl-seconds'] !== undefined) {
+        if (typeof flags['claim-ttl-seconds'] !== 'string') {
+          process.stderr.write('Error [AUN_RUNTIME_V2_INVALID]: --claim-ttl-seconds requires a value\n')
+          return 2
+        }
+        claimTtlSeconds = Number(flags['claim-ttl-seconds'])
+      }
+      const claimOpts = {
         mode: 'claim',
         format: flags.json ? 'json' : undefined,
         agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
@@ -398,7 +408,12 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
         messageId: typeof flags['message-id'] === 'string' ? (flags['message-id'] as string) : undefined,
         createdAfter: typeof flags['created-after'] === 'string' ? (flags['created-after'] as string) : undefined,
         dryRun: !!flags['dry-run'],
-      })
+        liveCanary: !!flags['live-canary'],
+        claimTtlSeconds,
+      } as const
+      const res = claimOpts.liveCanary
+        ? await runtimeV2ClaimLiveCanary(claimOpts)
+        : await runtimeV2ClaimDryRun(claimOpts)
       process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
       return res.code
     }
