@@ -1,21 +1,51 @@
 schema_version: "shirube-machine-evidence/v1"
 evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001"
 target_repo: "watchout/agent-comms-mcp"
-target_pr: 822
+target_pr: 823
 cell_id: "CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001"
 implementation_actor: "codex-implementation-bot"
-evidence_scope: "runtime_v2_live_kodama_canary_route_metadata"
+evidence_scope: "runtime_v2_live_kodama_canary_implementation"
 not_structured_audit: true
 owner_decision_required_before_merge: true
 handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml"
 audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml"
+changed_files:
+  - "bin/aun.ts"
+  - "bin/aun/runtime-v2.ts"
+  - "core/aun-runtime-v2-live-claim.ts"
+  - "tests/aun-runtime-v2-live-claim.test.ts"
+  - ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml"
+claims:
+  implementation_summary:
+    - "Adds aun runtime-v2 claim --live-canary --json as a kodama-only exact-fenced canary path."
+    - "Preserves the existing aun runtime-v2 claim --dry-run --json behavior."
+    - "Reuses read-only runtime-v2 planning before any live mutation."
+  protected_surface_boundary:
+    runtime_code_changed: true
+    database_mutation_code_changed: true
+    production_live_claim_executed: false
+    non_kodama_allowed: false
+    db_schema_or_migration_changed: false
+    state_daemon_changed: false
+    provider_delivery_changed: false
+    mcp_tool_behavior_changed: false
+    active_workflow_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    aun_activation: false
+  fail_closed_guards:
+    - "non-kodama agents reject before DB open"
+    - "missing --live-canary rejects before DB open in the live claim builder"
+    - "missing queue_id/message_id/created_after fence rejects before DB open"
+    - "non-claimable read-only plan result produces no mutation"
+    - "atomic update is bounded to exact queue_id, agent_id, message_id, created_after, and pending status"
 commands:
   - command: "git diff --check"
     result: "PASS"
   - command: "YAML parse for .shirube/**/*.yaml"
     result: "PASS: parsed 31 yaml files"
-  - command: "node scripts/shirube-current-overlay-check.mjs"
-    result: "PASS"
+  - command: "bun test tests/aun-runtime-v2-live-claim.test.ts tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts"
+    result: "PASS: 67 pass / 0 fail"
 validation_results:
   - "PASS"
 evidence_refs:
@@ -25,6 +55,6 @@ evidence_refs:
   - "validation_results"
   - "audit_checklist_report"
 notes:
-  - "This is route metadata evidence for the runtime-v2 kodama-only live canary implementation Cell."
-  - "It is not a structured audit and does not approve merge, remove draft, authorize owner decision, run live claim, mutate production DB, or activate AUN."
-  - "The future implementation PR must remain kodama-only, exact-fenced, and independently audited before owner exact-head handling."
+  - "This is implementation evidence for the runtime-v2 kodama-only live canary Cell."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, production live claim execution, or AUN activation."
+  - "The implementation PR must remain draft until independent audit and owner exact-head handling."

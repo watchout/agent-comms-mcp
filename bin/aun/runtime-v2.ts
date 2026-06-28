@@ -26,6 +26,12 @@ import {
   type AunRuntimeV2ClaimDryRunError,
 } from '../../core/aun-runtime-v2-claim-plan'
 import {
+  buildAunRuntimeV2LiveClaim,
+  validateAunRuntimeV2LiveClaimArgs,
+  type AunRuntimeV2LiveClaim,
+  type AunRuntimeV2LiveClaimError,
+} from '../../core/aun-runtime-v2-live-claim'
+import {
   buildCodexExecQueueWorkCommand,
   describeCodexExecFailure,
   repoRoot,
@@ -42,6 +48,7 @@ import {
 export interface RuntimeV2CliOptions extends AunRuntimeV2Options {
   mode?: 'execute' | 'plan' | 'claim'
   format?: 'json'
+  liveCanary?: boolean
 }
 
 export interface RuntimeV2CliResult {
@@ -64,6 +71,12 @@ export interface RuntimeV2ClaimDryRunCliResult {
   result: AunRuntimeV2ClaimDryRun | AunRuntimeV2ClaimDryRunError
 }
 
+export interface RuntimeV2ClaimLiveCanaryCliResult {
+  ok: boolean
+  code: number
+  result: AunRuntimeV2LiveClaim | AunRuntimeV2LiveClaimError
+}
+
 function parseArgs(argv: string[]): RuntimeV2CliOptions {
   const out: RuntimeV2CliOptions = {}
   for (let i = 2; i < argv.length; i++) {
@@ -79,6 +92,7 @@ function parseArgs(argv: string[]): RuntimeV2CliOptions {
     else if (tok === '--claim-ttl-seconds') out.claimTtlSeconds = Number(argv[++i])
     else if (tok === '--finalize') out.finalize = true
     else if (tok === '--dry-run') out.dryRun = true
+    else if (tok === '--live-canary') out.liveCanary = true
     else if (tok === '--json') out.format = 'json'
     else if (tok === '--format') out.format = argv[++i] as 'json'
   }
@@ -366,6 +380,18 @@ function createReadOnlyPlanDbAdapter(env: NodeJS.ProcessEnv): DbAdapter {
   return new SqliteAdapter(dbPath, { readonly: true, create: false })
 }
 
+function createLiveClaimDbAdapter(env: NodeJS.ProcessEnv): DbAdapter {
+  const dbType = env.AGENT_COM_DB || (env.DATABASE_URL ? 'postgres' : 'sqlite')
+  if (dbType === 'postgres' || dbType === 'postgresql') {
+    return new PgAdapter(env.DATABASE_URL)
+  }
+  const dbPath = env.AGENT_COM_SQLITE_PATH ?? './agent-com.db'
+  if (!existsSync(dbPath)) {
+    throw new Error(`sqlite database not found: ${dbPath}`)
+  }
+  return new SqliteAdapter(dbPath)
+}
+
 interface RuntimeV2DbUnreachableError {
   error: 'db_unreachable'
   message: string
@@ -502,6 +528,70 @@ export async function runtimeV2ClaimDryRun(
   }
 }
 
+export async function runtimeV2ClaimLiveCanary(
+  opts: RuntimeV2CliOptions = {},
+): Promise<RuntimeV2ClaimLiveCanaryCliResult> {
+  const env = opts.env ?? process.env
+  if (opts.format !== 'json') {
+    return {
+      ok: false,
+      code: 2,
+      result: {
+        error: 'invalid_arguments',
+        message: 'aun runtime-v2 claim --live-canary requires --json',
+      },
+    }
+  }
+
+  const args = validateAunRuntimeV2LiveClaimArgs({
+    agentId: opts.agentId,
+    queueId: opts.queueId,
+    messageId: opts.messageId,
+    createdAfter: opts.createdAfter,
+    env,
+    now: opts.now,
+    liveCanary: opts.liveCanary,
+    claimTtlSeconds: opts.claimTtlSeconds,
+  })
+  if (!args.ok) {
+    return { ok: false, code: 2, result: args.error }
+  }
+
+  let db: DbAdapter
+  try {
+    db = createLiveClaimDbAdapter(env)
+  } catch (err) {
+    return {
+      ok: false,
+      code: 1,
+      result: claimDbUnreachableError(err),
+    }
+  }
+
+  try {
+    const result = await buildAunRuntimeV2LiveClaim(toLegacyDb(db), {
+      agentId: opts.agentId,
+      queueId: opts.queueId,
+      messageId: opts.messageId,
+      createdAfter: opts.createdAfter,
+      env,
+      now: opts.now,
+      liveCanary: opts.liveCanary,
+      claimTtlSeconds: opts.claimTtlSeconds,
+    })
+    if ('error' in result) {
+      return {
+        ok: false,
+        code: result.error === 'db_unreachable' ? 1 : 2,
+        result,
+      }
+    }
+    return { ok: result.claim.claimed, code: result.claim.claimed ? 0 : 1, result }
+  } finally {
+    await db.close()
+  }
+}
+
 export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<RuntimeV2CliResult> {
   const env = opts.env ?? process.env
   const cwd = opts.cwd ?? repoRoot()
@@ -572,7 +662,9 @@ async function main(): Promise<void> {
     process.exit(result.code)
   }
   if (opts.mode === 'claim') {
-    const result = await runtimeV2ClaimDryRun(opts)
+    const result = opts.liveCanary
+      ? await runtimeV2ClaimLiveCanary(opts)
+      : await runtimeV2ClaimDryRun(opts)
     process.stdout.write(JSON.stringify(result.result, null, 2) + '\n')
     process.exit(result.code)
   }
