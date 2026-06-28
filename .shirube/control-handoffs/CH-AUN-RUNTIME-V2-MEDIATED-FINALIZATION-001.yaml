@@ -1,0 +1,148 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: independent_audit
+protected_surfaces:
+  - runtime code
+  - database
+  - GitHub writeback
+  - active workflows
+protected_surface_details:
+  - Runtime-v2 mediated finalization implementation route only.
+  - Future implementation may add structured result and terminal evidence validation, but this route metadata PR does not close queue work, post GitHub writeback, or mutate production DB.
+  - Report-only Rapid/Lite route metadata may be wired for this Cell; no required checks, branch protection, or rulesets.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this implementation Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+    - Audit checklist coverage for the mediated finalization implementation PR.
+  shirube_does_not_own:
+    - Production queue finalization execution without separate exact-head protected-surface authorization.
+    - Non-mediated GitHub writeback, provider delivery, state-daemon behavior, branch protection, rulesets, or AUN activation.
+cell:
+  CELL-ID: CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001
+  cell_type: implementation
+  risk_class: R3
+  goal: Add the smallest runtime-v2 mediated finalization contract after plan, claim dry-run, synthetic claim, and kodama-only live claim have merged.
+  governance_route: R3 protected finalization implementation with independent audit and owner exact-head authorization before ready or merge handling.
+  non_scope:
+    - production queue finalization execution during implementation
+    - fleet rollout
+    - policy allowlist expansion
+    - default enable
+    - DB schema or migration
+    - state-daemon behavior
+    - provider delivery
+    - MCP/tool behavior
+    - required check activation
+    - branch protection or ruleset mutation
+    - AUN activation
+  allowed_paths:
+    - bin/aun.ts
+    - bin/aun/runtime-v2.ts
+    - bin/aun/run-queue-work.ts
+    - core/aun-runtime-v2-finalization.ts
+    - core/queue-work.ts
+    - tests/aun-runtime-v2-finalization.test.ts
+    - tests/queue-work.test.ts
+    - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - runtime code
+      - database
+      - GitHub writeback
+      - active workflows
+    touched: true
+    details:
+      - Future implementation must validate result schema and terminal evidence before terminal close.
+      - Future implementation must enforce mediated GitHub writeback when handoff_contract.github_backed requires it.
+      - Future implementation tests must use isolated fixture DB or fakes only and must not execute production finalization.
+      - This route metadata PR only wires report-only routing; it does not execute finalization or writeback.
+  stop_conditions:
+    - implementation requires production queue finalization execution
+    - result schema cannot fail closed before terminal close
+    - GitHub-backed handoff can close without mediated writeback evidence
+    - DB schema or migration is required
+    - state-daemon, provider, MCP/tool behavior, or AUN activation is required
+    - independent audit fails
+implementation_boundary:
+  summary: Add runtime-v2 mediated finalization contract and fail-closed validation without production finalization execution.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - production queue finalization execution
+    - direct GitHub writeback bypass
+    - fleet rollout
+    - DB migration
+    - provider delivery
+    - state-daemon mutation
+    - AUN activation
+acceptance_criteria:
+  - Runtime-v2 finalization accepts only the structured queue-work result contract.
+  - Result contract mismatch fails closed and does not terminal-close work.
+  - Terminal close requires machine-readable terminal evidence compatible with #794 outcome semantics.
+  - GitHub-backed handoff cannot close without mediated writeback evidence when writeback is required.
+  - Non-GitHub-backed close remains possible with valid structured terminal evidence.
+  - Finalization is exact-fenced by queue_id and message_id.
+  - Tests use isolated fixture DB or fakes only and never production DB.
+  - Existing #788 queue-work runner and #823 live kodama canary behavior remain compatible.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun test tests/aun-runtime-v2-finalization.test.ts tests/aun-runtime-v2-live-claim.test.ts tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

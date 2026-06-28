@@ -1,0 +1,53 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: null
+cell_id: "CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "runtime_v2_mediated_finalization_implementation"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml"
+claims:
+  implementation_summary:
+    - "Future implementation adds runtime-v2 mediated finalization contract validation."
+    - "Future implementation validates terminal evidence before queue terminal close."
+    - "Future implementation enforces mediated GitHub writeback evidence when handoff_contract.github_backed requires it."
+  protected_surface_boundary:
+    runtime_code_changed: true
+    database_mutation_code_changed: true
+    production_finalization_executed: false
+    direct_github_writeback_bypass: false
+    db_schema_or_migration_changed: false
+    state_daemon_changed: false
+    provider_delivery_changed: false
+    mcp_tool_behavior_changed: false
+    active_workflow_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    aun_activation: false
+  fail_closed_guards:
+    - "malformed result contract rejects before terminal close"
+    - "missing terminal evidence rejects before terminal close"
+    - "GitHub-backed handoff requires mediated writeback result"
+    - "finalization is exact-fenced by queue_id and message_id"
+commands:
+  - command: "git diff --check"
+    result: "PENDING"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PENDING"
+  - command: "bun test tests/aun-runtime-v2-finalization.test.ts tests/aun-runtime-v2-live-claim.test.ts tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts"
+    result: "PENDING"
+validation_results:
+  - "PENDING"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This file is the machine-evidence template for the runtime-v2 mediated finalization implementation PR."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, production finalization execution, direct GitHub writeback bypass, or AUN activation."
+  - "The route metadata PR that introduces this file changes only report-only Shirube routing metadata."

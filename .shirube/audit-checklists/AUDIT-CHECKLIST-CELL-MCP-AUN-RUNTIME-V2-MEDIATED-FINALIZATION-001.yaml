@@ -1,0 +1,75 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml"
+  cell_id: "CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "codex-implementation-bot"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-001"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm runtime-v2 finalization accepts only the structured queue-work result contract."
+    expected_evidence:
+      - "core/aun-runtime-v2-finalization.ts"
+      - "queue_work_result_v1"
+      - "tests/aun-runtime-v2-finalization.test.ts"
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-002"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm malformed or mismatched result contracts fail closed before terminal queue close."
+    expected_evidence:
+      - "result_contract_invalid"
+      - "no terminal close"
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-003"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm terminal close requires machine-readable terminal evidence and typed outcome semantics."
+    expected_evidence:
+      - "terminal_evidence"
+      - "semantic_outcome"
+      - "outcome_reason"
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-004"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm GitHub-backed handoff cannot close without mediated writeback evidence when writeback is required."
+    expected_evidence:
+      - "required_writebacks"
+      - "writeback_result"
+      - "posted_with"
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-005"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm finalization is exact-fenced by queue_id and message_id."
+    expected_evidence:
+      - "queue_id"
+      - "message_id"
+      - "fence_required"
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-006"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm this PR does not execute production finalization, bypass mediated writeback, change DB schema, activate state-daemon/provider/MCP behavior, or activate AUN."
+    expected_evidence:
+      - "changed_files"
+      - "non_scope_confirmed"
+  - item_id: "AUDIT-AUN-MEDIATED-FINALIZATION-007"
+    source: "validation"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm required local validation passed."
+    expected_evidence:
+      - "git diff --check"
+      - "YAML parse for .shirube/**/*.yaml"
+      - "focused bun test command"
+notes:
+  - "Current gate-supported verification_method values are semantic and executable."
+  - "This checklist is for the future runtime-v2 mediated finalization implementation PR after the route metadata lands."
+  - "Owner exact-head decision and merge authorization remain separate."
+  - "This checklist does not approve ready, merge, production finalization execution, direct GitHub writeback bypass, or AUN activation."
