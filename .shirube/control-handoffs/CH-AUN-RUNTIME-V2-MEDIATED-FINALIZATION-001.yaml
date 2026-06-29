@@ -20,7 +20,6 @@ next_role: independent_audit
 protected_surfaces:
   - runtime code
   - database
-  - GitHub writeback
   - active workflows
 protected_surface_details:
   - Runtime-v2 mediated finalization implementation route only.
@@ -56,9 +55,11 @@ cell:
     - bin/aun.ts
     - bin/aun/runtime-v2.ts
     - bin/aun/run-queue-work.ts
+    - core/aun-runtime-v2.ts
     - core/aun-runtime-v2-finalization.ts
     - core/queue-work.ts
     - tests/aun-runtime-v2-finalization.test.ts
+    - tests/aun-runtime-v2.test.ts
     - tests/queue-work.test.ts
     - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml
     - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml
@@ -80,7 +81,6 @@ cell:
     declared:
       - runtime code
       - database
-      - GitHub writeback
       - active workflows
     touched: true
     details:

@@ -34,6 +34,7 @@ claims:
     - "GitHub-backed handoff requires mediated writeback result"
     - "finalization is exact-fenced by queue_id and message_id"
 changed_files:
+  - ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml"
   - "bin/aun/run-queue-work.ts"
   - "bin/aun/runtime-v2.ts"
   - "core/aun-runtime-v2.ts"
