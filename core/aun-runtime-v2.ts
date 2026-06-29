@@ -1,7 +1,9 @@
 import {
-  finalizeDoneQueueWork,
+  finalizeAunRuntimeV2MediatedQueueWork,
+  type AunRuntimeV2FinalizationResult,
+} from './aun-runtime-v2-finalization'
+import {
   runReceivedQueueWork,
-  type FinalizeDoneQueueWorkOptions,
   type LlmRuntimeAdapter,
   type QueueReplySender,
   type QueueWorkDb,
@@ -104,6 +106,7 @@ export type AunRuntimeV2Outcome =
       claimed: AunRuntimeV2Candidate
       runner: QueueWorkRunOutcome
       finalizer?: QueueWorkFinalizeOutcome
+      mediated_finalization?: AunRuntimeV2FinalizationResult
     }
   | {
       ok: false
@@ -114,6 +117,7 @@ export type AunRuntimeV2Outcome =
       claimed?: AunRuntimeV2Candidate | null
       runner?: QueueWorkRunOutcome
       finalizer?: QueueWorkFinalizeOutcome
+      mediated_finalization?: AunRuntimeV2FinalizationResult
       detail?: string
       status?: string
     }
@@ -181,6 +185,7 @@ function failure(input: {
   claimed?: AunRuntimeV2Candidate | null
   runner?: QueueWorkRunOutcome
   finalizer?: QueueWorkFinalizeOutcome
+  mediatedFinalization?: AunRuntimeV2FinalizationResult
   detail?: string
   status?: string
 }): AunRuntimeV2Outcome {
@@ -193,6 +198,7 @@ function failure(input: {
     claimed: input.claimed,
     runner: input.runner,
     finalizer: input.finalizer,
+    mediated_finalization: input.mediatedFinalization,
     detail: input.detail,
     status: input.status,
   }
@@ -617,15 +623,28 @@ export async function runAunRuntimeV2(
   }
 
   let finalizer: QueueWorkFinalizeOutcome | undefined
+  let mediatedFinalization: AunRuntimeV2FinalizationResult | undefined
   if (plan.finalize) {
-    const finalizeOpts: FinalizeDoneQueueWorkOptions = {
+    const mediated = await finalizeAunRuntimeV2MediatedQueueWork(db, {
       queueId: runner.queue_id,
+      messageId: plan.message_id,
       replySender: opts.replySender,
       writebackSender: opts.writebackSender,
       now: opts.now,
+    })
+    if ('error' in mediated) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'FINALIZER_FAILED',
+        claimed,
+        runner,
+        detail: mediated.message,
+      })
     }
-    finalizer = await finalizeDoneQueueWork(db, finalizeOpts)
-    if (!finalizer.ok) {
+    mediatedFinalization = mediated
+    finalizer = mediated.finalization.outcome ?? undefined
+    if (!mediated.finalization.finalized || !finalizer?.ok) {
       return failure({
         dryRun: false,
         plan,
@@ -633,8 +652,9 @@ export async function runAunRuntimeV2(
         claimed,
         runner,
         finalizer,
-        detail: finalizer.detail,
-        status: finalizer.status,
+        mediatedFinalization,
+        detail: finalizer?.detail ?? String(mediated.finalization.reason_code),
+        status: finalizer?.status,
       })
     }
   }
@@ -647,5 +667,6 @@ export async function runAunRuntimeV2(
     claimed,
     runner,
     finalizer,
+    mediated_finalization: mediatedFinalization,
   }
 }

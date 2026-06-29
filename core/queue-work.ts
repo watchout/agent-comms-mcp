@@ -182,7 +182,9 @@ export type QueueWorkFinalizeOutcome =
       code:
         | 'NO_DONE_ROW'
         | 'INVALID_STATE'
+        | 'MESSAGE_FENCE_MISMATCH'
         | 'MISSING_RUNNER_RESULT'
+        | 'TERMINAL_EVIDENCE_INVALID'
         | 'MISSING_REPLY'
         | 'MISSING_REPLY_SENDER'
         | 'MISSING_WRITEBACK'
@@ -197,8 +199,15 @@ export type QueueWorkFinalizeOutcome =
 
 export interface FinalizeDoneQueueWorkOptions {
   queueId: string | number
+  messageId?: string | null
   replySender?: QueueReplySender
   writebackSender?: QueueWorkWritebackSender
+  resultValidator?: (input: {
+    row: QueueWorkRow
+    payload: Record<string, any>
+    result: QueueWorkResult
+    handoffContract: QueueWorkHandoffContract
+  }) => { ok: true } | { ok: false; detail: string }
   now?: () => Date
 }
 
@@ -589,6 +598,16 @@ export async function finalizeDoneQueueWork(
         status: row.status,
       }
     }
+    if (opts.messageId !== undefined && opts.messageId !== null && String(row.message_id ?? '') !== String(opts.messageId)) {
+      await db.query('ROLLBACK')
+      committed = true
+      return {
+        ok: false,
+        code: 'MESSAGE_FENCE_MISMATCH',
+        queue_id: queueIdOf(row),
+        detail: `message_id=${row.message_id ?? 'null'} expected=${opts.messageId}`,
+      }
+    }
 
     const payload = parsePayload(row.payload)
     const result = payload.runner_result as QueueWorkResult | undefined
@@ -683,6 +702,16 @@ export async function finalizeDoneQueueWork(
       agentId: row.agent_id,
       payload: row.payload,
     })
+    const validation = opts.resultValidator?.({
+      row,
+      payload,
+      result,
+      handoffContract,
+    })
+    if (validation && !validation.ok) {
+      return failClosed('TERMINAL_EVIDENCE_INVALID', validation.detail)
+    }
+
     let writebackPostedWith: string | null = null
     let writebackBodySha256: string | null = null
     if (handoffContract.github_backed) {
