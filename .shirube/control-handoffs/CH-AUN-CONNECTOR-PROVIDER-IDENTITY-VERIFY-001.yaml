@@ -19,10 +19,11 @@ implementation_actor: codex-implementation-bot
 next_role: independent_audit
 protected_surfaces:
   - secrets
-  - provider_external_read
+  - active workflows
 protected_surface_details:
   - Provider identity verification implementation route only.
   - Adds a dry-run CLI verifier over existing connector credential evidence.
+  - Provider external-read planning is documented as implementation intent, not as a local protected-surface taxonomy value.
   - Does not authorize production provider API execution, raw token printing, credential mutation, channel access discovery, delivery behavior, or AUN activation.
   - No active workflows are changed beyond this report-only route table entry.
 rps_scope:
@@ -58,6 +59,7 @@ cell:
     - .shirube/control-handoffs/CH-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml
     - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml
     - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
   forbidden_paths:
     - server.ts
     - cli/**
@@ -74,7 +76,7 @@ cell:
   protected_surfaces:
     declared:
       - secrets
-      - provider_external_read
+      - active workflows
     touched: true
     details:
       - Implementation must require --dry-run and --json before opening DB or resolving provider evidence.
