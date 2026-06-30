@@ -22,6 +22,7 @@
  *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
  *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json
+ *   - aun connector verify-discord-identity --agent-id <id> --dry-run --json
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -39,7 +40,7 @@ import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
 import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
-import { connectorCredentialDiagnostic } from './aun/connector'
+import { connectorCredentialDiagnostic, connectorProviderIdentityVerify } from './aun/connector'
 
 function printHelp(): void {
   const lines = [
@@ -65,6 +66,7 @@ function printHelp(): void {
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
     '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json',
+    '  aun connector verify-discord-identity --agent-id <id> --dry-run --json',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -445,8 +447,17 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
   }
 
   if (subcommand === 'connector') {
+    if (extras[0] === 'verify-discord-identity') {
+      const res = await connectorProviderIdentityVerify({
+        format: flags.json ? 'json' : undefined,
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        dryRun: !!flags['dry-run'],
+      })
+      process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
+      return res.code
+    }
     if (extras[0] !== 'credential-diagnostic') {
-      process.stderr.write('Error [AUN_CONNECTOR_INVALID]: supported command is connector credential-diagnostic\n')
+      process.stderr.write('Error [AUN_CONNECTOR_INVALID]: supported commands are connector credential-diagnostic and connector verify-discord-identity\n')
       return 2
     }
     const res = await connectorCredentialDiagnostic({
