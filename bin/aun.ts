@@ -21,6 +21,7 @@
  *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
  *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
  *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
+ *   - aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -38,6 +39,7 @@ import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
 import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
+import { connectorCredentialDiagnostic } from './aun/connector'
 
 function printHelp(): void {
   const lines = [
@@ -62,6 +64,7 @@ function printHelp(): void {
     '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
     '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
+    '  aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -307,7 +310,8 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'record-no-reply' &&
     subcommand !== 'renew-claim' &&
     subcommand !== 'memory-ready-bootstrap' &&
-    subcommand !== 'runtime-v2'
+    subcommand !== 'runtime-v2' &&
+    subcommand !== 'connector'
   ) return run(argv)
 
   if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
@@ -438,6 +442,20 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     })
     process.stdout.write(JSON.stringify(res, null, 2) + '\n')
     return res.ok ? 0 : 1
+  }
+
+  if (subcommand === 'connector') {
+    if (extras[0] !== 'credential-diagnostic') {
+      process.stderr.write('Error [AUN_CONNECTOR_INVALID]: supported command is connector credential-diagnostic\n')
+      return 2
+    }
+    const res = await connectorCredentialDiagnostic({
+      format: flags.json ? 'json' : undefined,
+      agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+      provider: typeof flags.provider === 'string' ? (flags.provider as string) : undefined,
+    })
+    process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
+    return res.code
   }
 
   if (subcommand === 'reconcile') {
