@@ -1,0 +1,143 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: independent_audit
+protected_surfaces:
+  - secrets
+  - provider_external_read
+protected_surface_details:
+  - Provider identity verification implementation route only.
+  - Adds a dry-run CLI verifier over existing connector credential evidence.
+  - Does not authorize production provider API execution, raw token printing, credential mutation, channel access discovery, delivery behavior, or AUN activation.
+  - No active workflows are changed beyond this report-only route table entry.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this implementation Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+    - Audit checklist coverage for the provider identity verifier implementation PR.
+  shirube_does_not_own:
+    - Production provider API execution, raw token disclosure, credential mutation, channel access discovery, runtime activation, state-daemon behavior, branch protection, rulesets, or AUN activation.
+cell:
+  CELL-ID: CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001
+  cell_type: implementation
+  risk_class: R2
+  goal: Add the smallest dry-run provider identity verifier after connector credential diagnostic has merged.
+  governance_route: R2 protected connector verification implementation with independent audit and owner exact-head decision before ready or merge handling.
+  non_scope:
+    - DB schema or migration
+    - production provider API execution
+    - raw token printing or unredacted token evidence
+    - credential row creation or mutation
+    - channel access discovery
+    - routing or delivery behavior change
+    - MCP/tool behavior change
+    - state-daemon behavior change
+    - required check activation
+    - branch protection or ruleset mutation
+    - AUN activation or allowlist expansion
+  allowed_paths:
+    - bin/aun.ts
+    - bin/aun/connector.ts
+    - core/aun-connector-provider-identity-verify.ts
+    - tests/aun-connector-provider-identity-verify.test.ts
+    - .shirube/control-handoffs/CH-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - core/state-daemon/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - secrets
+      - provider_external_read
+    touched: true
+    details:
+      - Implementation must require --dry-run and --json before opening DB or resolving provider evidence.
+      - Implementation must not print raw-secret-like token material.
+      - "Implementation must return an explicit verification plan and applied_mutations: []."
+      - Tests must use fixtures or mocks and must not call a live provider.
+      - Live provider token verification remains a separate owner-authorized operation.
+  stop_conditions:
+    - live provider API execution is required for the implementation PR
+    - raw token access beyond redacted evidence is required
+    - credential creation, mutation, or migration is required
+    - channel access discovery is required
+    - state-daemon, MCP/tool, delivery, branch protection, ruleset, or AUN activation work is required
+    - independent audit fails
+implementation_boundary:
+  summary: Add a dry-run provider identity verification planner that reports exact provider identity verification intent without mutation or live provider execution in PR validation.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - live provider API execution
+    - raw token printing
+    - credential mutation
+    - channel access discovery
+    - DB migration
+    - state-daemon mutation
+    - AUN activation
+acceptance_criteria:
+  - CLI command is aun connector verify-discord-identity --agent-id <id> --dry-run --json.
+  - Output schema is aun-connector-provider-identity-verify/v1.
+  - Missing --dry-run or --json fails closed before DB open or provider evidence resolution.
+  - Unsupported provider identity targets fail closed before DB open.
+  - Verification plan is agent-id and provider scoped.
+  - Raw-secret-like refs are redacted and never printed.
+  - "Successful dry-run output includes applied_mutations: []."
+  - Tests prove no live provider call is made during local or CI validation.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - node --check scripts/shirube-current-overlay-check.mjs
+    - bun test tests/aun-connector-provider-identity-verify.test.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

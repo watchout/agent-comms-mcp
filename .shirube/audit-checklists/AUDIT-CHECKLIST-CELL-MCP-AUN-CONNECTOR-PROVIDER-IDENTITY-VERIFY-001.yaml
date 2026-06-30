@@ -1,0 +1,78 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml"
+  cell_id: "CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "codex-implementation-bot"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the PR adds only a dry-run provider identity verifier and does not mutate DB state."
+    expected_evidence:
+      - "core/aun-connector-provider-identity-verify.ts"
+      - "bin/aun/connector.ts"
+      - "tests/aun-connector-provider-identity-verify.test.ts"
+      - "applied_mutations: []"
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-002"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm missing --dry-run or --json fails closed before DB open or provider evidence resolution."
+    expected_evidence:
+      - "bin/aun/connector.ts"
+      - "tests/aun-connector-provider-identity-verify.test.ts"
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-003"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm raw-secret-like token material is never printed in verifier output."
+    expected_evidence:
+      - "redacted_secret_ref"
+      - "raw secret redaction test"
+      - "tests/aun-connector-provider-identity-verify.test.ts"
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-004"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the PR does not execute a live provider API call during local tests, CI, or implementation validation."
+    expected_evidence:
+      - "mock provider"
+      - "no live provider smoke"
+      - "tests/aun-connector-provider-identity-verify.test.ts"
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-005"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the dry-run plan is agent-id and provider scoped and fails closed for unsupported provider identity targets."
+    expected_evidence:
+      - "agent_id"
+      - "provider"
+      - "unsupported_provider"
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-006"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm no DB migration, credential mutation, channel access discovery, runtime activation, state-daemon, MCP/tool behavior, required check, ruleset, or AUN activation change is included."
+    expected_evidence:
+      - "changed_files"
+      - "non_scope_confirmed"
+      - ".shirube/control-handoffs/CH-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml"
+  - item_id: "AUDIT-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-007"
+    source: "validation"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm required local validation passed."
+    expected_evidence:
+      - "git diff --check"
+      - "YAML parse for .shirube/**/*.yaml"
+      - "node --check scripts/shirube-current-overlay-check.mjs"
+      - "focused bun test command"
+notes:
+  - "Current gate-supported verification_method values are semantic and executable."
+  - "This checklist is for the future provider identity verifier implementation PR after the route metadata lands."
+  - "Owner exact-head decision and merge handling remain separate."
+  - "This checklist does not authorize production provider API execution, channel access discovery, credential mutation, or AUN activation."
