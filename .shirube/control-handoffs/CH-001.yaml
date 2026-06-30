@@ -3,9 +3,9 @@ mode: rapid-lite
 profile: hotel-lite
 control_handoff_id: CH-001
 parent_ssot: watchout/agent-comms-mcp#802
-matrix_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+matrix_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
 matrix_location_in_framework: .shirube/gate-contracts/shirube-v3-rapid-lite-gate-contract-matrix.yaml
-framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
 repo_spec_ref: .shirube/repo-spec.yaml
 premise_ref: .shirube/repo-spec.yaml
 owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
