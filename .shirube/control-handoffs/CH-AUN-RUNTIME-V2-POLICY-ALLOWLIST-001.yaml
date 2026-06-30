@@ -1,0 +1,156 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001
+parent_ssot: watchout/agent-comms-mcp#792
+related_ssot:
+  - watchout/agent-comms-mcp#789
+  - watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/792
+source_handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/792#issuecomment-4736758746
+prior_conditional_cto_ref: https://github.com/watchout/agent-comms-mcp/pull/793#issuecomment-4736939047
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+execution_context:
+  active_function: implementation_executor
+next_role: independent_audit
+protected_surfaces:
+  - active workflows
+protected_surface_details:
+  - This route metadata PR wires report-only Rapid/Lite routing for the future #792 runtime-v2 policy allowlist implementation Cell.
+  - The future implementation Cell is an R3 runtime/database authorization boundary change.
+  - This route metadata PR does not change runtime code, package manifest, DB behavior, required checks, branch protection, or rulesets.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for the future implementation Cell.
+    - Exact-head evidence and owner decision requirements before future ready or merge handling.
+    - Audit checklist coverage for the policy allowlist implementation PR.
+  shirube_does_not_own:
+    - Live non-kodama runtime-v2 execution.
+    - Queue drain, cleanup, recovery, #774 retry, #780 resume, or stale row 121926 handling.
+    - Scheduler, LaunchAgent, GitHub puller, Discord recovery, fleet rollout, DB migration, provider delivery, state-daemon behavior, branch protection, rulesets, or AUN activation.
+cell:
+  CELL-ID: CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001
+  cell_type: route_metadata_for_future_implementation
+  risk_class: R3
+  goal: Add report-only Shirube route metadata for the future runtime-v2 policy allowlist implementation.
+  governance_route: R3 route metadata for a future protected runtime authorization boundary implementation.
+  non_scope:
+    - runtime code changes
+    - package manifest changes
+    - live non-kodama runtime-v2 execution
+    - production queue consumption by non-kodama agents
+    - all-bot runtime activation
+    - scheduler, LaunchAgent, GitHub puller, or Discord recovery behavior
+    - queue drain, cleanup, recovery, #774 retry, #780 resume, or stale row 121926 handling
+    - DB schema or migration
+    - state-daemon behavior
+    - provider delivery
+    - MCP/tool behavior
+    - required check activation
+    - branch protection or ruleset mutation
+    - AUN activation
+  allowed_paths:
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+    - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml
+  forbidden_paths:
+    - bin/**
+    - core/**
+    - config/**
+    - docs/spec/aun-runtime-v2-policy.md
+    - tests/**
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - active workflows
+    touched: true
+    details:
+      - Workflow change is limited to report-only route table wiring.
+      - The future implementation must keep non-kodama agents dry-run only.
+      - The future implementation must reject unknown, excluded, and non-kodama live attempts before DB access.
+      - The future implementation must not widen policy through environment variables or imported options.
+  stop_conditions:
+    - this PR requires runtime code or package manifest changes
+    - this PR requires live non-kodama execution
+    - this PR requires queue drain, cleanup, recovery, #774 retry, #780 resume, or stale row 121926 handling
+    - DB schema or migration is required
+    - state-daemon, provider, MCP/tool behavior, or AUN activation is required
+    - independent audit fails
+implementation_boundary:
+  summary: Route metadata only for the future policy-controlled runtime-v2 allowlist Cell.
+  expected_pr_count: 2
+  sequence:
+    - route_metadata_pr
+    - implementation_pr_after_route_metadata_lands
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - runtime code change
+    - package manifest change
+    - live non-kodama runtime execution
+    - production queue consumption by non-kodama agents
+    - queue drain or cleanup
+    - recovery of #774, #780, or stale row 121926
+    - fleet rollout
+    - DB migration
+    - provider delivery
+    - state-daemon mutation
+    - AUN activation
+acceptance_criteria:
+  - Report-only Rapid/Lite route table maps CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001 to this handoff, audit checklist, and evidence file.
+  - Handoff captures #792 policy allowlist scope and non-scope for the future implementation PR.
+  - Audit checklist covers deterministic policy, no env or option widening, dry-run-only non-kodama behavior, before-DB rejection, and no activation.
+  - This route metadata PR changes only the allowed metadata and report-only workflow route table files.
+  - No runtime code, package manifest, DB schema, provider, state-daemon, MCP/tool, required check, branch protection, ruleset, or AUN activation change is included.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - node --check scripts/shirube-current-overlay-check.mjs
+    - bash scripts/detect-breaking-changes.sh origin/main
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

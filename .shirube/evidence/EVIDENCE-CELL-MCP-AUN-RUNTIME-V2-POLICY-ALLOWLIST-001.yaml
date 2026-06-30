@@ -1,0 +1,69 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 831
+cell_id: "CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "runtime_v2_policy_allowlist_route_metadata"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
+changed_files:
+  - ".github/workflows/shirube-rapid-lite-gates-report.yml"
+  - ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
+  - ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
+  - ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
+claims:
+  route_metadata_summary:
+    - "Adds report-only Rapid/Lite route table entry for CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001."
+    - "Adds handoff, audit checklist, and machine evidence refs for the future #792 implementation PR."
+    - "Documents that future runtime-v2 policy allowlist implementation remains R3 and requires independent audit plus owner exact-head handling."
+  protected_surface_boundary:
+    runtime_code_changed: false
+    database_authorization_boundary_changed: false
+    package_manifest_changed: false
+    active_workflow_changed: true
+    workflow_change_scope: "report-only route table entry"
+    live_non_kodama_runtime_enabled: false
+    production_queue_consumption_by_non_kodama: false
+    queue_cleanup_or_recovery_changed: false
+    db_schema_or_migration_changed: false
+    scheduler_or_launchagent_changed: false
+    github_puller_changed: false
+    discord_recovery_changed: false
+    fleet_rollout_changed: false
+    state_daemon_changed: false
+    provider_delivery_changed: false
+    mcp_tool_behavior_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    aun_activation: false
+  future_implementation_guards:
+    - "future policy source must be deterministic and checked in"
+    - "unknown agents must reject before DB access"
+    - "l2auditor and devauditor remain excluded unless separately approved"
+    - "environment variables must not widen policy"
+    - "imported options must not widen policy"
+    - "policy-listed non-kodama live/non-dry-run attempts must reject before DB access"
+    - "live_agent_ids must contain kodama only"
+commands:
+  - command: "git diff --check origin/main...HEAD"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS: parsed 43 yaml files"
+  - command: "node --check scripts/shirube-current-overlay-check.mjs"
+    result: "PASS"
+  - command: "bash scripts/detect-breaking-changes.sh origin/main"
+    result: "PASS: no breaking change patterns detected"
+validation_results:
+  - "PASS"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This is route metadata evidence for the future runtime-v2 policy allowlist Cell."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, runtime implementation, live non-kodama runtime, production activation, fleet rollout, queue cleanup, or AUN activation."
