@@ -178,7 +178,11 @@ class EchoRuntimeAdapter implements LlmRuntimeAdapter {
       reply: envelope.reply_contract.required
         ? `Processed queue_id=${envelope.queue_id}\n\n${envelope.content}`
         : null,
-      evidence: [],
+      evidence: [
+        `semantic_outcome=${envelope.reply_contract.required ? 'reply' : 'close'}`,
+        'outcome_reason=runtime_v2_echo_completed',
+        `queue_id=${envelope.queue_id}`,
+      ],
       next_action: envelope.reply_contract.required ? 'reply' : 'close',
     }
   }

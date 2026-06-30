@@ -189,6 +189,7 @@ function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
     'Do not call next, inbox, processing, done, send, repair commands, tmux, or Discord.',
     'Do not post to GitHub directly.',
     'Do not inspect unrelated queue rows.',
+    'For terminal completion, evidence must include machine-readable entries semantic_outcome=<reply|handoff|no_reply|close|fail> and outcome_reason=<stable_reason>.',
     'If handoff_contract.github_backed is true, include writeback.mode="github_issue_comment" with repo, issue_number, body, and evidence. The trusted wrapper will post it.',
     'If handoff_contract.github_backed is false, omit writeback or set it to null.',
     'If reply_contract.required is false, use next_action "close" and omit reply.',

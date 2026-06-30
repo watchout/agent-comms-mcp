@@ -150,7 +150,11 @@ function closeResult(overrides: Partial<QueueWorkResult> = {}): QueueWorkResult 
     ok: true,
     summary: 'runtime v2 canary complete',
     reply: null,
-    evidence: ['fake-runtime'],
+    evidence: [
+      'semantic_outcome=close',
+      'outcome_reason=runtime_v2_canary_complete',
+      'fake-runtime',
+    ],
     next_action: 'close',
     ...overrides,
   }
