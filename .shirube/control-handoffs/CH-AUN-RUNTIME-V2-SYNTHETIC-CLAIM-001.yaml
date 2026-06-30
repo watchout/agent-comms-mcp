@@ -3,7 +3,7 @@ mode: rapid-lite
 profile: hotel-lite
 control_handoff_id: CH-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001
 parent_ssot: watchout/agent-comms-mcp#794
-framework_ref: watchout/ai-dev-framework@465db4863eb1fb5e248df74d46b29889da06cfc4
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
 repo_spec_ref: .shirube/repo-spec.yaml
 premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
 owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
