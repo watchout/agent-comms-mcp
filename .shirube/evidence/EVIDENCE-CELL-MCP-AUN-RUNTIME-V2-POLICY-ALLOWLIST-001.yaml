@@ -80,7 +80,22 @@ commands:
   - command: "CLI dry-run and fail-closed probes"
     result: "PASS: arc dry-run policy accepted with NO_PENDING_ROW/no mutation; arc live rejected before DB; l2auditor/devauditor/unknown plan rejected before DB; l2auditor/devauditor/unknown claim dry-run rejected before DB"
   - command: "bash scripts/detect-breaking-changes.sh origin/main"
-    result: "PASS: no breaking change patterns detected"
+    result: "DETECTED_AND_VERIFIED: Function signature changed; affected call sites are limited to runtime-v2 plan/claim/live-claim/CLI/tests and were verified by focused and adjacent tests"
+breaking_change_verification:
+  detection_result: "Function signature changed"
+  verification_status: "VERIFIED"
+  label_required_for_layer0: "breaking-change-verified"
+  affected_call_sites:
+    - "bin/aun/runtime-v2.ts"
+    - "core/aun-runtime-v2-claim-plan.ts"
+    - "core/aun-runtime-v2-live-claim.ts"
+    - "tests/aun-runtime-v2-claim-plan.test.ts"
+    - "tests/aun-runtime-v2-plan.test.ts"
+  verification_commands:
+    - "rg validateAunRuntimeV2ReadOnlyPlanArgs buildAunRuntimeV2ReadOnlyPlan AunRuntimeV2ReadOnlyPlan AunRuntimeV2ClaimDryRun validateAunRuntimeV2ClaimDryRunArgs buildAunRuntimeV2ClaimDryRun aunRuntimeV2PolicyMetadata"
+    - "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts"
+    - "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2.test.ts tests/queue-work.test.ts"
+    - "bun test tests/aun-runtime-v2-finalization.test.ts tests/aun-runtime-v2-live-claim.test.ts tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts"
 validation_results:
   - "PASS"
 evidence_refs:

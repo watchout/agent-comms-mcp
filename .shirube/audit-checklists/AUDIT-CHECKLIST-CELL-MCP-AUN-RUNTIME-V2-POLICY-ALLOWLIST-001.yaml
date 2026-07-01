@@ -81,6 +81,7 @@ items:
       - "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2.test.ts tests/queue-work.test.ts"
       - "CLI fail-closed probes"
       - "bash scripts/detect-breaking-changes.sh origin/main"
+      - "breaking_change_verification"
 notes:
   - "Current gate-supported verification_method values are semantic and executable."
   - "Owner exact-head decision and merge authorization remain separate."
