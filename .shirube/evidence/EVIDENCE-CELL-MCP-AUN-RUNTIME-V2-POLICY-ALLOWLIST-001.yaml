@@ -1,7 +1,7 @@
 schema_version: "shirube-machine-evidence/v1"
 evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
 target_repo: "watchout/agent-comms-mcp"
-target_pr: null
+target_pr: 832
 cell_id: "CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
 implementation_actor: "codex-implementation-bot"
 evidence_scope: "runtime_v2_policy_allowlist_implementation"
@@ -82,4 +82,4 @@ evidence_refs:
 notes:
   - "This is implementation evidence for the runtime-v2 policy allowlist Cell."
   - "It is not a structured audit and does not approve ready, merge, owner decision, live non-kodama runtime, production activation, fleet rollout, queue cleanup, or AUN activation."
-  - "target_pr must be finalized after PR creation."
+  - "target_pr was finalized after draft PR creation."
