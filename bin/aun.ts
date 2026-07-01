@@ -20,7 +20,7 @@
  *   - aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json
  *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
  *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
- *   - aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
+ *   - aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
  *   - aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json
  *   - aun connector verify-discord-identity --agent-id <id> --dry-run --json
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
@@ -64,7 +64,7 @@ function printHelp(): void {
     '  aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json',
     '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
-    '  aun runtime-v2 --agent-id kodama [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
+    '  aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json',
     '  aun connector verify-discord-identity --agent-id <id> --dry-run --json',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',

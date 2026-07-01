@@ -140,6 +140,11 @@ describe('AUN runtime-v2 claim dry-run planner', () => {
     expect(result).toMatchObject({
       schema_version: 'aun-runtime-v2-claim-dryrun/v1',
       agent_id: 'kodama',
+      policy_id: 'aun-runtime-v2-pr-a-allowlist',
+      policy_version: '2026-06-18.pr-a',
+      policy_source: 'watchout/agent-comms-mcp#792',
+      policy_agent_mode: 'live',
+      live_agent_ids: ['kodama'],
       target: {
         queue_id: '1001',
         message_id: 'msg-kodama-1',
@@ -171,6 +176,8 @@ describe('AUN runtime-v2 claim dry-run planner', () => {
         applied_mutations: [],
       },
     })
+    expect(result.allowed_agent_ids).toContain('arc')
+    expect(result.allowed_agent_ids).not.toContain('l2auditor')
   })
 
   test('emits non-claimable reason codes without mutation', async () => {
@@ -278,6 +285,33 @@ describe('AUN runtime-v2 claim dry-run planner', () => {
     expect(db.calls).toEqual([])
   })
 
+  test('rejects excluded and unknown agents before DB access', async () => {
+    for (const agentId of ['l2auditor', 'devauditor', 'unknown-agent']) {
+      const db = new FakeRuntimeV2ClaimPlanDb([queueRow({ agent_id: agentId })])
+      const result = await buildAunRuntimeV2ClaimDryRun(db, {
+        agentId,
+        queueId: '1001',
+        messageId: `msg-${agentId}-1`,
+        createdAfter: '2026-06-18T23:00:00.000Z',
+        env: {
+          AUN_RUNTIME_V2_ALLOWED_AGENT_ID: agentId,
+          AUN_RUNTIME_V2_ALLOWED_AGENT_IDS: agentId,
+        } as NodeJS.ProcessEnv,
+        dryRun: true,
+      })
+
+      expect(result, agentId).toMatchObject({
+        error: 'target_agent_not_allowed',
+        policy_id: 'aun-runtime-v2-pr-a-allowlist',
+        policy_agent_mode: 'not_allowed',
+        live_agent_ids: ['kodama'],
+      })
+      if (!('error' in result)) throw new Error(`${agentId} unexpectedly produced a claim plan`)
+      expect(result.allowed_agent_ids).not.toContain(agentId)
+      expect(db.calls).toEqual([])
+    }
+  })
+
   test('CLI emits claim dry-run JSON against sqlite fixture without mutating rows', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aun-runtime-v2-claim-plan-cli-'))
     const dbPath = join(dir, 'fixture.sqlite')
@@ -350,6 +384,11 @@ describe('AUN runtime-v2 claim dry-run planner', () => {
       expect(parsed).toMatchObject({
         schema_version: 'aun-runtime-v2-claim-dryrun/v1',
         agent_id: 'kodama',
+        policy_id: 'aun-runtime-v2-pr-a-allowlist',
+        policy_version: '2026-06-18.pr-a',
+        policy_source: 'watchout/agent-comms-mcp#792',
+        policy_agent_mode: 'live',
+        live_agent_ids: ['kodama'],
         claim_plan: {
           claimable: true,
           planned_operation: 'claim',
@@ -399,6 +438,52 @@ describe('AUN runtime-v2 claim dry-run planner', () => {
       expect(JSON.parse(result.stdout)).toMatchObject({
         error: 'live_claim_not_authorized_in_this_cell',
       })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CLI rejects excluded and unknown agents before opening a missing database', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-runtime-v2-claim-plan-policy-no-db-'))
+    try {
+      for (const agentId of ['l2auditor', 'devauditor', 'unknown-agent']) {
+        const result = spawnSync('bun', [
+          'run',
+          AUN_CLI,
+          'runtime-v2',
+          'claim',
+          '--agent-id',
+          agentId,
+          '--queue-id',
+          '1001',
+          '--message-id',
+          `msg-${agentId}-1`,
+          '--created-after',
+          '2026-06-18T23:00:00.000Z',
+          '--dry-run',
+          '--json',
+        ], {
+          encoding: 'utf-8',
+          env: {
+            ...process.env,
+            AGENT_COM_DB: 'sqlite',
+            AGENT_COM_SQLITE_PATH: join(dir, `${agentId}.missing.sqlite`),
+            DATABASE_URL: '',
+            AUN_RUNTIME_V2_ALLOWED_AGENT_ID: agentId,
+            AUN_RUNTIME_V2_ALLOWED_AGENT_IDS: agentId,
+          },
+          timeout: 20_000,
+        })
+
+        expect(result.status, agentId).toBe(2)
+        expect(result.stderr, agentId).toBe('')
+        expect(JSON.parse(result.stdout), agentId).toMatchObject({
+          error: 'target_agent_not_allowed',
+          policy_id: 'aun-runtime-v2-pr-a-allowlist',
+          policy_agent_mode: 'not_allowed',
+          live_agent_ids: ['kodama'],
+        })
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

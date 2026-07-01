@@ -12,9 +12,28 @@ import {
   type QueueWorkRunOutcome,
   type QueueWorkWritebackSender,
 } from './queue-work'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const AUN_RUNTIME_V2_CLAIM_SOURCE = 'aun-runtime-v2' as const
 export const AUN_RUNTIME_V2_DEFAULT_AGENT_ID = 'kodama' as const
+export const AUN_RUNTIME_V2_POLICY_SOURCE = 'config/aun-runtime-v2-policy.json' as const
+
+export interface AunRuntimeV2PolicyAgent {
+  agent_id: string
+  dry_run_allowed: boolean
+  live_allowed: boolean
+  notes?: string
+}
+
+export interface AunRuntimeV2Policy {
+  schema_version: 'aun_runtime_v2_policy_v1'
+  policy_id: string
+  policy_version: string
+  source: string
+  agents: AunRuntimeV2PolicyAgent[]
+}
 
 export interface AunRuntimeV2Options {
   agentId?: string | null
@@ -41,6 +60,12 @@ export interface AunRuntimeV2Plan {
   repoRoot: string | null
   agent_id: string | null
   allowed_agent_id: string
+  policy_id: string
+  policy_version: string
+  policy_source: string
+  policy_agent_mode: 'live' | 'dry_run' | 'not_allowed'
+  allowed_agent_ids: string[]
+  live_agent_ids: string[]
   queue_id: string | null
   message_id: string | null
   created_after: string | null
@@ -68,6 +93,7 @@ export interface AunRuntimeV2Candidate {
 export type AunRuntimeV2FailureCode =
   | 'AGENT_ID_REQUIRED'
   | 'TARGET_AGENT_NOT_ALLOWED'
+  | 'TARGET_AGENT_NOT_LIVE_CAPABLE'
   | 'INVALID_CREATED_AFTER'
   | 'INVALID_CLAIM_TTL'
   | 'ADAPTER_REQUIRED'
@@ -146,6 +172,73 @@ function rowCount(result: { rows: unknown[]; rowCount?: number | null }): number
   return result.rowCount ?? result.rows.length
 }
 
+function policyPath(): string {
+  return join(dirname(dirname(fileURLToPath(import.meta.url))), AUN_RUNTIME_V2_POLICY_SOURCE)
+}
+
+function assertStringArray(items: unknown, field: string): string[] {
+  if (
+    !Array.isArray(items) ||
+    items.length === 0 ||
+    items.some((item) => typeof item !== 'string' || item.trim().length === 0)
+  ) {
+    throw new Error(`${field} must be a non-empty string array`)
+  }
+  return items.map((item) => item.trim())
+}
+
+let cachedRuntimeV2Policy: AunRuntimeV2Policy | null = null
+
+export function loadAunRuntimeV2Policy(): AunRuntimeV2Policy {
+  if (cachedRuntimeV2Policy) return cachedRuntimeV2Policy
+  const parsed = JSON.parse(readFileSync(policyPath(), 'utf8')) as Record<string, unknown>
+  const policyId = cleanString(parsed.policy_id)
+  const policyVersion = cleanString(parsed.policy_version)
+  const source = cleanString(parsed.source)
+  const allowedAgentIds = assertStringArray(parsed.allowed_agent_ids, 'allowed_agent_ids')
+  const liveAgentIds = assertStringArray(parsed.live_agent_ids, 'live_agent_ids')
+  const liveSet = new Set(liveAgentIds)
+  const unknownLiveAgents = liveAgentIds.filter((agentId) => !allowedAgentIds.includes(agentId))
+  if (parsed.schema_version !== 'aun_runtime_v2_policy_v1') {
+    throw new Error('aun-runtime-v2 policy schema_version must be aun_runtime_v2_policy_v1')
+  }
+  if (!policyId) throw new Error('aun-runtime-v2 policy_id is required')
+  if (!policyVersion) throw new Error('aun-runtime-v2 policy_version is required')
+  if (!source) throw new Error('aun-runtime-v2 policy source is required')
+  if (unknownLiveAgents.length > 0) {
+    throw new Error(`live_agent_ids must be a subset of allowed_agent_ids: ${unknownLiveAgents.join(', ')}`)
+  }
+  cachedRuntimeV2Policy = {
+    schema_version: 'aun_runtime_v2_policy_v1',
+    policy_id: policyId,
+    policy_version: policyVersion,
+    source,
+    agents: allowedAgentIds.map((agentId) => ({
+      agent_id: agentId,
+      dry_run_allowed: true,
+      live_allowed: liveSet.has(agentId),
+    })),
+  }
+  return cachedRuntimeV2Policy
+}
+
+function policyAgent(policy: AunRuntimeV2Policy, agentId: string | null): AunRuntimeV2PolicyAgent | null {
+  if (!agentId) return null
+  return policy.agents.find((agent) => agent.agent_id === agentId) ?? null
+}
+
+function allowedAgentIds(policy: AunRuntimeV2Policy): string[] {
+  return policy.agents
+    .filter((agent) => agent.dry_run_allowed)
+    .map((agent) => agent.agent_id)
+}
+
+function liveAgentIds(policy: AunRuntimeV2Policy): string[] {
+  return policy.agents
+    .filter((agent) => agent.live_allowed)
+    .map((agent) => agent.agent_id)
+}
+
 function parsePayload(raw: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(raw)
@@ -206,6 +299,7 @@ function failure(input: {
 
 export function buildAunRuntimeV2Plan(opts: AunRuntimeV2Options = {}): AunRuntimeV2Plan {
   const env = opts.env ?? process.env
+  const policy = loadAunRuntimeV2Policy()
   const claimSource = cleanString(opts.claimSource)
     ?? cleanString(env.AUN_RUNTIME_V2_CLAIM_SOURCE)
     ?? AUN_RUNTIME_V2_CLAIM_SOURCE
@@ -217,11 +311,23 @@ export function buildAunRuntimeV2Plan(opts: AunRuntimeV2Options = {}): AunRuntim
   const finalize = opts.finalize
     ?? truthy(env.AUN_RUNTIME_V2_FINALIZE ?? env.STATE_DAEMON_QUEUE_WORK_FINALIZE)
   const ttl = positiveInteger(opts.claimTtlSeconds ?? env.AUN_RUNTIME_V2_CLAIM_TTL_SECONDS ?? env.AGENT_COMMS_CLAIM_TTL_SEC, 30)
+  const agentId = cleanString(opts.agentId) ?? cleanString(env.AGENT_ID)
+  const targetPolicyAgent = policyAgent(policy, agentId)
 
   return {
     repoRoot: opts.cwd ?? null,
-    agent_id: cleanString(opts.agentId) ?? cleanString(env.AGENT_ID),
+    agent_id: agentId,
     allowed_agent_id: AUN_RUNTIME_V2_DEFAULT_AGENT_ID,
+    policy_id: policy.policy_id,
+    policy_version: policy.policy_version,
+    policy_source: policy.source,
+    policy_agent_mode: targetPolicyAgent
+      ? targetPolicyAgent.live_allowed
+        ? 'live'
+        : 'dry_run'
+      : 'not_allowed',
+    allowed_agent_ids: allowedAgentIds(policy),
+    live_agent_ids: liveAgentIds(policy),
     queue_id: queueIdString(opts.queueId),
     message_id: cleanString(opts.messageId),
     created_after: cleanString(opts.createdAfter),
@@ -241,11 +347,11 @@ export function validateAunRuntimeV2Plan(plan: AunRuntimeV2Plan): { ok: true } |
   detail?: string
 } {
   if (!plan.agent_id) return { ok: false, code: 'AGENT_ID_REQUIRED' }
-  if (plan.agent_id !== plan.allowed_agent_id) {
+  if (!plan.allowed_agent_ids.includes(plan.agent_id)) {
     return {
       ok: false,
       code: 'TARGET_AGENT_NOT_ALLOWED',
-      detail: `agent_id=${plan.agent_id} allowed_agent_id=${plan.allowed_agent_id}`,
+      detail: `agent_id=${plan.agent_id} policy_id=${plan.policy_id} policy_version=${plan.policy_version}`,
     }
   }
   if (!Number.isInteger(plan.claim_ttl_seconds) || plan.claim_ttl_seconds <= 0) {
@@ -265,6 +371,19 @@ export function validateAunRuntimeV2Plan(plan: AunRuntimeV2Plan): { ok: true } |
   return { ok: true }
 }
 
+export function validateAunRuntimeV2LiveCapability(plan: AunRuntimeV2Plan): { ok: true } | {
+  ok: false
+  code: AunRuntimeV2FailureCode
+  detail: string
+} {
+  if (plan.agent_id && plan.live_agent_ids.includes(plan.agent_id)) return { ok: true }
+  return {
+    ok: false,
+    code: 'TARGET_AGENT_NOT_LIVE_CAPABLE',
+    detail: `agent_id=${plan.agent_id ?? 'null'} is dry-run only under policy_id=${plan.policy_id} policy_version=${plan.policy_version}`,
+  }
+}
+
 export function validateAunRuntimeV2ExecutionFence(plan: AunRuntimeV2Plan): { ok: true } | {
   ok: false
   code: AunRuntimeV2FailureCode
@@ -276,6 +395,30 @@ export function validateAunRuntimeV2ExecutionFence(plan: AunRuntimeV2Plan): { ok
     code: 'EXACT_FENCE_REQUIRED',
     detail: 'non-dry-run runtime-v2 requires queue_id, message_id, and created_after',
   }
+}
+
+function nonDryRunPreDbFailure(plan: AunRuntimeV2Plan): AunRuntimeV2Outcome | null {
+  const validFence = validateAunRuntimeV2ExecutionFence(plan)
+  if (!validFence.ok) {
+    return failure({
+      dryRun: false,
+      plan,
+      code: validFence.code,
+      detail: validFence.detail,
+    })
+  }
+
+  const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
+  if (!validLiveAgent.ok) {
+    return failure({
+      dryRun: false,
+      plan,
+      code: validLiveAgent.code,
+      detail: validLiveAgent.detail,
+    })
+  }
+
+  return null
 }
 
 async function selectPendingCandidate(
@@ -356,15 +499,6 @@ function validateCandidate(
       code: 'TARGET_QUEUE_AGENT_MISMATCH',
       candidate,
       detail: `queue agent_id=${candidate.agent_id} requested agent_id=${plan.agent_id}`,
-      status: candidate.status,
-    }
-  }
-  if (candidate.agent_id !== plan.allowed_agent_id) {
-    return {
-      ok: false,
-      code: 'TARGET_AGENT_NOT_ALLOWED',
-      candidate,
-      detail: `queue agent_id=${candidate.agent_id} allowed_agent_id=${plan.allowed_agent_id}`,
       status: candidate.status,
     }
   }
@@ -487,15 +621,8 @@ export async function claimPendingQueueForAunRuntimeV2(
       detail: validPlan.detail,
     })
   }
-  const validFence = validateAunRuntimeV2ExecutionFence(plan)
-  if (!validFence.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: validFence.code,
-      detail: validFence.detail,
-    })
-  }
+  const preDbFailure = nonDryRunPreDbFailure(plan)
+  if (preDbFailure) return preDbFailure
 
   const claimedAt = opts.now?.() ?? new Date()
   const claimExpiresAt = new Date(claimedAt.getTime() + plan.claim_ttl_seconds * 1000)
@@ -579,15 +706,8 @@ export async function runAunRuntimeV2(
 
   if (opts.dryRun) return inspectAunRuntimeV2Candidate(db, opts)
 
-  const validFence = validateAunRuntimeV2ExecutionFence(plan)
-  if (!validFence.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: validFence.code,
-      detail: validFence.detail,
-    })
-  }
+  const preDbFailure = nonDryRunPreDbFailure(plan)
+  if (preDbFailure) return preDbFailure
 
   if (!opts.adapter) {
     return failure({

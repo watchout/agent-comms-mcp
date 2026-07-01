@@ -1,30 +1,42 @@
 schema_version: "shirube-machine-evidence/v1"
 evidence_id: "EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
 target_repo: "watchout/agent-comms-mcp"
-target_pr: 831
+target_pr: 832
 cell_id: "CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
 implementation_actor: "codex-implementation-bot"
-evidence_scope: "runtime_v2_policy_allowlist_route_metadata"
+evidence_scope: "runtime_v2_policy_allowlist_implementation"
 not_structured_audit: true
 owner_decision_required_before_merge: true
 handoff_ref: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
 audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
 changed_files:
-  - ".github/workflows/shirube-rapid-lite-gates-report.yml"
   - ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
   - ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
   - ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
+  - "bin/aun.ts"
+  - "bin/aun/runtime-v2.ts"
+  - "config/aun-runtime-v2-policy.json"
+  - "core/aun-runtime-v2-claim-plan.ts"
+  - "core/aun-runtime-v2-plan.ts"
+  - "core/aun-runtime-v2.ts"
+  - "docs/spec/aun-runtime-v2-policy.md"
+  - "package.json"
+  - "tests/aun-runtime-v2-claim-plan.test.ts"
+  - "tests/aun-runtime-v2-plan.test.ts"
+  - "tests/aun-runtime-v2.test.ts"
 claims:
-  route_metadata_summary:
-    - "Adds report-only Rapid/Lite route table entry for CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001."
-    - "Adds handoff, audit checklist, and machine evidence refs for the future #792 implementation PR."
-    - "Documents that future runtime-v2 policy allowlist implementation remains R3 and requires independent audit plus owner exact-head handling."
+  implementation_summary:
+    - "Adds a deterministic checked-in runtime-v2 policy allowlist."
+    - "Adds policy identity/version/source fields to runtime-v2 plan output."
+    - "Extends policy metadata and before-DB rejection to public plan and claim dry-run surfaces."
+    - "Allows non-kodama policy agents to dry-run only."
+    - "Keeps live/non-dry-run runtime-v2 execution kodama-only."
   protected_surface_boundary:
-    runtime_code_changed: false
-    database_authorization_boundary_changed: false
-    package_manifest_changed: false
-    active_workflow_changed: true
-    workflow_change_scope: "report-only route table entry"
+    runtime_code_changed: true
+    database_authorization_boundary_changed: true
+    package_manifest_changed: true
+    active_workflow_changed: false
+    workflow_change_scope: "none"
     live_non_kodama_runtime_enabled: false
     production_queue_consumption_by_non_kodama: false
     queue_cleanup_or_recovery_changed: false
@@ -39,23 +51,51 @@ claims:
     required_check_changed: false
     branch_protection_or_ruleset_changed: false
     aun_activation: false
-  future_implementation_guards:
-    - "future policy source must be deterministic and checked in"
+  implementation_guards:
+    - "policy source is deterministic and checked in"
     - "unknown agents must reject before DB access"
     - "l2auditor and devauditor remain excluded unless separately approved"
     - "environment variables must not widen policy"
     - "imported options must not widen policy"
+    - "public runtime-v2 plan and claim dry-run surfaces must reject excluded/unknown agents before DB access"
     - "policy-listed non-kodama live/non-dry-run attempts must reject before DB access"
     - "live_agent_ids must contain kodama only"
 commands:
-  - command: "git diff --check origin/main...HEAD"
+  - command: "git diff --check"
     result: "PASS"
   - command: "YAML parse for .shirube/**/*.yaml"
     result: "PASS: parsed 43 yaml files"
   - command: "node --check scripts/shirube-current-overlay-check.mjs"
     result: "PASS"
+  - command: "GITHUB_REPOSITORY=watchout/agent-comms-mcp node scripts/shirube-current-overlay-check.mjs"
+    result: "PASS"
+  - command: "node /Users/yuji/Developer/ai-dev-framework/scripts/shirube/check-design-rules.mjs --rule-pack /Users/yuji/Developer/ai-dev-framework/.shirube/design-rule-packs/shirube-default-design-rules.yaml --changed-files <(git diff --name-only origin/main...HEAD) --diff-root . --handoff .shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml --format json"
+    result: "PASS_WITH_WARN: would_block=false, blockers=0, warnings=10"
+  - command: "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts"
+    result: "PASS: 20 pass / 0 fail"
+  - command: "bun test tests/aun-runtime-v2.test.ts"
+    result: "PASS: 13 pass / 0 fail"
+  - command: "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2.test.ts tests/queue-work.test.ts"
+    result: "PASS: 47 pass / 0 fail"
+  - command: "CLI dry-run and fail-closed probes"
+    result: "PASS: arc dry-run policy accepted with NO_PENDING_ROW/no mutation; arc live rejected before DB; l2auditor/devauditor/unknown plan rejected before DB; l2auditor/devauditor/unknown claim dry-run rejected before DB"
   - command: "bash scripts/detect-breaking-changes.sh origin/main"
-    result: "PASS: no breaking change patterns detected"
+    result: "DETECTED_AND_VERIFIED: Function signature changed; affected call sites are limited to runtime-v2 plan/claim/live-claim/CLI/tests and were verified by focused and adjacent tests"
+breaking_change_verification:
+  detection_result: "Function signature changed"
+  verification_status: "VERIFIED"
+  label_required_for_layer0: "breaking-change-verified"
+  affected_call_sites:
+    - "bin/aun/runtime-v2.ts"
+    - "core/aun-runtime-v2-claim-plan.ts"
+    - "core/aun-runtime-v2-live-claim.ts"
+    - "tests/aun-runtime-v2-claim-plan.test.ts"
+    - "tests/aun-runtime-v2-plan.test.ts"
+  verification_commands:
+    - "rg validateAunRuntimeV2ReadOnlyPlanArgs buildAunRuntimeV2ReadOnlyPlan AunRuntimeV2ReadOnlyPlan AunRuntimeV2ClaimDryRun validateAunRuntimeV2ClaimDryRunArgs buildAunRuntimeV2ClaimDryRun aunRuntimeV2PolicyMetadata"
+    - "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts"
+    - "bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2.test.ts tests/queue-work.test.ts"
+    - "bun test tests/aun-runtime-v2-finalization.test.ts tests/aun-runtime-v2-live-claim.test.ts tests/aun-runtime-v2-synthetic-claim.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2.test.ts tests/run-queue-work-plan.test.ts tests/queue-work.test.ts tests/contract/test_aun_cli_real_invocation.test.ts"
 validation_results:
   - "PASS"
 evidence_refs:
@@ -65,5 +105,6 @@ evidence_refs:
   - "validation_results"
   - "audit_checklist_report"
 notes:
-  - "This is route metadata evidence for the future runtime-v2 policy allowlist Cell."
-  - "It is not a structured audit and does not approve ready, merge, owner decision, runtime implementation, live non-kodama runtime, production activation, fleet rollout, queue cleanup, or AUN activation."
+  - "This is implementation evidence for the runtime-v2 policy allowlist Cell."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, live non-kodama runtime, production activation, fleet rollout, queue cleanup, or AUN activation."
+  - "target_pr was finalized after draft PR creation."

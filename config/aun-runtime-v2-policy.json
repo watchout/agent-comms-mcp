@@ -1,0 +1,25 @@
+{
+  "schema_version": "aun_runtime_v2_policy_v1",
+  "policy_id": "aun-runtime-v2-pr-a-allowlist",
+  "policy_version": "2026-06-18.pr-a",
+  "source": "watchout/agent-comms-mcp#792",
+  "allowed_agent_ids": [
+    "kodama",
+    "arc",
+    "agent-com-dev",
+    "codex-aun",
+    "auditor",
+    "codex-audit",
+    "codex-cto",
+    "qa",
+    "check",
+    "spec"
+  ],
+  "live_agent_ids": [
+    "kodama"
+  ],
+  "excluded_agent_ids": [
+    "l2auditor",
+    "devauditor"
+  ]
+}
