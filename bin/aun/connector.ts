@@ -12,6 +12,10 @@ import {
   buildAunConnectorChannelAccessDiscovery,
   type AunConnectorChannelAccessDiscovery,
 } from '../../core/aun-connector-channel-access-discovery'
+import {
+  buildAunConnectorUiBindingsMaterializer,
+  type AunConnectorUiBindingsMaterializer,
+} from '../../core/aun-connector-ui-bindings-materializer'
 
 export interface ConnectorCredentialDiagnosticCliOptions {
   format?: 'json'
@@ -59,6 +63,21 @@ export interface ConnectorChannelAccessDiscoveryCliResult {
   ok: boolean
   code: number
   result: AunConnectorChannelAccessDiscovery | ConnectorCliError
+}
+
+export interface ConnectorUiBindingsMaterializerCliOptions {
+  format?: 'json'
+  agentId?: string
+  provider?: string
+  dryRun?: boolean
+  env?: NodeJS.ProcessEnv
+  now?: () => Date
+}
+
+export interface ConnectorUiBindingsMaterializerCliResult {
+  ok: boolean
+  code: number
+  result: AunConnectorUiBindingsMaterializer | ConnectorCliError
 }
 
 const MUTATION_SQL = /\b(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|REINDEX|CLUSTER|CALL|DO)\b/i
@@ -227,6 +246,37 @@ export async function connectorChannelAccessDiscovery(
   return runReadOnlyConnectorCheck(
     env,
     (db) => buildAunConnectorChannelAccessDiscovery(db, {
+      agentId,
+      provider: 'discord',
+      dryRun: true,
+      now: opts.now,
+    }),
+    (result) => result.summary.blockers === 0,
+  )
+}
+
+export async function connectorUiBindingsMaterializer(
+  opts: ConnectorUiBindingsMaterializerCliOptions = {},
+): Promise<ConnectorUiBindingsMaterializerCliResult> {
+  const env = opts.env ?? process.env
+  const agentId = opts.agentId?.trim()
+  const provider = opts.provider?.trim() || 'discord'
+  if (opts.format !== 'json') {
+    return invalidArgument('aun connector materialize-ui-bindings requires --json')
+  }
+  if (opts.dryRun !== true) {
+    return invalidArgument('aun connector materialize-ui-bindings requires --dry-run')
+  }
+  if (!agentId) {
+    return invalidArgument('aun connector materialize-ui-bindings requires --agent-id <id>')
+  }
+  if (provider !== 'discord') {
+    return invalidArgument('aun connector materialize-ui-bindings currently supports --provider discord only')
+  }
+
+  return runReadOnlyConnectorCheck(
+    env,
+    (db) => buildAunConnectorUiBindingsMaterializer(db, {
       agentId,
       provider: 'discord',
       dryRun: true,

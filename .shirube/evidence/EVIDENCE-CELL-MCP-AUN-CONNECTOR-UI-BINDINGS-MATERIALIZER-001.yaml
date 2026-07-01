@@ -1,7 +1,7 @@
 schema_version: "shirube-machine-evidence/v1"
 evidence_id: "EVIDENCE-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
 target_repo: "watchout/agent-comms-mcp"
-target_pr: null
+target_pr: 836
 cell_id: "CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
 implementation_actor: "codex-implementation-bot"
 evidence_scope: "connector_ui_bindings_materializer_dry_run_implementation"
@@ -39,15 +39,26 @@ claims:
     - "Dry-run output must return applied_mutations: []."
 commands:
   - command: "git diff --check"
-    result: "PENDING"
+    result: "PASS"
+  - command: "git diff --check origin/main...HEAD"
+    result: "PASS"
   - command: "YAML parse for .shirube/**/*.yaml"
-    result: "PENDING"
+    result: "PASS, 49 files"
   - command: "node --check scripts/shirube-current-overlay-check.mjs"
-    result: "PENDING"
+    result: "PASS"
   - command: "bun test tests/aun-connector-ui-bindings-materializer.test.ts"
-    result: "PENDING"
+    result: "PASS, 8 pass / 0 fail"
+  - command: "bun test tests/aun-connector-credential-diagnostic.test.ts tests/aun-connector-provider-identity-verify.test.ts tests/aun-connector-channel-access-discovery.test.ts tests/aun-connector-ui-bindings-materializer.test.ts"
+    result: "PASS, 30 pass / 0 fail"
+  - command: "bash scripts/detect-breaking-changes.sh origin/main"
+    result: "PASS, no breaking change patterns detected"
 validation_results:
-  - "Pending future implementation PR."
+  - "Added core/aun-connector-ui-bindings-materializer.ts with aun-connector-ui-bindings-materializer/v1 dry-run output."
+  - "Added aun connector materialize-ui-bindings --agent-id <id> --dry-run --json."
+  - "Focused tests confirm fail-closed --dry-run and --json validation before sqlite DB open or creation."
+  - "Focused tests confirm raw-secret-like refs are redacted from agent profile, credential evidence, existing UI binding evidence, and planned UI binding output."
+  - "Focused tests confirm applied_mutations: [] and no mutation SQL or live provider calls."
+  - "Adjacent connector tests confirm credential diagnostic, provider identity verify, and channel access discovery behavior remains intact."
 evidence_refs:
   - "PR_head_SHA"
   - "changed_files"
@@ -55,5 +66,5 @@ evidence_refs:
   - "validation_results"
   - "audit_checklist_report"
 notes:
-  - "This file records expected implementation evidence for the UI bindings materializer implementation PR."
+  - "This file records local implementation evidence for the UI bindings materializer implementation PR."
   - "It is not a structured audit and does not approve ready, merge, owner decision, DB materialization writes, production provider API execution, credential mutation, channel policy mutation, routing/delivery behavior, or AUN activation."

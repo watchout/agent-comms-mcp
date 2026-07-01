@@ -24,6 +24,7 @@
  *   - aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json
  *   - aun connector verify-discord-identity --agent-id <id> --dry-run --json
  *   - aun connector discover-channel-access --agent-id <id> [--provider discord] --dry-run --json
+ *   - aun connector materialize-ui-bindings --agent-id <id> [--provider discord] --dry-run --json
  *   - aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close]
  *   - aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner>
  *   - aun uninstall [--backup <path>] [--surgical]
@@ -41,7 +42,12 @@ import { codexRunnerLifecyclePreflight } from './aun/codex-runner-preflight'
 import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
 import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
-import { connectorChannelAccessDiscovery, connectorCredentialDiagnostic, connectorProviderIdentityVerify } from './aun/connector'
+import {
+  connectorChannelAccessDiscovery,
+  connectorCredentialDiagnostic,
+  connectorProviderIdentityVerify,
+  connectorUiBindingsMaterializer,
+} from './aun/connector'
 
 function printHelp(): void {
   const lines = [
@@ -69,6 +75,7 @@ function printHelp(): void {
     '  aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json',
     '  aun connector verify-discord-identity --agent-id <id> --dry-run --json',
     '  aun connector discover-channel-access --agent-id <id> [--provider discord] --dry-run --json',
+    '  aun connector materialize-ui-bindings --agent-id <id> [--provider discord] --dry-run --json',
     '  aun reply --agent-id <id> --content <text> --mentions <owner> [--queue-id <id>] [--message-id <uuid>] [--no-close|--close] [--dry-run]',
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
@@ -468,8 +475,18 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
       process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
       return res.code
     }
+    if (extras[0] === 'materialize-ui-bindings') {
+      const res = await connectorUiBindingsMaterializer({
+        format: flags.json ? 'json' : undefined,
+        agentId: typeof flags['agent-id'] === 'string' ? (flags['agent-id'] as string) : undefined,
+        provider: typeof flags.provider === 'string' ? (flags.provider as string) : undefined,
+        dryRun: !!flags['dry-run'],
+      })
+      process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
+      return res.code
+    }
     if (extras[0] !== 'credential-diagnostic') {
-      process.stderr.write('Error [AUN_CONNECTOR_INVALID]: supported commands are connector credential-diagnostic, connector verify-discord-identity, and connector discover-channel-access\n')
+      process.stderr.write('Error [AUN_CONNECTOR_INVALID]: supported commands are connector credential-diagnostic, connector verify-discord-identity, connector discover-channel-access, and connector materialize-ui-bindings\n')
       return 2
     }
     const res = await connectorCredentialDiagnostic({
