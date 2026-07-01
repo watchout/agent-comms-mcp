@@ -1,0 +1,59 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: null
+cell_id: "CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "connector_ui_bindings_materializer_dry_run_implementation"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml"
+claims:
+  implementation_summary:
+    - "Implementation adds aun-connector-ui-bindings-materializer/v1 dry-run materialization planner."
+    - "Implementation adds aun connector materialize-ui-bindings --dry-run --json."
+    - "Implementation produces agent UI binding materialization intent from existing connector credential, provider identity, and channel access evidence."
+    - "Implementation redacts raw-secret-like token material."
+    - "Implementation reports applied_mutations: [] and does not mutate DB state."
+  protected_surface_boundary:
+    runtime_code_changed: false
+    database_mutation_code_changed: false
+    db_schema_or_migration_changed: false
+    production_provider_api_executed: false
+    raw_secret_printed: false
+    credential_mutation: false
+    provider_identity_behavior_changed: false
+    channel_access_discovery_behavior_changed: false
+    channel_policy_mutation: false
+    routing_or_delivery_behavior_changed: false
+    state_daemon_changed: false
+    provider_delivery_changed: false
+    mcp_tool_behavior_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    aun_activation: false
+  fail_closed_guards:
+    - "CLI must require --dry-run and --json before DB open or connector evidence resolution."
+    - "Raw-secret-like refs must be redacted."
+    - "Dry-run output must return applied_mutations: []."
+commands:
+  - command: "git diff --check"
+    result: "PENDING"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PENDING"
+  - command: "node --check scripts/shirube-current-overlay-check.mjs"
+    result: "PENDING"
+  - command: "bun test tests/aun-connector-ui-bindings-materializer.test.ts"
+    result: "PENDING"
+validation_results:
+  - "Pending future implementation PR."
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This file records expected implementation evidence for the UI bindings materializer implementation PR."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, DB materialization writes, production provider API execution, credential mutation, channel policy mutation, routing/delivery behavior, or AUN activation."
