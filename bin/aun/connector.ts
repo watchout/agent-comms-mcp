@@ -8,6 +8,10 @@ import {
   buildAunConnectorProviderIdentityVerify,
   type AunConnectorProviderIdentityVerify,
 } from '../../core/aun-connector-provider-identity-verify'
+import {
+  buildAunConnectorChannelAccessDiscovery,
+  type AunConnectorChannelAccessDiscovery,
+} from '../../core/aun-connector-channel-access-discovery'
 
 export interface ConnectorCredentialDiagnosticCliOptions {
   format?: 'json'
@@ -40,6 +44,21 @@ export interface ConnectorProviderIdentityVerifyCliResult {
   ok: boolean
   code: number
   result: AunConnectorProviderIdentityVerify | ConnectorCliError
+}
+
+export interface ConnectorChannelAccessDiscoveryCliOptions {
+  format?: 'json'
+  agentId?: string
+  provider?: string
+  dryRun?: boolean
+  env?: NodeJS.ProcessEnv
+  now?: () => Date
+}
+
+export interface ConnectorChannelAccessDiscoveryCliResult {
+  ok: boolean
+  code: number
+  result: AunConnectorChannelAccessDiscovery | ConnectorCliError
 }
 
 const MUTATION_SQL = /\b(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|REINDEX|CLUSTER|CALL|DO)\b/i
@@ -177,6 +196,37 @@ export async function connectorProviderIdentityVerify(
   return runReadOnlyConnectorCheck(
     env,
     (db) => buildAunConnectorProviderIdentityVerify(db, {
+      agentId,
+      provider: 'discord',
+      dryRun: true,
+      now: opts.now,
+    }),
+    (result) => result.summary.blockers === 0,
+  )
+}
+
+export async function connectorChannelAccessDiscovery(
+  opts: ConnectorChannelAccessDiscoveryCliOptions = {},
+): Promise<ConnectorChannelAccessDiscoveryCliResult> {
+  const env = opts.env ?? process.env
+  const agentId = opts.agentId?.trim()
+  const provider = opts.provider?.trim() || 'discord'
+  if (opts.format !== 'json') {
+    return invalidArgument('aun connector discover-channel-access requires --json')
+  }
+  if (opts.dryRun !== true) {
+    return invalidArgument('aun connector discover-channel-access requires --dry-run')
+  }
+  if (!agentId) {
+    return invalidArgument('aun connector discover-channel-access requires --agent-id <id>')
+  }
+  if (provider !== 'discord') {
+    return invalidArgument('aun connector discover-channel-access currently supports --provider discord only')
+  }
+
+  return runReadOnlyConnectorCheck(
+    env,
+    (db) => buildAunConnectorChannelAccessDiscovery(db, {
       agentId,
       provider: 'discord',
       dryRun: true,
