@@ -7,62 +7,75 @@ source:
   implementation_actor: "codex-implementation-bot"
   audit_model: "comment_backed_structured_audit"
 items:
-  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-ROUTE-001"
-    source: "route_metadata"
-    verification_method: "semantic"
-    required: true
-    prompt: "Confirm report-only Rapid/Lite route table maps the policy allowlist Cell to the intended handoff, checklist, and evidence refs."
-    expected_evidence:
-      - ".github/workflows/shirube-rapid-lite-gates-report.yml"
-      - "CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
-      - "CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001"
-  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-ROUTE-002"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-001"
     source: "handoff_acceptance"
     verification_method: "semantic"
     required: true
-    prompt: "Confirm the handoff preserves #792 scope for deterministic runtime-v2 policy allowlist implementation while keeping this PR route-metadata only."
+    prompt: "Confirm runtime-v2 reads allowed and live-capable agents from the checked-in policy file and includes policy identity/version/source in plan output."
     expected_evidence:
-      - ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml"
-      - "route_metadata_for_future_implementation"
-      - "runtime code changes"
-  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-ROUTE-003"
+      - "config/aun-runtime-v2-policy.json"
+      - "policy_id"
+      - "policy_version"
+      - "policy_source"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-002"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm environment variables and imported options cannot widen runtime-v2 allowed agents."
+    expected_evidence:
+      - "AUN_RUNTIME_V2_ALLOWED_AGENT_ID"
+      - "allowedAgentId"
+      - "TARGET_AGENT_NOT_ALLOWED"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-003"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm unknown, excluded, and non-policy agents reject before DB access."
+    expected_evidence:
+      - "l2auditor"
+      - "devauditor"
+      - "db.calls"
+      - "TARGET_AGENT_NOT_ALLOWED"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-004"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm policy-listed non-kodama agents are dry-run only and live/non-dry-run attempts reject before DB access."
+    expected_evidence:
+      - "policy_agent_mode: dry_run"
+      - "TARGET_AGENT_NOT_LIVE_CAPABLE"
+      - "live_agent_ids"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-005"
     source: "protected_surface_boundary"
     verification_method: "semantic"
     required: true
-    prompt: "Confirm changed files are limited to route metadata and report-only workflow route table paths."
+    prompt: "Confirm changed files are limited to the allowed implementation paths and package manifest change is only policy file distribution."
     expected_evidence:
       - "changed_files"
-      - ".shirube/**"
-      - ".github/workflows/shirube-rapid-lite-gates-report.yml"
-  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-ROUTE-004"
+      - "package.json"
+      - "config/aun-runtime-v2-policy.json"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-006"
     source: "protected_surface_boundary"
     verification_method: "semantic"
     required: true
-    prompt: "Confirm this route metadata PR does not change runtime code, package manifest, DB schema, provider/state-daemon/MCP behavior, required checks, branch protection, rulesets, or AUN activation."
+    prompt: "Confirm this PR does not change DB schema, queue cleanup/recovery, state-daemon, provider delivery, MCP/tool behavior, workflows, required checks, branch protection, rulesets, or AUN activation."
     expected_evidence:
       - "non_scope_confirmed"
       - "protected surfaces"
-  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-ROUTE-005"
-    source: "future_implementation_gate"
-    verification_method: "semantic"
-    required: true
-    prompt: "Confirm the future implementation checklist covers deterministic policy, no env or option widening, non-kodama dry-run only, before-DB rejection, and no activation."
-    expected_evidence:
-      - "deterministic policy"
-      - "dry-run only"
-      - "before DB access"
-      - "AUN activation"
-  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-ROUTE-006"
+  - item_id: "AUDIT-AUN-POLICY-ALLOWLIST-007"
     source: "validation"
     verification_method: "executable"
     required: true
-    prompt: "Confirm required local validation passed for the route metadata PR."
+    prompt: "Confirm required local validation and focused runtime-v2 tests passed."
     expected_evidence:
       - "git diff --check"
       - "YAML parse for .shirube/**/*.yaml"
       - "node --check scripts/shirube-current-overlay-check.mjs"
+      - "bun test tests/aun-runtime-v2.test.ts"
+      - "bun test tests/aun-runtime-v2.test.ts tests/queue-work.test.ts"
+      - "CLI fail-closed probes"
       - "bash scripts/detect-breaking-changes.sh origin/main"
 notes:
   - "Current gate-supported verification_method values are semantic and executable."
   - "Owner exact-head decision and merge authorization remain separate."
-  - "This checklist does not approve ready, merge, runtime implementation, live non-kodama runtime, production activation, fleet rollout, queue cleanup, or AUN activation."
+  - "This checklist does not approve ready, merge, live non-kodama runtime, production activation, fleet rollout, queue cleanup, or AUN activation."

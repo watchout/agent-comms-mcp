@@ -25,15 +25,19 @@ execution_context:
   active_function: implementation_executor
 next_role: independent_audit
 protected_surfaces:
-  - active workflows
+  - runtime code
+  - database authorization boundary
+  - package manifest
 protected_surface_details:
-  - This route metadata PR wires report-only Rapid/Lite routing for the future #792 runtime-v2 policy allowlist implementation Cell.
-  - The future implementation Cell is an R3 runtime/database authorization boundary change.
-  - This route metadata PR does not change runtime code, package manifest, DB behavior, required checks, branch protection, or rulesets.
+  - This implementation Cell changes runtime-v2 policy authorization and planning behavior.
+  - Non-kodama agents may be policy-listed for dry-run only.
+  - Live/non-dry-run runtime-v2 remains kodama-only and rejects before DB access for other agents.
+  - The package manifest change is limited to shipping the checked-in policy file.
+  - This implementation does not change active workflows, required checks, branch protection, or rulesets.
 rps_scope:
   shirube_owns:
-    - Report-only gate routing for the future implementation Cell.
-    - Exact-head evidence and owner decision requirements before future ready or merge handling.
+    - Report-only gate routing for this implementation Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
     - Audit checklist coverage for the policy allowlist implementation PR.
   shirube_does_not_own:
     - Live non-kodama runtime-v2 execution.
@@ -41,13 +45,11 @@ rps_scope:
     - Scheduler, LaunchAgent, GitHub puller, Discord recovery, fleet rollout, DB migration, provider delivery, state-daemon behavior, branch protection, rulesets, or AUN activation.
 cell:
   CELL-ID: CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001
-  cell_type: route_metadata_for_future_implementation
+  cell_type: implementation
   risk_class: R3
-  goal: Add report-only Shirube route metadata for the future runtime-v2 policy allowlist implementation.
-  governance_route: R3 route metadata for a future protected runtime authorization boundary implementation.
+  goal: Implement #792 runtime-v2 policy-controlled allowlist with non-kodama dry-run only and kodama-only live execution.
+  governance_route: R3 protected runtime/database authorization boundary implementation with independent audit and owner exact-head authorization before ready or merge handling.
   non_scope:
-    - runtime code changes
-    - package manifest changes
     - live non-kodama runtime-v2 execution
     - production queue consumption by non-kodama agents
     - all-bot runtime activation
@@ -61,21 +63,22 @@ cell:
     - branch protection or ruleset mutation
     - AUN activation
   allowed_paths:
-    - .github/workflows/shirube-rapid-lite-gates-report.yml
     - .shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml
     - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml
     - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml
-  forbidden_paths:
-    - bin/**
-    - core/**
-    - config/**
+    - bin/aun.ts
+    - bin/aun/runtime-v2.ts
+    - config/aun-runtime-v2-policy.json
+    - core/aun-runtime-v2.ts
     - docs/spec/aun-runtime-v2-policy.md
-    - tests/**
+    - package.json
+    - tests/aun-runtime-v2.test.ts
+  forbidden_paths:
+    - .github/workflows/**
     - server.ts
     - cli/**
     - adapters/**
     - db/**
-    - package.json
     - package-lock.json
     - bun.lockb
     - pnpm-lock.yaml
@@ -84,32 +87,31 @@ cell:
     - deploy/**
   protected_surfaces:
     declared:
-      - active workflows
+      - runtime code
+      - database authorization boundary
+      - package manifest
     touched: true
     details:
-      - Workflow change is limited to report-only route table wiring.
-      - The future implementation must keep non-kodama agents dry-run only.
-      - The future implementation must reject unknown, excluded, and non-kodama live attempts before DB access.
-      - The future implementation must not widen policy through environment variables or imported options.
+      - Runtime-v2 allowlist source must be deterministic and checked in.
+      - Environment variables and imported options must not widen allowed agents.
+      - Policy-listed non-kodama agents remain dry-run only.
+      - Unknown, excluded, and non-kodama live attempts must reject before DB access.
+      - Package manifest change must only include the policy file for distribution.
   stop_conditions:
-    - this PR requires runtime code or package manifest changes
-    - this PR requires live non-kodama execution
-    - this PR requires queue drain, cleanup, recovery, #774 retry, #780 resume, or stale row 121926 handling
+    - implementation requires live non-kodama execution
+    - implementation requires env or imported option widening of allowed agents
+    - implementation requires queue drain, cleanup, recovery, #774 retry, #780 resume, or stale row 121926 handling
     - DB schema or migration is required
     - state-daemon, provider, MCP/tool behavior, or AUN activation is required
+    - active workflow, required check, branch protection, or ruleset change is required
     - independent audit fails
 implementation_boundary:
-  summary: Route metadata only for the future policy-controlled runtime-v2 allowlist Cell.
-  expected_pr_count: 2
-  sequence:
-    - route_metadata_pr
-    - implementation_pr_after_route_metadata_lands
+  summary: Add a checked-in runtime-v2 policy allowlist and enforce dry-run-only non-kodama behavior before DB access.
+  expected_pr_count: 1
   forbidden_operations:
     - approve
     - merge
     - draft removal
-    - runtime code change
-    - package manifest change
     - live non-kodama runtime execution
     - production queue consumption by non-kodama agents
     - queue drain or cleanup
@@ -120,16 +122,24 @@ implementation_boundary:
     - state-daemon mutation
     - AUN activation
 acceptance_criteria:
-  - Report-only Rapid/Lite route table maps CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001 to this handoff, audit checklist, and evidence file.
-  - Handoff captures #792 policy allowlist scope and non-scope for the future implementation PR.
-  - Audit checklist covers deterministic policy, no env or option widening, dry-run-only non-kodama behavior, before-DB rejection, and no activation.
-  - This route metadata PR changes only the allowed metadata and report-only workflow route table files.
-  - No runtime code, package manifest, DB schema, provider, state-daemon, MCP/tool, required check, branch protection, ruleset, or AUN activation change is included.
+  - Runtime-v2 policy source is deterministic, checked in, and included in package distribution.
+  - Plan output includes policy_id, policy_version, policy_source, policy_agent_mode, allowed_agent_ids, and live_agent_ids.
+  - Environment variables cannot add allowed agents.
+  - Imported options cannot add allowed agents.
+  - Unknown and explicitly excluded agents reject before DB access.
+  - Policy-listed non-kodama agents may dry-run only.
+  - Policy-listed non-kodama live/non-dry-run attempts reject before DB access.
+  - Live_agent_ids contains kodama only.
+  - #788 live path remains compatible for kodama.
+  - No DB schema, queue cleanup/recovery, provider, state-daemon, MCP/tool, workflow, required check, branch protection, ruleset, or AUN activation change is included.
 validation:
   required_commands:
     - git diff --check
     - YAML parse for .shirube/**/*.yaml
     - node --check scripts/shirube-current-overlay-check.mjs
+    - bun test tests/aun-runtime-v2.test.ts
+    - bun test tests/aun-runtime-v2.test.ts tests/queue-work.test.ts
+    - CLI dry-run and fail-closed probes for allowed, excluded, and non-kodama live cases
     - bash scripts/detect-breaking-changes.sh origin/main
   required_evidence:
     - PR_head_SHA
