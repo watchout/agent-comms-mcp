@@ -1,7 +1,7 @@
 import {
-  AUN_RUNTIME_V2_DEFAULT_AGENT_ID,
   buildAunRuntimeV2Plan,
   selectAunRuntimeV2CandidateRow,
+  validateAunRuntimeV2Plan,
   type AunRuntimeV2Options,
   type AunRuntimeV2Plan,
 } from './aun-runtime-v2'
@@ -20,6 +20,16 @@ export type AunRuntimeV2PlanReasonCode =
   | 'fence_mismatch'
 
 export type AunRuntimeV2PlanErrorCode = 'invalid_arguments' | 'db_unreachable' | 'fence_required'
+  | 'target_agent_not_allowed'
+
+export interface AunRuntimeV2PolicyMetadata {
+  policy_id: string
+  policy_version: string
+  policy_source: string
+  policy_agent_mode: AunRuntimeV2Plan['policy_agent_mode']
+  allowed_agent_ids: string[]
+  live_agent_ids: string[]
+}
 
 export interface AunRuntimeV2ReadOnlyPlanOptions extends Pick<
   AunRuntimeV2Options,
@@ -31,6 +41,12 @@ export interface AunRuntimeV2ReadOnlyPlanOptions extends Pick<
 export interface AunRuntimeV2ReadOnlyPlan {
   schema_version: typeof AUN_RUNTIME_V2_PLAN_SCHEMA_VERSION
   agent_id: string
+  policy_id: string
+  policy_version: string
+  policy_source: string
+  policy_agent_mode: AunRuntimeV2Plan['policy_agent_mode']
+  allowed_agent_ids: string[]
+  live_agent_ids: string[]
   generated_at: string
   target: {
     queue_id: string | null
@@ -57,6 +73,12 @@ export interface AunRuntimeV2ReadOnlyPlan {
 export interface AunRuntimeV2ReadOnlyPlanError {
   error: AunRuntimeV2PlanErrorCode
   message: string
+  policy_id?: string
+  policy_version?: string
+  policy_source?: string
+  policy_agent_mode?: AunRuntimeV2Plan['policy_agent_mode']
+  allowed_agent_ids?: string[]
+  live_agent_ids?: string[]
 }
 
 interface RuntimeLivenessRow {
@@ -99,30 +121,27 @@ function runtimeStaleSeconds(opts: AunRuntimeV2ReadOnlyPlanOptions): number {
   return Number.isFinite(raw) && raw > 0 ? Number(raw) : DEFAULT_RUNTIME_STALE_SECONDS
 }
 
-function buildSelectorPlan(input: {
-  agentId: string
-  queueId: string | null
-  messageId: string | null
-  createdAfter: string | null
-}): AunRuntimeV2Plan {
+export function aunRuntimeV2PolicyMetadata(plan: AunRuntimeV2Plan): AunRuntimeV2PolicyMetadata {
   return {
-    ...buildAunRuntimeV2Plan({
-      agentId: input.agentId,
-      queueId: input.queueId,
-      messageId: input.messageId,
-      createdAfter: input.createdAfter,
-      env: {} as NodeJS.ProcessEnv,
-    }),
-    // This read-only planner is intentionally not the #788 kodama-only
-    // mutation path. It evaluates any requested agent without widening live
-    // claim/execute authorization.
-    allowed_agent_id: input.agentId || AUN_RUNTIME_V2_DEFAULT_AGENT_ID,
+    policy_id: plan.policy_id,
+    policy_version: plan.policy_version,
+    policy_source: plan.policy_source,
+    policy_agent_mode: plan.policy_agent_mode,
+    allowed_agent_ids: [...plan.allowed_agent_ids],
+    live_agent_ids: [...plan.live_agent_ids],
   }
 }
 
 export function validateAunRuntimeV2ReadOnlyPlanArgs(
   opts: AunRuntimeV2ReadOnlyPlanOptions,
-): { ok: true; agentId: string; queueId: string | null; messageId: string | null; createdAfter: string | null } | {
+): {
+  ok: true
+  agentId: string
+  queueId: string | null
+  messageId: string | null
+  createdAfter: string | null
+  policyPlan: AunRuntimeV2Plan
+} | {
   ok: false
   error: AunRuntimeV2ReadOnlyPlanError
 } {
@@ -149,6 +168,7 @@ export function validateAunRuntimeV2ReadOnlyPlanArgs(
   }
 
   const queueId = queueIdString(opts.queueId)
+  const messageId = cleanString(opts.messageId)
   if ((opts.env?.AUN_RUNTIME_V2_PLAN_REQUIRE_EXACT_FENCE === '1'
     || opts.env?.AUN_RUNTIME_V2_PLAN_REQUIRE_EXACT_FENCE?.toLowerCase() === 'true')
     && !queueId) {
@@ -161,12 +181,32 @@ export function validateAunRuntimeV2ReadOnlyPlanArgs(
     }
   }
 
+  const policyPlan = buildAunRuntimeV2Plan({
+    agentId,
+    queueId,
+    messageId,
+    createdAfter,
+    env: opts.env,
+  })
+  const validPolicy = validateAunRuntimeV2Plan(policyPlan)
+  if (!validPolicy.ok) {
+    return {
+      ok: false,
+      error: {
+        error: 'target_agent_not_allowed',
+        message: validPolicy.detail ?? validPolicy.code,
+        ...aunRuntimeV2PolicyMetadata(policyPlan),
+      },
+    }
+  }
+
   return {
     ok: true,
     agentId,
     queueId,
-    messageId: cleanString(opts.messageId),
+    messageId,
     createdAfter,
+    policyPlan,
   }
 }
 
@@ -259,9 +299,9 @@ export async function buildAunRuntimeV2ReadOnlyPlan(
   if (!args.ok) return args.error
 
   const now = opts.now?.() ?? new Date()
-  const selectorPlan = buildSelectorPlan(args)
+  const policyMetadata = aunRuntimeV2PolicyMetadata(args.policyPlan)
   try {
-    const row = await selectAunRuntimeV2CandidateRow(db, selectorPlan, false)
+    const row = await selectAunRuntimeV2CandidateRow(db, args.policyPlan, false)
     const runtimeIsAlive = await runtimeAlive(db, args.agentId, now, runtimeStaleSeconds(opts))
     const hasConflict = await hasConflictingActiveClaim(db, args.agentId, now)
     const fenceOk = exactFenceSatisfied(row, args.messageId, args.createdAfter)
@@ -276,6 +316,7 @@ export async function buildAunRuntimeV2ReadOnlyPlan(
     return {
       schema_version: AUN_RUNTIME_V2_PLAN_SCHEMA_VERSION,
       agent_id: args.agentId,
+      ...policyMetadata,
       generated_at: now.toISOString(),
       target: {
         queue_id: row ? String(row.id) : args.queueId,

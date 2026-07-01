@@ -1,9 +1,12 @@
 import {
+  aunRuntimeV2PolicyMetadata,
   buildAunRuntimeV2ReadOnlyPlan,
+  validateAunRuntimeV2ReadOnlyPlanArgs,
   type AunRuntimeV2ReadOnlyPlan,
   type AunRuntimeV2ReadOnlyPlanError,
   type AunRuntimeV2ReadOnlyPlanOptions,
   type AunRuntimeV2PlanReasonCode,
+  type AunRuntimeV2PolicyMetadata,
 } from './aun-runtime-v2-plan'
 import type { QueueWorkDb } from './queue-work'
 
@@ -40,6 +43,12 @@ export interface AunRuntimeV2ClaimPlannedMutation {
 export interface AunRuntimeV2ClaimDryRun {
   schema_version: typeof AUN_RUNTIME_V2_CLAIM_DRYRUN_SCHEMA_VERSION
   agent_id: string
+  policy_id: string
+  policy_version: string
+  policy_source: string
+  policy_agent_mode: AunRuntimeV2PolicyMetadata['policy_agent_mode']
+  allowed_agent_ids: string[]
+  live_agent_ids: string[]
   generated_at: string
   target: AunRuntimeV2ReadOnlyPlan['target']
   evaluation: AunRuntimeV2ReadOnlyPlan['evaluation']
@@ -78,7 +87,14 @@ function queueIdString(value: string | number | null | undefined): string | null
 
 export function validateAunRuntimeV2ClaimDryRunArgs(
   opts: AunRuntimeV2ClaimDryRunOptions,
-): { ok: true; agentId: string; queueId: string; messageId: string; createdAfter: string } | {
+): {
+  ok: true
+  agentId: string
+  queueId: string
+  messageId: string
+  createdAfter: string
+  policyMetadata: AunRuntimeV2PolicyMetadata
+} | {
   ok: false
   error: AunRuntimeV2ClaimDryRunError
 } {
@@ -126,12 +142,28 @@ export function validateAunRuntimeV2ClaimDryRunArgs(
     }
   }
 
+  const policyArgs = validateAunRuntimeV2ReadOnlyPlanArgs({
+    agentId,
+    queueId,
+    messageId,
+    createdAfter,
+    env: opts.env,
+    now: opts.now,
+  })
+  if (!policyArgs.ok) {
+    return {
+      ok: false,
+      error: policyArgs.error,
+    }
+  }
+
   return {
     ok: true,
     agentId,
     queueId,
     messageId,
     createdAfter,
+    policyMetadata: aunRuntimeV2PolicyMetadata(policyArgs.policyPlan),
   }
 }
 
@@ -181,6 +213,7 @@ export async function buildAunRuntimeV2ClaimDryRun(
   return {
     schema_version: AUN_RUNTIME_V2_CLAIM_DRYRUN_SCHEMA_VERSION,
     agent_id: args.agentId,
+    ...args.policyMetadata,
     generated_at: plan.generated_at,
     target: plan.target,
     evaluation: plan.evaluation,

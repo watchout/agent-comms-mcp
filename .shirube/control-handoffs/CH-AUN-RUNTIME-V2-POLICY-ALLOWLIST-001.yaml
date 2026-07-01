@@ -68,9 +68,13 @@ cell:
     - bin/aun.ts
     - bin/aun/runtime-v2.ts
     - config/aun-runtime-v2-policy.json
+    - core/aun-runtime-v2-claim-plan.ts
+    - core/aun-runtime-v2-plan.ts
     - core/aun-runtime-v2.ts
     - docs/spec/aun-runtime-v2-policy.md
     - package.json
+    - tests/aun-runtime-v2-claim-plan.test.ts
+    - tests/aun-runtime-v2-plan.test.ts
     - tests/aun-runtime-v2.test.ts
   forbidden_paths:
     - .github/workflows/**
@@ -122,9 +126,10 @@ implementation_boundary:
 acceptance_criteria:
   - Runtime-v2 policy source is deterministic, checked in, and included in package distribution.
   - Plan output includes policy_id, policy_version, policy_source, policy_agent_mode, allowed_agent_ids, and live_agent_ids.
+  - Public runtime-v2 plan and claim dry-run outputs include policy metadata.
   - Environment variables cannot add allowed agents.
   - Imported options cannot add allowed agents.
-  - Unknown and explicitly excluded agents reject before DB access.
+  - Unknown and explicitly excluded agents reject before DB access on runtime-v2 execute, plan, and claim dry-run surfaces.
   - Policy-listed non-kodama agents may dry-run only.
   - Policy-listed non-kodama live/non-dry-run attempts reject before DB access.
   - Live_agent_ids contains kodama only.
@@ -135,9 +140,10 @@ validation:
     - git diff --check
     - YAML parse for .shirube/**/*.yaml
     - node --check scripts/shirube-current-overlay-check.mjs
+    - bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts
     - bun test tests/aun-runtime-v2.test.ts
-    - bun test tests/aun-runtime-v2.test.ts tests/queue-work.test.ts
-    - CLI dry-run and fail-closed probes for allowed, excluded, and non-kodama live cases
+    - bun test tests/aun-runtime-v2-plan.test.ts tests/aun-runtime-v2-claim-plan.test.ts tests/aun-runtime-v2.test.ts tests/queue-work.test.ts
+    - CLI dry-run and fail-closed probes for execute, plan, and claim dry-run surfaces
     - bash scripts/detect-breaking-changes.sh origin/main
   required_evidence:
     - PR_head_SHA

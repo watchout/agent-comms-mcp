@@ -139,6 +139,11 @@ describe('AUN runtime-v2 read-only planner', () => {
     expect(result).toMatchObject({
       schema_version: 'aun-runtime-v2-plan/v1',
       agent_id: 'kodama',
+      policy_id: 'aun-runtime-v2-pr-a-allowlist',
+      policy_version: '2026-06-18.pr-a',
+      policy_source: 'watchout/agent-comms-mcp#792',
+      policy_agent_mode: 'live',
+      live_agent_ids: ['kodama'],
       target: {
         queue_id: '1001',
         message_id: 'msg-kodama-1',
@@ -159,6 +164,8 @@ describe('AUN runtime-v2 read-only planner', () => {
         mutations: [],
       },
     })
+    expect(result.allowed_agent_ids).toContain('arc')
+    expect(result.allowed_agent_ids).not.toContain('l2auditor')
   })
 
   test('reports not_pending for an exact in_progress row', async () => {
@@ -287,6 +294,29 @@ describe('AUN runtime-v2 read-only planner', () => {
     expect(db.calls).toEqual([])
   })
 
+  test('rejects excluded and unknown agents before DB access', async () => {
+    for (const agentId of ['l2auditor', 'devauditor', 'unknown-agent']) {
+      const db = new FakeRuntimeV2PlanDb([queueRow({ agent_id: agentId })])
+      const result = await buildAunRuntimeV2ReadOnlyPlan(db, {
+        agentId,
+        env: {
+          AUN_RUNTIME_V2_ALLOWED_AGENT_ID: agentId,
+          AUN_RUNTIME_V2_ALLOWED_AGENT_IDS: agentId,
+        } as NodeJS.ProcessEnv,
+      })
+
+      expect(result, agentId).toMatchObject({
+        error: 'target_agent_not_allowed',
+        policy_id: 'aun-runtime-v2-pr-a-allowlist',
+        policy_agent_mode: 'not_allowed',
+        live_agent_ids: ['kodama'],
+      })
+      if (!('error' in result)) throw new Error(`${agentId} unexpectedly produced a plan`)
+      expect(result.allowed_agent_ids).not.toContain(agentId)
+      expect(db.calls).toEqual([])
+    }
+  })
+
   test('CLI emits claimable JSON against sqlite fixture without mutating rows', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aun-runtime-v2-plan-cli-'))
     const dbPath = join(dir, 'fixture.sqlite')
@@ -358,6 +388,11 @@ describe('AUN runtime-v2 read-only planner', () => {
       expect(parsed).toMatchObject({
         schema_version: 'aun-runtime-v2-plan/v1',
         agent_id: 'kodama',
+        policy_id: 'aun-runtime-v2-pr-a-allowlist',
+        policy_version: '2026-06-18.pr-a',
+        policy_source: 'watchout/agent-comms-mcp#792',
+        policy_agent_mode: 'live',
+        live_agent_ids: ['kodama'],
         plan: {
           action: 'claim',
           reason_code: 'claimable',
@@ -370,6 +405,45 @@ describe('AUN runtime-v2 read-only planner', () => {
       const after = JSON.stringify(afterDb.prepare('SELECT * FROM message_queue ORDER BY id').all())
       afterDb.close()
       expect(after).toBe(before)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CLI rejects excluded and unknown agents before opening a missing database', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-runtime-v2-plan-no-db-'))
+    try {
+      for (const agentId of ['l2auditor', 'devauditor', 'unknown-agent']) {
+        const result = spawnSync('bun', [
+          'run',
+          AUN_CLI,
+          'runtime-v2',
+          'plan',
+          '--agent-id',
+          agentId,
+          '--json',
+        ], {
+          encoding: 'utf-8',
+          env: {
+            ...process.env,
+            AGENT_COM_DB: 'sqlite',
+            AGENT_COM_SQLITE_PATH: join(dir, `${agentId}.missing.sqlite`),
+            DATABASE_URL: '',
+            AUN_RUNTIME_V2_ALLOWED_AGENT_ID: agentId,
+            AUN_RUNTIME_V2_ALLOWED_AGENT_IDS: agentId,
+          },
+          timeout: 20_000,
+        })
+
+        expect(result.status, agentId).toBe(2)
+        expect(result.stderr, agentId).toBe('')
+        expect(JSON.parse(result.stdout), agentId).toMatchObject({
+          error: 'target_agent_not_allowed',
+          policy_id: 'aun-runtime-v2-pr-a-allowlist',
+          policy_agent_mode: 'not_allowed',
+          live_agent_ids: ['kodama'],
+        })
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
