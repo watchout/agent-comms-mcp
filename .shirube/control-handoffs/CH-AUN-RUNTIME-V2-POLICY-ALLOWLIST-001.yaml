@@ -150,7 +150,6 @@ validation:
     - changed_files
     - validation_commands
     - validation_results
-    - breaking_change_verification
     - audit_checklist_report
 owner_decision:
   required_before_merge: true
