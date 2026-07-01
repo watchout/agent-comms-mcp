@@ -63,6 +63,8 @@ commands:
     result: "PASS"
   - command: "GITHUB_REPOSITORY=watchout/agent-comms-mcp node scripts/shirube-current-overlay-check.mjs"
     result: "PASS"
+  - command: "node /Users/yuji/Developer/ai-dev-framework/scripts/shirube/check-design-rules.mjs --rule-pack /Users/yuji/Developer/ai-dev-framework/.shirube/design-rule-packs/shirube-default-design-rules.yaml --changed-files <(git diff --name-only origin/main...HEAD) --diff-root . --handoff .shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml --format json"
+    result: "PASS_WITH_WARN: would_block=false, blockers=0, warnings=10"
   - command: "bun test tests/aun-runtime-v2.test.ts"
     result: "PASS: 13 pass / 0 fail"
   - command: "bun test tests/aun-runtime-v2.test.ts tests/queue-work.test.ts"

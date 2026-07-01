@@ -397,6 +397,30 @@ export function validateAunRuntimeV2ExecutionFence(plan: AunRuntimeV2Plan): { ok
   }
 }
 
+function nonDryRunPreDbFailure(plan: AunRuntimeV2Plan): AunRuntimeV2Outcome | null {
+  const validFence = validateAunRuntimeV2ExecutionFence(plan)
+  if (!validFence.ok) {
+    return failure({
+      dryRun: false,
+      plan,
+      code: validFence.code,
+      detail: validFence.detail,
+    })
+  }
+
+  const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
+  if (!validLiveAgent.ok) {
+    return failure({
+      dryRun: false,
+      plan,
+      code: validLiveAgent.code,
+      detail: validLiveAgent.detail,
+    })
+  }
+
+  return null
+}
+
 async function selectPendingCandidate(
   db: QueueWorkDb,
   plan: AunRuntimeV2Plan,
@@ -597,24 +621,8 @@ export async function claimPendingQueueForAunRuntimeV2(
       detail: validPlan.detail,
     })
   }
-  const validFence = validateAunRuntimeV2ExecutionFence(plan)
-  if (!validFence.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: validFence.code,
-      detail: validFence.detail,
-    })
-  }
-  const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
-  if (!validLiveAgent.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: validLiveAgent.code,
-      detail: validLiveAgent.detail,
-    })
-  }
+  const preDbFailure = nonDryRunPreDbFailure(plan)
+  if (preDbFailure) return preDbFailure
 
   const claimedAt = opts.now?.() ?? new Date()
   const claimExpiresAt = new Date(claimedAt.getTime() + plan.claim_ttl_seconds * 1000)
@@ -698,24 +706,8 @@ export async function runAunRuntimeV2(
 
   if (opts.dryRun) return inspectAunRuntimeV2Candidate(db, opts)
 
-  const validFence = validateAunRuntimeV2ExecutionFence(plan)
-  if (!validFence.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: validFence.code,
-      detail: validFence.detail,
-    })
-  }
-  const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
-  if (!validLiveAgent.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: validLiveAgent.code,
-      detail: validLiveAgent.detail,
-    })
-  }
+  const preDbFailure = nonDryRunPreDbFailure(plan)
+  if (preDbFailure) return preDbFailure
 
   if (!opts.adapter) {
     return failure({

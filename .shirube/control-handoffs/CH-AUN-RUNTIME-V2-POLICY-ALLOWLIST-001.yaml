@@ -26,7 +26,7 @@ execution_context:
 next_role: independent_audit
 protected_surfaces:
   - runtime code
-  - database authorization boundary
+  - database
   - package manifest
 protected_surface_details:
   - This implementation Cell changes runtime-v2 policy authorization and planning behavior.
@@ -88,7 +88,7 @@ cell:
   protected_surfaces:
     declared:
       - runtime code
-      - database authorization boundary
+      - database
       - package manifest
     touched: true
     details:
