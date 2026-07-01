@@ -53,6 +53,10 @@ jobs:
             /^github-comment:\/\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value)
             );
           }
+          function supportedCommentRefList(value) {
+            if (!value) return false;
+            return value.split(",").map((entry) => entry.trim()).every(supportedCommentRef);
+          }
           function localRef(value) {
             if (!value || /^https?:\/\//i.test(value) || /^github-comment:\/\//i.test(value)) return "";
             return value;
@@ -115,7 +119,7 @@ jobs:
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `structured_audit_comment_ref=${supportedCommentRef(structuredAuditCommentRef) ? structuredAuditCommentRef : ""}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `additional_review_ref=${localRef(additionalReviewRef)}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `additional_review_comment_ref=${supportedCommentRef(additionalReviewCommentRef) ? additionalReviewCommentRef : ""}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `additional_review_comment_ref=${supportedCommentRefList(additionalReviewCommentRef) ? additionalReviewCommentRef : ""}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `handoff_ref=${route.handoffRef}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `audit_checklist_ref=${route.auditChecklistRef}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `audit_machine_evidence_ref=${route.auditMachineEvidenceRef}\n`);
