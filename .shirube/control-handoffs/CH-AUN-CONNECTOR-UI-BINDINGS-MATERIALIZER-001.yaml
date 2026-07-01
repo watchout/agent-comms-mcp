@@ -35,9 +35,9 @@ rps_scope:
 cell:
   CELL-ID: CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001
   cell_type: implementation
-  risk_class: R2
+  risk_class: R3
   goal: Add the smallest dry-run agent UI bindings materializer after connector credential, provider identity, and channel access discovery Cells have merged.
-  governance_route: R2 protected connector materialization planner with independent audit and owner exact-head decision before ready or merge handling.
+  governance_route: R3 protected workflow route metadata and connector materialization planner with independent audit and owner exact-head decision before ready or merge handling.
   non_scope:
     - DB schema or migration
     - DB materialization writes
