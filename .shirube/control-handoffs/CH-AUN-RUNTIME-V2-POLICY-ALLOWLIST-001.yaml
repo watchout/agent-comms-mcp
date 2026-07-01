@@ -27,7 +27,6 @@ next_role: independent_audit
 protected_surfaces:
   - runtime code
   - database
-  - package manifest
 protected_surface_details:
   - This implementation Cell changes runtime-v2 policy authorization and planning behavior.
   - Non-kodama agents may be policy-listed for dry-run only.
@@ -89,7 +88,6 @@ cell:
     declared:
       - runtime code
       - database
-      - package manifest
     touched: true
     details:
       - Runtime-v2 allowlist source must be deterministic and checked in.
