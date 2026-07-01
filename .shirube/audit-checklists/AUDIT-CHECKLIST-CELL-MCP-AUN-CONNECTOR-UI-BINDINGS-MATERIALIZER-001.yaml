@@ -1,0 +1,80 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml"
+  cell_id: "CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "codex-implementation-bot"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the PR adds only a dry-run agent UI bindings materializer and does not mutate DB state."
+    expected_evidence:
+      - "core/aun-connector-ui-bindings-materializer.ts"
+      - "bin/aun/connector.ts"
+      - "tests/aun-connector-ui-bindings-materializer.test.ts"
+      - "applied_mutations: []"
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-002"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm missing --dry-run or --json fails closed before DB open or connector evidence resolution."
+    expected_evidence:
+      - "bin/aun/connector.ts"
+      - "tests/aun-connector-ui-bindings-materializer.test.ts"
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-003"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm raw-secret-like token material is never printed in materialization output."
+    expected_evidence:
+      - "redacted_secret_ref"
+      - "raw secret redaction test"
+      - "tests/aun-connector-ui-bindings-materializer.test.ts"
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-004"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the PR does not execute a live provider API call during local tests, CI, or implementation validation."
+    expected_evidence:
+      - "mock provider"
+      - "no live provider smoke"
+      - "tests/aun-connector-ui-bindings-materializer.test.ts"
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-005"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the materialization plan is scoped to existing agent, provider identity, credential, and channel access evidence."
+    expected_evidence:
+      - "agent_id"
+      - "provider"
+      - "provider_identity"
+      - "channel_access"
+      - "ui_bindings"
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-006"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm no DB migration, DB materialization write, credential mutation, provider identity behavior change, channel access discovery behavior change, routing/delivery behavior, state-daemon, MCP/tool behavior, required check, ruleset, or AUN activation change is included."
+    expected_evidence:
+      - "changed_files"
+      - "non_scope_confirmed"
+      - ".shirube/control-handoffs/CH-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml"
+  - item_id: "AUDIT-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-007"
+    source: "validation"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm required local validation passed."
+    expected_evidence:
+      - "git diff --check"
+      - "YAML parse for .shirube/**/*.yaml"
+      - "node --check scripts/shirube-current-overlay-check.mjs"
+      - "focused bun test command"
+notes:
+  - "Current gate-supported verification_method values are semantic and executable."
+  - "This checklist is for the future UI bindings materializer implementation PR after the route metadata lands."
+  - "Owner exact-head decision and merge handling remain separate."
+  - "This checklist does not authorize DB materialization writes, production provider API execution, channel policy mutation, routing/delivery behavior, credential mutation, or AUN activation."

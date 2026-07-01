@@ -120,6 +120,12 @@ jobs:
               auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-CHANNEL-ACCESS-DISCOVERY-001.yaml",
               auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-CHANNEL-ACCESS-DISCOVERY-001.yaml",
             },
+            {
+              cellId: "CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001",
+              handoffRef: ".shirube/control-handoffs/CH-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
+            },
           ];
           const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
 
