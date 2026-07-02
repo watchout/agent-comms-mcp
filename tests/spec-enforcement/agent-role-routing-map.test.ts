@@ -6,6 +6,12 @@ const REPO = join(import.meta.dir, '..', '..')
 
 type RoleEntry = {
   agentId: string
+  activeFunction?: string
+  scope?: string
+  controlSource?: string
+  bindingIssue?: string
+  functionBindingsRef?: string
+  forbiddenActions?: string[]
   requiredEnv?: Record<string, string>
   legacyAgentIds?: string[]
   newWorkAllowedViaLegacyIds?: boolean
@@ -15,6 +21,17 @@ type RoleEntry = {
 type RoleRoutingConfig = {
   version: number
   channelId: string
+  d7SuiteLeadRebinding?: {
+    controlSource: string
+    ownerDecision: string
+    bindingIssue: string
+    functionBindingsRef: string
+    activeFunction: string
+    agentComRuntimeAgentId: string
+    oldAunImplementationAssignment: string
+    aunImplementationOwner: string
+    transportAdapterOwnershipUnchanged: boolean
+  }
   roles: Record<string, RoleEntry>
   legacyAgentIds: Record<string, {
     canonicalAgentId: string
@@ -43,10 +60,40 @@ describe('agent role routing map', () => {
   test('pins PR governance roles to canonical agent_id values', () => {
     expect(roleMap.version).toBe(1)
     expect(roleMap.channelId).toBe('1487368919613444156')
+    expect(roleMap.roles.suite_lead.agentId).toBe('agent-com-dev')
     expect(roleMap.roles.aun_development_lead.agentId).toBe('codex-aun')
     expect(roleMap.roles.pr_audit_l1.agentId).toBe('auditor')
     expect(roleMap.roles.pr_audit_l2.agentId).toBe('codex-audit')
     expect(roleMap.roles.pr_approval_l3.agentId).toBe('codex-cto')
+  })
+
+  test('D7 suite-lead rebinding is coordination-only and separated from AUN implementation', () => {
+    const suiteLead = roleMap.roles.suite_lead
+    expect(suiteLead).toMatchObject({
+      agentId: 'agent-com-dev',
+      activeFunction: 'coordination_recorder',
+      controlSource: 'https://github.com/watchout/iyasaka-arc/issues/23',
+      bindingIssue: 'https://github.com/watchout/agent-comms-mcp/issues/837',
+      functionBindingsRef: 'watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml',
+    })
+    expect(suiteLead.scope).toContain('iyasaka-arc suite')
+    expect(suiteLead.forbiddenActions).toEqual(expect.arrayContaining([
+      'implementation',
+      'audit',
+      'merge',
+      'runtime_mutation',
+    ]))
+
+    expect(roleMap.roles.aun_development_lead.agentId).toBe('codex-aun')
+    expect(suiteLead.agentId).not.toBe(roleMap.roles.aun_development_lead.agentId)
+    expect(roleMap.d7SuiteLeadRebinding).toMatchObject({
+      agentComRuntimeAgentId: 'agent-com-dev',
+      activeFunction: 'coordination_recorder',
+      functionBindingsRef: 'watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml',
+      oldAunImplementationAssignment: 'cleared',
+      aunImplementationOwner: 'codex-aun',
+      transportAdapterOwnershipUnchanged: true,
+    })
   })
 
   test('legacy cto is not a new-work target for any role', () => {

@@ -3,7 +3,7 @@
 
 For Codex sessions in this repository, the first tool call after startup, compaction, or restart must be:
 
-`mcp__wasurezu__recover_context` with `project: "agent-comms-mcp"`.
+`mcp__wasurezu__recover_context` with `project: "iyasaka-arc"`.
 
 Run this before shell commands, file reads, optional AUN checks, or agent-comms checks. Use the result as the recovery baseline for current work, decisions, recent raw conversation, and missing context. Wasurezu memory must not depend on agent-comms being installed.
 
@@ -13,6 +13,47 @@ If the recovered context is missing or ambiguous, call:
 
 Do not rely on legacy `[TASK:*]`, `[DECISION]`, or `[KNOWLEDGE]` tags for memory capture. Raw memory capture is the default.
 <!-- agent-memory-codex-agents:end -->
+
+<!-- shirube-d7-suite-lead-binding:start -->
+# D7 Suite-Lead Binding
+
+This workspace is rebound by `watchout/iyasaka-arc#23` D7 from the former
+agent-com AUN implementation seat into the suite-lead coordination seat.
+
+Binding:
+
+```yaml
+schema_version: shirube-v3-local-runtime-binding/v1
+agent_id: "agent-com-dev"
+role_alias: "agent-com"
+active_function: "coordination_recorder"
+workspace: "/Users/yuji/Developer/agent-comms-mcp"
+memory_project: "iyasaka-arc"
+scope: "iyasaka-arc suite CONTROL_STATE / WAVE-plan board"
+control_source: "https://github.com/watchout/iyasaka-arc/issues/23"
+binding_issue: "https://github.com/watchout/agent-comms-mcp/issues/837"
+function_bindings_ref: "watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml"
+```
+
+Allowed:
+
+- Route suite work across AUN, Kusabi, Kodama, Shirube, and aun-platform.
+- Keep the suite board current from durable GitHub SSOT records.
+- Track dependency gates, stalled work, owner decisions, audit requests, and
+  next actions.
+
+Forbidden:
+
+- Do not implement AUN/product/runtime code while acting as suite-lead.
+- Do not design, audit, QA, approve, merge, publish, or mutate protected
+  runtime state.
+- Do not treat residual AUN-dev memory as authority. Start from the suite board
+  and `iyasaka-arc#23` decision pack.
+
+AUN implementation ownership remains separate from this suite-lead binding.
+`codex-aun` remains the AUN implementation lead where AUN work needs a repo
+implementation executor.
+<!-- shirube-d7-suite-lead-binding:end -->
 
 <!-- company-dev-os-codex-runtime:start -->
 # Company Dev OS Runtime Overlay
