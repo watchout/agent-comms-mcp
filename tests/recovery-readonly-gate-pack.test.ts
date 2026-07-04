@@ -421,6 +421,33 @@ describe('#602 recovery read-only gate pack', () => {
     })
   })
 
+  test('separate runtime login and active delivery contracts do not force projection NO_GO', () => {
+    const result = summary({
+      'discord-projection': {
+        ok: true,
+        go_no_go: 'GO',
+        mutation_performed: false,
+        restart_performed: false,
+        contract: {
+          runtime_login_credential_statuses: ['active', 'registered'],
+          delivery_credential_statuses: ['active'],
+          runtime_login_delivery_status_policy: 'separate',
+          runtime_delivery_status_contract: 'aligned',
+          selected_delivery_credential_status: 'active',
+          selected_delivery_status_contract: 'satisfied',
+          selected_delivery_evidence_complete: true,
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.go_no_go).toBe('GO')
+    expect(result.blockers).not.toContainEqual({
+      source_report: 'discord-projection',
+      code: 'CREDENTIAL_STATUS_CONTRACT_DRIFT',
+    })
+  })
+
   test('runtime and fleet string blockers force NO_GO with source reports', () => {
     const result = summary({
       'runtime-inventory': {

@@ -14,7 +14,7 @@ const labels = new Set((pr?.labels ?? []).map((label) => String(label.name ?? ""
 const headSha = String(pr?.head?.sha ?? process.env.GITHUB_SHA ?? "");
 const errors = [];
 const warnings = [];
-const isRapidLiteAdoptionPr = body.includes("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001");
+const isRapidLiteAdoptionPr = /(?:^|\n)\s*CELL-ID\s*:\s*CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001(?:\s|$)/iu.test(body);
 
 const adoptionForbiddenRuntimePatterns = [
   /^server\.ts$/u,

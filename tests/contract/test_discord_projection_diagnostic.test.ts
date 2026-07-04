@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   buildDiscordProjectionDiagnosticReport,
@@ -215,7 +215,7 @@ afterEach(() => {
   delete process.env.AGENT_COM_BOT_ROUTING_PATH
   resetChannelPolicyCache()
   if (existsSync(TMP_CONFIG)) {
-    try { unlinkSync(TMP_CONFIG) } catch {}
+    try { rmSync(TMP_CONFIG, { force: true }) } catch {}
   }
 })
 
@@ -242,7 +242,11 @@ describe('#604 Discord projection diagnostic', () => {
     expect(report.contract).toMatchObject({
       runtime_login_credential_statuses: ['active', 'registered'],
       delivery_credential_statuses: ['active'],
-      runtime_delivery_status_contract: 'drift',
+      runtime_login_delivery_status_policy: 'separate',
+      runtime_delivery_status_contract: 'aligned',
+      selected_delivery_credential_status: 'active',
+      selected_delivery_status_contract: 'satisfied',
+      selected_delivery_evidence_complete: true,
       sender_direct_preferred_over_router: true,
       fallback_requires_explicit_allowance: true,
       selected_delivery_evidence_required: true,
@@ -286,13 +290,18 @@ describe('#604 Discord projection diagnostic', () => {
     expect(report.contract.runtime_delivery_status_contract).toBe('drift')
     expect(report.contract.runtime_login_credential_statuses).toEqual(['active', 'registered'])
     expect(report.contract.delivery_credential_statuses).toEqual(['active'])
+    expect(report.contract.runtime_login_delivery_status_policy).toBe('separate')
+    expect(report.contract.selected_delivery_credential_status).toBe('registered')
+    expect(report.contract.selected_delivery_status_contract).toBe('violated')
     expect(report.primary_blocker).toMatchObject({
       code: 'SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE',
       repair_hint: 'Promote the sender Discord credential to active only after token identity and channel write permission are verified.',
     })
     expect(text).toContain('Credential contract: drift')
+    expect(text).toContain('Credential policy: separate')
     expect(text).toContain('Runtime login statuses: active, registered')
     expect(text).toContain('Delivery statuses: active')
+    expect(text).toContain('Selected delivery status contract: violated')
     expect(text).toContain('Primary blocker: SENDER_CREDENTIAL_NOT_DELIVERY_ELIGIBLE')
     expect(text).toContain('Primary repair: Promote the sender Discord credential to active only after token identity and channel write permission are verified.')
     expect(text).toContain('Effective delivery owner: blocked:CREDENTIAL_NOT_DELIVERY_ELIGIBLE')
