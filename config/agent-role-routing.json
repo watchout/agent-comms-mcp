@@ -49,6 +49,40 @@
       "description": "CTO/L3 approval before merge",
       "legacyAgentIds": ["cto"],
       "newWorkAllowedViaLegacyIds": false
+    },
+    "repo_owner_exact_head_decision": {
+      "agentId": "codex-cto",
+      "description": "Delegated repo-owner exact-head decision poster for watchout/agent-comms-mcp. This role may post machine-readable owner decisions only after the required exact-head gates are complete; it must not merge or mutate runtime/protected surfaces.",
+      "authority": "delegated_repo_owner_exact_head_decision",
+      "activeFunction": "protected_surface_gate",
+      "controlSource": "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880967837",
+      "delegationPolicyRef": "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880983284",
+      "delegationSourceRequired": "owner_or_ceo_policy_or_decision_record",
+      "mayPostOwnerExactHeadDecision": true,
+      "mayMerge": false,
+      "mayRuntimeActivate": false,
+      "mayMutateProtectedRuntimeSurface": false,
+      "dualRoleCollapseWith": ["cto_review"],
+      "dualRoleCollapseScope": "exact_head_owner_decision_only",
+      "requiredPrerequisites": [
+        "implementation_actor_not_codex_cto",
+        "independent_audit_complete_exact_head_matched_clean",
+        "technical_owner_review_complete_exact_head_matched_clean",
+        "cto_review_complete_exact_head_matched_clean",
+        "additional_review_completion_complete_no_mismatch",
+        "owner_decision_required_is_only_remaining_gate"
+      ],
+      "forbiddenActions": [
+        "merge",
+        "ready_handling",
+        "runtime_activation",
+        "launchd_apply_or_restart",
+        "checkout_materialization",
+        "queue_db_fifo_mutation",
+        "secret_credential_deployment_mutation",
+        "branch_protection_ruleset_required_check_mutation",
+        "github_repository_permission_change"
+      ]
     }
   },
   "legacyAgentIds": {

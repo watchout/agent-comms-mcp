@@ -110,6 +110,16 @@ PR conveyor labels are normalized before owner resolution:
 - `needs:l3-review` -> role `cto`, owner `codex-cto`
 - `needs:ceo-approval` -> role `ceo`, owner `ceo`
 - `needs:rework` -> role `implementation`, owner `agent-com-dev`
+- `OWNER_DECISION_REQUIRED` with audit and additional-review completion true
+  -> role `repo_owner_exact_head_decision`, owner `codex-cto`
+
+The `repo_owner_exact_head_decision` route is repo-scoped to
+`watchout/agent-comms-mcp` and is governed by
+`config/agent-role-routing.json`. It may request or dispatch a delegated owner
+exact-head decision only after the readback proves independent audit and all
+required additional reviews are complete and exact-head matched. It must not
+dispatch merge, ready handling, runtime activation, launchd/checkout action,
+queue/DB/secret/deployment mutation, or branch-protection changes.
 
 ## Evidence
 

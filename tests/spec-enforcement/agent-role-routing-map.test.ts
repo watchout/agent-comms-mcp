@@ -6,11 +6,21 @@ const REPO = join(import.meta.dir, '..', '..')
 
 type RoleEntry = {
   agentId: string
+  authority?: string
   activeFunction?: string
   scope?: string
   controlSource?: string
+  delegationPolicyRef?: string
   bindingIssue?: string
   functionBindingsRef?: string
+  delegationSourceRequired?: string
+  mayPostOwnerExactHeadDecision?: boolean
+  mayMerge?: boolean
+  mayRuntimeActivate?: boolean
+  mayMutateProtectedRuntimeSurface?: boolean
+  dualRoleCollapseWith?: string[]
+  dualRoleCollapseScope?: string
+  requiredPrerequisites?: string[]
   forbiddenActions?: string[]
   requiredEnv?: Record<string, string>
   legacyAgentIds?: string[]
@@ -65,6 +75,7 @@ describe('agent role routing map', () => {
     expect(roleMap.roles.pr_audit_l1.agentId).toBe('auditor')
     expect(roleMap.roles.pr_audit_l2.agentId).toBe('codex-audit')
     expect(roleMap.roles.pr_approval_l3.agentId).toBe('codex-cto')
+    expect(roleMap.roles.repo_owner_exact_head_decision.agentId).toBe('codex-cto')
   })
 
   test('D7 suite-lead rebinding is coordination-only and separated from AUN implementation', () => {
@@ -118,6 +129,46 @@ describe('agent role routing map', () => {
     })
     expect(lead.selfSendTo).toContain('codex-cto')
     expect(lead.agentId).not.toBe(roleMap.roles.pr_approval_l3.agentId)
+  })
+
+  test('repo owner exact-head decision is delegated to codex-cto with fail-closed boundaries', () => {
+    const owner = roleMap.roles.repo_owner_exact_head_decision
+    expect(owner).toMatchObject({
+      agentId: 'codex-cto',
+      authority: 'delegated_repo_owner_exact_head_decision',
+      activeFunction: 'protected_surface_gate',
+      controlSource: 'https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880967837',
+      delegationPolicyRef: 'https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880983284',
+      delegationSourceRequired: 'owner_or_ceo_policy_or_decision_record',
+      mayPostOwnerExactHeadDecision: true,
+      mayMerge: false,
+      mayRuntimeActivate: false,
+      mayMutateProtectedRuntimeSurface: false,
+      dualRoleCollapseScope: 'exact_head_owner_decision_only',
+    })
+    expect(owner.dualRoleCollapseWith).toEqual(['cto_review'])
+    expect(owner.requiredPrerequisites).toEqual(expect.arrayContaining([
+      'implementation_actor_not_codex_cto',
+      'independent_audit_complete_exact_head_matched_clean',
+      'technical_owner_review_complete_exact_head_matched_clean',
+      'cto_review_complete_exact_head_matched_clean',
+      'additional_review_completion_complete_no_mismatch',
+      'owner_decision_required_is_only_remaining_gate',
+    ]))
+    expect(owner.forbiddenActions).toEqual(expect.arrayContaining([
+      'merge',
+      'ready_handling',
+      'runtime_activation',
+      'launchd_apply_or_restart',
+      'checkout_materialization',
+      'queue_db_fifo_mutation',
+      'secret_credential_deployment_mutation',
+      'branch_protection_ruleset_required_check_mutation',
+      'github_repository_permission_change',
+    ]))
+    expect(owner.agentId).toBe(roleMap.roles.pr_approval_l3.agentId)
+    expect(owner.agentId).not.toBe(roleMap.roles.suite_lead.agentId)
+    expect(owner.agentId).not.toBe(roleMap.roles.aun_development_lead.agentId)
   })
 
   test('role recipients are present in the channel outbound allowlist', () => {
