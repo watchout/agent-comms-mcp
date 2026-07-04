@@ -74,6 +74,10 @@ import {
   formatQueueWorkActivationPlanText,
 } from '../core/state-daemon/queue-work-activation-plan'
 import {
+  buildQueueWorkReservationPlan,
+  formatQueueWorkReservationPlanText,
+} from '../core/state-daemon/queue-work-reservation-plan'
+import {
   assertMessageQueueStatusVocabularyCompatible,
   formatMessageQueueStatusCodeDrift,
   isDbCodeDriftError,
@@ -4470,8 +4474,8 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
 }
 
 async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-activation-plan') {
-    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness|queue-work-activation-plan> ...')
+  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-reservation-plan' && subcommand !== 'queue-work-activation-plan') {
+    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness|queue-work-reservation-plan|queue-work-activation-plan> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
@@ -4481,6 +4485,8 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
+        : subcommand === 'queue-work-reservation-plan'
+          ? 'Usage: agent-com state-daemon queue-work-reservation-plan --agent-id <id> --commit <sha> [--message-id <uuid>] [--from-agent <id>] [--channel-id <id>] [--content <text>] [--priority <n>] [--format json|text]'
         : subcommand === 'queue-work-activation-plan'
           ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]'
           : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
@@ -4533,6 +4539,40 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       const report = buildQueueProcessingReadinessReport(rows, inspectStateDaemonRuntime())
       if (format === 'text') {
         process.stdout.write(formatQueueProcessingReadinessText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = 1
+    } finally {
+      await db.end()
+    }
+    return
+  }
+  if (subcommand === 'queue-work-reservation-plan') {
+    if (hasFlag(flags, 'execute')) {
+      console.error('Error: state-daemon queue-work-reservation-plan is read-only; DB row reservation requires a separate approved insert')
+      process.exit(2)
+    }
+    const agentId = flags['agent-id']
+    const commit = flags.commit
+    if (!agentId || !commit) {
+      console.error('Usage: agent-com state-daemon queue-work-reservation-plan --agent-id <id> --commit <sha> [--message-id <uuid>] [--from-agent <id>] [--channel-id <id>] [--content <text>] [--priority <n>] [--format json|text]')
+      process.exit(2)
+    }
+    const db = await getDb()
+    try {
+      const report = await buildQueueWorkReservationPlan(db.__adapter, {
+        agentId,
+        commit,
+        messageId: flags['message-id'],
+        fromAgentId: flags['from-agent'],
+        channelId: flags['channel-id'],
+        content: flags.content,
+        issueRef: flags.issue ?? flags['issue-ref'],
+        priority: flags.priority,
+      })
+      if (format === 'text') {
+        process.stdout.write(formatQueueWorkReservationPlanText(report))
       } else {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       }
@@ -5964,6 +6004,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
+  state-daemon queue-work-reservation-plan --agent-id <id> --commit <sha> [--message-id <uuid>] [--content <text>] [--format json|text]
+                                                       — read-only fresh queue-work row reservation plan; no DB insert or runner activation
   state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]
                                                        — read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]

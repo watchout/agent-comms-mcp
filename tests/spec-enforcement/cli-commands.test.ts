@@ -44,6 +44,7 @@ const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts
 const FULL_CHANNEL_SMOKE_PATH = join(REPO_ROOT, 'core', 'full-channel-smoke.ts')
 const STATE_DAEMON_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-readiness.ts')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-launchagent-readiness.ts')
+const STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_PATH = join(REPO_ROOT, 'core', 'state-daemon', 'queue-work-reservation-plan.ts')
 const STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_PATH = join(REPO_ROOT, 'core', 'state-daemon', 'queue-work-activation-plan.ts')
 const LOCAL_SUPERVISOR_ADAPTER_PATH = join(REPO_ROOT, 'core', 'local-supervisor-adapter.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
@@ -65,6 +66,7 @@ const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const FULL_CHANNEL_SMOKE_SRC = readFileSync(FULL_CHANNEL_SMOKE_PATH, 'utf-8')
 const STATE_DAEMON_READINESS_SRC = readFileSync(STATE_DAEMON_READINESS_PATH, 'utf-8')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_SRC = readFileSync(STATE_DAEMON_LAUNCHAGENT_READINESS_PATH, 'utf-8')
+const STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC = readFileSync(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_PATH, 'utf-8')
 const STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC = readFileSync(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_PATH, 'utf-8')
 const LOCAL_SUPERVISOR_ADAPTER_SRC = readFileSync(LOCAL_SUPERVISOR_ADAPTER_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
@@ -173,7 +175,7 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/async function stateDaemonCommand[\s\S]*?buildStateDaemonLaunchAgentReadinessReport/)
   })
   test("'state-daemon install-plan' invokes the dry-run local supervisor install planner", () => {
-    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-activation-plan'/)
+    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-reservation-plan' && subcommand !== 'queue-work-activation-plan'/)
     expect(CLI_SRC).toMatch(/subcommand === 'install-plan'[\s\S]*?buildLocalLaunchdInstallDryRunPlan/)
     expect(CLI_SRC).toMatch(/state-daemon install-plan is dry-run only/)
   })
@@ -181,6 +183,11 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?fetchBotStatusFromDb/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?buildQueueProcessingReadinessReport/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?formatQueueProcessingReadinessText/)
+  })
+  test("'state-daemon queue-work-reservation-plan' invokes the read-only fresh-row planner", () => {
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-work-reservation-plan'[\s\S]*?buildQueueWorkReservationPlan/)
+    expect(CLI_SRC).toMatch(/subcommand === 'queue-work-reservation-plan'[\s\S]*?formatQueueWorkReservationPlanText/)
+    expect(CLI_SRC).toMatch(/queue-work-reservation-plan is read-only/)
   })
   test("'state-daemon queue-work-activation-plan' invokes the read-only exact-row planner", () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?buildQueueWorkActivationPlan/)
@@ -752,6 +759,19 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_live_smoke: true/)
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/QUEUE_WAKE_STUCK/)
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/STATE_DAEMON_TRANSPORT_NOT_READY/)
+  })
+
+  test('help documents state-daemon fresh queue-work row reservation planner', () => {
+    expect(CLI_SRC).toMatch(/state-daemon queue-work-reservation-plan --agent-id <id> --commit <sha>/)
+    expect(CLI_SRC).toMatch(/read-only fresh queue-work row reservation plan; no DB insert or runner activation/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/issue_ref: issueRef/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/no_db_mutation: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/no_state_daemon_restart: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/no_launchctl_mutation: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/no_discord_live_write: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/reservation_requires_separate_approval: true/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/reply_contract/)
+    expect(STATE_DAEMON_QUEUE_WORK_RESERVATION_PLAN_SRC).toMatch(/target_agent_has_open_queue_rows/)
   })
 
   test('help documents state-daemon exact-row queue-work activation planner', () => {
