@@ -1,6 +1,7 @@
 {
   "version": 1,
   "channelId": "1487368919613444156",
+  "routingModel": "shirube_v3_active_function",
   "d7SuiteLeadRebinding": {
     "controlSource": "https://github.com/watchout/iyasaka-arc/issues/23",
     "ownerDecision": "https://github.com/watchout/iyasaka-arc/issues/23#issuecomment-4863673059",
@@ -11,6 +12,30 @@
     "oldAunImplementationAssignment": "cleared",
     "aunImplementationOwner": "codex-aun",
     "transportAdapterOwnershipUnchanged": true
+  },
+  "executionFunctions": {
+    "evidence_audit_gate": {
+      "agentId": "codex-audit",
+      "description": "Shirube V3 evidence audit gate. New audit dispatch must target this active_function, not L1/L2 role labels.",
+      "activeFunction": "evidence_audit_gate",
+      "legacyAliases": ["pr_audit_l1", "pr_audit_l2"],
+      "expectedRuntime": "runtime row decides dispatch path",
+      "mayImplement": false,
+      "mayOwnerApprove": false,
+      "mayMerge": false,
+      "mayRuntimeActivate": false
+    },
+    "protected_surface_gate": {
+      "agentId": "codex-cto",
+      "description": "Shirube V3 protected-surface gate for high-risk decisions and exact-head protected approvals.",
+      "activeFunction": "protected_surface_gate",
+      "legacyAliases": ["pr_approval_l3", "cto_review"],
+      "legacyAgentIds": ["cto"],
+      "newWorkAllowedViaLegacyIds": false,
+      "mayImplement": false,
+      "mayMerge": false,
+      "mayRuntimeActivate": false
+    }
   },
   "roles": {
     "suite_lead": {
@@ -36,17 +61,29 @@
     },
     "pr_audit_l1": {
       "agentId": "auditor",
-      "description": "Independent L1 PR audit",
+      "description": "Legacy compatibility alias only. New work must route by active_function=evidence_audit_gate.",
+      "activeFunction": "evidence_audit_gate",
+      "status": "legacy_alias",
+      "newWorkAllowed": false,
+      "replacementFunction": "evidence_audit_gate",
       "expectedRuntime": "TUI"
     },
     "pr_audit_l2": {
       "agentId": "codex-audit",
-      "description": "Independent L2 PR audit",
+      "description": "Legacy compatibility alias only. New work must route by active_function=evidence_audit_gate.",
+      "activeFunction": "evidence_audit_gate",
+      "status": "legacy_alias",
+      "newWorkAllowed": false,
+      "replacementFunction": "evidence_audit_gate",
       "expectedRuntime": "runtime row decides dispatch path"
     },
     "pr_approval_l3": {
       "agentId": "codex-cto",
-      "description": "CTO/L3 approval before merge",
+      "description": "Legacy compatibility alias only. New protected decisions must route by active_function=protected_surface_gate.",
+      "activeFunction": "protected_surface_gate",
+      "status": "legacy_alias",
+      "newWorkAllowed": false,
+      "replacementFunction": "protected_surface_gate",
       "legacyAgentIds": ["cto"],
       "newWorkAllowedViaLegacyIds": false
     },
@@ -90,7 +127,7 @@
       "canonicalAgentId": "codex-cto",
       "status": "disabled",
       "newWorkAllowed": false,
-      "reason": "The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto."
+      "reason": "The legacy CTO identity is retained for history only. New protected_surface_gate work targets codex-cto."
     }
   },
   "mcpNamespacePolicy": {

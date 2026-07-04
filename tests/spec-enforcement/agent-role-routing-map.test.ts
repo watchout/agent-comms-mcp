@@ -8,13 +8,18 @@ type RoleEntry = {
   agentId: string
   authority?: string
   activeFunction?: string
+  status?: string
   scope?: string
   controlSource?: string
   delegationPolicyRef?: string
   bindingIssue?: string
   functionBindingsRef?: string
   delegationSourceRequired?: string
+  replacementFunction?: string
+  newWorkAllowed?: boolean
   mayPostOwnerExactHeadDecision?: boolean
+  mayImplement?: boolean
+  mayOwnerApprove?: boolean
   mayMerge?: boolean
   mayRuntimeActivate?: boolean
   mayMutateProtectedRuntimeSurface?: boolean
@@ -26,11 +31,13 @@ type RoleEntry = {
   legacyAgentIds?: string[]
   newWorkAllowedViaLegacyIds?: boolean
   selfSendTo?: string[]
+  legacyAliases?: string[]
 }
 
 type RoleRoutingConfig = {
   version: number
   channelId: string
+  routingModel?: string
   d7SuiteLeadRebinding?: {
     controlSource: string
     ownerDecision: string
@@ -42,6 +49,7 @@ type RoleRoutingConfig = {
     aunImplementationOwner: string
     transportAdapterOwnershipUnchanged: boolean
   }
+  executionFunctions?: Record<string, RoleEntry>
   roles: Record<string, RoleEntry>
   legacyAgentIds: Record<string, {
     canonicalAgentId: string
@@ -67,14 +75,26 @@ describe('agent role routing map', () => {
     channels: Record<string, { outboundAllowlist?: string[] }>
   }>(join(REPO, 'config', 'bot-routing.json'))
 
-  test('pins PR governance roles to canonical agent_id values', () => {
+  test('pins Shirube V3 execution functions to canonical agent_id values', () => {
     expect(roleMap.version).toBe(1)
     expect(roleMap.channelId).toBe('1487368919613444156')
+    expect(roleMap.routingModel).toBe('shirube_v3_active_function')
     expect(roleMap.roles.suite_lead.agentId).toBe('agent-com-dev')
     expect(roleMap.roles.aun_development_lead.agentId).toBe('codex-aun')
-    expect(roleMap.roles.pr_audit_l1.agentId).toBe('auditor')
-    expect(roleMap.roles.pr_audit_l2.agentId).toBe('codex-audit')
-    expect(roleMap.roles.pr_approval_l3.agentId).toBe('codex-cto')
+    expect(roleMap.executionFunctions?.evidence_audit_gate).toMatchObject({
+      agentId: 'codex-audit',
+      activeFunction: 'evidence_audit_gate',
+      mayImplement: false,
+      mayMerge: false,
+      mayRuntimeActivate: false,
+    })
+    expect(roleMap.executionFunctions?.protected_surface_gate).toMatchObject({
+      agentId: 'codex-cto',
+      activeFunction: 'protected_surface_gate',
+      mayImplement: false,
+      mayMerge: false,
+      mayRuntimeActivate: false,
+    })
     expect(roleMap.roles.repo_owner_exact_head_decision.agentId).toBe('codex-cto')
   })
 
@@ -107,6 +127,27 @@ describe('agent role routing map', () => {
     })
   })
 
+  test('legacy L1 L2 L3 labels are compatibility aliases, not new dispatch functions', () => {
+    expect(roleMap.roles.pr_audit_l1).toMatchObject({
+      activeFunction: 'evidence_audit_gate',
+      status: 'legacy_alias',
+      newWorkAllowed: false,
+      replacementFunction: 'evidence_audit_gate',
+    })
+    expect(roleMap.roles.pr_audit_l2).toMatchObject({
+      activeFunction: 'evidence_audit_gate',
+      status: 'legacy_alias',
+      newWorkAllowed: false,
+      replacementFunction: 'evidence_audit_gate',
+    })
+    expect(roleMap.roles.pr_approval_l3).toMatchObject({
+      activeFunction: 'protected_surface_gate',
+      status: 'legacy_alias',
+      newWorkAllowed: false,
+      replacementFunction: 'protected_surface_gate',
+    })
+  })
+
   test('legacy cto is not a new-work target for any role', () => {
     for (const role of Object.values(roleMap.roles)) {
       expect(role.agentId).not.toBe('cto')
@@ -115,7 +156,7 @@ describe('agent role routing map', () => {
       canonicalAgentId: 'codex-cto',
       status: 'disabled',
       newWorkAllowed: false,
-      reason: 'The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto.',
+      reason: 'The legacy CTO identity is retained for history only. New protected_surface_gate work targets codex-cto.',
     })
     expect(roleMap.roles.pr_approval_l3.legacyAgentIds).toEqual(['cto'])
     expect(roleMap.roles.pr_approval_l3.newWorkAllowedViaLegacyIds).toBe(false)
@@ -128,7 +169,7 @@ describe('agent role routing map', () => {
       AGENT_COM_EXPECTED_AGENT_ID: 'codex-aun',
     })
     expect(lead.selfSendTo).toContain('codex-cto')
-    expect(lead.agentId).not.toBe(roleMap.roles.pr_approval_l3.agentId)
+    expect(lead.agentId).not.toBe(roleMap.executionFunctions?.protected_surface_gate.agentId)
   })
 
   test('repo owner exact-head decision is delegated to codex-cto with fail-closed boundaries', () => {
@@ -166,15 +207,18 @@ describe('agent role routing map', () => {
       'branch_protection_ruleset_required_check_mutation',
       'github_repository_permission_change',
     ]))
-    expect(owner.agentId).toBe(roleMap.roles.pr_approval_l3.agentId)
+    expect(owner.agentId).toBe(roleMap.executionFunctions?.protected_surface_gate.agentId)
     expect(owner.agentId).not.toBe(roleMap.roles.suite_lead.agentId)
     expect(owner.agentId).not.toBe(roleMap.roles.aun_development_lead.agentId)
   })
 
   test('role recipients are present in the channel outbound allowlist', () => {
     const allowlist = botRouting.channels[roleMap.channelId]?.outboundAllowlist ?? []
-    for (const role of Object.values(roleMap.roles)) {
-      expect(allowlist).toContain(role.agentId)
+    for (const route of [
+      ...Object.values(roleMap.roles),
+      ...Object.values(roleMap.executionFunctions ?? {}),
+    ]) {
+      expect(allowlist).toContain(route.agentId)
     }
   })
 

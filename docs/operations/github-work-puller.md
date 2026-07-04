@@ -75,12 +75,12 @@ matches configured labels such as:
 - `needs:implementation`
 - `needs:rework`
 - `needs:audit`
-- `needs:l1-audit`
-- `needs:l2-audit`
+- `needs:l1-audit` (legacy label; normalized to `evidence_audit_gate`)
+- `needs:l2-audit` (legacy label; normalized to `evidence_audit_gate`)
 - `needs:qa`
 - `needs:check`
 - `needs:cto`
-- `needs:l3-review`
+- `needs:l3-review` (legacy label; normalized to `protected_surface_gate`)
 - `needs:ceo-approval`
 - `owner:<agent-or-role>`
 - `route:fast`
@@ -104,14 +104,21 @@ prevents an unresolved item from accumulating one puller comment per poll.
 Protected routes resolve to `stop_lane`; they are surfaced but not approved,
 merged, deployed, live-activated, or executed as autonomous work.
 
-PR conveyor labels are normalized before owner resolution:
+PR conveyor labels are normalized to Shirube V3 active functions before owner
+resolution:
 
-- `needs:l1-audit` / `needs:l2-audit` -> role `audit`, owner `codex-audit`
-- `needs:l3-review` -> role `cto`, owner `codex-cto`
-- `needs:ceo-approval` -> role `ceo`, owner `ceo`
-- `needs:rework` -> role `implementation`, owner `agent-com-dev`
+- `needs:audit` / `needs:l1-audit` / `needs:l2-audit` -> function
+  `evidence_audit_gate`, owner `codex-audit`
+- `needs:cto` / `needs:l3-review` -> function `protected_surface_gate`, owner
+  `codex-cto`
+- `needs:ceo-approval` -> function `operator_acceptance_gate`, owner `ceo`
+- `needs:rework` -> function `implementation_executor`, owner `agent-com-dev`
 - `OWNER_DECISION_REQUIRED` with audit and additional-review completion true
-  -> role `repo_owner_exact_head_decision`, owner `codex-cto`
+  -> function `repo_owner_exact_head_decision`, owner `codex-cto`
+
+The legacy L1/L2/L3 label names are accepted only as input compatibility. The
+worker must not write queue payloads whose operating route is "L2" or
+`l2auditor`; it must write the normalized V3 function and canonical owner.
 
 The `repo_owner_exact_head_decision` route is repo-scoped to
 `watchout/agent-comms-mcp` and is governed by
