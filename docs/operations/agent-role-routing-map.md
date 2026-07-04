@@ -5,41 +5,83 @@ Issue: #440 / #470 coordination
 ## Decision
 
 Operational roles are not delivery identities. AUN delivery still uses
-canonical `agent_id`, and role labels must resolve through
-`config/agent-role-routing.json` before a message is sent.
+canonical `agent_id`, and Shirube V3 work must route through
+`execution_context.active_function` in `config/agent-role-routing.json` before
+a message is sent.
 
-Current PR governance routing:
+Current Shirube V3 function routing:
 
-| Role | Canonical agent_id | Notes |
+| active_function | Canonical agent_id | Notes |
 |---|---|---|
-| AUN development lead | `codex-aun` | Codex/AUN operator session. Its MCP registration must run with `AGENT_ID=codex-aun`. |
-| L1 PR audit | `auditor` | Independent L1 audit recipient. |
-| L2 PR audit | `codex-audit` | Independent L2 audit recipient. Runtime dispatch is determined by the live `agents.runtime` row. |
-| L3 / CTO approval | `codex-cto` | CTO approval recipient. Legacy `cto` is history-only and must not receive new governance work. |
+| `implementation_executor` for AUN development lead work | `codex-aun` | Codex/AUN operator session. Its MCP registration must run with `AGENT_ID=codex-aun`. |
+| `evidence_audit_gate` | `codex-audit` | Independent evidence audit gate. Runtime dispatch is determined by the live runtime row. |
+| `protected_surface_gate` | `codex-cto` | High-risk/protected-surface decision gate. Legacy `cto` is history-only and must not receive new governance work. |
+| `repo_owner_exact_head_decision` | `codex-cto` | Delegated repo-owner decision poster for `watchout/agent-comms-mcp`; exact-head owner decisions only, no merge or runtime/protected mutation authority. |
 
-## Per-Slice Overrides
+Legacy labels such as `pr_audit_l1`, `pr_audit_l2`, and `pr_approval_l3` are
+compatibility aliases only. New dispatch must not target "L1", "L2", or "L3" as
+the operating model. If a GitHub label or old payload contains those terms, the
+puller must normalize it to the V3 function route before queue delivery.
 
-CEO may override the default route for a specific slice. The override must be
-recorded in the slice plan so later gates do not silently fall back to the
-default table.
+## Delegated Repo-Owner Exact-Head Decisions
 
-| Slice | L1 | L2 | L3 | Source |
-|---|---|---|---|---|
-| NORM-022 runtime endpoint lease | `devauditor` | `l2auditor` | `cto` | CEO directive 2026-05-27 |
+`repo_owner_exact_head_decision` resolves to `codex-cto` for
+`watchout/agent-comms-mcp` only. The policy source is the protected-surface
+decision in #794:
+
+- https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880967837
+
+The owner delegation record is:
+
+- https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880983284
+
+This delegation is not blanket owner approval. It allows `codex-cto` to post a
+machine-readable owner exact-head decision only when all of these conditions are
+true:
+
+- the implementation actor for the target PR is not `codex-cto`
+- independent audit is complete, exact-head matched, maker-checker separated,
+  and has no blocking findings or required rework
+- `technical_owner_review` is complete, exact-head matched, and clean
+- `cto_review` is complete, exact-head matched, and clean
+- additional-review readback has no missing reviews, head mismatches,
+  provenance gaps, or maker-checker violations
+- the only remaining control-state gate is owner exact-head decision
+
+`codex-cto` may post the owner exact-head decision even when it also posted the
+`cto_review`, but only because this exact-head-only dual-role collapse is
+explicitly recorded in `config/agent-role-routing.json`. The owner decision must
+cite the delegation policy, audit ref, technical-owner review ref, CTO review
+ref, gate/readback evidence ref, and the exact PR head SHA.
+
+This delegation does not authorize merge, ready handling, runtime activation,
+launchd/launchctl apply or restart, checkout materialization, queue/DB/FIFO
+mutation, secret/credential/deployment mutation, branch protection/ruleset or
+required-check mutation, or GitHub repository permission changes.
+
+## Per-Slice Legacy Records
+
+Older slice records may mention L1/L2/L3. Treat those as historical routing
+records, not as the current operating model. Any resumed work must be expressed
+as V3 `active_function` before dispatch.
+
+| Slice | Historical route | V3 interpretation | Source |
+|---|---|---|---|
+| NORM-022 runtime endpoint lease | `devauditor` / `l2auditor` / `cto` | `evidence_audit_gate` followed by `protected_surface_gate` when required | CEO directive 2026-05-27 |
 
 At the time of the NORM-022 route update, live DB rows existed for
-`devauditor`, `l2auditor`, and `cto`; `cto` was disabled. If L3 delivery is
-required through `cto`, repair or enable that route before sending the L3
-approval request.
+`devauditor`, `l2auditor`, and `cto`; `cto` was disabled. Do not resume that
+shape directly. Convert the request to V3 function routing and use canonical
+agent IDs before sending.
 
 ## Failure Mode This Prevents
 
-If an AUN lead session tries to notify L3 and receives `SELF_SEND` for
-`codex-cto`, the problem is not that L3 needs a relay. The local MCP server is
-running under the wrong sender identity. Fix the session registration so the
-AUN lead sends as `codex-aun`.
+If an AUN lead session tries to notify `protected_surface_gate` and receives
+`SELF_SEND` for `codex-cto`, the problem is not that the gate needs a relay.
+The local MCP server is running under the wrong sender identity. Fix the
+session registration so the AUN lead sends as `codex-aun`.
 
-Do not work around this by sending L3 through a human relay as normal process.
+Do not work around this by sending the gate through a human relay as normal process.
 Relay is acceptable only as a temporary incident workaround while the mapping or
 registration is being repaired.
 
@@ -68,8 +110,8 @@ Required registry rows:
 
 | Session | Project dir | agent_id | Port | Notes |
 |---|---|---:|---:|---|
-| `codex-audit` | `~/Developer/codex-audit` | `codex-audit` | `8840` | L2 audit runtime. Disable `wasurezu` unless explicitly needed. |
-| `discord-cto` | `~/Developer/codex` | `codex-cto` | `8789` | L3/CTO runtime. Keep `wasurezu` identity aligned to `codex-cto` / `codex`. |
+| `codex-audit` | `~/Developer/codex-audit` | `codex-audit` | `8840` | `evidence_audit_gate` runtime. Disable `wasurezu` unless explicitly needed. |
+| `discord-cto` | `~/Developer/codex` | `codex-cto` | `8789` | `protected_surface_gate` runtime. Keep `wasurezu` identity aligned to `codex-cto` / `codex`. |
 
 Restart commands:
 
@@ -99,7 +141,7 @@ BEGIN READ ONLY;
 SELECT agent_id, display_name, agent_type, runtime, status,
        metadata->>'tmux_session' AS tmux_session
   FROM agents
-  WHERE agent_id IN ('codex-aun','auditor','codex-audit','codex-cto','cto')
+  WHERE agent_id IN ('codex-aun','codex-audit','codex-cto','cto')
   ORDER BY agent_id;
 SELECT id, members
   FROM channels
@@ -109,11 +151,13 @@ ROLLBACK;"
 
 Pass criteria:
 
-- `codex-aun`, `auditor`, `codex-audit`, and `codex-cto` exist.
+- `codex-aun`, `codex-audit`, and `codex-cto` exist.
 - `cto` may exist only as a disabled or history-only legacy alias.
 - Channel `1487368919613444156` includes the canonical role recipients.
-- No new PR governance request targets `cto` unless a per-slice CEO override
-  records that legacy target and its live route has been repaired.
+- No new PR governance request targets `cto`, `l2auditor`, or L1/L2/L3 role
+  names as the operating route.
+- `repo_owner_exact_head_decision` targets `codex-cto`, not `cto`, and its
+  forbidden actions still include merge and runtime/protected mutations.
 - AUN lead MCP registration uses `AGENT_ID=codex-aun`; if it sends as
   `codex-cto`, restart or re-register that MCP session before continuing.
 
