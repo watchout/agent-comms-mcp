@@ -75,6 +75,11 @@ check_pattern 'bin/(aun-watchdog|wake-daemon)'   "Daemon entrypoint"
 check_pattern 'adapters/(discord|outbound)'      "Runtime adapter (Discord/outbound)"
 
 # ── Queue / routing / claim / recovery ────────────────────────────────────
+check_pattern 'config/queue-work-'               "Queue-work runtime policy"
+check_pattern 'docs/spec/queue-work-'            "Queue-work runtime policy spec"
+check_pattern 'scripts/queue-work-'              "Queue-work runtime tooling"
+check_pattern 'tests/contract/state-daemon/'     "State-daemon contract tests"
+check_pattern 'tests/(contract/state-daemon/)?state-daemon.*queue-work' "Queue-work/state-daemon contract tests"
 check_pattern 'core/route-message\.'             "Core routing logic"
 check_pattern 'core/send-(fanout|fallback|errors)' "Send/fanout/recovery"
 check_pattern 'adapters/inbound-receiver'        "Inbound receiver"

@@ -545,7 +545,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(db.queries[0]?.sql).toContain('mq.created_at >=')
   })
 
-  test('queue-work scheduler canary residue preflight passes for exact policy-classified residue', async () => {
+  test('queue-work scheduler canary residue preflight passes for exact policy-classified skipped residue', async () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
@@ -572,7 +572,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
           invocation_source: 'state-daemon-queue-work-scheduler',
         },
       }),
-      status: 'pending',
+      status: 'skipped',
       created_at: '2026-06-14T08:46:57.674Z',
       claimed_by: null,
       claimed_at: null,
@@ -662,7 +662,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     ]))
   })
 
-  test('queue-work scheduler canary residue preflight passes for exact 120138 GitHub puller residue', async () => {
+  test('queue-work scheduler canary residue preflight passes for exact 120138 skipped GitHub puller residue', async () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
@@ -675,7 +675,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       agent_id: 'agent-com-dev',
       message_id: null,
       payload: JSON.stringify({ source: 'state-daemon-github-work-puller-canary' }),
-      status: 'pending',
+      status: 'skipped',
       created_at: '2026-06-14T08:00:00.000Z',
       claimed_by: null,
       claimed_at: null,
