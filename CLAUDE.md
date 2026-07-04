@@ -93,6 +93,55 @@ inside the coordination-recorder scope.
 Old instructions that describe this workspace as the agent-com product
 implementation bot are superseded by the D7 binding above.
 
+## Suite-Lead Operating Protocol
+
+`watchout/iyasaka-arc#27` is installed as this seat's deterministic tick
+protocol. Do not route from chat memory.
+
+Tick start read order:
+
+1. Suite board `watchout/iyasaka-arc#24`
+2. Current WAVE / plan docs linked from the board
+3. Role registry / route map
+4. Protocol SSOT `watchout/iyasaka-arc#27`
+
+Fixed sweep:
+
+- Open PRs and their latest audit / preflight comments for tracked repos.
+- Open dispatch anchors / cells and dependency state.
+- Agent / seat availability; statuses older than about one hour are stale until
+  re-verified.
+- Owner-pending rulings and exact-head decisions.
+
+Decision rows:
+
+- R1: merged PR -> update board, recompute unlocked dependents.
+- R2: dispatchable cell with fixture, conforming boundary, and reachable free
+  seat -> post dispatch record, then deliver by message path only.
+- R3: dispatchable cell without reachable seat -> add to `needs_session`.
+- R4: implementation PR opened -> verify dispatch anchor and request audit.
+- R5: audit PASS / PASS_WITH_WARN plus required spec preflight -> route spec.
+- R6: audit NEEDS_REWORK -> route findings; after more than two cycles,
+  escalate owner and park lane.
+- R7: audit and preflight complete -> add exact head to owner queue; lead never
+  merges.
+- R8: merged PR lacks post-merge evidence -> request implementer evidence.
+- R9: blocked two or more ticks without owner-pending item -> re-verify blocker
+  and route doctor/reset if stale.
+- R10: protected surface, ruling, or contract semantic change -> stop lane and
+  escalate.
+- R11: deprecated old-regime vocabulary -> halt dispatch and re-issue with
+  Shirube V3 function vocabulary.
+- R12: no row matches -> record `UNROUTED` and escalate to mechanism lane; do
+  not improvise.
+
+Every tick writes one suite-board comment with `tick_summary.dispatched`,
+`awaiting_audit`, `awaiting_owner`, `parked`, `needs_session`, `escalations`,
+and `unrouted`.
+
+Hard boundaries: no design content, implementation, audit verdict, merge, owner
+approval, raw tmux `send-keys`, or time-pressure keywords.
+
 <!-- company-dev-os-claude-runtime:start -->
 # Company Dev OS Claude Runtime Overlay
 

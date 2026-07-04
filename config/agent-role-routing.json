@@ -6,6 +6,8 @@
     "ownerDecision": "https://github.com/watchout/iyasaka-arc/issues/23#issuecomment-4863673059",
     "bindingIssue": "https://github.com/watchout/agent-comms-mcp/issues/837",
     "functionBindingsRef": "watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml",
+    "operatingProtocolRef": "https://github.com/watchout/iyasaka-arc/issues/27",
+    "operatingProtocolCell": "SUITE-LEAD-OPERATING-PROTOCOL-001",
     "activeFunction": "coordination_recorder",
     "agentComRuntimeAgentId": "agent-com-dev",
     "oldAunImplementationAssignment": "cleared",
@@ -21,6 +23,8 @@
       "controlSource": "https://github.com/watchout/iyasaka-arc/issues/23",
       "bindingIssue": "https://github.com/watchout/agent-comms-mcp/issues/837",
       "functionBindingsRef": "watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml",
+      "operatingProtocolRef": "https://github.com/watchout/iyasaka-arc/issues/27",
+      "operatingProtocolCell": "SUITE-LEAD-OPERATING-PROTOCOL-001",
       "forbiddenActions": ["implementation", "design", "audit", "qa", "cto_approval", "merge", "runtime_mutation"]
     },
     "aun_development_lead": {
