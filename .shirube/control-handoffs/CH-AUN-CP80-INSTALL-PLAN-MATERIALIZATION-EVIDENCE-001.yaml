@@ -23,8 +23,6 @@ implementation_actor: codex-implementation-bot
 next_role: independent_audit
 protected_surfaces:
   - active workflows
-  - launchd
-  - deployment
 protected_surface_details:
   - CP80-GAP-004 install-plan checkout materialization evidence and dry-run contract only.
   - Adds explicit install-plan evidence for materialization_required, approved_checkout_ref, no_apply, restart_performed false, and host apply disabled status.
@@ -89,8 +87,6 @@ cell:
   protected_surfaces:
     declared:
       - active workflows
-      - launchd
-      - deployment
     touched: true
     details:
       - Active workflow touch is limited to adding this Cell to the report-only Rapid/Lite route table.
@@ -158,6 +154,14 @@ validation:
     - install_plan_json_contract
     - read_only_gate_pack_summary
     - audit_checklist_report
+  required_evidence_refs:
+    install_plan_json_contract:
+      ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782
+      content: "install_plan_probe block records exact-head dry-run JSON contract fields and blocker codes."
+    read_only_gate_pack_summary:
+      ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782
+      supplemental_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880654692
+      content: "read_only_gate_pack block records repo_head_sha, mutation/restart false, install-plan blockers, and final remote-check update."
 owner_decision:
   required_before_merge: true
   evidence_source: external_owner_decision_comment_or_workflow_input
