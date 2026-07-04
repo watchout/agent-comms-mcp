@@ -13,6 +13,7 @@ import {
 import {
   DISCORD_DELIVERY_CREDENTIAL_STATUSES,
   DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES,
+  isDiscordDeliveryCredentialStatus,
 } from './discord-token-resolution'
 
 export type DiscordProjectionGoNoGo = 'GO' | 'NO_GO'
@@ -57,7 +58,11 @@ export interface DiscordProjectionEvidenceSummary {
 export interface DiscordProjectionCredentialContract {
   runtime_login_credential_statuses: readonly string[]
   delivery_credential_statuses: readonly string[]
+  runtime_login_delivery_status_policy: 'separate'
   runtime_delivery_status_contract: 'aligned' | 'drift'
+  selected_delivery_credential_status: string | null
+  selected_delivery_status_contract: 'satisfied' | 'violated' | 'unknown'
+  selected_delivery_evidence_complete: boolean
   sender_direct_preferred_over_router: true
   fallback_requires_explicit_allowance: true
   selected_delivery_evidence_required: true
@@ -257,12 +262,14 @@ function finding(
 function credentialContract(): DiscordProjectionCredentialContract {
   const runtimeStatuses = [...DISCORD_RUNTIME_LOGIN_CREDENTIAL_STATUSES]
   const deliveryStatuses = [...DISCORD_DELIVERY_CREDENTIAL_STATUSES]
-  const aligned = runtimeStatuses.length === deliveryStatuses.length
-    && runtimeStatuses.every((status, index) => status === deliveryStatuses[index])
   return {
     runtime_login_credential_statuses: runtimeStatuses,
     delivery_credential_statuses: deliveryStatuses,
-    runtime_delivery_status_contract: aligned ? 'aligned' : 'drift',
+    runtime_login_delivery_status_policy: 'separate',
+    runtime_delivery_status_contract: 'drift',
+    selected_delivery_credential_status: null,
+    selected_delivery_status_contract: 'unknown',
+    selected_delivery_evidence_complete: false,
     sender_direct_preferred_over_router: true,
     fallback_requires_explicit_allowance: true,
     selected_delivery_evidence_required: true,
@@ -449,6 +456,19 @@ export async function buildDiscordProjectionDiagnosticReport(
 
   const primaryBlocker = primaryBlockerFor(blockers)
   const ok = blockers.length === 0
+  const contract = credentialContract()
+  const hasSelectedDeliveryEvidence = selectedEvidenceComplete(selectedConsumer)
+  const selectedStatus = selectedConsumer.credential_status
+  const selectedDeliverySatisfied = hasSelectedDeliveryEvidence && isDiscordDeliveryCredentialStatus(selectedStatus)
+  contract.runtime_delivery_status_contract = selectedDeliverySatisfied ? 'aligned' : 'drift'
+  contract.selected_delivery_credential_status = selectedStatus
+  contract.selected_delivery_status_contract = selectedStatus === null
+    ? 'unknown'
+    : selectedDeliverySatisfied
+      ? 'satisfied'
+      : 'violated'
+  contract.selected_delivery_evidence_complete = hasSelectedDeliveryEvidence
+
   return {
     ok,
     go_no_go: ok ? 'GO' : 'NO_GO',
@@ -491,7 +511,7 @@ export async function buildDiscordProjectionDiagnosticReport(
       sender_direct: senderDirect,
       selected_consumer: selectedConsumer,
     },
-    contract: credentialContract(),
+    contract,
     primary_blocker: primaryBlocker,
     blockers,
     warnings,
@@ -531,8 +551,10 @@ export function formatDiscordProjectionDiagnosticText(report: DiscordProjectionD
     `Sender binding: ${report.evidence.sender_direct.channel_binding_id ?? '(none)'}`,
     `Sender connector: ${report.evidence.sender_direct.connector_instance_id ?? '(none)'}`,
     `Credential contract: ${report.contract.runtime_delivery_status_contract}`,
+    `Credential policy: ${report.contract.runtime_login_delivery_status_policy}`,
     `Runtime login statuses: ${report.contract.runtime_login_credential_statuses.join(', ')}`,
     `Delivery statuses: ${report.contract.delivery_credential_statuses.join(', ')}`,
+    `Selected delivery status contract: ${report.contract.selected_delivery_status_contract}`,
     `Sender direct priority: ${report.contract.sender_direct_preferred_over_router ? 'true' : 'false'}`,
     `Fallback allowed: ${report.decision.fallback_allowed ? 'true' : 'false'}`,
     `Fallback reason: ${report.decision.fallback_reason ?? '(none)'}`,
