@@ -1,0 +1,145 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-SUITE-LEAD-OPERATING-PROTOCOL-001
+parent_ssot: watchout/iyasaka-arc#27
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/iyasaka-arc/issues/27
+owner_confirmation_ref: https://github.com/watchout/iyasaka-arc/issues/27
+premise_confirmation_ref: https://github.com/watchout/iyasaka-arc/issues/27
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/837
+source_mirror_ref: https://github.com/watchout/iyasaka-arc/issues/27
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: independent_audit
+protected_surfaces:
+  - active workflows
+  - agent runtime startup policy
+protected_surface_details:
+  - Installs the #27 suite-lead operating protocol as startup/session baseline for agent-com / agent-com-dev.
+  - Adds report-only Rapid/Lite route-table metadata so this Cell is checked against its own allowed_paths.
+  - Does not activate runtime, queue workers, LaunchAgents, workflows as required checks, branch protection, rulesets, deploy, or production behavior.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this protocol-install Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+    - Audit checklist coverage for deterministic suite-lead tick baseline installation.
+  shirube_does_not_own:
+    - Product runtime behavior, API, DB, queue workers, launchd/launchctl, secrets, deployment, branch protection, rulesets, required-check activation, or external-system activation.
+cell:
+  CELL-ID: SUITE-LEAD-OPERATING-PROTOCOL-001
+  cell_type: governance_runtime_baseline
+  risk_class: R3
+  goal: Install SUITE-LEAD-OPERATING-PROTOCOL-001 from iyasaka-arc#27 as the agent-com / agent-com-dev suite-lead baseline.
+  governance_route: R3 governance/session baseline plus report-only workflow route metadata; independent audit and owner exact-head decision required before merge.
+  non_scope:
+    - product runtime implementation
+    - API handlers
+    - DB schema or migrations
+    - live queue, FIFO, or outbound projection mutation
+    - launchd or launchctl activation
+    - secrets or deployment changes
+    - required check activation
+    - branch protection or ruleset mutation
+    - production or external-system activation
+    - audit, QA, check, CTO, or owner decision substitution
+  allowed_paths:
+    - AGENTS.md
+    - CLAUDE.md
+    - config/agent-role-routing.json
+    - docs/operations/suite-lead-operating-protocol.md
+    - tests/spec-enforcement/agent-role-routing-map.test.ts
+    - .shirube/control-handoffs/CH-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml
+    - .shirube/evidence/EVIDENCE-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - core/**
+    - db/**
+    - migrations/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .env*
+    - secrets/**
+    - deploy/**
+    - deployment/**
+    - scripts/**
+    - src/**
+    - app/**
+    - api/**
+    - lib/**
+  protected_surfaces:
+    declared:
+      - active workflows
+      - agent runtime startup policy
+    touched: true
+    details:
+      - AGENTS.md and CLAUDE.md startup/session instructions are updated.
+      - The report-only Rapid/Lite workflow route table is updated to select this Cell's handoff/checklist/evidence.
+      - No workflow required-check activation, branch protection, ruleset, runtime, DB, queue, launchd, secret, deploy, or production mutation is included.
+  stop_conditions:
+    - any product runtime, API, DB, queue worker, launchd, secret, deploy, branch protection, ruleset, or required-check activation is needed
+    - route-table change would alter behavior for another Cell
+    - independent audit fails
+    - owner exact-head decision is missing before merge
+implementation_boundary:
+  summary: Install the #27 suite-lead operating protocol baseline and its dedicated report-only gate route metadata.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - queue or DB mutation
+    - launchd or launchctl mutation
+    - secret or deployment mutation
+    - required-check activation
+    - branch protection or ruleset mutation
+    - runtime activation
+acceptance_criteria:
+  - AGENTS.md and CLAUDE.md reference iyasaka-arc#27 as the suite-lead protocol baseline.
+  - config/agent-role-routing.json pins operatingProtocolRef and operatingProtocolCell for suite_lead / D7 binding.
+  - docs/operations/suite-lead-operating-protocol.md mirrors the #27 protocol without replacing #27 as SSOT.
+  - tests/spec-enforcement/agent-role-routing-map.test.ts verifies the protocol reference and cell pin.
+  - Rapid/Lite route selection maps SUITE-LEAD-OPERATING-PROTOCOL-001 to this dedicated handoff/checklist/evidence only.
+  - No runtime, queue, DB, launchd, secret, deployment, required-check, branch-protection, ruleset, production, audit/QA/check/CTO, owner, or merge action is performed.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - node --check scripts/shirube-current-overlay-check.mjs
+    - bun test tests/spec-enforcement/agent-role-routing-map.test.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
+    - no_unresolved_follow_up_blocker
