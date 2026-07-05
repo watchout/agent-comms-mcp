@@ -1,0 +1,55 @@
+{
+  "schema_version": "github_work_event_log_core_v1",
+  "event_id": "f1_event_log_core_valid",
+  "event_type": "github_work.dispatch_planned",
+  "recorded_at": "2026-07-05T16:55:41+09:00",
+  "recorded_by": "aun",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/744",
+  "lane": "P1_contract_only",
+  "status": "would_queue",
+  "github": {
+    "repo": "watchout/agent-comms-mcp",
+    "kind": "issue",
+    "number": 744,
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/744",
+    "node_id": "I_kwDORw1jW85P1F1",
+    "activity_cursor": "content:p1-contract|base:I_kwDORw1jW85P1F1:2026-07-05T16:55:41+09:00",
+    "fingerprint": "p1-f1-fingerprint",
+    "labels": ["needs:implementation", "owner:aun", "route:fast", "runner:codex"]
+  },
+  "route": {
+    "role": "implementation",
+    "owner": "aun",
+    "route": "fast",
+    "runner_policy": "codex_native_fast_lane",
+    "protected": false,
+    "autonomous_execution_allowed": false
+  },
+  "queue": {
+    "queue_id": null,
+    "agent_id": "aun",
+    "status": null
+  },
+  "evidence": {
+    "ssot": "github",
+    "aun_is_acceleration_only": true,
+    "completion_evidence_not_accepted": [
+      "aun_ack",
+      "queue_id",
+      "discord_projection",
+      "tui_visibility",
+      "green_ci_alone"
+    ],
+    "mutation_performed": false,
+    "live_github_api_performed": false,
+    "live_canary_performed": false,
+    "daemon_or_scheduler_touched": false,
+    "token_used": false,
+    "db_queue_mutation_performed": false,
+    "repo_settings_changed": false,
+    "workflow_changed": false,
+    "deploy_changed": false
+  },
+  "blocker_codes": [],
+  "notes": ["F1 pins a valid P1 contract-only EventLogCore event."]
+}

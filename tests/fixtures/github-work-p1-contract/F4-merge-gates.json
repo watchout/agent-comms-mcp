@@ -1,0 +1,29 @@
+{
+  "schema_version": "github_work_p1_contract_merge_gates_v1",
+  "lane": "P1_contract_only",
+  "merge_gates": [
+    "F1_EVENT_LOG_CORE_SCHEMA_PARSER",
+    "F2_FORBIDDEN_SCOPE_REJECTION",
+    "F3_QUEUE_VIEW_PROJECTOR",
+    "F4_CONTRACT_ONLY_SURFACE_PIN"
+  ],
+  "forbidden_surfaces": [
+    "P2_github_pull_once",
+    "live GitHub/API/canary",
+    "daemon",
+    "scheduler",
+    "AUN runner",
+    "token",
+    "DB",
+    "queue",
+    "repo settings",
+    "workflow",
+    "deploy"
+  ],
+  "runtime_wiring_forbidden": [
+    "bin/state-daemon.ts",
+    "core/state-daemon/index.ts",
+    "scripts/state-daemon-launchagent.ts",
+    "cli/index.ts"
+  ]
+}

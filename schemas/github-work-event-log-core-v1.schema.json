@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schema://github-work-event-log-core-v1",
+  "title": "GitHub Work EventLogCore v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "recorded_at",
+    "recorded_by",
+    "control_source",
+    "lane",
+    "status",
+    "github",
+    "route",
+    "queue",
+    "evidence",
+    "blocker_codes",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": { "const": "github_work_event_log_core_v1" },
+    "event_id": { "type": "string", "minLength": 1 },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "github_work.item_seen",
+        "github_work.dispatch_planned",
+        "github_work.duplicate_suppressed",
+        "github_work.blocked",
+        "github_work.dispatch_failed"
+      ]
+    },
+    "recorded_at": { "type": "string", "minLength": 1 },
+    "recorded_by": { "type": "string", "minLength": 1 },
+    "control_source": { "type": "string", "minLength": 1 },
+    "lane": { "const": "P1_contract_only" },
+    "status": {
+      "type": "string",
+      "enum": [
+        "plan_only",
+        "dry_run",
+        "would_queue",
+        "duplicate_suppressed",
+        "blocked",
+        "dispatch_failed"
+      ]
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "kind",
+        "number",
+        "url",
+        "node_id",
+        "activity_cursor",
+        "fingerprint",
+        "labels"
+      ],
+      "properties": {
+        "repo": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["issue", "pull_request"] },
+        "number": { "type": "integer", "minimum": 1 },
+        "url": { "type": "string", "minLength": 1 },
+        "node_id": { "type": "string", "minLength": 1 },
+        "activity_cursor": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "labels": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "owner",
+        "route",
+        "runner_policy",
+        "protected",
+        "autonomous_execution_allowed"
+      ],
+      "properties": {
+        "role": { "type": ["string", "null"] },
+        "owner": { "type": ["string", "null"] },
+        "route": { "type": "string", "enum": ["fast", "protected", "manual"] },
+        "runner_policy": {
+          "type": "string",
+          "enum": [
+            "codex_native_fast_lane",
+            "claude_code_autonomous_lane",
+            "headless_runtime_adapter_lane",
+            "governed_manual_lane",
+            "stop_lane"
+          ]
+        },
+        "protected": { "type": "boolean" },
+        "autonomous_execution_allowed": { "const": false }
+      }
+    },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["queue_id", "agent_id", "status"],
+      "properties": {
+        "queue_id": { "const": null },
+        "agent_id": { "type": ["string", "null"] },
+        "status": { "const": null }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ssot",
+        "aun_is_acceleration_only",
+        "completion_evidence_not_accepted",
+        "mutation_performed",
+        "live_github_api_performed",
+        "live_canary_performed",
+        "daemon_or_scheduler_touched",
+        "token_used",
+        "db_queue_mutation_performed",
+        "repo_settings_changed",
+        "workflow_changed",
+        "deploy_changed"
+      ],
+      "properties": {
+        "ssot": { "const": "github" },
+        "aun_is_acceleration_only": { "const": true },
+        "completion_evidence_not_accepted": {
+          "type": "array",
+          "items": { "type": "string" },
+          "contains": { "const": "aun_ack" }
+        },
+        "mutation_performed": { "const": false },
+        "live_github_api_performed": { "const": false },
+        "live_canary_performed": { "const": false },
+        "daemon_or_scheduler_touched": { "const": false },
+        "token_used": { "const": false },
+        "db_queue_mutation_performed": { "const": false },
+        "repo_settings_changed": { "const": false },
+        "workflow_changed": { "const": false },
+        "deploy_changed": { "const": false }
+      }
+    },
+    "blocker_codes": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

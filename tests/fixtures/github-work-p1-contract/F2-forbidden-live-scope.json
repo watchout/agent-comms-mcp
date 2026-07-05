@@ -1,0 +1,49 @@
+{
+  "schema_version": "github_work_event_log_core_v1",
+  "event_id": "f2_forbidden_live_scope",
+  "event_type": "github_work.dispatch_planned",
+  "recorded_at": "2026-07-05T16:55:42+09:00",
+  "recorded_by": "aun",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/744",
+  "lane": "P2_github_pull_once",
+  "status": "would_queue",
+  "github": {
+    "repo": "watchout/agent-comms-mcp",
+    "kind": "issue",
+    "number": 744,
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/744",
+    "node_id": "I_kwDORw1jW85P1F2",
+    "activity_cursor": "content:p1-contract|base:I_kwDORw1jW85P1F2:2026-07-05T16:55:42+09:00",
+    "fingerprint": "p1-f2-fingerprint",
+    "labels": ["needs:implementation", "owner:aun", "route:fast", "runner:codex"]
+  },
+  "route": {
+    "role": "implementation",
+    "owner": "aun",
+    "route": "fast",
+    "runner_policy": "codex_native_fast_lane",
+    "protected": false,
+    "autonomous_execution_allowed": true
+  },
+  "queue": {
+    "queue_id": "123456",
+    "agent_id": "aun",
+    "status": "pending"
+  },
+  "evidence": {
+    "ssot": "github",
+    "aun_is_acceleration_only": true,
+    "completion_evidence_not_accepted": ["queue_id"],
+    "mutation_performed": true,
+    "live_github_api_performed": true,
+    "live_canary_performed": true,
+    "daemon_or_scheduler_touched": true,
+    "token_used": true,
+    "db_queue_mutation_performed": true,
+    "repo_settings_changed": false,
+    "workflow_changed": false,
+    "deploy_changed": false
+  },
+  "blocker_codes": [],
+  "notes": ["F2 must be rejected because it crosses P1 forbidden surfaces."]
+}
