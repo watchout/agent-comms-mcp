@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/github-work-pull-once-v1.schema.json",
+  "title": "GitHub Work Pull Once v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "lane",
+    "input",
+    "ok",
+    "go_no_go",
+    "status",
+    "scanned",
+    "matched",
+    "selected",
+    "candidates",
+    "blocker_codes",
+    "events_to_post",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": { "const": "github_work_pull_once_v1" },
+    "lane": { "const": "P2_github_pull_once" },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["repo", "label", "ownerAllowlist", "writebackMode", "action", "actorSeat", "execute", "now"],
+      "properties": {
+        "repo": { "type": "string", "pattern": "^[^/\\s,]+/[^/\\s,]+$" },
+        "label": { "type": "string" },
+        "ownerAllowlist": { "type": "array", "items": { "type": "string" } },
+        "targetNumber": { "type": ["integer", "null"], "minimum": 1 },
+        "targetKind": { "type": ["string", "null"], "enum": ["issue", "pull_request", null] },
+        "writebackMode": { "enum": ["none", "github-comment"] },
+        "action": { "enum": ["discover", "claim", "result"] },
+        "actorSeat": { "type": "string" },
+        "ownerDecisionUrl": { "type": ["string", "null"] },
+        "execute": { "type": "boolean" },
+        "now": { "type": "string" }
+      }
+    },
+    "ok": { "type": "boolean" },
+    "go_no_go": { "enum": ["GO_DRY_RUN", "GO_EXECUTE", "NO_GO"] },
+    "status": {
+      "enum": [
+        "dry_run",
+        "would_claim",
+        "claim_requested",
+        "claim_won",
+        "claim_lost",
+        "result_posted",
+        "duplicate_suppressed",
+        "blocked",
+        "dispatch_failed",
+        "no_match"
+      ]
+    },
+    "scanned": { "type": "integer", "minimum": 0 },
+    "matched": { "type": "integer", "minimum": 0 },
+    "selected": { "type": ["object", "null"] },
+    "candidates": { "type": "array", "items": { "type": "object" } },
+    "blocker_codes": { "type": "array", "items": { "type": "string" } },
+    "events_to_post": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "schema_version",
+          "lane",
+          "event_type",
+          "event_id",
+          "repo",
+          "kind",
+          "number",
+          "url",
+          "work_key",
+          "fingerprint",
+          "status",
+          "mutation_performed",
+          "live_github_api_performed",
+          "db_queue_mutation_performed",
+          "token_used"
+        ],
+        "properties": {
+          "schema_version": { "const": "github_work_pull_once_v1" },
+          "lane": { "const": "P2_github_pull_once" },
+          "event_type": {
+            "enum": ["claim.requested", "claim.won", "claim.lost", "result.posted", "work.blocked"]
+          },
+          "event_id": { "type": "string" },
+          "repo": { "type": "string" },
+          "kind": { "enum": ["issue", "pull_request"] },
+          "number": { "type": "integer", "minimum": 1 },
+          "url": { "type": "string" },
+          "work_key": { "type": "string" },
+          "fingerprint": { "type": "string" },
+          "status": { "type": "string" },
+          "mutation_performed": { "type": "boolean" },
+          "live_github_api_performed": { "type": "boolean" },
+          "db_queue_mutation_performed": { "const": false },
+          "token_used": { "type": "boolean" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run",
+        "mutation_performed",
+        "live_github_api_performed",
+        "db_queue_mutation_performed",
+        "queue_claim_process_completion_performed",
+        "token_used",
+        "token_value_disclosed",
+        "daemon_or_scheduler_touched",
+        "aun_runner_touched",
+        "repo_settings_changed",
+        "workflow_changed",
+        "deploy_changed",
+        "p1_f1_f4_contracts_remain_required"
+      ],
+      "properties": {
+        "dry_run": { "type": "boolean" },
+        "mutation_performed": { "const": false },
+        "live_github_api_performed": { "const": false },
+        "db_queue_mutation_performed": { "const": false },
+        "queue_claim_process_completion_performed": { "const": false },
+        "token_used": { "const": false },
+        "token_value_disclosed": { "const": false },
+        "daemon_or_scheduler_touched": { "const": false },
+        "aun_runner_touched": { "const": false },
+        "repo_settings_changed": { "const": false },
+        "workflow_changed": { "const": false },
+        "deploy_changed": { "const": false },
+        "p1_f1_f4_contracts_remain_required": { "const": true }
+      }
+    }
+  }
+}

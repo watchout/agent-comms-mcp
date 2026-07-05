@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "repo": "watchout/agent-comms-mcp",
+      "kind": "issue",
+      "number": 744,
+      "nodeId": "I_kwDORw1jW85P2DRYRUN",
+      "title": "P2 GitHub pull once canary fixture",
+      "url": "https://github.com/watchout/agent-comms-mcp/issues/744",
+      "createdAt": "2026-07-05T10:00:00Z",
+      "updatedAt": "2026-07-05T10:01:00Z",
+      "labels": [
+        "canary:github-work-pull-once",
+        "needs:implementation",
+        "owner:aun",
+        "route:fast",
+        "runner:codex"
+      ],
+      "body": "## Goal\nImplement bounded P2 pull-once dry-run.\n\n## Scope\nFixture-only planning.\n\n## Non-scope\nNo live API.\n\n## Acceptance Criteria\nDry-run plan is emitted.\n\n## Stop Conditions\nProtected boundary.\n\n## Required Evidence\nPR evidence comment.",
+      "author": "watchout",
+      "lastActivityId": "comment:P2_DRY_RUN",
+      "activityCursor": "content:p2-dry-run|base:I_kwDORw1jW85P2DRYRUN:2026-07-05T10:01:00Z"
+    }
+  ],
+  "comments": {}
+}
