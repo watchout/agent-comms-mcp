@@ -2,10 +2,17 @@
   "schema_version": "github_work_p1_contract_merge_gates_v1",
   "lane": "P1_contract_only",
   "merge_gates": [
-    "F1_EVENT_LOG_CORE_SCHEMA_PARSER",
-    "F2_FORBIDDEN_SCOPE_REJECTION",
-    "F3_QUEUE_VIEW_PROJECTOR",
-    "F4_CONTRACT_ONLY_SURFACE_PIN"
+    "F1_CLAIM_ATOMICITY_TWO_PHASE_CONFIRMATION",
+    "F2_POLL_CADENCE_FAIRNESS_BACKPRESSURE_AUDIT_POOL",
+    "F3_INDEPENDENT_PROTECTED_SURFACE_CLASSIFIER",
+    "F4_GOLDEN_FAILURE_FIXTURES"
+  ],
+  "required_golden_failure_fixtures": [
+    "github-double-claim-one-confirmed.yaml",
+    "missed-signal-next-poll-recovers.yaml",
+    "function-address-binding-unresolved-blocked.yaml",
+    "protected-surface-misdeclared-blocked.yaml",
+    "protected-option-a-owner-required.yaml"
   ],
   "forbidden_surfaces": [
     "P2_github_pull_once",

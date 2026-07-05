@@ -1,0 +1,55 @@
+{
+  "schema_version": "github_work_p1_golden_failure_fixture_v1",
+  "fixture": "missed-signal-next-poll-recovers.yaml",
+  "specimen": "no wake signal delivered after work appears",
+  "base_event_ref": "F1-event-log-core-valid.json",
+  "events": [
+    {
+      "event_id": "golden_missed_signal_next_poll_recovers",
+      "event_type": "github_work.item_seen",
+      "status": "dry_run",
+      "route": {
+        "role": "audit",
+        "owner": null,
+        "route": "manual",
+        "runner_policy": "governed_manual_lane",
+        "protected": false,
+        "autonomous_execution_allowed": false
+      },
+      "poll_profile": {
+        "profile_id": "audit_pool_profile",
+        "source_ref": "watchout/iyasaka-arc#32",
+        "poll_interval_ms": 60000,
+        "jitter_ms_min": 0,
+        "jitter_ms_max": 20000,
+        "max_in_flight_claims_per_seat": 1,
+        "max_new_claims_per_poll": 1,
+        "pool_width_source": "count(active registered evidence_audit_gate seats in watchout/iyasaka-arc#32 registry)",
+        "race_behavior": "two_phase_claim_confirmation",
+        "no_poll_overlap": true,
+        "api_rate_limit_backoff": "exponential_backoff_with_jitter",
+        "repo_hammer_guard": "etag_or_if_none_match_when_available",
+        "missed_signal_recovery": {
+          "signal_required_for_discovery": false,
+          "next_poll_discovers_work": true,
+          "claim_possible_without_human_relay": true
+        },
+        "starvation_guard": {
+          "unclaimed_after_one_lead_tick": "lead_nudges_pool_with_queue_view_refs",
+          "unclaimed_after_two_lead_ticks": "owner_escalation_as_capacity_signal",
+          "metrics_derive_from_events": [
+            "request_to_claim_latency_ms",
+            "unclaimed_count_by_function",
+            "active_claims_by_seat",
+            "claim_lost_count_by_seat"
+          ]
+        }
+      }
+    }
+  ],
+  "expected": {
+    "next_poll_discovers_work": true,
+    "claim_possible_without_human_relay": true,
+    "signal_required_for_discovery": false
+  }
+}

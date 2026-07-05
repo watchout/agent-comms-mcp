@@ -1,0 +1,46 @@
+{
+  "schema_version": "github_work_p1_golden_failure_fixture_v1",
+  "fixture": "function-address-binding-unresolved-blocked.yaml",
+  "specimen": "function-only addressing before binding evidence is green",
+  "base_event_ref": "F1-event-log-core-valid.json",
+  "events": [
+    {
+      "event_id": "golden_function_address_binding_unresolved_blocked",
+      "event_type": "github_work.blocked",
+      "status": "blocked",
+      "route": {
+        "role": "implementation_executor",
+        "owner": null,
+        "route": "manual",
+        "runner_policy": "stop_lane",
+        "protected": false,
+        "autonomous_execution_allowed": false
+      },
+      "claim": {
+        "work_key": "watchout/agent-comms-mcp#744",
+        "claim_id": null,
+        "claimant_seat": null,
+        "github_created_at": null,
+        "lease_expires_at": null,
+        "phase": "work_blocked",
+        "settle_window_ms": 3000,
+        "reread_after_settle": false,
+        "stable_event_set": false,
+        "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+        "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+        "confirmed_winner_claim_id": null,
+        "winner_confirmation_required_before_execution": true,
+        "winner_execution_precondition_met": false,
+        "runtime_execution_performed": false,
+        "result_publication_performed": false
+      },
+      "blocker_codes": ["BINDING_UNRESOLVED"]
+    }
+  ],
+  "expected": {
+    "queue_view_state": "blocked",
+    "blocker_code": "BINDING_UNRESOLVED",
+    "claim_allowed": false,
+    "local_inference_allowed": false
+  }
+}

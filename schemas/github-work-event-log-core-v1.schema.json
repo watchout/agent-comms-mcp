@@ -16,6 +16,9 @@
     "github",
     "route",
     "queue",
+    "claim",
+    "poll_profile",
+    "protected_surface",
     "evidence",
     "blocker_codes",
     "notes"
@@ -28,6 +31,9 @@
       "enum": [
         "github_work.item_seen",
         "github_work.dispatch_planned",
+        "github_work.claim_requested",
+        "github_work.claim_won",
+        "github_work.claim_lost",
         "github_work.duplicate_suppressed",
         "github_work.blocked",
         "github_work.dispatch_failed"
@@ -43,6 +49,9 @@
         "plan_only",
         "dry_run",
         "would_queue",
+        "claim_requested",
+        "claim_won",
+        "claim_lost",
         "duplicate_suppressed",
         "blocked",
         "dispatch_failed"
@@ -111,6 +120,170 @@
         "status": { "const": null }
       }
     },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "work_key",
+        "claim_id",
+        "claimant_seat",
+        "github_created_at",
+        "lease_expires_at",
+        "phase",
+        "settle_window_ms",
+        "reread_after_settle",
+        "stable_event_set",
+        "stable_event_set_rule",
+        "deterministic_winner_rule",
+        "confirmed_winner_claim_id",
+        "winner_confirmation_required_before_execution",
+        "winner_execution_precondition_met",
+        "runtime_execution_performed",
+        "result_publication_performed"
+      ],
+      "properties": {
+        "work_key": { "type": ["string", "null"] },
+        "claim_id": { "type": ["string", "null"] },
+        "claimant_seat": { "type": ["string", "null"] },
+        "github_created_at": { "type": ["string", "null"] },
+        "lease_expires_at": { "type": ["string", "null"] },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "not_applicable",
+            "claim_requested",
+            "settle_and_reread",
+            "claim_won",
+            "claim_lost",
+            "work_blocked"
+          ]
+        },
+        "settle_window_ms": { "type": "integer", "minimum": 0 },
+        "reread_after_settle": { "type": "boolean" },
+        "stable_event_set": { "type": "boolean" },
+        "stable_event_set_rule": { "const": "two_consecutive_reads_or_contract_unstable" },
+        "deterministic_winner_rule": { "const": "earliest_github_created_at_tie_claim_id" },
+        "confirmed_winner_claim_id": { "type": ["string", "null"] },
+        "winner_confirmation_required_before_execution": { "const": true },
+        "winner_execution_precondition_met": { "type": "boolean" },
+        "runtime_execution_performed": { "const": false },
+        "result_publication_performed": { "const": false }
+      }
+    },
+    "poll_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "source_ref",
+        "poll_interval_ms",
+        "jitter_ms_min",
+        "jitter_ms_max",
+        "max_in_flight_claims_per_seat",
+        "max_new_claims_per_poll",
+        "pool_width_source",
+        "race_behavior",
+        "no_poll_overlap",
+        "api_rate_limit_backoff",
+        "repo_hammer_guard",
+        "missed_signal_recovery",
+        "starvation_guard"
+      ],
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "enum": ["serial_seat_default", "audit_pool_profile", "protected_surface_gate_profile"]
+        },
+        "source_ref": { "type": "string", "minLength": 1 },
+        "poll_interval_ms": { "type": "integer", "minimum": 1 },
+        "jitter_ms_min": { "type": "integer", "minimum": 0 },
+        "jitter_ms_max": { "type": "integer", "minimum": 0 },
+        "max_in_flight_claims_per_seat": { "const": 1 },
+        "max_new_claims_per_poll": { "const": 1 },
+        "pool_width_source": { "type": ["string", "null"] },
+        "race_behavior": { "const": "two_phase_claim_confirmation" },
+        "no_poll_overlap": { "const": true },
+        "api_rate_limit_backoff": { "const": "exponential_backoff_with_jitter" },
+        "repo_hammer_guard": { "const": "etag_or_if_none_match_when_available" },
+        "missed_signal_recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "signal_required_for_discovery",
+            "next_poll_discovers_work",
+            "claim_possible_without_human_relay"
+          ],
+          "properties": {
+            "signal_required_for_discovery": { "const": false },
+            "next_poll_discovers_work": { "type": "boolean" },
+            "claim_possible_without_human_relay": { "type": "boolean" }
+          }
+        },
+        "starvation_guard": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "unclaimed_after_one_lead_tick",
+            "unclaimed_after_two_lead_ticks",
+            "metrics_derive_from_events"
+          ],
+          "properties": {
+            "unclaimed_after_one_lead_tick": { "const": "lead_nudges_pool_with_queue_view_refs" },
+            "unclaimed_after_two_lead_ticks": { "const": "owner_escalation_as_capacity_signal" },
+            "metrics_derive_from_events": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "protected_surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification_source",
+        "declared_protected_surface",
+        "classifier_inputs",
+        "protected_surface_classified",
+        "protected_surface_reasons",
+        "owner_decision_required",
+        "owner_decision_url",
+        "claim_allowed",
+        "queue_view_state"
+      ],
+      "properties": {
+        "classification_source": { "const": "independent_classifier_v1" },
+        "declared_protected_surface": { "type": "boolean" },
+        "classifier_inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "declared_protected_surface",
+            "title",
+            "body",
+            "labels",
+            "changed_paths",
+            "declared_operations",
+            "route_labels",
+            "owner_decision_url"
+          ],
+          "properties": {
+            "declared_protected_surface": { "type": "boolean" },
+            "title": { "type": "string", "minLength": 1 },
+            "body": { "type": "string", "minLength": 1 },
+            "labels": { "type": "array", "items": { "type": "string" } },
+            "changed_paths": { "type": "array", "items": { "type": "string" } },
+            "declared_operations": { "type": "array", "items": { "type": "string" } },
+            "route_labels": { "type": "array", "items": { "type": "string" } },
+            "owner_decision_url": { "type": ["string", "null"] }
+          }
+        },
+        "protected_surface_classified": { "type": "boolean" },
+        "protected_surface_reasons": { "type": "array", "items": { "type": "string" } },
+        "owner_decision_required": { "type": "boolean" },
+        "owner_decision_url": { "type": ["string", "null"] },
+        "claim_allowed": { "type": "boolean" },
+        "queue_view_state": { "type": "string", "enum": ["claimable", "blocked"] }
+      }
+    },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
@@ -134,7 +307,13 @@
         "completion_evidence_not_accepted": {
           "type": "array",
           "items": { "type": "string" },
-          "contains": { "const": "aun_ack" }
+          "allOf": [
+            { "contains": { "const": "aun_ack" } },
+            { "contains": { "const": "queue_id" } },
+            { "contains": { "const": "discord_projection" } },
+            { "contains": { "const": "tui_visibility" } },
+            { "contains": { "const": "green_ci_alone" } }
+          ]
         },
         "mutation_performed": { "const": false },
         "live_github_api_performed": { "const": false },
