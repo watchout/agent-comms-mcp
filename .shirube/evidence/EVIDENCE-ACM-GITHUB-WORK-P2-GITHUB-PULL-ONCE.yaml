@@ -1,0 +1,62 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 848
+cell_id: "ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE"
+implementation_actor: "aun"
+evidence_scope: "P2_github_pull_once_metadata_rework"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+control_source_ref: "https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+audit_rework_ref: "https://github.com/watchout/agent-comms-mcp/pull/848#issuecomment-4887725989"
+handoff_ref: ".shirube/control-handoffs/CH-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE.yaml"
+commands:
+  - command: "git diff --check"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS: three new .shirube YAML files parsed successfully"
+  - command: "bun test tests/github-work-pull-once.test.ts tests/github-work-puller.test.ts tests/contract/test_github_work_p1_contract_only.test.ts tests/spec-enforcement/cli-commands.test.ts"
+    result: "PASS: 126 pass, 0 fail"
+  - command: "bun cli/index.ts github-work pull-once --repo watchout/agent-comms-mcp --label canary:github-work-pull-once --owner-allowlist aun --target-number 744 --target-kind issue --fixture tests/fixtures/github-work-p2-pull-once/dry-run-canary.json --format json"
+    result: "PASS: ok=true, go_no_go=GO_DRY_RUN, status=would_claim, mutation_performed=false, live_github_api_performed=false"
+  - command: "bun cli/index.ts github-work pull-once --repo watchout/agent-comms-mcp --label canary:github-work-pull-once --owner-allowlist aun --target-number 744 --target-kind issue --fixture tests/fixtures/github-work-p2-pull-once/dry-run-canary.json --execute --format json"
+    result: "PASS_EXPECTED_REJECTION: exit 2; execute requires separate owner-approved live runner command"
+validation_results:
+  - "PASS_LOCAL_RERUN"
+  - "Final exact head, changed files, and command output summary must be reposted on #744."
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "route_classifier_evidence"
+  - "Rapid/Lite allowed_paths evidence"
+  - "design_rule_exceptions"
+route_classifier_evidence:
+  route: "ceo-approval"
+  reason: "State-daemon core"
+  accepted_routing_refs:
+    - "https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+    - "https://github.com/watchout/iyasaka-arc/issues/39#issuecomment-4885306104"
+    - "https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4887707526"
+  owner_merge_decision_required: true
+rapid_lite_report_scope:
+  allowed_paths_resolution: "Resolved by exact handoff_ref and full changed-file allowlist in CH-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE."
+  dr_data_001_resolution: "Resolved by handoff design_rule_exception for tests/spec-enforcement/cli-commands.test.ts negative SQL assertions."
+  dr_code_001_exception: "Recorded as report-only exact-head owner/routing exception for pre-existing cli/index.ts command-dispatch duplication and narrow EventLog planner duplication; no broad CLI/runtime refactor is authorized in this P2 cell."
+  dr_arch_001_exception: "Recorded as report-only warning justification: flagged domain shapes are CLI tokens, route labels, and P2 contract/test vocabulary."
+  dr_config_001_exception: "Recorded as report-only warning justification: repeated literals are CLI dispatch tokens, existing adapter labels, and GitHub-comment EventLog enum/schema values."
+  audit_review_status: "Fresh independent re-audit required after final exact head is posted."
+protected_surface_statement:
+  path_classifier_surface: "state-daemon core"
+  mutation_performed: false
+  no_live_github_api_canary: true
+  no_runtime_activation: true
+  no_daemon_scheduler_aun_runner_activation: true
+  no_db_queue_mutation: true
+  no_token_secret_access: true
+  no_repo_settings_workflow_deploy_changes: true
+notes:
+  - "This evidence does not approve merge, remove draft, authorize owner decision, or activate runtime."
+  - "Exact head and command output summary are reposted on #744 after the final commit SHA is known."

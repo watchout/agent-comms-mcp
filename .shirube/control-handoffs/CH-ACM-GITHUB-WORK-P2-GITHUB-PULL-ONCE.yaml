@@ -1,0 +1,228 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE
+parent_ssot: watchout/agent-comms-mcp#744
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175
+premise_confirmation_ref: https://github.com/watchout/iyasaka-arc/issues/39#issuecomment-4885306104
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/744
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: aun
+next_role: evidence_audit_gate
+audit_required: true
+formal_audit_required: true
+review_plan_required: false
+owner_decision_required: true
+owner_decision_required_now: false
+protected_surfaces:
+  - runtime code
+protected_surface_details:
+  - "Path classifier observes core/state-daemon/ because the P2 planner lives next to the existing GitHub work puller contracts."
+  - "This cell does not activate state-daemon, persistent polling, daemon/scheduler/AUN runner, DB/queue/FIFO, token source, repo settings, workflow, deploy, or live canary behavior."
+  - "Protected-surface handling is classifier-only and fail-closed; no protected-surface mutation is authorized or performed."
+route_classifier_evidence:
+  route: ceo-approval
+  reason: State-daemon core
+  accepted_routing_evidence:
+    - https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175
+    - https://github.com/watchout/iyasaka-arc/issues/39#issuecomment-4885306104
+  owner_evidence:
+    - https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175
+    - https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4887707526
+  merge_owner_decision_required: true
+  owner_exception_scope:
+    status: report_only_exception_recorded_for_rapid_lite_allowed_paths_and_design_rule_findings
+    applies_to: P2_github_pull_once exact-head audit and metadata evidence only
+    does_not_authorize:
+      - approval
+      - merge
+      - draft removal
+      - live GitHub/API/canary
+      - runtime activation
+      - daemon/scheduler/AUN runner activation
+      - DB/queue mutation
+      - token/secret access
+      - repo settings/workflow/deploy changes
+rps_scope:
+  shirube_owns:
+    - P2 pull-once dry-run planning contract.
+    - GitHub-comment EventLog claim/result fixtures and mocked tests.
+    - Exact-head evidence and independent audit requirements before owner/merge handling.
+  shirube_does_not_own:
+    - Live GitHub/API/canary execution in this PR.
+    - Persistent daemon, scheduler, AUN runner, or state-daemon activation.
+    - DB schema, DB queue lifecycle, production DB/queue/FIFO mutation, or token/secret source mutation.
+    - Repository settings, protection, rulesets, active workflows, deploy, or release automation.
+cell:
+  CELL-ID: ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE
+  cell_type: implementation
+  risk_class: R3
+  risk_tier: R3
+  goal: Add the P2 GitHub pull-once fixture/mock planner and evidence surface without live execution or protected-surface mutation.
+  governance_route: R3 owner-gated route because Layer 0 classifies core/state-daemon changes as ceo-approval.
+  non_scope:
+    - P3 persistent polling
+    - live GitHub/API/canary
+    - runtime activation
+    - daemon or scheduler activation
+    - AUN runner activation
+    - DB or queue mutation
+    - token or secret access
+    - repository settings, workflow, protection, ruleset, or deploy changes
+    - approval or merge
+  allowed_paths:
+    - cli/index.ts
+    - core/state-daemon/github-work-pull-once.ts
+    - docs/operations/github-work-puller.md
+    - schemas/github-work-pull-once-v1.schema.json
+    - tests/fixtures/github-work-p2-pull-once/dry-run-canary.json
+    - tests/github-work-pull-once.test.ts
+    - tests/spec-enforcement/cli-commands.test.ts
+    - .shirube/control-handoffs/CH-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE.yaml
+    - .shirube/evidence/EVIDENCE-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE.yaml
+  forbidden_paths:
+    - .github/workflows/**
+    - db/**
+    - adapters/**
+    - server.ts
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+    - deployment/**
+    - '**/branch-protection/**'
+    - '**/ruleset/**'
+  protected_surfaces:
+    declared:
+      - runtime code
+    touched: true
+    mutation_performed: false
+    details:
+      - "core/state-daemon path is touched for a contract/planner module only."
+      - "No state-daemon runtime activation, persistent poller, LaunchAgent, scheduler, DB/queue mutation, token/secret access, workflow, deploy, repo settings, approval, or merge."
+  stop_conditions:
+    - live GitHub/API/canary is required
+    - runtime activation is required
+    - daemon/scheduler/AUN runner activation is required
+    - DB/queue/FIFO mutation is required
+    - token/secret access is required
+    - repo settings/workflow/deploy changes are required
+    - protected-surface mutation is required
+    - independent audit blocks the exact head
+design_rule_exceptions:
+  - rule_id: DR-DATA-001
+    scope:
+      - tests/spec-enforcement/cli-commands.test.ts
+    reason: "The matched DELETE FROM/UPDATE/INSERT strings are negative source-level assertions proving the P2 planner does not contain DB/queue mutation SQL; no hard-delete operation is introduced."
+    approved_by: "suite-lead owner-scoped dispatch https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+    expires_at: "2026-08-31T00:00:00Z"
+  - rule_id: DR-CODE-001
+    scope:
+      - cli/index.ts
+      - core/state-daemon/github-work-pull-once.ts
+    reason: "The CLI keeps existing command-dispatch/help patterns for a narrow dry-run surface; extraction is deferred to avoid broad CLI refactor outside P2 scope."
+    approved_by: "suite-lead owner-scoped dispatch https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+    expires_at: "2026-08-31T00:00:00Z"
+  - rule_id: DR-ARCH-001
+    scope:
+      - cli/index.ts
+      - core/state-daemon/github-work-pull-once.ts
+      - tests/spec-enforcement/cli-commands.test.ts
+    reason: "The flagged domain shapes are command names, route labels, and P2 contract/test vocabulary; moving them to DB/config would exceed the fixture/mock P2 cell and touch forbidden runtime/config surfaces."
+    approved_by: "suite-lead owner-scoped dispatch https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+    expires_at: "2026-08-31T00:00:00Z"
+  - rule_id: DR-CONFIG-001
+    scope:
+      - cli/index.ts
+      - core/state-daemon/github-work-pull-once.ts
+    reason: "The repeated literals are CLI dispatch tokens, existing DB adapter labels, and GitHub-comment EventLog enum values that must remain aligned with schema/fixtures; centralizing them would be a wider refactor outside P2."
+    approved_by: "suite-lead owner-scoped dispatch https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+    expires_at: "2026-08-31T00:00:00Z"
+rapid_lite_design_rule_report:
+  exact_head_owner_exception_required: true
+  report_only_findings_recorded:
+    - rule_id: DR-CODE-001
+      severity: BLOCK
+      path: cli/index.ts
+      evidence: "duplicate block length 41; broad CLI extraction is outside this P2 cell."
+    - rule_id: DR-CODE-001
+      severity: WARN
+      path: core/state-daemon/github-work-pull-once.ts
+      evidence: "duplicate block length 8 within narrow EventLog planner vocabulary."
+    - rule_id: DR-ARCH-001
+      severity: WARN
+      paths:
+        - cli/index.ts
+        - core/state-daemon/github-work-pull-once.ts
+        - tests/spec-enforcement/cli-commands.test.ts
+      evidence: "configurable-looking domain shape is P2 contract/test vocabulary."
+    - rule_id: DR-CONFIG-001
+      severity: WARN
+      paths:
+        - cli/index.ts
+        - core/state-daemon/github-work-pull-once.ts
+      evidence: "repeated literals are CLI tokens and EventLog enum/schema values."
+  owner_exception_boundary:
+    - "Exception is limited to PR #848 exact head and report-only Rapid/Lite findings."
+    - "Exception does not approve merge, remove draft, or authorize protected-surface/runtime mutation."
+implementation_boundary:
+  summary: Add P2 pull-once planning, schema, fixtures, tests, and evidence metadata only.
+  expected_pr_count: 1
+  forbidden_operations:
+    - merge
+    - approve
+    - draft removal
+    - live GitHub/API/canary
+    - runtime activation
+    - daemon/scheduler/AUN runner activation
+    - DB/queue mutation
+    - token/secret access
+    - repo settings/workflow/deploy changes
+acceptance_criteria:
+  - P2 CLI dry-run emits GO_DRY_RUN and would_claim against the canary fixture.
+  - P2 CLI rejects --execute before planning.
+  - Duplicate suppression, protected route block, dispatch failure, and self-writeback prevention are tested offline.
+  - P1 F1-F4 contract tests remain passing.
+  - Layer 0 PR body fields and route/owner evidence are present.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun test tests/github-work-pull-once.test.ts tests/github-work-puller.test.ts tests/contract/test_github_work_p1_contract_only.test.ts tests/spec-enforcement/cli-commands.test.ts
+    - bun cli/index.ts github-work pull-once --repo watchout/agent-comms-mcp --label canary:github-work-pull-once --owner-allowlist aun --target-number 744 --target-kind issue --fixture tests/fixtures/github-work-p2-pull-once/dry-run-canary.json --format json
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - APPROVED_PILOT_EXCEPTION
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
