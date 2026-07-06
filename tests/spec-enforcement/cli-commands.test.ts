@@ -45,6 +45,7 @@ const FULL_CHANNEL_SMOKE_PATH = join(REPO_ROOT, 'core', 'full-channel-smoke.ts')
 const STATE_DAEMON_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-readiness.ts')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_PATH = join(REPO_ROOT, 'core', 'state-daemon-launchagent-readiness.ts')
 const STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_PATH = join(REPO_ROOT, 'core', 'state-daemon', 'queue-work-activation-plan.ts')
+const GITHUB_WORK_PULL_ONCE_PATH = join(REPO_ROOT, 'core', 'state-daemon', 'github-work-pull-once.ts')
 const LOCAL_SUPERVISOR_ADAPTER_PATH = join(REPO_ROOT, 'core', 'local-supervisor-adapter.ts')
 const CONTROL_PLANE_LEASES_PATH = join(REPO_ROOT, 'core', 'control-plane-leases.ts')
 const CHANNEL_CONNECTOR_SYNC_PATH = join(REPO_ROOT, 'core', 'channel-connector-sync.ts')
@@ -66,6 +67,7 @@ const FULL_CHANNEL_SMOKE_SRC = readFileSync(FULL_CHANNEL_SMOKE_PATH, 'utf-8')
 const STATE_DAEMON_READINESS_SRC = readFileSync(STATE_DAEMON_READINESS_PATH, 'utf-8')
 const STATE_DAEMON_LAUNCHAGENT_READINESS_SRC = readFileSync(STATE_DAEMON_LAUNCHAGENT_READINESS_PATH, 'utf-8')
 const STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC = readFileSync(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_PATH, 'utf-8')
+const GITHUB_WORK_PULL_ONCE_SRC = readFileSync(GITHUB_WORK_PULL_ONCE_PATH, 'utf-8')
 const LOCAL_SUPERVISOR_ADAPTER_SRC = readFileSync(LOCAL_SUPERVISOR_ADAPTER_PATH, 'utf-8')
 const CONTROL_PLANE_LEASES_SRC = readFileSync(CONTROL_PLANE_LEASES_PATH, 'utf-8')
 const CHANNEL_CONNECTOR_SYNC_SRC = readFileSync(CHANNEL_CONNECTOR_SYNC_PATH, 'utf-8')
@@ -129,6 +131,9 @@ describe('T1 — cli/index.ts defines handler functions for next/send/agents', (
   test('stateDaemonCommand handler is defined', () => {
     expect(CLI_SRC).toMatch(/async function stateDaemonCommand\s*\(/)
   })
+  test('githubWorkCommand handler is defined', () => {
+    expect(CLI_SRC).toMatch(/async function githubWorkCommand\s*\(/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -186,6 +191,13 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?buildQueueWorkActivationPlan/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?formatQueueWorkActivationPlanText/)
     expect(CLI_SRC).toMatch(/queue-work-activation-plan is read-only/)
+  })
+  test("'github-work pull-once' invokes the P2 dry-run planner", () => {
+    expect(CLI_SRC).toMatch(/command === 'github-work'[\s\S]*?githubWorkCommand\(subcommand, rest\)/)
+    expect(CLI_SRC).toMatch(/async function githubWorkCommand[\s\S]*?subcommand !== 'pull-once'/)
+    expect(CLI_SRC).toMatch(/async function githubWorkCommand[\s\S]*?loadGithubWorkPullOnceFixture/)
+    expect(CLI_SRC).toMatch(/async function githubWorkCommand[\s\S]*?planGithubWorkPullOnce/)
+    expect(CLI_SRC).toMatch(/github-work pull-once execute requires a separate owner-approved live runner command/)
   })
   test("'queue' repair subcommands invoke repairQueue(...)", () => {
     expect(CLI_SRC).toMatch(/command === 'queue'[\s\S]*?repairQueue\(/)
@@ -764,6 +776,27 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/execute_requires_separate_approval: true/)
     expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/queue_id_required_for_multiple_pending/)
     expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/validateQueueWorkCanaryResiduePreflight/)
+  })
+
+  test('help documents P2 GitHub pull-once dry-run planner', () => {
+    expect(CLI_SRC).toMatch(/github-work pull-once --repo <owner\/repo> --label <canary:label>/)
+    expect(CLI_SRC).toMatch(/P2 dry-run GitHub pull-once planner using fixture\/mock data/)
+    expect(CLI_SRC).toMatch(/no live API, DB\/queue write, token read, or runtime activation/)
+  })
+
+  test('P2 GitHub pull-once core stays outside daemon, DB, queue, token, and runner surfaces', () => {
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/GITHUB_WORK_PULL_ONCE_SCHEMA_VERSION/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/GITHUB_WORK_PULL_ONCE_COMMENT_MARKER/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/classifyProtectedSurface/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/parseGithubWorkPullOnceEventComment/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/renderGithubWorkPullOnceEventComment/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/owner_decision_url_required_for_execute/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/github_comment_writeback_required_for_execute/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).toMatch(/queue_claim_process_completion_performed:\s*false/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM|message_queue|audit_log/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).not.toMatch(/STATE_DAEMON_GITHUB_TOKEN|GITHUB_TOKEN|TOKEN_FILE|process\.env/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).not.toMatch(/setInterval|setTimeout|launchctl|LaunchAgent|schedulerCommand|daemonCommand/)
+    expect(GITHUB_WORK_PULL_ONCE_SRC).not.toMatch(/StateDaemonGithubWorkPuller|pollOnce\(/)
   })
 
   test('queue wake smoke is bounded, approval-gated, and does not drain or terminalize rows', () => {
