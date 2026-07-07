@@ -111,6 +111,45 @@
       "expected_status": ["pending"],
       "expected_payload_source": "cli-notify",
       "notes": "PR #775 L2 handoff delivery residue. PR #775 merged by CI after green checks; preserve as GitHub/AUN delivery evidence and exclude from later exact-row l2auditor activation canaries."
+    },
+    {
+      "queue_id": 123851,
+      "agent_id": "aun",
+      "message_id": "b91e28bf-01f0-42d0-91ad-59e8b5765f4b",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4899712011",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "payload_md5": "c364d75e90e4c2e83c750ac9bfe4077a",
+      "notes": "CP80 exact-row AUN notification residue. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
+    },
+    {
+      "queue_id": 123940,
+      "agent_id": "aun",
+      "message_id": "439850af-a7e2-487a-8bec-3350d5ea244d",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4899712011",
+      "expected_status": ["pending"],
+      "expected_payload_source": "agent-comms",
+      "payload_md5": "86415242b48a77d83184d0719f1d045d",
+      "notes": "CP80 exact-row AUN instruction residue. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
+    },
+    {
+      "queue_id": 123945,
+      "agent_id": "aun",
+      "message_id": "e8da25ca-93d7-4d8a-9dd2-63756c9c0c69",
+      "classification": "preserve_immutable_evidence",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4899712011",
+      "expected_status": ["pending"],
+      "expected_payload_source": "agent-comms",
+      "payload_md5": "979de68a28e0b0a79fd6708467d14751",
+      "notes": "CP80 exact-row AUN instruction residue. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
     }
   ]
 }
