@@ -140,11 +140,12 @@ function validateWritebackObject(writeback: QueueWorkGithubIssueCommentWriteback
   if (typeof writeback.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(writeback.repo)) return 'writeback.repo must be owner/name'
   if (!Number.isInteger(writeback.issue_number) || writeback.issue_number <= 0) return 'writeback.issue_number must be a positive integer'
   if (typeof writeback.body !== 'string' || writeback.body.trim().length === 0) return 'writeback.body must be non-empty'
-  if (writeback.evidence !== undefined && (!Array.isArray(writeback.evidence) || writeback.evidence.some((item) => typeof item !== 'string'))) {
+  // strict structured output emits optional fields as explicit null — accept both absent and null
+  if (writeback.evidence !== undefined && writeback.evidence !== null && (!Array.isArray(writeback.evidence) || writeback.evidence.some((item) => typeof item !== 'string'))) {
     return 'writeback.evidence must be a string array'
   }
-  if (writeback.body_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(writeback.body_sha256)) return 'writeback.body_sha256 must be 64 lowercase hex characters'
-  if (writeback.idempotency_key !== undefined && (typeof writeback.idempotency_key !== 'string' || writeback.idempotency_key.trim().length === 0)) {
+  if (writeback.body_sha256 !== undefined && writeback.body_sha256 !== null && !/^[a-f0-9]{64}$/.test(writeback.body_sha256)) return 'writeback.body_sha256 must be 64 lowercase hex characters'
+  if (writeback.idempotency_key !== undefined && writeback.idempotency_key !== null && (typeof writeback.idempotency_key !== 'string' || writeback.idempotency_key.trim().length === 0)) {
     return 'writeback.idempotency_key must be a non-empty string'
   }
   return null
@@ -226,7 +227,7 @@ async function hasDuplicateComment(input: {
   repo: string
   issueNumber: number
   body: string
-  idempotencyKey?: string
+  idempotencyKey?: string | null
 }): Promise<boolean> {
   const comments = await githubFetchJson<Array<{ body?: string | null }>>(
     input.fetchImpl,

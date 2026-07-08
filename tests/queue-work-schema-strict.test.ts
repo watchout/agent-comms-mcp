@@ -94,4 +94,37 @@ describe('runner-side validation accepts strict-mode (null-filled) results', () 
       }),
     ).toBe(false)
   })
+
+  test('the mediated writeback wrapper accepts a null-filled strict-mode writeback', async () => {
+    const { validateMediatedPostingRequest } = await import('../scripts/queue-work-github-writeback')
+    const body = [
+      '<!-- aun:state-transition-request/v1 -->',
+      'repo: watchout/agent-comms-mcp',
+      'issue: 846',
+      'source_queue_id: 124225',
+      'role: aun',
+      'status: ok',
+      '',
+      'strict-mode null-filled writeback fixture',
+    ].join('\n')
+    const result = validateMediatedPostingRequest(
+      {
+        schema_version: 'queue_work_mediated_posting_request_v1',
+        agent_id: 'aun',
+        queue_id: '124225',
+        handoff_contract: { github_backed: true, required_writebacks: ['github_issue_comment'] },
+        writeback: {
+          mode: 'github_issue_comment',
+          repo: 'watchout/agent-comms-mcp',
+          issue_number: 846,
+          body,
+          evidence: null,
+          idempotency_key: null,
+          body_sha256: null,
+        },
+      } as any,
+      { allowRepos: ['watchout/agent-comms-mcp'] },
+    )
+    expect(result.ok).toBe(true)
+  })
 })
