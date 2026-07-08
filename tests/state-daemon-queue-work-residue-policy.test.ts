@@ -155,7 +155,7 @@ function rowCp80ExactResidue(
     id: item.id,
     agent_id: 'aun',
     message_id: item.message_id,
-    status: 'pending',
+    status: 'skipped',
     payload: JSON.stringify({
       source: item.source,
       message_type: 'instruction',
@@ -289,7 +289,7 @@ describe('#758 queue-work residue policy model', () => {
     }
   })
 
-  test('CP80 exact-row residue entries pin only governed identity metadata', () => {
+  test('CP80 exact-row residue entries pin only governed skipped-state identity metadata', () => {
     const raw = loadPolicyJson()
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
 
@@ -304,18 +304,18 @@ describe('#758 queue-work residue policy model', () => {
         classification: 'preserve_immutable_evidence',
         scheduler_action: 'exclude',
         authorized_action: 'preserve_only',
-        expected_status: ['pending'],
+        expected_status: ['skipped'],
         expected_payload_source: item.source,
         payload_md5: item.payload_md5,
       })
       expect(matchQueueWorkResiduePolicyEntry(entry, rowCp80ExactResidue(item)).matched).toBe(true)
 
       const drifted = matchQueueWorkResiduePolicyEntry(entry, rowCp80ExactResidue(item, {
-        status: 'replied',
+        status: 'pending',
         payload: JSON.stringify({ source: 'state-daemon-queue-work-scheduler' }),
       }))
       expect(drifted.matched).toBe(false)
-      expect(drifted.mismatches.join('\n')).toContain('status expected one of pending')
+      expect(drifted.mismatches.join('\n')).toContain('status expected one of skipped')
       expect(drifted.mismatches.join('\n')).toContain(`payload.source expected ${item.source}`)
     }
   })

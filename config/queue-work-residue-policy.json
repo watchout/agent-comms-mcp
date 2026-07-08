@@ -120,10 +120,10 @@
       "scheduler_action": "exclude",
       "authorized_action": "preserve_only",
       "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4899712011",
-      "expected_status": ["pending"],
+      "expected_status": ["skipped"],
       "expected_payload_source": "cli-notify",
       "payload_md5": "c364d75e90e4c2e83c750ac9bfe4077a",
-      "notes": "CP80 exact-row AUN notification residue. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
+      "notes": "CP80 exact-row AUN notification residue, now terminal skipped by external bulk cleanup. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
     },
     {
       "queue_id": 123940,
@@ -133,10 +133,10 @@
       "scheduler_action": "exclude",
       "authorized_action": "preserve_only",
       "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4899712011",
-      "expected_status": ["pending"],
+      "expected_status": ["skipped"],
       "expected_payload_source": "agent-comms",
       "payload_md5": "86415242b48a77d83184d0719f1d045d",
-      "notes": "CP80 exact-row AUN instruction residue. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
+      "notes": "CP80 exact-row AUN instruction residue, now terminal skipped by external bulk cleanup. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
     },
     {
       "queue_id": 123945,
@@ -146,10 +146,10 @@
       "scheduler_action": "exclude",
       "authorized_action": "preserve_only",
       "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4899712011",
-      "expected_status": ["pending"],
+      "expected_status": ["skipped"],
       "expected_payload_source": "agent-comms",
       "payload_md5": "979de68a28e0b0a79fd6708467d14751",
-      "notes": "CP80 exact-row AUN instruction residue. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
+      "notes": "CP80 exact-row AUN instruction residue, now terminal skipped by external bulk cleanup. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
     }
   ]
 }
