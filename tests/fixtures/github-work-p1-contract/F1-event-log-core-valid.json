@@ -1,0 +1,126 @@
+{
+  "schema_version": "github_work_event_log_core_v1",
+  "event_id": "f1_event_log_core_valid",
+  "event_type": "github_work.dispatch_planned",
+  "recorded_at": "2026-07-05T16:55:41+09:00",
+  "recorded_by": "aun",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/744",
+  "lane": "P1_contract_only",
+  "status": "would_queue",
+  "github": {
+    "repo": "watchout/agent-comms-mcp",
+    "kind": "issue",
+    "number": 744,
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/744",
+    "node_id": "I_kwDORw1jW85P1F1",
+    "activity_cursor": "content:p1-contract|base:I_kwDORw1jW85P1F1:2026-07-05T16:55:41+09:00",
+    "fingerprint": "p1-f1-fingerprint",
+    "labels": ["needs:implementation", "owner:aun", "route:fast", "runner:codex"]
+  },
+  "route": {
+    "role": "implementation",
+    "owner": "aun",
+    "route": "fast",
+    "runner_policy": "codex_native_fast_lane",
+    "protected": false,
+    "autonomous_execution_allowed": false
+  },
+  "queue": {
+    "queue_id": null,
+    "agent_id": "aun",
+    "status": null
+  },
+  "claim": {
+    "work_key": "watchout/agent-comms-mcp#744",
+    "claim_id": null,
+    "claimant_seat": null,
+    "github_created_at": null,
+    "lease_expires_at": null,
+    "phase": "not_applicable",
+    "settle_window_ms": 3000,
+    "reread_after_settle": false,
+    "stable_event_set": false,
+    "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+    "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+    "confirmed_winner_claim_id": null,
+    "winner_confirmation_required_before_execution": true,
+    "winner_execution_precondition_met": false,
+    "runtime_execution_performed": false,
+    "result_publication_performed": false
+  },
+  "poll_profile": {
+    "profile_id": "serial_seat_default",
+    "source_ref": "watchout/iyasaka-arc#39",
+    "poll_interval_ms": 120000,
+    "jitter_ms_min": 0,
+    "jitter_ms_max": 30000,
+    "max_in_flight_claims_per_seat": 1,
+    "max_new_claims_per_poll": 1,
+    "pool_width_source": null,
+    "race_behavior": "two_phase_claim_confirmation",
+    "no_poll_overlap": true,
+    "api_rate_limit_backoff": "exponential_backoff_with_jitter",
+    "repo_hammer_guard": "etag_or_if_none_match_when_available",
+    "missed_signal_recovery": {
+      "signal_required_for_discovery": false,
+      "next_poll_discovers_work": true,
+      "claim_possible_without_human_relay": true
+    },
+    "starvation_guard": {
+      "unclaimed_after_one_lead_tick": "lead_nudges_pool_with_queue_view_refs",
+      "unclaimed_after_two_lead_ticks": "owner_escalation_as_capacity_signal",
+      "metrics_derive_from_events": [
+        "request_to_claim_latency_ms",
+        "unclaimed_count_by_function",
+        "active_claims_by_seat",
+        "claim_lost_count_by_seat"
+      ]
+    }
+  },
+  "protected_surface": {
+    "classification_source": "independent_classifier_v1",
+    "declared_protected_surface": false,
+    "classifier_inputs": {
+      "declared_protected_surface": false,
+      "title": "P1 contract-only implementation",
+      "body": "Schema parser fixtures and contract tests only.",
+      "labels": ["needs:implementation", "owner:aun", "route:fast", "runner:codex"],
+      "changed_paths": [
+        "core/state-daemon/github-work-event-log-core.ts",
+        "schemas/github-work-event-log-core-v1.schema.json",
+        "tests/contract/test_github_work_p1_contract_only.test.ts"
+      ],
+      "declared_operations": ["contract_schema", "fixture", "contract_test"],
+      "route_labels": ["route:fast", "runner:codex"],
+      "owner_decision_url": null
+    },
+    "protected_surface_classified": false,
+    "protected_surface_reasons": [],
+    "owner_decision_required": false,
+    "owner_decision_url": null,
+    "claim_allowed": true,
+    "queue_view_state": "claimable"
+  },
+  "evidence": {
+    "ssot": "github",
+    "aun_is_acceleration_only": true,
+    "completion_evidence_not_accepted": [
+      "aun_ack",
+      "queue_id",
+      "discord_projection",
+      "tui_visibility",
+      "green_ci_alone"
+    ],
+    "mutation_performed": false,
+    "live_github_api_performed": false,
+    "live_canary_performed": false,
+    "daemon_or_scheduler_touched": false,
+    "token_used": false,
+    "db_queue_mutation_performed": false,
+    "repo_settings_changed": false,
+    "workflow_changed": false,
+    "deploy_changed": false
+  },
+  "blocker_codes": [],
+  "notes": ["F1 pins a valid P1 contract-only EventLogCore event with claim, poll, and classifier contract fields."]
+}

@@ -1,0 +1,111 @@
+{
+  "schema_version": "github_work_p1_golden_failure_fixture_v1",
+  "fixture": "github-double-claim-one-confirmed.yaml",
+  "specimen": "two seats post claim.requested concurrently",
+  "base_event_ref": "F1-event-log-core-valid.json",
+  "events": [
+    {
+      "event_id": "golden_double_claim_requested_a",
+      "event_type": "github_work.claim_requested",
+      "recorded_at": "2026-07-05T09:00:00.000Z",
+      "status": "claim_requested",
+      "claim": {
+        "work_key": "watchout/agent-comms-mcp#744",
+        "claim_id": "claim-a",
+        "claimant_seat": "codex-audit",
+        "github_created_at": "2026-07-05T09:00:00.000Z",
+        "lease_expires_at": "2026-07-05T09:30:00.000Z",
+        "phase": "claim_requested",
+        "settle_window_ms": 3000,
+        "reread_after_settle": false,
+        "stable_event_set": false,
+        "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+        "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+        "confirmed_winner_claim_id": null,
+        "winner_confirmation_required_before_execution": true,
+        "winner_execution_precondition_met": false,
+        "runtime_execution_performed": false,
+        "result_publication_performed": false
+      }
+    },
+    {
+      "event_id": "golden_double_claim_requested_b",
+      "event_type": "github_work.claim_requested",
+      "recorded_at": "2026-07-05T09:00:00.000Z",
+      "status": "claim_requested",
+      "claim": {
+        "work_key": "watchout/agent-comms-mcp#744",
+        "claim_id": "claim-b",
+        "claimant_seat": "discord-auditor",
+        "github_created_at": "2026-07-05T09:00:00.000Z",
+        "lease_expires_at": "2026-07-05T09:30:00.000Z",
+        "phase": "claim_requested",
+        "settle_window_ms": 3000,
+        "reread_after_settle": false,
+        "stable_event_set": false,
+        "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+        "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+        "confirmed_winner_claim_id": null,
+        "winner_confirmation_required_before_execution": true,
+        "winner_execution_precondition_met": false,
+        "runtime_execution_performed": false,
+        "result_publication_performed": false
+      }
+    },
+    {
+      "event_id": "golden_double_claim_won_a",
+      "event_type": "github_work.claim_won",
+      "recorded_at": "2026-07-05T09:00:03.000Z",
+      "status": "claim_won",
+      "claim": {
+        "work_key": "watchout/agent-comms-mcp#744",
+        "claim_id": "claim-a",
+        "claimant_seat": "codex-audit",
+        "github_created_at": "2026-07-05T09:00:00.000Z",
+        "lease_expires_at": "2026-07-05T09:30:00.000Z",
+        "phase": "claim_won",
+        "settle_window_ms": 3000,
+        "reread_after_settle": true,
+        "stable_event_set": true,
+        "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+        "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+        "confirmed_winner_claim_id": "claim-a",
+        "winner_confirmation_required_before_execution": true,
+        "winner_execution_precondition_met": true,
+        "runtime_execution_performed": false,
+        "result_publication_performed": false
+      }
+    },
+    {
+      "event_id": "golden_double_claim_lost_b",
+      "event_type": "github_work.claim_lost",
+      "recorded_at": "2026-07-05T09:00:03.000Z",
+      "status": "claim_lost",
+      "claim": {
+        "work_key": "watchout/agent-comms-mcp#744",
+        "claim_id": "claim-b",
+        "claimant_seat": "discord-auditor",
+        "github_created_at": "2026-07-05T09:00:00.000Z",
+        "lease_expires_at": "2026-07-05T09:30:00.000Z",
+        "phase": "claim_lost",
+        "settle_window_ms": 3000,
+        "reread_after_settle": true,
+        "stable_event_set": true,
+        "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+        "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+        "confirmed_winner_claim_id": "claim-a",
+        "winner_confirmation_required_before_execution": true,
+        "winner_execution_precondition_met": false,
+        "runtime_execution_performed": false,
+        "result_publication_performed": false
+      }
+    }
+  ],
+  "expected": {
+    "confirmed_claims": 1,
+    "deterministic_winner_claim_id": "claim-a",
+    "losing_claims_emit": "claim_lost",
+    "losing_seat_executes_work": false,
+    "losing_seat_publishes_result": false
+  }
+}

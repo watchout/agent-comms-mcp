@@ -55,6 +55,9 @@ closed with a mismatch instead of assuming the row is safe.
 | `120138` | `preserve_immutable_evidence` | Preserve GitHub work puller canary evidence. Exclude from queue-work scheduler selection. |
 | `120245` | `preserve_failed_scheduler_evidence` | Preserve failed `qa` scheduler evidence. Do not retry this row. Fresh retry must use a fresh row/message id. |
 | `121744` | `preserve_incomplete_scheduler_evidence` | Preserve incomplete `secretary` scheduler evidence. Exclude from scheduler selection, claim refresh, reclaim, and runner invocation. |
+| `123851` | `preserve_immutable_evidence` | Preserve CP80 superseded AUN notification evidence now observed as terminal `skipped`. Exclude from queue-work scheduler selection. |
+| `123940` | `preserve_immutable_evidence` | Preserve CP80 superseded AUN instruction evidence now observed as terminal `skipped`. Exclude from queue-work scheduler selection. |
+| `123945` | `preserve_immutable_evidence` | Preserve CP80 superseded AUN instruction evidence now observed as terminal `skipped`. Exclude from queue-work scheduler selection. |
 
 `121745` is terminal `replied` and is not a residue policy entry.
 

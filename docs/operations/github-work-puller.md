@@ -34,6 +34,40 @@ One-shot diagnostics may still use `STATE_DAEMON_GITHUB_TOKEN` or
 `STATE_DAEMON_GITHUB_TOKEN_FILE`. LaunchAgent preflight rejects raw GitHub token
 values in plist environment variables.
 
+## P2 Pull-Once Planner
+
+`agent-com github-work pull-once` is a bounded P2 planning surface for the
+GitHub-comment EventLog claim path. The CLI surface is dry-run only and reads
+fixture/mock data; it does not call the live GitHub API, read a token, write
+the DB, claim/process/complete queue rows, activate a daemon, touch a scheduler,
+or start an AUN runner.
+
+Example dry-run:
+
+```bash
+bun cli/index.ts github-work pull-once \
+  --repo watchout/agent-comms-mcp \
+  --label canary:github-work-pull-once \
+  --owner-allowlist aun \
+  --target-number 744 \
+  --target-kind issue \
+  --fixture tests/fixtures/github-work-p2-pull-once/dry-run-canary.json \
+  --format json
+```
+
+The output is a `github_work_pull_once_v1` plan with:
+
+- one selected canary work item, or explicit blocker codes
+- would-post `claim.requested` EventLog comment data
+- duplicate suppression from existing `claim.won` or `result.posted` comments
+- protected-surface blocking from the independent classifier
+- evidence flags for no live API, no DB/queue mutation, no token use, no
+  daemon/scheduler touch, no AUN runner touch, and no repo settings/workflow
+  mutation
+
+`--execute` is intentionally rejected by this CLI path. A later live path
+requires a fresh owner decision URL with exact canary scope before execution.
+
 ## Persistent Activation Profile
 
 Persistent activation is intentionally narrower than the general worker

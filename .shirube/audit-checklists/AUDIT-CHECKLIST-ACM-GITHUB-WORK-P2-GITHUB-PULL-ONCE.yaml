@@ -1,0 +1,51 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE.yaml"
+  cell_id: "ACM-GITHUB-WORK-P2-GITHUB-PULL-ONCE"
+  pr: 848
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/744#issuecomment-4885884175"
+  implementation_actor: "aun"
+  audit_model: "comment_backed_structured_audit"
+  structured_audit_comment_ref: "pending_new_exact_head_reaudit"
+items:
+  - item_id: "AUDIT-P2-PULL-ONCE-001"
+    source: "comment_backed_structured_audit"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm exact head, changed files, validation output, and P2_github_pull_once scope."
+    expected_evidence:
+      - "exact_head"
+      - "changed_files"
+      - "validation_commands"
+      - "validation_results"
+  - item_id: "AUDIT-P2-PULL-ONCE-002"
+    source: "comment_backed_structured_audit"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm no live GitHub/API/canary, runtime activation, daemon/scheduler/AUN runner activation, DB/queue mutation, token/secret access, repo settings/workflow/deploy changes, approval, or merge."
+    expected_evidence:
+      - "forbidden_surfaces_not_performed"
+      - "execute_rejection"
+  - item_id: "AUDIT-P2-PULL-ONCE-003"
+    source: "comment_backed_structured_audit"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm route classifier State-daemon core/ceo-approval handling is owner-gated and supported by accepted routing evidence."
+    expected_evidence:
+      - "route_classifier_evidence"
+      - "owner_decision_required_before_merge"
+  - item_id: "AUDIT-P2-PULL-ONCE-004"
+    source: "comment_backed_structured_audit"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm F1-F4 remain passing and P2 duplicate/protected/dispatch/self-writeback tests are covered."
+    expected_evidence:
+      - "F1"
+      - "F2"
+      - "F3"
+      - "F4"
+notes:
+  - "This checklist is a route/evidence artifact for PR #848 metadata rework."
+  - "Owner exact-head decision and merge authorization remain separate."
+  - "No checklist item is self-approved by the implementation executor."

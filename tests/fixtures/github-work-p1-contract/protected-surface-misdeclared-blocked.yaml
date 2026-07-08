@@ -1,0 +1,70 @@
+{
+  "schema_version": "github_work_p1_golden_failure_fixture_v1",
+  "fixture": "protected-surface-misdeclared-blocked.yaml",
+  "specimen": "payload declares protected_surface=false but classifier detects a protected surface",
+  "base_event_ref": "F1-event-log-core-valid.json",
+  "events": [
+    {
+      "event_id": "golden_protected_surface_misdeclared_blocked",
+      "event_type": "github_work.blocked",
+      "status": "blocked",
+      "route": {
+        "role": "implementation",
+        "owner": "aun",
+        "route": "fast",
+        "runner_policy": "codex_native_fast_lane",
+        "protected": false,
+        "autonomous_execution_allowed": false
+      },
+      "claim": {
+        "work_key": "watchout/agent-comms-mcp#744",
+        "claim_id": null,
+        "claimant_seat": null,
+        "github_created_at": null,
+        "lease_expires_at": null,
+        "phase": "work_blocked",
+        "settle_window_ms": 3000,
+        "reread_after_settle": false,
+        "stable_event_set": false,
+        "stable_event_set_rule": "two_consecutive_reads_or_contract_unstable",
+        "deterministic_winner_rule": "earliest_github_created_at_tie_claim_id",
+        "confirmed_winner_claim_id": null,
+        "winner_confirmation_required_before_execution": true,
+        "winner_execution_precondition_met": false,
+        "runtime_execution_performed": false,
+        "result_publication_performed": false
+      },
+      "protected_surface": {
+        "classification_source": "independent_classifier_v1",
+        "declared_protected_surface": false,
+        "classifier_inputs": {
+          "declared_protected_surface": false,
+          "title": "Enable state daemon LaunchAgent",
+          "body": "Request selects host LaunchAgent activation for the state daemon.",
+          "labels": ["needs:implementation", "owner:aun", "route:fast", "runner:codex"],
+          "changed_paths": ["scripts/state-daemon-launchagent.ts"],
+          "declared_operations": ["launchagent_activation", "state-daemon enablement"],
+          "route_labels": ["route:fast", "runner:codex"],
+          "owner_decision_url": null
+        },
+        "protected_surface_classified": true,
+        "protected_surface_reasons": [
+          "state_daemon_or_scheduler_enablement",
+          "launchd_or_plist_activation"
+        ],
+        "owner_decision_required": true,
+        "owner_decision_url": null,
+        "claim_allowed": false,
+        "queue_view_state": "blocked"
+      },
+      "blocker_codes": ["PROTECTED_SURFACE_OWNER_REQUIRED"]
+    }
+  ],
+  "expected": {
+    "queue_view_state": "blocked",
+    "blocker_code": "PROTECTED_SURFACE_OWNER_REQUIRED",
+    "claim_allowed": false,
+    "declared_protected_surface": false,
+    "protected_surface_classified": true
+  }
+}

@@ -74,6 +74,12 @@ import {
   formatQueueWorkActivationPlanText,
 } from '../core/state-daemon/queue-work-activation-plan'
 import {
+  buildGithubWorkPullOnceInput,
+  formatGithubWorkPullOncePlanText,
+  loadGithubWorkPullOnceFixture,
+  planGithubWorkPullOnce,
+} from '../core/state-daemon/github-work-pull-once'
+import {
   assertMessageQueueStatusVocabularyCompatible,
   formatMessageQueueStatusCodeDrift,
   isDbCodeDriftError,
@@ -4597,6 +4603,51 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
   }
 }
 
+async function githubWorkCommand(subcommand: string | undefined, args: string[]) {
+  if (subcommand !== 'pull-once') {
+    console.error('Usage: agent-com github-work pull-once --repo <owner/repo> --label <canary:label> --owner-allowlist <agent> [--target-number <n>] [--target-kind issue|pull_request] [--fixture <path>] [--writeback-mode none|github-comment] [--format json|text]')
+    process.exit(2)
+  }
+  const { flags } = parseArgs(args)
+  const format = flags.format ?? 'json'
+  if (!['json', 'text'].includes(format)) {
+    console.error('Usage: agent-com github-work pull-once ... [--format json|text]')
+    process.exit(2)
+  }
+  const execute = hasFlag(flags, 'execute') && flagEnabled(flags.execute)
+  if (execute) {
+    console.error('Error: github-work pull-once execute requires a separate owner-approved live runner command; this CLI path is dry-run/planning only in P2')
+    process.exit(2)
+  }
+  const targetKind = flags['target-kind']
+  if (targetKind !== undefined && targetKind !== 'issue' && targetKind !== 'pull_request') {
+    console.error('Error: --target-kind must be issue or pull_request')
+    process.exit(2)
+  }
+  const fixture = flags.fixture ? loadGithubWorkPullOnceFixture(resolve(flags.fixture)) : { items: [], comments: {} }
+  const input = buildGithubWorkPullOnceInput({
+    repo: flags.repo,
+    label: flags.label,
+    ownerAllowlist: parseCsvFlag(flags['owner-allowlist']) ?? [],
+    targetNumber: flags['target-number'] ? parsePositiveIntFlag(flags['target-number'], 0, 'target-number') : null,
+    targetKind: targetKind ?? null,
+    writebackMode: flags['writeback-mode'] ?? 'none',
+    action: flags.action ?? 'discover',
+    actorSeat: flags['actor-seat'] ?? 'aun',
+    ownerDecisionUrl: flags['owner-decision-url'] ?? null,
+    execute: false,
+    now: flags.now ?? null,
+    resultSummary: flags['result-summary'] ?? null,
+  })
+  const plan = planGithubWorkPullOnce(input, fixture.items, fixture.comments ?? {})
+  if (format === 'text') {
+    process.stdout.write(formatGithubWorkPullOncePlanText(plan))
+  } else {
+    process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`)
+  }
+  if (!plan.ok) process.exitCode = 1
+}
+
 async function repairQueue(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand === 'normalize' && hasFlag(flags, 'execute')) {
@@ -5892,6 +5943,8 @@ if (command === 'channel') {
   await diagnoseQueue([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'recovery') {
   await recoveryCommand(subcommand, rest)
+} else if (command === 'github-work') {
+  await githubWorkCommand(subcommand, rest)
 } else if (command === 'state-daemon') {
   await stateDaemonCommand(subcommand, rest)
 } else if (command === 'queue' && subcommand === 'doctor') {
@@ -5958,6 +6011,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — CP-80 read-only recovery GO/NO-GO gate; no restart, no Discord activation, no FIFO drain
   recovery activation-plan --scope-file <json> --readiness-report <json> [--format json|text]
                                                        — CP-80 read-only canary-first activation plan; no runtime or Discord activation
+  github-work pull-once --repo <owner/repo> --label <canary:label> --owner-allowlist <agent> [--target-number <n>] [--target-kind issue|pull_request] [--fixture <path>] [--writeback-mode none|github-comment] [--format json|text]
+                                                       — P2 dry-run GitHub pull-once planner using fixture/mock data; no live API, DB/queue write, token read, or runtime activation
   state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]
                                                        — read-only LaunchAgent persistent-path readiness diagnostic; no restart
   state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--active-plist-path <path>] [--checkout-dirs <csv>] [--format json|text]

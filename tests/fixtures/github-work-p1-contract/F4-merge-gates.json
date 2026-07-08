@@ -1,0 +1,36 @@
+{
+  "schema_version": "github_work_p1_contract_merge_gates_v1",
+  "lane": "P1_contract_only",
+  "merge_gates": [
+    "F1_CLAIM_ATOMICITY_TWO_PHASE_CONFIRMATION",
+    "F2_POLL_CADENCE_FAIRNESS_BACKPRESSURE_AUDIT_POOL",
+    "F3_INDEPENDENT_PROTECTED_SURFACE_CLASSIFIER",
+    "F4_GOLDEN_FAILURE_FIXTURES"
+  ],
+  "required_golden_failure_fixtures": [
+    "github-double-claim-one-confirmed.yaml",
+    "missed-signal-next-poll-recovers.yaml",
+    "function-address-binding-unresolved-blocked.yaml",
+    "protected-surface-misdeclared-blocked.yaml",
+    "protected-option-a-owner-required.yaml"
+  ],
+  "forbidden_surfaces": [
+    "P2_github_pull_once",
+    "live GitHub/API/canary",
+    "daemon",
+    "scheduler",
+    "AUN runner",
+    "token",
+    "DB",
+    "queue",
+    "repo settings",
+    "workflow",
+    "deploy"
+  ],
+  "runtime_wiring_forbidden": [
+    "bin/state-daemon.ts",
+    "core/state-daemon/index.ts",
+    "scripts/state-daemon-launchagent.ts",
+    "cli/index.ts"
+  ]
+}
