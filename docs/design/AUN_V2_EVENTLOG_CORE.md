@@ -65,6 +65,7 @@ conversation are independent work orders claimable by seat pools.
 | SPEC-AUN-002 criterion | Fixture |
 |---|---|
 | Fleet-kill → restart → full rebuild, zero lost work | `eventlog-fleet-kill.test.ts` — real subprocess workers SIGKILLed mid-work twice, restarted, drained; every turn completed exactly once, replay into a virgin DB reproduces identical views |
+| Runtime switch (codex ↔ claude-code) mid-work, zero loss | `eventlog-runtime-switch.test.ts` (owner addendum 2026-07-08) — old engine holds a live claim at the swap; the new engine, a real subprocess reading only the log, auto-releases it (identity baton), finishes the in-flight turn exactly once, order preserved across the engine boundary, outbox delivered exactly once; the lingering old engine's late completion is fenced out. Reverse direction symmetric |
 | p95 within budget, fail-closed | `eventlog-p95.test.ts` — enqueue p95 < 10ms, claim p95 < 50ms, queue_view < 250ms budgets as hard assertions (observed baseline ~0.1–0.4ms) |
 | Zero double-processing / zero double-send | `eventlog-turns.test.ts`, `eventlog-outbox.test.ts` — negative fixtures incl. ambiguous-send crash window + nonce-dedup retry, concurrent dispatchers, forged completion |
 | Thread traceable from the log | `eventlog-thread.test.ts` — causation-chain tree, Discord-agnostic |
