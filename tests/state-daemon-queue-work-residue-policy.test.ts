@@ -109,6 +109,27 @@ const L2AUDITOR_OBSOLETE_ROWS = [
   },
 ] as const
 
+const CP80_EXACT_ROW_RESIDUE_ROWS = [
+  {
+    id: 123851,
+    message_id: 'b91e28bf-01f0-42d0-91ad-59e8b5765f4b',
+    source: 'cli-notify',
+    payload_md5: 'c364d75e90e4c2e83c750ac9bfe4077a',
+  },
+  {
+    id: 123940,
+    message_id: '439850af-a7e2-487a-8bec-3350d5ea244d',
+    source: 'agent-comms',
+    payload_md5: '86415242b48a77d83184d0719f1d045d',
+  },
+  {
+    id: 123945,
+    message_id: 'e8da25ca-93d7-4d8a-9dd2-63756c9c0c69',
+    source: 'agent-comms',
+    payload_md5: '979de68a28e0b0a79fd6708467d14751',
+  },
+] as const
+
 function rowL2AuditorObsolete(
   item: typeof L2AUDITOR_OBSOLETE_ROWS[number],
   patch: Partial<QueueWorkResidueRow> = {},
@@ -121,6 +142,23 @@ function rowL2AuditorObsolete(
     payload: JSON.stringify({
       source: 'cli-notify',
       message_type: item.message_type,
+    }),
+    ...patch,
+  }
+}
+
+function rowCp80ExactResidue(
+  item: typeof CP80_EXACT_ROW_RESIDUE_ROWS[number],
+  patch: Partial<QueueWorkResidueRow> = {},
+): QueueWorkResidueRow {
+  return {
+    id: item.id,
+    agent_id: 'aun',
+    message_id: item.message_id,
+    status: 'skipped',
+    payload: JSON.stringify({
+      source: item.source,
+      message_type: 'instruction',
     }),
     ...patch,
   }
@@ -141,6 +179,9 @@ describe('#758 queue-work residue policy model', () => {
       121919,
       121924,
       121938,
+      123851,
+      123940,
+      123945,
     ])
     expect(policy.entries.map((entry) => entry.authorized_action)).toEqual(
       Array.from({ length: policy.entries.length }, () => 'preserve_only'),
@@ -248,10 +289,42 @@ describe('#758 queue-work residue policy model', () => {
     }
   })
 
+  test('CP80 exact-row residue entries pin only governed skipped-state identity metadata', () => {
+    const raw = loadPolicyJson()
+    const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
+
+    for (const item of CP80_EXACT_ROW_RESIDUE_ROWS) {
+      const rawEntry = raw.entries.find((candidate: any) => candidate.queue_id === item.id)
+      const entry = policy.entries.find((candidate) => candidate.queue_id === item.id)!
+
+      expect(rawEntry).toMatchObject({
+        queue_id: item.id,
+        agent_id: 'aun',
+        message_id: item.message_id,
+        classification: 'preserve_immutable_evidence',
+        scheduler_action: 'exclude',
+        authorized_action: 'preserve_only',
+        expected_status: ['skipped'],
+        expected_payload_source: item.source,
+        payload_md5: item.payload_md5,
+      })
+      expect(matchQueueWorkResiduePolicyEntry(entry, rowCp80ExactResidue(item)).matched).toBe(true)
+
+      const drifted = matchQueueWorkResiduePolicyEntry(entry, rowCp80ExactResidue(item, {
+        status: 'pending',
+        payload: JSON.stringify({ source: 'state-daemon-queue-work-scheduler' }),
+      }))
+      expect(drifted.matched).toBe(false)
+      expect(drifted.mismatches.join('\n')).toContain('status expected one of skipped')
+      expect(drifted.mismatches.join('\n')).toContain(`payload.source expected ${item.source}`)
+    }
+  })
+
   test('classifier reports exact matches, unclassified rows, missing entries, and mismatches', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
     const l2Rows = L2AUDITOR_OBSOLETE_ROWS.map((item) => rowL2AuditorObsolete(item))
-    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows], {
+    const cp80Rows = CP80_EXACT_ROW_RESIDUE_ROWS.map((item) => rowCp80ExactResidue(item))
+    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows, ...cp80Rows], {
       requirePolicyRows: true,
     })
 
@@ -266,6 +339,9 @@ describe('#758 queue-work residue policy model', () => {
       121919,
       121924,
       121938,
+      123851,
+      123940,
+      123945,
     ])
 
     const failing = classifyQueueWorkResidueRows(policy, [
