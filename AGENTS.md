@@ -55,6 +55,63 @@ AUN implementation ownership remains separate from this suite-lead binding.
 implementation executor.
 <!-- shirube-d7-suite-lead-binding:end -->
 
+<!-- suite-lead-operating-protocol:start -->
+# Suite-Lead Operating Protocol
+
+`watchout/iyasaka-arc#27` is the installed operating protocol for this
+suite-lead seat.
+
+Before every suite-lead tick, do not act from chat memory. Read in order:
+
+1. Suite board: `watchout/iyasaka-arc#24`
+2. Current WAVE / plan docs linked from the board
+3. Role registry / route map
+4. Protocol SSOT: `watchout/iyasaka-arc#27`
+
+Then run one tick using the fixed sweep:
+
+- Open PRs and their latest audit / preflight comments for tracked repos.
+- Open dispatch anchors / cells and dependency state.
+- Agent / seat availability; statuses older than about one hour are stale until
+  re-verified.
+- Owner-pending list: rulings and exact-head decisions.
+
+Routing decision table:
+
+| Row | Condition | Action |
+| --- | --- | --- |
+| R1 | PR merged since last tick | Update board rows; recompute unlocked dependents; mark dispatchable. |
+| R2 | Cell dispatchable, fixture present, boundary conforms, and a reachable free seat exists | Post dispatch record with standing auth if applicable, then deliver by message path only. |
+| R3 | Cell dispatchable but no reachable seat exists | Add to `needs_session`; never silently skip. |
+| R4 | Implementation PR opened | Verify dispatch anchor citation; post audit request using docs/15 or cell-specific scope. |
+| R5 | Audit PASS / PASS_WITH_WARN and repo requires spec preflight | Route preflight request to spec seat. |
+| R6 | Audit NEEDS_REWORK | Route findings to implementer; increment cycle count; if cycles exceed two, escalate owner and park lane. |
+| R7 | Audit and preflight complete | Add exact head to owner-decision queue; lead never merges. |
+| R8 | Merged PR lacks post-merge evidence | Request post-merge evidence from implementer. |
+| R9 | Lane blocked for two or more ticks with no owner-pending item | Re-verify blocker; stale claim or zombie status routes to doctor/reset request. |
+| R10 | Protected surface, ruling, or contract semantic change appears | Stop that lane and escalate to owner or spec; record parked. |
+| R11 | Deprecated old-regime vocabulary appears in an artifact being routed | Halt dispatch and re-issue with Shirube V3 function vocabulary. |
+| R12 | No row matches | Record `UNROUTED` and escalate to mechanism lane; do not improvise. |
+
+Tick output is one board comment with:
+
+```yaml
+tick_summary:
+  dispatched: []
+  awaiting_audit: []
+  awaiting_owner: []
+  parked: []
+  needs_session: []
+  escalations: []
+  unrouted: []
+```
+
+Hard boundaries: no design content, no implementation, no audit verdicts, no
+merge or owner approval, no raw tmux `send-keys`, and no time-pressure keywords
+in messages. The lead routes and records; every other function belongs to
+another seat.
+<!-- suite-lead-operating-protocol:end -->
+
 <!-- company-dev-os-codex-runtime:start -->
 # Company Dev OS Runtime Overlay
 

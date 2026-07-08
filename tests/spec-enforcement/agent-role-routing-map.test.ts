@@ -11,6 +11,8 @@ type RoleEntry = {
   controlSource?: string
   bindingIssue?: string
   functionBindingsRef?: string
+  operatingProtocolRef?: string
+  operatingProtocolCell?: string
   forbiddenActions?: string[]
   requiredEnv?: Record<string, string>
   legacyAgentIds?: string[]
@@ -26,6 +28,8 @@ type RoleRoutingConfig = {
     ownerDecision: string
     bindingIssue: string
     functionBindingsRef: string
+    operatingProtocolRef: string
+    operatingProtocolCell: string
     activeFunction: string
     agentComRuntimeAgentId: string
     oldAunImplementationAssignment: string
@@ -75,6 +79,8 @@ describe('agent role routing map', () => {
       controlSource: 'https://github.com/watchout/iyasaka-arc/issues/23',
       bindingIssue: 'https://github.com/watchout/agent-comms-mcp/issues/837',
       functionBindingsRef: 'watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml',
+      operatingProtocolRef: 'https://github.com/watchout/iyasaka-arc/issues/27',
+      operatingProtocolCell: 'SUITE-LEAD-OPERATING-PROTOCOL-001',
     })
     expect(suiteLead.scope).toContain('iyasaka-arc suite')
     expect(suiteLead.forbiddenActions).toEqual(expect.arrayContaining([
@@ -90,10 +96,20 @@ describe('agent role routing map', () => {
       agentComRuntimeAgentId: 'agent-com-dev',
       activeFunction: 'coordination_recorder',
       functionBindingsRef: 'watchout/iyasaka-arc#21:docs/shirube/function-bindings.yaml',
+      operatingProtocolRef: 'https://github.com/watchout/iyasaka-arc/issues/27',
+      operatingProtocolCell: 'SUITE-LEAD-OPERATING-PROTOCOL-001',
       oldAunImplementationAssignment: 'cleared',
       aunImplementationOwner: 'codex-aun',
       transportAdapterOwnershipUnchanged: true,
     })
+  })
+
+  test('suite lead baseline is pinned to the deterministic tick protocol', () => {
+    const suiteLead = roleMap.roles.suite_lead
+    expect(suiteLead.operatingProtocolRef).toBe('https://github.com/watchout/iyasaka-arc/issues/27')
+    expect(suiteLead.operatingProtocolCell).toBe('SUITE-LEAD-OPERATING-PROTOCOL-001')
+    expect(roleMap.d7SuiteLeadRebinding?.operatingProtocolRef).toBe(suiteLead.operatingProtocolRef)
+    expect(roleMap.d7SuiteLeadRebinding?.operatingProtocolCell).toBe(suiteLead.operatingProtocolCell)
   })
 
   test('legacy cto is not a new-work target for any role', () => {

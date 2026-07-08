@@ -1,0 +1,58 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-SUITE-LEAD-OPERATING-PROTOCOL-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 844
+cell_id: "SUITE-LEAD-OPERATING-PROTOCOL-001"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "suite_lead_operating_protocol_baseline_install"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml"
+claims:
+  implementation_summary:
+    - "Installs iyasaka-arc#27 SUITE-LEAD-OPERATING-PROTOCOL-001 as the agent-com / agent-com-dev suite-lead baseline."
+    - "Pins suite-lead route metadata to operatingProtocolRef and operatingProtocolCell."
+    - "Adds a local operation mirror while keeping iyasaka-arc#27 as canonical SSOT."
+    - "Adds focused spec-enforcement coverage for the route-map protocol pin."
+    - "Adds report-only Rapid/Lite route metadata for this Cell only."
+  protected_surface_boundary:
+    startup_or_session_policy_changed: true
+    active_workflow_changed: true
+    active_workflow_change_scope: "route-table mapping for this Cell only"
+    runtime_code_changed: false
+    queue_or_db_mutation: false
+    db_schema_or_migration_changed: false
+    launchd_or_launchctl_changed: false
+    secrets_or_deployment_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    production_activation: false
+    audit_qa_check_cto_owner_substitution: false
+  fail_closed_guards:
+    - "Workflow change only selects the dedicated handoff/checklist/evidence when PR body CELL-ID is SUITE-LEAD-OPERATING-PROTOCOL-001."
+    - "Owner exact-head decision remains required before merge."
+    - "Independent evidence_audit_gate remains required before owner decision readiness."
+commands:
+  - command: "git diff --check"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS_55_FILES"
+  - command: "node --check scripts/shirube-current-overlay-check.mjs"
+    result: "PASS"
+  - command: "bun test tests/spec-enforcement/agent-role-routing-map.test.ts"
+    result: "PASS_7_TESTS_0_FAIL"
+validation_results:
+  - "git diff --check PASS"
+  - "YAML parse for .shirube/**/*.yaml PASS, 55 files"
+  - "node --check scripts/shirube-current-overlay-check.mjs PASS"
+  - "bun test tests/spec-enforcement/agent-role-routing-map.test.ts PASS, 7 pass / 0 fail"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This file is machine evidence for the protocol baseline install implementation PR."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, CTO judgment, deployment, runtime activation, queue mutation, branch protection, rulesets, or required-check activation."
