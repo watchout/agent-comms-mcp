@@ -738,6 +738,10 @@ export async function handleInboundMessage(params: {
         messageId,
         mqPayloadJson: mqPayload,
         skipReason,
+        // V2 cutover M1: dual-write the EventLogCore receive event in the
+        // same transaction. Conversation stream = thread when present,
+        // else the channel.
+        conversationId: resolved.threadId ?? resolved.channelId,
       })
       const thisCommitted = r.committed && !skipReason
       if (thisCommitted) {

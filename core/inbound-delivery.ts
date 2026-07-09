@@ -103,6 +103,15 @@ export interface InboundDeliveryParams {
    * any push signal when this is set).
    */
   skipReason?: string
+  /**
+   * V2 cutover M1 (owner GO: #794 comment 4923054432) — EventLogCore
+   * conversation stream for the receive event (thread id when present,
+   * else channel id). When set, the transaction ALSO appends the V2
+   * `message.received` event (and `turn.completed(skipped)` for auto-skip
+   * rows) to `event_log` atomically with the V1 writes. Absent = V1-only
+   * (legacy callers/tests unaffected).
+   */
+  conversationId?: string
 }
 
 export interface InboundDeliveryResult {
@@ -174,7 +183,7 @@ export async function persistInboundDeliveryOnClient(
   client: InboundDeliveryClient,
   params: InboundDeliveryParams,
 ): Promise<InboundDeliveryResult> {
-  const { receiverAgentId, messageId, mqPayloadJson, skipReason } = params
+  const { receiverAgentId, messageId, mqPayloadJson, skipReason, conversationId } = params
   try {
     await client.query('BEGIN')
     // Explicit casts: node-postgres cannot always infer the parameter
@@ -219,6 +228,31 @@ export async function persistInboundDeliveryOnClient(
            ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
           [receiverAgentId, messageId, mqPayloadJson],
         )
+    // M1 dual-write (V2 cutover): append the EventLogCore receive event in
+    // the SAME transaction as the V1 writes — no dual-write race window.
+    // Deterministic event ids make redelivery a no-op (ON CONFLICT
+    // (event_id) DO NOTHING). An auto-skip delivery is terminal on
+    // arrival, so it also closes its turn with outcome 'skipped' — the V2
+    // queue_view never shows it as open work.
+    if (conversationId !== undefined) {
+      const turnId = `turn:${receiverAgentId}:${messageId}`
+      const recvEventId = `recv:${receiverAgentId}:${messageId}`
+      await client.query(
+        `INSERT INTO event_log (event_id, event_type, seat_id, conversation_id, correlation_id, turn_id, payload)
+         VALUES ($1::text, 'message.received', $2::text, $3::text, $4::text, $5::text, $6::jsonb)
+         ON CONFLICT (event_id) DO NOTHING`,
+        [recvEventId, receiverAgentId, conversationId, messageId, turnId, mqPayloadJson],
+      )
+      if (skipReason) {
+        await client.query(
+          `INSERT INTO event_log (event_id, event_type, seat_id, conversation_id, causation_id, correlation_id, turn_id, payload)
+           VALUES ($1::text, 'turn.completed', $2::text, $3::text, $4::text, $5::text, $6::text, $7::jsonb)
+           ON CONFLICT (event_id) DO NOTHING`,
+          [`done:${turnId}`, receiverAgentId, conversationId, recvEventId, messageId, turnId,
+           JSON.stringify({ outcome: 'skipped', reason: skipReason })],
+        )
+      }
+    }
     await client.query('COMMIT')
     return {
       committed: true,

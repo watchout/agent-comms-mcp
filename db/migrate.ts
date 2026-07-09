@@ -1399,6 +1399,57 @@ async function migrate() {
     COMMIT;
   `)
 
+  // ── AUN V2 EventLogCore (owner cutover GO: #794 comment 4923054432) ──
+  // Append-only event log — the V2 receive-side source of truth. Mirrors
+  // core/eventlog/schema.ts (SQLite dialect used by fixtures); this is the
+  // production PostgreSQL DDL. NO UPDATE, NO DELETE — enforced by trigger.
+  await gatedQuery(client, `
+    CREATE TABLE IF NOT EXISTS event_log (
+      seq BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      seat_id TEXT,
+      seat_instance_id TEXT,
+      conversation_id TEXT,
+      causation_id TEXT,
+      correlation_id TEXT,
+      turn_id TEXT,
+      reply_id TEXT,
+      claim_epoch INTEGER,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+
+    CREATE OR REPLACE FUNCTION event_log_append_only() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'event_log is append-only: % forbidden', TG_OP;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS event_log_no_update ON event_log;
+    CREATE TRIGGER event_log_no_update
+      BEFORE UPDATE ON event_log
+      FOR EACH ROW EXECUTE FUNCTION event_log_append_only();
+    DROP TRIGGER IF EXISTS event_log_no_delete ON event_log;
+    CREATE TRIGGER event_log_no_delete
+      BEFORE DELETE ON event_log
+      FOR EACH ROW EXECUTE FUNCTION event_log_append_only();
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_el_turn_claim
+      ON event_log(turn_id, claim_epoch) WHERE event_type = 'turn.claimed';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_el_turn_completed
+      ON event_log(turn_id) WHERE event_type = 'turn.completed';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_el_delivery_claim
+      ON event_log(reply_id, claim_epoch) WHERE event_type = 'reply.delivery_claimed';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_el_reply_delivered
+      ON event_log(reply_id) WHERE event_type = 'reply.delivered';
+    CREATE INDEX IF NOT EXISTS idx_el_type_turn ON event_log(event_type, turn_id);
+    CREATE INDEX IF NOT EXISTS idx_el_type_reply ON event_log(event_type, reply_id);
+    CREATE INDEX IF NOT EXISTS idx_el_conversation ON event_log(conversation_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_el_seat_type ON event_log(seat_id, event_type);
+    CREATE INDEX IF NOT EXISTS idx_el_causation ON event_log(causation_id);
+  `)
+
   // Sync channel settings from config.json if available
   if (existsSync(configPath)) {
     try {
