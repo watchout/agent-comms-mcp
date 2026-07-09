@@ -75,7 +75,10 @@ export function parseTurnResult(text: string): TurnResultShape | null {
   const v = value as Record<string, unknown>
   const keys = Object.keys(v).sort()
   if (keys.join(',') !== 'ok,outcome,reply') return null
-  if (typeof v.ok !== 'boolean') return null
+  // ok !== true is the model asserting failure — fail closed (audit
+  // 4930621767): an ok:false result must NEVER become a replied turn or
+  // enqueue a reply, regardless of the rest of the shape.
+  if (v.ok !== true) return null
   if (v.outcome !== 'replied' && v.outcome !== 'no_reply') return null
   if (v.reply !== null && typeof v.reply !== 'string') return null
   if (v.outcome === 'replied' && (v.reply === null || v.reply.trim() === '')) return null

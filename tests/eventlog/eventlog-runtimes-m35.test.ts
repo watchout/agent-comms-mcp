@@ -62,6 +62,10 @@ describe('strict result contract (shared by both engines)', () => {
     expect(parseTurnResult('{"ok":true,"outcome":"replied","reply":null}')).toBeNull() // replied without text
     expect(parseTurnResult('{"ok":true,"outcome":"exfiltrate","reply":"x"}')).toBeNull() // unknown outcome
     expect(parseTurnResult('{"ok":true,"outcome":"no_reply","reply":null,"extra":1}')).toBeNull() // extra key
+    // audit 4930621767: ok:false is the model asserting failure — REJECTED
+    // even with an otherwise perfect shape; it must never become a reply
+    expect(parseTurnResult('{"ok":false,"outcome":"replied","reply":"偽の成功"}')).toBeNull()
+    expect(parseTurnResult('{"ok":false,"outcome":"no_reply","reply":null}')).toBeNull()
   })
 })
 
@@ -137,5 +141,31 @@ describe('engine symmetry', () => {
     expect(prompt).toContain('状況教えて')
     expect(prompt).toContain('ceo')
     expect(prompt).toContain('"no_reply"')
+  })
+})
+
+describe('ok:false fail-closed (audit 4930621767)', () => {
+  test('an ok:false result terminal-closes as failed with ZERO replies enqueued — both engines', async () => {
+    const okFalse = '{"ok":false,"outcome":"replied","reply":"偽の成功"}'
+    // codex path
+    let r = await runSeatWorkerOnce(db, {
+      seatId: 'kodama', seatInstanceId: 'w1',
+      runtime: codexExecRuntime({ db, invoker: canned({ exitCode: 0, stdout: okFalse }), schemaPath: '/tmp/s.json' }),
+    })
+    expect(r.failed).toBe(1)
+    // claude path
+    await receiveMessage(db, { messageId: 'm2', seatId: 'kodama', conversationId: 'chan-1' })
+    r = await runSeatWorkerOnce(db, {
+      seatId: 'kodama', seatInstanceId: 'w2',
+      runtime: claudeCodeRuntime({ db, invoker: canned({ exitCode: 0, stdout: JSON.stringify({ is_error: false, result: okFalse }) }) }),
+    })
+    expect(r.failed).toBe(1)
+    const replies = await db.query(`SELECT * FROM event_log WHERE event_type = 'reply.enqueued'`)
+    expect(replies.length).toBe(0)
+    const completions = await db.query<{ payload: string }>(
+      `SELECT payload FROM event_log WHERE event_type = 'turn.completed'`,
+    )
+    expect(completions.length).toBe(2)
+    for (const c of completions) expect(JSON.parse(c.payload).outcome).toBe('failed')
   })
 })
