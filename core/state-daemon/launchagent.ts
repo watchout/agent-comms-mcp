@@ -496,14 +496,39 @@ export function validateStateDaemonLaunchAgentConfig(
 
   const queueWorkSchedulerEnabled = queueWorkSchedulerLaunchAgentEnabled(env)
   if (queueWorkSchedulerEnabled) {
+    // Fleet mode (owner ruling 6 amended, iyasaka-arc#24 comment 4921804733):
+    // after the fenced single-seat canary has a terminal PASS + audit PASS,
+    // the scheduler may run for the whole fleet without a fence. Fail-closed
+    // conditions: fleet mode must cite the authorizing decision URL and must
+    // carry a governed residue policy file (unclassified non-terminal rows
+    // stay protected per row instead of per fence).
+    const fleetMode = env.STATE_DAEMON_QUEUE_WORK_FLEET_MODE?.trim() === '1'
+    const fleetDecisionRef = env.STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF?.trim() ?? ''
+    if (fleetMode) {
+      if (!/^https:\/\/github\.com\//.test(fleetDecisionRef)) {
+        errors.push({
+          code: 'queue_work_fleet_mode_requires_decision_ref',
+          message: 'Fleet-mode scheduler activation must cite the authorizing owner decision as a GitHub URL in STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF.',
+        })
+      }
+      if (!env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE?.trim()) {
+        errors.push({
+          code: 'queue_work_fleet_mode_requires_residue_policy',
+          message: 'Fleet-mode scheduler activation must carry a governed residue policy file (STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE).',
+        })
+      }
+    }
+
     const allowlist = (env.STATE_DAEMON_AGENT_ALLOWLIST ?? '')
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    if (allowlist.length !== 1) {
+    if (fleetMode ? allowlist.length === 0 : allowlist.length !== 1) {
       errors.push({
         code: 'queue_work_scheduler_requires_single_agent_allowlist',
-        message: 'Queue-work scheduler activation must specify exactly one STATE_DAEMON_AGENT_ALLOWLIST entry for bounded canary launch.',
+        message: fleetMode
+          ? 'Fleet-mode scheduler activation must specify at least one STATE_DAEMON_AGENT_ALLOWLIST entry.'
+          : 'Queue-work scheduler activation must specify exactly one STATE_DAEMON_AGENT_ALLOWLIST entry for bounded canary launch.',
       })
     }
 
@@ -516,7 +541,7 @@ export function validateStateDaemonLaunchAgentConfig(
       .map((item) => item.trim())
       .filter(Boolean)
     const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
-    if (fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
+    if (!fleetMode && fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
       errors.push({
         code: 'queue_work_scheduler_requires_canary_fence',
         message: 'Queue-work scheduler activation must specify a queue-work fence so existing non-terminal rows cannot be processed by a bounded canary.',

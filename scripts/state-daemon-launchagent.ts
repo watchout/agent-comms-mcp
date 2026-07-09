@@ -132,6 +132,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
     else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = resolve(next())
+    else if (arg === '--queue-work-fleet-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_MODE = '1'
+    else if (arg === '--queue-work-fleet-decision-ref') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF = next()
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
