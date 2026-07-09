@@ -138,6 +138,12 @@ jobs:
               auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
               auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
             },
+            {
+              cellId: "CELL-MCP-AUN-CP80-FLEET-MODE-001",
+              handoffRef: ".shirube/control-handoffs/CH-AUN-CP80-FLEET-MODE-001.yaml",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
+            },
           ];
           const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
 

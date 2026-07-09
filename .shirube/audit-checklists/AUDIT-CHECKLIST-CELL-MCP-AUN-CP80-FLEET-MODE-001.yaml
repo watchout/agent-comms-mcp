@@ -1,0 +1,54 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-FLEET-MODE-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-CP80-FLEET-MODE-001.yaml"
+  cell_id: "CELL-MCP-AUN-CP80-FLEET-MODE-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/846"
+  implementation_actor: "aun"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-FLEET-MODE-001"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm fleet mode passes preflight ONLY when STATE_DAEMON_QUEUE_WORK_FLEET_MODE=1 is accompanied by a GitHub-URL decision ref, a residue policy file, and a non-empty allowlist."
+    expected_evidence:
+      - "core/state-daemon/launchagent.ts"
+      - "STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF"
+      - "queue_work_fleet_mode_requires_decision_ref"
+      - "queue_work_fleet_mode_requires_residue_policy"
+  - item_id: "AUDIT-FLEET-MODE-002"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm canary discipline is unchanged without the fleet flag: multi-seat/no-fence still fails with queue_work_scheduler_requires_single_agent_allowlist and queue_work_scheduler_requires_canary_fence."
+    expected_evidence:
+      - "tests/state-daemon-launchagent-fleet-mode.test.ts"
+      - "queue_work_scheduler_requires_single_agent_allowlist"
+      - "queue_work_scheduler_requires_canary_fence"
+  - item_id: "AUDIT-FLEET-MODE-003"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the restore script maps --queue-work-fleet-mode and --queue-work-fleet-decision-ref to the two envs and performs no other behavior change."
+    expected_evidence:
+      - "scripts/state-daemon-launchagent.ts"
+      - "--queue-work-fleet-mode"
+      - "--queue-work-fleet-decision-ref"
+  - item_id: "AUDIT-FLEET-MODE-004"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the PR performs no runtime, plist, launchd, queue, DB, secret, deploy, required-check, branch-protection, or ruleset mutation; the fleet restore is a separate post-merge action under owner ruling 6."
+    expected_evidence:
+      - ".shirube/control-handoffs/CH-AUN-CP80-FLEET-MODE-001.yaml"
+      - "https://github.com/watchout/iyasaka-arc/issues/24#issuecomment-4921804733"
+  - item_id: "AUDIT-FLEET-MODE-005"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the fixture suite passes: fleet-mode contract + launchagent restore contract + scheduler suites."
+    expected_evidence:
+      - "tests/state-daemon-launchagent-fleet-mode.test.ts"
+      - "tests/contract/state-daemon/test_launchagent_restore.test.ts"
+      - "tests/state-daemon-queue-work-scheduler.test.ts"
