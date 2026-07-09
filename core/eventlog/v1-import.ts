@@ -24,9 +24,25 @@ export interface ImportedRow {
 
 export async function importPendingV1Rows(
   db: DbAdapter,
-  opts: { seats: string[]; limit?: number },
+  opts: {
+    seats: string[]
+    /**
+     * MANDATORY created-at fence (ISO timestamp): only V1 rows created
+     * strictly after this instant cross into V2. This is the garbage
+     * barrier — historic pending residue (stale instructions, obsolete
+     * chatter, abandoned dispatches) stays in V1 for explicit typed
+     * disposition and is NEVER auto-imported or auto-answered. Same
+     * fence discipline as the CP80 canary. The daemon defaults this to
+     * its own boot time, so V2 only ever sees NEW work.
+     */
+    createdAfter: string
+    limit?: number
+  },
 ): Promise<ImportedRow[]> {
   if (opts.seats.length === 0) return []
+  if (!opts.createdAfter || Number.isNaN(Date.parse(opts.createdAfter))) {
+    throw new Error('importPendingV1Rows: createdAfter fence is mandatory (valid ISO timestamp)')
+  }
   const seatParams = opts.seats.map((_, i) => `$${i + 1}`).join(', ')
   const rows = await db.query<{
     id: number; agent_id: string; message_id: string
@@ -37,9 +53,10 @@ export async function importPendingV1Rows(
      FROM message_queue mq JOIN agent_messages am ON am.id::text = mq.message_id
      WHERE mq.status = 'pending' AND mq.message_id IS NOT NULL
        AND mq.agent_id IN (${seatParams})
+       AND mq.created_at > $${opts.seats.length + 1}
      ORDER BY mq.created_at ASC
-     LIMIT $${opts.seats.length + 1}`,
-    [...opts.seats, opts.limit ?? 50],
+     LIMIT $${opts.seats.length + 2}`,
+    [...opts.seats, opts.createdAfter, opts.limit ?? 50],
   )
   const imported: ImportedRow[] = []
   for (const row of rows) {

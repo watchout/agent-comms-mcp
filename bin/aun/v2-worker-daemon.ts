@@ -39,6 +39,18 @@ const intervalIdx = process.argv.indexOf('--interval-ms')
 const INTERVAL_MS = intervalIdx > -1 ? Number.parseInt(process.argv[intervalIdx + 1], 10) : 5000
 const INSTANCE = `v2wd-${randomUUID().slice(0, 8)}`
 
+// GARBAGE BARRIER (owner directive 2026-07-10): V1's historic pending
+// residue must NEVER cross into V2. Only rows created after this fence are
+// imported; everything older stays in V1 for explicit typed disposition.
+// Default = daemon boot time (V2 sees only NEW work). Backfilling anything
+// older requires the operator to set AUN_V2_IMPORT_CREATED_AFTER on
+// purpose — there is no "import everything" mode.
+const IMPORT_CREATED_AFTER = process.env.AUN_V2_IMPORT_CREATED_AFTER ?? new Date().toISOString()
+if (Number.isNaN(Date.parse(IMPORT_CREATED_AFTER))) {
+  console.error('AUN_V2_IMPORT_CREATED_AFTER must be a valid ISO timestamp')
+  process.exit(1)
+}
+
 if (SEATS.length === 0) {
   console.error('AUN_V2_WORKER_SEATS is required (comma-separated seat ids)')
   process.exit(1)
@@ -94,7 +106,7 @@ for (const seat of SEATS) {
 }
 await recoverDispatcherClaims(db, { dispatcherId: 'v2-outbox', activeInstanceId: INSTANCE })
 
-console.log(`[${INSTANCE}] v2 worker daemon up — seats=${SEATS.join(',')} interval=${INTERVAL_MS}ms once=${ONCE}`)
+console.log(`[${INSTANCE}] v2 worker daemon up — seats=${SEATS.join(',')} interval=${INTERVAL_MS}ms once=${ONCE} import_fence=${IMPORT_CREATED_AFTER}`)
 
 let stopping = false
 process.on('SIGTERM', () => { stopping = true })
@@ -102,7 +114,7 @@ process.on('SIGINT', () => { stopping = true })
 
 do {
   try {
-    const imported = await importPendingV1Rows(db, { seats: SEATS })
+    const imported = await importPendingV1Rows(db, { seats: SEATS, createdAfter: IMPORT_CREATED_AFTER })
     if (imported.length > 0) console.log(`[${INSTANCE}] imported ${imported.length} pending V1 row(s)`)
 
     for (const seat of SEATS) {

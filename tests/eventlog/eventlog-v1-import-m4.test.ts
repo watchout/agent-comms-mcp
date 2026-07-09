@@ -13,6 +13,10 @@ import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { ensureEventLogSchema, openTurnCount } from '../../core/eventlog'
 import { importPendingV1Rows, closeAnsweredV1Row } from '../../core/eventlog/v1-import'
 
+// fence older than every seeded row → rows qualify; the garbage-barrier
+// suite below uses a FUTURE fence to prove exclusion
+const FENCE_PAST = '2000-01-01T00:00:00Z'
+
 let dir: string
 let db: SqliteAdapter
 
@@ -53,7 +57,7 @@ describe('V1→V2 import bridge', () => {
     await seedV1('kodama', 'm-2', 'こっちも')
     await seedV1('outsider', 'm-3', '対象外')
 
-    const imported = await importPendingV1Rows(db, { seats: ['spec', 'kodama'] })
+    const imported = await importPendingV1Rows(db, { seats: ['spec', 'kodama'], createdAfter: FENCE_PAST })
     expect(imported.map(i => i.seatId).sort()).toEqual(['kodama', 'spec'])
     expect(await openTurnCount(db)).toBe(2)
 
@@ -64,8 +68,8 @@ describe('V1→V2 import bridge', () => {
 
   test('re-import is a no-op (deterministic ids = dual-write convergence)', async () => {
     await seedV1('spec', 'm-1', 'やって')
-    const first = await importPendingV1Rows(db, { seats: ['spec'] })
-    const second = await importPendingV1Rows(db, { seats: ['spec'] })
+    const first = await importPendingV1Rows(db, { seats: ['spec'], createdAfter: FENCE_PAST })
+    const second = await importPendingV1Rows(db, { seats: ['spec'], createdAfter: FENCE_PAST })
     expect(first.length).toBe(1)
     expect(second.length).toBe(0) // inserted=false → not reported, nothing appended
     expect(await openTurnCount(db)).toBe(1)
@@ -99,5 +103,27 @@ describe('typed V1 closure after V2 answers', () => {
       `SELECT failed_reason FROM message_queue WHERE message_id = 'm-1'`,
     )
     expect(row?.failed_reason).toContain('(x)') // first reason preserved
+  })
+})
+
+describe('garbage barrier (owner directive: V1 residue never crosses)', () => {
+  test('rows older than the fence are NOT imported — they stay V1-only', async () => {
+    await seedV1('spec', 'm-old', '大昔の放置指示')
+    // fence in the future of the seeded row = row is "historic garbage"
+    const imported = await importPendingV1Rows(db, {
+      seats: ['spec'],
+      createdAfter: new Date(Date.now() + 60_000).toISOString(),
+    })
+    expect(imported.length).toBe(0)
+    expect(await openTurnCount(db)).toBe(0) // V2 log untouched
+    const v1 = await db.queryOne<{ status: string }>(`SELECT status FROM message_queue WHERE message_id = 'm-old'`)
+    expect(v1?.status).toBe('pending') // stays in V1 for typed disposition
+  })
+
+  test('the fence is mandatory — a missing/invalid fence throws, never imports everything', async () => {
+    await seedV1('spec', 'm-1', 'x')
+    expect(importPendingV1Rows(db, { seats: ['spec'], createdAfter: '' })).rejects.toThrow(/fence is mandatory/)
+    expect(importPendingV1Rows(db, { seats: ['spec'], createdAfter: 'not-a-date' })).rejects.toThrow(/fence is mandatory/)
+    expect(await openTurnCount(db)).toBe(0)
   })
 })
