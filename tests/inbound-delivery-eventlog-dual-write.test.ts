@@ -112,9 +112,23 @@ describe('M1 dual-write sequencing (mock client)', () => {
   })
 })
 
-const DATABASE_URL = process.env.DATABASE_URL
+// Audit gate (PR #859 review 4661298335): event_log is append-only, so
+// probe events written by this fixture are PERMANENT in whatever database
+// it runs against. It therefore refuses to run unless the target is
+// explicitly a disposable test database: AGENT_COM_TEST_DATABASE_URL, or
+// DATABASE_URL whose database name ends in `_test` (the CI database). A
+// production-shaped DATABASE_URL silently skips instead of polluting.
+function testDatabaseUrl(): string | undefined {
+  const explicit = process.env.AGENT_COM_TEST_DATABASE_URL
+  if (explicit) return explicit
+  const url = process.env.DATABASE_URL
+  if (!url) return undefined
+  const dbName = url.split('?')[0].split('/').pop() ?? ''
+  return dbName.endsWith('_test') ? url : undefined
+}
+const DATABASE_URL = testDatabaseUrl()
 
-describe.if(!!DATABASE_URL)('M1 dual-write DB integration (PostgreSQL)', () => {
+describe.if(!!DATABASE_URL)('M1 dual-write DB integration (PostgreSQL, _test DB only)', () => {
   test('event_log row lands with the delivery, dedups on retry, and rejects UPDATE/DELETE', async () => {
     const { Client } = await import('pg')
     const client = new Client({ connectionString: DATABASE_URL })
@@ -160,7 +174,11 @@ describe.if(!!DATABASE_URL)('M1 dual-write DB integration (PostgreSQL)', () => {
         client.query(`DELETE FROM event_log WHERE event_id = $1`, [`recv:${probeAgent}:${messageId}`]),
       ).rejects.toThrow(/append-only/)
     } finally {
+      // clean everything deletable; the event_log probe rows are immutable
+      // by design (append-only), which is why the _test-DB gate above is a
+      // hard precondition for this fixture
       await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [probeAgent]).catch(() => {})
+      await client.query(`DELETE FROM agent_messages WHERE author_id = 'm1-sender' AND channel_id = 'm1-chan'`).catch(() => {})
       await client.end().catch(() => {})
     }
   })
