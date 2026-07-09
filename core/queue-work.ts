@@ -63,9 +63,9 @@ export interface QueueWorkGithubIssueCommentWriteback {
   repo: string
   issue_number: number
   body: string
-  evidence?: string[]
-  idempotency_key?: string
-  body_sha256?: string
+  evidence?: string[] | null
+  idempotency_key?: string | null
+  body_sha256?: string | null
 }
 
 export interface QueueWorkResult {
@@ -270,7 +270,7 @@ export function detectQueueWorkHandoffContract(input: {
   }
 }
 
-function writebackLooksValid(value: unknown): value is QueueWorkGithubIssueCommentWriteback {
+export function writebackLooksValid(value: unknown): value is QueueWorkGithubIssueCommentWriteback {
   if (value === null || value === undefined) return true
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const writeback = value as QueueWorkGithubIssueCommentWriteback
@@ -284,10 +284,11 @@ function writebackLooksValid(value: unknown): value is QueueWorkGithubIssueComme
     writeback.body.trim().length > 0 &&
     (
       writeback.evidence === undefined ||
+      writeback.evidence === null ||
       (Array.isArray(writeback.evidence) && writeback.evidence.every((item) => typeof item === 'string'))
     ) &&
-    (writeback.idempotency_key === undefined || (typeof writeback.idempotency_key === 'string' && writeback.idempotency_key.trim().length > 0)) &&
-    (writeback.body_sha256 === undefined || (typeof writeback.body_sha256 === 'string' && /^[a-f0-9]{64}$/.test(writeback.body_sha256)))
+    (writeback.idempotency_key === undefined || writeback.idempotency_key === null || (typeof writeback.idempotency_key === 'string' && writeback.idempotency_key.trim().length > 0)) &&
+    (writeback.body_sha256 === undefined || writeback.body_sha256 === null || (typeof writeback.body_sha256 === 'string' && /^[a-f0-9]{64}$/.test(writeback.body_sha256)))
   )
 }
 

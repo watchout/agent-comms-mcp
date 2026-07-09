@@ -148,7 +148,9 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     const schema = JSON.parse(readFileSync(new URL('../schemas/queue-work-result-v1.schema.json', import.meta.url), 'utf8'))
 
     expect(schema.additionalProperties).toBe(false)
-    expect(schema.required).toEqual(['schema_version', 'ok', 'summary', 'reply', 'evidence', 'next_action'])
+    // strict structured output: required must include EVERY key in properties
+    // (CP80 canary invalid_json_schema failure 2026-07-09, #846 — writeback was missing here)
+    expect(schema.required).toEqual(['schema_version', 'ok', 'summary', 'reply', 'evidence', 'writeback', 'next_action'])
     expect(schema.properties.schema_version).toMatchObject({
       type: 'string',
       const: 'queue_work_result_v1',
@@ -160,7 +162,7 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     })
     expect(schema.properties.writeback).toMatchObject({
       type: ['object', 'null'],
-      required: ['mode', 'repo', 'issue_number', 'body'],
+      required: ['mode', 'repo', 'issue_number', 'body', 'evidence', 'idempotency_key', 'body_sha256'],
     })
     expect(schema.properties.next_action).toMatchObject({
       type: 'string',
