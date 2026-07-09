@@ -1,0 +1,39 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M3-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M3-001.yaml"
+  cell_id: "CELL-MCP-AUN-V2-CUTOVER-M3-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "aun"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-V2-M3-001"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the worker pull-claims, presents, and terminal-closes turns with replies in one transaction, with identity-based recovery and fail-closed runtime crash handling."
+    expected_evidence:
+      - "core/eventlog/worker.ts"
+      - "tests/eventlog/eventlog-worker-m3.test.ts"
+  - item_id: "AUDIT-V2-M3-002"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm both engine adapters share the seam and the strict v2_turn_result_v1 contract, failing closed on nonzero exit, wrapper error, and malformed output."
+    expected_evidence:
+      - "core/eventlog/runtimes.ts"
+      - "tests/eventlog/eventlog-runtimes-m35.test.ts"
+  - item_id: "AUDIT-V2-M3-003"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the PR mutates no runtime, daemon, queue, DB, secret, or deploy surface; operational scripts are excluded (dedicated ops PR)."
+    expected_evidence:
+      - ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M3-001.yaml"
+  - item_id: "AUDIT-V2-M3-004"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the eventlog regression suite and the bot-to-bot round-trip fixture pass."
+    expected_evidence:
+      - "tests/eventlog/"
