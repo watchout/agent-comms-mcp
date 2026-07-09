@@ -1,0 +1,118 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-V2-OPS-SCRIPTS-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4924913779
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4924913779
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: aun
+next_role: independent_audit
+protected_surfaces:
+  - production V1 queue read (exact-fenced)
+  - V2 event_log append
+  - real LLM engine invocation
+  - typed notify send path
+protected_surface_details:
+  - Operational tooling, declared honestly; every run requires explicit operator invocation with explicit ids/urls (nothing autonomous).
+  - Mutates NO V1 rows, NO schema, NO daemon/plist, NO secrets; bench refuses the production database by name.
+  - Adds report-only Rapid/Lite route-table metadata so this Cell is checked against its own allowed_paths.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this ops-tooling Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+  shirube_does_not_own:
+    - Runtime activation, launchd, queue/DB mutation, secrets, deployment.
+cell:
+  CELL-ID: CELL-MCP-AUN-V2-OPS-SCRIPTS-001
+  cell_type: operational_tooling
+  risk_class: R3
+  goal: Version the two production-proven V2 operational scripts (round-trip bench, exact-fenced live pilot) with honest protected-surface declaration.
+  governance_route: evidence_audit_gate then owner exact-head decision per standing rulings.
+  non_scope:
+    - library code (PR #860)
+    - schema DDL (PR #859)
+    - daemon wiring (M4 slice)
+  allowed_paths:
+    - scripts/bench-v2-roundtrip-pg.ts
+    - scripts/v2-live-pilot.ts
+    - .shirube/control-handoffs/CH-AUN-V2-OPS-SCRIPTS-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-OPS-SCRIPTS-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-OPS-SCRIPTS-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - core/**
+    - db/**
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - production V1 queue read (exact-fenced)
+      - V2 event_log append
+      - real LLM engine invocation
+      - typed notify send path
+      - active workflows
+    touched: true
+    details:
+      - The scripts themselves perform the declared operations ONLY when explicitly invoked by an operator with explicit ids; committing them changes no runtime behavior.
+      - Route-table mapping for this Cell only.
+  stop_conditions:
+    - any autonomous/scheduled invocation path is added
+    - bench loses its production-database refusal guard
+    - pilot loses its exact-id fence
+    - independent audit fails
+    - owner exact-head decision is missing before merge
+implementation_boundary:
+  summary: Two operator-invoked scripts plus this Cell's report-only route metadata.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - queue or DB mutation by the PR itself
+    - launchd mutation
+    - secret or deployment mutation
+    - runtime activation
+acceptance_criteria:
+  - bench refuses to run against the production database by name and requires an explicit throwaway URL.
+  - pilot imports ONLY the queue ids passed on the command line, V1 read-only, deterministic M1-convergent event ids.
+  - Both scripts carry recorded production evidence (bench numbers; pilot PASS on #794 comment 4924913779).
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun build --target bun scripts/bench-v2-roundtrip-pg.ts scripts/v2-live-pilot.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

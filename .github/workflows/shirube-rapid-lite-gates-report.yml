@@ -133,6 +133,12 @@ jobs:
               auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
             },
             {
+              cellId: "CELL-MCP-AUN-V2-OPS-SCRIPTS-001",
+              handoffRef: ".shirube/control-handoffs/CH-AUN-V2-OPS-SCRIPTS-001.yaml",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-OPS-SCRIPTS-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-OPS-SCRIPTS-001.yaml",
+            },
+            {
               cellId: "SUITE-LEAD-OPERATING-PROTOCOL-001",
               handoffRef: ".shirube/control-handoffs/CH-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
               auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
