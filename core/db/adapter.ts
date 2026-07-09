@@ -1,4 +1,6 @@
 export interface DbAdapter {
+  /** SQL dialect hint for dialect-sensitive readers (e.g. json extraction). */
+  dialect?: 'sqlite' | 'postgres'
   query<T = any>(sql: string, params?: any[]): Promise<T[]>
   queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>
   execute(sql: string, params?: any[]): Promise<{ rowCount: number }>

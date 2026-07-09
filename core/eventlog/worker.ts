@@ -1,0 +1,185 @@
+// EventLogCore/v1 — V2 seat worker (cutover M3: pull-claim consumer).
+//
+// This is the piece that makes "row lands in the queue → seat processes it
+// with zero terminal input" true on the V2 design: an idle seat PULLS one
+// open turn (claimNextTurn — conditional insert wins), runs the injected
+// LLM runtime, and terminal-closes the turn with its replies in ONE
+// transaction (completeTurn → reply.enqueued, transactional outbox). The
+// outbox dispatcher then delivers through the injected transport.
+//
+// No push, no wake dependency: a missed signal is caught by the next poll.
+// Crash recovery is identity-based (recoverSeatClaims at startup) — the
+// fleet-kill and runtime-switch fixtures in tests/eventlog/ are the proof
+// this loop leans on.
+
+import type { DbAdapter } from '../db/adapter'
+import {
+  claimNextTurn,
+  completeTurn,
+  presentTurn,
+  recoverSeatClaims,
+  StaleClaimError,
+  type ReplyInput,
+} from './turns'
+import { dispatchOutboxOnce } from './outbox'
+import { parseEventPayload, type OutboxTransport, type QueueViewRow } from './types'
+
+export interface TurnRuntimeResult {
+  outcome: 'replied' | 'no_reply' | 'failed'
+  replies?: ReplyInput[]
+  summary?: string
+}
+
+/**
+ * The LLM runtime seam. Production binds this to a codex-exec invocation
+ * (bin/aun/v2-worker.ts); fixtures inject fakes. The runtime NEVER touches
+ * the log — appending transitions stays with this worker (no LLM in any
+ * transition path, per the Option B guardrails).
+ */
+export interface TurnRuntime {
+  runTurn(input: {
+    seatId: string
+    turn: QueueViewRow
+    payload: Record<string, unknown>
+  }): Promise<TurnRuntimeResult>
+}
+
+export interface SeatWorkerOptions {
+  seatId: string
+  seatInstanceId: string
+  runtime: TurnRuntime
+  /** Max turns to process in one pass (bounded work per tick). */
+  maxTurns?: number
+}
+
+export interface SeatWorkerPassResult {
+  claimed: number
+  completed: number
+  failed: number
+  staleLost: number
+}
+
+/** Startup recovery: release claims of this seat's dead predecessors. */
+export async function recoverSeat(db: DbAdapter, opts: { seatId: string; seatInstanceId: string }) {
+  return recoverSeatClaims(db, { seatId: opts.seatId, activeInstanceId: opts.seatInstanceId })
+}
+
+/**
+ * One worker pass: pull-claim and process turns for a seat until the inbox
+ * is drained or maxTurns is hit. Safe to call from any number of instances
+ * — the claim arbiter serializes them.
+ *
+ * CONNECTION OWNERSHIP: each worker instance must own its own DbAdapter
+ * connection. Transactions are connection-wide (both bun:sqlite and pg),
+ * so two instances sharing one adapter would interleave BEGIN/COMMIT —
+ * same rule as core/inbound-delivery.ts's transaction-private client.
+ */
+export async function runSeatWorkerOnce(
+  db: DbAdapter,
+  opts: SeatWorkerOptions,
+): Promise<SeatWorkerPassResult> {
+  const result: SeatWorkerPassResult = { claimed: 0, completed: 0, failed: 0, staleLost: 0 }
+  const maxTurns = opts.maxTurns ?? 10
+
+  for (let i = 0; i < maxTurns; i++) {
+    const claimed = await claimNextTurn(db, {
+      seatId: opts.seatId,
+      seatInstanceId: opts.seatInstanceId,
+    })
+    if (!claimed) break
+    result.claimed++
+    await presentTurn(db, claimed, { seatId: opts.seatId, seatInstanceId: opts.seatInstanceId })
+
+    let runtimeResult: TurnRuntimeResult
+    try {
+      runtimeResult = await opts.runtime.runTurn({
+        seatId: opts.seatId,
+        turn: claimed.turn,
+        payload: payloadOfTurn(db, claimed.turn),
+      })
+    } catch (err) {
+      runtimeResult = {
+        outcome: 'failed',
+        summary: err instanceof Error ? err.message : String(err),
+      }
+    }
+
+    try {
+      await completeTurn(db, {
+        turnId: claimed.turn.turn_id,
+        seatId: opts.seatId,
+        seatInstanceId: opts.seatInstanceId,
+        claimEventId: claimed.claimEventId,
+        outcome: runtimeResult.outcome,
+        conversationId: claimed.turn.conversation_id,
+        payload: runtimeResult.summary ? { summary: runtimeResult.summary } : {},
+        replies: runtimeResult.outcome === 'replied' ? runtimeResult.replies ?? [] : [],
+      })
+      if (runtimeResult.outcome === 'failed') result.failed++
+      else result.completed++
+    } catch (err) {
+      // fenced out by a racing recovery — the turn belongs to a newer
+      // claim now; count and move on
+      if (err instanceof StaleClaimError) {
+        result.staleLost++
+        continue
+      }
+      throw err
+    }
+  }
+  return result
+}
+
+function payloadOfTurn(db: DbAdapter, turn: QueueViewRow): Record<string, unknown> {
+  void db
+  // message_id is projected on the view; the full inbound payload rides on
+  // the received event row and is what the receive dual-write stored —
+  // callers get channel/thread/author/content from it.
+  return { message_id: turn.message_id }
+}
+
+/**
+ * Full pass for a set of seats plus one outbox drain: the shape the
+ * production daemon tick calls. Returns per-seat results and the dispatch
+ * outcome so the caller can emit metrics.
+ */
+export async function runV2Tick(
+  db: DbAdapter,
+  opts: {
+    seats: Array<{ seatId: string; runtime: TurnRuntime }>
+    instanceId: string
+    transport: OutboxTransport
+    maxTurnsPerSeat?: number
+  },
+) {
+  const seatResults: Record<string, SeatWorkerPassResult> = {}
+  for (const seat of opts.seats) {
+    seatResults[seat.seatId] = await runSeatWorkerOnce(db, {
+      seatId: seat.seatId,
+      seatInstanceId: opts.instanceId,
+      runtime: seat.runtime,
+      maxTurns: opts.maxTurnsPerSeat,
+    })
+  }
+  const dispatch = await dispatchOutboxOnce(db, opts.transport, {
+    dispatcherId: 'v2-outbox',
+    dispatcherInstanceId: opts.instanceId,
+  })
+  return { seatResults, dispatch }
+}
+
+/**
+ * Read the full inbound payload for a turn from its receive event (the
+ * dual-write stored the whole envelope there). Exposed for runtimes that
+ * want channel/thread/author/content when building the prompt.
+ */
+export async function turnInboundPayload(
+  db: DbAdapter,
+  turn: QueueViewRow,
+): Promise<Record<string, unknown>> {
+  const row = await db.queryOne<{ payload: unknown }>(
+    'SELECT payload FROM event_log WHERE event_id = $1',
+    [turn.received_event_id],
+  )
+  return row ? parseEventPayload(row.payload) : {}
+}

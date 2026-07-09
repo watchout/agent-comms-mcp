@@ -23,6 +23,7 @@ import { EventLog } from './store'
 import { outboxView, pendingDeliveries } from './views'
 import {
   ClaimLostError,
+  parseEventPayload,
   type OutboxTransport,
   type OutboxViewRow,
 } from './types'
@@ -116,7 +117,7 @@ export async function dispatchOutboxOnce(
       throw err
     }
 
-    const payload = JSON.parse(row.payload) as Record<string, unknown>
+    const payload = parseEventPayload<Record<string, unknown>>(row.payload)
     try {
       const sent = await transport.send({
         replyId: row.reply_id,

@@ -11,6 +11,15 @@
 // timer, it is the query "open turns" (optionally filtered older-than-T).
 
 import type { DbAdapter } from '../db/adapter'
+
+// json extraction differs by dialect: SQLite stores payload as TEXT
+// (json_extract), PostgreSQL as JSONB (->> operator). Views substitute the
+// right form at query time from the adapter's dialect hint.
+function jsonText(db: DbAdapter, column: string, key: string): string {
+  return (db.dialect ?? 'sqlite') === 'postgres'
+    ? `${column}::jsonb->>'${key}'`
+    : `json_extract(${column}, '$.${key}')`
+}
 import type {
   OutboxViewRow,
   QueueViewRow,
@@ -22,7 +31,7 @@ import type {
 // Its ACTIVE claim is the max-epoch turn.claimed with no matching
 // turn.claim_released (a completed turn has no active claim by definition —
 // completion closes the turn entirely).
-const QUEUE_VIEW_SQL = `
+const queueViewSql = (db: DbAdapter) => `
   SELECT
     r.turn_id,
     r.seat_id,
@@ -30,7 +39,7 @@ const QUEUE_VIEW_SQL = `
     r.seq AS received_seq,
     r.event_id AS received_event_id,
     r.occurred_at AS received_at,
-    json_extract(r.payload, '$.message_id') AS message_id,
+    ${jsonText(db, 'r.payload', 'message_id')} AS message_id,
     c.event_id AS claim_event_id,
     c.claim_epoch AS claim_epoch,
     c.seat_id AS claimed_by_seat,
@@ -58,13 +67,13 @@ const QUEUE_VIEW_SQL = `
 `
 
 export async function queueView(db: DbAdapter): Promise<QueueViewRow[]> {
-  return db.query<QueueViewRow>(`${QUEUE_VIEW_SQL} ORDER BY r.seq ASC`)
+  return db.query<QueueViewRow>(`${queueViewSql(db)} ORDER BY r.seq ASC`)
 }
 
 /** Per-seat pending work: open turns addressed to this seat. */
 export async function inboxView(db: DbAdapter, seatId: string): Promise<QueueViewRow[]> {
   return db.query<QueueViewRow>(
-    `${QUEUE_VIEW_SQL} AND r.seat_id = $1 ORDER BY r.seq ASC`,
+    `${queueViewSql(db)} AND r.seat_id = $1 ORDER BY r.seq ASC`,
     [seatId],
   )
 }
@@ -89,7 +98,7 @@ export async function openTurns(
     clauses.push(`AND r.occurred_at < $${params.length}`)
   }
   return db.query<QueueViewRow>(
-    `${QUEUE_VIEW_SQL} ${clauses.join(' ')} ORDER BY r.seq ASC`,
+    `${queueViewSql(db)} ${clauses.join(' ')} ORDER BY r.seq ASC`,
     params,
   )
 }
@@ -128,7 +137,7 @@ export async function claimableTurns(db: DbAdapter, seatId: string): Promise<Que
 // A reply is PENDING iff enqueued, not delivered, not permanently failed.
 // Its active delivery claim is the max-epoch reply.delivery_claimed whose
 // epoch has no reply.failed row (a retryable failure releases the epoch).
-const OUTBOX_VIEW_SQL = `
+const outboxViewSql = (db: DbAdapter) => `
   SELECT
     q.reply_id,
     q.seat_id,
@@ -168,12 +177,12 @@ const OUTBOX_VIEW_SQL = `
       SELECT 1 FROM event_log pf
       WHERE pf.event_type = 'reply.failed'
         AND pf.reply_id = q.reply_id
-        AND json_extract(pf.payload, '$.kind') = 'permanent'
+        AND ${jsonText(db, 'pf.payload', 'kind')} = 'permanent'
     )
 `
 
 export async function outboxView(db: DbAdapter): Promise<OutboxViewRow[]> {
-  return db.query<OutboxViewRow>(`${OUTBOX_VIEW_SQL} ORDER BY q.seq ASC`)
+  return db.query<OutboxViewRow>(`${outboxViewSql(db)} ORDER BY q.seq ASC`)
 }
 
 export async function pendingDeliveries(db: DbAdapter): Promise<OutboxViewRow[]> {
