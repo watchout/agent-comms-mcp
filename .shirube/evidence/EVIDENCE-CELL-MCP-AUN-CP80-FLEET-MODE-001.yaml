@@ -1,0 +1,59 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-CP80-FLEET-MODE-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 858
+cell_id: "CELL-MCP-AUN-CP80-FLEET-MODE-001"
+implementation_actor: "aun"
+evidence_scope: "queue_work_scheduler_fleet_mode_validator"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-CP80-FLEET-MODE-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml"
+claims:
+  implementation_summary:
+    - "Adds a fail-closed fleet mode to the queue-work scheduler activation preflight (owner ruling 6 amended, iyasaka-arc#24 comment 4921804733)."
+    - "Fleet mode requires a GitHub-URL decision ref, a governed residue policy file, and a non-empty allowlist; it relaxes exactly the single-seat and fence constraints."
+    - "Canary discipline without the flag is byte-for-byte unchanged and regression-pinned."
+    - "Restore script gains --queue-work-fleet-mode and --queue-work-fleet-decision-ref."
+    - "Adds report-only Rapid/Lite route metadata for this Cell only."
+  protected_surface_boundary:
+    startup_or_session_policy_changed: false
+    active_workflow_changed: true
+    active_workflow_change_scope: "route-table mapping for this Cell only"
+    runtime_code_changed: true
+    runtime_code_change_scope: "activation VALIDATOR only; no activation performed by the PR"
+    queue_or_db_mutation: false
+    db_schema_or_migration_changed: false
+    launchd_or_launchctl_changed: false
+    secrets_or_deployment_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    production_activation: false
+    audit_qa_check_cto_owner_substitution: false
+  fail_closed_guards:
+    - "Fleet mode without a GitHub decision-ref URL fails closed (queue_work_fleet_mode_requires_decision_ref)."
+    - "Fleet mode without a governed residue policy file fails closed (queue_work_fleet_mode_requires_residue_policy)."
+    - "Empty allowlist fails closed in fleet mode."
+    - "Without the flag, both canary error codes still fire (regression fixture)."
+    - "Owner exact-head decision remains required before merge."
+commands:
+  - command: "git diff --check"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS"
+  - command: "bun test tests/state-daemon-launchagent-fleet-mode.test.ts tests/contract/state-daemon/test_launchagent_restore.test.ts tests/state-daemon-queue-work-scheduler.test.ts"
+    result: "PASS_58_TESTS_0_FAIL"
+validation_results:
+  - "git diff --check PASS"
+  - "YAML parse for .shirube/**/*.yaml PASS"
+  - "bun test fleet-mode + launchagent restore contract + scheduler suites PASS, 58 pass / 0 fail"
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This file is machine evidence for the fleet-mode validator implementation PR."
+  - "It is not a structured audit and does not approve ready, merge, owner decision, CTO judgment, deployment, runtime activation, queue mutation, branch protection, rulesets, or required-check activation."
+  - "The fleet restore itself executes post-merge as a separate owner-ruling-6 action with its own evidence."

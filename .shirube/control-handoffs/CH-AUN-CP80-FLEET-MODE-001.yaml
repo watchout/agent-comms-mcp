@@ -1,0 +1,126 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-CP80-FLEET-MODE-001
+parent_ssot: watchout/agent-comms-mcp#846
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/iyasaka-arc/issues/24#issuecomment-4921804733
+owner_confirmation_ref: https://github.com/watchout/iyasaka-arc/issues/24#issuecomment-4921804733
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/846#issuecomment-4921943807
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/846
+source_mirror_ref: https://github.com/watchout/iyasaka-arc/issues/24#issuecomment-4921804733
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: aun
+next_role: independent_audit
+protected_surfaces:
+  - queue-work scheduler activation validator
+  - active workflows
+protected_surface_details:
+  - Changes the LaunchAgent preflight VALIDATOR for queue-work scheduler activation (a protected activation path) by adding an explicit fleet mode.
+  - Fleet mode is fail-closed by construction; canary discipline is unchanged without the flag (regression-pinned).
+  - Adds report-only Rapid/Lite route-table metadata so this Cell is checked against its own allowed_paths.
+  - The PR itself performs NO runtime, plist, launchd, queue, DB, secret, deploy, or required-check mutation; the fleet restore executes separately after merge under owner ruling 6.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this validator-change Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+    - Audit checklist coverage for the fleet-mode fail-closed design.
+  shirube_does_not_own:
+    - Runtime activation, launchd/launchctl, queue/DB mutation, secrets, deployment, branch protection, rulesets, required-check activation.
+cell:
+  CELL-ID: CELL-MCP-AUN-CP80-FLEET-MODE-001
+  cell_type: implementation
+  risk_class: R3
+  goal: Add an explicit fail-closed fleet mode to the queue-work scheduler activation preflight so the owner-authorized fleet expansion (ruling 6 amended) has a governed code path.
+  governance_route: evidence_audit_gate then protected_surface_gate then owner exact-head decision (rulings 2/3 class approval applies after both gates).
+  non_scope:
+    - executing the fleet restore (post-merge, separate action under ruling 6)
+    - runtime, plist, launchd, queue, DB, secret, deployment mutation
+    - required-check activation, branch protection, ruleset mutation
+    - audit, QA, check, CTO, or owner decision substitution
+  allowed_paths:
+    - core/state-daemon/launchagent.ts
+    - scripts/state-daemon-launchagent.ts
+    - tests/state-daemon-launchagent-fleet-mode.test.ts
+    - .shirube/control-handoffs/CH-AUN-CP80-FLEET-MODE-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - migrations/**
+    - package.json
+    - bun.lock
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - queue-work scheduler activation validator
+      - active workflows
+    touched: true
+    details:
+      - validateStateDaemonLaunchAgentConfig gains a fleet-mode branch relaxing exactly two canary constraints (single-seat allowlist, fence), each replaced by fail-closed fleet requirements (GitHub decision-ref URL, governed residue policy file, non-empty allowlist).
+      - The report-only Rapid/Lite workflow route table is updated to select this Cell's handoff/checklist/evidence.
+      - No workflow required-check activation or runtime mutation is included.
+  stop_conditions:
+    - any change would alter canary-mode validation behavior
+    - route-table change would alter behavior for another Cell
+    - independent audit fails
+    - owner exact-head decision is missing before merge
+implementation_boundary:
+  summary: Validator fleet mode plus restore-script flags plus contract fixture plus this Cell's report-only route metadata.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - queue or DB mutation
+    - launchd or launchctl mutation
+    - secret or deployment mutation
+    - required-check activation
+    - branch protection or ruleset mutation
+    - runtime activation
+acceptance_criteria:
+  - Fleet mode passes preflight ONLY with STATE_DAEMON_QUEUE_WORK_FLEET_MODE=1, a GitHub-URL decision ref, a governed residue policy file, and a non-empty allowlist.
+  - Fleet mode without a decision ref, with a non-GitHub decision ref, without a residue policy file, or with an empty allowlist fails closed with dedicated error codes.
+  - Without the fleet flag, canary discipline is byte-for-byte unchanged (both original error codes still fire for multi-seat/no-fence).
+  - scripts/state-daemon-launchagent.ts gains --queue-work-fleet-mode and --queue-work-fleet-decision-ref mapping to the two envs.
+  - Rapid/Lite route selection maps CELL-MCP-AUN-CP80-FLEET-MODE-001 to this dedicated handoff/checklist/evidence only.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun test tests/state-daemon-launchagent-fleet-mode.test.ts tests/contract/state-daemon/test_launchagent_restore.test.ts tests/state-daemon-queue-work-scheduler.test.ts
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
+    - no_unresolved_follow_up_blocker
