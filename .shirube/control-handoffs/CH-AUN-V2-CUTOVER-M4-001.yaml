@@ -1,0 +1,70 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-V2-CUTOVER-M4-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4924913779
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+owner: { role: repo_owner, actor: watchout }
+implementation_actor: aun
+next_role: independent_audit
+protected_surfaces:
+  - V1 queue read + typed skip close
+  - real LLM engine invocation
+  - typed notify send path
+protected_surface_details:
+  - The daemon binary and importer are library code here; no launchd/plist/activation is included. Starting the daemon is a separate deploy step under the cutover GO.
+  - V1 rows are read (fenced) and only typed-skip-closed AFTER a V2 completion; no other V1 mutation; no schema/secret/daemon-plist change by this PR.
+  - Mandatory created-after garbage barrier: V1 historic residue never crosses into V2.
+rps_scope:
+  shirube_owns: [Report-only gate routing for this Cell., Exact-head evidence and owner decision before merge.]
+  shirube_does_not_own: [Runtime activation, launchd, schema, secrets, deployment.]
+cell:
+  CELL-ID: CELL-MCP-AUN-V2-CUTOVER-M4-001
+  cell_type: implementation
+  risk_class: R3
+  goal: V2 worker daemon + V1 import bridge (fenced) + typed V1 closure — the runtime that makes the receive side live after M1/M3 merge.
+  governance_route: evidence_audit_gate then owner exact-head decision per standing rulings.
+  non_scope: [launchd/plist activation (deploy step), schema DDL (#859), library worker/adapters (#860)]
+  allowed_paths:
+    - bin/aun/v2-worker-daemon.ts
+    - core/eventlog/v1-import.ts
+    - tests/eventlog/eventlog-v1-import-m4.test.ts
+    - .shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M4-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-CUTOVER-M4-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths: [server.ts, cli/**, adapters/**, db/**, .env*, secrets/**, deploy/**]
+  protected_surfaces:
+    declared: [V1 queue read + typed skip close, real LLM engine invocation, typed notify send path, active workflows]
+    touched: true
+    details: [Daemon is not started by this PR., Route-table mapping for this Cell only.]
+  stop_conditions: [import loses its mandatory created-after fence, V1 mutation beyond typed-skip-after-completion, independent audit fails, owner exact-head decision missing before merge]
+implementation_boundary:
+  summary: Daemon binary + fenced importer + typed closure + fixtures + this Cell's report-only route metadata.
+  expected_pr_count: 1
+  forbidden_operations: [approve, merge, launchd mutation, secret/deploy mutation, runtime activation]
+acceptance_criteria:
+  - Importer's created-after fence is mandatory; missing/invalid fence throws; historic rows never cross.
+  - Daemon default fence is boot time (only NEW work); per-seat engine from agents.metadata; identity recovery at boot; SIGTERM-clean.
+  - V1 rows typed-skip-closed only after the V2 completion event, idempotently.
+validation:
+  required_commands: [git diff --check, YAML parse for .shirube/**/*.yaml, bun test tests/eventlog/, bun build --target bun bin/aun/v2-worker-daemon.ts]
+  required_evidence: [PR_head_SHA, changed_files, validation_commands, validation_results]
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts: [APPROVED_EXACT_HEAD, CHANGES_REQUIRED, BLOCKED]
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence: [merge_commit, merged_at, post_merge_smoke_or_NA, next_step]

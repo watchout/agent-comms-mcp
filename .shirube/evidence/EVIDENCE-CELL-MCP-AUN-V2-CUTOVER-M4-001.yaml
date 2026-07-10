@@ -1,0 +1,38 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-V2-CUTOVER-M4-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 0
+cell_id: "CELL-MCP-AUN-V2-CUTOVER-M4-001"
+implementation_actor: "aun"
+evidence_scope: "v2_worker_daemon_and_import_bridge"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M4-001.yaml"
+claims:
+  implementation_summary:
+    - "Worker daemon tick: fenced V1 import -> per-seat pull-claim (configured engine) -> outbox drain via typed notify -> typed V1 closure."
+    - "Mandatory created-after garbage barrier; default boot-time fence; identity recovery at boot; SIGTERM-clean."
+  protected_surface_boundary:
+    startup_or_session_policy_changed: false
+    active_workflow_changed: true
+    active_workflow_change_scope: "route-table mapping for this Cell only"
+    runtime_code_changed: false
+    queue_or_db_mutation: false
+    db_schema_or_migration_changed: false
+    launchd_or_launchctl_changed: false
+    secrets_or_deployment_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    production_activation: false
+    audit_qa_check_cto_owner_substitution: false
+  fail_closed_guards:
+    - "Import throws without a valid created-after fence (no import-everything mode)."
+    - "V1 closure only after V2 completion; idempotent."
+    - "Owner exact-head decision required before merge."
+commands:
+  - { command: "bun test tests/eventlog/", result: "PASS_48_TESTS_0_FAIL" }
+  - { command: "bun build --target bun bin/aun/v2-worker-daemon.ts", result: "PASS" }
+validation_results: ["worker/import/closure fixtures + full regression PASS; daemon build-checked"]
+evidence_refs: [PR_head_SHA, changed_files, validation_commands, validation_results]
+notes: ["Machine evidence only; not a structured audit; approves nothing.", "Daemon is not started by this PR."]
