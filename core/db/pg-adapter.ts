@@ -2,6 +2,7 @@ import { Client, type ClientConfig } from 'pg'
 import type { DbAdapter } from './adapter'
 
 export class PgAdapter implements DbAdapter {
+  readonly dialect = 'postgres' as const
   private client: Client
   private connected = false
   private connecting: Promise<void> | null = null

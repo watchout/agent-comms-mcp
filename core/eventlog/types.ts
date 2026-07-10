@@ -65,6 +65,15 @@ export interface StoredEvent {
   payload: string
 }
 
+/**
+ * payload column is TEXT on SQLite (string) and JSONB on PostgreSQL (the
+ * driver returns a parsed object). Consumers must use this instead of
+ * JSON.parse directly.
+ */
+export function parseEventPayload<T = Record<string, unknown>>(payload: unknown): T {
+  return typeof payload === 'string' ? JSON.parse(payload) : (payload as T)
+}
+
 export interface AppendResult {
   /** false when event_id already existed (idempotent duplicate — not an error). */
   inserted: boolean

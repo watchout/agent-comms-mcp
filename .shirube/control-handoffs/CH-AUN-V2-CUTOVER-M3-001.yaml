@@ -1,0 +1,119 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-V2-CUTOVER-M3-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4924913779
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4923054432
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: aun
+next_role: independent_audit
+protected_surfaces:
+  - active workflows
+protected_surface_details:
+  - Library + fixtures only; no runtime, daemon, plist, queue, DB, secret, or deploy mutation by this PR.
+  - Adds report-only Rapid/Lite route-table metadata so this Cell is checked against its own allowed_paths.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this library Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+  shirube_does_not_own:
+    - Runtime activation, launchd, queue/DB mutation, secrets, deployment.
+cell:
+  CELL-ID: CELL-MCP-AUN-V2-CUTOVER-M3-001
+  cell_type: implementation
+  risk_class: R3
+  goal: V2 pull-claim seat worker + engine adapters (codex exec / claude -p) + PG dialect groundwork, per the owner-GOed EventLogCore cutover (M3/M3.5).
+  governance_route: evidence_audit_gate then owner exact-head decision per standing rulings.
+  non_scope:
+    - operational scripts (dedicated ops PR)
+    - daemon wiring / deploy (post-merge slice)
+    - schema DDL (PR #859)
+  allowed_paths:
+    - core/eventlog/worker.ts
+    - core/eventlog/runtimes.ts
+    - core/eventlog/schema.ts
+    - core/eventlog/views.ts
+    - core/eventlog/types.ts
+    - core/eventlog/outbox.ts
+    - core/db/adapter.ts
+    - core/db/sqlite-adapter.ts
+    - core/db/pg-adapter.ts
+    - tests/eventlog/eventlog-worker-m3.test.ts
+    - tests/eventlog/eventlog-runtimes-m35.test.ts
+    - tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+    - .shirube/control-handoffs/CH-AUN-V2-CUTOVER-M3-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M3-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-CUTOVER-M3-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - scripts/**
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - active workflows
+    touched: true
+    details:
+      - Route-table mapping for this Cell only; no required-check activation or behavior change for other Cells.
+  stop_conditions:
+    - any runtime, daemon, queue, DB, secret, or deploy mutation is needed
+    - route-table change would alter behavior for another Cell
+    - independent audit fails
+    - owner exact-head decision is missing before merge
+implementation_boundary:
+  summary: Worker + runtime adapters + dialect groundwork + fixtures + this Cell's report-only route metadata.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - queue or DB mutation
+    - launchd mutation
+    - secret or deployment mutation
+    - runtime activation
+acceptance_criteria:
+  - Pull-claim worker processes turns with zero terminal input in fixtures; identity-based restart recovery; runtime crash closes terminal as failed.
+  - Both engine adapters bind the same seam with the same strict v2_turn_result_v1 contract and fail closed on every deviation.
+  - Canary/live acceptance evidence exists (production pilot, #794 comment 4924913779).
+  - Full eventlog regression suite stays green.
+validation:
+  required_commands:
+    - git diff --check
+    - YAML parse for .shirube/**/*.yaml
+    - bun test tests/eventlog/
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

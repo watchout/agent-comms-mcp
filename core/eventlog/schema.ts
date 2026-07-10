@@ -61,6 +61,10 @@ const SCHEMA_STATEMENTS: string[] = [
 ]
 
 export async function ensureEventLogSchema(db: DbAdapter): Promise<void> {
+  // PostgreSQL DDL is owned by db/migrate.ts (production migration path,
+  // protected surface). ensureSchema is a fixture/local convenience for the
+  // SQLite dialect only.
+  if ((db.dialect ?? 'sqlite') === 'postgres') return
   for (const stmt of SCHEMA_STATEMENTS) {
     await db.execute(stmt)
   }
