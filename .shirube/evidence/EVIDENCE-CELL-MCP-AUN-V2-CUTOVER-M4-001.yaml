@@ -17,8 +17,10 @@ claims:
     startup_or_session_policy_changed: false
     active_workflow_changed: true
     active_workflow_change_scope: "route-table mapping for this Cell only"
-    runtime_code_changed: false
-    queue_or_db_mutation: false
+    runtime_code_changed: true
+    runtime_code_change_scope: "adds bin/aun/v2-worker-daemon.ts (a runtime daemon); not started by this PR"
+    queue_or_db_mutation: true
+    queue_or_db_mutation_scope: "closeAnsweredV1Row issues UPDATE message_queue (typed skip) ONLY after a committed V2 completion; no other V1 write"
     db_schema_or_migration_changed: false
     launchd_or_launchctl_changed: false
     secrets_or_deployment_changed: false

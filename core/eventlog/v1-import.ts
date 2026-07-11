@@ -79,6 +79,46 @@ export async function importPendingV1Rows(
   return imported
 }
 
+/** One V1 row that V2 has answered but whose V1 status is still open. */
+export interface UnclosedAnsweredRow {
+  seatId: string
+  messageId: string
+  turnId: string
+}
+
+/**
+ * Durable recovery query (audit 4931107358 fix): the set of turns that have
+ * a committed V2 `turn.completed` event whose corresponding V1 row is STILL
+ * non-terminal. Derived entirely from durable state — the append-only log
+ * joined to the live V1 row — so it CANNOT age out. A crash between the
+ * completion event and the V1 close is healed the next time any daemon
+ * instance runs this, whether that is 1 second or 1 week later. Replaces the
+ * previous 10-minute `occurred_at` window, which silently dropped
+ * completions older than the window and left V1 rows to be re-answered by
+ * the legacy path.
+ */
+export async function findUnclosedAnsweredRows(
+  db: DbAdapter,
+  opts: { seats: string[]; limit?: number },
+): Promise<UnclosedAnsweredRow[]> {
+  if (opts.seats.length === 0) return []
+  const seatParams = opts.seats.map((_, i) => `$${i + 1}`).join(', ')
+  const rows = await db.query<{ seat_id: string; turn_id: string; message_id: string }>(
+    `SELECT c.seat_id, c.turn_id, mq.message_id
+     FROM event_log c
+     JOIN message_queue mq
+       ON mq.message_id = split_part(c.turn_id, ':', 3)
+      AND mq.agent_id = c.seat_id
+     WHERE c.event_type = 'turn.completed'
+       AND c.seat_id IN (${seatParams})
+       AND mq.status IN ('pending', 'read')
+     ORDER BY c.seq ASC
+     LIMIT $${opts.seats.length + 1}`,
+    [...opts.seats, opts.limit ?? 200],
+  )
+  return rows.map(r => ({ seatId: r.seat_id, messageId: r.message_id, turnId: r.turn_id }))
+}
+
 /**
  * Typed V1 closure for a turn V2 has terminal-closed: mirrors the operator
  * `skip` semantics (terminal state + evidence reason) without claiming.

@@ -30,7 +30,7 @@ import { dispatchOutboxOnce, recoverDispatcherClaims } from '../../core/eventlog
 import { parseEventPayload, type OutboxDelivery, type OutboxTransport } from '../../core/eventlog/types'
 import { recoverSeat, runSeatWorkerOnce } from '../../core/eventlog/worker'
 import { runtimeForEngine, V2_TURN_RESULT_SCHEMA } from '../../core/eventlog/runtimes'
-import { closeAnsweredV1Row, importPendingV1Rows } from '../../core/eventlog/v1-import'
+import { closeAnsweredV1Row, findUnclosedAnsweredRows, importPendingV1Rows } from '../../core/eventlog/v1-import'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql:///agent_comms?host=/tmp'
 const SEATS = (process.env.AUN_V2_WORKER_SEATS ?? '').split(',').map(s => s.trim()).filter(Boolean)
@@ -134,19 +134,15 @@ do {
     }
 
     // close answered V1 rows (typed terminal with evidence reason) —
-    // driven from recent V2 completions; closeAnsweredV1Row is a no-op for
-    // rows already terminal, so re-scanning a window is idempotent
-    const completions = await db.query<{ seat_id: string; turn_id: string }>(
-      `SELECT seat_id, turn_id FROM event_log
-       WHERE event_type = 'turn.completed' AND seat_id = ANY($1)
-         AND occurred_at > now() - interval '10 minutes'`,
-      [SEATS],
-    )
-    for (const c of completions) {
-      const messageId = c.turn_id.split(':').slice(2).join(':')
+    // DURABLE recovery (audit 4931107358): the set is derived by joining
+    // committed V2 completions to still-open V1 rows, so a crash between
+    // the completion event and the V1 close is healed on ANY later tick,
+    // no matter how much time passed. Not a time window.
+    const unclosed = await findUnclosedAnsweredRows(db, { seats: SEATS })
+    for (const u of unclosed) {
       await closeAnsweredV1Row(db, {
-        seatId: c.seat_id, messageId,
-        evidenceRef: `event_log turn ${c.turn_id}`,
+        seatId: u.seatId, messageId: u.messageId,
+        evidenceRef: `event_log turn ${u.turnId}`,
       })
     }
   } catch (err) {
