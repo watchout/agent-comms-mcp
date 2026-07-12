@@ -33,9 +33,9 @@ claims:
     - "V1 closure only after V2 completion; idempotent."
     - "Owner exact-head decision required before merge."
 commands:
-  - { command: "bun test tests/eventlog/", result: "PASS_51_TESTS_0_FAIL" }
+  - { command: "bun test tests/eventlog/", result: "PASS_52_TESTS_0_FAIL" }
   - { command: "bun build --target bun bin/aun/v2-worker-daemon.ts", result: "PASS" }
-  - { command: "durable recovery verified on BOTH SQLite (fixtures) and real PostgreSQL", result: "PASS_BOTH_DIALECTS" }
+  - { command: "durable + starvation-free recovery verified on BOTH SQLite (fixtures) and real PostgreSQL (residue > batchSize cannot hide a later completed row)", result: "PASS_BOTH_DIALECTS" }
 validation_results: ["worker/import/closure fixtures + full regression 51 pass 0 fail on SQLite; durable recovery re-verified on real PostgreSQL (dialect-safe, no split_part); daemon build-checked"]
 evidence_refs: [PR_head_SHA, changed_files, validation_commands, validation_results]
 notes: ["Machine evidence only; not a structured audit; approves nothing.", "Daemon is not started by this PR."]

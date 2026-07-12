@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { ensureEventLogSchema, openTurnCount } from '../../core/eventlog'
 import { importPendingV1Rows, closeAnsweredV1Row, findUnclosedAnsweredRows } from '../../core/eventlog/v1-import'
-import { completeTurn, claimNextTurn } from '../../core/eventlog'
+import { EventLog, turnIdFor } from '../../core/eventlog'
 
 // fence older than every seeded row → rows qualify; the garbage-barrier
 // suite below uses a FUTURE fence to prove exclusion
@@ -45,6 +45,21 @@ async function seedV1(seat: string, messageId: string, content: string) {
   await db.execute(
     `INSERT INTO agent_messages (id, channel_id, author_id, content) VALUES ($1, 'chan-1', 'ceo', $2)`,
     [messageId, content],
+  )
+  await db.execute(
+    `INSERT INTO message_queue (agent_id, message_id) VALUES ($1, $2)`,
+    [seat, messageId],
+  )
+}
+
+// each row on its OWN thread = its own conversation, so per-conversation
+// serialization does not block claiming (independent work orders). Used by
+// the starvation test to complete a specific row without a shared-
+// conversation head-of-line block confounding the recovery assertion.
+async function seedV1Thread(seat: string, messageId: string, content: string) {
+  await db.execute(
+    `INSERT INTO agent_messages (id, channel_id, thread_id, author_id, content) VALUES ($1, 'chan-1', $2, 'ceo', $3)`,
+    [messageId, `thr-${messageId}`, content],
   )
   await db.execute(
     `INSERT INTO message_queue (agent_id, message_id) VALUES ($1, $2)`,
@@ -176,5 +191,31 @@ describe('durable V1-closure recovery (audit 4931107358 — no time window)', ()
     expect(unclosed.length).toBe(0) // already closed → not returned again
     // kodama's row was never completed in V2, so it's never in the set
     expect((await findUnclosedAnsweredRows(db, { seats: ['kodama'] })).length).toBe(0)
+  })
+})
+
+describe('starvation-free recovery (audit cycle-3 — residue cannot hide a later match)', () => {
+  test('a completed row AFTER >batchSize unmatched historic residue is still found + closed', async () => {
+    // N historic garbage rows (pending, NO V2 completion) then one 'real'
+    // pending row that DOES have a committed completion. The completion is
+    // appended DIRECTLY (no claim/serialization confound) — the recovery
+    // function only cares that a turn.completed exists for a pending V1 row.
+    for (let i = 0; i < 7; i++) await seedV1('spec', `garbage-${i}`, '大昔の放置')
+    await seedV1('spec', 'real', 'やって')
+    const log = new EventLog(db)
+    const realTurn = turnIdFor('spec', 'real')
+    await log.append({
+      eventId: `done:${realTurn}`, eventType: 'turn.completed',
+      seatId: 'spec', turnId: realTurn, payload: { outcome: 'no_reply' },
+    })
+
+    // batchSize=2 forces the cursor across multiple pages; the 7 unmatched
+    // garbage rows would starve a fixed-prefix scan but the cursor reaches 'real'
+    const unclosed = await findUnclosedAnsweredRows(db, { seats: ['spec'], batchSize: 2 })
+    expect(unclosed.map(u => u.messageId)).toEqual(['real'])
+    for (const u of unclosed) await closeAnsweredV1Row(db, { seatId: u.seatId, messageId: u.messageId, evidenceRef: `turn ${u.turnId}` })
+    expect((await db.queryOne<{ status: string }>(`SELECT status FROM message_queue WHERE message_id='real'`))?.status).toBe('skipped')
+    expect((await db.queryOne<{ status: string }>(`SELECT status FROM message_queue WHERE message_id='garbage-0'`))?.status).toBe('pending')
+    expect((await findUnclosedAnsweredRows(db, { seats: ['spec'], batchSize: 2 })).length).toBe(0)
   })
 })

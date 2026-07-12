@@ -99,40 +99,57 @@ export interface UnclosedAnsweredRow {
  */
 export async function findUnclosedAnsweredRows(
   db: DbAdapter,
-  opts: { seats: string[]; limit?: number },
+  opts: { seats: string[]; limit?: number; batchSize?: number },
 ): Promise<UnclosedAnsweredRow[]> {
   if (opts.seats.length === 0) return []
-  const limit = opts.limit ?? 200
+  const resultLimit = opts.limit ?? 200
+  const batchSize = opts.batchSize ?? 500
 
-  // Dialect-safe (audit 4944457810 fix): no DB-specific string functions.
-  // The turn_id for a (seat, message_id) is deterministic — turnIdFor —
-  // so we compute candidate turn_ids in application code and check for a
-  // committed completion, rather than parsing turn_id inside SQL (which
-  // needed PostgreSQL-only split_part and broke on the SQLite adapter).
+  // Dialect-safe (no split_part) AND starvation-free (audit cycle-3 fix).
+  // turnIdFor is deterministic, so candidate turn_ids are computed in
+  // application code. Critically, we PAGINATE through ALL pending
+  // candidates by id cursor rather than taking a fixed oldest-N prefix:
+  // the garbage barrier deliberately leaves historic residue in `pending`,
+  // and a fixed prefix of that residue would permanently hide a later row
+  // that DOES have a committed completion (head-of-line starvation). The
+  // bound is on the MATCHED result count, so a completed row is always
+  // reached regardless of how much unmatched residue precedes it.
   const seatParams = opts.seats.map((_, i) => `$${i + 1}`).join(', ')
-  const pending = await db.query<{ agent_id: string; message_id: string }>(
-    `SELECT agent_id, message_id FROM message_queue
-     WHERE status IN ('pending', 'read')
-       AND message_id IS NOT NULL
-       AND agent_id IN (${seatParams})
-     ORDER BY id ASC
-     LIMIT $${opts.seats.length + 1}`,
-    [...opts.seats, limit],
-  )
-  if (pending.length === 0) return []
+  const results: UnclosedAnsweredRow[] = []
+  let afterId = 0
 
-  // which of those pending rows have a committed V2 completion?
-  const turnIds = pending.map(p => turnIdFor(p.agent_id, p.message_id))
-  const tParams = turnIds.map((_, i) => `$${i + 1}`).join(', ')
-  const completed = await db.query<{ turn_id: string }>(
-    `SELECT turn_id FROM event_log
-     WHERE event_type = 'turn.completed' AND turn_id IN (${tParams})`,
-    turnIds,
-  )
-  const completedSet = new Set(completed.map(c => c.turn_id))
-  return pending
-    .filter(p => completedSet.has(turnIdFor(p.agent_id, p.message_id)))
-    .map(p => ({ seatId: p.agent_id, messageId: p.message_id, turnId: turnIdFor(p.agent_id, p.message_id) }))
+  for (;;) {
+    const pending = await db.query<{ id: number; agent_id: string; message_id: string }>(
+      `SELECT id, agent_id, message_id FROM message_queue
+       WHERE status IN ('pending', 'read')
+         AND message_id IS NOT NULL
+         AND agent_id IN (${seatParams})
+         AND id > $${opts.seats.length + 1}
+       ORDER BY id ASC
+       LIMIT $${opts.seats.length + 2}`,
+      [...opts.seats, afterId, batchSize],
+    )
+    if (pending.length === 0) break
+    afterId = pending[pending.length - 1].id
+
+    const turnIds = pending.map(p => turnIdFor(p.agent_id, p.message_id))
+    const tParams = turnIds.map((_, i) => `$${i + 1}`).join(', ')
+    const completed = await db.query<{ turn_id: string }>(
+      `SELECT turn_id FROM event_log
+       WHERE event_type = 'turn.completed' AND turn_id IN (${tParams})`,
+      turnIds,
+    )
+    const completedSet = new Set(completed.map(c => c.turn_id))
+    for (const p of pending) {
+      const tid = turnIdFor(p.agent_id, p.message_id)
+      if (completedSet.has(tid)) {
+        results.push({ seatId: p.agent_id, messageId: p.message_id, turnId: tid })
+        if (results.length >= resultLimit) return results
+      }
+    }
+    if (pending.length < batchSize) break // last page reached
+  }
+  return results
 }
 
 /**
