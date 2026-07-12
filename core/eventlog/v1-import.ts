@@ -14,7 +14,7 @@
 // worker daemon's separate, typed step (skip with an evidence reason).
 
 import type { DbAdapter } from '../db/adapter'
-import { receiveMessage } from './turns'
+import { receiveMessage, turnIdFor } from './turns'
 
 export interface ImportedRow {
   v1QueueId: number
@@ -102,21 +102,37 @@ export async function findUnclosedAnsweredRows(
   opts: { seats: string[]; limit?: number },
 ): Promise<UnclosedAnsweredRow[]> {
   if (opts.seats.length === 0) return []
+  const limit = opts.limit ?? 200
+
+  // Dialect-safe (audit 4944457810 fix): no DB-specific string functions.
+  // The turn_id for a (seat, message_id) is deterministic — turnIdFor —
+  // so we compute candidate turn_ids in application code and check for a
+  // committed completion, rather than parsing turn_id inside SQL (which
+  // needed PostgreSQL-only split_part and broke on the SQLite adapter).
   const seatParams = opts.seats.map((_, i) => `$${i + 1}`).join(', ')
-  const rows = await db.query<{ seat_id: string; turn_id: string; message_id: string }>(
-    `SELECT c.seat_id, c.turn_id, mq.message_id
-     FROM event_log c
-     JOIN message_queue mq
-       ON mq.message_id = split_part(c.turn_id, ':', 3)
-      AND mq.agent_id = c.seat_id
-     WHERE c.event_type = 'turn.completed'
-       AND c.seat_id IN (${seatParams})
-       AND mq.status IN ('pending', 'read')
-     ORDER BY c.seq ASC
+  const pending = await db.query<{ agent_id: string; message_id: string }>(
+    `SELECT agent_id, message_id FROM message_queue
+     WHERE status IN ('pending', 'read')
+       AND message_id IS NOT NULL
+       AND agent_id IN (${seatParams})
+     ORDER BY id ASC
      LIMIT $${opts.seats.length + 1}`,
-    [...opts.seats, opts.limit ?? 200],
+    [...opts.seats, limit],
   )
-  return rows.map(r => ({ seatId: r.seat_id, messageId: r.message_id, turnId: r.turn_id }))
+  if (pending.length === 0) return []
+
+  // which of those pending rows have a committed V2 completion?
+  const turnIds = pending.map(p => turnIdFor(p.agent_id, p.message_id))
+  const tParams = turnIds.map((_, i) => `$${i + 1}`).join(', ')
+  const completed = await db.query<{ turn_id: string }>(
+    `SELECT turn_id FROM event_log
+     WHERE event_type = 'turn.completed' AND turn_id IN (${tParams})`,
+    turnIds,
+  )
+  const completedSet = new Set(completed.map(c => c.turn_id))
+  return pending
+    .filter(p => completedSet.has(turnIdFor(p.agent_id, p.message_id)))
+    .map(p => ({ seatId: p.agent_id, messageId: p.message_id, turnId: turnIdFor(p.agent_id, p.message_id) }))
 }
 
 /**
