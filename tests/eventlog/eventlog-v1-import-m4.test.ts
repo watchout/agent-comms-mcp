@@ -10,9 +10,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
-import { ensureEventLogSchema, openTurnCount } from '../../core/eventlog'
+import { ensureEventLogSchema, openTurnCount, EventLog, turnIdFor, completeTurn, claimNextTurn } from '../../core/eventlog'
 import { importPendingV1Rows, closeAnsweredV1Row, findUnclosedAnsweredRows } from '../../core/eventlog/v1-import'
-import { EventLog, turnIdFor } from '../../core/eventlog'
 
 // fence older than every seeded row → rows qualify; the garbage-barrier
 // suite below uses a FUTURE fence to prove exclusion
