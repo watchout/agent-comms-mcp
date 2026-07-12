@@ -1,0 +1,20 @@
+{
+  "schema_version": "aun-k0-db-capabilities/v1",
+  "database": "sqlite",
+  "profile": "unit_conformance",
+  "production_authority": false,
+  "capabilities": {
+    "immutable_event_history": true,
+    "atomic_claim": false,
+    "skip_locked": false,
+    "listen_notify": false,
+    "multi_worker_concurrency": false
+  },
+  "unsupported": [
+    "production_authority",
+    "skip_locked_claim",
+    "listen_notify_wake_hint",
+    "multi_worker_concurrency"
+  ],
+  "fail_closed": true
+}

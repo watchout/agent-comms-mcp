@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-k0-db-capabilities-v1.schema.json",
+  "title": "AUN K0 Database Capabilities v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "database", "profile", "production_authority", "capabilities", "unsupported", "fail_closed"],
+  "properties": {
+    "schema_version": { "const": "aun-k0-db-capabilities/v1" },
+    "database": { "enum": ["postgresql", "sqlite"] },
+    "profile": { "enum": ["production", "unit_conformance"] },
+    "production_authority": { "type": "boolean" },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["immutable_event_history", "atomic_claim", "skip_locked", "listen_notify", "multi_worker_concurrency"],
+      "properties": {
+        "immutable_event_history": { "type": "boolean" },
+        "atomic_claim": { "type": "boolean" },
+        "skip_locked": { "type": "boolean" },
+        "listen_notify": { "type": "boolean" },
+        "multi_worker_concurrency": { "type": "boolean" }
+      }
+    },
+    "unsupported": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "fail_closed": { "type": "boolean" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "database": { "const": "postgresql" } } },
+      "then": {
+        "properties": {
+          "profile": { "const": "production" },
+          "production_authority": { "const": true }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "database": { "const": "sqlite" } } },
+      "then": {
+        "properties": {
+          "profile": { "const": "unit_conformance" },
+          "production_authority": { "const": false },
+          "fail_closed": { "const": true }
+        }
+      }
+    }
+  ]
+}

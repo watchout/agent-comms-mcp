@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-k0-event-vocabulary-v1.schema.json",
+  "title": "AUN K0 Event Vocabulary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "authority", "events", "invariants"],
+  "properties": {
+    "schema_version": { "const": "aun-k0-event-vocabulary/v1" },
+    "authority": { "const": "postgresql_event_log" },
+    "events": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_type", "terminal", "proof_tier", "writer_authority"],
+        "properties": {
+          "event_type": {
+            "enum": [
+              "message.received",
+              "turn.claimed",
+              "turn.started",
+              "turn.attempt_failed",
+              "turn.retry_scheduled",
+              "turn.blocked",
+              "turn.dead_lettered",
+              "turn.completed"
+            ]
+          },
+          "terminal": { "type": "boolean" },
+          "proof_tier": {
+            "enum": ["committed_event", "fenced_claim", "attempt_evidence", "semantic_terminal"]
+          },
+          "writer_authority": {
+            "enum": ["event_store", "current_fencing_token_holder", "retry_policy"]
+          }
+        }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 5,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

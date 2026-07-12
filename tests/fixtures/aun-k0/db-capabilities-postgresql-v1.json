@@ -1,0 +1,15 @@
+{
+  "schema_version": "aun-k0-db-capabilities/v1",
+  "database": "postgresql",
+  "profile": "production",
+  "production_authority": true,
+  "capabilities": {
+    "immutable_event_history": true,
+    "atomic_claim": true,
+    "skip_locked": true,
+    "listen_notify": true,
+    "multi_worker_concurrency": true
+  },
+  "unsupported": [],
+  "fail_closed": false
+}

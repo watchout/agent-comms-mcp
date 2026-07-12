@@ -1,0 +1,68 @@
+schema_version: shirube-control-handoff/v1
+control_handoff_id: CH-AUN-FIRST-F1-K0-CONTRACT-CORPUS-BENCHMARK-001
+cell_id: CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+risk_class: R2
+control_source: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+queue_ref:
+  queue_id: 124341
+  message_id: e0fb3965-0683-4ac6-aa6d-bdb9736eac77
+owner_agent: aun
+owner_function: implementation_executor
+exact_base: 0d7c52d80b515ed39fd0e41bc84a617fd6fbe2fa
+inputs:
+  architecture:
+    path: /Users/yuji/Developer/spec/specs/SPEC-AUN-SHIRUBE-001-oss-grade-runtime-architecture.md
+    sha256: ba23fe5a7e1ba8dbf10344e4753288ffbc8228533f3be778598707dfea408fc7
+    sections: [5.1-5.6, 8.1, 9.1, 9.3, 11, 12, 18.1]
+  acceptance:
+    path: /Users/yuji/Developer/spec/specs/SPEC-AUN-SHIRUBE-001-acceptance.yaml
+    sha256: aa2e91055953439022ab65fc429ef86d9d280acc6a9fde6a46394694d44a85a5
+    sections: [measurement_rules, profiles.A0_correctness, profiles.A1_reference, profiles.A2_soak, aun_slo, required_correctness_specimens.aun]
+implementation_boundary:
+  allowed_paths_ref: .shirube/cells/CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+  production_behavior_change: false
+  new_dependency: false
+forbidden_operations:
+  - runtime_or_runner_or_daemon_activation
+  - database_schema_or_migration_or_production_access
+  - connector_credential_secret_or_external_provider_send
+  - F2_F3_F4_F5_implementation
+  - CP80_canary_claim_or_processing
+  - PR_862_rebase_or_edit
+  - self_audit_or_approval_or_merge
+validation:
+  - git diff --check
+  - parse every new JSON and YAML artifact
+  - bun test tests/aun-k0/
+  - bun test tests/eventlog/
+  - bun benchmarks/aun-k0/cli.ts --profile A0_correctness --plan --json
+  - bun benchmarks/aun-k0/cli.ts --profile A1_reference --plan --json
+  - bun benchmarks/aun-k0/cli.ts --profile A2_soak --plan --json
+stop_conditions:
+  - base_or_input_hash_drift
+  - changed_path_outside_allowed_set
+  - new_dependency_or_live_infrastructure_required
+  - behavior_or_SLO_claim_without_execution
+  - owner_policy_conflict
+deliverable: One exact-scope draft PR and a complete handoff to l2auditor/evidence_audit_gate.
+completion_evidence:
+  - exact base and draft PR head
+  - changed-file manifest limited to allowed paths
+  - 15-of-15 acceptance mapping and 12-of-12 specimen mapping
+  - command and result evidence
+  - independent review URL
+blocking: true
+next_action:
+  owner_agent: aun
+  owner_function: implementation_executor
+  action: Implement and validate only this handoff, publish one draft PR, then route its exact head to l2auditor.
+  handoff_method: GitHub draft PR plus AUN exact queue reply/read-back.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+    - queue:124341
+  scope:
+    allowed: Cell allowed paths and deterministic offline validation only.
+    forbidden: All forbidden paths and operations above.
+  deliverable: Draft PR, truthful exact-head evidence, and independent audit handoff.
+  completion_evidence: PR URL, head SHA, changed paths, validation outputs, and audit queue/ref.
+  blocking: true

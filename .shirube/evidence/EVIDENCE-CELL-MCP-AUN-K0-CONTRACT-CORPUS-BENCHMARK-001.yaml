@@ -1,0 +1,78 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+target_repo: watchout/agent-comms-mcp
+target_pr: null
+cell_id: CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+implementation_actor: aun
+not_structured_audit: true
+completes_cell: false
+owner_decision_required_before_merge: true
+exact_base: 0d7c52d80b515ed39fd0e41bc84a617fd6fbe2fa
+head_evidence_source: draft_PR_exact_head_at_audit_time
+handoff_ref: .shirube/control-handoffs/CH-AUN-FIRST-F1-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+input_evidence:
+  architecture_sha256: ba23fe5a7e1ba8dbf10344e4753288ffbc8228533f3be778598707dfea408fc7
+  acceptance_sha256: aa2e91055953439022ab65fc429ef86d9d280acc6a9fde6a46394694d44a85a5
+claims:
+  contract_coverage:
+    owner_acceptance_ids: 15
+    owner_acceptance_ids_mapped: 15
+    duplicate_or_unknown_acceptance_ids: 0
+    required_specimens: 12
+    required_specimens_mapped: 12
+    dangling_predicates_or_specimens: 0
+  database_truth:
+    postgresql_production_authority_declared: true
+    sqlite_multi_worker_production_supported: false
+    sqlite_unsupported_concurrency_fail_closed: true
+  benchmark_truth:
+    profiles: [A0_correctness, A1_reference, A2_soak]
+    plan_only: true
+    contract_valid_is_behavior_proven: false
+    unexecuted_SLO_PASS_count: 0
+    canonical_digest_excludes: [generated_at, run_id, observed_hardware]
+  protected_surface_boundary:
+    production_behavior_changed: false
+    runtime_runner_daemon_changed: false
+    queue_or_database_changed: false
+    schema_or_migration_changed: false
+    connector_provider_secret_changed: false
+    workflow_required_check_or_deploy_changed: false
+    CP80_canary_touched: false
+    F2_F3_F4_F5_or_PR862_touched: false
+    self_audit_approval_or_merge: false
+validation_state: local_precommit_pass
+commands:
+  - command: git diff --check
+    result: PASS
+  - command: parse every new JSON/YAML artifact
+    result: PASS_21_JSON_4_YAML
+  - command: bun test tests/aun-k0/
+    result: PASS_12_TESTS_0_FAIL
+  - command: bun test tests/eventlog/
+    result: PASS_43_TESTS_0_FAIL
+  - command: bun benchmarks/aun-k0/cli.ts --profile A0_correctness --plan --json
+    result: PASS_PLAN_ONLY_15_NOT_MEASURED_BEHAVIOR_PROVEN_FALSE
+  - command: bun benchmarks/aun-k0/cli.ts --profile A1_reference --plan --json
+    result: PASS_PLAN_ONLY_15_NOT_MEASURED_BEHAVIOR_PROVEN_FALSE
+  - command: bun benchmarks/aun-k0/cli.ts --profile A2_soak --plan --json
+    result: PASS_PLAN_ONLY_15_NOT_MEASURED_BEHAVIOR_PROVEN_FALSE
+notes:
+  - Machine evidence only; it approves nothing and is not an independent audit.
+  - PASS above means local contract/parsing/regression commands passed; no runtime behavior or SLO was executed or proven.
+  - Draft PR, exact head, independent review, merge, and post-merge evidence remain outstanding.
+next_action:
+  owner_agent: aun
+  owner_function: implementation_executor
+  action: Complete local validation, publish a draft PR, bind evidence to its exact head, and hand off to l2auditor.
+  handoff_method: GitHub draft PR plus AUN exact queue reply/read-back.
+  input_refs:
+    - queue:124341
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+  scope:
+    allowed: Validation and publication of this exact allowed-path diff.
+    forbidden: Self-audit, approval, merge, activation, or scope expansion.
+  deliverable: Draft PR with truthful command results and independent audit request.
+  completion_evidence: PR URL, exact head SHA, validation results, and audit request reference.
+  blocking: true

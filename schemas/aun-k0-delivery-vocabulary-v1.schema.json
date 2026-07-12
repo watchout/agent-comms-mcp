@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-k0-delivery-vocabulary-v1.schema.json",
+  "title": "AUN K0 Delivery Vocabulary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "events", "guarantees", "invariants"],
+  "properties": {
+    "schema_version": { "const": "aun-k0-delivery-vocabulary/v1" },
+    "events": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_type", "terminal", "proof_tier"],
+        "properties": {
+          "event_type": {
+            "enum": [
+              "reply.enqueued",
+              "reply.delivery_claimed",
+              "reply.handoff_accepted",
+              "reply.delivered",
+              "reply.delivery_unknown",
+              "reply.failed_retryable",
+              "reply.failed_permanent",
+              "reply.dead_lettered"
+            ]
+          },
+          "terminal": { "type": "boolean" },
+          "proof_tier": {
+            "enum": [
+              "committed_event",
+              "fenced_claim",
+              "durable_queue_receipt",
+              "provider_receipt",
+              "reconciliation_required",
+              "attempt_evidence",
+              "semantic_terminal"
+            ]
+          }
+        }
+      }
+    },
+    "guarantees": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["internal_state_transition", "processing_attempt", "external_effect"],
+      "properties": {
+        "internal_state_transition": { "const": "exactly_once_by_unique_constraint_and_fencing" },
+        "processing_attempt": { "const": "at_least_once" },
+        "external_effect": { "const": "effectively_once_only_with_end_to_end_idempotency" }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

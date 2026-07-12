@@ -1,0 +1,53 @@
+schema_version: shirube-audit-checklist/v1
+audit_checklist_id: AUDIT-CHECKLIST-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+source:
+  handoff_ref: .shirube/control-handoffs/CH-AUN-FIRST-F1-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+  cell_id: CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+  work_order: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+  implementation_actor: aun
+  audit_model: independent_exact_head_R2
+items:
+  - item_id: AUDIT-AUN-K0-001
+    source: exact_input
+    verification_method: hash_and_traceability
+    required: true
+    prompt: Confirm the implementation uses exact base 0d7c52d and the two pinned SPEC SHA-256 inputs without changing owner predicates.
+  - item_id: AUDIT-AUN-K0-002
+    source: scope_boundary
+    verification_method: changed_path_manifest
+    required: true
+    prompt: Confirm every changed path is explicitly allowed and no production/runtime/DB/provider/F2-F5/#862/CP80 surface changed.
+  - item_id: AUDIT-AUN-K0-003
+    source: contract_coverage
+    verification_method: machine_tests
+    required: true
+    prompt: Confirm all 15 acceptance IDs appear exactly once and all 12 specimens carry complete provenance and have no dangling mappings.
+  - item_id: AUDIT-AUN-K0-004
+    source: database_truth
+    verification_method: semantic_and_fixture
+    required: true
+    prompt: Confirm PostgreSQL is the production authority and SQLite multi-worker concurrency is unsupported fail-closed.
+  - item_id: AUDIT-AUN-K0-005
+    source: evidence_truth
+    verification_method: deterministic_plan_replay
+    required: true
+    prompt: Confirm A0/A1/A2 plans include required dimensions, stable canonical digests, and never claim behavior or SLO PASS without execution.
+  - item_id: AUDIT-AUN-K0-006
+    source: regression
+    verification_method: command_results
+    required: true
+    prompt: Confirm K0 tests, existing EventLog tests, artifact parsing, and git diff checks pass at the exact PR head.
+next_action:
+  owner_agent: l2auditor
+  owner_function: evidence_audit_gate
+  action: Return a structured exact-head verdict with each item answered once and confidence/evidence.
+  handoff_method: GitHub review comment on the draft PR plus AUN read-back.
+  input_refs:
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+    - draft PR exact head
+  scope:
+    allowed: read-only evidence/code review and validation replay.
+    forbidden: implementation fixes, approval, merge, activation, or owner decision substitution.
+  deliverable: Independent R2 verdict and complete next_action.
+  completion_evidence: GitHub audit URL bound to exact head.
+  blocking: true

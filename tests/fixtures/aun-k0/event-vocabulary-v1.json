@@ -1,0 +1,21 @@
+{
+  "schema_version": "aun-k0-event-vocabulary/v1",
+  "authority": "postgresql_event_log",
+  "events": [
+    { "event_type": "message.received", "terminal": false, "proof_tier": "committed_event", "writer_authority": "event_store" },
+    { "event_type": "turn.claimed", "terminal": false, "proof_tier": "fenced_claim", "writer_authority": "current_fencing_token_holder" },
+    { "event_type": "turn.started", "terminal": false, "proof_tier": "attempt_evidence", "writer_authority": "current_fencing_token_holder" },
+    { "event_type": "turn.attempt_failed", "terminal": false, "proof_tier": "attempt_evidence", "writer_authority": "current_fencing_token_holder" },
+    { "event_type": "turn.retry_scheduled", "terminal": false, "proof_tier": "attempt_evidence", "writer_authority": "retry_policy" },
+    { "event_type": "turn.blocked", "terminal": true, "proof_tier": "semantic_terminal", "writer_authority": "current_fencing_token_holder" },
+    { "event_type": "turn.dead_lettered", "terminal": true, "proof_tier": "semantic_terminal", "writer_authority": "retry_policy" },
+    { "event_type": "turn.completed", "terminal": true, "proof_tier": "semantic_terminal", "writer_authority": "current_fencing_token_holder" }
+  ],
+  "invariants": [
+    "postgresql_event_log_is_production_authority",
+    "same_event_id_different_canonical_payload_is_collision",
+    "runtime_timeout_is_not_semantic_completion",
+    "only_current_fencing_token_holder_may_complete",
+    "projection_is_rebuildable_from_event_history"
+  ]
+}

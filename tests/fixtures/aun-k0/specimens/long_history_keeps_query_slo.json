@@ -1,0 +1,10 @@
+{
+  "schema_version": "aun-k0-correctness-specimen/v1",
+  "id": "long_history_keeps_query_slo",
+  "provenance": { "spec_ref": "SPEC-AUN-SHIRUBE-001 §8.1 and §9.1", "acceptance_ids": ["AUN-PERF-003", "AUN-PERF-006"] },
+  "input": { "closed_history": 1000000, "active_turns": 10000 },
+  "expected_predicate": "active_projection_p95_ms <= 50 and active_projection_p99_ms <= 150",
+  "proof_tier": "future_measured",
+  "owning_future_cell": "AUN-K1",
+  "behavior_status": "not_executed"
+}
