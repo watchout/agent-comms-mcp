@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
+import { matchesAutoSkipPattern } from '../config/auto-skip-patterns'
+import { autoSkipReason } from './message-queue-terminal'
 import {
   outboundProjectionSkipCode,
   outboundProjectionSkipReason,
@@ -95,12 +97,31 @@ export async function persistAnchoredReplyMessageAndRecipientInTransaction(
     source: input.queueSource ?? 'transaction-native-reply',
     ts: now.toISOString(),
   })
+  const autoSkip = matchesAutoSkipPattern({
+    content: input.content,
+    messageType,
+    authorAgentId: input.senderAgentId,
+    recipientAgentId: input.recipientAgentId,
+  })
   const fanout = await db.query<{ id: string | number }>(
-    `INSERT INTO message_queue (agent_id, message_id, payload)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
-     RETURNING id`,
-    [input.recipientAgentId, input.messageId, payload],
+    autoSkip.matched
+      ? `INSERT INTO message_queue (agent_id, message_id, payload, status, failed_reason, done_at)
+         VALUES ($1, $2, $3, 'skipped', $4, $5)
+         ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
+         RETURNING id`
+      : `INSERT INTO message_queue (agent_id, message_id, payload)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL DO NOTHING
+         RETURNING id`,
+    autoSkip.matched
+      ? [
+          input.recipientAgentId,
+          input.messageId,
+          payload,
+          autoSkipReason(autoSkip.reason ?? 'unknown'),
+          now.toISOString(),
+        ]
+      : [input.recipientAgentId, input.messageId, payload],
   )
   const recipientQueueId = fanout.rows[0]?.id
   if (recipientQueueId === undefined || recipientQueueId === null) {

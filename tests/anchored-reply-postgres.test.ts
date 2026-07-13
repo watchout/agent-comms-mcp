@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Client } from 'pg'
 
+import { persistAnchoredReplyMessageAndRecipientInTransaction } from '../core/anchored-reply'
 import {
   QUEUE_WORK_RESULT_VERSION,
   finalizeDoneQueueWork,
@@ -105,6 +106,97 @@ if (DATABASE_URL) describe('transaction-native anchored reply finalizer — Post
       [originalId, owner, queueId],
     )
     return result.rows[0]
+  }
+
+  const sharedReceiptCases = [
+    {
+      label: 'terminal no-op continuation',
+      senderAgentId: sender,
+      recipientAgentId: owner,
+      messageType: 'report',
+      content: [
+        'Processed queue 86535.',
+        '',
+        'Acknowledged: the audit note is covered. No further action is required for this continuation.',
+        '',
+        'Residual gates remain unchanged: exact-head approval is still pending.',
+      ].join('\n'),
+      expectedStatus: 'skipped',
+      expectedReason: 'AUTO_SKIP_PATTERN:terminal_noop_continuation',
+    },
+    {
+      label: 'system-info receipt',
+      senderAgentId: sender,
+      recipientAgentId: owner,
+      messageType: 'system_info',
+      content: 'queue bookkeeping only',
+      expectedStatus: 'skipped',
+      expectedReason: 'AUTO_SKIP_PATTERN:system_info_type',
+    },
+    {
+      label: 'pattern-matched receipt',
+      senderAgentId: sender,
+      recipientAgentId: owner,
+      messageType: 'chat',
+      content: '[hb finalizer] healthy',
+      expectedStatus: 'skipped',
+      expectedReason: 'AUTO_SKIP_PATTERN:heartbeat_broadcast',
+    },
+    {
+      label: 'self-echo receipt',
+      senderAgentId: sender,
+      recipientAgentId: sender,
+      messageType: 'chat',
+      content: 'self echo',
+      expectedStatus: 'skipped',
+      expectedReason: 'AUTO_SKIP_PATTERN:self_echo',
+    },
+    {
+      label: 'normal actionable receipt',
+      senderAgentId: sender,
+      recipientAgentId: owner,
+      messageType: 'chat',
+      content: 'Please review this exact implementation head.',
+      expectedStatus: 'pending',
+      expectedReason: null,
+    },
+  ] as const
+
+  for (const scenario of sharedReceiptCases) {
+    test(`shared receipt preserves auto-skip compatibility for ${scenario.label}`, async () => {
+      const messageId = randomUUID()
+      const replyTo = randomUUID()
+      await client.query(
+        `INSERT INTO agent_messages
+           (id, channel_id, author_id, content, message_type, source, direction, role)
+         VALUES ($1, $2, $3, 'shared receipt parent', 'instruction', 'test', 'inbound', 'agent')`,
+        [replyTo, channel, scenario.recipientAgentId],
+      )
+      const persisted = await persistAnchoredReplyMessageAndRecipientInTransaction(client, {
+        sourceQueueId: `shared-receipt-${scenario.label}`,
+        senderAgentId: scenario.senderAgentId,
+        recipientAgentId: scenario.recipientAgentId,
+        replyTo,
+        channelId: channel,
+        content: scenario.content,
+        messageType: scenario.messageType,
+        queueSource: 'test-shared-receipt',
+        metadata: { mentions: [scenario.recipientAgentId] },
+        now: new Date(),
+        messageId,
+      })
+      const receipt = await client.query(
+        `SELECT status, failed_reason, done_at IS NOT NULL AS terminalized
+           FROM message_queue
+          WHERE id = $1`,
+        [persisted.recipient_queue_id],
+      )
+      expect(receipt.rows[0]).toEqual({
+        status: scenario.expectedStatus,
+        failed_reason: scenario.expectedReason,
+        terminalized: scenario.expectedStatus === 'skipped',
+      })
+    })
   }
 
   test('done → replied is one atomic reply/receipt with connector-free zero outbound and idempotent replay', async () => {
