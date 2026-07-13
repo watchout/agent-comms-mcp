@@ -8,7 +8,11 @@
  * tests/route-message.test.ts (spec §20 廃止: file-based access + plugin:discord).
  */
 import { describe, test, expect } from 'bun:test'
-import { shouldIgnoreDiscordInboundMessage } from '../adapters/discord'
+import { DiscordAdapter, shouldIgnoreDiscordInboundMessage } from '../adapters/discord'
+import {
+  discordProviderRequestDigest,
+  type DiscordProviderRequestV1,
+} from '../core/eventlog/transport-contract'
 
 describe('Inbound bot-authored message guard', () => {
   test('ignores all bot-authored Discord messages before inbound routing', () => {
@@ -53,5 +57,61 @@ describe('Outbound endpoint contract', () => {
     const webhookPort = 8795
     const outboundPort = webhookPort + 1000
     expect(outboundPort).toBe(9795)
+  })
+})
+
+describe('EventLog strict Discord provider effect', () => {
+  test('hands the exact frozen content/reference/mentions/nonce to one pinned destination', async () => {
+    const sentPayloads: any[] = []
+    const material = {
+      schema_version: 'aun-discord-provider-request/v1' as const,
+      connector_instance_id: '11111111-1111-4111-8111-111111111111',
+      adapter_build_digest: 'a'.repeat(64),
+      channel_id: 'parent-channel',
+      thread_id: 'exact-thread',
+      message_reference: { message_id: 'reference-message', channel_id: 'exact-thread', guild_id: 'guild-1', fail_if_not_exists: true },
+      final_content_utf8: '界'.repeat(2500),
+      allowed_mentions: { parse: ['roles', 'users'] as Array<'everyone' | 'roles' | 'users'>, roles: ['role-1'], users: ['user-1'], replied_user: false },
+      direct_attention_targets: ['user-1'],
+      provider_nonce: 'a1_abcdefghijklmnopqrstuv',
+      enforce_nonce: true as const,
+      projection_identity_id: 'projection-1',
+      expected_mention_everyone: false,
+      expected_mentioned_user_ids: ['user-1'],
+      expected_mentioned_role_ids: ['role-1'],
+    }
+    const request: DiscordProviderRequestV1 = { ...material, provider_request_digest: discordProviderRequestDigest(material) }
+    const adapter = new DiscordAdapter()
+    ;(adapter as any).client = {
+      isReady: () => true,
+      channels: {
+        fetch: async (id: string) => ({
+          id,
+          send: async (payload: any) => {
+            sentPayloads.push(payload)
+            return {
+              id: 'sent-message', channelId: id, nonce: payload.nonce, content: payload.content,
+              author: { id: 'projection-1' },
+              reference: { messageId: 'reference-message', channelId: 'exact-thread', guildId: 'guild-1' },
+              mentions: {
+                everyone: false,
+                users: new Map([['user-1', {}]]),
+                roles: new Map([['role-1', {}]]),
+              },
+            }
+          },
+        }),
+      },
+    }
+    const ack = await adapter.sendFrozenProviderRequest(request)
+    expect(sentPayloads).toHaveLength(1)
+    expect(sentPayloads[0].content).toBe(request.final_content_utf8)
+    expect(sentPayloads[0].content.length).toBe(2500)
+    expect(sentPayloads[0].reply).toEqual({ messageReference: 'reference-message', failIfNotExists: true })
+    expect(sentPayloads[0].allowedMentions).toEqual({ parse: ['roles', 'users'], roles: ['role-1'], users: ['user-1'], repliedUser: false })
+    expect(sentPayloads[0].nonce).toBe(request.provider_nonce)
+    expect(sentPayloads[0].enforceNonce).toBe(true)
+    expect(ack.actual_content_utf8).toBe(request.final_content_utf8)
+    expect(ack.provider_request_digest).toBe(request.provider_request_digest)
   })
 })

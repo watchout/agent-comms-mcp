@@ -6,24 +6,18 @@
  * Discord client or Postgres. The consumer in server.ts imports both
  * helpers; test coverage lives in tests/outbound-delivery.test.ts.
  *
- * Contract:
- *   - `isDuplicateNonceError(err)` returns true for the two shapes Discord
- *     surfaces when a retry collides with enforceNonce inside the ~5 min
- *     dedup window: a DiscordAPIError with numeric code 40062, or a plain
- *     Error whose message carries "40062" / "using that nonce" / "nonce …
- *     already" etc.
- *   - The classifier is **conservative**: any ambiguity falls through as
- *     "not a duplicate-nonce", preserving the existing transient / permanent
- *     classification. False positives (mark sent when Discord did not
- *     accept) are worse than false negatives (retry and eventually fail
- *     permanently) because the former produces silent message loss.
+ * Transport-Neutral Contract r1.1.4 correction:
+ *   - numeric Discord code 40062 is service-resource rate limiting;
+ *   - it is never prior-message evidence and never idempotent success;
+ *   - only a returned, fully validated original receipt can converge a
+ *     duplicate attempt to delivered.
  *
  * See:
  *   - docs/agent-com-message-queue-spec.md §7.4 (outbound consumer)
  *   - docs/design/core/SSOT-5_CROSS_CUTTING.md §1 adapter nonce contract
  */
 
-const DISCORD_DUPLICATE_NONCE_CODE = 40062
+const DISCORD_RESOURCE_RATE_LIMIT_CODE = 40062
 
 /** Extract the numeric Discord error code from an unknown thrown value. */
 function extractDiscordErrorCode(err: unknown): number | null {
@@ -35,15 +29,15 @@ function extractDiscordErrorCode(err: unknown): number | null {
 }
 
 /**
- * Identify the "Discord rejected a retry because the nonce matches a
- * recently-sent message" case. Consumer treats this as idempotent success.
+ * Retained compatibility export. No thrown error shape is delivery evidence.
  */
-export function isDuplicateNonceError(err: unknown, message?: string): boolean {
-  if (extractDiscordErrorCode(err) === DISCORD_DUPLICATE_NONCE_CODE) return true
-  const text = message ?? (err instanceof Error ? err.message : String(err ?? ''))
-  if (!text) return false
-  if (text.includes(String(DISCORD_DUPLICATE_NONCE_CODE))) return true
-  if (/using that nonce/i.test(text)) return true
-  if (/nonce.*(already|duplicat)/i.test(text)) return true
+export function isDuplicateNonceError(_err: unknown, _message?: string): boolean {
   return false
+}
+
+/** Numeric 40062 is retry/rate-limit classification, not success truth. */
+export function isDiscord40062RateLimit(err: unknown, message?: string): boolean {
+  if (extractDiscordErrorCode(err) === DISCORD_RESOURCE_RATE_LIMIT_CODE) return true
+  const text = message ?? (err instanceof Error ? err.message : String(err ?? ''))
+  return text.includes(String(DISCORD_RESOURCE_RATE_LIMIT_CODE))
 }

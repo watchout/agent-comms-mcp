@@ -6,13 +6,10 @@
 // record reply.delivered (with the transport message id) or
 // reply.failed(retryable|permanent).
 //
-// Double-send is prevented by two independent layers:
-//   1. the log: uq_el_reply_delivered allows one reply.delivered per reply,
-//      and delivery attempts are epoch-claimed;
-//   2. the transport: every attempt for a reply carries the SAME nonce
-//      (`out-<reply_id>`), so a crash between send and the delivered event
-//      is healed by the transport's nonce dedup on retry (the V1 Discord
-//      40062-as-success pattern, made a contract here).
+// The r1.1.4 contract never infers delivery from a nonce error. Durable nonce
+// reservation and invocation-start CAS happen before a provider call; an
+// ambiguous started attempt becomes delivery_unknown and is excluded from
+// ordinary pending delivery until explicit reconciliation reopens it.
 //
 // Crash recovery mirrors turns: a restarting dispatcher instance releases
 // delivery claims held by its dead predecessors (identity, not timers).
@@ -23,15 +20,86 @@ import { EventLog } from './store'
 import { outboxView, pendingDeliveries } from './views'
 import {
   ClaimLostError,
+  EventIdCanonicalMaterialCollisionError,
+  InvocationStartCollisionError,
+  ProviderNonceCollisionError,
   parseEventPayload,
   type OutboxTransport,
   type OutboxViewRow,
 } from './types'
+import {
+  buildReplyDeliveryUnknownPayload,
+  decodeProviderInvocationStart,
+  decodeProviderNonceReservation,
+  decodeReplyDeliveryUnknownPayload,
+  providerInvocationStartEventId,
+  providerNonceReservationEventId,
+  type ProviderInvocationStartPayloadV1,
+  type ProviderNonceReservationPayloadV1,
+  type DeliveryUnitV1,
+  type ReplyDeliveryUnknownPayloadV1,
+} from './transport-contract'
 
 export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
 
 export class PermanentDeliveryError extends Error {
   permanent = true as const
+}
+
+/** Provider invocation may have happened but no exact acknowledgement exists. */
+export class AmbiguousDeliveryOutcomeError extends Error {
+  ambiguous = true as const
+}
+
+export type ProviderNonceReservationResult = 'reserved' | 'same_delivery'
+export type ProviderInvocationStartResult = 'started' | 'already_started'
+
+export async function reserveProviderNonce(
+  db: DbAdapter,
+  reservation: ProviderNonceReservationPayloadV1,
+): Promise<{ status: ProviderNonceReservationResult; eventId: string }> {
+  decodeProviderNonceReservation(reservation)
+  const eventId = providerNonceReservationEventId(reservation.key)
+  try {
+    const result = await new EventLog(db).append({
+      eventId,
+      eventType: 'reply.provider_nonce_reserved',
+      payload: reservation as unknown as Record<string, unknown>,
+    })
+    return { status: result.inserted ? 'reserved' : 'same_delivery', eventId }
+  } catch (error) {
+    if (error instanceof EventIdCanonicalMaterialCollisionError) {
+      throw new ProviderNonceCollisionError(error.message)
+    }
+    throw error
+  }
+}
+
+export async function startProviderInvocation(
+  db: DbAdapter,
+  start: ProviderInvocationStartPayloadV1,
+): Promise<{ status: ProviderInvocationStartResult; eventId: string; providerInvocationAuthorized: boolean }> {
+  decodeProviderInvocationStart(start)
+  const eventId = providerInvocationStartEventId(start.delivery_id, start.attempt_ordinal)
+  try {
+    const result = await new EventLog(db).append({
+      eventId,
+      eventType: 'reply.provider_invocation_started',
+      replyId: start.reply_id,
+      claimEpoch: start.attempt_ordinal,
+      payload: start as unknown as Record<string, unknown>,
+    })
+    return {
+      status: result.inserted ? 'started' : 'already_started',
+      eventId,
+      providerInvocationAuthorized: result.inserted,
+    }
+  } catch (error) {
+    if (error instanceof EventIdCanonicalMaterialCollisionError) {
+      throw new InvocationStartCollisionError(error.message)
+    }
+    throw error
+  }
 }
 
 export function deliveryNonce(replyId: string): string {
@@ -42,6 +110,7 @@ export interface DispatchResult {
   delivered: string[]
   failedRetryable: string[]
   failedPermanent: string[]
+  deliveryUnknown: string[]
   lostClaims: string[]
 }
 
@@ -74,6 +143,7 @@ export async function dispatchOutboxOnce(
     delivered: [],
     failedRetryable: [],
     failedPermanent: [],
+    deliveryUnknown: [],
     lostClaims: [],
   }
 
@@ -140,6 +210,35 @@ export async function dispatchOutboxOnce(
       })
       result.delivered.push(row.reply_id)
     } catch (err) {
+      const ambiguous = err instanceof AmbiguousDeliveryOutcomeError || (err as any)?.ambiguous === true
+      if (ambiguous) {
+        const unknown = payload.delivery_unknown_payload
+        if (!unknown) throw new AmbiguousDeliveryOutcomeError('ambiguous provider outcome lacks a frozen delivery_unknown payload')
+        const unknownPayload = decodeReplyDeliveryUnknownPayload(unknown) as ReplyDeliveryUnknownPayloadV1
+        const invocationStart = await db.queryOne<{ event_id: string }>(
+          `SELECT event_id FROM event_log
+           WHERE event_id = $1 AND event_type = 'reply.provider_invocation_started'
+             AND reply_id = $2 AND claim_epoch = $3`,
+          [unknownPayload.invocation_started_event_id, row.reply_id, epoch],
+        )
+        if (unknownPayload.reply_id !== row.reply_id || unknownPayload.attempt_ordinal !== epoch || !invocationStart) {
+          throw new AmbiguousDeliveryOutcomeError('frozen delivery_unknown payload does not bind the active attempt')
+        }
+        await log.append({
+          eventId: `delivery-unknown:${unknownPayload.delivery_id}:${unknownPayload.attempt_ordinal}`,
+          eventType: 'reply.delivery_unknown',
+          seatId: opts.dispatcherId,
+          seatInstanceId: opts.dispatcherInstanceId,
+          conversationId: row.conversation_id,
+          causationId: unknownPayload.invocation_started_event_id,
+          turnId: row.turn_id,
+          replyId: row.reply_id,
+          claimEpoch: epoch,
+          payload: unknownPayload as unknown as Record<string, unknown>,
+        })
+        result.deliveryUnknown.push(row.reply_id)
+        continue
+      }
       const permanent = err instanceof PermanentDeliveryError || (err as any)?.permanent === true
       await log.append({
         eventId: randomUUID(),
@@ -164,9 +263,9 @@ export async function dispatchOutboxOnce(
 }
 
 /**
- * Release delivery claims held by dead predecessor instances of this
- * dispatcher. A retryable reply.failed on the stale epoch reopens the reply
- * for the next dispatch pass. Restart is the evidence; no timers.
+ * Release only claims that provably never crossed invocation-start. A stale
+ * claim with a persisted invocation-start or delivery_unknown is preserved
+ * for explicit reconciliation; restart is not zero-effect evidence.
  */
 export async function recoverDispatcherClaims(
   db: DbAdapter,
@@ -181,7 +280,48 @@ export async function recoverDispatcherClaims(
       r.claimed_by_instance !== null &&
       r.claimed_by_instance !== opts.activeInstanceId,
   )
+  const released: OutboxViewRow[] = []
   for (const row of stale) {
+    const invocationStarted = await db.queryOne<{ event_id: string; payload: unknown }>(
+      `SELECT event_id, payload FROM event_log
+       WHERE event_type = 'reply.provider_invocation_started'
+         AND reply_id = $1 AND claim_epoch = $2
+       LIMIT 1`,
+      [row.reply_id, row.delivery_claim_epoch],
+    )
+    const unknown = await db.queryOne<{ event_id: string }>(
+      `SELECT event_id FROM event_log
+       WHERE event_type = 'reply.delivery_unknown'
+         AND reply_id = $1 AND claim_epoch = $2
+       LIMIT 1`,
+      [row.reply_id, row.delivery_claim_epoch],
+    )
+    if (invocationStarted || unknown) {
+      if (invocationStarted && !unknown) {
+        const enqueued = parseEventPayload<Record<string, unknown>>(row.payload)
+        if (enqueued.schema_version === 'aun-delivery-unit/v1') {
+          const start = decodeProviderInvocationStart(parseEventPayload(invocationStarted.payload))
+          const unknownPayload = buildReplyDeliveryUnknownPayload(
+            enqueued as unknown as DeliveryUnitV1,
+            start,
+            invocationStarted.event_id,
+          )
+          await log.append({
+            eventId: `delivery-unknown:${unknownPayload.delivery_id}:${unknownPayload.attempt_ordinal}`,
+            eventType: 'reply.delivery_unknown',
+            seatId: opts.dispatcherId,
+            seatInstanceId: opts.activeInstanceId,
+            conversationId: row.conversation_id,
+            causationId: invocationStarted.event_id,
+            turnId: row.turn_id,
+            replyId: row.reply_id,
+            claimEpoch: row.delivery_claim_epoch,
+            payload: unknownPayload as unknown as Record<string, unknown>,
+          })
+        }
+      }
+      continue
+    }
     await log.append({
       eventId: `dispatch-recover:${row.reply_id}:${row.delivery_claim_epoch}`,
       eventType: 'reply.failed',
@@ -194,6 +334,7 @@ export async function recoverDispatcherClaims(
       claimEpoch: row.delivery_claim_epoch,
       payload: { kind: 'retryable', reason: 'dispatcher_instance_recovery' },
     })
+    released.push(row)
   }
-  return stale
+  return released
 }

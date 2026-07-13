@@ -20,12 +20,23 @@ function jsonText(db: DbAdapter, column: string, key: string): string {
     ? `${column}::jsonb->>'${key}'`
     : `json_extract(${column}, '$.${key}')`
 }
-import type {
-  OutboxViewRow,
-  QueueViewRow,
-  StoredEvent,
-  ThreadViewNode,
+import {
+  FanoutParentLinkMismatchError,
+  parseEventPayload,
+  type OutboxViewRow,
+  type QueueViewRow,
+  type StoredEvent,
+  type ThreadViewNode,
 } from './types'
+import {
+  decodeFanoutPlan,
+  decodeFanoutProvenance,
+  decodeReplyDeliveredPayload,
+  decodeReplyFailedPayload,
+  decodeReplyHandoffAcceptedPayload,
+  decodeReplyDeliveryUnknownPayload,
+  type DeliveryUnitV1,
+} from './transport-contract'
 
 // A turn is OPEN iff it has a message.received event and no turn.completed.
 // Its ACTIVE claim is the max-epoch turn.claimed with no matching
@@ -168,6 +179,12 @@ const outboxViewSql = (db: DbAdapter) => `
        AND rf.reply_id = q.reply_id
        AND rf.claim_epoch = dc.claim_epoch
    )
+   AND NOT EXISTS (
+     SELECT 1 FROM event_log du
+     WHERE du.event_type = 'reply.delivery_unknown'
+       AND du.reply_id = q.reply_id
+       AND du.claim_epoch = dc.claim_epoch
+   )
   WHERE q.event_type = 'reply.enqueued'
     AND NOT EXISTS (
       SELECT 1 FROM event_log d
@@ -177,7 +194,24 @@ const outboxViewSql = (db: DbAdapter) => `
       SELECT 1 FROM event_log pf
       WHERE pf.event_type = 'reply.failed'
         AND pf.reply_id = q.reply_id
-        AND ${jsonText(db, 'pf.payload', 'kind')} = 'permanent'
+        AND (${jsonText(db, 'pf.payload', 'kind')} = 'permanent'
+          OR CAST(${jsonText(db, 'pf.payload', 'permanent')} AS TEXT) IN ('true', '1'))
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM event_log ha
+      WHERE ha.event_type = 'reply.handoff_accepted' AND ha.reply_id = q.reply_id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM event_log du
+      WHERE du.event_type = 'reply.delivery_unknown'
+        AND du.reply_id = q.reply_id
+        AND NOT EXISTS (
+          SELECT 1 FROM event_log ro
+          WHERE ro.event_type = 'reply.delivery_reopened'
+            AND ro.reply_id = q.reply_id
+            AND ${jsonText(db, 'ro.payload', 'causation_delivery_unknown_event_id')} = du.event_id
+            AND ro.claim_epoch = du.claim_epoch + 1
+        )
     )
 `
 
@@ -188,6 +222,133 @@ export async function outboxView(db: DbAdapter): Promise<OutboxViewRow[]> {
 export async function pendingDeliveries(db: DbAdapter): Promise<OutboxViewRow[]> {
   const rows = await outboxView(db)
   return rows.filter(r => r.delivery_claim_event_id === null)
+}
+
+export interface FanoutParentAggregateV1 {
+  schema_version: 'aun-fanout-parent-aggregate/v1'
+  fanout_planned_event_id: string
+  fanout_id: string
+  fanout_digest: string
+  parent_reply_id: string
+  expected_children: Array<{ child_reply_id: string; delivery_id: string; recipient_seat_id: string }>
+  validated_delivered_delivery_ids: string[]
+  failed_delivery_ids: string[]
+  unknown_delivery_ids: string[]
+  parent_delivered: boolean
+}
+
+/**
+ * Parent fanout truth is derived only from the persisted plan, persisted
+ * delivery units, and exact terminal evidence. Mutable request state is never
+ * consulted and a same-fanout out-of-plan terminal is corruption.
+ */
+export async function fanoutParentAggregate(
+  db: DbAdapter,
+  fanoutPlannedEventId: string,
+): Promise<FanoutParentAggregateV1> {
+  const planEvent = await db.queryOne<StoredEvent>(
+    `SELECT * FROM event_log WHERE event_id = $1 AND event_type = 'reply.fanout_planned'`,
+    [fanoutPlannedEventId],
+  )
+  if (!planEvent) throw new FanoutParentLinkMismatchError(`fanout plan ${fanoutPlannedEventId} is missing`)
+  const plan = decodeFanoutPlan(parseEventPayload(planEvent.payload))
+  if (planEvent.reply_id !== plan.parent_reply_id || fanoutPlannedEventId !== `fanout-planned:${plan.fanout_id}`) throw new FanoutParentLinkMismatchError('fanout plan EventLog identity differs')
+
+  const expectedReplyIds = new Set(plan.children.map(child => child.child_reply_id))
+  const expectedProvenanceDigests = new Set(plan.children.map(child => child.fanout_child_provenance_digest))
+  const validated: string[] = []
+  const failed: string[] = []
+  const unknown: string[] = []
+
+  for (const child of plan.children) {
+    const childEvent = await db.queryOne<StoredEvent>(
+      `SELECT * FROM event_log WHERE event_id = $1 AND event_type = 'reply.enqueued'`,
+      [`fanout-child-enqueued:${child.child_reply_id}`],
+    )
+    if (!childEvent || childEvent.reply_id !== child.child_reply_id) throw new FanoutParentLinkMismatchError(`planned child ${child.child_reply_id} is missing`)
+    const unit = parseEventPayload<DeliveryUnitV1>(childEvent.payload)
+    const provenance = unit.fanout_child_provenance === null
+      ? null
+      : decodeFanoutProvenance(unit.fanout_child_provenance)
+    if (
+      unit.reply_id !== child.child_reply_id ||
+      unit.delivery_id !== child.delivery_id ||
+      unit.recipient_seat_id !== child.recipient_seat_id ||
+      unit.destination_ref !== child.destination_ref ||
+      unit.resolved_binding_snapshot_digest !== child.resolved_binding_snapshot_digest ||
+      unit.resolved_delivery_decision?.resolved_delivery_decision_digest !== child.resolved_delivery_decision_digest ||
+      provenance === null ||
+      provenance.provenance_digest !== child.fanout_child_provenance_digest ||
+      provenance.fanout_planned_event_id !== fanoutPlannedEventId ||
+      provenance.fanout_id !== plan.fanout_id ||
+      provenance.fanout_digest !== plan.fanout_digest ||
+      provenance.parent_reply_id !== plan.parent_reply_id
+    ) throw new FanoutParentLinkMismatchError(`planned child ${child.child_reply_id} provenance differs`)
+
+    const terminals = await db.query<StoredEvent>(
+      `SELECT * FROM event_log
+       WHERE reply_id = $1
+         AND event_type IN ('reply.delivered', 'reply.failed', 'reply.delivery_unknown', 'reply.handoff_accepted')
+       ORDER BY seq ASC`,
+      [child.child_reply_id],
+    )
+    let deliveredCount = 0
+    let failedCount = 0
+    let unknownCount = 0
+    for (const terminal of terminals) {
+      const payload = parseEventPayload(terminal.payload)
+      let identity: { reply_id: string; delivery_id: string; recipient_seat_id: string; fanout_child_provenance_digest: string | null }
+      if (terminal.event_type === 'reply.delivered') {
+        identity = decodeReplyDeliveredPayload(payload)
+        deliveredCount += 1
+      } else if (terminal.event_type === 'reply.failed') {
+        const decoded = decodeReplyFailedPayload(payload)
+        identity = decoded
+        if (decoded.permanent) failedCount += 1
+      } else if (terminal.event_type === 'reply.handoff_accepted') {
+        identity = decodeReplyHandoffAcceptedPayload(payload)
+        failedCount += 1
+      } else {
+        identity = decodeReplyDeliveryUnknownPayload(payload)
+        unknownCount += 1
+      }
+      if (
+        identity.reply_id !== child.child_reply_id ||
+        identity.delivery_id !== child.delivery_id ||
+        identity.recipient_seat_id !== child.recipient_seat_id ||
+        identity.fanout_child_provenance_digest !== child.fanout_child_provenance_digest
+      ) throw new FanoutParentLinkMismatchError(`terminal for ${child.child_reply_id} differs from persisted plan`)
+    }
+    if (deliveredCount > 1 || (deliveredCount > 0 && (failedCount > 0 || unknownCount > 0))) throw new FanoutParentLinkMismatchError(`child ${child.child_reply_id} has conflicting terminal truth`)
+    if (deliveredCount === 1) validated.push(child.delivery_id)
+    else if (failedCount > 0) failed.push(child.delivery_id)
+    else if (unknownCount > 0) unknown.push(child.delivery_id)
+  }
+
+  const allTerminals = await db.query<StoredEvent>(
+    `SELECT * FROM event_log
+     WHERE event_type IN ('reply.delivered', 'reply.failed', 'reply.delivery_unknown', 'reply.handoff_accepted')
+     ORDER BY seq ASC`,
+  )
+  for (const terminal of allTerminals) {
+    if (terminal.reply_id !== null && expectedReplyIds.has(terminal.reply_id)) continue
+    const payload = parseEventPayload<Record<string, unknown>>(terminal.payload)
+    const digest = payload.fanout_child_provenance_digest
+    if (typeof digest === 'string' && expectedProvenanceDigests.has(digest)) throw new FanoutParentLinkMismatchError(`out-of-plan terminal ${terminal.event_id} claims this fanout`)
+  }
+
+  return {
+    schema_version: 'aun-fanout-parent-aggregate/v1',
+    fanout_planned_event_id: fanoutPlannedEventId,
+    fanout_id: plan.fanout_id,
+    fanout_digest: plan.fanout_digest,
+    parent_reply_id: plan.parent_reply_id,
+    expected_children: plan.children.map(child => ({ child_reply_id: child.child_reply_id, delivery_id: child.delivery_id, recipient_seat_id: child.recipient_seat_id })),
+    validated_delivered_delivery_ids: validated.sort(),
+    failed_delivery_ids: failed.sort(),
+    unknown_delivery_ids: unknown.sort(),
+    parent_delivered: validated.length === plan.children.length,
+  }
 }
 
 /**

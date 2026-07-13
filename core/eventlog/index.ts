@@ -5,7 +5,29 @@
 
 export * from './types'
 export { ensureEventLogSchema } from './schema'
-export { EventLog } from './store'
+export {
+  EventLog,
+  appendEventConflictMaterial,
+  storedEventConflictMaterial,
+  assertByteIdenticalEvent,
+  type AppendEventConflictMaterialV1,
+  type AppendFanoutAtomicInputV1,
+  type AppendFanoutAtomicResultV1,
+  type CommitReopenAuthorizationCASInput,
+  type CommitReopenAuthorizationCASResult,
+  type CommitReconciliationTerminalCASInputV1,
+  type CommitReconciliationTerminalCASResultV1,
+} from './store'
+export * from './transport-contract'
+export {
+  ConnectorRegistry,
+  type LoadedConnectorVerifierPort,
+  type RegisterLoadedConnectorInput,
+  type ResolveLoadedCapabilityInput,
+  type ResolvedLoadedCapabilityV1,
+  type RegisterZeroEffectProducerInputV1,
+  type RegisterRetryBudgetIssuerInputV1,
+} from './connector-registry'
 export {
   queueView,
   inboxView,
@@ -14,6 +36,7 @@ export {
   claimableTurns,
   outboxView,
   pendingDeliveries,
+  fanoutParentAggregate,
   threadView,
 } from './views'
 export {
@@ -34,6 +57,9 @@ export {
   recoverDispatcherClaims,
   deliveryNonce,
   PermanentDeliveryError,
+  AmbiguousDeliveryOutcomeError,
+  reserveProviderNonce,
+  startProviderInvocation,
   DEFAULT_MAX_DELIVERY_ATTEMPTS,
   type DispatchResult,
 } from './outbox'

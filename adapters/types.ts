@@ -5,6 +5,11 @@
  * a unified message receive/send interface for the communication bus.
  */
 
+import type {
+  DiscordProviderAckV1,
+  DiscordProviderRequestV1,
+} from '../core/eventlog/transport-contract'
+
 export interface AdapterConfig {
   /** Platform-specific configuration (e.g., bot token, state dir) */
   [key: string]: unknown
@@ -25,9 +30,9 @@ export interface SendOptions {
   /**
    * Opt-in flag that instructs the platform to reject rather than silently
    * accept a duplicate `nonce` within its dedup window. Discord surfaces
-   * this as `enforce_nonce: true` in the message-create payload; a rejected
-   * retry returns error code 40062 which the consumer collapses to
-   * idempotent success. Adapters whose platform does not expose the flag
+   * this as `enforce_nonce: true` in the message-create payload. A rejected
+   * retry is not acknowledgement evidence and is never collapsed to success.
+   * Adapters whose platform does not expose the flag
    * may treat it as a no-op but MUST NOT drop the `nonce`. Phase C Step 1
    * PR-A cycle 4 — aligned with the SSOT-5 adapter contract.
    */
@@ -142,4 +147,9 @@ export interface UIAdapter {
 
   /** Disconnect */
   disconnect(): Promise<void>
+}
+
+/** Exact provider-effect seam used by EventLogCore; no routing or mutation. */
+export interface StrictDiscordProviderPort {
+  sendFrozenProviderRequest(request: DiscordProviderRequestV1): Promise<DiscordProviderAckV1>
 }

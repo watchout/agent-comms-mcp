@@ -27,8 +27,17 @@ import {
   type ThreadChannel,
   type Interaction,
 } from 'discord.js'
-import type { UIAdapter, Adapter, AdapterConfig, UnifiedMessage, InboundMessage, PlatformCapabilities, SendOptions } from './types'
+import type { UIAdapter, Adapter, AdapterConfig, UnifiedMessage, InboundMessage, PlatformCapabilities, SendOptions, StrictDiscordProviderPort } from './types'
 import { getAgentDiscordUiId, resolveAgentFromDiscordUiId } from '../core/ui-bindings'
+import {
+  decodeDiscordProviderAck,
+  decodeDiscordProviderRequest,
+  discordActualRequestDigest,
+  discordProviderResponseDigest,
+  validateDiscordProviderAck,
+  type DiscordProviderAckV1,
+  type DiscordProviderRequestV1,
+} from '../core/eventlog/transport-contract'
 
 // --- Permission operators (DM / button gate for MCP permission prompts) ---
 //
@@ -95,7 +104,7 @@ const PERMISSION_REPLY_RE = /^(yes|no)\s+([a-z]{5})$/i
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
 
 // --- Discord Adapter ---
-export class DiscordAdapter implements UIAdapter, Adapter {
+export class DiscordAdapter implements UIAdapter, Adapter, StrictDiscordProviderPort {
   platform = 'discord' as const
 
   capabilities: PlatformCapabilities = {
@@ -439,6 +448,69 @@ export class DiscordAdapter implements UIAdapter, Adapter {
     }
 
     return { messageId: sentMsg.id }
+  }
+
+  /**
+   * Exact EventLogCore provider seam. Unlike the legacy UI method this never
+   * truncates, searches latest messages, changes reply target, converts
+   * mentions, or falls back to another channel/thread.
+   */
+  async sendFrozenProviderRequest(value: DiscordProviderRequestV1): Promise<DiscordProviderAckV1> {
+    const request = decodeDiscordProviderRequest(value)
+    if (!this.client || !this.client.isReady()) throw new Error('Discord client not connected')
+    const targetId = request.thread_id ?? request.channel_id
+    const channel = await this.client.channels.fetch(targetId)
+    if (!channel || !('send' in channel) || channel.id !== targetId) throw new Error(`Frozen Discord destination ${targetId} is unavailable`)
+    const textChannel = channel as TextChannel | ThreadChannel
+    const actualRequestDigest = discordActualRequestDigest(request)
+    const sendPayload: Record<string, unknown> = {
+      content: request.final_content_utf8,
+      allowedMentions: {
+        parse: [...request.allowed_mentions.parse],
+        roles: [...request.allowed_mentions.roles],
+        users: [...request.allowed_mentions.users],
+        repliedUser: request.allowed_mentions.replied_user,
+      },
+      nonce: request.provider_nonce,
+      enforceNonce: true,
+    }
+    if (request.message_reference !== null) {
+      sendPayload.reply = {
+        messageReference: request.message_reference.message_id,
+        failIfNotExists: request.message_reference.fail_if_not_exists,
+      }
+    }
+    const sent = await textChannel.send(sendPayload as any)
+    if (sent.channelId !== targetId) throw new Error('Discord provider returned a message from a different destination')
+    const returnedReference = sent.reference?.messageId
+      ? {
+          message_id: sent.reference.messageId,
+          channel_id: sent.reference.channelId ?? request.message_reference?.channel_id ?? request.channel_id,
+          guild_id: sent.reference.guildId ?? null,
+          fail_if_not_exists: request.message_reference?.fail_if_not_exists ?? false,
+        }
+      : null
+    const ackWithoutDigest = {
+      schema_version: 'aun-discord-provider-ack/v1' as const,
+      provider_request_digest: request.provider_request_digest,
+      actual_provider_request_digest: actualRequestDigest,
+      message_id: sent.id,
+      channel_id: request.channel_id,
+      thread_id: request.thread_id,
+      nonce: String(sent.nonce ?? ''),
+      author_id: sent.author.id,
+      message_reference: returnedReference,
+      actual_content_utf8: sent.content,
+      mention_everyone: sent.mentions.everyone,
+      mentioned_user_ids: [...sent.mentions.users.keys()].sort(),
+      mentioned_role_ids: [...sent.mentions.roles.keys()].sort(),
+    }
+    const ack = decodeDiscordProviderAck({
+      ...ackWithoutDigest,
+      provider_response_digest: discordProviderResponseDigest(ackWithoutDigest),
+    })
+    validateDiscordProviderAck(request, ack)
+    return ack
   }
 
   async fetchHistory(channel: string, limit = 50, before?: string): Promise<UnifiedMessage[]> {

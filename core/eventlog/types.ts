@@ -23,7 +23,26 @@ export const EVENT_TYPES = [
   'reply.enqueued', // written atomically with turn.completed (transactional outbox)
   'reply.delivery_claimed', // outbox consumer claims one delivery attempt
   'reply.delivered', // terminal: carries transport message id
+  'reply.handoff_accepted', // terminal placement truth; never provider-delivered
   'reply.failed', // retryable → next delivery epoch claimable; permanent → terminal
+  // Transport-Neutral Contract r1.1.4 lifecycle and authority records.
+  // These remain payload contracts over the existing append-only event_log;
+  // no physical schema object is introduced by the contract layer.
+  'reply.provider_nonce_reserved',
+  'reply.provider_invocation_started',
+  'reply.delivery_unknown',
+  'reply.delivery_reconciliation_requested',
+  'reply.delivery_reconciliation_observed',
+  'reply.delivery_reconciliation_resolved',
+  'reply.delivery_reopened',
+  'reply.fanout_planned',
+  'reply.zero_external_effect_evidence_recorded',
+  'reply.zero_external_effect_attested',
+  'reply.zero_external_effect_attestation_consumed',
+  'reply.retry_budget_snapshot',
+  'authority.loaded_connector_registered',
+  'authority.zero_effect_producer_registered',
+  'authority.retry_budget_issuer_registered',
   // conversation metadata
   'conversation.linked',
 ] as const
@@ -129,7 +148,7 @@ export interface OutboxDelivery {
   replyId: string
   channelExternalId: string | null
   content: string
-  /** Idempotency nonce for the transport layer (V1 pattern: enforced nonce). */
+  /** Stable transport nonce; nonce errors are never delivery evidence. */
   nonce: string
   payload: Record<string, unknown>
 }
@@ -141,14 +160,59 @@ export interface TransportSendResult {
 /**
  * Transport adapter consumed by the outbox dispatcher. Discord/Slack/CLI
  * adapters implement this at cutover; fixtures inject fakes.
- * Implementations MUST be idempotent on nonce (duplicate nonce = return the
- * original send's id, or throw DuplicateNonceError).
+ * Legacy compatibility transport. The Transport-Neutral direct adapter uses
+ * frozen request/ack envelopes; a thrown nonce error never means delivered.
  */
 export interface OutboxTransport {
   send(delivery: OutboxDelivery): Promise<TransportSendResult>
 }
 
 export class AppendOnlyViolationError extends Error {}
+
+/** Same event_id was reused with different canonical conflict material. */
+export class EventIdCanonicalMaterialCollisionError extends Error {
+  readonly code = 'EVENT_ID_CANONICAL_MATERIAL_COLLISION' as const
+}
+
+/** A deterministic atomic group was only partly durable. */
+export class ReopenAtomicSetIncompleteError extends Error {
+  readonly code = 'REOPEN_ATOMIC_SET_INCOMPLETE' as const
+}
+
+/** Persisted evidence does not authorize a reopened provider attempt. */
+export class ReopenNotAuthorizedError extends Error {
+  readonly code = 'REOPEN_NOT_AUTHORIZED' as const
+}
+
+/** A different outcome already won for the same delivery attempt. */
+export class ReconciliationTransitionCollisionError extends Error {
+  readonly code = 'RECONCILIATION_TRANSITION_COLLISION' as const
+}
+
+/** A fan-out event or child set disagrees with its deterministic plan. */
+export class FanoutCollisionError extends Error {
+  readonly code = 'FANOUT_COLLISION' as const
+}
+
+/** Terminal evidence cannot be joined to the persisted fan-out child. */
+export class FanoutParentLinkMismatchError extends Error {
+  readonly code = 'FANOUT_PARENT_LINK_MISMATCH' as const
+}
+
+/** A provider nonce was already reserved for different canonical material. */
+export class ProviderNonceCollisionError extends Error {
+  readonly code = 'PROVIDER_NONCE_COLLISION' as const
+}
+
+/** Persisted loaded connector authority is absent, stale, or unverifiable. */
+export class LoadedRegistrationUnprovenError extends Error {
+  readonly code = 'LOADED_REGISTRATION_UNPROVEN' as const
+}
+
+/** One invocation-start CAS already exists with different attempt material. */
+export class InvocationStartCollisionError extends Error {
+  readonly code = 'INVOCATION_START_COLLISION' as const
+}
 
 /** Thrown internally when a conditional claim insert loses the race. */
 export class ClaimLostError extends Error {

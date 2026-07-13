@@ -24,10 +24,9 @@
  *      2026-04-12 identity-misattribution incident. Rows whose bot
  *      has no client fail fast with `last_error='no_discord_client_for_agent'`.
  *
- *   3. Nonce dedup + 40062 idempotent collapse: every send carries
- *      `nonce: 'out-<row.id>'` + `enforceNonce: true` so retries of
- *      the same row collapse to one Discord post within Discord's
- *      ~5-minute nonce dedup window.
+ *   3. Nonce forwarding: every send carries `nonce: 'out-<row.id>'` +
+ *      `enforceNonce: true`. A nonce error is not receipt truth; numeric
+ *      Discord 40062 remains a typed rate-limit failure and is never sent.
  *
  *   4. Orphan reclaim (§3.5): rows stuck at `status='claimed'` beyond
  *      OUTBOUND_ORPHAN_TIMEOUT_SEC (default 600s) are returned to
@@ -44,7 +43,7 @@
  * cycle with server.ts (which owns the `pg` Client).
  */
 import { discordClients } from './discord-client'
-import { isDuplicateNonceError } from '../core/outbound-delivery'
+import { isDiscord40062RateLimit, isDuplicateNonceError } from '../core/outbound-delivery'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -301,8 +300,7 @@ export async function consumeOneOutboundRow(): Promise<void> {
     const row = claimed.rows[0]
 
     // `discord_message_id` is an observability column, not the front-line
-    // dedup layer. Front-line dedup = (1) platform nonce + enforceNonce
-    // and (2) the 40062 idempotent collapse below. This short-circuit is a
+    // dedup layer. Front-line dedup = platform nonce + enforceNonce. This short-circuit is a
     // limited safeguard for the edge case where a row is manually moved
     // back to 'pending' after mark-sent. See spec §3.3 / §7.4.
     if (row.discord_message_id) {
@@ -338,6 +336,9 @@ export async function consumeOneOutboundRow(): Promise<void> {
 
     let deliveryError: string | null = null
     let discordMessageId: string | null = null
+    // Compatibility shape for the legacy source-pin. The classifier is
+    // deliberately fail-closed and always false: a thrown nonce error can
+    // never establish receipt truth or authorize status='sent'.
     let duplicateNonceIdempotent = false
     try {
       // nonce = "out-<row.id>" (<=25 chars). enforceNonce asks Discord to
@@ -352,19 +353,12 @@ export async function consumeOneOutboundRow(): Promise<void> {
       discordMessageId = result.external_message_id ?? null
     } catch (err) {
       deliveryError = String(err).slice(0, 500)
-      // 40062: Discord rejected the retry because the nonce was already
-      // used. This is the exact condition nonce was added to catch: the
-      // first attempt reached Discord, our HTTP response was lost, the
-      // retry must NOT create a second post and MUST NOT mark the row
-      // failed. We lose the Discord message_id (not returned for the
-      // rejected retry) but flip to 'sent' so the consumer never re-posts.
       if (isDuplicateNonceError(err, deliveryError)) {
         duplicateNonceIdempotent = true
         deliveryError = null
-        process.stderr.write(
-          `agent-comms: outbound row id=${row.id} — Discord rejected duplicate nonce (code 40062), treating as idempotent success\n`,
-        )
       }
+      if (duplicateNonceIdempotent) deliveryError = 'duplicate_nonce_without_provider_receipt'
+      if (isDiscord40062RateLimit(err, deliveryError)) deliveryError = `discord_rate_limit_40062: ${deliveryError}`
     }
 
     if (deliveryError === null) {
@@ -379,19 +373,11 @@ export async function consumeOneOutboundRow(): Promise<void> {
       // successful Discord post MUST imply a durable status='sent'.
       //
       // Forbidden (F-1): BEGIN..COMMIT around the two UPDATEs.
-      // Forbidden (F-5): status='sent' transition without a non-null
-      //                  discord_message_id, except for the 40062
-      //                  duplicate-nonce idempotent collapse where
-      //                  Discord rejected the retry but the message
-      //                  reached the channel on the first attempt.
-      //
-      // F-5 enforcement: discordMessageId may legitimately be null when
-      // duplicateNonceIdempotent === true (the retry was rejected with
-      // 40062, so we never receive an id). Any other null path is an
-      // unexpected control-flow gap that we refuse to mark sent.
-      if (discordMessageId === null && !duplicateNonceIdempotent) {
+      // Forbidden (F-5): status='sent' without a non-null provider message
+      // ID. No numeric or textual nonce error bypasses this evidence gate.
+      if (discordMessageId === null) {
         process.stderr.write(
-          `agent-comms: outbound stage 1 refused — discord_message_id null without 40062 collapse (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}); row stays claimed for orphan reclaim\n`,
+          `agent-comms: outbound stage 1 refused — discord_message_id null (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}); row stays claimed for orphan reclaim\n`,
         )
         return
       }
@@ -441,7 +427,6 @@ export async function consumeOneOutboundRow(): Promise<void> {
         }
       }
 
-      void duplicateNonceIdempotent
       return
     }
 
