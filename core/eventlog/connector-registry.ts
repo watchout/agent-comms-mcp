@@ -6,6 +6,8 @@ import { assertByteIdenticalEvent, EventLog } from './store'
 import {
   LoadedRegistrationUnprovenError,
   parseEventPayload,
+  type AppendEvent,
+  type AppendResult,
   type StoredEvent,
 } from './types'
 import {
@@ -24,6 +26,12 @@ import {
   type Sha256,
   type ZeroEffectProducerRegistrationV1,
 } from './transport-contract'
+
+class ConnectorRegistryEventLog extends EventLog {
+  appendVerifiedAuthority(input: AppendEvent): Promise<AppendResult> {
+    return this.appendRegistryVerifiedAuthority(input)
+  }
+}
 
 export interface LoadedBuildAttestationVerificationV1 {
   verified: true
@@ -117,14 +125,14 @@ function fail(message: string): never {
 }
 
 export class ConnectorRegistry {
-  private readonly log: EventLog
+  private readonly log: ConnectorRegistryEventLog
 
   constructor(
     private readonly db: DbAdapter,
     private readonly verifier: LoadedConnectorVerifierPort,
   ) {
     requireSha(verifier.loader_identity_digest, 'loader_identity_digest')
-    this.log = new EventLog(db)
+    this.log = new ConnectorRegistryEventLog(db)
   }
 
   async registerLoadedConnector(input: RegisterLoadedConnectorInput): Promise<{ inserted: boolean; registration: LoadedConnectorRegistrationV1 }> {
@@ -304,7 +312,7 @@ export class ConnectorRegistry {
       verification.registry_generation !== resolved.registration.registry_generation ||
       verification.verifier_contract_version !== registration!.verifier_contract_version
     ) fail('producer registration is not bound to loaded capability/build/test authority')
-    const result = await this.log.append(producerRegistrationEvent(registration!))
+    const result = await this.log.appendVerifiedAuthority(producerRegistrationEvent(registration!))
     return { inserted: result.inserted, registration: registration! }
   }
 
@@ -337,7 +345,7 @@ export class ConnectorRegistry {
       verification.registry_generation !== registration!.registry_generation ||
       verification.registry_generation !== resolved.registration.registry_generation
     ) fail('retry-budget issuer registration is not bound to loaded capability/policy/build/test authority')
-    const result = await this.log.append(issuerRegistrationEvent(registration!))
+    const result = await this.log.appendVerifiedAuthority(issuerRegistrationEvent(registration!))
     return { inserted: result.inserted, registration: registration! }
   }
 }

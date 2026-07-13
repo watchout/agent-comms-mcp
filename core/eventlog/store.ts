@@ -13,6 +13,7 @@ import {
   EVENT_TYPES,
   EventIdCanonicalMaterialCollisionError,
   FanoutCollisionError,
+  LoadedRegistrationUnprovenError,
   ReconciliationTransitionCollisionError,
   ReopenAtomicSetIncompleteError,
   ReopenNotAuthorizedError,
@@ -31,6 +32,7 @@ import {
   decodeFanoutPlan,
   decodeFanoutRequest,
   decodeIssuerRegistration,
+  decodeLoadedConnectorRegistration,
   decodeProducerRegistration,
   decodeReconciliationObservation,
   decodeReconciliationResolvedPayload,
@@ -42,8 +44,11 @@ import {
   decodeRetryBudgetAuthority,
   decodeRetryBudgetSnapshot,
   issuerRegistrationEventId,
+  issuerRegistrationEvent,
   buildFanoutProvenance,
+  loadedConnectorRegistrationEventId,
   producerRegistrationEventId,
+  producerRegistrationEvent,
   reconciliationOutcomeEventId,
   reconciliationOutcomeKey,
   reconciliationObservationEventId,
@@ -109,6 +114,19 @@ function validate(input: AppendEvent): void {
   if (!input.eventId) throw new Error('eventId is required')
   if (!EVENT_TYPES.includes(input.eventType)) {
     throw new Error(`unknown event_type: ${input.eventType}`)
+  }
+}
+
+function isRegistryVerifiedAuthorityEvent(input: AppendEvent): boolean {
+  return input.eventType === 'authority.zero_effect_producer_registered' ||
+    input.eventType === 'authority.retry_budget_issuer_registered'
+}
+
+function assertCallerAppendAllowed(input: AppendEvent): void {
+  if (isRegistryVerifiedAuthorityEvent(input)) {
+    throw new LoadedRegistrationUnprovenError(
+      `${input.eventType} must be admitted and persisted by ConnectorRegistry`,
+    )
   }
 }
 
@@ -330,7 +348,20 @@ export class EventLog {
    * Throws ClaimLostError when a claim-arbiter unique index rejects the row.
    */
   async append(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
-    if (!db) return serializedTransaction(this.db, tx => this.append(input, tx))
+    assertCallerAppendAllowed(input)
+    return this.appendValidated(input, db)
+  }
+
+  /** ConnectorRegistry is the sole admission boundary for these authority rows. */
+  protected async appendRegistryVerifiedAuthority(input: AppendEvent): Promise<AppendResult> {
+    if (!isRegistryVerifiedAuthorityEvent(input)) {
+      throw new LoadedRegistrationUnprovenError('registry authority append received a non-registry event')
+    }
+    return this.appendValidated(input)
+  }
+
+  private async appendValidated(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
+    if (!db) return serializedTransaction(this.db, tx => this.appendValidated(input, tx))
     validate(input)
     const params = [
       input.eventId,
@@ -369,7 +400,10 @@ export class EventLog {
    * outbound work does not (or vice versa).
    */
   async appendBatch(inputs: AppendEvent[]): Promise<AppendResult[]> {
-    for (const input of inputs) validate(input)
+    for (const input of inputs) {
+      validate(input)
+      assertCallerAppendAllowed(input)
+    }
     return serializedTransaction(this.db, async tx => {
       const results: AppendResult[] = []
       for (const input of inputs) {
@@ -557,30 +591,62 @@ export class EventLog {
     }
   }
 
-  private async assertCurrentRegistrationGenerations(db: DbAdapter, sources: ReopenSources): Promise<void> {
+  private async assertCurrentRegistrationAuthorities(db: DbAdapter, sources: ReopenSources): Promise<void> {
     const producerRows = await db.query<StoredEvent>(
       `SELECT * FROM event_log WHERE event_type = 'authority.zero_effect_producer_registered' ORDER BY seq ASC`,
     )
     const issuerRows = await db.query<StoredEvent>(
       `SELECT * FROM event_log WHERE event_type = 'authority.retry_budget_issuer_registered' ORDER BY seq ASC`,
     )
+    const loadedRows = await db.query<StoredEvent>(
+      `SELECT * FROM event_log WHERE event_type = 'authority.loaded_connector_registered' ORDER BY seq ASC`,
+    )
     let producers: ZeroEffectProducerRegistrationV1[]
     let issuers: RetryBudgetIssuerRegistrationV1[]
+    let loaded: LoadedConnectorRegistrationV1[]
     try {
       producers = producerRows.map(row => decodeProducerRegistration(parseEventPayload(row.payload)))
       issuers = issuerRows.map(row => decodeIssuerRegistration(parseEventPayload(row.payload)))
+      loaded = loadedRows.map(row => {
+        const registration = decodeLoadedConnectorRegistration(parseEventPayload(row.payload))
+        assertByteIdenticalEvent({
+          eventId: loadedConnectorRegistrationEventId(
+            registration.registration_id,
+            registration.registry_generation,
+          ),
+          eventType: 'authority.loaded_connector_registered',
+          payload: registration as unknown as Record<string, unknown>,
+        }, row)
+        return registration
+      })
+      assertByteIdenticalEvent(producerRegistrationEvent(sources.producer), sources.producerEvent)
+      assertByteIdenticalEvent(issuerRegistrationEvent(sources.issuer), sources.issuerEvent)
     } catch (error) {
       throw new ReopenNotAuthorizedError(`registration projection is unverifiable: ${String(error)}`)
     }
     const sameProducer = producers.filter(item => item.registration_id === sources.producer.registration_id)
     const sameIssuer = issuers.filter(item => item.registration_id === sources.issuer.registration_id)
+    const sameConnector = loaded.filter(item => item.connector_instance_id === sources.producer.connector_instance_id)
+    if (sameConnector.length === 0) {
+      throw new ReopenNotAuthorizedError('current loaded connector registration is missing')
+    }
+    const loadedGeneration = Math.max(...sameConnector.map(item => item.registry_generation))
+    const currentLoaded = sameConnector.filter(item => item.registry_generation === loadedGeneration)
     if (
       sameProducer.length === 0 ||
       Math.max(...sameProducer.map(item => item.registry_generation)) !== sources.producer.registry_generation ||
       sameIssuer.length === 0 ||
-      Math.max(...sameIssuer.map(item => item.registry_generation)) !== sources.issuer.registry_generation
+      Math.max(...sameIssuer.map(item => item.registry_generation)) !== sources.issuer.registry_generation ||
+      currentLoaded.length !== 1 ||
+      currentLoaded[0]!.status !== 'active' ||
+      currentLoaded[0]!.registry_generation !== sources.producer.registry_generation ||
+      currentLoaded[0]!.registry_generation !== sources.issuer.registry_generation ||
+      currentLoaded[0]!.canonical_capability_digest !== sources.producer.capability_digest ||
+      currentLoaded[0]!.canonical_capability_digest !== sources.issuer.capability_digest
     ) {
-      throw new ReopenNotAuthorizedError('producer or issuer registration generation is retired')
+      throw new ReopenNotAuthorizedError(
+        'producer or issuer authority is retired or not rebound to the exact current loaded registration',
+      )
     }
   }
 
@@ -697,7 +763,7 @@ export class EventLog {
     ) {
       throw new ReopenNotAuthorizedError('issuer, authority, budget, or next attempt is unauthorized')
     }
-    await this.assertCurrentRegistrationGenerations(db, sources)
+    await this.assertCurrentRegistrationAuthorities(db, sources)
 
     const priorConsumption = await db.queryOne<StoredEvent>(
       'SELECT * FROM event_log WHERE event_id = $1',
