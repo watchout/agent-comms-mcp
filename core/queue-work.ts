@@ -1,3 +1,5 @@
+import { writeAnchoredReplyInTransaction } from './anchored-reply'
+
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
 
@@ -84,6 +86,7 @@ export interface LlmRuntimeAdapter {
   invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult>
 }
 
+/** @deprecated Queue-work finalization is transaction-native; retained for API compatibility. */
 export interface QueueReplySender {
   sendReply(input: {
     queue_id: string
@@ -130,6 +133,7 @@ export interface QueueWorkRow {
   claimed_by?: string | null
   claimed_at?: Date | string | null
   claim_expires_at?: Date | string | null
+  replied_with?: string | null
 }
 
 export type QueueWorkRunOutcome =
@@ -186,12 +190,13 @@ export type QueueWorkFinalizeOutcome =
         | 'MISSING_RUNNER_RESULT'
         | 'TERMINAL_EVIDENCE_INVALID'
         | 'MISSING_REPLY'
-        | 'MISSING_REPLY_SENDER'
+        | 'MISSING_REPLY_CONTEXT'
         | 'MISSING_WRITEBACK'
         | 'MISSING_WRITEBACK_SENDER'
         | 'WRITEBACK_FAILED'
         | 'RETRY_NOT_IMPLEMENTED'
         | 'FINALIZE_RACE'
+        | 'RETRYABLE_FINALIZER_FAILURE'
       queue_id?: string
       status?: string
       detail?: string
@@ -200,6 +205,7 @@ export type QueueWorkFinalizeOutcome =
 export interface FinalizeDoneQueueWorkOptions {
   queueId: string | number
   messageId?: string | null
+  /** @deprecated Ignored; reply finalization uses the caller transaction. */
   replySender?: QueueReplySender
   writebackSender?: QueueWorkWritebackSender
   resultValidator?: (input: {
@@ -567,7 +573,7 @@ export async function finalizeDoneQueueWork(
   try {
     const selected = await db.query<QueueWorkRow>(
       `SELECT id, agent_id, message_id, payload, status, priority, created_at,
-              claimed_by, claimed_at, claim_expires_at
+              claimed_by, claimed_at, claim_expires_at, replied_with
          FROM message_queue
         WHERE id = $1
         FOR UPDATE`,
@@ -586,7 +592,7 @@ export async function finalizeDoneQueueWork(
         ok: true,
         code: 'ALREADY_REPLIED',
         queue_id: queueIdOf(row),
-        replied_with: null,
+        replied_with: row.replied_with ?? null,
       }
     }
     if (row.status !== 'done') {
@@ -754,20 +760,52 @@ export async function finalizeDoneQueueWork(
         committed = true
         return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
       }
-      if (!opts.replySender) {
+      const envelope = buildQueueWorkEnvelope(row)
+      if (!envelope.channel || !envelope.reply_contract.reply_to || !envelope.reply_contract.mention) {
         await db.query('ROLLBACK')
         committed = true
-        return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
+        return {
+          ok: false,
+          code: 'MISSING_REPLY_CONTEXT',
+          queue_id: queueIdOf(row),
+          detail: 'queue payload is missing channel, reply_to, or active-owner mention',
+        }
       }
-      const envelope = buildQueueWorkEnvelope(row)
-      const sent = await opts.replySender.sendReply({
-        queue_id: queueIdOf(row),
-        agent_id: row.agent_id,
-        message_id: row.message_id,
-        content: result.reply,
-        mention: envelope.reply_contract.mention,
-      })
-      return closeDirectly(sent.message_id ?? null, 'REPLIED', writebackPostedWith, writebackBodySha256)
+      try {
+        const sent = await writeAnchoredReplyInTransaction(db, {
+          sourceQueueId: row.id,
+          expectedSourceStatus: 'done',
+          senderAgentId: row.agent_id,
+          recipientAgentId: envelope.reply_contract.mention,
+          replyTo: envelope.reply_contract.reply_to,
+          channelId: envelope.channel,
+          threadId: envelope.thread_id,
+          content: result.reply,
+          metadata: {
+            cli: 'queue-work-finalizer',
+            queue_work: true,
+          },
+          now: opts.now?.() ?? new Date(),
+        })
+        await db.query('COMMIT')
+        committed = true
+        return {
+          ok: true,
+          code: 'REPLIED',
+          queue_id: queueIdOf(row),
+          replied_with: sent.message_id,
+          writeback_posted_with: writebackPostedWith,
+        }
+      } catch (error) {
+        await db.query('ROLLBACK').catch(() => {})
+        committed = true
+        return {
+          ok: false,
+          code: 'RETRYABLE_FINALIZER_FAILURE',
+          queue_id: queueIdOf(row),
+          detail: (error as Error)?.message ?? String(error),
+        }
+      }
     }
 
     if (result.next_action === 'retry') {

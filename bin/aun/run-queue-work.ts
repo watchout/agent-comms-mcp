@@ -8,7 +8,6 @@ import {
   finalizeDoneQueueWork,
   runReceivedQueueWork,
   type LlmRuntimeAdapter,
-  type QueueReplySender,
   type QueueWorkEnvelope,
   type QueueWorkGithubIssueCommentWriteback,
   type QueueWorkHandoffContract,
@@ -408,47 +407,6 @@ function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): L
   throw new Error(`unsupported queue work runtime: ${plan.runtime}`)
 }
 
-class AgentComCliReplySender implements QueueReplySender {
-  constructor(private readonly repoRoot: string, private readonly env: NodeJS.ProcessEnv) {}
-
-  async sendReply(input: {
-    queue_id: string
-    agent_id: string
-    message_id: string | null
-    content: string
-    mention: string | null
-  }): Promise<{ message_id?: string | null }> {
-    if (!input.mention) {
-      throw new Error('reply mention is required for agent-com send')
-    }
-    const child = await execFileAsync('bun', [
-      'cli/index.ts',
-      'send',
-      '--content',
-      input.content,
-      '--mentions',
-      input.mention,
-      '--queue-id',
-      input.queue_id,
-      ...(input.message_id ? ['--message-id', input.message_id] : []),
-    ], {
-      cwd: this.repoRoot,
-      env: {
-        ...this.env,
-        AGENT_ID: input.agent_id,
-        AGENT_COM_EXPECTED_AGENT_ID: input.agent_id,
-      },
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024 * 5,
-    })
-    if (child.status !== 0) {
-      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr}`)
-    }
-    const parsed = JSON.parse(child.stdout || '{}')
-    return { message_id: parsed.message_id ?? null }
-  }
-}
-
 interface MediatedPostingRequest {
   schema_version: 'queue_work_mediated_posting_request_v1'
   queue_id: string
@@ -564,7 +522,6 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
     if (plan.finalize && runner.ok) {
       finalizer = await finalizeDoneQueueWork(legacyDb, {
         queueId: runner.queue_id,
-        replySender: new AgentComCliReplySender(plan.repoRoot, env),
         writebackSender,
       })
     }
