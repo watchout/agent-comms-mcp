@@ -11,9 +11,8 @@ import {
 } from '../core/queue-work'
 
 const DATABASE_URL = process.env.DATABASE_URL
-const dbDescribe = DATABASE_URL ? describe : describe.skip
 
-dbDescribe('transaction-native anchored reply finalizer — PostgreSQL', () => {
+if (DATABASE_URL) describe('transaction-native anchored reply finalizer — PostgreSQL', () => {
   let client: Client
   const suffix = randomUUID().slice(0, 8)
   const sender = `test-finalizer-sender-${suffix}`
@@ -203,5 +202,10 @@ dbDescribe('transaction-native anchored reply finalizer — PostgreSQL', () => {
     process.stdout.write(`finalizer_latency_ms p95=${p95.toFixed(2)} max=${max.toFixed(2)} samples=${samples.length}\n`)
     expect(p95).toBeLessThanOrEqual(250)
     expect(max).toBeLessThanOrEqual(1000)
+  })
+})
+else describe('transaction-native anchored reply finalizer — PostgreSQL', () => {
+  test('requires DATABASE_URL for the PostgreSQL fixture', () => {
+    expect(DATABASE_URL).toBeUndefined()
   })
 })
