@@ -4,6 +4,39 @@
   "title": "AUN K0 Delivery Vocabulary v1",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_type", "terminal", "proof_tier"],
+      "properties": {
+        "event_type": {
+          "enum": [
+            "reply.enqueued",
+            "reply.delivery_claimed",
+            "reply.handoff_accepted",
+            "reply.delivered",
+            "reply.delivery_unknown",
+            "reply.failed_retryable",
+            "reply.failed_permanent",
+            "reply.dead_lettered"
+          ]
+        },
+        "terminal": { "type": "boolean" },
+        "proof_tier": {
+          "enum": [
+            "committed_event",
+            "fenced_claim",
+            "durable_queue_receipt",
+            "provider_receipt",
+            "reconciliation_required",
+            "attempt_evidence",
+            "semantic_terminal"
+          ]
+        }
+      }
+    }
+  },
   "required": ["schema_version", "events", "guarantees", "invariants"],
   "properties": {
     "schema_version": { "const": "aun-k0-delivery-vocabulary/v1" },
@@ -12,37 +45,17 @@
       "minItems": 8,
       "maxItems": 8,
       "uniqueItems": true,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["event_type", "terminal", "proof_tier"],
-        "properties": {
-          "event_type": {
-            "enum": [
-              "reply.enqueued",
-              "reply.delivery_claimed",
-              "reply.handoff_accepted",
-              "reply.delivered",
-              "reply.delivery_unknown",
-              "reply.failed_retryable",
-              "reply.failed_permanent",
-              "reply.dead_lettered"
-            ]
-          },
-          "terminal": { "type": "boolean" },
-          "proof_tier": {
-            "enum": [
-              "committed_event",
-              "fenced_claim",
-              "durable_queue_receipt",
-              "provider_receipt",
-              "reconciliation_required",
-              "attempt_evidence",
-              "semantic_terminal"
-            ]
-          }
-        }
-      }
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.enqueued" }, "terminal": { "const": false }, "proof_tier": { "const": "committed_event" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.delivery_claimed" }, "terminal": { "const": false }, "proof_tier": { "const": "fenced_claim" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.handoff_accepted" }, "terminal": { "const": false }, "proof_tier": { "const": "durable_queue_receipt" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.delivered" }, "terminal": { "const": true }, "proof_tier": { "const": "provider_receipt" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.delivery_unknown" }, "terminal": { "const": true }, "proof_tier": { "const": "reconciliation_required" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.failed_retryable" }, "terminal": { "const": false }, "proof_tier": { "const": "attempt_evidence" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.failed_permanent" }, "terminal": { "const": true }, "proof_tier": { "const": "semantic_terminal" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "reply.dead_lettered" }, "terminal": { "const": true }, "proof_tier": { "const": "semantic_terminal" } } }] }
+      ],
+      "items": false
     },
     "guarantees": {
       "type": "object",

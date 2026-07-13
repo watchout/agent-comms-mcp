@@ -35,7 +35,18 @@
       "then": {
         "properties": {
           "profile": { "const": "production" },
-          "production_authority": { "const": true }
+          "production_authority": { "const": true },
+          "capabilities": {
+            "properties": {
+              "immutable_event_history": { "const": true },
+              "atomic_claim": { "const": true },
+              "skip_locked": { "const": true },
+              "listen_notify": { "const": true },
+              "multi_worker_concurrency": { "const": true }
+            }
+          },
+          "unsupported": { "maxItems": 0 },
+          "fail_closed": { "const": false }
         }
       }
     },
@@ -45,6 +56,26 @@
         "properties": {
           "profile": { "const": "unit_conformance" },
           "production_authority": { "const": false },
+          "capabilities": {
+            "properties": {
+              "immutable_event_history": { "const": true },
+              "atomic_claim": { "const": false },
+              "skip_locked": { "const": false },
+              "listen_notify": { "const": false },
+              "multi_worker_concurrency": { "const": false }
+            }
+          },
+          "unsupported": {
+            "minItems": 4,
+            "maxItems": 4,
+            "prefixItems": [
+              { "const": "production_authority" },
+              { "const": "skip_locked_claim" },
+              { "const": "listen_notify_wake_hint" },
+              { "const": "multi_worker_concurrency" }
+            ],
+            "items": false
+          },
           "fail_closed": { "const": true }
         }
       }

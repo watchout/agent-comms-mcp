@@ -4,6 +4,19 @@
   "title": "AUN K0 Benchmark Plan Result v1",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "acceptanceResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "predicate", "status", "measured"],
+      "properties": {
+        "id": { "type": "string" },
+        "predicate": { "type": "string", "minLength": 1 },
+        "status": { "const": "not_measured" },
+        "measured": { "type": "null" }
+      }
+    }
+  },
   "required": [
     "schema_version",
     "mode",
@@ -58,23 +71,44 @@
       "type": "array",
       "minItems": 15,
       "maxItems": 15,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "predicate", "status", "measured"],
-        "properties": {
-          "id": { "type": "string", "pattern": "^AUN-(PERF|RES|EFF)-[0-9]{3}$" },
-          "predicate": { "type": "string", "minLength": 1 },
-          "status": { "const": "not_measured" },
-          "measured": { "type": "null" }
-        }
-      }
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-001" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-002" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-003" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-004" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-005" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-006" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-001" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-002" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-003" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-004" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-005" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-006" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-007" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-008" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-EFF-001" } } }] }
+      ],
+      "items": false
     },
     "specimens": {
       "type": "array",
       "minItems": 12,
       "maxItems": 12,
-      "items": { "type": "string", "minLength": 1 }
+      "prefixItems": [
+        { "const": "event_id_same_payload_idempotent" },
+        { "const": "event_id_different_payload_collision" },
+        { "const": "two_live_daemons_no_claim_steal" },
+        { "const": "stale_fencing_token_rejected" },
+        { "const": "every_crash_boundary_zero_loss" },
+        { "const": "historic_prefix_does_not_starve_matched_reconciliation" },
+        { "const": "notification_loss_converges_via_scan" },
+        { "const": "runtime_timeout_is_not_semantic_completion" },
+        { "const": "invalid_binding_causes_zero_model_calls" },
+        { "const": "provider_without_receipt_never_emits_delivered" },
+        { "const": "same_nonce_retry_has_one_external_effect" },
+        { "const": "long_history_keeps_query_slo" }
+      ],
+      "items": false
     },
     "plan_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "generated_at": { "type": "string", "format": "date-time" },
