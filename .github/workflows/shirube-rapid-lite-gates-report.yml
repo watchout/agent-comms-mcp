@@ -64,14 +64,20 @@ jobs:
           const structuredAuditCommentRef = refFromBody(["structured_audit_comment_ref", "structured_audit_comment", "structured-audit-comment"]);
           const additionalReviewRef = refFromBody(["additional_review_ref", "additional_review", "additional-review", "protected_review_ref", "protected_review"]);
           const additionalReviewCommentRef = refFromBody(["additional_review_comment_ref", "additional_review_comment", "additional-review-comment", "protected_review_comment_ref", "protected_review_comment"]);
-          const defaultRoute = {
-            cellId: "CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001",
-            handoffRef: ".shirube/control-handoffs/CH-001.yaml",
-            auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
-            auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
-          };
           const primaryCellId = body.match(/(?:^|\n)\s*CELL-ID\s*:\s*([^\s`'"]+)/i)?.[1]?.trim() || "";
           const implementationRoutes = [
+            {
+              cellId: "CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001",
+              handoffRef: ".shirube/control-handoffs/CH-001.yaml",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
+            },
+            {
+              cellId: "CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001",
+              handoffRef: ".shirube/control-handoffs/CH-AUN-FIRST-F1-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml",
+            },
             {
               cellId: "CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001",
               handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml",
@@ -151,7 +157,11 @@ jobs:
               auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
             },
           ];
-          const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
+          const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId);
+          if (!route) {
+            console.error(`ROUTE_NOT_REGISTERED: CELL-ID=${primaryCellId || "<missing>"}`);
+            process.exit(1);
+          }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `structured_audit_comment_ref=${supportedCommentRef(structuredAuditCommentRef) ? structuredAuditCommentRef : ""}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `additional_review_ref=${localRef(additionalReviewRef)}\n`);
