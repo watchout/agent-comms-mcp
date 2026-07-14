@@ -43,6 +43,8 @@ export const EVENT_TYPES = [
   'authority.loaded_connector_registered',
   'authority.zero_effect_producer_registered',
   'authority.retry_budget_issuer_registered',
+  'authority.connector_registry_admission_recorded',
+  'authority.reopen_scan_cursor_advanced',
   // conversation metadata
   'conversation.linked',
 ] as const
@@ -207,6 +209,30 @@ export class ProviderNonceCollisionError extends Error {
 /** Persisted loaded connector authority is absent, stale, or unverifiable. */
 export class LoadedRegistrationUnprovenError extends Error {
   readonly code = 'LOADED_REGISTRATION_UNPROVEN' as const
+}
+
+/** Generic EventLog callers may never persist registered-loader authority. */
+export class ProtectedAuthorityAppendForbiddenError extends Error {
+  readonly code = 'PROTECTED_AUTHORITY_APPEND_FORBIDDEN' as const
+}
+
+/** The private registered-loader composition root has not established authority. */
+export class RegisteredLoaderNotReadyError extends Error {
+  readonly code = 'REGISTERED_LOADER_NOT_READY' as const
+}
+
+/** Durable subject/receipt authority is malformed, partial, duplicated, or colliding. */
+export class AuthorityAdmissionError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(`${code}: ${message}`)
+  }
+}
+
+/** The private append-only reopen scan cursor cannot be trusted. */
+export class RegisteredReopenCursorError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(`${code}: ${message}`)
+  }
 }
 
 /** One invocation-start CAS already exists with different attempt material. */

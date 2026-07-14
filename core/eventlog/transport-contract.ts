@@ -57,6 +57,12 @@ export const CONTRACT_DOMAINS = {
   producerRegistrationKey: 'aun-zero-effect-producer-registration-key/v1\n',
   issuerRegistration: 'aun-retry-budget-issuer-registration/v1\n',
   issuerRegistrationKey: 'aun-retry-budget-issuer-registration-key/v1\n',
+  authoritySubjectConflictMaterial: 'aun-authority-subject-conflict-material/v1\n',
+  authoritySubjectPayload: 'aun-authority-subject-payload/v1\n',
+  authorityAdmissionId: 'aun-authority-admission-id/v1\n',
+  authorityAdmissionReceiptMaterial: 'aun-authority-admission-receipt-material/v1\n',
+  authorityAdmissionReceiptEventId: 'aun-authority-admission-receipt-event-id/v1\n',
+  registeredReopenCursorSuccessor: 'aun-registered-reopen-scan-cursor-successor/v1\n',
   zeroEffectAttestation: 'aun-zero-external-effect-attestation/v1\n',
   retryBudgetAuthority: 'aun-retry-budget-authority/v1\n',
   retryBudgetSnapshotKey: 'aun-retry-budget-snapshot-key/v1\n',
@@ -344,6 +350,347 @@ export const LOADED_CONNECTOR_REGISTRATION_EVENT_ID_VECTOR = {
   sha256: '5c0fce43316c349afba145d811fb119c9f17dcc1a2c1b34de86ed90ad63b6eb1',
   event_id: 'loaded-connector-registration:5c0fce43316c349afba145d811fb119c9f17dcc1a2c1b34de86ed90ad63b6eb1',
 } as const
+
+export const AUTHORITY_SUBJECT_EVENT_TYPES = [
+  'authority.loaded_connector_registered',
+  'authority.zero_effect_producer_registered',
+  'authority.retry_budget_issuer_registered',
+] as const
+
+export const PROTECTED_AUTHORITY_EVENT_TYPES = [
+  ...AUTHORITY_SUBJECT_EVENT_TYPES,
+  'authority.connector_registry_admission_recorded',
+  'authority.reopen_scan_cursor_advanced',
+] as const
+
+export type AuthoritySubjectEventType = (typeof AUTHORITY_SUBJECT_EVENT_TYPES)[number]
+export type ProtectedAuthorityEventType = (typeof PROTECTED_AUTHORITY_EVENT_TYPES)[number]
+export type AuthorityAdmissionVerificationKind =
+  | 'loaded_build_and_fixture'
+  | 'zero_effect_producer'
+  | 'retry_budget_issuer_and_policy'
+
+export function isProtectedAuthorityEventType(value: string): value is ProtectedAuthorityEventType {
+  return (PROTECTED_AUTHORITY_EVENT_TYPES as readonly string[]).includes(value)
+}
+
+export interface AuthorityAdmissionMaterialV2 {
+  subject_event_id: string
+  subject_event_type: AuthoritySubjectEventType
+  subject_conflict_material_digest: Sha256
+  subject_payload_digest: Sha256
+  registration_id: string
+  connector_instance_id: string
+  registry_generation: number
+  capability_digest: Sha256
+  loader_catalog_digest: Sha256
+  loader_identity_digest: Sha256
+  verification_kind: AuthorityAdmissionVerificationKind
+  verifier_contract_version: string
+  build_test_attestation_digest: Sha256
+  policy_source_digest: Sha256 | null
+}
+
+export interface AuthorityAdmissionReceiptV1 extends AuthorityAdmissionMaterialV2 {
+  schema_version: 'aun-authority-admission-receipt/v1'
+  admission_id: Sha256
+  admission_digest: Sha256
+}
+
+const AUTHORITY_ADMISSION_MATERIAL_FIELDS = [
+  'subject_event_id', 'subject_event_type', 'subject_conflict_material_digest',
+  'subject_payload_digest', 'registration_id', 'connector_instance_id',
+  'registry_generation', 'capability_digest', 'loader_catalog_digest',
+  'loader_identity_digest', 'verification_kind', 'verifier_contract_version',
+  'build_test_attestation_digest', 'policy_source_digest',
+] as const
+
+const AUTHORITY_ADMISSION_RECEIPT_FIELDS = [
+  'schema_version', 'admission_id', ...AUTHORITY_ADMISSION_MATERIAL_FIELDS, 'admission_digest',
+] as const
+
+export function decodeAuthorityAdmissionMaterial(value: unknown): AuthorityAdmissionMaterialV2 {
+  assertExactKeys(value, AUTHORITY_ADMISSION_MATERIAL_FIELDS, 'AuthorityAdmissionMaterialV2')
+  const material = value as unknown as AuthorityAdmissionMaterialV2
+  assertString(material.subject_event_id, 'subject_event_id')
+  if (!(AUTHORITY_SUBJECT_EVENT_TYPES as readonly string[]).includes(material.subject_event_type)) {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_SUBJECT_INVALID', 'unknown subject_event_type')
+  }
+  for (const field of [
+    'subject_conflict_material_digest', 'subject_payload_digest', 'capability_digest',
+    'loader_catalog_digest', 'loader_identity_digest', 'build_test_attestation_digest',
+  ] as const) assertSha(material[field], field)
+  assertUuid(material.registration_id, 'registration_id')
+  assertUuid(material.connector_instance_id, 'connector_instance_id')
+  assertPositiveInteger(material.registry_generation, 'registry_generation')
+  assertString(material.verifier_contract_version, 'verifier_contract_version')
+  if (![
+    'loaded_build_and_fixture', 'zero_effect_producer', 'retry_budget_issuer_and_policy',
+  ].includes(material.verification_kind)) {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_SUBJECT_INVALID', 'unknown verification_kind')
+  }
+  const expectedKind: Record<AuthoritySubjectEventType, AuthorityAdmissionVerificationKind> = {
+    'authority.loaded_connector_registered': 'loaded_build_and_fixture',
+    'authority.zero_effect_producer_registered': 'zero_effect_producer',
+    'authority.retry_budget_issuer_registered': 'retry_budget_issuer_and_policy',
+  }
+  if (expectedKind[material.subject_event_type] !== material.verification_kind) {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_SUBJECT_INVALID', 'verification_kind differs from subject type')
+  }
+  assertNullableSha(material.policy_source_digest, 'policy_source_digest')
+  if ((material.subject_event_type === 'authority.retry_budget_issuer_registered') !== (material.policy_source_digest !== null)) {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_SUBJECT_INVALID', 'policy_source_digest one-of differs from subject type')
+  }
+  return material
+}
+
+export function authoritySubjectConflictMaterialDigest(conflictMaterial: unknown): Sha256 {
+  return digestCanonical(CONTRACT_DOMAINS.authoritySubjectConflictMaterial, conflictMaterial)
+}
+
+export function authoritySubjectPayloadDigest(payload: unknown): Sha256 {
+  return digestCanonical(CONTRACT_DOMAINS.authoritySubjectPayload, payload)
+}
+
+export function authorityAdmissionId(material: AuthorityAdmissionMaterialV2): Sha256 {
+  return digestCanonical(CONTRACT_DOMAINS.authorityAdmissionId, decodeAuthorityAdmissionMaterial(material))
+}
+
+function receiptWithoutDigest(
+  material: AuthorityAdmissionMaterialV2,
+  admissionId = authorityAdmissionId(material),
+): Omit<AuthorityAdmissionReceiptV1, 'admission_digest'> {
+  return {
+    schema_version: 'aun-authority-admission-receipt/v1',
+    admission_id: admissionId,
+    ...decodeAuthorityAdmissionMaterial(material),
+  }
+}
+
+export function authorityAdmissionDigest(
+  value: AuthorityAdmissionMaterialV2 | Omit<AuthorityAdmissionReceiptV1, 'admission_digest'>,
+): Sha256 {
+  const receipt = 'schema_version' in value
+    ? value
+    : receiptWithoutDigest(value)
+  return digestCanonical(CONTRACT_DOMAINS.authorityAdmissionReceiptMaterial, receipt)
+}
+
+export function buildAuthorityAdmissionReceipt(
+  material: AuthorityAdmissionMaterialV2,
+): AuthorityAdmissionReceiptV1 {
+  const withoutDigest = receiptWithoutDigest(material)
+  return decodeAuthorityAdmissionReceipt({
+    ...withoutDigest,
+    admission_digest: authorityAdmissionDigest(withoutDigest),
+  })
+}
+
+export function authorityAdmissionReceiptEventId(receipt: AuthorityAdmissionReceiptV1): string {
+  const decoded = decodeAuthorityAdmissionReceipt(receipt)
+  const key = {
+    admission_id: decoded.admission_id,
+    subject_event_id: decoded.subject_event_id,
+    subject_event_type: decoded.subject_event_type,
+    registry_generation: decoded.registry_generation,
+    admission_digest: decoded.admission_digest,
+  }
+  return `authority-admission:${digestCanonical(CONTRACT_DOMAINS.authorityAdmissionReceiptEventId, key)}`
+}
+
+export function decodeAuthorityAdmissionReceipt(value: unknown): AuthorityAdmissionReceiptV1 {
+  assertExactKeys(value, AUTHORITY_ADMISSION_RECEIPT_FIELDS, 'AuthorityAdmissionReceiptV1')
+  const receipt = value as unknown as AuthorityAdmissionReceiptV1
+  if (receipt.schema_version !== 'aun-authority-admission-receipt/v1') {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_RECEIPT_INVALID', 'wrong admission receipt schema')
+  }
+  assertSha(receipt.admission_id, 'admission_id')
+  assertSha(receipt.admission_digest, 'admission_digest')
+  const material: AuthorityAdmissionMaterialV2 = {
+    subject_event_id: receipt.subject_event_id,
+    subject_event_type: receipt.subject_event_type,
+    subject_conflict_material_digest: receipt.subject_conflict_material_digest,
+    subject_payload_digest: receipt.subject_payload_digest,
+    registration_id: receipt.registration_id,
+    connector_instance_id: receipt.connector_instance_id,
+    registry_generation: receipt.registry_generation,
+    capability_digest: receipt.capability_digest,
+    loader_catalog_digest: receipt.loader_catalog_digest,
+    loader_identity_digest: receipt.loader_identity_digest,
+    verification_kind: receipt.verification_kind,
+    verifier_contract_version: receipt.verifier_contract_version,
+    build_test_attestation_digest: receipt.build_test_attestation_digest,
+    policy_source_digest: receipt.policy_source_digest,
+  }
+  decodeAuthorityAdmissionMaterial(material)
+  const expectedId = authorityAdmissionId(material)
+  if (receipt.admission_id !== expectedId) {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_ID_MISMATCH', 'admission_id differs')
+  }
+  const expectedDigest = authorityAdmissionDigest(receiptWithoutDigest(material, expectedId))
+  if (receipt.admission_digest !== expectedDigest) {
+    throw new ContractValidationError('AUTHORITY_ADMISSION_DIGEST_MISMATCH', 'admission_digest differs')
+  }
+  return receipt
+}
+
+export function authorityAdmissionReceiptEvent(receipt: AuthorityAdmissionReceiptV1): AppendEvent {
+  const decoded = decodeAuthorityAdmissionReceipt(receipt)
+  return {
+    eventId: authorityAdmissionReceiptEventId(decoded),
+    eventType: 'authority.connector_registry_admission_recorded',
+    causationId: decoded.subject_event_id,
+    payload: decoded as unknown as Record<string, unknown>,
+  }
+}
+
+export type RegisteredReopenClassificationCode =
+  | 'ELIGIBLE'
+  | 'ALREADY_RESOLVED_OR_REOPENED'
+  | 'MALFORMED_IMMUTABLE'
+  | 'REQUEST_ID_OR_CONFLICT_MISMATCH'
+  | 'SOURCE_INCOMPLETE_AT_FROZEN_EPOCH'
+  | 'SOURCE_CONFLICT_IMMUTABLE'
+  | 'AUTHORITY_SNAPSHOT_NOT_CURRENT'
+  | 'ATOMIC_SET_QUARANTINED'
+
+export interface RegisteredReopenScannedDispositionV1 {
+  request_seq: number
+  request_event_id: string
+  request_conflict_material_digest: Sha256
+  classification_code: RegisteredReopenClassificationCode
+}
+
+export interface RegisteredReopenScanCursorV1 {
+  schema_version: 'aun-registered-reopen-scan-cursor/v1'
+  selector_version: 'registered-reopen-selector/v1'
+  predecessor_cursor_event_id: string
+  cycle_source_epoch_seq: number
+  page_start_after_request_seq: number
+  page_start_after_request_event_id: string | null
+  page_end_request_seq: number
+  page_end_request_event_id: string | null
+  cycle_exhausted: boolean
+  scanned_dispositions: RegisteredReopenScannedDispositionV1[]
+  selected_request_event_id: string | null
+  selected_result: 'reopened' | 'byte_identical_existing' | null
+}
+
+const REOPEN_CURSOR_FIELDS = [
+  'schema_version', 'selector_version', 'predecessor_cursor_event_id',
+  'cycle_source_epoch_seq', 'page_start_after_request_seq',
+  'page_start_after_request_event_id', 'page_end_request_seq',
+  'page_end_request_event_id', 'cycle_exhausted', 'scanned_dispositions',
+  'selected_request_event_id', 'selected_result',
+] as const
+
+export function decodeRegisteredReopenScanCursor(value: unknown): RegisteredReopenScanCursorV1 {
+  assertExactKeys(value, REOPEN_CURSOR_FIELDS, 'RegisteredReopenScanCursorV1')
+  const cursor = value as unknown as RegisteredReopenScanCursorV1
+  if (cursor.schema_version !== 'aun-registered-reopen-scan-cursor/v1' ||
+      cursor.selector_version !== 'registered-reopen-selector/v1') {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'wrong cursor schema or selector version')
+  }
+  assertString(cursor.predecessor_cursor_event_id, 'predecessor_cursor_event_id')
+  for (const field of [
+    'cycle_source_epoch_seq', 'page_start_after_request_seq', 'page_end_request_seq',
+  ] as const) assertNonNegativeInteger(cursor[field], field)
+  assertNullableString(cursor.page_start_after_request_event_id, 'page_start_after_request_event_id')
+  assertNullableString(cursor.page_end_request_event_id, 'page_end_request_event_id')
+  assertNullableString(cursor.selected_request_event_id, 'selected_request_event_id')
+  if (typeof cursor.cycle_exhausted !== 'boolean') {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'cycle_exhausted must be boolean')
+  }
+  if (cursor.selected_result !== null && !['reopened', 'byte_identical_existing'].includes(cursor.selected_result)) {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'selected_result is invalid')
+  }
+  if (!Array.isArray(cursor.scanned_dispositions) || cursor.scanned_dispositions.length > 64) {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'scanned dispositions must contain at most 64 rows')
+  }
+  let previous: [number, string] | null = null
+  const admittedCodes: RegisteredReopenClassificationCode[] = [
+    'ELIGIBLE', 'ALREADY_RESOLVED_OR_REOPENED', 'MALFORMED_IMMUTABLE',
+    'REQUEST_ID_OR_CONFLICT_MISMATCH', 'SOURCE_INCOMPLETE_AT_FROZEN_EPOCH',
+    'SOURCE_CONFLICT_IMMUTABLE', 'AUTHORITY_SNAPSHOT_NOT_CURRENT', 'ATOMIC_SET_QUARANTINED',
+  ]
+  for (const disposition of cursor.scanned_dispositions) {
+    assertExactKeys(disposition, [
+      'request_seq', 'request_event_id', 'request_conflict_material_digest', 'classification_code',
+    ], 'RegisteredReopenScannedDispositionV1')
+    assertPositiveInteger(disposition.request_seq, 'request_seq')
+    assertString(disposition.request_event_id, 'request_event_id')
+    assertSha(disposition.request_conflict_material_digest, 'request_conflict_material_digest')
+    if (!admittedCodes.includes(disposition.classification_code)) {
+      throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'unknown classification code')
+    }
+    const tuple: [number, string] = [disposition.request_seq, disposition.request_event_id]
+    if (previous && (tuple[0] < previous[0] || tuple[0] === previous[0] && tuple[1] <= previous[1])) {
+      throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'dispositions are not strictly ordered')
+    }
+    previous = tuple
+  }
+  if ((cursor.page_start_after_request_seq === 0) !== (cursor.page_start_after_request_event_id === null)) {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'page start tuple nullability differs')
+  }
+  if ((cursor.page_end_request_seq === 0) !== (cursor.page_end_request_event_id === null)) {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'page end tuple nullability differs')
+  }
+  if (cursor.page_end_request_seq < cursor.page_start_after_request_seq ||
+      cursor.cycle_source_epoch_seq < cursor.page_end_request_seq) {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'cursor tuple moved backward or past epoch')
+  }
+  const first = cursor.scanned_dispositions[0]
+  const last = cursor.scanned_dispositions.at(-1)
+  if (!first) {
+    if (
+      cursor.page_end_request_seq !== cursor.page_start_after_request_seq ||
+      cursor.page_end_request_event_id !== cursor.page_start_after_request_event_id
+    ) throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'empty page changed its tuple')
+  } else {
+    if (
+      first.request_seq < cursor.page_start_after_request_seq ||
+      first.request_seq === cursor.page_start_after_request_seq &&
+        first.request_event_id <= (cursor.page_start_after_request_event_id ?? '')
+    ) throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'first disposition is not after page start')
+    if (
+      last!.request_seq !== cursor.page_end_request_seq ||
+      last!.request_event_id !== cursor.page_end_request_event_id
+    ) throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'page end differs from last disposition')
+  }
+  const eligible = cursor.scanned_dispositions.filter(item => item.classification_code === 'ELIGIBLE')
+  if (cursor.selected_request_event_id === null) {
+    if (cursor.selected_result !== null || eligible.length !== 0) {
+      throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'unselected cursor contains an eligible result')
+    }
+  } else if (
+    cursor.selected_result === null ||
+    cursor.cycle_exhausted ||
+    eligible.length !== 1 ||
+    eligible[0] !== last ||
+    last?.request_event_id !== cursor.selected_request_event_id
+  ) {
+    throw new ContractValidationError('REGISTERED_REOPEN_CURSOR_CORRUPT', 'selected result does not bind the last eligible disposition')
+  }
+  return cursor
+}
+
+export function registeredReopenCursorEventId(predecessorCursorEventId: string): string {
+  assertString(predecessorCursorEventId, 'predecessor_cursor_event_id')
+  return `authority-reopen-scan-cursor:${digestCanonical(CONTRACT_DOMAINS.registeredReopenCursorSuccessor, {
+    selector_version: 'registered-reopen-selector/v1',
+    predecessor_cursor_event_id: predecessorCursorEventId,
+  })}`
+}
+
+export function registeredReopenCursorEvent(cursor: RegisteredReopenScanCursorV1): AppendEvent {
+  const decoded = decodeRegisteredReopenScanCursor(cursor)
+  return {
+    eventId: registeredReopenCursorEventId(decoded.predecessor_cursor_event_id),
+    eventType: 'authority.reopen_scan_cursor_advanced',
+    causationId: decoded.selected_request_event_id,
+    payload: decoded as unknown as Record<string, unknown>,
+  }
+}
 
 export interface ConnectorAddressV1 {
   schema_version: 'aun-connector-address/v1'

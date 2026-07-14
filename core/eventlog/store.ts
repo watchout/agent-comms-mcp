@@ -1,4 +1,6 @@
-// EventLogCore/v1 store — the only write path into event_log.
+// EventLogCore/v1 generic store — the caller-visible write path into event_log.
+// Protected authority rows are owned only by the lexical registered-loader
+// composition root and are rejected at this surface.
 //
 // Writes are INSERTs only. event_id conflicts are idempotent only when the
 // complete canonical conflict material is byte-identical. Conflicts on the claim arbiters (uq_el_turn_claim /
@@ -13,9 +15,8 @@ import {
   EVENT_TYPES,
   EventIdCanonicalMaterialCollisionError,
   FanoutCollisionError,
-  LoadedRegistrationUnprovenError,
+  ProtectedAuthorityAppendForbiddenError,
   ReconciliationTransitionCollisionError,
-  ReopenAtomicSetIncompleteError,
   ReopenNotAuthorizedError,
   parseEventPayload,
   type AppendEvent,
@@ -23,37 +24,20 @@ import {
   type StoredEvent,
 } from './types'
 import {
-  PRODUCER_KIND_TO_EVIDENCE_KIND,
-  attestationConsumptionEventId,
   canonicalJson,
-  decodeAttestation,
-  decodeAttestationConsumption,
-  decodeEvidenceRecord,
   decodeFanoutPlan,
   decodeFanoutRequest,
-  decodeIssuerRegistration,
-  decodeLoadedConnectorRegistration,
-  decodeProducerRegistration,
   decodeReconciliationObservation,
   decodeReconciliationResolvedPayload,
   decodeReplyDeliveredPayload,
   decodeReplyFailedPayload,
   decodeReconciliationRequest,
-  decodeReplyDeliveryReopenedPayload,
   decodeReplyDeliveryUnknownPayload,
-  decodeRetryBudgetAuthority,
-  decodeRetryBudgetSnapshot,
-  issuerRegistrationEventId,
-  issuerRegistrationEvent,
+  isProtectedAuthorityEventType,
   buildFanoutProvenance,
-  loadedConnectorRegistrationEventId,
-  producerRegistrationEventId,
-  producerRegistrationEvent,
   reconciliationOutcomeEventId,
   reconciliationOutcomeKey,
   reconciliationObservationEventId,
-  reopenEventId,
-  retryBudgetSnapshotEventId,
   sha256Utf8,
   validateDeliveryUnit,
   type DeliveryUnknownReconciliationObservationV1,
@@ -63,17 +47,9 @@ import {
   type FanoutRequestV1,
   type LoadedConnectorRegistrationV1,
   type ReplyDeliveryReconciliationResolvedPayloadV1,
-  type ReplyDeliveryReopenedPayloadV1,
   type ReplyDeliveryUnknownPayloadV1,
   type ReplyDeliveredPayloadV1,
   type ReplyFailedPayloadV1,
-  type RetryBudgetAuthorityV1,
-  type RetryBudgetSnapshotV1,
-  type ZeroEffectProducerRegistrationV1,
-  type ZeroExternalEffectAttestationConsumptionV1,
-  type ZeroExternalEffectAttestationV1,
-  type ZeroExternalEffectEvidenceRecordV1,
-  type RetryBudgetIssuerRegistrationV1,
 } from './transport-contract'
 
 const INSERT_SQL = `
@@ -117,15 +93,10 @@ function validate(input: AppendEvent): void {
   }
 }
 
-function isRegistryVerifiedAuthorityEvent(input: AppendEvent): boolean {
-  return input.eventType === 'authority.zero_effect_producer_registered' ||
-    input.eventType === 'authority.retry_budget_issuer_registered'
-}
-
 function assertCallerAppendAllowed(input: AppendEvent): void {
-  if (isRegistryVerifiedAuthorityEvent(input)) {
-    throw new LoadedRegistrationUnprovenError(
-      `${input.eventType} must be admitted and persisted by ConnectorRegistry`,
+  if (isProtectedAuthorityEventType(input.eventType)) {
+    throw new ProtectedAuthorityAppendForbiddenError(
+      `${input.eventType} is owned by the private registered-loader boundary`,
     )
   }
 }
@@ -197,43 +168,6 @@ export function assertByteIdenticalEvent(input: AppendEvent, stored: StoredEvent
   }
 }
 
-export type ReopenAuthorizationCommitPoint =
-  | 'before_transaction'
-  | 'before_outcome_append'
-  | 'after_outcome_append'
-  | 'before_consumption_append'
-  | 'after_consumption_append'
-  | 'before_budget_snapshot_append'
-  | 'after_budget_snapshot_append'
-  | 'before_reopen_append'
-  | 'after_reopen_append'
-  | 'before_commit'
-  | 'after_commit_before_return'
-
-export interface CommitReopenAuthorizationCASInput {
-  unknown_event_id: string
-  reconciliation_request_event_id: string
-  reconciliation_observation_event_id: string
-  evidence_event_id: string
-  attestation_event_id: string
-  producer_registration_event_id: string
-  issuer_registration_event_id: string
-  budget_snapshot_event_id: string
-  retry_budget_authority: RetryBudgetAuthorityV1
-  intended_next_attempt_ordinal: number
-  /** Deterministic crash fixture only; never provider authority. */
-  on_commit_point?: (point: ReopenAuthorizationCommitPoint) => void | Promise<void>
-}
-
-export interface CommitReopenAuthorizationCASResult {
-  status: 'inserted' | 'byte_identical_existing'
-  outcome: StoredEvent
-  consumption: StoredEvent
-  generation_after_snapshot: StoredEvent
-  reopen: StoredEvent
-  provider_invocations: 0
-}
-
 export type ReconciliationTerminalCommitPoint =
   | 'before_transaction'
   | 'before_outcome_append'
@@ -292,49 +226,6 @@ export interface AppendFanoutAtomicResultV1 {
   provider_invocations: 0
 }
 
-interface ReopenSources {
-  unknownEvent: StoredEvent
-  unknown: ReplyDeliveryUnknownPayloadV1
-  requestEvent: StoredEvent
-  request: DeliveryUnknownReconciliationRequestV1
-  observationEvent: StoredEvent
-  observation: DeliveryUnknownReconciliationObservationV1
-  evidenceEvent: StoredEvent
-  evidence: ZeroExternalEffectEvidenceRecordV1
-  attestationEvent: StoredEvent
-  attestation: ZeroExternalEffectAttestationV1
-  producerEvent: StoredEvent
-  producer: ZeroEffectProducerRegistrationV1
-  issuerEvent: StoredEvent
-  issuer: RetryBudgetIssuerRegistrationV1
-  budgetEvent: StoredEvent
-  budget: RetryBudgetSnapshotV1
-}
-
-function transactionTime(value: unknown): number {
-  const millis = value instanceof Date ? value.getTime() : Date.parse(String(value))
-  if (!Number.isFinite(millis)) throw new ReopenNotAuthorizedError('transaction time is unreadable')
-  return millis
-}
-
-function intervalContains(now: number, start: string, end: string): boolean {
-  return Date.parse(start) <= now && now < Date.parse(end)
-}
-
-function payloadDeliveryIdentity(body: Record<string, unknown>): {
-  delivery_id: unknown
-  attempt_ordinal: unknown
-  provider_request_digest: unknown
-  provider_nonce: unknown
-} {
-  return {
-    delivery_id: body.delivery_id,
-    attempt_ordinal: body.attempt_ordinal,
-    provider_request_digest: body.provider_request_digest,
-    provider_nonce: body.provider_nonce,
-  }
-}
-
 export class EventLog {
   constructor(private db: DbAdapter) {}
 
@@ -350,14 +241,6 @@ export class EventLog {
   async append(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
     assertCallerAppendAllowed(input)
     return this.appendValidated(input, db)
-  }
-
-  /** ConnectorRegistry is the sole admission boundary for these authority rows. */
-  protected async appendRegistryVerifiedAuthority(input: AppendEvent): Promise<AppendResult> {
-    if (!isRegistryVerifiedAuthorityEvent(input)) {
-      throw new LoadedRegistrationUnprovenError('registry authority append received a non-registry event')
-    }
-    return this.appendValidated(input)
   }
 
   private async appendValidated(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
@@ -558,464 +441,6 @@ export class EventLog {
     return event
   }
 
-  private async readReopenSources(db: DbAdapter, input: CommitReopenAuthorizationCASInput): Promise<ReopenSources> {
-    const unknownEvent = await this.requireEvent(db, input.unknown_event_id, 'reply.delivery_unknown')
-    const requestEvent = await this.requireEvent(db, input.reconciliation_request_event_id, 'reply.delivery_reconciliation_requested')
-    const observationEvent = await this.requireEvent(db, input.reconciliation_observation_event_id, 'reply.delivery_reconciliation_observed')
-    const evidenceEvent = await this.requireEvent(db, input.evidence_event_id, 'reply.zero_external_effect_evidence_recorded')
-    const attestationEventRow = await this.requireEvent(db, input.attestation_event_id, 'reply.zero_external_effect_attested')
-    const producerEvent = await this.requireEvent(db, input.producer_registration_event_id, 'authority.zero_effect_producer_registered')
-    const issuerEvent = await this.requireEvent(db, input.issuer_registration_event_id, 'authority.retry_budget_issuer_registered')
-    const budgetEvent = await this.requireEvent(db, input.budget_snapshot_event_id, 'reply.retry_budget_snapshot')
-    try {
-      return {
-        unknownEvent,
-        unknown: decodeReplyDeliveryUnknownPayload(parseEventPayload(unknownEvent.payload)),
-        requestEvent,
-        request: decodeReconciliationRequest(parseEventPayload(requestEvent.payload)),
-        observationEvent,
-        observation: decodeReconciliationObservation(parseEventPayload(observationEvent.payload)),
-        evidenceEvent,
-        evidence: decodeEvidenceRecord(parseEventPayload(evidenceEvent.payload)),
-        attestationEvent: attestationEventRow,
-        attestation: decodeAttestation(parseEventPayload(attestationEventRow.payload)),
-        producerEvent,
-        producer: decodeProducerRegistration(parseEventPayload(producerEvent.payload)),
-        issuerEvent,
-        issuer: decodeIssuerRegistration(parseEventPayload(issuerEvent.payload)),
-        budgetEvent,
-        budget: decodeRetryBudgetSnapshot(parseEventPayload(budgetEvent.payload)),
-      }
-    } catch (error) {
-      throw new ReopenNotAuthorizedError(`persisted reopen source failed strict decode: ${String(error)}`)
-    }
-  }
-
-  private async assertCurrentRegistrationAuthorities(db: DbAdapter, sources: ReopenSources): Promise<void> {
-    const producerRows = await db.query<StoredEvent>(
-      `SELECT * FROM event_log WHERE event_type = 'authority.zero_effect_producer_registered' ORDER BY seq ASC`,
-    )
-    const issuerRows = await db.query<StoredEvent>(
-      `SELECT * FROM event_log WHERE event_type = 'authority.retry_budget_issuer_registered' ORDER BY seq ASC`,
-    )
-    const loadedRows = await db.query<StoredEvent>(
-      `SELECT * FROM event_log WHERE event_type = 'authority.loaded_connector_registered' ORDER BY seq ASC`,
-    )
-    let producers: ZeroEffectProducerRegistrationV1[]
-    let issuers: RetryBudgetIssuerRegistrationV1[]
-    let loaded: LoadedConnectorRegistrationV1[]
-    try {
-      producers = producerRows.map(row => decodeProducerRegistration(parseEventPayload(row.payload)))
-      issuers = issuerRows.map(row => decodeIssuerRegistration(parseEventPayload(row.payload)))
-      loaded = loadedRows.map(row => {
-        const registration = decodeLoadedConnectorRegistration(parseEventPayload(row.payload))
-        assertByteIdenticalEvent({
-          eventId: loadedConnectorRegistrationEventId(
-            registration.registration_id,
-            registration.registry_generation,
-          ),
-          eventType: 'authority.loaded_connector_registered',
-          payload: registration as unknown as Record<string, unknown>,
-        }, row)
-        return registration
-      })
-      assertByteIdenticalEvent(producerRegistrationEvent(sources.producer), sources.producerEvent)
-      assertByteIdenticalEvent(issuerRegistrationEvent(sources.issuer), sources.issuerEvent)
-    } catch (error) {
-      throw new ReopenNotAuthorizedError(`registration projection is unverifiable: ${String(error)}`)
-    }
-    const sameProducer = producers.filter(item => item.registration_id === sources.producer.registration_id)
-    const sameIssuer = issuers.filter(item => item.registration_id === sources.issuer.registration_id)
-    const sameConnector = loaded.filter(item => item.connector_instance_id === sources.producer.connector_instance_id)
-    if (sameConnector.length === 0) {
-      throw new ReopenNotAuthorizedError('current loaded connector registration is missing')
-    }
-    const loadedGeneration = Math.max(...sameConnector.map(item => item.registry_generation))
-    const currentLoaded = sameConnector.filter(item => item.registry_generation === loadedGeneration)
-    if (
-      sameProducer.length === 0 ||
-      Math.max(...sameProducer.map(item => item.registry_generation)) !== sources.producer.registry_generation ||
-      sameIssuer.length === 0 ||
-      Math.max(...sameIssuer.map(item => item.registry_generation)) !== sources.issuer.registry_generation ||
-      currentLoaded.length !== 1 ||
-      currentLoaded[0]!.status !== 'active' ||
-      currentLoaded[0]!.registry_generation !== sources.producer.registry_generation ||
-      currentLoaded[0]!.registry_generation !== sources.issuer.registry_generation ||
-      currentLoaded[0]!.canonical_capability_digest !== sources.producer.capability_digest ||
-      currentLoaded[0]!.canonical_capability_digest !== sources.issuer.capability_digest
-    ) {
-      throw new ReopenNotAuthorizedError(
-        'producer or issuer authority is retired or not rebound to the exact current loaded registration',
-      )
-    }
-  }
-
-  private async reverifyReopenSources(
-    db: DbAdapter,
-    sources: ReopenSources,
-    input: CommitReopenAuthorizationCASInput,
-  ): Promise<void> {
-    const authority = decodeRetryBudgetAuthority(input.retry_budget_authority)
-    const nowRow = await db.queryOne<{ transaction_now: unknown }>('SELECT CURRENT_TIMESTAMP AS transaction_now')
-    const now = transactionTime(nowRow?.transaction_now)
-    const { unknown, request, observation, evidence, attestation, producer, issuer, budget } = sources
-
-    if (
-      sources.unknownEvent.reply_id !== unknown.reply_id ||
-      sources.unknownEvent.claim_epoch === null ||
-      Number(sources.unknownEvent.claim_epoch) !== unknown.attempt_ordinal ||
-      sources.requestEvent.reply_id !== null && sources.requestEvent.reply_id !== unknown.reply_id ||
-      sources.observationEvent.reply_id !== null && sources.observationEvent.reply_id !== unknown.reply_id
-    ) {
-      throw new ReopenNotAuthorizedError('persisted EventLog identity differs from unknown delivery')
-    }
-    const unknownDigest = sha256Utf8(canonicalJson(storedEventConflictMaterial(sources.unknownEvent)))
-    if (
-      request.delivery_unknown_event_id !== sources.unknownEvent.event_id ||
-      request.delivery_unknown_event_digest !== unknownDigest ||
-      request.reply_id !== unknown.reply_id ||
-      request.delivery_id !== unknown.delivery_id ||
-      request.recipient_seat_id !== unknown.recipient_seat_id ||
-      request.attempt_ordinal !== unknown.attempt_ordinal ||
-      request.connector_instance_id !== unknown.connector_instance_id ||
-      request.resolved_binding_snapshot_digest !== unknown.resolved_binding_snapshot_digest ||
-      request.resolved_delivery_decision_digest !== unknown.resolved_delivery_decision_digest ||
-      request.delivery_digest !== unknown.delivery_digest ||
-      request.provider_request_digest !== unknown.provider_request_digest ||
-      request.business_nonce !== unknown.business_nonce ||
-      request.provider_nonce !== unknown.provider_nonce ||
-      request.capability_digest !== unknown.capability_digest ||
-      request.reconciliation_mode !== unknown.reconciliation_mode
-    ) {
-      throw new ReopenNotAuthorizedError('reconciliation request does not bind the persisted unknown delivery')
-    }
-    if (
-      observation.reconciliation_request_digest !== request.request_digest ||
-      observation.observed_outcome !== 'proven_zero_external_effect' ||
-      observation.zero_external_effect_attestation_digest !== attestation.attestation_digest ||
-      observation.evidence_digest !== evidence.evidence_digest
-    ) {
-      throw new ReopenNotAuthorizedError('observation is not exact proven-zero-effect evidence')
-    }
-
-    const evidenceIdentity = payloadDeliveryIdentity(evidence.evidence_body as unknown as Record<string, unknown>)
-    if (
-      evidenceIdentity.delivery_id !== unknown.delivery_id ||
-      evidenceIdentity.attempt_ordinal !== unknown.attempt_ordinal ||
-      evidenceIdentity.provider_request_digest !== unknown.provider_request_digest ||
-      evidenceIdentity.provider_nonce !== unknown.provider_nonce ||
-      attestation.delivery_id !== unknown.delivery_id ||
-      attestation.attempt_ordinal !== unknown.attempt_ordinal ||
-      attestation.connector_instance_id !== unknown.connector_instance_id ||
-      attestation.provider_request_digest !== unknown.provider_request_digest ||
-      attestation.provider_nonce !== unknown.provider_nonce ||
-      attestation.evidence_kind !== evidence.evidence_kind ||
-      attestation.evidence_digest !== evidence.evidence_digest ||
-      attestation.producer_registration_digest !== producer.registration_digest
-    ) {
-      throw new ReopenNotAuthorizedError('evidence or attestation identity differs from unknown delivery')
-    }
-    const mappedEvidenceKind = PRODUCER_KIND_TO_EVIDENCE_KIND[producer.producer_kind]
-    if (
-      mappedEvidenceKind !== evidence.evidence_kind ||
-      producer.authorized_evidence_kinds.length !== 1 ||
-      producer.authorized_evidence_kinds[0] !== mappedEvidenceKind ||
-      producer.connector_instance_id !== unknown.connector_instance_id ||
-      producer.capability_digest !== unknown.capability_digest ||
-      producer.status !== 'active' ||
-      !intervalContains(now, producer.valid_from, producer.expires_at) ||
-      !intervalContains(now, attestation.issued_at, attestation.expires_at) ||
-      Date.parse(attestation.issued_at) < Date.parse(producer.valid_from) ||
-      Date.parse(attestation.expires_at) > Date.parse(producer.expires_at)
-    ) {
-      throw new ReopenNotAuthorizedError('producer mapping, scope, status, or interval is unauthorized')
-    }
-
-    if (
-      producerRegistrationEventId(producer.registration_id, producer.registry_generation) !== sources.producerEvent.event_id ||
-      issuerRegistrationEventId(issuer.registration_id, issuer.registry_generation) !== sources.issuerEvent.event_id ||
-      retryBudgetSnapshotEventId(budget.delivery_id, budget.generation) !== sources.budgetEvent.event_id
-    ) {
-      throw new ReopenNotAuthorizedError('registration or budget event identity does not recompute')
-    }
-    if (
-      issuer.status !== 'active' ||
-      !intervalContains(now, issuer.valid_from, issuer.expires_at) ||
-      !intervalContains(now, authority.issued_at, authority.expires_at) ||
-      Date.parse(authority.issued_at) < Date.parse(issuer.valid_from) ||
-      Date.parse(authority.expires_at) > Date.parse(issuer.expires_at) ||
-      issuer.registration_digest !== authority.authority_registration_digest ||
-      issuer.capability_digest !== unknown.capability_digest ||
-      issuer.budget_policy_digest !== budget.budget_policy_digest ||
-      authority.delivery_id !== unknown.delivery_id ||
-      authority.capability_digest !== unknown.capability_digest ||
-      authority.budget_policy_digest !== budget.budget_policy_digest ||
-      authority.current_attempt_ordinal !== unknown.attempt_ordinal ||
-      authority.remaining_before !== budget.remaining ||
-      authority.remaining_after !== budget.remaining - 1 ||
-      authority.generation_before !== budget.generation ||
-      authority.generation_after !== budget.generation + 1 ||
-      budget.reply_id !== unknown.reply_id ||
-      budget.delivery_id !== unknown.delivery_id ||
-      budget.capability_digest !== unknown.capability_digest ||
-      budget.authority_registration_digest !== issuer.registration_digest ||
-      input.intended_next_attempt_ordinal !== unknown.attempt_ordinal + 1
-    ) {
-      throw new ReopenNotAuthorizedError('issuer, authority, budget, or next attempt is unauthorized')
-    }
-    await this.assertCurrentRegistrationAuthorities(db, sources)
-
-    const priorConsumption = await db.queryOne<StoredEvent>(
-      'SELECT * FROM event_log WHERE event_id = $1',
-      [attestationConsumptionEventId(attestation.attestation_digest)],
-    )
-    if (priorConsumption) {
-      const expectedOutcomeId = reconciliationOutcomeEventId(unknown.delivery_id, unknown.attempt_ordinal)
-      const expectedReopenId = reopenEventId(sources.unknownEvent.event_id, unknown.delivery_id, input.intended_next_attempt_ordinal)
-      const payload = parseEventPayload<Record<string, unknown>>(priorConsumption.payload)
-      if (payload.reconciliation_resolved_event_id !== expectedOutcomeId || payload.reopen_event_id !== expectedReopenId) {
-        throw new ReopenNotAuthorizedError('attestation was already consumed by another transition')
-      }
-    }
-
-    const terminals = await db.query<StoredEvent>(
-      `SELECT * FROM event_log
-       WHERE reply_id = $1 AND event_type IN ('reply.delivered', 'reply.failed')
-       ORDER BY seq ASC`,
-      [unknown.reply_id],
-    )
-    for (const terminal of terminals) {
-      const payload = parseEventPayload<Record<string, unknown>>(terminal.payload)
-      const sameDelivery = payload.delivery_id === unknown.delivery_id || (
-        payload.delivery_id === undefined && Number(terminal.claim_epoch) === unknown.attempt_ordinal
-      )
-      const permanent = terminal.event_type === 'reply.delivered' || payload.permanent === true || payload.kind === 'permanent'
-      if (sameDelivery && permanent) throw new ReopenNotAuthorizedError('delivery already has a terminal outcome')
-    }
-  }
-
-  /**
-   * Atomic EventLogReopenAuthorizationPersistencePortV1. This method has no
-   * provider port and therefore cannot invoke or retry an external effect.
-   */
-  async commitReopenAuthorizationCAS(input: CommitReopenAuthorizationCASInput): Promise<CommitReopenAuthorizationCASResult> {
-    await input.on_commit_point?.('before_transaction')
-    const result = await serializedTransaction(this.db, async tx => {
-      const firstRead = await this.readReopenSources(tx, input)
-      const lockIds = [
-        firstRead.producerEvent.event_id,
-        firstRead.issuerEvent.event_id,
-        firstRead.budgetEvent.event_id,
-      ].sort()
-      const locked = await tx.query<{ event_id: string }>(
-        `SELECT event_id FROM event_log
-         WHERE event_id IN ($1, $2, $3)
-         ORDER BY event_id ASC
-         FOR UPDATE`,
-        lockIds,
-      )
-      if (locked.length !== 3 || locked.some((row, index) => row.event_id !== lockIds[index])) {
-        throw new ReopenNotAuthorizedError('ordered authority lock set is incomplete')
-      }
-
-      const sources = await this.readReopenSources(tx, input)
-      await this.reverifyReopenSources(tx, sources, input)
-      const { unknown, request, observation, evidence, attestation, producer, issuer, budget } = sources
-      const authority = decodeRetryBudgetAuthority(input.retry_budget_authority)
-      const outcomeKey = reconciliationOutcomeKey(unknown.delivery_id, unknown.attempt_ordinal)
-      const outcomeEventId = reconciliationOutcomeEventId(unknown.delivery_id, unknown.attempt_ordinal)
-      const reopenId = reopenEventId(sources.unknownEvent.event_id, unknown.delivery_id, input.intended_next_attempt_ordinal)
-      const consumptionId = attestationConsumptionEventId(attestation.attestation_digest)
-      const afterSnapshotId = retryBudgetSnapshotEventId(unknown.delivery_id, authority.generation_after)
-
-      const outcomePayload: ReplyDeliveryReconciliationResolvedPayloadV1 = {
-        delivery_unknown_event_id: sources.unknownEvent.event_id,
-        reconciliation_observation_event_id: sources.observationEvent.event_id,
-        reconciliation_request_digest: request.request_digest,
-        observation_digest: observation.observation_digest,
-        reply_id: unknown.reply_id,
-        delivery_id: unknown.delivery_id,
-        recipient_seat_id: unknown.recipient_seat_id,
-        attempt_ordinal: unknown.attempt_ordinal,
-        reconciliation_outcome_key: outcomeKey,
-        outcome: 'reopened',
-        resulting_event_id: reopenId,
-      }
-      decodeReconciliationResolvedPayload(outcomePayload)
-      const consumptionPayload: ZeroExternalEffectAttestationConsumptionV1 = {
-        schema_version: 'aun-zero-external-effect-attestation-consumption/v1',
-        reply_id: unknown.reply_id,
-        delivery_id: unknown.delivery_id,
-        attempt_ordinal: unknown.attempt_ordinal,
-        attestation_digest: attestation.attestation_digest,
-        evidence_digest: evidence.evidence_digest,
-        producer_registration_digest: producer.registration_digest,
-        reconciliation_outcome_key: outcomeKey,
-        reconciliation_resolved_event_id: outcomeEventId,
-        reopen_event_id: reopenId,
-      }
-      decodeAttestationConsumption(consumptionPayload)
-      const afterSnapshot: RetryBudgetSnapshotV1 = {
-        schema_version: 'aun-retry-budget-snapshot/v1',
-        reply_id: unknown.reply_id,
-        delivery_id: unknown.delivery_id,
-        capability_digest: unknown.capability_digest,
-        budget_policy_digest: budget.budget_policy_digest,
-        authority_registration_digest: issuer.registration_digest,
-        generation: authority.generation_after,
-        remaining: authority.remaining_after,
-        prior_snapshot_event_id: sources.budgetEvent.event_id,
-        transition_authority_digest: authority.authority_digest,
-      }
-      decodeRetryBudgetSnapshot(afterSnapshot)
-      const reopenPayload: ReplyDeliveryReopenedPayloadV1 = {
-        reply_id: unknown.reply_id,
-        delivery_id: unknown.delivery_id,
-        recipient_seat_id: unknown.recipient_seat_id,
-        causation_delivery_unknown_event_id: sources.unknownEvent.event_id,
-        reconciliation_request_digest: request.request_digest,
-        reconciliation_observation_digest: observation.observation_digest,
-        prior_attempt_ordinal: unknown.attempt_ordinal,
-        next_attempt_ordinal: input.intended_next_attempt_ordinal,
-        provider_request_digest: unknown.provider_request_digest,
-        capability_digest: unknown.capability_digest,
-        attestation_digest: attestation.attestation_digest,
-        producer_registration_digest: producer.registration_digest,
-        retry_budget_before_reopen: authority.remaining_before,
-        retry_budget_after_reopen: authority.remaining_after,
-        retry_budget_generation_before: authority.generation_before,
-        retry_budget_generation_after: authority.generation_after,
-        authority_digest: authority.authority_digest,
-        authority_registration_digest: authority.authority_registration_digest,
-        fanout_child_provenance_digest: unknown.fanout_child_provenance_digest,
-      }
-      decodeReplyDeliveryReopenedPayload(reopenPayload)
-
-      const group: AppendEvent[] = [
-        {
-          eventId: outcomeEventId,
-          eventType: 'reply.delivery_reconciliation_resolved',
-          conversationId: sources.unknownEvent.conversation_id,
-          causationId: sources.observationEvent.event_id,
-          correlationId: sources.unknownEvent.correlation_id,
-          turnId: sources.unknownEvent.turn_id,
-          replyId: unknown.reply_id,
-          claimEpoch: unknown.attempt_ordinal,
-          payload: outcomePayload as unknown as Record<string, unknown>,
-        },
-        {
-          eventId: consumptionId,
-          eventType: 'reply.zero_external_effect_attestation_consumed',
-          conversationId: sources.unknownEvent.conversation_id,
-          causationId: outcomeEventId,
-          correlationId: sources.unknownEvent.correlation_id,
-          turnId: sources.unknownEvent.turn_id,
-          replyId: unknown.reply_id,
-          claimEpoch: unknown.attempt_ordinal,
-          payload: consumptionPayload as unknown as Record<string, unknown>,
-        },
-        {
-          eventId: afterSnapshotId,
-          eventType: 'reply.retry_budget_snapshot',
-          conversationId: sources.unknownEvent.conversation_id,
-          causationId: outcomeEventId,
-          correlationId: sources.unknownEvent.correlation_id,
-          turnId: sources.unknownEvent.turn_id,
-          replyId: unknown.reply_id,
-          claimEpoch: input.intended_next_attempt_ordinal,
-          payload: afterSnapshot as unknown as Record<string, unknown>,
-        },
-        {
-          eventId: reopenId,
-          eventType: 'reply.delivery_reopened',
-          conversationId: sources.unknownEvent.conversation_id,
-          causationId: outcomeEventId,
-          correlationId: sources.unknownEvent.correlation_id,
-          turnId: sources.unknownEvent.turn_id,
-          replyId: unknown.reply_id,
-          claimEpoch: input.intended_next_attempt_ordinal,
-          payload: reopenPayload as unknown as Record<string, unknown>,
-        },
-      ]
-
-      const existing = await Promise.all(group.map(item => tx.queryOne<StoredEvent>(
-        'SELECT * FROM event_log WHERE event_id = $1',
-        [item.eventId],
-      )))
-      const existingCount = existing.filter(Boolean).length
-      if (existingCount > 0 && existingCount < 4) {
-        existing.forEach((row, index) => {
-          if (!row) return
-          try {
-            assertByteIdenticalEvent(group[index], row)
-          } catch (error) {
-            if (index === 0) throw new ReconciliationTransitionCollisionError(String(error))
-            throw error
-          }
-        })
-        throw new ReopenAtomicSetIncompleteError(`reopen atomic set has ${existingCount}/4 durable members`)
-      }
-
-      if (existingCount === 4) {
-        group.forEach((item, index) => assertByteIdenticalEvent(item, existing[index]!))
-        return {
-          status: 'byte_identical_existing' as const,
-          outcome: existing[0]!,
-          consumption: existing[1]!,
-          generation_after_snapshot: existing[2]!,
-          reopen: existing[3]!,
-          provider_invocations: 0 as const,
-        }
-      }
-
-      await input.on_commit_point?.('before_outcome_append')
-      let outcomeResult: AppendResult
-      try {
-        outcomeResult = await this.append(group[0], tx)
-      } catch (error) {
-        if (error instanceof EventIdCanonicalMaterialCollisionError) {
-          throw new ReconciliationTransitionCollisionError(error.message)
-        }
-        throw error
-      }
-      await input.on_commit_point?.('after_outcome_append')
-      await input.on_commit_point?.('before_consumption_append')
-      const consumptionResult = await this.append(group[1], tx)
-      await input.on_commit_point?.('after_consumption_append')
-      await input.on_commit_point?.('before_budget_snapshot_append')
-      const snapshotResult = await this.append(group[2], tx)
-      await input.on_commit_point?.('after_budget_snapshot_append')
-      await input.on_commit_point?.('before_reopen_append')
-      const reopenResult = await this.append(group[3], tx)
-      await input.on_commit_point?.('after_reopen_append')
-
-      const readback = await Promise.all(group.map(item => tx.queryOne<StoredEvent>(
-        'SELECT * FROM event_log WHERE event_id = $1',
-        [item.eventId],
-      )))
-      if (readback.some(row => !row)) throw new ReopenAtomicSetIncompleteError('four-member readback is incomplete')
-      group.forEach((item, index) => assertByteIdenticalEvent(item, readback[index]!))
-      await input.on_commit_point?.('before_commit')
-      return {
-        status: [outcomeResult, consumptionResult, snapshotResult, reopenResult].some(item => item.inserted)
-          ? 'inserted' as const
-          : 'byte_identical_existing' as const,
-        outcome: readback[0]!,
-        consumption: readback[1]!,
-        generation_after_snapshot: readback[2]!,
-        reopen: readback[3]!,
-        provider_invocations: 0 as const,
-      }
-    })
-    await input.on_commit_point?.('after_commit_before_return')
-    return result
-  }
-
-  /**
-   * Single outcome CAS for conclusive read-only reconciliation. The persisted
-   * observation is the authority for either a validated original receipt or
-   * a proven permanent failure. No provider port exists at this boundary.
-   */
   async commitReconciliationTerminalCAS(
     input: CommitReconciliationTerminalCASInputV1,
   ): Promise<CommitReconciliationTerminalCASResultV1> {
