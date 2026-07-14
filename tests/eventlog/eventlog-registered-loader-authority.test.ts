@@ -609,7 +609,11 @@ describe.if(!!POSTGRES_TEST_URL)('registered-loader PostgreSQL boundary', () => 
       import { runProductionRegisteredLoaderLifecycle, processNextRegisteredReopen } from './core/eventlog/registered-loader.ts'
       const lifecycle = await runProductionRegisteredLoaderLifecycle()
       const inserted = await processNextRegisteredReopen()
-      console.log(JSON.stringify({ lifecycle, inserted }))
+      await Bun.write(Bun.stdout, JSON.stringify({ lifecycle, inserted }) + '\\n')
+      // The private production root intentionally exposes no database handle or
+      // shutdown seam.  End this one-shot boundary process after its evidence
+      // has been flushed instead of waiting for the internal PG pool to idle.
+      process.exit(0)
     `], {
       cwd: process.cwd(),
       env: {
