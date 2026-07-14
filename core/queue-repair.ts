@@ -56,13 +56,32 @@ function statusCounts(rows: any[]): Record<string, number> {
 }
 
 function isRetiredAgent(row: any): boolean {
-  const retired = row.retired ?? row.metadata?.retired
+  const metadata = typeof row.metadata === 'string'
+    ? (() => {
+        try { return JSON.parse(row.metadata) } catch { return {} }
+      })()
+    : row.metadata ?? {}
+  const retired = row.retired ?? metadata.retired
   return retired === true || retired === 'true'
 }
 
 function assertReassignTargetAvailable(row: any, agentId: string) {
   const status = String(row.status ?? '')
-  if (isRetiredAgent(row) || (status && !['online', 'idle', 'busy'].includes(status))) {
+  const historicalOnly = row.historical_only === true || row.historical_only === 1 || row.historical_only === '1'
+  const newWorkAllowed = row.new_work_allowed === undefined || row.new_work_allowed === null
+    ? true
+    : row.new_work_allowed === true || row.new_work_allowed === 1 || row.new_work_allowed === '1'
+  const profileEnabled = row.profile_enabled === undefined || row.profile_enabled === null
+    ? true
+    : row.profile_enabled === true || row.profile_enabled === 1 || row.profile_enabled === '1'
+  if (
+    isRetiredAgent(row) ||
+    historicalOnly ||
+    !newWorkAllowed ||
+    !profileEnabled ||
+    row.disabled_at ||
+    (status && !['online', 'idle', 'busy'].includes(status))
+  ) {
     throw new Error(`QUEUE_REPAIR_TARGET_UNAVAILABLE:${agentId}:${status || 'unknown'}`)
   }
 }
@@ -102,7 +121,7 @@ export async function reassignPendingQueueRows(
   }
 
   const target = await db.query(
-    "SELECT agent_id, status, metadata, metadata->>'retired' AS retired FROM agents WHERE agent_id = $1 LIMIT 1",
+    "SELECT agent_id, status, metadata, metadata->>'retired' AS retired, profile_enabled, disabled_at, historical_only, new_work_allowed FROM agents WHERE agent_id = $1 LIMIT 1",
     [input.toAgentId],
   )
   if (target.rows.length === 0) {
@@ -416,10 +435,11 @@ export async function closeDuplicatePendingQueueRows(
   if (!reason) throw new Error('QUEUE_REPAIR_REASON_REQUIRED')
 
   const target = await db.query(
-    "SELECT agent_id, status, metadata, metadata->>'retired' AS retired FROM agents WHERE agent_id = $1 LIMIT 1",
+    "SELECT agent_id, status, metadata, metadata->>'retired' AS retired, profile_enabled, disabled_at, historical_only, new_work_allowed FROM agents WHERE agent_id = $1 LIMIT 1",
     [input.toAgentId],
   )
   if (target.rows.length === 0) throw new Error(`QUEUE_REPAIR_TARGET_NOT_FOUND:${input.toAgentId}`)
+  assertReassignTargetAvailable(target.rows[0], input.toAgentId)
 
   const selectSql = `
     SELECT mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,

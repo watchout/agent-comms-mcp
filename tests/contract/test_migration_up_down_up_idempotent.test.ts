@@ -26,6 +26,8 @@ const BOT_PROFILE_UP = join(REPO_ROOT, 'db/migrations/2026-05-25-bot-profile-sso
 const BOT_PROFILE_DOWN = join(REPO_ROOT, 'db/migrations/2026-05-25-bot-profile-ssot.down.sql')
 const UI_IDENTITY_UP = join(REPO_ROOT, 'db/migrations/2026-05-26-agent-ui-identity-binding.up.sql')
 const UI_IDENTITY_DOWN = join(REPO_ROOT, 'db/migrations/2026-05-26-agent-ui-identity-binding.down.sql')
+const AUDIT_IDENTITY_UP = join(REPO_ROOT, 'db/migrations/2026-07-14-audit-identity-canonicalization.up.sql')
+const AUDIT_IDENTITY_DOWN = join(REPO_ROOT, 'db/migrations/2026-07-14-audit-identity-canonicalization.down.sql')
 
 // PR #340 (incident #339): the destructive-migration gate in
 // db/migrate.ts rejects DROP COLUMN / TRUNCATE / etc. unless
@@ -90,6 +92,7 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     try {
       await applyUpMigrationFile(BOT_PROFILE_UP)
       await applyUpMigrationFile(UI_IDENTITY_UP)
+      await applyUpMigrationFile(AUDIT_IDENTITY_UP)
     } catch {}
 
     await client.end()
@@ -112,6 +115,14 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
   async function indexExists(name: string): Promise<boolean> {
     const r = await client.query<{ count: number }>(
       `SELECT count(*)::int AS count FROM pg_indexes WHERE indexname = $1`,
+      [name],
+    )
+    return (r.rows[0]?.count ?? 0) > 0
+  }
+
+  async function triggerExists(name: string): Promise<boolean> {
+    const r = await client.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM pg_trigger WHERE tgname = $1`,
       [name],
     )
     return (r.rows[0]?.count ?? 0) > 0
@@ -183,6 +194,10 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     expect(upRow.rows[0].profile_revision).toBe(1)
     expect(upRow.rows[0].profile_source).toBe('legacy')
 
+    // The audit-identity migration is later in the stack and its triggers
+    // depend on profile_enabled, so roll it back before exercising the older
+    // bot-profile down migration.
+    await applyDownMigration(AUDIT_IDENTITY_DOWN)
     await applyDownMigration(BOT_PROFILE_DOWN)
     expect(await columnExists('agents', 'home_directory')).toBe(false)
     expect(await columnExists('agents', 'expected_provider_identity')).toBe(false)
@@ -199,6 +214,7 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     )
 
     await applyUpMigrationFile(BOT_PROFILE_UP)
+    await applyUpMigrationFile(AUDIT_IDENTITY_UP)
     expect(await columnExists('agents', 'home_directory')).toBe(true)
     expect(await columnExists('agents', 'expected_provider_identity')).toBe(true)
     const reUpFunction = await client.query<{ body: string }>(
@@ -272,5 +288,40 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     expect(reUpFunction.rows[0].body).toContain('ui_handle')
 
     await client.query(`DELETE FROM agents WHERE agent_id LIKE '__ui_identity_roundtrip_%'`)
+  })
+
+  test('audit-identity-canonicalization — down removes fail-closed guards, up restores them', async () => {
+    await applyUpMigrationFile(AUDIT_IDENTITY_UP)
+    expect(await columnExists('agents', 'historical_only')).toBe(true)
+    expect(await columnExists('agents', 'new_work_allowed')).toBe(true)
+    expect(await columnExists('role_routing', 'active_function')).toBe(true)
+    expect(await columnExists('role_routing', 'canonical_seat')).toBe(true)
+    expect(await columnExists('role_routing', 'historical_only')).toBe(true)
+    expect(await indexExists('idx_agents_routable')).toBe(true)
+    expect(await indexExists('idx_role_routing_active_function')).toBe(true)
+    expect(await triggerExists('trg_connector_instances_routable')).toBe(true)
+    expect(await triggerExists('trg_agents_no_disable_with_active_dependencies')).toBe(true)
+
+    await applyDownMigration(AUDIT_IDENTITY_DOWN)
+    expect(await columnExists('agents', 'historical_only')).toBe(false)
+    expect(await columnExists('agents', 'new_work_allowed')).toBe(false)
+    expect(await columnExists('role_routing', 'active_function')).toBe(false)
+    expect(await columnExists('role_routing', 'canonical_seat')).toBe(false)
+    expect(await columnExists('role_routing', 'historical_only')).toBe(false)
+    expect(await indexExists('idx_agents_routable')).toBe(false)
+    expect(await indexExists('idx_role_routing_active_function')).toBe(false)
+    expect(await triggerExists('trg_connector_instances_routable')).toBe(false)
+    expect(await triggerExists('trg_agents_no_disable_with_active_dependencies')).toBe(false)
+
+    await applyUpMigrationFile(AUDIT_IDENTITY_UP)
+    expect(await columnExists('agents', 'historical_only')).toBe(true)
+    expect(await columnExists('agents', 'new_work_allowed')).toBe(true)
+    expect(await columnExists('role_routing', 'active_function')).toBe(true)
+    expect(await columnExists('role_routing', 'canonical_seat')).toBe(true)
+    expect(await columnExists('role_routing', 'historical_only')).toBe(true)
+    expect(await triggerExists('trg_connector_instances_routable')).toBe(true)
+    expect(await triggerExists('trg_agents_no_disable_with_active_dependencies')).toBe(true)
+
+    await applyUpMigrationFile(AUDIT_IDENTITY_UP)
   })
 })

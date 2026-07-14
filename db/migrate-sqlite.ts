@@ -225,6 +225,8 @@ export function migrateSqlite(dbPath?: string): void {
       profile_revision INTEGER NOT NULL DEFAULT 1,
       profile_source TEXT NOT NULL DEFAULT 'legacy',
       profile_updated_at TEXT,
+      historical_only INTEGER NOT NULL DEFAULT 0,
+      new_work_allowed INTEGER NOT NULL DEFAULT 1,
       -- Issue #287 (PR-0 cycle 5 axis 4) — inbox cursor persistence
       -- mirrors PG schema added in db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql
       -- so SQLite-backed deployments survive session restarts identically.
@@ -315,6 +317,12 @@ export function migrateSqlite(dbPath?: string): void {
   if (!agentsColNames.has('profile_updated_at')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN profile_updated_at TEXT`)
   }
+  if (!agentsColNames.has('historical_only')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN historical_only INTEGER NOT NULL DEFAULT 0`)
+  }
+  if (!agentsColNames.has('new_work_allowed')) {
+    gatedExec(`ALTER TABLE agents ADD COLUMN new_work_allowed INTEGER NOT NULL DEFAULT 1`)
+  }
   if (!agentsColNames.has('registered_at')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN registered_at TEXT`)
   }
@@ -324,6 +332,8 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`UPDATE agents SET profile_enabled = 1 WHERE profile_enabled IS NULL`)
   gatedExec(`UPDATE agents SET profile_revision = 1 WHERE profile_revision IS NULL OR profile_revision < 1`)
   gatedExec(`UPDATE agents SET profile_source = 'legacy' WHERE profile_source IS NULL OR profile_source = ''`)
+  gatedExec(`UPDATE agents SET historical_only = 0 WHERE historical_only IS NULL`)
+  gatedExec(`UPDATE agents SET new_work_allowed = 1 WHERE new_work_allowed IS NULL`)
   gatedExec(`
     UPDATE agents
        SET ui_id = rowid
@@ -898,11 +908,25 @@ export function migrateSqlite(dbPath?: string): void {
       agent_id TEXT REFERENCES agents(agent_id),
       description TEXT,
       new_work_allowed INTEGER NOT NULL DEFAULT 1,
+      active_function TEXT,
+      canonical_seat TEXT,
+      historical_only INTEGER NOT NULL DEFAULT 0,
       policy_source TEXT NOT NULL DEFAULT 'db',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
+  const roleCols = db.query(`PRAGMA table_info(role_routing)`).all() as Array<{ name: string }>
+  const roleColNames = new Set(roleCols.map((c) => c.name))
+  if (!roleColNames.has('active_function')) {
+    gatedExec(`ALTER TABLE role_routing ADD COLUMN active_function TEXT`)
+  }
+  if (!roleColNames.has('canonical_seat')) {
+    gatedExec(`ALTER TABLE role_routing ADD COLUMN canonical_seat TEXT`)
+  }
+  if (!roleColNames.has('historical_only')) {
+    gatedExec(`ALTER TABLE role_routing ADD COLUMN historical_only INTEGER NOT NULL DEFAULT 0`)
+  }
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_role_routing_agent ON role_routing(agent_id) WHERE agent_id IS NOT NULL`)
 
   gatedExec(`
@@ -1001,6 +1025,209 @@ export function migrateSqlite(dbPath?: string): void {
   }
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_delivery_connector_pending ON outbound_queue(delivery_connector_instance_id, status, next_retry_at) WHERE delivery_connector_instance_id IS NOT NULL AND status = 'pending'`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_channel_binding_pending ON outbound_queue(channel_binding_id, status, next_retry_at) WHERE channel_binding_id IS NOT NULL AND status = 'pending'`)
+
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_connector_instances_routable_insert
+    BEFORE INSERT ON connector_instances
+    WHEN NEW.status IN ('registered', 'active', 'standby', 'draining')
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM agents a
+         WHERE a.agent_id = NEW.agent_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_connector_instances_routable_update
+    BEFORE UPDATE OF agent_id, status ON connector_instances
+    WHEN NEW.status IN ('registered', 'active', 'standby', 'draining')
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM agents a
+         WHERE a.agent_id = NEW.agent_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_channel_connector_bindings_routable_insert
+    BEFORE INSERT ON channel_connector_bindings
+    WHEN NEW.status IN ('active', 'standby') AND NEW.connector_instance_id IS NOT NULL
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+          FROM connector_instances ci
+          JOIN agents a ON a.agent_id = ci.agent_id
+         WHERE ci.connector_instance_id = NEW.connector_instance_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_BINDING') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_channel_connector_bindings_routable_update
+    BEFORE UPDATE OF connector_instance_id, status ON channel_connector_bindings
+    WHEN NEW.status IN ('active', 'standby') AND NEW.connector_instance_id IS NOT NULL
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+          FROM connector_instances ci
+          JOIN agents a ON a.agent_id = ci.agent_id
+         WHERE ci.connector_instance_id = NEW.connector_instance_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_BINDING') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_provider_channel_access_routable_insert
+    BEFORE INSERT ON provider_channel_access
+    WHEN NEW.status = 'active'
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+          FROM agents a
+          LEFT JOIN connector_instances ci ON ci.connector_instance_id = NEW.connector_instance_id
+         WHERE a.agent_id = COALESCE(NEW.agent_id, ci.agent_id)
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_ACCESS') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_provider_channel_access_routable_update
+    BEFORE UPDATE OF agent_id, connector_instance_id, status ON provider_channel_access
+    WHEN NEW.status = 'active'
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+          FROM agents a
+          LEFT JOIN connector_instances ci ON ci.connector_instance_id = NEW.connector_instance_id
+         WHERE a.agent_id = COALESCE(NEW.agent_id, ci.agent_id)
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_ACCESS') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agent_ui_bindings_routable_insert
+    BEFORE INSERT ON agent_ui_bindings
+    WHEN NEW.status IN ('registered', 'active')
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM agents a
+         WHERE a.agent_id = NEW.agent_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_UI_BINDING') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agent_ui_bindings_routable_update
+    BEFORE UPDATE OF agent_id, status ON agent_ui_bindings
+    WHEN NEW.status IN ('registered', 'active')
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM agents a
+         WHERE a.agent_id = NEW.agent_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_UI_BINDING') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agent_workspace_bindings_routable_insert
+    BEFORE INSERT ON agent_workspace_bindings
+    WHEN NEW.active = 1
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM agents a
+         WHERE a.agent_id = NEW.agent_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_WORKSPACE_BINDING') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agent_workspace_bindings_routable_update
+    BEFORE UPDATE OF agent_id, active ON agent_workspace_bindings
+    WHEN NEW.active = 1
+    BEGIN
+      SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM agents a
+         WHERE a.agent_id = NEW.agent_id
+           AND COALESCE(a.historical_only, 0) = 0
+           AND COALESCE(a.new_work_allowed, 1) = 1
+           AND COALESCE(a.profile_enabled, 1) = 1
+           AND a.disabled_at IS NULL
+           AND COALESCE(a.status, '') NOT IN ('disabled', 'retired')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_ACTIVE_WORKSPACE_BINDING') END;
+    END
+  `)
+  gatedExec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_no_disable_with_active_dependencies
+    BEFORE UPDATE OF status, disabled_at, profile_enabled, historical_only, new_work_allowed ON agents
+    WHEN (
+      NEW.status IN ('disabled', 'retired') OR
+      NEW.disabled_at IS NOT NULL OR
+      COALESCE(NEW.profile_enabled, 1) = 0 OR
+      COALESCE(NEW.historical_only, 0) = 1 OR
+      COALESCE(NEW.new_work_allowed, 1) = 0
+    )
+    BEGIN
+      SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM connector_instances ci
+         WHERE ci.agent_id = NEW.agent_id
+           AND ci.status IN ('registered', 'active', 'standby', 'draining')
+        UNION ALL
+        SELECT 1 FROM agent_ui_bindings ub
+         WHERE ub.agent_id = NEW.agent_id
+           AND ub.status IN ('registered', 'active')
+        UNION ALL
+        SELECT 1 FROM provider_channel_access pca
+         WHERE pca.agent_id = NEW.agent_id
+           AND pca.status = 'active'
+        UNION ALL
+        SELECT 1 FROM agent_workspace_bindings awb
+         WHERE awb.agent_id = NEW.agent_id
+           AND awb.active = 1
+        UNION ALL
+        SELECT 1 FROM agent_runtime_instances ari
+         WHERE ari.agent_id = NEW.agent_id
+           AND ari.status IN ('running', 'active')
+      ) THEN RAISE(ABORT, 'DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES') END;
+    END
+  `)
 
   db.close()
   console.log(`SQLite migration complete: ${path}`)

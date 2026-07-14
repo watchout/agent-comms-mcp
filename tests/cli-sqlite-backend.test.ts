@@ -1097,14 +1097,14 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
 
 describe('F3 — agent-com send (SQLite)', () => {
   test('replies to the in-flight row, sets replied, idles the agent', () => {
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     const { queueId } = seedPendingMessage('send test')
     runCli(['next'])
     const r = runCli(['send', '--content', 'F3 reply', '--mentions', 'cto'])
     expect(r.status).toBe(0)
     const payload = JSON.parse(r.stdout.trim()) as any
     expect(payload.ok).toBe(true)
-    expect(payload.mentions).toEqual(['cto'])
+    expect(payload.mentions).toEqual(['codex-cto'])
     // outbound_skip_reason is expected because no discord adapter row exists
     expect(payload.outbound_skip_reason).toContain('discord adapter')
     const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
@@ -1139,7 +1139,7 @@ describe('F3 — agent-com send (SQLite)', () => {
   })
 
   test('shadow control-plane stamps the outbound message and active-owner queue row', () => {
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     seedPendingMessage('conversation shadow')
     runCli(['next'])
     const r = runCli(
@@ -1162,7 +1162,7 @@ describe('F3 — agent-com send (SQLite)', () => {
       [payload.message_id],
     )[0]
     const queue = dbRead(
-      `SELECT id, conversation_id, baton_id FROM message_queue WHERE agent_id = 'cto' AND message_id = ?`,
+      `SELECT id, conversation_id, baton_id FROM message_queue WHERE agent_id = 'codex-cto' AND message_id = ?`,
       [payload.message_id],
     )[0]
     expect(message.conversation_id).toBe(payload.conversation_control_plane.conversation_id)
@@ -1174,7 +1174,7 @@ describe('F3 — agent-com send (SQLite)', () => {
       `SELECT owner_agent_id, state, source_queue_id FROM conversation_batons WHERE baton_id = ?`,
       [message.baton_id],
     )[0]
-    expect(baton.owner_agent_id).toBe('cto')
+    expect(baton.owner_agent_id).toBe('codex-cto')
     expect(baton.state).toBe('active')
     expect(String(baton.source_queue_id)).toBe(String(queue.id))
 
@@ -1184,14 +1184,14 @@ describe('F3 — agent-com send (SQLite)', () => {
     expect(audits).toHaveLength(1)
     expect(JSON.parse(audits[0].detail)).toMatchObject({
       surface: 'cli.send',
-      active_owner: 'cto',
+      active_owner: 'codex-cto',
       ok: true,
       action: 'allocated',
     })
   })
 
   test('enforce control-plane failure reports allocation error and rolls back send rows', () => {
-    allowOutboundAgents('probe-f', 'cto', 'probe-owner')
+    allowOutboundAgents('probe-f', 'codex-cto', 'probe-owner')
     const { messageId, queueId } = seedPendingMessage('conversation enforce mismatch')
     const conversationId = randomUUID()
     const batonId = randomUUID()
@@ -1248,7 +1248,7 @@ describe('F3 — agent-com send (SQLite)', () => {
     expect(r.stderr).toContain('ACTIVE_BATON_OWNER_MISMATCH')
 
     expect(dbRead(`SELECT id FROM agent_messages WHERE content = 'enforce rollback reply'`)).toHaveLength(0)
-    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto' AND message_id = ?`, [payload.outbound_message_id])).toHaveLength(0)
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'codex-cto' AND message_id = ?`, [payload.outbound_message_id])).toHaveLength(0)
     const source = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])[0]
     expect(source).toEqual({ status: 'received', replied_with: null })
   })
@@ -1257,7 +1257,7 @@ describe('F3 — agent-com send (SQLite)', () => {
     // Issue #278 §1 error taxonomy: NO_CURRENT_MESSAGE retired in
     // favour of INVALID_REPLY_TO. The CLI hits the same branch when
     // the agent has no active claim (post-reply, post-TTL, or pre-next).
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     seedPendingMessage('dbl-send')
     runCli(['next'])
     const ok = runCli(['send', '--content', 'first', '--mentions', 'cto'])
@@ -1269,7 +1269,7 @@ describe('F3 — agent-com send (SQLite)', () => {
 
   test('rejects DB channel policy outbound allowlist violations before writing reply rows', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('codex-cto', 'codex-cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
     db.close()
     const { queueId } = seedPendingMessage('acl send')
@@ -1290,12 +1290,12 @@ describe('F3 — agent-com send (SQLite)', () => {
     expect(JSON.parse(audits[0].detail)).toMatchObject({
       operation: 'send',
       sender: 'probe-f',
-      intended_recipients: ['cto'],
+      intended_recipients: ['codex-cto'],
       channel_id: 'probe-f-ch',
       violated_policy: 'channel.outboundAllowlist',
       outbound_allowlist: ['cto'],
       policy_source: 'db',
-      violations: ['probe-f'],
+      violations: ['probe-f', 'codex-cto'],
     })
   })
 })
@@ -1410,7 +1410,7 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
 
 describe('F5 — agent-com notify (SQLite)', () => {
   test('notify posts a self-originated message without touching agents state', () => {
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     const r = runCli(['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'notify body'])
     expect(r.status).toBe(0)
     const payload = JSON.parse(r.stdout.trim()) as any
@@ -1429,7 +1429,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
   })
 
   test('notify rejects legacy --channel before writing', () => {
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     const r = runCli(['notify', '--channel', 'probe-f-ch', '--mentions', 'cto', '--content', 'legacy notify'])
     expect(r.status).toBe(2)
     expect(r.stderr).toContain('CHANNEL_ALIAS_NOT_ALLOWED')
@@ -1437,7 +1437,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
   })
 
   test('notify resolves channel name only through explicit human alias flags', () => {
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     const r = runCli([
       'notify',
       '--channel-name', 'probe-f-ch',
@@ -1462,7 +1462,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
   })
 
   test('shadow control-plane stamps notify message and active-owner queue row', () => {
-    allowOutboundAgents('probe-f', 'cto')
+    allowOutboundAgents('probe-f', 'codex-cto')
     const r = runCli(
       ['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'shadow notify'],
       { AGENT_COM_CONVERSATION_CONTROL_PLANE: 'shadow' },
@@ -1483,7 +1483,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
       [payload.message_id],
     )[0]
     const queue = dbRead(
-      `SELECT id, conversation_id, baton_id FROM message_queue WHERE agent_id = 'cto' AND message_id = ?`,
+      `SELECT id, conversation_id, baton_id FROM message_queue WHERE agent_id = 'codex-cto' AND message_id = ?`,
       [payload.message_id],
     )[0]
     expect(message.conversation_id).toBe(payload.conversation_control_plane.conversation_id)
@@ -1495,7 +1495,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
       `SELECT owner_agent_id, state, source_queue_id FROM conversation_batons WHERE baton_id = ?`,
       [message.baton_id],
     )[0]
-    expect(baton.owner_agent_id).toBe('cto')
+    expect(baton.owner_agent_id).toBe('codex-cto')
     expect(baton.state).toBe('active')
     expect(String(baton.source_queue_id)).toBe(String(queue.id))
 
@@ -1503,7 +1503,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
     expect(audits).toHaveLength(1)
     expect(JSON.parse(audits[0].detail)).toMatchObject({
       surface: 'cli.notify',
-      active_owner: 'cto',
+      active_owner: 'codex-cto',
       ok: true,
       action: 'allocated',
     })
@@ -1511,7 +1511,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
 
   test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('codex-cto', 'codex-cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
     db.close()
 
@@ -1528,12 +1528,12 @@ describe('F5 — agent-com notify (SQLite)', () => {
     expect(JSON.parse(audits[0].detail)).toMatchObject({
       operation: 'notify',
       sender: 'probe-f',
-      intended_recipients: ['cto'],
+      intended_recipients: ['codex-cto'],
       channel_id: 'probe-f-ch',
       violated_policy: 'channel.outboundAllowlist',
       outbound_allowlist: ['cto'],
       policy_source: 'db',
-      violations: ['probe-f'],
+      violations: ['probe-f', 'codex-cto'],
     })
   })
 })

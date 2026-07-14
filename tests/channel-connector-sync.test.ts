@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
-import { SqliteAdapter } from '../core/db'
+import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import { syncChannelPolicyConnectors } from '../core/channel-connector-sync'
 
 async function withSyncDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {

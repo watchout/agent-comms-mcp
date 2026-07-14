@@ -7,6 +7,9 @@ const REPO = join(import.meta.dir, '..', '..')
 type RoleEntry = {
   agentId: string
   activeFunction?: string
+  canonicalSeat?: string
+  historicalOnly?: boolean
+  newWorkAllowed?: boolean
   scope?: string
   controlSource?: string
   bindingIssue?: string
@@ -40,9 +43,23 @@ type RoleRoutingConfig = {
   legacyAgentIds: Record<string, {
     canonicalAgentId: string
     newWorkAllowed: boolean
+    historicalOnly?: boolean
     reason: string
     status: string
   }>
+  auditRouting?: {
+    evidenceAuditGate?: {
+      activeFunction: string
+      canonicalSeat: string
+      agentId: string
+      forbiddenFallbackAgentIds: string[]
+    }
+    scenarioVerificationGate?: {
+      activeFunction: string
+      canonicalSeat: string
+      agentId: string
+    }
+  }
   mcpNamespacePolicy: {
     canonicalRegistration: string
     legacyRegistrations: string[]
@@ -66,9 +83,65 @@ describe('agent role routing map', () => {
     expect(roleMap.channelId).toBe('1487368919613444156')
     expect(roleMap.roles.suite_lead.agentId).toBe('agent-com-dev')
     expect(roleMap.roles.aun_development_lead.agentId).toBe('codex-aun')
-    expect(roleMap.roles.pr_audit_l1.agentId).toBe('auditor')
-    expect(roleMap.roles.pr_audit_l2.agentId).toBe('codex-audit')
+    expect(roleMap.roles.evidence_audit_gate).toMatchObject({
+      agentId: 'codex-audit',
+      activeFunction: 'evidence_audit_gate',
+      canonicalSeat: 'codex-audit',
+      newWorkAllowed: true,
+    })
+    expect(roleMap.roles.scenario_verification_gate).toMatchObject({
+      agentId: 'devauditor',
+      activeFunction: 'scenario_verification_gate',
+      canonicalSeat: 'devauditor',
+      newWorkAllowed: true,
+    })
     expect(roleMap.roles.pr_approval_l3.agentId).toBe('codex-cto')
+  })
+
+  test('evidence audit routing requires canonical codex-audit seat and no legacy fallback', () => {
+    expect(roleMap.auditRouting?.evidenceAuditGate).toEqual({
+      activeFunction: 'evidence_audit_gate',
+      canonicalSeat: 'codex-audit',
+      agentId: 'codex-audit',
+      forbiddenFallbackAgentIds: ['l2auditor', 'devauditor'],
+    })
+    expect(roleMap.auditRouting?.scenarioVerificationGate).toEqual({
+      activeFunction: 'scenario_verification_gate',
+      canonicalSeat: 'devauditor',
+      agentId: 'devauditor',
+    })
+  })
+
+  test('legacy PR L1/L2 keys are historical only', () => {
+    expect(roleMap.roles.pr_audit_l1).toMatchObject({
+      historicalOnly: true,
+      newWorkAllowed: false,
+    })
+    expect(roleMap.roles.pr_audit_l2).toMatchObject({
+      historicalOnly: true,
+      newWorkAllowed: false,
+    })
+    expect(roleMap.legacyAgentIds.l2auditor).toMatchObject({
+      canonicalAgentId: 'codex-audit',
+      status: 'disabled',
+      historicalOnly: true,
+      newWorkAllowed: false,
+    })
+  })
+
+  test('historical NORM-022 l2auditor route remains documented but not active', () => {
+    const doc = readFileSync(join(REPO, 'docs', 'operations', 'agent-role-routing-map.md'), 'utf-8')
+    expect(doc).toContain('NORM-022 runtime endpoint lease')
+    expect(doc).toContain('`l2auditor`')
+    expect(doc).toContain('historical_only / non-routable / no new work')
+
+    expect(roleMap.roles.evidence_audit_gate.agentId).toBe('codex-audit')
+    expect(roleMap.roles.evidence_audit_gate.agentId).not.toBe('l2auditor')
+    expect(roleMap.auditRouting?.evidenceAuditGate?.forbiddenFallbackAgentIds).toContain('l2auditor')
+    expect(roleMap.legacyAgentIds.l2auditor).toMatchObject({
+      historicalOnly: true,
+      newWorkAllowed: false,
+    })
   })
 
   test('D7 suite-lead rebinding is coordination-only and separated from AUN implementation', () => {
@@ -119,6 +192,7 @@ describe('agent role routing map', () => {
     expect(roleMap.legacyAgentIds.cto).toEqual({
       canonicalAgentId: 'codex-cto',
       status: 'disabled',
+      historicalOnly: true,
       newWorkAllowed: false,
       reason: 'The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto.',
     })
@@ -139,6 +213,8 @@ describe('agent role routing map', () => {
   test('role recipients are present in the channel outbound allowlist', () => {
     const allowlist = botRouting.channels[roleMap.channelId]?.outboundAllowlist ?? []
     for (const role of Object.values(roleMap.roles)) {
+      if (role.historicalOnly === true || role.newWorkAllowed === false) continue
+      if (role.activeFunction === 'scenario_verification_gate') continue
       expect(allowlist).toContain(role.agentId)
     }
   })

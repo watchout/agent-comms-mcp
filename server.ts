@@ -141,6 +141,7 @@ import {
 } from './core/inbox-cursor'
 import { fetchReplyChain, parseReplyChainDepth, REPLY_CHAIN_PREVIEW_CHARS } from './core/reply-chain'
 import { resolvePhase5 } from './core/routing/server-integration'
+import { isHistoricalOnlyAgentId } from './core/audit-identity'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
@@ -1477,6 +1478,57 @@ interface ResolvedDestination {
   members: string[]       // channel members
 }
 
+function isRoutableAgentRow(row: any): boolean {
+  const agentId = String(row.agent_id ?? '')
+  const metadata = parseBotMetadata(row.metadata)
+  const lifecycle = typeof metadata.lifecycle === 'string' ? metadata.lifecycle.trim().toLowerCase() : ''
+  const historicalOnly =
+    row.historical_only === true ||
+    row.historical_only === 1 ||
+    row.historical_only === '1' ||
+    metadata.historical_only === true ||
+    metadata.non_routable === true ||
+    lifecycle === 'historical_only' ||
+    isHistoricalOnlyAgentId(agentId)
+  const newWorkAllowed = row.new_work_allowed === undefined || row.new_work_allowed === null
+    ? !historicalOnly
+    : row.new_work_allowed === true || row.new_work_allowed === 1 || row.new_work_allowed === '1'
+  const profileEnabled = row.profile_enabled === undefined || row.profile_enabled === null
+    ? true
+    : row.profile_enabled === true || row.profile_enabled === 1 || row.profile_enabled === '1'
+  const status = String(row.status ?? '').trim().toLowerCase()
+  return status !== 'disabled' &&
+    status !== 'retired' &&
+    !row.disabled_at &&
+    profileEnabled &&
+    !historicalOnly &&
+    newWorkAllowed
+}
+
+async function refreshRoutableAgentCache(): Promise<string[]> {
+  const client = await tryGetDb()
+  if (!client) {
+    return (await refreshAgentCache()).filter((agentId) => !isHistoricalOnlyAgentId(agentId))
+  }
+  try {
+    const rows = await client.query(
+      `SELECT agent_id, status, metadata, profile_enabled, disabled_at, historical_only, new_work_allowed
+         FROM agents
+        ORDER BY agent_id`,
+    )
+    return rows.rows
+      .filter((row: any) => isRoutableAgentRow(row))
+      .map((row: any) => String(row.agent_id))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (!/(profile_enabled|disabled_at|historical_only|new_work_allowed)/i.test(message)) throw err
+    const rows = await client.query('SELECT agent_id, status, metadata FROM agents ORDER BY agent_id')
+    return rows.rows
+      .filter((row: any) => isRoutableAgentRow(row))
+      .map((row: any) => String(row.agent_id))
+  }
+}
+
 async function resolveDestination(to: string, senderId: string): Promise<ResolvedDestination | { error: string; code: string }> {
   const match = /^(channel|agent|thread):(.+)$/.exec(to)
   if (!match) return { error: `invalid destination format. Use channel:/agent:/thread:`, code: 'INVALID_DESTINATION' }
@@ -1519,8 +1571,23 @@ async function resolveDestination(to: string, senderId: string): Promise<Resolve
   if (prefix === 'agent') {
     if (id === senderId) return { error: `cannot send DM to yourself`, code: 'SELF_SEND' }
     // Check agent exists
-    const agentR = await client.query('SELECT agent_id FROM agents WHERE agent_id = $1', [id])
+    let agentR
+    try {
+      agentR = await client.query(
+        `SELECT agent_id, status, metadata, profile_enabled, disabled_at, historical_only, new_work_allowed
+           FROM agents
+          WHERE agent_id = $1`,
+        [id],
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (!/(profile_enabled|disabled_at|historical_only|new_work_allowed)/i.test(message)) throw err
+      agentR = await client.query('SELECT agent_id, status, metadata FROM agents WHERE agent_id = $1', [id])
+    }
     if (agentR.rows.length === 0) return { error: `agent '${id}' not found`, code: 'AGENT_NOT_FOUND' }
+    if (!isRoutableAgentRow(agentR.rows[0])) {
+      return { error: `agent '${id}' is disabled, historical_only, or non-routable`, code: 'AGENT_NOT_ROUTABLE' }
+    }
     // Resolve DM channel (sorted pair)
     const pair = [senderId, id].sort()
     const dmId = `dm:${pair[0]}-${pair[1]}`
@@ -1963,7 +2030,7 @@ function registerTools(server: Server, agentId: string) {
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   // Issue #118 PR-B ②: inject current agent_id list into description via cache
-  const knownAgents = await refreshAgentCache()
+  const knownAgents = await refreshRoutableAgentCache()
   const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
   return { tools: [
     {
@@ -2526,8 +2593,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
       const phase5Channel: string = claimChannelRow.rows[0]?.channel_id ?? ''
       await refreshChannelPolicyDbSnapshot(txClient)
-      // UNKNOWN_AGENT reject: real agent registry lookup via refreshAgentCache().
-      const knownAgents = await refreshAgentCache()
+      // UNKNOWN_AGENT reject: real routable agent registry lookup.
+      const knownAgents = await refreshRoutableAgentCache()
       const phase5 = resolvePhase5({
         sender: agentId,
         channel_id: phase5Channel,
@@ -2546,6 +2613,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (phase5.error === 'UNKNOWN_AGENT') {
           await txClient.query('ROLLBACK'); txCommitted = true
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+        }
+        if (phase5.error === 'AGENT_NOT_ROUTABLE') {
+          await txClient.query('ROLLBACK'); txCommitted = true
+          return { content: [{ type: 'text', text: `Error [AGENT_NOT_ROUTABLE]: mention agent_id "${phase5.detail}" is disabled, historical_only, or non-routable` }], isError: true }
         }
         if (phase5.error === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED') {
           await txClient.query('ROLLBACK'); txCommitted = true
@@ -2581,7 +2652,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // a usable agent list for migration.
     if (mentions.length === 0) {
       let authorId: string | null = null
-      const knownAgentsForErr = await refreshAgentCache()
+      const knownAgentsForErr = await refreshRoutableAgentCache()
       if (reply_to) {
         const orig = await getMessageById(await coreDbAdapter(), reply_to)
         if (orig?.author_id) authorId = orig.author_id
@@ -2631,7 +2702,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const inChannelTargets: string[] = []
     const outChannelTargets: string[] = []
     const client = await tryGetDb()
-    const validAgentIds = await refreshAgentCache()
+    const validAgentIds = await refreshRoutableAgentCache()
     for (const mention of mentions) {
       const mentionErr = validateMentionOrError(mention, validAgentIds)
       if (mentionErr) {
@@ -3238,7 +3309,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // sanitisation so cc[] body suffix is included in the saved message.
     // mention and mentions[] normalize through one canonical port.
     {
-      const knownAgentsN = await refreshAgentCache()
+      const knownAgentsN = await refreshRoutableAgentCache()
       await refreshChannelPolicyDbSnapshot(client)
       const phase5 = resolvePhase5({
         sender: agentId,
@@ -3256,6 +3327,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (phase5.error === 'UNKNOWN_AGENT') {
           return { content: [{ type: 'text', text: `Error [UNKNOWN_AGENT]: mention agent_id "${phase5.detail}" not found in agents registry` }], isError: true }
+        }
+        if (phase5.error === 'AGENT_NOT_ROUTABLE') {
+          return { content: [{ type: 'text', text: `Error [AGENT_NOT_ROUTABLE]: mention agent_id "${phase5.detail}" is disabled, historical_only, or non-routable` }], isError: true }
         }
         if (phase5.error === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED') {
           return { content: [{ type: 'text', text: 'Error [MULTI_ACTIVE_RECIPIENT_UNSUPPORTED]: send/notify supports exactly one active owner. Use mention for the owner and cc[]/fyi[] for observers.' }], isError: true }

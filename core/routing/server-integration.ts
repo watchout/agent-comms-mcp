@@ -16,6 +16,7 @@ import {
   createMessageBodyDecorator,
   type AgentId,
 } from './index'
+import { isHistoricalOnlyAgentId } from '../audit-identity'
 
 export interface Phase5ResolveInput {
   /** Sender agent_id (server-side: derived from auth). */
@@ -53,7 +54,7 @@ export interface Phase5ResolveOk {
 export interface Phase5ResolveErr {
   ok: false
   /** Error class — active-owner / policy validation failures. */
-  error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' | 'OUTBOUND_ACL_VIOLATION'
+  error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'AGENT_NOT_ROUTABLE' | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' | 'OUTBOUND_ACL_VIOLATION'
   /** Identifier surfaced in error message (agent_id or channel_id). */
   detail?: AgentId
   /** For OUTBOUND_ACL_VIOLATION: the canonical attempted recipients. */
@@ -95,6 +96,12 @@ export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | 
 
   if (!resolved.ok) {
     return { ok: false, error: resolved.error, detail: resolved.agent_id }
+  }
+
+  const nonRoutable = [...resolved.enqueue, ...resolved.cc, ...resolved.fyi]
+    .find((agentId) => isHistoricalOnlyAgentId(agentId))
+  if (nonRoutable) {
+    return { ok: false, error: 'AGENT_NOT_ROUTABLE', detail: nonRoutable }
   }
 
   // §2.4 — outbound ACL: active owner + observers must all be policy-allowed.

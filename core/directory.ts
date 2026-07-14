@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './channel-policy'
+import { isHistoricalOnlyAgentId, isHistoricalRoleKey } from './audit-identity'
 
 type Queryable = {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[] }>
@@ -14,6 +15,8 @@ export type DirectoryAgent = {
   agent_type: string
   runtime: string
   status: string
+  historical_only: boolean
+  new_work_allowed: boolean
   sendability: DirectorySendability
   channel_count: number
   channels: string[]
@@ -41,6 +44,8 @@ export type DirectoryRole = {
   role: string
   agent_id: string
   description: string | null
+  historical_only: boolean
+  new_work_allowed: boolean
   warnings: string[]
 }
 
@@ -114,13 +119,20 @@ type RoleRoutingConfig = {
   roles?: Record<string, {
     agentId?: string
     description?: string
+    historicalOnly?: boolean
+    newWorkAllowed?: boolean
     legacyAgentIds?: string[]
     newWorkAllowedViaLegacyIds?: boolean
   }>
   legacyAgentIds?: Record<string, {
     canonicalAgentId?: string
+    historicalOnly?: boolean
     newWorkAllowed?: boolean
   }>
+}
+
+export type DirectoryReportOptions = {
+  includeHistorical?: boolean
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> {
@@ -169,8 +181,9 @@ function isSnowflakeLike(value: string): boolean {
   return /^\d{16,22}$/.test(value)
 }
 
-function sendabilityFor(agentType: string, status: string, channelCount: number): DirectorySendability {
+function sendabilityFor(agentType: string, status: string, channelCount: number, historicalOnly = false, newWorkAllowed = true): DirectorySendability {
   if (agentType === 'human') return 'human'
+  if (historicalOnly || newWorkAllowed === false) return 'blocked'
   if (status === 'disabled' || status === 'offline' || status === 'disconnected') return 'blocked'
   if (channelCount === 0) return 'blocked'
   if (status === 'busy') return 'queueable'
@@ -182,15 +195,29 @@ function isMissingRuntimeColumnError(err: unknown): boolean {
   return /runtime/i.test(message) && /(no such column|column .* does not exist|does not exist)/i.test(message)
 }
 
+function isMissingAgentLifecycleColumnError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /(historical_only|new_work_allowed)/i.test(message) && /(no such column|column .* does not exist|does not exist)/i.test(message)
+}
+
 async function queryAgentRows(db: Queryable): Promise<any[]> {
   try {
     const result = await db.query(
-      `SELECT agent_id, display_name, agent_type, runtime, status, metadata
+      `SELECT agent_id, display_name, agent_type, runtime, status, metadata,
+              historical_only, new_work_allowed
          FROM agents
         ORDER BY agent_id`,
     )
     return result.rows
   } catch (err) {
+    if (isMissingAgentLifecycleColumnError(err)) {
+      const result = await db.query(
+        `SELECT agent_id, display_name, agent_type, runtime, status, metadata
+           FROM agents
+          ORDER BY agent_id`,
+      )
+      return result.rows
+    }
     if (!isMissingRuntimeColumnError(err)) throw err
     const result = await db.query(
       `SELECT agent_id, display_name, agent_type, cli_type AS runtime, status, metadata
@@ -206,9 +233,40 @@ function metadataString(metadata: Record<string, unknown>, key: string): string 
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
+function normalizeBool(value: unknown, fallback = false): boolean {
+  if (value === null || value === undefined) return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  const normalized = String(value).trim().toLowerCase()
+  if (!normalized) return fallback
+  return ['1', 'true', 'yes', 'on'].includes(normalized)
+}
+
+function rowHistoricalOnly(row: any): boolean {
+  const metadata = parseMetadata(row.metadata)
+  const lifecycle = typeof metadata.lifecycle === 'string' ? metadata.lifecycle.trim().toLowerCase() : ''
+  return normalizeBool(row.historical_only) ||
+    normalizeBool(metadata.historical_only) ||
+    normalizeBool(metadata.non_routable) ||
+    lifecycle === 'historical_only' ||
+    lifecycle === 'retired' ||
+    isHistoricalOnlyAgentId(String(row.agent_id))
+}
+
+function rowNewWorkAllowed(row: any): boolean {
+  if (row.new_work_allowed !== undefined && row.new_work_allowed !== null) {
+    return normalizeBool(row.new_work_allowed, true)
+  }
+  const metadata = parseMetadata(row.metadata)
+  if (metadata.new_work_allowed !== undefined) return normalizeBool(metadata.new_work_allowed, true)
+  return !isHistoricalOnlyAgentId(String(row.agent_id))
+}
+
 function agentWarnings(row: any, channelCount: number, duplicateDisplayName: boolean): string[] {
   const warnings: string[] = []
   const status = String(row.status ?? '')
+  if (row.__historical_only === true) warnings.push('historical_only')
+  if (row.__new_work_allowed === false) warnings.push('new_work_blocked')
   if (status === 'disabled') warnings.push('disabled')
   if (status === 'offline' || status === 'disconnected') warnings.push('offline')
   if (channelCount === 0 && row.agent_type !== 'human') warnings.push('no_channel_membership')
@@ -230,6 +288,8 @@ function channelWarnings(row: any, activeMemberCount: number): string[] {
 
 function mentionHardBlocks(agent: DirectoryAgent | null): string[] {
   if (!agent) return ['agent_missing']
+  if (agent.historical_only) return ['historical_only']
+  if (agent.new_work_allowed === false) return ['new_work_blocked']
   if (agent.status === 'disabled') return ['disabled']
   if (agent.status === 'failed' || agent.status === 'disconnected') return [agent.status]
   return []
@@ -247,14 +307,24 @@ function mentionWarnings(agent: DirectoryAgent, hasActiveConnector: boolean): st
 
 function policyEntryReason(agentId: string, members: string[], agent: DirectoryAgent | null): string | null {
   if (!agent) return 'agent_missing'
+  if (agent.historical_only) return 'historical_only'
+  if (agent.new_work_allowed === false) return 'new_work_blocked'
   if (!members.includes(agentId)) return 'not_channel_member'
   const hardBlocks = mentionHardBlocks(agent)
   return hardBlocks[0] ?? null
 }
 
-export async function buildDirectoryReport(db: Queryable): Promise<DirectoryReport> {
+export async function buildDirectoryReport(db: Queryable, options: DirectoryReportOptions = {}): Promise<DirectoryReport> {
   const policySnapshot = await refreshChannelPolicyDbSnapshot(db)
-  const agentRows = await queryAgentRows(db)
+  const includeHistorical = options.includeHistorical === true
+  const allAgentRows = await queryAgentRows(db)
+  for (const row of allAgentRows) {
+    row.__historical_only = rowHistoricalOnly(row)
+    row.__new_work_allowed = rowNewWorkAllowed(row)
+  }
+  const agentRows = includeHistorical
+    ? allAgentRows
+    : allAgentRows.filter((row) => row.__historical_only !== true && row.__new_work_allowed !== false)
   const channelRows = await db.query(
     `SELECT c.id, c.name, c.type, c.members,
             ca.external_id AS discord_external_id,
@@ -291,9 +361,11 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   )
 
   const channelsByAgent = new Map<string, string[]>()
+  const visibleAgentIds = new Set(agentRows.map((row) => String(row.agent_id)))
   for (const row of channelRows.rows) {
     const label = row.name ? String(row.name) : String(row.id)
     for (const member of parseMembers(row.members)) {
+      if (!includeHistorical && !visibleAgentIds.has(member)) continue
       const channels = channelsByAgent.get(member) ?? []
       channels.push(label)
       channelsByAgent.set(member, channels)
@@ -307,13 +379,17 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
     const channelCount = channels.length
     const discordId = metadataString(metadata, 'discord_id')
     row.__duplicate_discord_identity = discordId !== null && (discordIdentityCounts.get(discordId) ?? 0) > 1
+    const historicalOnly = row.__historical_only === true
+    const newWorkAllowed = row.__new_work_allowed !== false
     return {
       agent_id: agentId,
       display_name: String(row.display_name ?? agentId),
       agent_type: String(row.agent_type ?? ''),
       runtime: String(row.runtime ?? ''),
       status: String(row.status ?? ''),
-      sendability: sendabilityFor(String(row.agent_type ?? ''), String(row.status ?? ''), channelCount),
+      historical_only: historicalOnly,
+      new_work_allowed: newWorkAllowed,
+      sendability: sendabilityFor(String(row.agent_type ?? ''), String(row.status ?? ''), channelCount, historicalOnly, newWorkAllowed),
       channel_count: channelCount,
       channels,
       has_discord_identity: discordId !== null,
@@ -324,7 +400,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   const agentsById = new Map(agents.map((agent) => [agent.agent_id, agent]))
 
   const channels: DirectoryChannel[] = channelRows.rows.map((row) => {
-    const members = parseMembers(row.members)
+    const members = parseMembers(row.members).filter((member) => includeHistorical || visibleAgentIds.has(member))
     const activeMemberCount = members.filter((member) => {
       const status = agentStatus.get(member)
       return status === 'idle' || status === 'online' || status === 'busy'
@@ -348,7 +424,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
 
   const mentionChannels: MentionDirectoryChannel[] = channelRows.rows.map((row) => {
     const channelId = String(row.id)
-    const members = parseMembers(row.members)
+    const members = parseMembers(row.members).filter((member) => includeHistorical || visibleAgentIds.has(member))
     const policy = getChannelPolicy(channelId)
     const candidates = members
       .map((agentId): MentionDirectoryCandidate | null => {
@@ -411,12 +487,18 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
   })
 
   const roleConfig = loadRoleRoutingConfig()
-  const roles: DirectoryRole[] = Object.entries(roleConfig.roles ?? {}).map(([role, entry]) => {
+  const roles: DirectoryRole[] = Object.entries(roleConfig.roles ?? {})
+    .filter(([role, entry]) => includeHistorical || (!isHistoricalRoleKey(role) && entry.historicalOnly !== true && entry.newWorkAllowed !== false))
+    .map(([role, entry]) => {
     const agentId = typeof entry.agentId === 'string' ? entry.agentId : ''
     const warnings: string[] = []
     const target = agents.find((agent) => agent.agent_id === agentId)
+    const historicalOnly = entry.historicalOnly === true || isHistoricalRoleKey(role) || isHistoricalOnlyAgentId(agentId)
+    const newWorkAllowed = entry.newWorkAllowed !== false && historicalOnly === false
     if (!target) warnings.push('target_agent_missing')
     if (target?.sendability === 'blocked') warnings.push('target_agent_blocked')
+    if (historicalOnly) warnings.push('historical_only')
+    if (!newWorkAllowed) warnings.push('new_work_blocked')
     if (entry.legacyAgentIds?.some((legacy) => roleConfig.legacyAgentIds?.[legacy]?.newWorkAllowed === false)) {
       warnings.push('legacy_alias_for_history_only')
     }
@@ -424,6 +506,8 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       role,
       agent_id: agentId,
       description: entry.description ?? null,
+      historical_only: historicalOnly,
+      new_work_allowed: newWorkAllowed,
       warnings,
     }
   })
@@ -468,7 +552,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       policy: {
         db_ssot: true,
         final_send_must_revalidate_db: true,
-        hard_blocks: ['agent_missing', 'not_channel_member', 'disabled', 'failed', 'disconnected'],
+        hard_blocks: ['agent_missing', 'not_channel_member', 'historical_only', 'new_work_blocked', 'disabled', 'failed', 'disconnected'],
         runtime_offline_enforcement: 'offline is warning-only until agent_runtime_instances heartbeat evidence is populated',
       },
       channels: mentionChannels,

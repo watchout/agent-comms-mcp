@@ -136,6 +136,12 @@ import { syncChannelPolicyConnectors, type BindingRole, type OrderingScope } fro
 import { buildLiveTmuxProfileDoctorBlockers, parseTmuxListPanes } from '../core/tmux-runtime-inspector'
 import { profileExclusionReason } from '../core/profile-classification'
 import { reconcileDiscordDeliveryCredentialPromotion } from '../core/discord-credential-promotion'
+import {
+  buildAgentRetirementPlan,
+  executeAgentRetirement,
+  isHistoricalOnlyAgentId,
+  resolveAuditSeatRoute,
+} from '../core/audit-identity'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -629,6 +635,23 @@ async function auditOutboundAclViolation(
   })
 }
 
+async function assertAgentsRoutable(db: Client, agentIds: string[], context: string) {
+  const ids = [...new Set(agentIds.filter((id) => id && !GROUP_KEYWORDS.has(id)))]
+  if (ids.length === 0) return
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ')
+  const rows = await db.query(`SELECT agent_id FROM agents WHERE agent_id IN (${placeholders})`, ids)
+  const found = new Set(rows.rows.map((row: any) => String(row.agent_id)))
+  const missing = ids.filter((id) => !found.has(id))
+  if (missing.length > 0) {
+    throw new Error(`UNKNOWN_AGENT:${context}:${missing.join(',')}`)
+  }
+  const routable = new Set(await loadKnownAgentIds(db))
+  const blocked = ids.filter((id) => !routable.has(id))
+  if (blocked.length > 0) {
+    throw new Error(`AGENT_NOT_ROUTABLE:${context}:${blocked.join(',')}`)
+  }
+}
+
 // --- Commands ---
 
 async function channelCreate(args: string[]) {
@@ -640,6 +663,13 @@ async function channelCreate(args: string[]) {
   const members = flags.members ? flags.members.split(',').map(m => m.trim()) : []
 
   const db = await getDb()
+  try {
+    await assertAgentsRoutable(db, members, 'channel_membership')
+  } catch (err) {
+    console.error(`Error [${err instanceof Error ? err.message : String(err)}]`)
+    await db.end()
+    process.exit(1)
+  }
   await db.query(
     `INSERT INTO channels (id, org_id, type, name, members, created_by, created_at, updated_at)
      VALUES ($1, 'default', 'channel', $2, $3, 'cli', now(), now())
@@ -659,6 +689,13 @@ async function channelAddMember(args: string[]) {
   const db = await getDb()
   const r = await db.query('SELECT members FROM channels WHERE id = $1', [channelId])
   if (r.rows.length === 0) { console.error(`Channel '${channelId}' not found`); await db.end(); process.exit(1) }
+  try {
+    await assertAgentsRoutable(db, [agentId], 'channel_membership')
+  } catch (err) {
+    console.error(`Error [${err instanceof Error ? err.message : String(err)}]`)
+    await db.end()
+    process.exit(1)
+  }
 
   const members: string[] = r.rows[0].members ?? []
   if (members.includes(agentId)) { console.log(`'${agentId}' is already a member of '${channelId}'`); await db.end(); return }
@@ -919,11 +956,50 @@ async function assertPolicyAgentsExist(db: Client, agentIds: string[]) {
   if (missing.length > 0) {
     throw new Error(`unknown policy agent_id(s): ${missing.join(', ')}`)
   }
+  await assertAgentsRoutable(db, ids, 'channel_policy')
 }
 
 async function loadKnownAgentIds(db: Client): Promise<string[]> {
-  const rows = await db.query(`SELECT agent_id FROM agents ORDER BY agent_id`)
-  return rows.rows.map((row: any) => String(row.agent_id))
+  let rows
+  try {
+    rows = await db.query(
+      `SELECT agent_id, status, metadata, profile_enabled, disabled_at, historical_only, new_work_allowed
+         FROM agents
+        ORDER BY agent_id`,
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (!/(historical_only|new_work_allowed|profile_enabled|disabled_at)/i.test(message)) throw err
+    rows = await db.query(`SELECT agent_id, status, metadata FROM agents ORDER BY agent_id`)
+  }
+  return rows.rows
+    .filter((row: any) => {
+      const agentId = String(row.agent_id)
+      const status = String(row.status ?? '').trim().toLowerCase()
+      const metadata = parseJsonObject(row.metadata)
+      const lifecycle = typeof metadata.lifecycle === 'string' ? metadata.lifecycle.trim().toLowerCase() : ''
+      const historicalOnly =
+        row.historical_only === true ||
+        row.historical_only === 1 ||
+        row.historical_only === '1' ||
+        metadata.historical_only === true ||
+        metadata.non_routable === true ||
+        lifecycle === 'historical_only' ||
+        isHistoricalOnlyAgentId(agentId)
+      const newWorkAllowed = row.new_work_allowed === undefined || row.new_work_allowed === null
+        ? !historicalOnly
+        : row.new_work_allowed === true || row.new_work_allowed === 1 || row.new_work_allowed === '1'
+      const profileEnabled = row.profile_enabled === undefined || row.profile_enabled === null
+        ? true
+        : row.profile_enabled === true || row.profile_enabled === 1 || row.profile_enabled === '1'
+      return status !== 'disabled' &&
+        status !== 'retired' &&
+        profileEnabled &&
+        !row.disabled_at &&
+        !historicalOnly &&
+        newWorkAllowed
+    })
+    .map((row: any) => String(row.agent_id))
 }
 
 async function assertPolicyChannelsExist(db: Client, channelIds: string[]) {
@@ -2498,6 +2574,37 @@ async function agentProfile(args: string[]) {
   }
 }
 
+async function agentRetire(args: string[]) {
+  const { positional, flags } = parseArgs(args)
+  const agentId = positional[0] ?? flags['agent-id']
+  if (!agentId) {
+    console.error('Usage: agent-com agent retire <agent_id> [--reason <text>] [--execute|--dry-run]')
+    process.exit(2)
+  }
+  const dryRun = parseRepairDryRun(flags)
+  const reason = flags.reason ?? 'historical-only identity canonicalization'
+  const db = await getDb()
+  try {
+    const report = dryRun
+      ? await buildAgentRetirementPlan((db as any).__adapter, { agentId, reason, dryRun: true })
+      : await executeAgentRetirement((db as any).__adapter, { agentId, reason })
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  } finally {
+    await db.end()
+  }
+}
+
+async function auditRoute(args: string[]) {
+  const { flags } = parseArgs(args)
+  const result = resolveAuditSeatRoute({
+    active_function: flags['active-function'] ?? flags.active_function ?? null,
+    canonical_seat: flags['canonical-seat'] ?? flags.canonical_seat ?? null,
+    requested_agent_id: flags['agent-id'] ?? flags.agent ?? null,
+  })
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+  if (!result.ok) process.exitCode = 1
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Issue #132 — message-queue-spec §4-6 commands (MVP: next / send / agents)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3128,6 +3235,8 @@ async function sendMessage(args: string[]) {
           const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
           const detail = code === 'UNKNOWN_AGENT'
             ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" not found in agents registry`
+            : code === 'AGENT_NOT_ROUTABLE'
+              ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" is disabled, historical_only, or non-routable`
             : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
               ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
               : code === 'OUTBOUND_ACL_VIOLATION'
@@ -3698,6 +3807,8 @@ async function notifyMessage(args: string[]) {
         const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
         const detail = code === 'UNKNOWN_AGENT'
           ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" not found in agents registry`
+          : code === 'AGENT_NOT_ROUTABLE'
+            ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" is disabled, historical_only, or non-routable`
           : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
             ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
             : code === 'OUTBOUND_ACL_VIOLATION'
@@ -4793,9 +4904,10 @@ async function listAgents() {
 async function directory(args: string[]) {
   const { flags } = parseArgs(args)
   const format = flags.format ?? 'json'
+  const includeHistorical = flagEnabled(flags['include-historical'])
   const db = await getDb()
   try {
-    const report = await buildDirectoryReport(db as any)
+    const report = await buildDirectoryReport(db as any, { includeHistorical })
     if (format === 'text') {
       process.stdout.write(formatDirectoryText(report))
     } else {
@@ -5905,10 +6017,13 @@ if (command === 'channel') {
 } else if (command === 'agent') {
   if (subcommand === 'register') await agentRegister(rest)
   else if (subcommand === 'profile') await agentProfile(rest)
+  else if (subcommand === 'retire') await agentRetire(rest)
   else {
-    console.error('Usage: agent-com agent <register|profile> ...')
+    console.error('Usage: agent-com agent <register|profile|retire> ...')
     process.exit(1)
   }
+} else if (command === 'audit-route') {
+  await auditRoute([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'status') {
   await status([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'heartbeat') {
@@ -5992,6 +6107,8 @@ Commands:
   agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
   agent profile project <agent_id>|--all [--execute|--dry-run]
   agent profile doctor [--strict] [--live-tmux] [--include-disabled] [--include-test]
+  agent retire <agent_id> [--reason <text>] [--execute|--dry-run]
+  audit-route --active-function <fn> --canonical-seat <seat> [--agent-id <agent>]
   status
 
 Message I/O (requires AGENT_ID env var):
@@ -6045,7 +6162,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run by default; roll expired received/in_progress claims back to pending
   queue daemon-status [--format json|text]             — read-only DB-observed queue daemon liveness and queue status
   queue smoke --agent-id <agent> [--execute|--dry-run] — queue smoke readiness; execute command is reported, not run by default
-  directory [--format json|text]                       — bot/channel directory and sendability report
+  directory [--format json|text] [--include-historical] — bot/channel directory and sendability report
   runtime inventory [--format json|text] [--stale-minutes 15] [--expected-commit <sha>] [--approved-checkout-root <path[,path]>] [--binding-role outbound]
                                                        — read-only runtime/connector/binding freshness report
   runtime cleanup [--format json|text] [--stale-minutes 15] [--execute --confirm <plan_hash>] [--allow-unknown-risk] [--include-disabled] [--include-test]
