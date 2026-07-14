@@ -1,0 +1,39 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M4-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml"
+  cell_id: "CELL-MCP-AUN-V2-CUTOVER-M4-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/794"
+  implementation_actor: "aun"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-V2-M4-001"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the created-after fence is mandatory (throws on missing/invalid) and historic V1 rows never cross into V2."
+    expected_evidence: ["core/eventlog/v1-import.ts", "fence is mandatory", "tests/eventlog/eventlog-v1-import-m4.test.ts"]
+  - item_id: "AUDIT-V2-M4-002"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm V1 rows are only typed-skip-closed AFTER a V2 completion, idempotently, and no other V1 mutation occurs."
+    expected_evidence: ["core/eventlog/v1-import.ts", "closeAnsweredV1Row"]
+  - item_id: "AUDIT-V2-M4-003"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the daemon does not start itself (no launchd/plist/activation in this PR); starting is a separate deploy step."
+    expected_evidence: ["bin/aun/v2-worker-daemon.ts", ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml"]
+  - item_id: "AUDIT-V2-M4-004"
+    source: "transport_neutral_dependency_adaptation"
+    verification_method: "semantic_and_executable"
+    required: true
+    prompt: "Confirm NotifyTransport derives sender, exact active recipient, channel, and optional thread only from the reply.enqueued→message.received append-only chain; actual cli.notify receives that recipient and returns ok=true plus an exact UUID message_id; missing or malformed authority/receipt records zero reply.delivered evidence."
+    expected_evidence: ["bin/aun/v2-worker-daemon.ts:resolveNotifyAuthority", "tests/eventlog/eventlog-v1-import-m4.test.ts:typed notify recipient and receipt bridge", "actual cli.notify with minimal PATH", "zero reply.delivered for negative fixtures"]
+  - item_id: "AUDIT-V2-M4-005"
+    source: "cross_dialect_recovery"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm the >batchSize starvation and typed-close idempotency fixture runs against migration-backed PostgreSQL and rolls back all fixture writes."
+    expected_evidence: ["tests/eventlog/eventlog-v1-import-m4.test.ts", "RollbackPostgresFixture", "AGENT_COM_TEST_DATABASE_URL=<test-db> bun test tests/eventlog/"]

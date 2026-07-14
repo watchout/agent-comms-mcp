@@ -1,0 +1,45 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-V2-CUTOVER-M4-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 862
+cell_id: "CELL-MCP-AUN-V2-CUTOVER-M4-001"
+implementation_actor: "aun"
+evidence_scope: "v2_worker_daemon_and_import_bridge"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M4-001.yaml"
+claims:
+  implementation_summary:
+    - "Worker daemon tick: fenced V1 import -> per-seat pull-claim (configured engine) -> outbox drain via typed notify -> typed V1 closure."
+    - "Mandatory created-after garbage barrier; default boot-time fence; identity recovery at boot; SIGTERM-clean."
+  protected_surface_boundary:
+    startup_or_session_policy_changed: false
+    active_workflow_changed: true
+    active_workflow_change_scope: "route-table mapping for this Cell only"
+    runtime_code_changed: true
+    runtime_code_change_scope: "adds bin/aun/v2-worker-daemon.ts (a runtime daemon); not started by this PR"
+    queue_or_db_mutation: true
+    queue_or_db_mutation_scope: "closeAnsweredV1Row issues UPDATE message_queue (typed skip) ONLY after a committed V2 completion; no other V1 write"
+    db_schema_or_migration_changed: false
+    launchd_or_launchctl_changed: false
+    secrets_or_deployment_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    production_activation: false
+    audit_qa_check_cto_owner_substitution: false
+  fail_closed_guards:
+    - "Import throws without a valid created-after fence (no import-everything mode)."
+    - "V1 closure only after V2 completion; idempotent."
+    - "NotifyTransport derives sender/recipient/channel/thread only from the append-only inbound authority for the exact reply; no reply-id parsing or recipient fallback."
+    - "Actual cli.notify must return ok=true with an exact UUID message_id; missing or malformed authority/receipt records zero reply.delivered evidence."
+    - "Owner exact-head decision required before merge."
+commands:
+  - { command: "AGENT_COM_TEST_DATABASE_URL=<test-db> bun test tests/eventlog/ --timeout 30000", result: "PASS_113_TESTS_0_FAIL_SQLITE_AND_POSTGRESQL" }
+  - { command: "AGENT_COM_TEST_DATABASE_URL=<test-db> bun test tests/eventlog/eventlog-v1-import-m4.test.ts --timeout 30000", result: "PASS_11_TESTS_0_FAIL" }
+  - { command: "bun test tests/ --timeout 30000 + bun test db/migrate.destructive-gate.test.ts", result: "PASS_2312_SKIP_52_FAIL_0" }
+  - { command: "bun build --target bun bin/aun/v2-worker-daemon.ts", result: "PASS" }
+  - { command: "migration-backed PostgreSQL fixture transaction", result: "PASS_ROLLBACK_ZERO_RESIDUE" }
+validation_results: ["M4 fixtures 11 pass 0 fail including actual minimal-PATH cli.notify; EventLog regression 113 pass 0 fail across SQLite and migration-backed PostgreSQL; complete repository tests 2312 pass 52 skip 0 fail; daemon build-checked; no runtime activation"]
+evidence_refs: [PR_head_SHA, changed_files, validation_commands, validation_results]
+notes: ["Machine evidence only; not a structured audit; approves nothing.", "Daemon is not started by this PR.", "PostgreSQL fixture writes are enclosed in one transaction and intentionally rolled back.", "The notify behavioral fixture uses only an isolated migrated SQLite test DB; no external provider send occurs."]
