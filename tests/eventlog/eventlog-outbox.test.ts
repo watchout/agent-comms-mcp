@@ -1,6 +1,6 @@
 // EventLogCore/v1 — transactional outbox fixture.
 // Proves: reply.enqueued commits atomically with turn.completed, zero
-// lost sends, zero double-sends (log arbiter + transport nonce dedup),
+// lost sends, unknown-not-pending after an ambiguous started attempt,
 // bounded retry, and identity-based dispatcher crash recovery.
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
@@ -18,6 +18,8 @@ import {
   pendingDeliveries,
   outboxView,
   PermanentDeliveryError,
+  AmbiguousDeliveryOutcomeError,
+  startProviderInvocation,
   type OutboxDelivery,
   type OutboxTransport,
 } from '../../core/eventlog'
@@ -36,7 +38,7 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-/** Transport fake with real nonce-idempotency semantics (V1 Discord 40062 pattern). */
+/** Legacy transport fake; typed ambiguity is never converted to success. */
 class RecordingTransport implements OutboxTransport {
   sends: OutboxDelivery[] = []
   private byNonce = new Map<string, string>()
@@ -57,14 +59,13 @@ class RecordingTransport implements OutboxTransport {
     this.sends.push(delivery)
     this.byNonce.set(delivery.nonce, id)
     if (behavior === 'ambiguous') {
-      // classic crash window: message went out, response was lost
-      throw new Error('connection reset while reading response')
+      throw new AmbiguousDeliveryOutcomeError('connection reset while reading response')
     }
     return { transportMessageId: id }
   }
 }
 
-async function completeWithReply(seatId: string, messageId: string, content: string) {
+async function completeWithReply(seatId: string, messageId: string, content: string, payload?: Record<string, unknown>) {
   await receiveMessage(db, { messageId, seatId, conversationId: 'conv-1' })
   const claimed = await claimNextTurn(db, { seatId, seatInstanceId: 'i1' })
   return completeTurn(db, {
@@ -74,7 +75,7 @@ async function completeWithReply(seatId: string, messageId: string, content: str
     claimEventId: claimed!.claimEventId,
     outcome: 'replied',
     conversationId: 'conv-1',
-    replies: [{ content, channelExternalId: 'chan-1' }],
+    replies: [{ content, channelExternalId: 'chan-1', payload }],
   })
 }
 
@@ -101,29 +102,45 @@ describe('transactional outbox', () => {
     expect((await pendingDeliveries(db)).length).toBe(0)
   })
 
-  test('zero double-send: ambiguous send outcome + retry uses the same nonce', async () => {
-    await completeWithReply('kodama', 'm1', 'exactly once')
+  test('ambiguous started attempt becomes delivery_unknown and is never blindly retried', async () => {
+    const start = {
+      delivery_id: 'delivery-unknown-1', reply_id: 'reply:turn:kodama:m1:0', recipient_seat_id: 'spec', attempt_ordinal: 0,
+      provider_nonce: 'a1_abcdefghijklmnopqrstuv', delivery_digest: '2'.repeat(64), provider_request_digest: '3'.repeat(64),
+    }
+    const invocation = await startProviderInvocation(db, start)
+    await completeWithReply('kodama', 'm1', 'exactly once', {
+      delivery_unknown_payload: {
+        reply_id: start.reply_id,
+        delivery_id: start.delivery_id,
+        recipient_seat_id: start.recipient_seat_id,
+        attempt_ordinal: 0,
+        connector_instance_id: '11111111-1111-4111-8111-111111111111',
+        resolved_binding_snapshot_digest: '4'.repeat(64),
+        resolved_delivery_decision_digest: '5'.repeat(64),
+        delivery_digest: start.delivery_digest,
+        provider_request_digest: start.provider_request_digest,
+        business_nonce: 'business-1',
+        provider_nonce: start.provider_nonce,
+        capability_digest: '6'.repeat(64),
+        invocation_started_event_id: invocation.eventId,
+        reconciliation_mode: 'none',
+        fanout_child_provenance_digest: null,
+      },
+    })
     const transport = new RecordingTransport()
-    transport.script = ['ambiguous'] // send goes out, dispatcher sees an error
+    transport.script = ['ambiguous']
 
-    let result = await dispatchOutboxOnce(db, transport, {
+    const result = await dispatchOutboxOnce(db, transport, {
       dispatcherId: 'outbox', dispatcherInstanceId: 'd1',
     })
-    expect(result.failedRetryable.length).toBe(1)
-    expect((await pendingDeliveries(db)).length).toBe(1) // still owed a delivery record
-
-    // retry pass: same nonce → transport dedups, no second send
-    result = await dispatchOutboxOnce(db, transport, {
+    expect(result.deliveryUnknown).toEqual([start.reply_id])
+    expect((await pendingDeliveries(db)).length).toBe(0)
+    const retry = await dispatchOutboxOnce(db, transport, {
       dispatcherId: 'outbox', dispatcherInstanceId: 'd1',
     })
-    expect(result.delivered.length).toBe(1)
-    expect(transport.sends.length).toBe(1) // the wire saw exactly ONE send
-
-    // and the log allows exactly one reply.delivered
-    const deliveredRows = await db.query(
-      `SELECT * FROM event_log WHERE event_type = 'reply.delivered'`,
-    )
-    expect(deliveredRows.length).toBe(1)
+    expect(retry.delivered).toHaveLength(0)
+    expect(transport.sends.length).toBe(1)
+    expect(await db.query(`SELECT * FROM event_log WHERE event_type = 'reply.delivered'`)).toHaveLength(0)
   })
 
   test('two concurrent dispatchers never double-deliver one reply', async () => {

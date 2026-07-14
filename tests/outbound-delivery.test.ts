@@ -1,14 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Phase C Step 1 PR-A cycle 2 (PR #168) — behavioural tests for the
- * outbound consumer's duplicate-nonce idempotency.
+ * Transport-Neutral Contract r1.1.4 correction: thrown nonce errors are
+ * not receipt truth and numeric Discord 40062 is rate limiting, not success.
  *
  * Covers two distinct layers:
  *
- *   1. Unit tests on the pure `isDuplicateNonceError` classifier imported
- *      from core/outbound-delivery.ts. Source-shape tests in the
- *      spec-enforcement suite pin the wiring; these tests pin the
- *      semantics (what kinds of errors get classified as duplicates).
+ *   1. Unit tests prove `isDuplicateNonceError` is fail-closed and the exact
+ *      numeric 40062 classifier remains retry/failure-only.
  *
  *   2. SQL integration tests that drive the exact UPDATE statements the
  *      consumer uses — short-circuit path (row claimed with
@@ -29,34 +27,34 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { Client } from 'pg'
-import { isDuplicateNonceError } from '../core/outbound-delivery'
+import { isDiscord40062RateLimit, isDuplicateNonceError } from '../core/outbound-delivery'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Unit tests — pure classifier
 // ─────────────────────────────────────────────────────────────────────────
-describe('isDuplicateNonceError — pure classifier', () => {
-  test('matches DiscordAPIError-shaped errors with code 40062', () => {
+describe('40062 false-success removal', () => {
+  test('numeric code 40062 is rate limiting and never duplicate success', () => {
     const err = Object.assign(new Error('Cannot send a message using that nonce'), { code: 40062 })
-    expect(isDuplicateNonceError(err)).toBe(true)
+    expect(isDiscord40062RateLimit(err)).toBe(true)
+    expect(isDuplicateNonceError(err)).toBe(false)
   })
 
-  test('matches errors exposing the code through rawError', () => {
+  test('rawError 40062 is rate limiting and never success', () => {
     const err = Object.assign(new Error('upstream rejected'), { rawError: { code: 40062 } })
-    expect(isDuplicateNonceError(err)).toBe(true)
+    expect(isDiscord40062RateLimit(err)).toBe(true)
+    expect(isDuplicateNonceError(err)).toBe(false)
   })
 
-  test('matches plain Error objects whose message carries "40062"', () => {
+  test('stringified 40062 remains failure-only', () => {
     const err = new Error('DiscordAPIError[40062]: Cannot send a message using that nonce')
-    expect(isDuplicateNonceError(err)).toBe(true)
+    expect(isDiscord40062RateLimit(err)).toBe(true)
+    expect(isDuplicateNonceError(err)).toBe(false)
   })
 
-  test('matches plain Error objects whose message carries "using that nonce"', () => {
-    expect(isDuplicateNonceError(new Error('Cannot send a message USING that NONCE'))).toBe(true)
-  })
-
-  test('matches pre-stringified messages via the 2nd argument', () => {
-    expect(isDuplicateNonceError({}, 'DiscordAPIError[40062]')).toBe(true)
-    expect(isDuplicateNonceError({}, 'nonce already used by prior send')).toBe(true)
+  test('nonce-like prose without an exact provider receipt is not success', () => {
+    expect(isDuplicateNonceError(new Error('Cannot send a message USING that NONCE'))).toBe(false)
+    expect(isDuplicateNonceError({}, 'nonce already used by prior send')).toBe(false)
+    expect(isDiscord40062RateLimit({}, 'nonce already used by prior send')).toBe(false)
   })
 
   test('does NOT match regular transient errors', () => {
@@ -199,15 +197,12 @@ describe('outbound consumer SQL contract — PR-A cycle 2', () => {
     expect(row.sent_at).not.toBeNull()
   })
 
-  test('duplicate-nonce idempotent success: status flips to sent, discord_message_id stays NULL', async () => {
+  test('40062 with no provider message ID remains unsent and retryable', async () => {
     if (!available) return
 
     // Seed a pending row with no discord_message_id. This simulates the
-    // retry scenario where the first attempt's HTTP response was lost so
-    // the row never captured the Discord id. Discord now rejects the
-    // retry with code 40062; the consumer's B1 branch flips status to
-    // 'sent' with discord_message_id left NULL (the observability
-    // trade-off documented in SSOT-5 §1 and spec §7.4).
+    // retry scenario where the first attempt's HTTP response was lost. A
+    // numeric error alone cannot prove the original effect.
     const seed = await client!.query(
       `INSERT INTO outbound_queue
          (message_id, agent_id, channel_external_id, content,
@@ -219,15 +214,16 @@ describe('outbound consumer SQL contract — PR-A cycle 2', () => {
     )
     const fixtureId = seed.rows[0].id
 
-    // The consumer treats the 40062 error as deliveryError=null with
-    // discordMessageId=null and runs the same mark-sent UPDATE; the NULL
-    // is persisted explicitly to record that the id is unknown.
-    const markSent = await client!.query(
-      `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2 RETURNING status, discord_message_id`,
-      [null, fixtureId],
+    const keepRetryable = await client!.query(
+      `UPDATE outbound_queue
+          SET status = 'pending', last_error = $1, next_retry_at = now() + interval '1 second', claimed_at = NULL
+        WHERE id = $2
+        RETURNING status, discord_message_id, last_error`,
+      ['discord_rate_limit_40062', fixtureId],
     )
-    expect(markSent.rowCount).toBe(1)
-    expect(markSent.rows[0].status).toBe('sent')
-    expect(markSent.rows[0].discord_message_id).toBeNull()
+    expect(keepRetryable.rowCount).toBe(1)
+    expect(keepRetryable.rows[0].status).toBe('pending')
+    expect(keepRetryable.rows[0].discord_message_id).toBeNull()
+    expect(keepRetryable.rows[0].last_error).toBe('discord_rate_limit_40062')
   })
 })

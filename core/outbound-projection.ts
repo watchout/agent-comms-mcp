@@ -5,6 +5,344 @@ import {
   isDiscordDeliveryCredentialStatus,
 } from './discord-token-resolution'
 import { getAgentDiscordUiId } from './ui-bindings'
+import {
+  ContractValidationError,
+  bindingSnapshotDigest,
+  decodeBindingSnapshot,
+  decodeResolvedDeliveryDecision,
+  digestCanonical,
+  resolvedDeliveryDecisionDigest,
+  sortedUnique,
+  type ResolvedDeliveryBindingSnapshotV1,
+  type ResolvedDeliveryDecisionV1,
+  type Sha256,
+} from './eventlog/transport-contract'
+
+const CANONICAL_ROUTE_DOMAINS = {
+  resolutionInput: 'aun-route-resolution-input/v1\n',
+  candidate: 'aun-effective-route-candidate/v1\n',
+  eligibleCandidateSet: 'aun-eligible-route-candidate-set/v1\n',
+  evaluatedCandidateSet: 'aun-evaluated-route-candidate-set/v1\n',
+  selectedRoute: 'aun-selected-route/v1\n',
+  policy: 'aun-route-policy/v1\n',
+} as const
+
+export interface RouteResolutionInputV1 {
+  sender_seat_id: string
+  recipient_seat_id: string
+  conversation_id: string
+  turn_id: string
+  required_semantic_capabilities: string[]
+  required_receipt_mode: 'provider_ack' | 'durable_handoff' | 'none'
+  required_guarantee: 'effectively_once' | 'at_least_once'
+  authority_snapshot_digest: Sha256
+}
+
+export type EffectiveRouteExclusionReasonV1 =
+  | 'binding_inactive'
+  | 'connector_inactive'
+  | 'credential_inactive'
+  | 'provider_access_inactive'
+  | 'provider_access_expired'
+  | 'provider_identity_untrusted'
+  | 'projection_identity_untrusted'
+  | 'capability_unproven'
+  | 'policy_excluded'
+  | null
+
+export interface EffectiveRouteCandidateV1 {
+  binding_id: string
+  binding_role: 'outbound' | 'bidirectional' | 'projection'
+  binding_status: 'active' | 'inactive'
+  binding_priority: number
+  connector_instance_id: string
+  connector_status: 'active' | 'inactive'
+  adapter_build_digest: Sha256
+  capability_digest: Sha256
+  credential_id: string
+  credential_status: 'active' | 'revoked' | 'expired' | 'disabled'
+  credential_generation_digest: Sha256
+  provider_channel_access_id: string
+  provider_channel_access_status: 'active' | 'inactive' | 'revoked'
+  provider_channel_access_expires_at: string | null
+  provider_channel_access_generation_digest: Sha256
+  provider_identity_id: string
+  provider_identity_trust: 'trusted' | 'untrusted' | 'revoked'
+  provider_identity_fingerprint: Sha256
+  projection_identity_id: string | null
+  projection_identity_trust: 'trusted' | 'untrusted' | 'revoked' | 'not_applicable'
+  opaque_address_fingerprint: Sha256
+  eligible: boolean
+  exclusion_reason: EffectiveRouteExclusionReasonV1
+}
+
+export interface SelectedRouteV1 {
+  binding_id: string
+  connector_instance_id: string
+  credential_generation_digest: Sha256
+  provider_channel_access_generation_digest: Sha256
+  provider_identity_fingerprint: Sha256
+  projection_identity_id: string | null
+  opaque_address_fingerprint: Sha256
+  capability_digest: Sha256
+}
+
+export interface RoutePolicyMaterialV1 {
+  policy_source_digest: Sha256
+  fallback_allowed: false
+  candidate_serialization_order: 'binding_priority_desc_then_binding_id_connector_id_access_id_asc'
+  tie_behavior: 'reject_ambiguous'
+}
+
+export interface CanonicalRouteResolutionMaterialV1 {
+  resolution_input: RouteResolutionInputV1
+  evaluated_candidates: EffectiveRouteCandidateV1[]
+  policy: RoutePolicyMaterialV1
+  resolver_version: string
+  selected_binding_snapshot: ResolvedDeliveryBindingSnapshotV1
+}
+
+function routeAssertString(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', `${field} must be a non-empty string`)
+  }
+}
+
+function routeAssertSha(value: unknown, field: string): asserts value is Sha256 {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', `${field} must be lowercase sha256`)
+  }
+}
+
+function routeAssertUuid(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', `${field} must be a lowercase UUID`)
+  }
+}
+
+function routeAssertEnum(value: unknown, values: readonly string[], field: string): asserts value is string {
+  if (typeof value !== 'string' || !values.includes(value)) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', `${field} is outside the closed enum`)
+  }
+}
+
+function routeAssertRfc3339(value: unknown, field: string): asserts value is string {
+  routeAssertString(value, field)
+  if (!Number.isFinite(Date.parse(value)) || !/(?:Z|[+-]\d\d:\d\d)$/.test(value)) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', `${field} must be RFC3339`)
+  }
+}
+
+function canonicalRouteResolutionInput(value: RouteResolutionInputV1): RouteResolutionInputV1 {
+  for (const field of ['sender_seat_id', 'recipient_seat_id', 'conversation_id', 'turn_id'] as const) {
+    routeAssertString(value[field], field)
+  }
+  routeAssertSha(value.authority_snapshot_digest, 'authority_snapshot_digest')
+  routeAssertEnum(value.required_receipt_mode, ['provider_ack', 'durable_handoff', 'none'], 'required_receipt_mode')
+  routeAssertEnum(value.required_guarantee, ['effectively_once', 'at_least_once'], 'required_guarantee')
+  const requiredSemanticCapabilities = sortedUnique(value.required_semantic_capabilities, 'required_semantic_capabilities')
+  if (requiredSemanticCapabilities.some((item, index) => item !== value.required_semantic_capabilities[index])) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'required_semantic_capabilities must already be sorted')
+  }
+  return {
+    sender_seat_id: value.sender_seat_id,
+    recipient_seat_id: value.recipient_seat_id,
+    conversation_id: value.conversation_id,
+    turn_id: value.turn_id,
+    required_semantic_capabilities: requiredSemanticCapabilities,
+    required_receipt_mode: value.required_receipt_mode,
+    required_guarantee: value.required_guarantee,
+    authority_snapshot_digest: value.authority_snapshot_digest,
+  }
+}
+
+function canonicalEffectiveRouteCandidate(value: EffectiveRouteCandidateV1): EffectiveRouteCandidateV1 {
+  routeAssertUuid(value.binding_id, 'binding_id')
+  routeAssertUuid(value.connector_instance_id, 'connector_instance_id')
+  routeAssertEnum(value.binding_role, ['outbound', 'bidirectional', 'projection'], 'binding_role')
+  routeAssertEnum(value.binding_status, ['active', 'inactive'], 'binding_status')
+  routeAssertEnum(value.connector_status, ['active', 'inactive'], 'connector_status')
+  routeAssertEnum(value.credential_status, ['active', 'revoked', 'expired', 'disabled'], 'credential_status')
+  routeAssertEnum(value.provider_channel_access_status, ['active', 'inactive', 'revoked'], 'provider_channel_access_status')
+  routeAssertEnum(value.provider_identity_trust, ['trusted', 'untrusted', 'revoked'], 'provider_identity_trust')
+  routeAssertEnum(value.projection_identity_trust, ['trusted', 'untrusted', 'revoked', 'not_applicable'], 'projection_identity_trust')
+  if (!Number.isSafeInteger(value.binding_priority)) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'binding_priority must be an integer')
+  }
+  for (const field of ['adapter_build_digest', 'capability_digest', 'credential_generation_digest', 'provider_channel_access_generation_digest', 'provider_identity_fingerprint', 'opaque_address_fingerprint'] as const) {
+    routeAssertSha(value[field], field)
+  }
+  for (const field of ['credential_id', 'provider_channel_access_id', 'provider_identity_id'] as const) {
+    routeAssertString(value[field], field)
+  }
+  if (value.provider_channel_access_expires_at !== null) routeAssertRfc3339(value.provider_channel_access_expires_at, 'provider_channel_access_expires_at')
+  if (value.projection_identity_id !== null) routeAssertString(value.projection_identity_id, 'projection_identity_id')
+  if (value.projection_identity_id === null && value.projection_identity_trust !== 'not_applicable') {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'null projection identity must be not_applicable')
+  }
+  if (value.projection_identity_id !== null && value.projection_identity_trust === 'not_applicable') {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'present projection identity needs an explicit trust result')
+  }
+  const exclusions = [
+    'binding_inactive', 'connector_inactive', 'credential_inactive', 'provider_access_inactive',
+    'provider_access_expired', 'provider_identity_untrusted', 'projection_identity_untrusted',
+    'capability_unproven', 'policy_excluded',
+  ] as const
+  if (value.exclusion_reason !== null) routeAssertEnum(value.exclusion_reason, exclusions, 'exclusion_reason')
+  if (typeof value.eligible !== 'boolean' || value.eligible !== (value.exclusion_reason === null)) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'eligible and exclusion_reason disagree')
+  }
+  if (value.eligible && (
+    value.binding_status !== 'active' ||
+    value.connector_status !== 'active' ||
+    value.credential_status !== 'active' ||
+    value.provider_channel_access_status !== 'active' ||
+    value.provider_identity_trust !== 'trusted' ||
+    !['trusted', 'not_applicable'].includes(value.projection_identity_trust)
+  )) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'an eligible candidate contains inactive or untrusted authority')
+  }
+  return {
+    binding_id: value.binding_id,
+    binding_role: value.binding_role,
+    binding_status: value.binding_status,
+    binding_priority: value.binding_priority,
+    connector_instance_id: value.connector_instance_id,
+    connector_status: value.connector_status,
+    adapter_build_digest: value.adapter_build_digest,
+    capability_digest: value.capability_digest,
+    credential_id: value.credential_id,
+    credential_status: value.credential_status,
+    credential_generation_digest: value.credential_generation_digest,
+    provider_channel_access_id: value.provider_channel_access_id,
+    provider_channel_access_status: value.provider_channel_access_status,
+    provider_channel_access_expires_at: value.provider_channel_access_expires_at,
+    provider_channel_access_generation_digest: value.provider_channel_access_generation_digest,
+    provider_identity_id: value.provider_identity_id,
+    provider_identity_trust: value.provider_identity_trust,
+    provider_identity_fingerprint: value.provider_identity_fingerprint,
+    projection_identity_id: value.projection_identity_id,
+    projection_identity_trust: value.projection_identity_trust,
+    opaque_address_fingerprint: value.opaque_address_fingerprint,
+    eligible: value.eligible,
+    exclusion_reason: value.exclusion_reason,
+  }
+}
+
+function canonicalRoutePolicy(value: RoutePolicyMaterialV1): RoutePolicyMaterialV1 {
+  routeAssertSha(value.policy_source_digest, 'policy_source_digest')
+  if (
+    value.fallback_allowed !== false ||
+    value.candidate_serialization_order !== 'binding_priority_desc_then_binding_id_connector_id_access_id_asc' ||
+    value.tie_behavior !== 'reject_ambiguous'
+  ) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'route policy is outside the fail-closed contract')
+  }
+  return {
+    policy_source_digest: value.policy_source_digest,
+    fallback_allowed: false,
+    candidate_serialization_order: 'binding_priority_desc_then_binding_id_connector_id_access_id_asc',
+    tie_behavior: 'reject_ambiguous',
+  }
+}
+
+function compareLowercaseUtf8(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left.toLowerCase(), 'utf8'), Buffer.from(right.toLowerCase(), 'utf8'))
+}
+
+function compareCanonicalRouteCandidates(left: EffectiveRouteCandidateV1, right: EffectiveRouteCandidateV1): number {
+  if (left.binding_priority !== right.binding_priority) return right.binding_priority - left.binding_priority
+  return compareLowercaseUtf8(left.binding_id, right.binding_id)
+    || compareLowercaseUtf8(left.connector_instance_id, right.connector_instance_id)
+    || compareLowercaseUtf8(left.provider_channel_access_id, right.provider_channel_access_id)
+}
+
+export function effectiveRouteCandidateDigest(candidate: EffectiveRouteCandidateV1): Sha256 {
+  return digestCanonical(CANONICAL_ROUTE_DOMAINS.candidate, canonicalEffectiveRouteCandidate(candidate))
+}
+
+export function routeResolutionInputDigest(input: RouteResolutionInputV1): Sha256 {
+  return digestCanonical(CANONICAL_ROUTE_DOMAINS.resolutionInput, canonicalRouteResolutionInput(input))
+}
+
+export function selectedRouteDigest(route: SelectedRouteV1): Sha256 {
+  return digestCanonical(CANONICAL_ROUTE_DOMAINS.selectedRoute, route)
+}
+
+export function routePolicyDigest(policy: RoutePolicyMaterialV1): Sha256 {
+  return digestCanonical(CANONICAL_ROUTE_DOMAINS.policy, canonicalRoutePolicy(policy))
+}
+
+/** Re-run the same canonical resolver against one pinned authority snapshot. */
+export function resolveCanonicalDeliveryDecision(material: CanonicalRouteResolutionMaterialV1): ResolvedDeliveryDecisionV1 {
+  routeAssertString(material.resolver_version, 'resolver_version')
+  const resolutionInput = canonicalRouteResolutionInput(material.resolution_input)
+  const policy = canonicalRoutePolicy(material.policy)
+  const candidates = material.evaluated_candidates.map(canonicalEffectiveRouteCandidate).sort(compareCanonicalRouteCandidates)
+  if (candidates.length === 0) throw new ContractValidationError('NO_ELIGIBLE_ROUTE', 'the evaluated candidate set is empty')
+
+  const evaluatedDigests = sortedUnique(candidates.map(effectiveRouteCandidateDigest), 'evaluated candidate digest set')
+  const eligible = candidates.filter(candidate => candidate.eligible)
+  if (eligible.length === 0) throw new ContractValidationError('NO_ELIGIBLE_ROUTE', 'no evaluated candidate is eligible')
+  const topPriority = eligible[0]!.binding_priority
+  const top = eligible.filter(candidate => candidate.binding_priority === topPriority)
+  if (top.length !== 1) throw new ContractValidationError('AMBIGUOUS_ROUTE', 'more than one eligible route has the highest priority')
+  const selectedCandidate = top[0]!
+  const eligibleDigests = sortedUnique(eligible.map(effectiveRouteCandidateDigest), 'eligible candidate digest set')
+  const snapshot = decodeBindingSnapshot(material.selected_binding_snapshot)
+  if (
+    snapshot.status !== 'active' ||
+    snapshot.resolver_version !== material.resolver_version ||
+    snapshot.channel_binding_id !== selectedCandidate.binding_id ||
+    snapshot.binding_role !== selectedCandidate.binding_role ||
+    snapshot.priority !== selectedCandidate.binding_priority ||
+    snapshot.connector_instance_id !== selectedCandidate.connector_instance_id ||
+    snapshot.provider_channel_access_id !== selectedCandidate.provider_channel_access_id ||
+    snapshot.provider_identity_fingerprint !== selectedCandidate.provider_identity_fingerprint ||
+    snapshot.projection_identity_id !== selectedCandidate.projection_identity_id ||
+    snapshot.opaque_address_fingerprint !== selectedCandidate.opaque_address_fingerprint ||
+    snapshot.capability_digest !== selectedCandidate.capability_digest
+  ) {
+    throw new ContractValidationError('ROUTE_AUTHORITY_INVALID', 'selected binding snapshot differs from the selected candidate')
+  }
+  const selectedRoute: SelectedRouteV1 = {
+    binding_id: selectedCandidate.binding_id,
+    connector_instance_id: selectedCandidate.connector_instance_id,
+    credential_generation_digest: selectedCandidate.credential_generation_digest,
+    provider_channel_access_generation_digest: selectedCandidate.provider_channel_access_generation_digest,
+    provider_identity_fingerprint: selectedCandidate.provider_identity_fingerprint,
+    projection_identity_id: selectedCandidate.projection_identity_id,
+    opaque_address_fingerprint: selectedCandidate.opaque_address_fingerprint,
+    capability_digest: selectedCandidate.capability_digest,
+  }
+  const decisionWithoutDigest: Omit<ResolvedDeliveryDecisionV1, 'resolved_delivery_decision_digest'> = {
+    schema_version: 'aun-resolved-delivery-decision/v1',
+    resolution_input_digest: digestCanonical(CANONICAL_ROUTE_DOMAINS.resolutionInput, resolutionInput),
+    evaluated_candidate_set_digest: digestCanonical(CANONICAL_ROUTE_DOMAINS.evaluatedCandidateSet, evaluatedDigests),
+    eligible_candidate_set_digest: digestCanonical(CANONICAL_ROUTE_DOMAINS.eligibleCandidateSet, eligibleDigests),
+    selected_route_digest: digestCanonical(CANONICAL_ROUTE_DOMAINS.selectedRoute, selectedRoute),
+    policy_digest: digestCanonical(CANONICAL_ROUTE_DOMAINS.policy, policy),
+    resolver_version: material.resolver_version,
+    selected_binding_snapshot_digest: bindingSnapshotDigest(snapshot),
+  }
+  return {
+    ...decisionWithoutDigest,
+    resolved_delivery_decision_digest: resolvedDeliveryDecisionDigest(decisionWithoutDigest),
+  }
+}
+
+/** Fail closed before provider invocation if any effective resolver authority drifted. */
+export function assertCanonicalDeliveryDecisionCurrent(
+  pinned: ResolvedDeliveryDecisionV1,
+  current: CanonicalRouteResolutionMaterialV1,
+): ResolvedDeliveryDecisionV1 {
+  const validatedPinned = decodeResolvedDeliveryDecision(pinned)
+  const recomputed = resolveCanonicalDeliveryDecision(current)
+  if (recomputed.resolved_delivery_decision_digest !== validatedPinned.resolved_delivery_decision_digest) {
+    throw new ContractValidationError('RESOLVER_DECISION_DRIFT', 'canonical resolver decision changed before provider invocation')
+  }
+  return recomputed
+}
 
 export type Queryable = {
   query: (sql: string, params?: any[]) => Promise<{ rows: any[] }>
