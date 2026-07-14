@@ -148,23 +148,36 @@ export type AgentRetirementPlan = {
   }
 }
 
-export type AuditRouteReconciliationPlan = {
-  ok: true
-  dry_run: boolean
-  reason: string
-  canonical_routes: Array<{
-    role_key: 'evidence_audit_gate' | 'scenario_verification_gate'
-    before: RoleRouteSnapshot | null
-    after: RoleRouteSnapshot
-    action: 'create' | 'activate' | 'noop'
-  }>
-  legacy_routes: Array<{
-    role_key: string
-    before: RoleRouteSnapshot
-    after: RoleRouteSnapshot
-    reason: 'ambiguous_legacy_audit_key'
-  }>
-}
+export type AuditRouteReconciliationPlan =
+  | {
+      ok: true
+      dry_run: boolean
+      reason: string
+      canonical_routes: Array<{
+        role_key: 'evidence_audit_gate' | 'scenario_verification_gate'
+        before: RoleRouteSnapshot | null
+        after: RoleRouteSnapshot
+        action: 'create' | 'activate' | 'noop'
+      }>
+      legacy_routes: Array<{
+        role_key: string
+        before: RoleRouteSnapshot
+        after: RoleRouteSnapshot
+        reason: 'ambiguous_legacy_audit_key'
+      }>
+    }
+  | {
+      ok: false
+      dry_run: boolean
+      reason: string
+      blocker: {
+        code: 'ROLE_ROUTING_READ_FAILED'
+        phase: 'canonical_routes' | 'legacy_routes'
+        detail: string
+      }
+      canonical_routes: []
+      legacy_routes: []
+    }
 
 export type RoleRouteSnapshot = {
   role_key: string
@@ -632,8 +645,27 @@ async function queryRoleRouteRows(db: Queryable, whereSql: string, params: unkno
       ${whereSql}
       ORDER BY role_key`,
     params,
-  ).catch(() => [])
+  )
   return rows.map(roleRouteSnapshot)
+}
+
+function auditRouteReconciliationReadBlocker(
+  input: { reason?: string; dryRun?: boolean },
+  phase: 'canonical_routes' | 'legacy_routes',
+  err: unknown,
+): AuditRouteReconciliationPlan {
+  return {
+    ok: false,
+    dry_run: input.dryRun !== false,
+    reason: input.reason?.trim() || 'audit route canonicalization',
+    blocker: {
+      code: 'ROLE_ROUTING_READ_FAILED',
+      phase,
+      detail: err instanceof Error ? err.message : String(err),
+    },
+    canonical_routes: [],
+    legacy_routes: [],
+  }
 }
 
 export async function buildAuditRouteReconciliationPlan(
@@ -641,11 +673,16 @@ export async function buildAuditRouteReconciliationPlan(
   input: { reason?: string; dryRun?: boolean } = {},
 ): Promise<AuditRouteReconciliationPlan> {
   const reason = input.reason?.trim() || 'audit route canonicalization'
-  const canonicalRows = await queryRoleRouteRows(
-    db,
-    `WHERE role_key IN ($1, $2)`,
-    ['evidence_audit_gate', 'scenario_verification_gate'],
-  )
+  let canonicalRows: RoleRouteSnapshot[]
+  try {
+    canonicalRows = await queryRoleRouteRows(
+      db,
+      `WHERE role_key IN ($1, $2)`,
+      ['evidence_audit_gate', 'scenario_verification_gate'],
+    )
+  } catch (err) {
+    return auditRouteReconciliationReadBlocker({ ...input, reason }, 'canonical_routes', err)
+  }
   const canonicalByKey = new Map(canonicalRows.map((row) => [row.role_key, row]))
   const canonicalRoutes: AuditRouteReconciliationPlan['canonical_routes'] = CANONICAL_AUDIT_ROLE_ROUTES.map((route) => {
     const before = canonicalByKey.get(route.role_key) ?? null
@@ -666,23 +703,28 @@ export async function buildAuditRouteReconciliationPlan(
     }
   })
 
-  const legacyRows = await queryRoleRouteRows(
-    db,
-    `WHERE role_key NOT IN ($1, $2)
-       AND (
-         lower(role_key) IN (${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.map((_, idx) => `$${idx + 3}`).join(', ')})
-         OR (agent_id = $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 3} AND lower(role_key) LIKE '%audit%')
-         OR (active_function = $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 4} AND agent_id <> $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 5})
-       )`,
-    [
-      'evidence_audit_gate',
-      'scenario_verification_gate',
-      ...AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS,
-      'devauditor',
-      'evidence_audit_gate',
-      'codex-audit',
-    ],
-  )
+  let legacyRows: RoleRouteSnapshot[]
+  try {
+    legacyRows = await queryRoleRouteRows(
+      db,
+      `WHERE role_key NOT IN ($1, $2)
+         AND (
+           lower(role_key) IN (${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.map((_, idx) => `$${idx + 3}`).join(', ')})
+           OR (agent_id = $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 3} AND lower(role_key) LIKE '%audit%')
+           OR (active_function = $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 4} AND agent_id <> $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 5})
+         )`,
+      [
+        'evidence_audit_gate',
+        'scenario_verification_gate',
+        ...AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS,
+        'devauditor',
+        'evidence_audit_gate',
+        'codex-audit',
+      ],
+    )
+  } catch (err) {
+    return auditRouteReconciliationReadBlocker({ ...input, reason }, 'legacy_routes', err)
+  }
   const legacyRoutes = legacyRows
     .filter((row) => row.historical_only !== true || row.new_work_allowed !== false)
     .map((before) => ({
@@ -1054,6 +1096,9 @@ export async function executeAuditRouteReconciliation(
       reason: input.reason,
       dryRun: false,
     })
+    if (!plan.ok) {
+      throw new Error(`${plan.blocker.code}:${plan.blocker.phase}:${plan.blocker.detail}`)
+    }
     for (const route of plan.canonical_routes) {
       if (route.action === 'noop') continue
       await upsertRoleRoute(tx, route.after)

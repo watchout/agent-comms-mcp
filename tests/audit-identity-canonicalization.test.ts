@@ -14,6 +14,7 @@ import {
   resolveCanonicalAuditRouteForInputStrict,
   resolveAuditSeatRoute,
 } from '../core/audit-identity'
+import type { DbAdapter } from '../core/db'
 
 async function withSqlite<T>(fn: (dbPath: string, adapter: SqliteAdapter) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'audit-identity-'))
@@ -27,6 +28,52 @@ async function withSqlite<T>(fn: (dbPath: string, adapter: SqliteAdapter) => Pro
     await adapter?.close()
     rmSync(dir, { recursive: true, force: true })
   }
+}
+
+class FailingRoleRoutingAdapter implements DbAdapter {
+  readonly dialect = 'sqlite' as const
+  transactions: string[] = []
+  writes: string[] = []
+
+  constructor(private readonly failOnQuery: number) {}
+
+  async query<T = any>(sql: string): Promise<T[]> {
+    if (sql.includes('FROM role_routing')) {
+      this.failOnQuery -= 1
+      if (this.failOnQuery === 0) throw new Error('role_routing schema unreadable')
+      return [
+        {
+          role_key: 'evidence_audit_gate',
+          agent_id: 'codex-audit',
+          active_function: 'evidence_audit_gate',
+          canonical_seat: 'codex-audit',
+          historical_only: 0,
+          new_work_allowed: 1,
+          description: 'canonical',
+        },
+      ] as T[]
+    }
+    return []
+  }
+
+  async execute(sql: string): Promise<{ rowCount: number }> {
+    this.writes.push(sql)
+    return { rowCount: 1 }
+  }
+
+  async transaction<T>(fn: (tx: DbAdapter) => Promise<T>): Promise<T> {
+    this.transactions.push('BEGIN')
+    try {
+      const result = await fn(this)
+      this.transactions.push('COMMIT')
+      return result
+    } catch (err) {
+      this.transactions.push('ROLLBACK')
+      throw err
+    }
+  }
+
+  async close(): Promise<void> {}
 }
 
 function seedDirectoryRows(dbPath: string): void {
@@ -347,6 +394,38 @@ describe('audit identity canonicalization', () => {
         read.close()
       }
     })
+  })
+
+  test('audit-route reconciliation dry-run returns a typed blocker when canonical role rows are unreadable', async () => {
+    const adapter = new FailingRoleRoutingAdapter(1)
+
+    const plan = await buildAuditRouteReconciliationPlan(adapter, {
+      reason: 'schema blocker',
+      dryRun: true,
+    })
+
+    expect(plan).toEqual({
+      ok: false,
+      dry_run: true,
+      reason: 'schema blocker',
+      blocker: {
+        code: 'ROLE_ROUTING_READ_FAILED',
+        phase: 'canonical_routes',
+        detail: 'role_routing schema unreadable',
+      },
+      canonical_routes: [],
+      legacy_routes: [],
+    })
+  })
+
+  test('audit-route reconciliation execute rolls back when legacy route read fails', async () => {
+    const adapter = new FailingRoleRoutingAdapter(2)
+
+    await expect(executeAuditRouteReconciliation(adapter, {
+      reason: 'schema blocker',
+    })).rejects.toThrow('ROLE_ROUTING_READ_FAILED:legacy_routes:role_routing schema unreadable')
+    expect(adapter.transactions).toEqual(['BEGIN', 'ROLLBACK'])
+    expect(adapter.writes).toEqual([])
   })
 
   test('DB triggers reject active projections for disabled or historical-only agents', async () => {

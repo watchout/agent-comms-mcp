@@ -2607,6 +2607,7 @@ async function auditRoute(args: string[]) {
         ? await buildAuditRouteReconciliationPlan((db as any).__adapter, { reason, dryRun: true })
         : await executeAuditRouteReconciliation((db as any).__adapter, { reason })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      if (!report.ok) process.exitCode = 1
     } finally {
       await db.end()
     }
