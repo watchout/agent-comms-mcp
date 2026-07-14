@@ -7,13 +7,28 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
-import { ensureEventLogSchema, openTurnCount, EventLog, turnIdFor, completeTurn, claimNextTurn } from '../../core/eventlog'
+import {
+  ensureEventLogSchema,
+  openTurnCount,
+  EventLog,
+  turnIdFor,
+  completeTurn,
+  claimNextTurn,
+  dispatchOutboxOnce,
+  receiveMessage,
+} from '../../core/eventlog'
 import { importPendingV1Rows, closeAnsweredV1Row, findUnclosedAnsweredRows } from '../../core/eventlog/v1-import'
+import { NotifyTransport } from '../../bin/aun/v2-worker-daemon'
+
+const REPO_ROOT = join(import.meta.dir, '..', '..')
+const CLI_PATH = join(REPO_ROOT, 'cli', 'index.ts')
+const MIGRATE_PATH = join(REPO_ROOT, 'db', 'migrate.ts')
 
 // fence older than every seeded row → rows qualify; the garbage-barrier
 // suite below uses a FUTURE fence to prove exclusion
@@ -305,11 +320,142 @@ describe.if(!!POSTGRES_TEST_URL)('starvation-free PostgreSQL recovery', () => {
   })
 })
 
-describe('typed notify evidence bridge', () => {
-  test('daemon requires exact notify JSON evidence and never fabricates a transport message id', () => {
-    const source = readFileSync(join(import.meta.dir, '../../bin/aun/v2-worker-daemon.ts'), 'utf8')
-    expect(source).toContain('receipt = JSON.parse(out.trim())')
-    expect(source).toContain('notify response missing exact message_id evidence')
-    expect(source).not.toContain('`notify-${Date.now()}`')
+describe('typed notify recipient and receipt bridge', () => {
+  test('replied turn reaches actual cli.notify with durable recipient authority; missing or malformed evidence never delivers', async () => {
+    const notifyDir = mkdtempSync(join(tmpdir(), 'eventlog-m4-notify-'))
+    const notifyDbPath = join(notifyDir, 'notify.db')
+    const notifyEnv = {
+      ...process.env,
+      AGENT_COM_DB: 'sqlite',
+      AGENT_COM_SQLITE_PATH: notifyDbPath,
+      AGENT_COM_PG_NOTIFY: 'false',
+      DATABASE_URL: '',
+      PATH: '/usr/bin:/bin',
+    }
+    const migrated = spawnSync(process.execPath, [MIGRATE_PATH], {
+      cwd: REPO_ROOT,
+      env: notifyEnv,
+      encoding: 'utf8',
+    })
+    expect(migrated.status).toBe(0)
+
+    const notifyDb = new SqliteAdapter(notifyDbPath)
+    try {
+      await ensureEventLogSchema(notifyDb)
+      await notifyDb.execute(
+        `INSERT INTO agents (agent_id, display_name, agent_type, status)
+         VALUES ('spec', 'spec', 'dev', 'idle'), ('ceo', 'ceo', 'ceo', 'idle')`,
+      )
+      await notifyDb.execute(
+        `INSERT INTO channels (id, name, members) VALUES ($1, $1, $2)`,
+        ['chan-1', JSON.stringify(['spec', 'ceo'])],
+      )
+      await notifyDb.execute(
+        `INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
+         VALUES ($1, $2, 'eventlog-m4-notify-test')`,
+        ['chan-1', JSON.stringify(['spec', 'ceo'])],
+      )
+
+      const enqueueReply = async (
+        messageId: string,
+        payload: Record<string, unknown>,
+        content: string,
+      ) => {
+        await receiveMessage(notifyDb, {
+          messageId,
+          seatId: 'spec',
+          conversationId: `conv-${messageId}`,
+          payload,
+        })
+        const claimed = await claimNextTurn(notifyDb, { seatId: 'spec', seatInstanceId: `worker-${messageId}` })
+        expect(claimed?.turn.message_id).toBe(messageId)
+        return completeTurn(notifyDb, {
+          turnId: claimed!.turn.turn_id,
+          seatId: 'spec',
+          seatInstanceId: `worker-${messageId}`,
+          claimEventId: claimed!.claimEventId,
+          outcome: 'replied',
+          conversationId: `conv-${messageId}`,
+          replies: [{ content, channelExternalId: 'chan-1' }],
+        })
+      }
+
+      const transport = new NotifyTransport(notifyDb, CLI_PATH, { env: notifyEnv })
+      const success = await enqueueReply('notify-success', {
+        channel_id: 'chan-1',
+        author_id: 'ceo',
+        content: 'reply please',
+      }, 'durable reply')
+      const successReplyId = success.replies[0].event.reply_id!
+      const delivered = await dispatchOutboxOnce(notifyDb, transport, {
+        dispatcherId: 'v2-outbox',
+        dispatcherInstanceId: 'notify-success-dispatcher',
+      })
+      expect(delivered.delivered).toEqual([successReplyId])
+      const deliveredEvent = await notifyDb.queryOne<{ payload: string }>(
+        `SELECT payload FROM event_log WHERE event_type = 'reply.delivered' AND reply_id = $1`,
+        [successReplyId],
+      )
+      const transportMessageId = JSON.parse(deliveredEvent!.payload).transport_message_id as string
+      expect(transportMessageId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+      expect((await notifyDb.queryOne<{ author_id: string; channel_id: string; content: string }>(
+        `SELECT author_id, channel_id, content FROM agent_messages WHERE id = $1`,
+        [transportMessageId],
+      ))).toEqual({ author_id: 'spec', channel_id: 'chan-1', content: 'durable reply' })
+      expect((await notifyDb.queryOne<{ agent_id: string }>(
+        `SELECT agent_id FROM message_queue WHERE message_id = $1`,
+        [transportMessageId],
+      ))?.agent_id).toBe('ceo')
+
+      const messageCountBeforeMissing = (await notifyDb.queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM agent_messages`,
+      ))!.n
+      const missing = await enqueueReply('notify-missing-recipient', {
+        channel_id: 'chan-1',
+        content: 'no author authority',
+      }, 'must not send')
+      const missingReplyId = missing.replies[0].event.reply_id!
+      const missingResult = await dispatchOutboxOnce(notifyDb, transport, {
+        dispatcherId: 'v2-outbox',
+        dispatcherInstanceId: 'notify-missing-dispatcher',
+      })
+      expect(missingResult.failedPermanent).toEqual([missingReplyId])
+      expect(await notifyDb.queryOne(
+        `SELECT event_id FROM event_log WHERE event_type = 'reply.delivered' AND reply_id = $1`,
+        [missingReplyId],
+      )).toBeNull()
+      expect((await notifyDb.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM agent_messages`))!.n)
+        .toBe(messageCountBeforeMissing)
+
+      const malformed = await enqueueReply('notify-malformed-receipt', {
+        channel_id: 'chan-1',
+        author_id: 'ceo',
+        content: 'malformed receipt probe',
+      }, 'must not claim delivery')
+      const malformedReplyId = malformed.replies[0].event.reply_id!
+      let invokedCommand: string[] = []
+      const malformedTransport = new NotifyTransport(notifyDb, CLI_PATH, {
+        env: notifyEnv,
+        runner: async command => {
+          invokedCommand = command
+          return { stdout: '{"ok":true,"message_id":"not-a-uuid"}', stderr: '', exitCode: 0 }
+        },
+      })
+      const malformedResult = await dispatchOutboxOnce(notifyDb, malformedTransport, {
+        dispatcherId: 'v2-outbox',
+        dispatcherInstanceId: 'notify-malformed-dispatcher',
+      })
+      expect(invokedCommand[0]).toBe(process.execPath)
+      expect(invokedCommand).toContain('--mention')
+      expect(invokedCommand).toContain('ceo')
+      expect(malformedResult.failedPermanent).toEqual([malformedReplyId])
+      expect(await notifyDb.queryOne(
+        `SELECT event_id FROM event_log WHERE event_type = 'reply.delivered' AND reply_id = $1`,
+        [malformedReplyId],
+      )).toBeNull()
+    } finally {
+      await notifyDb.close()
+      rmSync(notifyDir, { recursive: true, force: true })
+    }
   })
 })

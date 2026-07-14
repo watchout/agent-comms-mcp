@@ -27,10 +27,10 @@ items:
     expected_evidence: ["bin/aun/v2-worker-daemon.ts", ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml"]
   - item_id: "AUDIT-V2-M4-004"
     source: "transport_neutral_dependency_adaptation"
-    verification_method: "semantic"
+    verification_method: "semantic_and_executable"
     required: true
-    prompt: "Confirm NotifyTransport accepts only cli.notify JSON with ok=true and an exact UUID message_id, and never fabricates delivery evidence when stdout is missing or malformed."
-    expected_evidence: ["bin/aun/v2-worker-daemon.ts", "tests/eventlog/eventlog-v1-import-m4.test.ts", "notify response missing exact message_id evidence"]
+    prompt: "Confirm NotifyTransport derives sender, exact active recipient, channel, and optional thread only from the reply.enqueued→message.received append-only chain; actual cli.notify receives that recipient and returns ok=true plus an exact UUID message_id; missing or malformed authority/receipt records zero reply.delivered evidence."
+    expected_evidence: ["bin/aun/v2-worker-daemon.ts:resolveNotifyAuthority", "tests/eventlog/eventlog-v1-import-m4.test.ts:typed notify recipient and receipt bridge", "actual cli.notify with minimal PATH", "zero reply.delivered for negative fixtures"]
   - item_id: "AUDIT-V2-M4-005"
     source: "cross_dialect_recovery"
     verification_method: "executable"

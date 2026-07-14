@@ -31,13 +31,15 @@ claims:
   fail_closed_guards:
     - "Import throws without a valid created-after fence (no import-everything mode)."
     - "V1 closure only after V2 completion; idempotent."
-    - "NotifyTransport rejects missing, malformed, or non-exact cli.notify evidence; no transport message id is fabricated."
+    - "NotifyTransport derives sender/recipient/channel/thread only from the append-only inbound authority for the exact reply; no reply-id parsing or recipient fallback."
+    - "Actual cli.notify must return ok=true with an exact UUID message_id; missing or malformed authority/receipt records zero reply.delivered evidence."
     - "Owner exact-head decision required before merge."
 commands:
   - { command: "AGENT_COM_TEST_DATABASE_URL=<test-db> bun test tests/eventlog/ --timeout 30000", result: "PASS_113_TESTS_0_FAIL_SQLITE_AND_POSTGRESQL" }
   - { command: "AGENT_COM_TEST_DATABASE_URL=<test-db> bun test tests/eventlog/eventlog-v1-import-m4.test.ts --timeout 30000", result: "PASS_11_TESTS_0_FAIL" }
+  - { command: "bun test tests/ --timeout 30000 + bun test db/migrate.destructive-gate.test.ts", result: "PASS_2312_SKIP_52_FAIL_0" }
   - { command: "bun build --target bun bin/aun/v2-worker-daemon.ts", result: "PASS" }
   - { command: "migration-backed PostgreSQL fixture transaction", result: "PASS_ROLLBACK_ZERO_RESIDUE" }
-validation_results: ["M4 fixtures 11 pass 0 fail; EventLog regression 113 pass 0 fail across SQLite and migration-backed PostgreSQL; daemon build-checked; no runtime activation"]
+validation_results: ["M4 fixtures 11 pass 0 fail including actual minimal-PATH cli.notify; EventLog regression 113 pass 0 fail across SQLite and migration-backed PostgreSQL; complete repository tests 2312 pass 52 skip 0 fail; daemon build-checked; no runtime activation"]
 evidence_refs: [PR_head_SHA, changed_files, validation_commands, validation_results]
-notes: ["Machine evidence only; not a structured audit; approves nothing.", "Daemon is not started by this PR.", "PostgreSQL fixture writes are enclosed in one transaction and intentionally rolled back."]
+notes: ["Machine evidence only; not a structured audit; approves nothing.", "Daemon is not started by this PR.", "PostgreSQL fixture writes are enclosed in one transaction and intentionally rolled back.", "The notify behavioral fixture uses only an isolated migrated SQLite test DB; no external provider send occurs."]
