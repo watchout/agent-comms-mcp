@@ -110,13 +110,62 @@ describe('registered-loader protected append boundary', () => {
 
   test('generic append rejects all five protected event types before a transaction writes', async () => {
     const log = new EventLog(db)
+    let denied = 0
     for (const [index, eventType] of protectedTypes.entries()) {
       await expect(log.append({
         eventId: `protected-${index}`,
         eventType,
         payload: {},
       })).rejects.toBeInstanceOf(ProtectedAuthorityAppendForbiddenError)
+      denied += 1
     }
+    expect(denied).toBe(5)
+    expect(await log.count()).toBe(0)
+  })
+
+  test('subclass surface denies all five protected event types with zero durable rows', async () => {
+    class CallerSubclass extends EventLog {
+      async attemptInheritedWriter(input: AppendEvent): Promise<'denied' | 'written'> {
+        const inheritedWriter = Reflect.get(this, 'appendValidated')
+        if (typeof inheritedWriter !== 'function') return 'denied'
+        await Reflect.apply(inheritedWriter, this, [input])
+        return 'written'
+      }
+    }
+    const log = new CallerSubclass(db)
+    let denied = 0
+    for (const [index, eventType] of protectedTypes.entries()) {
+      const result = await log.attemptInheritedWriter({
+        eventId: `subclass-protected-${index}`,
+        eventType,
+        payload: {},
+      })
+      expect(result).toBe('denied')
+      denied += 1
+    }
+    expect(denied).toBe(5)
+    expect(await log.count()).toBe(0)
+  })
+
+  test('runtime reflection surface denies all five protected event types with zero durable rows', async () => {
+    const log = new EventLog(db)
+    const runtimePrototype = Object.getPrototypeOf(log)
+    expect(Object.getOwnPropertyNames(runtimePrototype)).not.toContain('appendValidated')
+    let denied = 0
+    for (const [index, eventType] of protectedTypes.entries()) {
+      const reflectedWriter = Reflect.get(runtimePrototype, 'appendValidated', log)
+      const input: AppendEvent = {
+        eventId: `reflection-protected-${index}`,
+        eventType,
+        payload: {},
+      }
+      if (typeof reflectedWriter === 'function') {
+        await Reflect.apply(reflectedWriter, log, [input])
+      } else {
+        denied += 1
+      }
+    }
+    expect(denied).toBe(5)
     expect(await log.count()).toBe(0)
   })
 

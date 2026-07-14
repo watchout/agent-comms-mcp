@@ -240,11 +240,11 @@ export class EventLog {
    */
   async append(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
     assertCallerAppendAllowed(input)
-    return this.appendValidated(input, db)
+    return this.#appendValidated(input, db)
   }
 
-  private async appendValidated(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
-    if (!db) return serializedTransaction(this.db, tx => this.appendValidated(input, tx))
+  async #appendValidated(input: AppendEvent, db?: DbAdapter): Promise<AppendResult> {
+    if (!db) return serializedTransaction(this.db, tx => this.#appendValidated(input, tx))
     validate(input)
     const params = [
       input.eventId,
