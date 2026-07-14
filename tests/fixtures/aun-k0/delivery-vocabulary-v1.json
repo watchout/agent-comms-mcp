@@ -1,0 +1,24 @@
+{
+  "schema_version": "aun-k0-delivery-vocabulary/v1",
+  "events": [
+    { "event_type": "reply.enqueued", "terminal": false, "proof_tier": "committed_event" },
+    { "event_type": "reply.delivery_claimed", "terminal": false, "proof_tier": "fenced_claim" },
+    { "event_type": "reply.handoff_accepted", "terminal": false, "proof_tier": "durable_queue_receipt" },
+    { "event_type": "reply.delivered", "terminal": true, "proof_tier": "provider_receipt" },
+    { "event_type": "reply.delivery_unknown", "terminal": true, "proof_tier": "reconciliation_required" },
+    { "event_type": "reply.failed_retryable", "terminal": false, "proof_tier": "attempt_evidence" },
+    { "event_type": "reply.failed_permanent", "terminal": true, "proof_tier": "semantic_terminal" },
+    { "event_type": "reply.dead_lettered", "terminal": true, "proof_tier": "semantic_terminal" }
+  ],
+  "guarantees": {
+    "internal_state_transition": "exactly_once_by_unique_constraint_and_fencing",
+    "processing_attempt": "at_least_once",
+    "external_effect": "effectively_once_only_with_end_to_end_idempotency"
+  },
+  "invariants": [
+    "placed_is_not_delivered",
+    "provider_without_receipt_never_emits_delivered",
+    "same_nonce_different_payload_is_collision",
+    "synthetic_provider_receipt_is_forbidden"
+  ]
+}

@@ -1,0 +1,72 @@
+schema_version: shirube-cell/v1
+CELL-ID: CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+SPEC-ID: SPEC-AUN-SHIRUBE-001
+risk_tier: R2
+goal: Encode the owner-ratified AUN-K0 event/delivery vocabulary, DbCapabilities truth, A0/A1/A2 profiles, and 12-specimen correctness corpus without production behavior change.
+control_source: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+exact_base: 0d7c52d80b515ed39fd0e41bc84a617fd6fbe2fa
+execution_context:
+  agent_id: aun
+  active_function: implementation_executor
+allowed_paths:
+  - docs/spec/aun-k0-contract-and-corpus.md
+  - schemas/aun-k0-event-vocabulary-v1.schema.json
+  - schemas/aun-k0-delivery-vocabulary-v1.schema.json
+  - schemas/aun-k0-db-capabilities-v1.schema.json
+  - schemas/aun-k0-benchmark-result-v1.schema.json
+  - tests/fixtures/aun-k0/**
+  - tests/aun-k0/contract.test.ts
+  - tests/aun-k0/corpus.test.ts
+  - tests/aun-k0/benchmark-harness.test.ts
+  - benchmarks/aun-k0/README.md
+  - benchmarks/aun-k0/cli.ts
+  - benchmarks/aun-k0/harness.ts
+  - benchmarks/aun-k0/profiles.ts
+  - .shirube/cells/CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+  - .shirube/control-handoffs/CH-AUN-FIRST-F1-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+  - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+  - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+forbidden_paths:
+  - core/**
+  - adapters/**
+  - bin/**
+  - cli/**
+  - db/**
+  - config/**
+  - deploy/**
+  - secrets/**
+  - .env*
+  - server.ts
+  - scripts/**
+  - package.json
+  - bun.lock
+  - .github/workflows/**
+acceptance_criteria:
+  - id: AC-AUN-K0-001
+    statement: All 15 owner acceptance IDs appear exactly once and every predicate maps to a known specimen.
+  - id: AC-AUN-K0-002
+    statement: All 12 required correctness specimens have provenance, input, expected predicate, proof tier, and future Cell owner.
+  - id: AC-AUN-K0-003
+    statement: PostgreSQL is declared production authority and SQLite multi-worker concurrency is unsupported fail-closed.
+  - id: AC-AUN-K0-004
+    statement: A0/A1/A2 plan output contains required dimensions and a deterministic canonical plan digest.
+  - id: AC-AUN-K0-005
+    statement: Plan mode distinguishes contract_valid from behavior_proven and never reports an unexecuted SLO PASS.
+required_tests:
+  - bun test tests/aun-k0/
+  - bun test tests/eventlog/
+  - bun benchmarks/aun-k0/cli.ts --profile A0_correctness --plan --json
+  - bun benchmarks/aun-k0/cli.ts --profile A1_reference --plan --json
+  - bun benchmarks/aun-k0/cli.ts --profile A2_soak --plan --json
+non_goals:
+  - No production behavior, runtime, runner, daemon, connector, queue, database, schema, migration, provider, secret, activation, F2-F5, #862, workflow, deploy, or merge change.
+stop_conditions:
+  - Exact base differs from 0d7c52d80b515ed39fd0e41bc84a617fd6fbe2fa.
+  - A required change touches a forbidden path or needs a new dependency/live infrastructure.
+  - The harness would call unexecuted behavior or an SLO PASS.
+  - An input hash or owner predicate conflicts with the pinned SPEC inputs.
+completion_routing:
+  owner_agent: l2auditor
+  owner_function: evidence_audit_gate
+  action: Independently review the exact draft PR head for traceability, path scope, deterministic plan behavior, and truthful evidence grading.
+  blocking: true

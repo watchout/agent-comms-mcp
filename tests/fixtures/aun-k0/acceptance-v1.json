@@ -1,0 +1,24 @@
+{
+  "schema_version": "aun-k0-acceptance-map/v1",
+  "source": {
+    "spec": "SPEC-AUN-SHIRUBE-001-acceptance.yaml",
+    "sha256": "aa2e91055953439022ab65fc429ef86d9d280acc6a9fde6a46394694d44a85a5"
+  },
+  "acceptance": [
+    { "id": "AUN-PERF-001", "metric": "event_append_commit_ms", "profile": "A1_reference", "predicate": "p95 <= 25 and p99 <= 100", "specimen_ids": ["event_id_same_payload_idempotent", "event_id_different_payload_collision"] },
+    { "id": "AUN-PERF-002", "metric": "committed_to_claimed_ms", "profile": "A1_reference", "predicate": "p95 <= 50 and p99 <= 200 at expected_peak_x2", "specimen_ids": ["two_live_daemons_no_claim_steal"] },
+    { "id": "AUN-PERF-003", "metric": "active_projection_query_ms", "profile": "A1_reference", "predicate": "p95 <= 50 and p99 <= 150", "specimen_ids": ["long_history_keeps_query_slo"] },
+    { "id": "AUN-PERF-004", "metric": "wake_to_observation_ms", "profile": "A1_reference", "predicate": "p95 <= 100 and poll_backstop_ms <= 2000", "specimen_ids": ["notification_loss_converges_via_scan"] },
+    { "id": "AUN-PERF-005", "metric": "dispatcher_handoff_overhead_ms", "profile": "A1_reference", "predicate": "p95 <= 100 excluding_provider", "specimen_ids": ["provider_without_receipt_never_emits_delivered"] },
+    { "id": "AUN-PERF-006", "metric": "core_throughput", "profile": "A1_reference", "predicate": "completed_turns_per_second >= 250 and event_appends_per_second >= 1000", "specimen_ids": ["long_history_keeps_query_slo"] },
+    { "id": "AUN-RES-001", "metric": "committed_message_loss", "profile": "A0_correctness", "predicate": "count == 0 at every crash point", "specimen_ids": ["every_crash_boundary_zero_loss", "notification_loss_converges_via_scan", "historic_prefix_does_not_starve_matched_reconciliation"] },
+    { "id": "AUN-RES-002", "metric": "duplicate_terminal_completion", "profile": "A0_correctness", "predicate": "count == 0", "specimen_ids": ["event_id_same_payload_idempotent", "event_id_different_payload_collision", "two_live_daemons_no_claim_steal", "runtime_timeout_is_not_semantic_completion"] },
+    { "id": "AUN-RES-003", "metric": "duplicate_external_effect", "profile": "A0_correctness", "predicate": "count == 0 when adapter capability is idempotent", "specimen_ids": ["provider_without_receipt_never_emits_delivered", "same_nonce_retry_has_one_external_effect"] },
+    { "id": "AUN-RES-004", "metric": "wrong_workspace_or_function_invocation", "profile": "A0_correctness", "predicate": "model_invocation_count == 0 for invalid binding fixtures", "specimen_ids": ["invalid_binding_causes_zero_model_calls"] },
+    { "id": "AUN-RES-005", "metric": "stale_completion", "profile": "A0_correctness", "predicate": "rejected == 100_percent", "specimen_ids": ["stale_fencing_token_rejected"] },
+    { "id": "AUN-RES-006", "metric": "database_recovery", "profile": "A2_soak", "predicate": "rto_seconds <= 30 and committed_event_rpo == 0", "specimen_ids": ["every_crash_boundary_zero_loss", "notification_loss_converges_via_scan"] },
+    { "id": "AUN-RES-007", "metric": "fault_isolation", "profile": "A1_reference", "predicate": "hung_seat_additional_p95_delay_ms <= 100 for other seats and outbox", "specimen_ids": ["two_live_daemons_no_claim_steal", "runtime_timeout_is_not_semantic_completion"] },
+    { "id": "AUN-RES-008", "metric": "release_candidate_soak", "profile": "A2_soak", "predicate": "deadlocks == 0 and memory_growth_percent < 10 and unbounded_backlog == false", "specimen_ids": ["every_crash_boundary_zero_loss", "historic_prefix_does_not_starve_matched_reconciliation"] },
+    { "id": "AUN-EFF-001", "metric": "idle_daemon_overhead", "profile": "A1_reference", "predicate": "cpu_percent < 1 and db_safety_poll_qps_per_process <= 0.5 and rss_mib <= 256", "specimen_ids": ["notification_loss_converges_via_scan"] }
+  ]
+}

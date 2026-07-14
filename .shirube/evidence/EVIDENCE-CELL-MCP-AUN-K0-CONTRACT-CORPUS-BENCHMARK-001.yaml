@@ -1,0 +1,119 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+target_repo: watchout/agent-comms-mcp
+target_pr: 863
+cell_id: CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001
+implementation_actor: aun
+not_structured_audit: true
+completes_cell: false
+owner_decision_required_before_merge: true
+exact_base: 0d7c52d80b515ed39fd0e41bc84a617fd6fbe2fa
+head_evidence_source: draft_PR_exact_head_at_audit_time
+handoff_ref: .shirube/control-handoffs/CH-AUN-FIRST-F1-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-K0-CONTRACT-CORPUS-BENCHMARK-001.yaml
+input_evidence:
+  architecture_sha256: ba23fe5a7e1ba8dbf10344e4753288ffbc8228533f3be778598707dfea408fc7
+  acceptance_sha256: aa2e91055953439022ab65fc429ef86d9d280acc6a9fde6a46394694d44a85a5
+audit_cycles:
+  - cycle: 1
+    exact_head: b5b903d3600711a10b8d8589fe72cf3105acd57d
+    gate_result: BLOCK
+    audit_ref: https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953337047
+    blocking_finding: AUN-K0-SCHEMA-FAIL-CLOSED-001
+  - cycle: 2
+    lifecycle_state: audit_needs_rework_cycle_2
+    handoff_ref: https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953374596
+    implementation_state: local_validation_pass_pending_exact_head_publish_and_reaudit
+claims:
+  contract_coverage:
+    owner_acceptance_ids: 15
+    owner_acceptance_ids_mapped: 15
+    duplicate_or_unknown_acceptance_ids: 0
+    required_specimens: 12
+    required_specimens_mapped: 12
+    dangling_predicates_or_specimens: 0
+  database_truth:
+    postgresql_production_authority_declared: true
+    sqlite_multi_worker_production_supported: false
+    sqlite_unsupported_concurrency_fail_closed: true
+  schema_validation:
+    validator: Ajv_2020_12
+    committed_positive_fixtures_validate: true
+    generated_benchmark_plan_validates: true
+    repeated_event_or_delivery_types_rejected: true
+    contradictory_event_or_delivery_semantics_rejected: true
+    contradictory_postgresql_or_sqlite_capabilities_rejected: true
+    missing_or_unknown_sqlite_unsupported_declarations_rejected: true
+    duplicate_or_unknown_acceptance_ids_rejected: true
+    duplicate_or_unknown_specimen_ids_rejected: true
+  benchmark_truth:
+    profiles: [A0_correctness, A1_reference, A2_soak]
+    plan_only: true
+    contract_valid_is_behavior_proven: false
+    unexecuted_SLO_PASS_count: 0
+    canonical_digest_excludes: [generated_at, run_id, observed_hardware]
+  protected_surface_boundary:
+    production_behavior_changed: false
+    runtime_runner_daemon_changed: false
+    queue_or_database_changed: false
+    schema_or_migration_changed: false
+    connector_provider_secret_changed: false
+    workflow_required_check_or_deploy_changed: false
+    CP80_canary_touched: false
+    F2_F3_F4_F5_or_PR862_touched: false
+    self_audit_approval_or_merge: false
+design_judgments:
+  - judgment: Canonical event and delivery vocabularies are closed ordered tuples, not open sets.
+    disposition: accepted_for_cycle_2
+    basis_refs:
+      - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+      - https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953337047
+    consequence: Each array position binds the exact event type, terminal state, proof tier, and writer authority where applicable.
+  - judgment: Benchmark acceptance and specimen arrays are closed ordered owner-ratified registries.
+    disposition: accepted_for_cycle_2
+    basis_refs:
+      - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+      - https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953374596
+    consequence: Duplicate, unknown, missing, reordered, or extra IDs fail schema validation.
+  - judgment: Ajv is used only as the existing executable Draft 2020-12 validation layer; no dependency or lockfile change is introduced.
+    disposition: accepted_for_cycle_2
+    basis_refs:
+      - https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953337047
+      - https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953374596
+    consequence: Positive and negative instances exercise the published schemas inside the existing K0 test allowlist.
+validation_state: cycle_2_local_precommit_pass
+commands:
+  - command: git diff --check
+    result: PASS
+  - command: parse every new JSON/YAML artifact
+    result: PASS_21_JSON_4_YAML
+  - command: bun test tests/aun-k0/
+    result: PASS_17_TESTS_0_FAIL_254_EXPECTATIONS
+  - command: bun test tests/eventlog/
+    result: PASS_43_TESTS_0_FAIL
+  - command: bun benchmarks/aun-k0/cli.ts --profile A0_correctness --plan --json
+    result: PASS_PLAN_ONLY_15_NOT_MEASURED_BEHAVIOR_PROVEN_FALSE
+  - command: bun benchmarks/aun-k0/cli.ts --profile A1_reference --plan --json
+    result: PASS_PLAN_ONLY_15_NOT_MEASURED_BEHAVIOR_PROVEN_FALSE
+  - command: bun benchmarks/aun-k0/cli.ts --profile A2_soak --plan --json
+    result: PASS_PLAN_ONLY_15_NOT_MEASURED_BEHAVIOR_PROVEN_FALSE
+notes:
+  - Machine evidence only; it approves nothing and is not an independent audit.
+  - PASS above means local contract/parsing/regression commands passed; no runtime behavior or SLO was executed or proven.
+  - Cycle-1 BLOCK is not superseded until codex-audit independently re-audits the new exact head.
+  - Exact head publication, exact-head CI, independent re-audit, owner decision, merge, and post-merge evidence remain outstanding.
+next_action:
+  owner_agent: codex-audit
+  owner_function: evidence_audit_gate
+  action: Independently re-audit the published cycle-2 exact head against all six K0 checklist items, with emphasis on AUDIT-AUN-K0-003 and AUDIT-AUN-K0-004.
+  handoff_method: Actionable exact AUN queue plus a structured exact-head request on draft PR #863.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953337047
+    - https://github.com/watchout/agent-comms-mcp/pull/863#issuecomment-4953374596
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4950705886
+  scope:
+    allowed: Read-only exact-head schema, fixture, corpus, benchmark, evidence, and validation review.
+    forbidden: Implementation fixes, self-approval, merge, activation, workflow changes, or scope expansion.
+  deliverable: Structured PASS, CONDITIONAL PASS, BLOCK, or FAILURE verdict bound to the new exact head with complete next_action.
+  completion_evidence: GitHub audit URL, exact audited head, replayed validation results, and all checklist dispositions.
+  blocking: true

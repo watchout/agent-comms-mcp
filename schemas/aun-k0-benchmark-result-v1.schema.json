@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-k0-benchmark-result-v1.schema.json",
+  "title": "AUN K0 Benchmark Plan Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "acceptanceResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "predicate", "status", "measured"],
+      "properties": {
+        "id": { "type": "string" },
+        "predicate": { "type": "string", "minLength": 1 },
+        "status": { "const": "not_measured" },
+        "measured": { "type": "null" }
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "mode",
+    "profile",
+    "contract_valid",
+    "behavior_proven",
+    "source_sha",
+    "tree_digest",
+    "config_digest",
+    "policy_digest",
+    "database",
+    "hardware",
+    "payload_profile",
+    "worker_count",
+    "acceptance",
+    "specimens",
+    "plan_digest",
+    "generated_at",
+    "run_id"
+  ],
+  "properties": {
+    "schema_version": { "const": "aun-k0-benchmark-result/v1" },
+    "mode": { "const": "plan" },
+    "profile": { "enum": ["A0_correctness", "A1_reference", "A2_soak"] },
+    "contract_valid": { "type": "boolean" },
+    "behavior_proven": { "const": false },
+    "source_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "tree_digest": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+    "config_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "policy_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "version"],
+      "properties": {
+        "kind": { "const": "postgresql" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory_bytes"],
+      "properties": {
+        "cpu": { "type": "string", "minLength": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "payload_profile": { "type": "string", "minLength": 1 },
+    "worker_count": { "type": "integer", "minimum": 1 },
+    "acceptance": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-001" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-002" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-003" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-004" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-005" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-PERF-006" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-001" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-002" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-003" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-004" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-005" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-006" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-007" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-RES-008" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/acceptanceResult" }, { "properties": { "id": { "const": "AUN-EFF-001" } } }] }
+      ],
+      "items": false
+    },
+    "specimens": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "prefixItems": [
+        { "const": "event_id_same_payload_idempotent" },
+        { "const": "event_id_different_payload_collision" },
+        { "const": "two_live_daemons_no_claim_steal" },
+        { "const": "stale_fencing_token_rejected" },
+        { "const": "every_crash_boundary_zero_loss" },
+        { "const": "historic_prefix_does_not_starve_matched_reconciliation" },
+        { "const": "notification_loss_converges_via_scan" },
+        { "const": "runtime_timeout_is_not_semantic_completion" },
+        { "const": "invalid_binding_causes_zero_model_calls" },
+        { "const": "provider_without_receipt_never_emits_delivered" },
+        { "const": "same_nonce_retry_has_one_external_effect" },
+        { "const": "long_history_keeps_query_slo" }
+      ],
+      "items": false
+    },
+    "plan_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "run_id": { "type": "string", "minLength": 1 }
+  }
+}

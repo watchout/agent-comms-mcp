@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-k0-event-vocabulary-v1.schema.json",
+  "title": "AUN K0 Event Vocabulary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_type", "terminal", "proof_tier", "writer_authority"],
+      "properties": {
+        "event_type": {
+          "enum": [
+            "message.received",
+            "turn.claimed",
+            "turn.started",
+            "turn.attempt_failed",
+            "turn.retry_scheduled",
+            "turn.blocked",
+            "turn.dead_lettered",
+            "turn.completed"
+          ]
+        },
+        "terminal": { "type": "boolean" },
+        "proof_tier": {
+          "enum": ["committed_event", "fenced_claim", "attempt_evidence", "semantic_terminal"]
+        },
+        "writer_authority": {
+          "enum": ["event_store", "current_fencing_token_holder", "retry_policy"]
+        }
+      }
+    }
+  },
+  "required": ["schema_version", "authority", "events", "invariants"],
+  "properties": {
+    "schema_version": { "const": "aun-k0-event-vocabulary/v1" },
+    "authority": { "const": "postgresql_event_log" },
+    "events": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "message.received" }, "terminal": { "const": false }, "proof_tier": { "const": "committed_event" }, "writer_authority": { "const": "event_store" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.claimed" }, "terminal": { "const": false }, "proof_tier": { "const": "fenced_claim" }, "writer_authority": { "const": "current_fencing_token_holder" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.started" }, "terminal": { "const": false }, "proof_tier": { "const": "attempt_evidence" }, "writer_authority": { "const": "current_fencing_token_holder" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.attempt_failed" }, "terminal": { "const": false }, "proof_tier": { "const": "attempt_evidence" }, "writer_authority": { "const": "current_fencing_token_holder" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.retry_scheduled" }, "terminal": { "const": false }, "proof_tier": { "const": "attempt_evidence" }, "writer_authority": { "const": "retry_policy" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.blocked" }, "terminal": { "const": true }, "proof_tier": { "const": "semantic_terminal" }, "writer_authority": { "const": "current_fencing_token_holder" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.dead_lettered" }, "terminal": { "const": true }, "proof_tier": { "const": "semantic_terminal" }, "writer_authority": { "const": "retry_policy" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/event" }, { "properties": { "event_type": { "const": "turn.completed" }, "terminal": { "const": true }, "proof_tier": { "const": "semantic_terminal" }, "writer_authority": { "const": "current_fencing_token_holder" } } }] }
+      ],
+      "items": false
+    },
+    "invariants": {
+      "type": "array",
+      "minItems": 5,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

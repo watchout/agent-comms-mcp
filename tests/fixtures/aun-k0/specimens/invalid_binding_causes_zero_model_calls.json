@@ -1,0 +1,10 @@
+{
+  "schema_version": "aun-k0-correctness-specimen/v1",
+  "id": "invalid_binding_causes_zero_model_calls",
+  "provenance": { "spec_ref": "SPEC-AUN-SHIRUBE-001 §9.1", "acceptance_ids": ["AUN-RES-004"] },
+  "input": { "workspace_function_policy_digest": "invalid" },
+  "expected_predicate": "model_invocation_count == 0",
+  "proof_tier": "future_measured",
+  "owning_future_cell": "AUN-K2",
+  "behavior_status": "not_executed"
+}

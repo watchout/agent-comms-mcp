@@ -1,0 +1,10 @@
+{
+  "schema_version": "aun-k0-correctness-specimen/v1",
+  "id": "event_id_same_payload_idempotent",
+  "provenance": { "spec_ref": "SPEC-AUN-SHIRUBE-001 §9.1", "acceptance_ids": ["AUN-PERF-001", "AUN-RES-002"] },
+  "input": { "event_id": "same", "canonical_payloads": ["A", "A"] },
+  "expected_predicate": "stored_event_count == 1 and collision_count == 0",
+  "proof_tier": "future_measured",
+  "owning_future_cell": "AUN-K1",
+  "behavior_status": "not_executed"
+}
