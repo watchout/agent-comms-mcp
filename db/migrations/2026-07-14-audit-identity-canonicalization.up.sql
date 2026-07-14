@@ -55,6 +55,12 @@ BEGIN
       FROM channel_connector_bindings b
      WHERE b.connector_instance_id = NEW.connector_instance_id
        AND b.status IN ('active', 'standby')
+  ) OR EXISTS (
+    SELECT 1
+      FROM provider_channel_access pca
+     WHERE pca.connector_instance_id = NEW.connector_instance_id
+       AND pca.agent_id IS NULL
+       AND pca.status = 'active'
   ) THEN
     PERFORM aun_assert_agent_routable(NEW.agent_id, 'CONNECTOR');
   END IF;
@@ -141,6 +147,13 @@ BEGIN
     UNION ALL
     SELECT 1 FROM provider_channel_access pca
      WHERE pca.agent_id = NEW.agent_id
+       AND pca.status = 'active'
+    UNION ALL
+    SELECT 1 FROM provider_channel_access pca
+      JOIN connector_instances ci
+        ON ci.connector_instance_id = pca.connector_instance_id
+     WHERE pca.agent_id IS NULL
+       AND ci.agent_id = NEW.agent_id
        AND pca.status = 'active'
     UNION ALL
     SELECT 1 FROM agent_workspace_bindings awb

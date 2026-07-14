@@ -304,16 +304,36 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
 
     const connectorId = '00000000-0000-4000-8000-000000127159'
     const bindingId = '00000000-0000-4000-8000-000000127160'
+    const accessConnectorId = '00000000-0000-4000-8000-000000127178'
+    const accessId = '00000000-0000-4000-8000-000000127179'
+    const directAccessConnectorId = '00000000-0000-4000-8000-000000127180'
+    const directAccessId = '00000000-0000-4000-8000-000000127181'
+    await client.query(`DELETE FROM provider_channel_access WHERE provider_channel_access_id IN ($1::uuid, $2::uuid)`, [accessId, directAccessId])
     await client.query(`DELETE FROM channel_connector_bindings WHERE channel_binding_id = $1::uuid`, [bindingId])
-    await client.query(`DELETE FROM connector_instances WHERE connector_instance_id = $1::uuid`, [connectorId])
+    await client.query(`DELETE FROM connector_instances WHERE connector_instance_id IN ($1::uuid, $2::uuid, $3::uuid)`, [connectorId, accessConnectorId, directAccessConnectorId])
     await client.query(`DELETE FROM channels WHERE id = $1`, ['__audit_identity_binding_reassign__'])
-    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, ['__audit_identity_binding_owner__', '__audit_identity_disabled_owner__'])
+    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2, $3, $4, $5)`, [
+      '__audit_identity_binding_owner__',
+      '__audit_identity_disabled_owner__',
+      '__audit_identity_access_owner__',
+      '__audit_identity_direct_owner__',
+      '__audit_identity_direct_access_agent__',
+    ])
     await client.query(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, historical_only, new_work_allowed, profile_enabled)
        VALUES
          ($1, $1, 'dev', 'codex', 'idle', false, true, true),
-         ($2, $2, 'dev', 'codex', 'disabled', true, false, false)`,
-      ['__audit_identity_binding_owner__', '__audit_identity_disabled_owner__'],
+         ($2, $2, 'dev', 'codex', 'disabled', true, false, false),
+         ($3, $3, 'dev', 'codex', 'idle', false, true, true),
+         ($4, $4, 'dev', 'codex', 'idle', false, true, true),
+         ($5, $5, 'dev', 'codex', 'idle', false, true, true)`,
+      [
+        '__audit_identity_binding_owner__',
+        '__audit_identity_disabled_owner__',
+        '__audit_identity_access_owner__',
+        '__audit_identity_direct_owner__',
+        '__audit_identity_direct_access_agent__',
+      ],
     )
     await client.query(
       `INSERT INTO channels (id, name, type, members)
@@ -336,10 +356,105 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
         WHERE connector_instance_id = $2::uuid`,
       ['__audit_identity_disabled_owner__', connectorId],
     )).rejects.toThrow('DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR')
+    await client.query(
+      `INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+       VALUES ($1::uuid, $2, 'discord', 'discord://agents/__audit_identity_access_owner__', 'disabled')`,
+      [accessConnectorId, '__audit_identity_access_owner__'],
+    )
+    await client.query(
+      `INSERT INTO provider_channel_access (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, status)
+       VALUES ($1::uuid, 'discord', 'access-channel-127178', $2::uuid, NULL, 'active')`,
+      [accessId, accessConnectorId],
+    )
+    await expect(client.query(
+      `UPDATE connector_instances
+          SET agent_id = $1
+        WHERE connector_instance_id = $2::uuid`,
+      ['__audit_identity_disabled_owner__', accessConnectorId],
+    )).rejects.toThrow('DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR')
+    expect((await client.query(
+      `SELECT agent_id, status
+         FROM connector_instances
+        WHERE connector_instance_id = $1::uuid`,
+      [accessConnectorId],
+    )).rows[0]).toEqual({
+      agent_id: '__audit_identity_access_owner__',
+      status: 'disabled',
+    })
+    expect((await client.query(
+      `SELECT agent_id, status
+         FROM provider_channel_access
+        WHERE provider_channel_access_id = $1::uuid`,
+      [accessId],
+    )).rows[0]).toEqual({
+      agent_id: null,
+      status: 'active',
+    })
+    await expect(client.query(
+      `UPDATE agents
+          SET historical_only = true,
+              new_work_allowed = false,
+              status = 'disabled'
+        WHERE agent_id = $1`,
+      ['__audit_identity_access_owner__'],
+    )).rejects.toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
+    expect((await client.query(
+      `SELECT status, historical_only, new_work_allowed
+         FROM agents
+        WHERE agent_id = $1`,
+      ['__audit_identity_access_owner__'],
+    )).rows[0]).toEqual({
+      status: 'idle',
+      historical_only: false,
+      new_work_allowed: true,
+    })
+    await client.query(
+      `INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+       VALUES ($1::uuid, $2, 'discord', 'discord://agents/__audit_identity_direct_owner__', 'disabled')`,
+      [directAccessConnectorId, '__audit_identity_direct_owner__'],
+    )
+    await client.query(
+      `INSERT INTO provider_channel_access (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, status)
+       VALUES ($1::uuid, 'discord', 'direct-access-channel-127178', $2::uuid, $3, 'active')`,
+      [directAccessId, directAccessConnectorId, '__audit_identity_direct_access_agent__'],
+    )
+    await client.query(
+      `UPDATE agents
+          SET historical_only = true,
+              new_work_allowed = false,
+              status = 'disabled'
+        WHERE agent_id = $1`,
+      ['__audit_identity_direct_owner__'],
+    )
+    expect((await client.query(
+      `SELECT status, historical_only, new_work_allowed
+         FROM agents
+        WHERE agent_id = $1`,
+      ['__audit_identity_direct_owner__'],
+    )).rows[0]).toEqual({
+      status: 'disabled',
+      historical_only: true,
+      new_work_allowed: false,
+    })
+    await expect(client.query(
+      `UPDATE agents
+          SET historical_only = true,
+              new_work_allowed = false,
+              status = 'disabled'
+        WHERE agent_id = $1`,
+      ['__audit_identity_direct_access_agent__'],
+    )).rejects.toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
+    await client.query(`DELETE FROM provider_channel_access WHERE provider_channel_access_id IN ($1::uuid, $2::uuid)`, [accessId, directAccessId])
     await client.query(`DELETE FROM channel_connector_bindings WHERE channel_binding_id = $1::uuid`, [bindingId])
-    await client.query(`DELETE FROM connector_instances WHERE connector_instance_id = $1::uuid`, [connectorId])
+    await client.query(`DELETE FROM connector_instances WHERE connector_instance_id IN ($1::uuid, $2::uuid, $3::uuid)`, [connectorId, accessConnectorId, directAccessConnectorId])
     await client.query(`DELETE FROM channels WHERE id = $1`, ['__audit_identity_binding_reassign__'])
-    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, ['__audit_identity_binding_owner__', '__audit_identity_disabled_owner__'])
+    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2, $3, $4, $5)`, [
+      '__audit_identity_binding_owner__',
+      '__audit_identity_disabled_owner__',
+      '__audit_identity_access_owner__',
+      '__audit_identity_direct_owner__',
+      '__audit_identity_direct_access_agent__',
+    ])
 
     await applyDownMigration(AUDIT_IDENTITY_DOWN)
     expect(await columnExists('agents', 'historical_only')).toBe(false)

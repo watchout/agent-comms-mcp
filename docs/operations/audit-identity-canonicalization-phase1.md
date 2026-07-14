@@ -29,6 +29,11 @@ protected-surface GO.
 - Connector owner/status updates also fail closed when a disabled connector is
   still referenced by any active/standby channel connector binding, preventing
   owner reassignment to a disabled or historical-only agent.
+- Connector-derived active provider channel access is treated the same way:
+  connector owner/status updates and agent disable/historical transitions fail
+  closed when `provider_channel_access.agent_id` is null and the effective
+  owner comes from the connector. Direct `provider_channel_access.agent_id`
+  ownership remains authoritative when present.
 
 ## Read-Only External Patch Plan
 

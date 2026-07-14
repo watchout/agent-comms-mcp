@@ -597,7 +597,10 @@ describe('audit identity canonicalization', () => {
           VALUES
             ('disabled-audit', 'disabled-audit', 'dev', 'TUI', 'disabled', 1, 0, 0),
             ('active-audit', 'active-audit', 'dev', 'codex', 'idle', 0, 1, 1),
-            ('binding-owner', 'binding-owner', 'dev', 'codex', 'idle', 0, 1, 1);
+            ('binding-owner', 'binding-owner', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('access-owner', 'access-owner', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('direct-owner', 'direct-owner', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('direct-access-agent', 'direct-access-agent', 'dev', 'codex', 'idle', 0, 1, 1);
         `)
         expect(() => {
           db.exec(`
@@ -627,6 +630,48 @@ describe('audit identity canonicalization', () => {
         }).toThrow('DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR')
         expect(() => {
           db.exec(`UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'binding-owner'`)
+        }).toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
+
+        db.exec(`
+          INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+          VALUES ('access-connector', 'access-owner', 'discord', 'discord://agents/access-owner', 'disabled');
+          INSERT INTO provider_channel_access (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, status)
+          VALUES ('access-through-connector', 'discord', 'access-channel', 'access-connector', NULL, 'active');
+        `)
+        expect(() => {
+          db.exec(`UPDATE connector_instances SET agent_id = 'disabled-audit' WHERE connector_instance_id = 'access-connector'`)
+        }).toThrow('DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR')
+        expect(db.prepare(`SELECT agent_id, status FROM connector_instances WHERE connector_instance_id = 'access-connector'`).get()).toEqual({
+          agent_id: 'access-owner',
+          status: 'disabled',
+        })
+        expect(db.prepare(`SELECT agent_id, status FROM provider_channel_access WHERE provider_channel_access_id = 'access-through-connector'`).get()).toEqual({
+          agent_id: null,
+          status: 'active',
+        })
+        expect(() => {
+          db.exec(`UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'access-owner'`)
+        }).toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
+        expect(db.prepare(`SELECT status, historical_only, new_work_allowed FROM agents WHERE agent_id = 'access-owner'`).get()).toEqual({
+          status: 'idle',
+          historical_only: 0,
+          new_work_allowed: 1,
+        })
+
+        db.exec(`
+          INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+          VALUES ('direct-access-connector', 'direct-owner', 'discord', 'discord://agents/direct-owner', 'disabled');
+          INSERT INTO provider_channel_access (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, status)
+          VALUES ('direct-access', 'discord', 'direct-access-channel', 'direct-access-connector', 'direct-access-agent', 'active');
+          UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'direct-owner';
+        `)
+        expect(db.prepare(`SELECT status, historical_only, new_work_allowed FROM agents WHERE agent_id = 'direct-owner'`).get()).toEqual({
+          status: 'disabled',
+          historical_only: 1,
+          new_work_allowed: 0,
+        })
+        expect(() => {
+          db.exec(`UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'direct-access-agent'`)
         }).toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
       } finally {
         db.close()
