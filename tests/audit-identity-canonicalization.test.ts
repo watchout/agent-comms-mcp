@@ -399,6 +399,103 @@ describe('audit identity canonicalization', () => {
     })
   })
 
+  test('retirement preserves provider access direct-agent precedence', async () => {
+    await withSqlite(async (dbPath, adapter) => {
+      const db = new Database(dbPath)
+      try {
+        db.exec(`
+          INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, historical_only, new_work_allowed, profile_enabled)
+          VALUES
+            ('connector-owner', 'connector-owner', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('direct-agent', 'direct-agent', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('derived-owner', 'derived-owner', 'dev', 'codex', 'idle', 0, 1, 1);
+          INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+          VALUES
+            ('direct-connector', 'connector-owner', 'discord', 'discord://agents/connector-owner', 'active'),
+            ('derived-connector', 'derived-owner', 'discord', 'discord://agents/derived-owner', 'active');
+          INSERT INTO provider_channel_access (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, status)
+          VALUES
+            ('direct-pca', 'discord', 'direct-channel', 'direct-connector', 'direct-agent', 'active'),
+            ('derived-pca', 'discord', 'derived-channel', 'derived-connector', NULL, 'active');
+        `)
+      } finally {
+        db.close()
+      }
+
+      const connectorOwnerDry = await buildAgentRetirementPlan(adapter, {
+        agentId: 'connector-owner',
+        reason: 'test retirement',
+        dryRun: true,
+      })
+      expect(connectorOwnerDry.ok).toBe(true)
+      expect(connectorOwnerDry.affected.provider_channel_access).toEqual([])
+
+      const connectorOwnerExecuted = await executeAgentRetirement(adapter, {
+        agentId: 'connector-owner',
+        reason: 'test retirement',
+      })
+      expect(connectorOwnerExecuted.ok).toBe(true)
+      expect(connectorOwnerExecuted.affected.provider_channel_access).toEqual([])
+
+      let read = new Database(dbPath)
+      try {
+        expect(read.prepare(`SELECT status FROM provider_channel_access WHERE provider_channel_access_id = 'direct-pca'`).get()).toEqual({
+          status: 'active',
+        })
+      } finally {
+        read.close()
+      }
+
+      const directAgentDry = await buildAgentRetirementPlan(adapter, {
+        agentId: 'direct-agent',
+        reason: 'test retirement',
+        dryRun: true,
+      })
+      expect(directAgentDry.ok).toBe(true)
+      expect(directAgentDry.affected.provider_channel_access).toEqual(['direct-pca'])
+
+      const directAgentExecuted = await executeAgentRetirement(adapter, {
+        agentId: 'direct-agent',
+        reason: 'test retirement',
+      })
+      expect(directAgentExecuted.ok).toBe(true)
+      expect(directAgentExecuted.affected.provider_channel_access).toEqual(['direct-pca'])
+
+      read = new Database(dbPath)
+      try {
+        expect(read.prepare(`SELECT status FROM provider_channel_access WHERE provider_channel_access_id = 'direct-pca'`).get()).toEqual({
+          status: 'disabled',
+        })
+      } finally {
+        read.close()
+      }
+
+      const derivedOwnerDry = await buildAgentRetirementPlan(adapter, {
+        agentId: 'derived-owner',
+        reason: 'test retirement',
+        dryRun: true,
+      })
+      expect(derivedOwnerDry.ok).toBe(true)
+      expect(derivedOwnerDry.affected.provider_channel_access).toEqual(['derived-pca'])
+
+      const derivedOwnerExecuted = await executeAgentRetirement(adapter, {
+        agentId: 'derived-owner',
+        reason: 'test retirement',
+      })
+      expect(derivedOwnerExecuted.ok).toBe(true)
+      expect(derivedOwnerExecuted.affected.provider_channel_access).toEqual(['derived-pca'])
+
+      read = new Database(dbPath)
+      try {
+        expect(read.prepare(`SELECT status FROM provider_channel_access WHERE provider_channel_access_id = 'derived-pca'`).get()).toEqual({
+          status: 'disabled',
+        })
+      } finally {
+        read.close()
+      }
+    })
+  })
+
   test('retirement dry-run fails closed for every required preflight read family', async () => {
     for (const failCase of RETIREMENT_READ_FAILURE_CASES) {
       const adapter = new FailingRetirementPreflightAdapter(failCase)

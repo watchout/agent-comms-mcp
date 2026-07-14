@@ -1033,9 +1033,9 @@ export async function buildAgentRetirementPlan(
         db,
         `SELECT pca.provider_channel_access_id
            FROM provider_channel_access pca
-           LEFT JOIN connector_instances ci
-             ON ci.connector_instance_id = pca.connector_instance_id
-          WHERE (pca.agent_id = $1 OR ci.agent_id = $1)
+          LEFT JOIN connector_instances ci
+            ON ci.connector_instance_id = pca.connector_instance_id
+          WHERE (pca.agent_id = $1 OR (pca.agent_id IS NULL AND ci.agent_id = $1))
             AND pca.status = 'active'
           ORDER BY pca.provider_channel_access_id`,
         [agentId],
