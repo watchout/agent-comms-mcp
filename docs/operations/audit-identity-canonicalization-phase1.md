@@ -26,6 +26,9 @@ protected-surface GO.
   ambiguous legacy audit keys historical-only / no-new-work.
 - DB and application activation paths reject active connector/binding
   projections for disabled or historical-only agents.
+- Connector owner/status updates also fail closed when a disabled connector is
+  still referenced by any active/standby channel connector binding, preventing
+  owner reassignment to a disabled or historical-only agent.
 
 ## Read-Only External Patch Plan
 

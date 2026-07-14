@@ -302,6 +302,45 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     expect(await triggerExists('trg_connector_instances_routable')).toBe(true)
     expect(await triggerExists('trg_agents_no_disable_with_active_dependencies')).toBe(true)
 
+    const connectorId = '00000000-0000-4000-8000-000000127159'
+    const bindingId = '00000000-0000-4000-8000-000000127160'
+    await client.query(`DELETE FROM channel_connector_bindings WHERE channel_binding_id = $1::uuid`, [bindingId])
+    await client.query(`DELETE FROM connector_instances WHERE connector_instance_id = $1::uuid`, [connectorId])
+    await client.query(`DELETE FROM channels WHERE id = $1`, ['__audit_identity_binding_reassign__'])
+    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, ['__audit_identity_binding_owner__', '__audit_identity_disabled_owner__'])
+    await client.query(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, historical_only, new_work_allowed, profile_enabled)
+       VALUES
+         ($1, $1, 'dev', 'codex', 'idle', false, true, true),
+         ($2, $2, 'dev', 'codex', 'disabled', true, false, false)`,
+      ['__audit_identity_binding_owner__', '__audit_identity_disabled_owner__'],
+    )
+    await client.query(
+      `INSERT INTO channels (id, name, type, members)
+       VALUES ($1, $1, 'channel', ARRAY[]::text[])`,
+      ['__audit_identity_binding_reassign__'],
+    )
+    await client.query(
+      `INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+       VALUES ($1::uuid, $2, 'discord', 'discord://agents/__audit_identity_binding_owner__', 'disabled')`,
+      [connectorId, '__audit_identity_binding_owner__'],
+    )
+    await client.query(
+      `INSERT INTO channel_connector_bindings (channel_binding_id, channel_id, provider, connector_instance_id, status)
+       VALUES ($1::uuid, $2, 'discord', $3::uuid, 'active')`,
+      [bindingId, '__audit_identity_binding_reassign__', connectorId],
+    )
+    await expect(client.query(
+      `UPDATE connector_instances
+          SET agent_id = $1
+        WHERE connector_instance_id = $2::uuid`,
+      ['__audit_identity_disabled_owner__', connectorId],
+    )).rejects.toThrow('DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR')
+    await client.query(`DELETE FROM channel_connector_bindings WHERE channel_binding_id = $1::uuid`, [bindingId])
+    await client.query(`DELETE FROM connector_instances WHERE connector_instance_id = $1::uuid`, [connectorId])
+    await client.query(`DELETE FROM channels WHERE id = $1`, ['__audit_identity_binding_reassign__'])
+    await client.query(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, ['__audit_identity_binding_owner__', '__audit_identity_disabled_owner__'])
+
     await applyDownMigration(AUDIT_IDENTITY_DOWN)
     expect(await columnExists('agents', 'historical_only')).toBe(false)
     expect(await columnExists('agents', 'new_work_allowed')).toBe(false)

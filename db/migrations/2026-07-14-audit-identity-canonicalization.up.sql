@@ -50,7 +50,12 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION aun_enforce_connector_instance_routable()
 RETURNS trigger AS $$
 BEGIN
-  IF NEW.status IN ('registered', 'active', 'standby', 'draining') THEN
+  IF NEW.status IN ('registered', 'active', 'standby', 'draining') OR EXISTS (
+    SELECT 1
+      FROM channel_connector_bindings b
+     WHERE b.connector_instance_id = NEW.connector_instance_id
+       AND b.status IN ('active', 'standby')
+  ) THEN
     PERFORM aun_assert_agent_routable(NEW.agent_id, 'CONNECTOR');
   END IF;
   RETURN NEW;

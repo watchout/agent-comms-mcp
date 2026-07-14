@@ -463,6 +463,9 @@ describe('audit identity canonicalization', () => {
           VALUES ('active-binding-through-disabled-connector', 'binding-ch', 'discord', 'stopped-connector', 'active');
         `)
         expect(() => {
+          db.exec(`UPDATE connector_instances SET agent_id = 'disabled-audit' WHERE connector_instance_id = 'stopped-connector'`)
+        }).toThrow('DISABLED_OR_HISTORICAL_AGENT_ACTIVE_CONNECTOR')
+        expect(() => {
           db.exec(`UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'binding-owner'`)
         }).toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
       } finally {

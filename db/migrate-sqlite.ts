@@ -1026,10 +1026,18 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_delivery_connector_pending ON outbound_queue(delivery_connector_instance_id, status, next_retry_at) WHERE delivery_connector_instance_id IS NOT NULL AND status = 'pending'`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_channel_binding_pending ON outbound_queue(channel_binding_id, status, next_retry_at) WHERE channel_binding_id IS NOT NULL AND status = 'pending'`)
 
+  gatedExec(`DROP TRIGGER IF EXISTS trg_connector_instances_routable_insert`)
+  gatedExec(`DROP TRIGGER IF EXISTS trg_connector_instances_routable_update`)
   gatedExec(`
     CREATE TRIGGER IF NOT EXISTS trg_connector_instances_routable_insert
     BEFORE INSERT ON connector_instances
     WHEN NEW.status IN ('registered', 'active', 'standby', 'draining')
+      OR EXISTS (
+        SELECT 1
+          FROM channel_connector_bindings b
+         WHERE b.connector_instance_id = NEW.connector_instance_id
+           AND b.status IN ('active', 'standby')
+      )
     BEGIN
       SELECT CASE WHEN NOT EXISTS (
         SELECT 1 FROM agents a
@@ -1046,6 +1054,12 @@ export function migrateSqlite(dbPath?: string): void {
     CREATE TRIGGER IF NOT EXISTS trg_connector_instances_routable_update
     BEFORE UPDATE OF agent_id, status ON connector_instances
     WHEN NEW.status IN ('registered', 'active', 'standby', 'draining')
+      OR EXISTS (
+        SELECT 1
+          FROM channel_connector_bindings b
+         WHERE b.connector_instance_id = NEW.connector_instance_id
+           AND b.status IN ('active', 'standby')
+      )
     BEGIN
       SELECT CASE WHEN NOT EXISTS (
         SELECT 1 FROM agents a
