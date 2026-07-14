@@ -6,9 +6,11 @@
 // states, with the evidence reason.
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { ensureEventLogSchema, openTurnCount, EventLog, turnIdFor, completeTurn, claimNextTurn } from '../../core/eventlog'
 import { importPendingV1Rows, closeAnsweredV1Row, findUnclosedAnsweredRows } from '../../core/eventlog/v1-import'
@@ -216,5 +218,98 @@ describe('starvation-free recovery (audit cycle-3 — residue cannot hide a late
     expect((await db.queryOne<{ status: string }>(`SELECT status FROM message_queue WHERE message_id='real'`))?.status).toBe('skipped')
     expect((await db.queryOne<{ status: string }>(`SELECT status FROM message_queue WHERE message_id='garbage-0'`))?.status).toBe('pending')
     expect((await findUnclosedAnsweredRows(db, { seats: ['spec'], batchSize: 2 })).length).toBe(0)
+  })
+})
+
+function postgresTestUrl(): string | undefined {
+  if (process.env.AGENT_COM_TEST_DATABASE_URL) return process.env.AGENT_COM_TEST_DATABASE_URL
+  const url = process.env.DATABASE_URL
+  if (!url) return undefined
+  const dbName = url.split('?')[0]!.split('/').pop() ?? ''
+  return dbName.endsWith('_test') ? url : undefined
+}
+
+const POSTGRES_TEST_URL = postgresTestUrl()
+
+class RollbackPostgresFixture extends Error {}
+
+describe.if(!!POSTGRES_TEST_URL)('starvation-free PostgreSQL recovery', () => {
+  test('historic residue cannot hide a later completion and the typed close is idempotent', async () => {
+    const pg = new PgAdapter(POSTGRES_TEST_URL!)
+    let rolledBack = false
+    try {
+      await pg.transaction(async tx => {
+        const seat = `spec-${randomUUID()}`
+        const garbageMessageIds: string[] = []
+        for (let i = 0; i < 7; i++) {
+          const messageId = randomUUID()
+          garbageMessageIds.push(messageId)
+          await tx.execute(
+            `INSERT INTO agent_messages (id, channel_id, thread_id, author_id, content)
+             VALUES ($1, 'chan-1', $2, 'ceo', 'historic residue')`,
+            [messageId, `thr-${messageId}`],
+          )
+          await tx.execute(
+            `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, '{}')`,
+            [seat, messageId],
+          )
+        }
+
+        const realMessageId = randomUUID()
+        await tx.execute(
+          `INSERT INTO agent_messages (id, channel_id, thread_id, author_id, content)
+           VALUES ($1, 'chan-1', $2, 'ceo', 'process me')`,
+          [realMessageId, `thr-${realMessageId}`],
+        )
+        await tx.execute(
+          `INSERT INTO message_queue (agent_id, message_id, payload) VALUES ($1, $2, '{}')`,
+          [seat, realMessageId],
+        )
+        const realTurn = turnIdFor(seat, realMessageId)
+        await tx.execute(
+          `INSERT INTO event_log (event_id, event_type, seat_id, turn_id, payload)
+           VALUES ($1, 'turn.completed', $2, $3, $4::jsonb)`,
+          [`done:${realTurn}`, seat, realTurn, JSON.stringify({ outcome: 'no_reply' })],
+        )
+
+        const unclosed = await findUnclosedAnsweredRows(tx, { seats: [seat], batchSize: 2 })
+        expect(unclosed.map(row => row.messageId)).toEqual([realMessageId])
+        expect(await closeAnsweredV1Row(tx, {
+          seatId: seat,
+          messageId: realMessageId,
+          evidenceRef: `turn ${realTurn}`,
+        })).toBe(true)
+        expect(await closeAnsweredV1Row(tx, {
+          seatId: seat,
+          messageId: realMessageId,
+          evidenceRef: `turn ${realTurn}`,
+        })).toBe(false)
+        expect((await tx.queryOne<{ status: string }>(
+          `SELECT status FROM message_queue WHERE message_id = $1`,
+          [realMessageId],
+        ))?.status).toBe('skipped')
+        expect((await tx.queryOne<{ status: string }>(
+          `SELECT status FROM message_queue WHERE message_id = $1`,
+          [garbageMessageIds[0]],
+        ))?.status).toBe('pending')
+        expect(await findUnclosedAnsweredRows(tx, { seats: [seat], batchSize: 2 })).toEqual([])
+        throw new RollbackPostgresFixture()
+      })
+    } catch (error) {
+      if (!(error instanceof RollbackPostgresFixture)) throw error
+      rolledBack = true
+    } finally {
+      await pg.close()
+    }
+    expect(rolledBack).toBe(true)
+  })
+})
+
+describe('typed notify evidence bridge', () => {
+  test('daemon requires exact notify JSON evidence and never fabricates a transport message id', () => {
+    const source = readFileSync(join(import.meta.dir, '../../bin/aun/v2-worker-daemon.ts'), 'utf8')
+    expect(source).toContain('receipt = JSON.parse(out.trim())')
+    expect(source).toContain('notify response missing exact message_id evidence')
+    expect(source).not.toContain('`notify-${Date.now()}`')
   })
 })

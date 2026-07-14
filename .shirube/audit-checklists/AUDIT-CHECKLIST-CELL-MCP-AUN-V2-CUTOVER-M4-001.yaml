@@ -25,3 +25,15 @@ items:
     required: true
     prompt: "Confirm the daemon does not start itself (no launchd/plist/activation in this PR); starting is a separate deploy step."
     expected_evidence: ["bin/aun/v2-worker-daemon.ts", ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml"]
+  - item_id: "AUDIT-V2-M4-004"
+    source: "transport_neutral_dependency_adaptation"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm NotifyTransport accepts only cli.notify JSON with ok=true and an exact UUID message_id, and never fabricates delivery evidence when stdout is missing or malformed."
+    expected_evidence: ["bin/aun/v2-worker-daemon.ts", "tests/eventlog/eventlog-v1-import-m4.test.ts", "notify response missing exact message_id evidence"]
+  - item_id: "AUDIT-V2-M4-005"
+    source: "cross_dialect_recovery"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm the >batchSize starvation and typed-close idempotency fixture runs against migration-backed PostgreSQL and rolls back all fixture writes."
+    expected_evidence: ["tests/eventlog/eventlog-v1-import-m4.test.ts", "RollbackPostgresFixture", "AGENT_COM_TEST_DATABASE_URL=<test-db> bun test tests/eventlog/"]

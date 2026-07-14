@@ -83,8 +83,23 @@ class NotifyTransport implements OutboxTransport {
       new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
     ])
     if (code !== 0) throw new Error(`notify failed (seat=${seat}): ${(err || out).slice(0, 400)}`)
-    const idMatch = out.match(/id:\s*([0-9a-f-]{36})/i)
-    return { transportMessageId: idMatch?.[1] ?? `notify-${Date.now()}` }
+    let receipt: unknown
+    try {
+      receipt = JSON.parse(out.trim())
+    } catch {
+      throw new Error(`notify returned non-JSON evidence (seat=${seat})`)
+    }
+    const messageId = receipt && typeof receipt === 'object'
+      ? (receipt as Record<string, unknown>).message_id
+      : undefined
+    if (
+      (receipt as Record<string, unknown> | null)?.ok !== true ||
+      typeof messageId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId)
+    ) {
+      throw new Error(`notify response missing exact message_id evidence (seat=${seat})`)
+    }
+    return { transportMessageId: messageId }
   }
 }
 
