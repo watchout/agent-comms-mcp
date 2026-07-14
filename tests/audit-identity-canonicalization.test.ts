@@ -7,6 +7,7 @@ import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import { buildDirectoryReport } from '../core/directory'
 import {
+  type AgentRetirementReadPhase,
   buildAuditRouteReconciliationPlan,
   buildAgentRetirementPlan,
   executeAuditRouteReconciliation,
@@ -52,6 +53,112 @@ class FailingRoleRoutingAdapter implements DbAdapter {
           description: 'canonical',
         },
       ] as T[]
+    }
+    return []
+  }
+
+  async execute(sql: string): Promise<{ rowCount: number }> {
+    this.writes.push(sql)
+    return { rowCount: 1 }
+  }
+
+  async transaction<T>(fn: (tx: DbAdapter) => Promise<T>): Promise<T> {
+    this.transactions.push('BEGIN')
+    try {
+      const result = await fn(this)
+      this.transactions.push('COMMIT')
+      return result
+    } catch (err) {
+      this.transactions.push('ROLLBACK')
+      throw err
+    }
+  }
+
+  async close(): Promise<void> {}
+}
+
+type RetirementReadFailureCase = {
+  phase: AgentRetirementReadPhase
+  surface: string
+  matches: (sql: string) => boolean
+}
+
+const RETIREMENT_READ_FAILURE_CASES: RetirementReadFailureCase[] = [
+  {
+    phase: 'agent_exists',
+    surface: 'agents',
+    matches: (sql) => sql.includes('FROM agents') && sql.includes('WHERE agent_id = $1') && sql.includes('LIMIT 1'),
+  },
+  {
+    phase: 'connector_instances',
+    surface: 'connector_instances',
+    matches: (sql) => sql.includes('FROM connector_instances') && sql.includes("status IN ('registered', 'active', 'standby', 'draining')"),
+  },
+  {
+    phase: 'channel_connector_bindings',
+    surface: 'channel_connector_bindings',
+    matches: (sql) => sql.includes('FROM channel_connector_bindings b') && sql.includes('JOIN connector_instances ci'),
+  },
+  {
+    phase: 'connector_credentials',
+    surface: 'connector_credentials',
+    matches: (sql) => sql.includes('FROM connector_credentials'),
+  },
+  {
+    phase: 'agent_provider_identities',
+    surface: 'agent_provider_identities',
+    matches: (sql) => sql.includes('FROM agent_provider_identities'),
+  },
+  {
+    phase: 'provider_channel_access',
+    surface: 'provider_channel_access',
+    matches: (sql) => sql.includes('FROM provider_channel_access pca'),
+  },
+  {
+    phase: 'agent_ui_bindings',
+    surface: 'agent_ui_bindings',
+    matches: (sql) => sql.includes('FROM agent_ui_bindings'),
+  },
+  {
+    phase: 'agent_workspace_bindings',
+    surface: 'agent_workspace_bindings',
+    matches: (sql) => sql.includes('FROM agent_workspace_bindings'),
+  },
+  {
+    phase: 'agent_runtime_instances',
+    surface: 'agent_runtime_instances',
+    matches: (sql) => sql.includes('FROM agent_runtime_instances'),
+  },
+  {
+    phase: 'channel_memberships',
+    surface: 'channels',
+    matches: (sql) => sql.includes('FROM channels') && sql.includes('ORDER BY id'),
+  },
+  {
+    phase: 'role_routing',
+    surface: 'role_routing',
+    matches: (sql) => sql.includes('FROM role_routing') && sql.includes('WHERE agent_id = $1'),
+  },
+  {
+    phase: 'channel_routing_policies',
+    surface: 'channel_routing_policy',
+    matches: (sql) => sql.includes('FROM channel_routing_policy'),
+  },
+]
+
+class FailingRetirementPreflightAdapter implements DbAdapter {
+  readonly dialect = 'sqlite' as const
+  transactions: string[] = []
+  writes: string[] = []
+  queries: string[] = []
+
+  constructor(private readonly failCase: RetirementReadFailureCase) {}
+
+  async query<T = any>(sql: string): Promise<T[]> {
+    this.queries.push(sql)
+    if (this.failCase.matches(sql)) throw new Error(`${this.failCase.surface} unreadable`)
+    if (sql.includes('FROM agents') && sql.includes('WHERE agent_id = $1')) {
+      return [{ agent_id: 'l2auditor', metadata: '{}' }] as T[]
     }
     return []
   }
@@ -290,6 +397,59 @@ describe('audit identity canonicalization', () => {
         read.close()
       }
     })
+  })
+
+  test('retirement dry-run fails closed for every required preflight read family', async () => {
+    for (const failCase of RETIREMENT_READ_FAILURE_CASES) {
+      const adapter = new FailingRetirementPreflightAdapter(failCase)
+
+      const plan = await buildAgentRetirementPlan(adapter, {
+        agentId: 'l2auditor',
+        reason: 'schema blocker',
+        dryRun: true,
+      })
+
+      expect(plan).toEqual({
+        ok: false,
+        dry_run: true,
+        agent_id: 'l2auditor',
+        reason: 'schema blocker',
+        blocker: {
+          code: 'RETIREMENT_PREFLIGHT_READ_FAILED',
+          phase: failCase.phase,
+          surface: failCase.surface,
+          detail: `${failCase.surface} unreadable`,
+        },
+        affected: {
+          connector_instances: [],
+          channel_connector_bindings: [],
+          connector_credentials: [],
+          agent_provider_identities: [],
+          provider_channel_access: [],
+          agent_ui_bindings: [],
+          agent_workspace_bindings: [],
+          agent_runtime_instances: [],
+          channel_memberships: [],
+          role_routing: [],
+          channel_routing_policies: [],
+        },
+      })
+      expect(adapter.transactions).toEqual([])
+      expect(adapter.writes).toEqual([])
+    }
+  })
+
+  test('retirement execute rolls back before writes for every required preflight read family', async () => {
+    for (const failCase of RETIREMENT_READ_FAILURE_CASES) {
+      const adapter = new FailingRetirementPreflightAdapter(failCase)
+
+      await expect(executeAgentRetirement(adapter, {
+        agentId: 'l2auditor',
+        reason: 'schema blocker',
+      })).rejects.toThrow(`RETIREMENT_PREFLIGHT_READ_FAILED:${failCase.phase}:${failCase.surface}:${failCase.surface} unreadable`)
+      expect(adapter.transactions).toEqual(['BEGIN', 'ROLLBACK'])
+      expect(adapter.writes).toEqual([])
+    }
   })
 
   test('audit-route reconciliation canonicalizes devauditor-owned legacy audit rows without requiring l2auditor routes', async () => {

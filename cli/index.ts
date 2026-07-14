@@ -2591,6 +2591,7 @@ async function agentRetire(args: string[]) {
       ? await buildAgentRetirementPlan((db as any).__adapter, { agentId, reason, dryRun: true })
       : await executeAgentRetirement((db as any).__adapter, { agentId, reason })
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    if (!report.ok) process.exitCode = 1
   } finally {
     await db.end()
   }

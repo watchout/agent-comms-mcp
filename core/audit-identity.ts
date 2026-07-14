@@ -98,55 +98,87 @@ export type CanonicalAuditRouteResolveResult =
       requested_agent_id: string | null
     }
 
-export type AgentRetirementPlan = {
-  ok: true
-  dry_run: boolean
-  agent_id: string
-  reason: string
-  agent_exists: boolean
-  final_tombstone: {
-    status: 'disabled'
-    historical_only: true
-    new_work_allowed: false
-    profile_enabled: false
-    non_routable: true
-  }
-  affected: {
-    connector_instances: string[]
-    channel_connector_bindings: string[]
-    connector_credentials: string[]
-    agent_provider_identities: string[]
-    provider_channel_access: string[]
-    agent_ui_bindings: string[]
-    agent_workspace_bindings: Array<{ agent_id: string; workspace_id: string; binding_role: string }>
-    agent_runtime_instances: string[]
-    channel_memberships: Array<{ channel_id: string; before_members: string[]; after_members: string[] }>
-    role_routing: Array<{
-      role_key: string
-      before_agent_id: string
-      after_agent_id: string
-      before_historical_only: boolean
-      before_new_work_allowed: boolean
-      after_historical_only: true
-      after_new_work_allowed: false
-      active_function: string | null
-      canonical_seat: string | null
-    }>
-    channel_routing_policies: Array<{
-      channel_id: string
-      before_primary_agent_id: string | null
-      after_primary_agent_id: string | null
-      before_adapter_owner_agent_id: string | null
-      after_adapter_owner_agent_id: string | null
-      before_outbound_allowlist: string[]
-      after_outbound_allowlist: string[]
-      before_native_role_outbound_owners: Record<string, unknown>
-      after_native_role_outbound_owners: Record<string, unknown>
-      before_native_projection_identities: Record<string, unknown>
-      after_native_projection_identities: Record<string, unknown>
-    }>
-  }
+export type AgentRetirementReadPhase =
+  | 'agent_exists'
+  | 'connector_instances'
+  | 'channel_connector_bindings'
+  | 'connector_credentials'
+  | 'agent_provider_identities'
+  | 'provider_channel_access'
+  | 'agent_ui_bindings'
+  | 'agent_workspace_bindings'
+  | 'agent_runtime_instances'
+  | 'channel_memberships'
+  | 'role_routing'
+  | 'channel_routing_policies'
+
+export type AgentRetirementAffected = {
+  connector_instances: string[]
+  channel_connector_bindings: string[]
+  connector_credentials: string[]
+  agent_provider_identities: string[]
+  provider_channel_access: string[]
+  agent_ui_bindings: string[]
+  agent_workspace_bindings: Array<{ agent_id: string; workspace_id: string; binding_role: string }>
+  agent_runtime_instances: string[]
+  channel_memberships: Array<{ channel_id: string; before_members: string[]; after_members: string[] }>
+  role_routing: Array<{
+    role_key: string
+    before_agent_id: string
+    after_agent_id: string
+    before_historical_only: boolean
+    before_new_work_allowed: boolean
+    after_historical_only: true
+    after_new_work_allowed: false
+    active_function: string | null
+    canonical_seat: string | null
+  }>
+  channel_routing_policies: Array<{
+    channel_id: string
+    before_primary_agent_id: string | null
+    after_primary_agent_id: string | null
+    before_adapter_owner_agent_id: string | null
+    after_adapter_owner_agent_id: string | null
+    before_outbound_allowlist: string[]
+    after_outbound_allowlist: string[]
+    before_native_role_outbound_owners: Record<string, unknown>
+    after_native_role_outbound_owners: Record<string, unknown>
+    before_native_projection_identities: Record<string, unknown>
+    after_native_projection_identities: Record<string, unknown>
+  }>
 }
+
+export type AgentRetirementTombstone = {
+  status: 'disabled'
+  historical_only: true
+  new_work_allowed: false
+  profile_enabled: false
+  non_routable: true
+}
+
+export type AgentRetirementPlan =
+  | {
+      ok: true
+      dry_run: boolean
+      agent_id: string
+      reason: string
+      agent_exists: boolean
+      final_tombstone: AgentRetirementTombstone
+      affected: AgentRetirementAffected
+    }
+  | {
+      ok: false
+      dry_run: boolean
+      agent_id: string
+      reason: string
+      blocker: {
+        code: 'RETIREMENT_PREFLIGHT_READ_FAILED'
+        phase: AgentRetirementReadPhase
+        surface: string
+        detail: string
+      }
+      affected: AgentRetirementAffected
+    }
 
 export type AuditRouteReconciliationPlan =
   | {
@@ -668,6 +700,82 @@ function auditRouteReconciliationReadBlocker(
   }
 }
 
+function errorDetail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function finalRetirementTombstone(): AgentRetirementTombstone {
+  return {
+    status: 'disabled',
+    historical_only: true,
+    new_work_allowed: false,
+    profile_enabled: false,
+    non_routable: true,
+  }
+}
+
+function emptyRetirementAffected(): AgentRetirementAffected {
+  return {
+    connector_instances: [],
+    channel_connector_bindings: [],
+    connector_credentials: [],
+    agent_provider_identities: [],
+    provider_channel_access: [],
+    agent_ui_bindings: [],
+    agent_workspace_bindings: [],
+    agent_runtime_instances: [],
+    channel_memberships: [],
+    role_routing: [],
+    channel_routing_policies: [],
+  }
+}
+
+class AgentRetirementPreflightReadError extends Error {
+  readonly phase: AgentRetirementReadPhase
+  readonly surface: string
+  readonly detail: string
+
+  constructor(phase: AgentRetirementReadPhase, surface: string, err: unknown) {
+    const detail = errorDetail(err)
+    super(`RETIREMENT_PREFLIGHT_READ_FAILED:${phase}:${surface}:${detail}`)
+    this.name = 'AgentRetirementPreflightReadError'
+    this.phase = phase
+    this.surface = surface
+    this.detail = detail
+  }
+}
+
+async function requiredRetirementRead<T>(
+  phase: AgentRetirementReadPhase,
+  surface: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await read()
+  } catch (err) {
+    throw new AgentRetirementPreflightReadError(phase, surface, err)
+  }
+}
+
+function agentRetirementReadBlocker(
+  input: { agentId: string; reason?: string; dryRun?: boolean },
+  err: AgentRetirementPreflightReadError,
+): AgentRetirementPlan {
+  return {
+    ok: false,
+    dry_run: input.dryRun !== false,
+    agent_id: input.agentId.trim(),
+    reason: input.reason?.trim() || 'historical-only identity canonicalization',
+    blocker: {
+      code: 'RETIREMENT_PREFLIGHT_READ_FAILED',
+      phase: err.phase,
+      surface: err.surface,
+      detail: err.detail,
+    },
+    affected: emptyRetirementAffected(),
+  }
+}
+
 export async function buildAuditRouteReconciliationPlan(
   db: Queryable,
   input: { reason?: string; dryRun?: boolean } = {},
@@ -748,11 +856,11 @@ export async function buildAuditRouteReconciliationPlan(
 }
 
 async function queryIds(db: Queryable, sql: string, params: unknown[], idColumn: string): Promise<string[]> {
-  const rows = await db.query<Record<string, unknown>>(sql, params).catch(() => [])
+  const rows = await db.query<Record<string, unknown>>(sql, params)
   return rows.map((row) => String(row[idColumn])).filter(Boolean)
 }
 
-async function queryWorkspaceBindings(db: Queryable, agentId: string): Promise<AgentRetirementPlan['affected']['agent_workspace_bindings']> {
+async function queryWorkspaceBindings(db: Queryable, agentId: string): Promise<AgentRetirementAffected['agent_workspace_bindings']> {
   const rows = await db.query<any>(
     `SELECT agent_id, workspace_id, binding_role
        FROM agent_workspace_bindings
@@ -760,7 +868,7 @@ async function queryWorkspaceBindings(db: Queryable, agentId: string): Promise<A
         AND active = true
       ORDER BY workspace_id, binding_role`,
     [agentId],
-  ).catch(() => [])
+  )
   return rows.map((row) => ({
     agent_id: String(row.agent_id),
     workspace_id: String(row.workspace_id),
@@ -768,13 +876,13 @@ async function queryWorkspaceBindings(db: Queryable, agentId: string): Promise<A
   }))
 }
 
-async function queryChannelMemberships(db: Queryable, agentId: string): Promise<AgentRetirementPlan['affected']['channel_memberships']> {
+async function queryChannelMemberships(db: Queryable, agentId: string): Promise<AgentRetirementAffected['channel_memberships']> {
   const rows = await db.query<any>(
     `SELECT id, members
        FROM channels
       ORDER BY id`,
-  ).catch(() => [])
-  const memberships: AgentRetirementPlan['affected']['channel_memberships'] = []
+  )
+  const memberships: AgentRetirementAffected['channel_memberships'] = []
   for (const row of rows) {
     const beforeMembers = parseMembers(row.members)
     if (!beforeMembers.includes(agentId)) continue
@@ -791,7 +899,7 @@ async function queryRoleRouting(
   db: Queryable,
   agentId: string,
   config: AgentRoleRoutingConfig,
-): Promise<AgentRetirementPlan['affected']['role_routing']> {
+): Promise<AgentRetirementAffected['role_routing']> {
   const canonicalAgentId = config.legacyAgentIds?.[agentId]?.canonicalAgentId ?? agentId
   const rows = await db.query<any>(
     `SELECT role_key, agent_id, active_function, canonical_seat, historical_only, new_work_allowed
@@ -804,7 +912,7 @@ async function queryRoleRouting(
             ))
       ORDER BY role_key`,
     [agentId],
-  ).catch(() => [])
+  )
   return rows
     .filter((row) => String(row.agent_id) === agentId)
     .map((row) => ({
@@ -823,14 +931,14 @@ async function queryRoleRouting(
 async function queryChannelRoutingPolicies(
   db: Queryable,
   agentId: string,
-): Promise<AgentRetirementPlan['affected']['channel_routing_policies']> {
+): Promise<AgentRetirementAffected['channel_routing_policies']> {
   const rows = await db.query<any>(
     `SELECT channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist,
             native_role_outbound_owners, native_projection_identities
        FROM channel_routing_policy
       ORDER BY channel_id`,
-  ).catch(() => [])
-  const affected: AgentRetirementPlan['affected']['channel_routing_policies'] = []
+  )
+  const affected: AgentRetirementAffected['channel_routing_policies'] = []
   for (const row of rows) {
     const beforeOutbound = parseMembers(row.outbound_allowlist)
     const beforeOwners = parseJsonObject(row.native_role_outbound_owners)
@@ -869,28 +977,18 @@ export async function buildAgentRetirementPlan(
   const agentId = input.agentId.trim()
   const config = loadAgentRoleRoutingConfig()
   const reason = input.reason?.trim() || 'historical-only identity canonicalization'
-  const rows = await db.query<any>(
-    `SELECT agent_id
-       FROM agents
-      WHERE agent_id = $1
-      LIMIT 1`,
-    [agentId],
-  ).catch(() => [])
-  return {
-    ok: true,
-    dry_run: input.dryRun !== false,
-    agent_id: agentId,
-    reason,
-    agent_exists: rows.length > 0,
-    final_tombstone: {
-      status: 'disabled',
-      historical_only: true,
-      new_work_allowed: false,
-      profile_enabled: false,
-      non_routable: true,
-    },
-    affected: {
-      connector_instances: await queryIds(
+  let rows: any[]
+  let affected: AgentRetirementAffected
+  try {
+    rows = await requiredRetirementRead('agent_exists', 'agents', () => db.query<any>(
+      `SELECT agent_id
+         FROM agents
+        WHERE agent_id = $1
+        LIMIT 1`,
+      [agentId],
+    ))
+    affected = {
+      connector_instances: await requiredRetirementRead('connector_instances', 'connector_instances', () => queryIds(
         db,
         `SELECT connector_instance_id
            FROM connector_instances
@@ -899,8 +997,8 @@ export async function buildAgentRetirementPlan(
           ORDER BY connector_instance_id`,
         [agentId],
         'connector_instance_id',
-      ),
-      channel_connector_bindings: await queryIds(
+      )),
+      channel_connector_bindings: await requiredRetirementRead('channel_connector_bindings', 'channel_connector_bindings', () => queryIds(
         db,
         `SELECT b.channel_binding_id
            FROM channel_connector_bindings b
@@ -910,8 +1008,8 @@ export async function buildAgentRetirementPlan(
           ORDER BY b.channel_binding_id`,
         [agentId],
         'channel_binding_id',
-      ),
-      connector_credentials: await queryIds(
+      )),
+      connector_credentials: await requiredRetirementRead('connector_credentials', 'connector_credentials', () => queryIds(
         db,
         `SELECT credential_id
            FROM connector_credentials
@@ -920,8 +1018,8 @@ export async function buildAgentRetirementPlan(
           ORDER BY credential_id`,
         [agentId],
         'credential_id',
-      ),
-      agent_provider_identities: await queryIds(
+      )),
+      agent_provider_identities: await requiredRetirementRead('agent_provider_identities', 'agent_provider_identities', () => queryIds(
         db,
         `SELECT provider_identity_id
            FROM agent_provider_identities
@@ -930,8 +1028,8 @@ export async function buildAgentRetirementPlan(
           ORDER BY provider_identity_id`,
         [agentId],
         'provider_identity_id',
-      ),
-      provider_channel_access: await queryIds(
+      )),
+      provider_channel_access: await requiredRetirementRead('provider_channel_access', 'provider_channel_access', () => queryIds(
         db,
         `SELECT pca.provider_channel_access_id
            FROM provider_channel_access pca
@@ -942,8 +1040,8 @@ export async function buildAgentRetirementPlan(
           ORDER BY pca.provider_channel_access_id`,
         [agentId],
         'provider_channel_access_id',
-      ),
-      agent_ui_bindings: await queryIds(
+      )),
+      agent_ui_bindings: await requiredRetirementRead('agent_ui_bindings', 'agent_ui_bindings', () => queryIds(
         db,
         `SELECT binding_id
            FROM agent_ui_bindings
@@ -952,9 +1050,9 @@ export async function buildAgentRetirementPlan(
           ORDER BY binding_id`,
         [agentId],
         'binding_id',
-      ),
-      agent_workspace_bindings: await queryWorkspaceBindings(db, agentId),
-      agent_runtime_instances: await queryIds(
+      )),
+      agent_workspace_bindings: await requiredRetirementRead('agent_workspace_bindings', 'agent_workspace_bindings', () => queryWorkspaceBindings(db, agentId)),
+      agent_runtime_instances: await requiredRetirementRead('agent_runtime_instances', 'agent_runtime_instances', () => queryIds(
         db,
         `SELECT runtime_instance_id
            FROM agent_runtime_instances
@@ -963,11 +1061,25 @@ export async function buildAgentRetirementPlan(
           ORDER BY started_at DESC`,
         [agentId],
         'runtime_instance_id',
-      ),
-      channel_memberships: await queryChannelMemberships(db, agentId),
-      role_routing: await queryRoleRouting(db, agentId, config),
-      channel_routing_policies: await queryChannelRoutingPolicies(db, agentId),
-    },
+      )),
+      channel_memberships: await requiredRetirementRead('channel_memberships', 'channels', () => queryChannelMemberships(db, agentId)),
+      role_routing: await requiredRetirementRead('role_routing', 'role_routing', () => queryRoleRouting(db, agentId, config)),
+      channel_routing_policies: await requiredRetirementRead('channel_routing_policies', 'channel_routing_policy', () => queryChannelRoutingPolicies(db, agentId)),
+    }
+  } catch (err) {
+    if (err instanceof AgentRetirementPreflightReadError) {
+      return agentRetirementReadBlocker(input, err)
+    }
+    throw err
+  }
+  return {
+    ok: true,
+    dry_run: input.dryRun !== false,
+    agent_id: agentId,
+    reason,
+    agent_exists: rows.length > 0,
+    final_tombstone: finalRetirementTombstone(),
+    affected,
   }
 }
 
@@ -1134,6 +1246,9 @@ export async function executeAgentRetirement(
       reason: input.reason,
       dryRun: false,
     })
+    if (!plan.ok) {
+      throw new Error(`${plan.blocker.code}:${plan.blocker.phase}:${plan.blocker.surface}:${plan.blocker.detail}`)
+    }
     await updateByIds(tx, 'channel_connector_bindings', 'channel_binding_id', plan.affected.channel_connector_bindings, "status = 'disabled', disabled_at = COALESCE(disabled_at, now()), updated_at = now()")
     await updateByIds(tx, 'provider_channel_access', 'provider_channel_access_id', plan.affected.provider_channel_access, "status = 'disabled', disabled_at = COALESCE(disabled_at, now()), updated_at = now()")
     await updateByIds(tx, 'agent_ui_bindings', 'binding_id', plan.affected.agent_ui_bindings, "status = 'disabled', disabled_at = COALESCE(disabled_at, now()), updated_at = now()")
