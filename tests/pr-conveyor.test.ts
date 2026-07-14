@@ -29,6 +29,7 @@ describe('PR conveyor exact-head label controller', () => {
     expect(plan.blocker?.code).toBe('exact_head_mismatch')
     expect(plan.add_labels).toEqual([])
     expect(plan.remove_labels).toEqual([])
+    expect(plan.audit_route).toBeNull()
     expect(plan.gh_command).toEqual([])
   })
 
@@ -57,6 +58,13 @@ describe('PR conveyor exact-head label controller', () => {
       'needs:l2-audit',
       'state:impl-l2',
     ])
+    expect(plan.audit_route).toMatchObject({
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'codex-audit',
+      agent_id: 'codex-audit',
+      route_kind: 'evidence_audit_gate',
+      historical_input: true,
+    })
     expect(plan.gh_command).toEqual([
       'gh',
       'pr',
@@ -88,6 +96,11 @@ describe('PR conveyor exact-head label controller', () => {
     expect(plan.ok).toBe(true)
     expect(plan.add_labels).toEqual(['audit-pending'])
     expect(plan.remove_labels).toEqual(['needs:rework', 'state:rework'])
+    expect(plan.audit_route).toMatchObject({
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'codex-audit',
+      agent_id: 'codex-audit',
+    })
   })
 
   test('needs-rework moves passed or ready PRs back to implementation rework', () => {

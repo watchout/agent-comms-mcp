@@ -137,7 +137,9 @@ import { buildLiveTmuxProfileDoctorBlockers, parseTmuxListPanes } from '../core/
 import { profileExclusionReason } from '../core/profile-classification'
 import { reconcileDiscordDeliveryCredentialPromotion } from '../core/discord-credential-promotion'
 import {
+  buildAuditRouteReconciliationPlan,
   buildAgentRetirementPlan,
+  executeAuditRouteReconciliation,
   executeAgentRetirement,
   isHistoricalOnlyAgentId,
   resolveAuditSeatRoute,
@@ -2595,7 +2597,21 @@ async function agentRetire(args: string[]) {
 }
 
 async function auditRoute(args: string[]) {
-  const { flags } = parseArgs(args)
+  const { positional, flags } = parseArgs(args)
+  if (positional[0] === 'reconcile') {
+    const dryRun = parseRepairDryRun(flags)
+    const reason = flags.reason ?? 'audit route canonicalization'
+    const db = await getDb()
+    try {
+      const report = dryRun
+        ? await buildAuditRouteReconciliationPlan((db as any).__adapter, { reason, dryRun: true })
+        : await executeAuditRouteReconciliation((db as any).__adapter, { reason })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    } finally {
+      await db.end()
+    }
+    return
+  }
   const result = resolveAuditSeatRoute({
     active_function: flags['active-function'] ?? flags.active_function ?? null,
     canonical_seat: flags['canonical-seat'] ?? flags.canonical_seat ?? null,
@@ -6109,6 +6125,7 @@ Commands:
   agent profile doctor [--strict] [--live-tmux] [--include-disabled] [--include-test]
   agent retire <agent_id> [--reason <text>] [--execute|--dry-run]
   audit-route --active-function <fn> --canonical-seat <seat> [--agent-id <agent>]
+  audit-route reconcile [--reason <text>] [--execute|--dry-run]
   status
 
 Message I/O (requires AGENT_ID env var):

@@ -1,3 +1,5 @@
+import { resolveCanonicalAuditRouteForInput, type CanonicalAuditRoute } from './audit-identity'
+
 export type PrConveyorTransition =
   | 'impl-to-l2'
   | 'l2-pass'
@@ -25,6 +27,7 @@ export type PrConveyorPlan = {
   current_labels: string[]
   add_labels: string[]
   remove_labels: string[]
+  audit_route: CanonicalAuditRoute | null
   gh_command: string[]
   blocker: null | {
     code: PrConveyorBlockerCode
@@ -48,6 +51,7 @@ export type BuildPrConveyorPlanInput = {
 type TransitionSpec = {
   add: string[]
   remove: string[]
+  auditRouteRole?: string
 }
 
 const STATE_LABELS = [
@@ -117,6 +121,7 @@ export const PR_CONVEYOR_TRANSITIONS: Record<PrConveyorTransition, TransitionSpe
   'impl-to-l2': {
     add: ['audit:l2-pending', 'needs:l2-audit', 'state:impl-l2', 'audit-pending'],
     remove: resetConveyorLabels(),
+    auditRouteRole: 'l2-audit',
   },
   'l2-pass': {
     add: ['audit:l2-passed', 'evidence-ready'],
@@ -131,6 +136,7 @@ export const PR_CONVEYOR_TRANSITIONS: Record<PrConveyorTransition, TransitionSpe
       'state:rework',
       'rework-implementing',
     ]),
+    auditRouteRole: 'l2-audit',
   },
   'needs-rework': {
     add: ['audit:changes-requested', 'changes-requested', 'needs:rework', 'state:rework'],
@@ -210,6 +216,7 @@ function blocker(
     current_labels: unique(input.currentLabels).sort(),
     add_labels: [],
     remove_labels: [],
+    audit_route: null,
     gh_command: [],
     blocker: { code, message, details },
   }
@@ -272,6 +279,9 @@ export function buildPrConveyorPlan(input: BuildPrConveyorPlanInput): PrConveyor
     current_labels: unique(input.currentLabels).sort(),
     add_labels: addLabels,
     remove_labels: removeLabels,
+    audit_route: spec.auditRouteRole
+      ? resolveCanonicalAuditRouteForInput({ role: spec.auditRouteRole })
+      : null,
     gh_command: buildGhPrEditCommand(input.prNumber, addLabels, removeLabels),
     blocker: null,
   }

@@ -1210,6 +1210,12 @@ export function migrateSqlite(dbPath?: string): void {
          WHERE ci.agent_id = NEW.agent_id
            AND ci.status IN ('registered', 'active', 'standby', 'draining')
         UNION ALL
+        SELECT 1 FROM channel_connector_bindings b
+          JOIN connector_instances ci
+            ON ci.connector_instance_id = b.connector_instance_id
+         WHERE ci.agent_id = NEW.agent_id
+           AND b.status IN ('active', 'standby')
+        UNION ALL
         SELECT 1 FROM agent_ui_bindings ub
          WHERE ub.agent_id = NEW.agent_id
            AND ub.status IN ('registered', 'active')

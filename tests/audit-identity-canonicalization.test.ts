@@ -7,8 +7,11 @@ import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import { buildDirectoryReport } from '../core/directory'
 import {
+  buildAuditRouteReconciliationPlan,
   buildAgentRetirementPlan,
+  executeAuditRouteReconciliation,
   executeAgentRetirement,
+  resolveCanonicalAuditRouteForInputStrict,
   resolveAuditSeatRoute,
 } from '../core/audit-identity'
 
@@ -114,15 +117,54 @@ describe('audit identity canonicalization', () => {
     })
   })
 
+  test('canonical audit route resolver fails closed on contradictory explicit tuples', () => {
+    expect(resolveCanonicalAuditRouteForInputStrict({
+      activeFunction: 'evidence_audit_gate',
+      canonicalSeat: 'devauditor',
+      agentId: 'devauditor',
+    })).toMatchObject({
+      ok: false,
+      code: 'CANONICAL_SEAT_MISMATCH',
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'devauditor',
+      requested_agent_id: 'devauditor',
+    })
+
+    expect(resolveCanonicalAuditRouteForInputStrict({
+      activeFunction: 'scenario_verification_gate',
+      canonicalSeat: 'codex-audit',
+      agentId: 'codex-audit',
+    })).toMatchObject({
+      ok: false,
+      code: 'CANONICAL_SEAT_MISMATCH',
+      active_function: 'scenario_verification_gate',
+      canonical_seat: 'codex-audit',
+      requested_agent_id: 'codex-audit',
+    })
+  })
+
   test('retirement dry-run is default-shaped and execute disables projections before final tombstone', async () => {
     await withSqlite(async (dbPath, adapter) => {
       const db = new Database(dbPath)
       try {
         db.exec(`
           INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, historical_only, new_work_allowed, profile_enabled)
-          VALUES ('l2auditor', 'l2auditor', 'dev', 'TUI', 'idle', 0, 1, 1);
+          VALUES
+            ('codex-audit', 'codex-audit', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('l2auditor', 'l2auditor', 'dev', 'TUI', 'idle', 0, 1, 1);
           INSERT INTO channels (id, name, type, members)
           VALUES ('audit-ch', 'audit-ch', 'channel', '["l2auditor"]');
+          INSERT INTO role_routing (role_key, channel_id, agent_id, description, new_work_allowed, active_function, canonical_seat, historical_only)
+          VALUES ('pr_audit_l2', 'audit-ch', 'l2auditor', 'legacy L2 route', 1, NULL, NULL, 0);
+          INSERT INTO channel_routing_policy (
+            channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist,
+            native_role_outbound_owners, native_projection_identities
+          )
+          VALUES (
+            'audit-ch', 'l2auditor', 'l2auditor', '["codex-audit","l2auditor"]',
+            '{"l2":"l2auditor","codex":"codex-audit"}',
+            '{"l2auditor":"legacy","codex-audit":"canonical"}'
+          );
           INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id, runtime_engine, status)
           VALUES ('runtime-l2', 'l2auditor', 'claude-code', 'running');
           INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
@@ -148,6 +190,22 @@ describe('audit identity canonicalization', () => {
         before_members: ['l2auditor'],
         after_members: [],
       }])
+      expect(dry.affected.role_routing).toEqual([expect.objectContaining({
+        role_key: 'pr_audit_l2',
+        before_agent_id: 'l2auditor',
+        after_agent_id: 'codex-audit',
+        after_historical_only: true,
+        after_new_work_allowed: false,
+      })])
+      expect(dry.affected.channel_routing_policies).toEqual([expect.objectContaining({
+        channel_id: 'audit-ch',
+        before_primary_agent_id: 'l2auditor',
+        after_primary_agent_id: null,
+        before_adapter_owner_agent_id: 'l2auditor',
+        after_adapter_owner_agent_id: null,
+        before_outbound_allowlist: ['codex-audit', 'l2auditor'],
+        after_outbound_allowlist: ['codex-audit'],
+      })])
 
       const executed = await executeAgentRetirement(adapter, {
         agentId: 'l2auditor',
@@ -167,6 +225,124 @@ describe('audit identity canonicalization', () => {
         expect(read.prepare(`SELECT status FROM channel_connector_bindings WHERE channel_binding_id = 'binding-l2'`).get()).toEqual({ status: 'disabled' })
         expect(read.prepare(`SELECT status FROM agent_runtime_instances WHERE runtime_instance_id = 'runtime-l2'`).get()).toEqual({ status: 'stopped' })
         expect(read.prepare(`SELECT members FROM channels WHERE id = 'audit-ch'`).get()).toEqual({ members: '[]' })
+        expect(read.prepare(`SELECT agent_id, historical_only, new_work_allowed, active_function, canonical_seat FROM role_routing WHERE role_key = 'pr_audit_l2'`).get()).toEqual({
+          agent_id: 'codex-audit',
+          historical_only: 1,
+          new_work_allowed: 0,
+          active_function: 'evidence_audit_gate',
+          canonical_seat: 'codex-audit',
+        })
+        expect(read.prepare(`SELECT primary_agent_id, adapter_owner_agent_id, outbound_allowlist, native_role_outbound_owners, native_projection_identities FROM channel_routing_policy WHERE channel_id = 'audit-ch'`).get()).toEqual({
+          primary_agent_id: null,
+          adapter_owner_agent_id: null,
+          outbound_allowlist: '["codex-audit"]',
+          native_role_outbound_owners: '{"codex":"codex-audit"}',
+          native_projection_identities: '{"codex-audit":"canonical"}',
+        })
+      } finally {
+        read.close()
+      }
+    })
+  })
+
+  test('audit-route reconciliation canonicalizes devauditor-owned legacy audit rows without requiring l2auditor routes', async () => {
+    await withSqlite(async (dbPath, adapter) => {
+      const db = new Database(dbPath)
+      try {
+        db.exec(`
+          INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, historical_only, new_work_allowed, profile_enabled)
+          VALUES
+            ('codex-audit', 'codex-audit', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('devauditor', 'devauditor', 'dev', 'codex', 'idle', 0, 1, 1);
+          INSERT INTO role_routing (role_key, agent_id, description, new_work_allowed, historical_only)
+          VALUES
+            ('audit', 'devauditor', 'legacy active audit route', 1, 0),
+            ('contract_audit_viewpoint', 'devauditor', 'legacy active audit route', 1, 0),
+            ('pr_audit_l1', 'devauditor', 'legacy active audit route', 1, 0),
+            ('pr_audit_l2', 'devauditor', 'legacy active audit route', 1, 0),
+            ('primary_audit', 'devauditor', 'legacy active audit route', 1, 0),
+            ('secondary_audit', 'devauditor', 'legacy active audit route', 1, 0);
+        `)
+      } finally {
+        db.close()
+      }
+
+      const dry = await buildAuditRouteReconciliationPlan(adapter, {
+        reason: 'test route reconcile',
+        dryRun: true,
+      })
+      expect(dry.dry_run).toBe(true)
+      expect(dry.canonical_routes).toEqual([
+        expect.objectContaining({
+          role_key: 'evidence_audit_gate',
+          action: 'create',
+          after: expect.objectContaining({
+            agent_id: 'codex-audit',
+            active_function: 'evidence_audit_gate',
+            canonical_seat: 'codex-audit',
+            historical_only: false,
+            new_work_allowed: true,
+          }),
+        }),
+        expect.objectContaining({
+          role_key: 'scenario_verification_gate',
+          action: 'create',
+          after: expect.objectContaining({
+            agent_id: 'devauditor',
+            active_function: 'scenario_verification_gate',
+            canonical_seat: 'devauditor',
+            historical_only: false,
+            new_work_allowed: true,
+          }),
+        }),
+      ])
+      expect(dry.legacy_routes.map((route) => route.role_key)).toEqual([
+        'audit',
+        'contract_audit_viewpoint',
+        'pr_audit_l1',
+        'pr_audit_l2',
+        'primary_audit',
+        'secondary_audit',
+      ])
+      expect(dry.legacy_routes.every((route) => route.before.agent_id === 'devauditor')).toBe(true)
+      expect(dry.legacy_routes.every((route) => route.after.historical_only === true && route.after.new_work_allowed === false)).toBe(true)
+
+      const executed = await executeAuditRouteReconciliation(adapter, {
+        reason: 'test route reconcile',
+      })
+      expect(executed.dry_run).toBe(false)
+
+      const read = new Database(dbPath)
+      try {
+        expect(read.prepare(`SELECT agent_id, active_function, canonical_seat, historical_only, new_work_allowed FROM role_routing WHERE role_key = 'evidence_audit_gate'`).get()).toEqual({
+          agent_id: 'codex-audit',
+          active_function: 'evidence_audit_gate',
+          canonical_seat: 'codex-audit',
+          historical_only: 0,
+          new_work_allowed: 1,
+        })
+        expect(read.prepare(`SELECT agent_id, active_function, canonical_seat, historical_only, new_work_allowed FROM role_routing WHERE role_key = 'scenario_verification_gate'`).get()).toEqual({
+          agent_id: 'devauditor',
+          active_function: 'scenario_verification_gate',
+          canonical_seat: 'devauditor',
+          historical_only: 0,
+          new_work_allowed: 1,
+        })
+        expect(read.prepare(`
+          SELECT count(*) AS count
+            FROM role_routing
+           WHERE agent_id = 'devauditor'
+             AND role_key LIKE '%audit%'
+             AND historical_only = 0
+             AND new_work_allowed = 1
+        `).get()).toEqual({ count: 0 })
+        expect(read.prepare(`
+          SELECT count(*) AS count
+            FROM role_routing
+           WHERE role_key IN ('audit','contract_audit_viewpoint','pr_audit_l1','pr_audit_l2','primary_audit','secondary_audit')
+             AND historical_only = 1
+             AND new_work_allowed = 0
+        `).get()).toEqual({ count: 6 })
       } finally {
         read.close()
       }
@@ -181,7 +357,8 @@ describe('audit identity canonicalization', () => {
           INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, historical_only, new_work_allowed, profile_enabled)
           VALUES
             ('disabled-audit', 'disabled-audit', 'dev', 'TUI', 'disabled', 1, 0, 0),
-            ('active-audit', 'active-audit', 'dev', 'codex', 'idle', 0, 1, 1);
+            ('active-audit', 'active-audit', 'dev', 'codex', 'idle', 0, 1, 1),
+            ('binding-owner', 'binding-owner', 'dev', 'codex', 'idle', 0, 1, 1);
         `)
         expect(() => {
           db.exec(`
@@ -196,6 +373,18 @@ describe('audit identity canonicalization', () => {
         `)
         expect(() => {
           db.exec(`UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'active-audit'`)
+        }).toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
+
+        db.exec(`
+          INSERT INTO channels (id, name, type, members)
+          VALUES ('binding-ch', 'binding-ch', 'channel', '[]');
+          INSERT INTO connector_instances (connector_instance_id, agent_id, provider, connector_uri, status)
+          VALUES ('stopped-connector', 'binding-owner', 'discord', 'discord://agents/binding-owner', 'disabled');
+          INSERT INTO channel_connector_bindings (channel_binding_id, channel_id, provider, connector_instance_id, status)
+          VALUES ('active-binding-through-disabled-connector', 'binding-ch', 'discord', 'stopped-connector', 'active');
+        `)
+        expect(() => {
+          db.exec(`UPDATE agents SET historical_only = 1, new_work_allowed = 0, status = 'disabled' WHERE agent_id = 'binding-owner'`)
         }).toThrow('DISABLED_OR_HISTORICAL_AGENT_HAS_ACTIVE_DEPENDENCIES')
       } finally {
         db.close()

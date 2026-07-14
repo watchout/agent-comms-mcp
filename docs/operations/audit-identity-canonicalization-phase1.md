@@ -20,6 +20,10 @@ protected-surface GO.
 - Agent retirement is dry-run by default and disables connector, binding,
   workspace, runtime, and channel membership projections before final
   tombstone on execute.
+- Audit route reconciliation is dry-run by default and separately canonicalizes
+  active role routing: it creates or activates `evidence_audit_gate ->
+  codex-audit` and `scenario_verification_gate -> devauditor`, while marking
+  ambiguous legacy audit keys historical-only / no-new-work.
 - DB and application activation paths reject active connector/binding
   projections for disabled or historical-only agents.
 
@@ -48,6 +52,7 @@ Use canonical CLI only; do not use direct SQL for live readback.
 bun cli/index.ts audit-route --active-function evidence_audit_gate --canonical-seat codex-audit
 bun cli/index.ts audit-route --active-function evidence_audit_gate --canonical-seat devauditor
 bun cli/index.ts audit-route --active-function scenario_verification_gate --agent-id devauditor
+bun cli/index.ts audit-route reconcile --dry-run --reason "AUDIT-IDENTITY-CANONICALIZATION-20260714-001 live route dry-run"
 bun cli/index.ts directory --format json
 bun cli/index.ts directory --include-historical --format json
 bun cli/index.ts agent retire l2auditor --dry-run --reason "AUDIT-IDENTITY-CANONICALIZATION-20260714-001 live dry-run"
@@ -61,6 +66,15 @@ Expected live dry-run evidence:
   fails closed with `CANONICAL_SEAT_MISMATCH`.
 - `audit-route --active-function scenario_verification_gate --agent-id
   devauditor` passes and routes to `devauditor`.
+- `audit-route reconcile --dry-run` must report canonical route upserts for
+  `evidence_audit_gate -> codex-audit` and
+  `scenario_verification_gate -> devauditor`. Protected-state readback found
+  live active legacy audit rows owned by `devauditor`:
+  `audit`, `contract_audit_viewpoint`, `pr_audit_l1`, `pr_audit_l2`,
+  `primary_audit`, and `secondary_audit`. The dry-run must list these as
+  `legacy_routes` whose after-state is `historical_only=true` and
+  `new_work_allowed=false`, so `devauditor` is no longer an evidence-audit
+  same-gate candidate. Do not run `--execute` until protected-surface GO.
 - Default directory omits `l2auditor` and `cto`; channel
   `1487368919613444156` still shows `codex-audit` as an active member and
   omits `l2auditor`.

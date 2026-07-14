@@ -1,3 +1,5 @@
+import { resolveCanonicalAuditRouteForInputStrict, type CanonicalAuditRoute } from './audit-identity'
+
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
 
@@ -56,6 +58,12 @@ export interface QueueWorkHandoffContract {
   required_writebacks: Array<'github_issue_comment'>
   posting_mode: QueueWorkWritebackMode
   detected_from: string[]
+  audit_route: CanonicalAuditRoute | null
+  active_function: string | null
+  canonical_seat: string | null
+  canonical_agent_id: string | null
+  route_blocker: string | null
+  route_blocker_detail: string | null
 }
 
 export interface QueueWorkGithubIssueCommentWriteback {
@@ -233,6 +241,152 @@ function payloadMessageType(payload: Record<string, any>): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+function payloadRole(payload: Record<string, any>): string | null {
+  const value = payload.role ?? payload.active_function ?? payload.handoff_contract?.role ?? null
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function payloadString(payload: Record<string, any>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function stripScalarQuotes(value: string): string {
+  const trimmed = value.trim()
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed
+}
+
+function flattenObject(
+  input: unknown,
+  out: Record<string, string>,
+  prefix = '',
+  depth = 0,
+): void {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || depth > 4) return
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (value === null || value === undefined) continue
+    if (typeof value === 'object' && !Array.isArray(value)) {
+      flattenObject(value, out, path, depth + 1)
+      continue
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      out[path] = String(value)
+    }
+  }
+}
+
+function parseBoundedJsonControlArtifact(content: string): Record<string, string> {
+  const trimmed = content.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}') || trimmed.length > 30_000) return {}
+  try {
+    const flattened: Record<string, string> = {}
+    flattenObject(JSON.parse(trimmed), flattened)
+    return flattened
+  } catch {
+    return {}
+  }
+}
+
+function extractLikelyControlArtifact(content: string): string {
+  const fenced = content.match(/```(?:ya?ml|json)?\s*\n([\s\S]*?)```/i)
+  const raw = fenced?.[1] ?? content
+  return raw.slice(0, 30_000)
+}
+
+function parseBoundedYamlControlArtifact(content: string): Record<string, string> {
+  const flattened: Record<string, string> = {}
+  const lines = extractLikelyControlArtifact(content).split(/\r?\n/).slice(0, 500)
+  const stack: Array<{ indent: number; path: string }> = []
+  for (const line of lines) {
+    if (!line.trim() || line.trimStart().startsWith('#') || line.trimStart().startsWith('- ')) continue
+    const match = line.match(/^(\s*)([A-Za-z0-9_.-]+):(?:\s*(.*))?$/)
+    if (!match) continue
+    const indent = match[1].replace(/\t/g, '  ').length
+    const key = match[2]
+    const rawValue = match[3] ?? ''
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop()
+    const parent = stack[stack.length - 1]?.path
+    const path = parent ? `${parent}.${key}` : key
+    const value = rawValue.trim()
+    if (!value) {
+      stack.push({ indent, path })
+      continue
+    }
+    flattened[path] = stripScalarQuotes(value.replace(/\s+#.*$/, ''))
+  }
+  return flattened
+}
+
+function pickRouteField(fields: Record<string, string>, candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    const direct = fields[candidate]
+    if (direct?.trim()) return direct.trim()
+  }
+  const lower = new Map(Object.entries(fields).map(([key, value]) => [key.toLowerCase(), value]))
+  for (const candidate of candidates) {
+    const value = lower.get(candidate.toLowerCase())
+    if (value?.trim()) return value.trim()
+  }
+  return null
+}
+
+function extractContentRouteTuple(content: string): {
+  role: string | null
+  activeFunction: string | null
+  canonicalSeat: string | null
+  agentId: string | null
+  detectedFrom: string[]
+} {
+  const artifact = extractLikelyControlArtifact(content)
+  const fields = {
+    ...parseBoundedYamlControlArtifact(artifact),
+    ...parseBoundedJsonControlArtifact(artifact),
+  }
+  const activeFunction = pickRouteField(fields, [
+    'execution_context.active_function',
+    'control_handoff.active_function',
+    'active_function',
+    'activeFunction',
+  ])
+  const canonicalSeat = pickRouteField(fields, [
+    'target.canonical_seat',
+    'target.canonicalSeat',
+    'execution_context.canonical_seat',
+    'execution_context.canonicalSeat',
+    'control_handoff.canonical_seat',
+    'canonical_seat',
+    'canonicalSeat',
+  ])
+  const agentId = pickRouteField(fields, [
+    'target.agent_id',
+    'target.agentId',
+    'execution_context.agent_id',
+    'agent_id',
+    'agentId',
+  ])
+  const role = pickRouteField(fields, [
+    'target.role',
+    'control_handoff.role',
+    'role',
+  ])
+  const detectedFrom: string[] = []
+  if (activeFunction) detectedFrom.push('content:active_function')
+  if (canonicalSeat) detectedFrom.push('content:canonical_seat')
+  if (agentId) detectedFrom.push('content:agent_id')
+  if (role) detectedFrom.push('content:role')
+  return { role, activeFunction, canonicalSeat, agentId, detectedFrom }
+}
+
 function containsGithubIssueOrPullUrl(content: string): boolean {
   return /https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:issues|pull)\/\d+/i.test(content)
 }
@@ -252,10 +406,24 @@ export function detectQueueWorkHandoffContract(input: {
   const payload = parsePayload(input.payload)
   const content = typeof payload.content === 'string' ? payload.content : input.payload
   const messageType = payloadMessageType(payload)
+  const contentRoute = extractContentRouteTuple(content)
+  const auditRouteResult = resolveCanonicalAuditRouteForInputStrict({
+    role: contentRoute.role ?? payloadRole(payload) ?? messageType,
+    agentId: contentRoute.agentId ?? input.agentId,
+    activeFunction: contentRoute.activeFunction ?? payloadString(payload, 'active_function', 'activeFunction'),
+    canonicalSeat: contentRoute.canonicalSeat ?? payloadString(payload, 'canonical_seat', 'canonicalSeat'),
+  })
+  const auditRoute = auditRouteResult?.ok ? auditRouteResult.route : null
+  const routeBlocker = auditRouteResult && !auditRouteResult.ok
+    ? auditRouteResult.code
+    : auditRoute && auditRoute.agent_id !== input.agentId
+      ? 'historical_or_mismatched_audit_owner'
+      : null
   const detectedFrom: string[] = []
   if (messageType === 'phase_handoff') detectedFrom.push('message_type:phase_handoff')
   if (containsGithubIssueOrPullUrl(content)) detectedFrom.push('github_url')
   if (looksLikeRoleHandoff(content, input.agentId)) detectedFrom.push('role_handoff_text')
+  detectedFrom.push(...contentRoute.detectedFrom)
 
   const githubBacked = (
     (messageType === 'phase_handoff' && containsGithubIssueOrPullUrl(content)) ||
@@ -267,6 +435,12 @@ export function detectQueueWorkHandoffContract(input: {
     required_writebacks: githubBacked ? ['github_issue_comment'] : [],
     posting_mode: input.postingMode ?? 'none',
     detected_from: detectedFrom,
+    audit_route: auditRoute,
+    active_function: auditRoute?.active_function ?? (auditRouteResult && !auditRouteResult.ok ? auditRouteResult.active_function : null),
+    canonical_seat: auditRoute?.canonical_seat ?? (auditRouteResult && !auditRouteResult.ok ? auditRouteResult.canonical_seat : null),
+    canonical_agent_id: auditRoute?.agent_id ?? null,
+    route_blocker: routeBlocker,
+    route_blocker_detail: auditRouteResult && !auditRouteResult.ok ? auditRouteResult.detail : null,
   }
 }
 

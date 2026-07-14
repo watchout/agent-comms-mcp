@@ -64,6 +64,40 @@ export type AuditSeatRouteResult =
       detail: string
     }
 
+export type CanonicalAuditRoute = {
+  active_function: string
+  canonical_seat: string
+  agent_id: string
+  route_kind: 'evidence_audit_gate' | 'scenario_verification_gate'
+  legacy_input: {
+    role?: string | null
+    label?: string | null
+    agent_id?: string | null
+  }
+  historical_input: boolean
+}
+
+export type CanonicalAuditRouteInput = {
+  role?: string | null
+  label?: string | null
+  agentId?: string | null
+  activeFunction?: string | null
+  canonicalSeat?: string | null
+}
+
+export type AuditRouteBlockCode = Extract<AuditSeatRouteResult, { ok: false }>['code']
+
+export type CanonicalAuditRouteResolveResult =
+  | { ok: true; route: CanonicalAuditRoute }
+  | {
+      ok: false
+      code: AuditRouteBlockCode
+      detail: string
+      active_function: string | null
+      canonical_seat: string | null
+      requested_agent_id: string | null
+    }
+
 export type AgentRetirementPlan = {
   ok: true
   dry_run: boolean
@@ -87,10 +121,94 @@ export type AgentRetirementPlan = {
     agent_workspace_bindings: Array<{ agent_id: string; workspace_id: string; binding_role: string }>
     agent_runtime_instances: string[]
     channel_memberships: Array<{ channel_id: string; before_members: string[]; after_members: string[] }>
+    role_routing: Array<{
+      role_key: string
+      before_agent_id: string
+      after_agent_id: string
+      before_historical_only: boolean
+      before_new_work_allowed: boolean
+      after_historical_only: true
+      after_new_work_allowed: false
+      active_function: string | null
+      canonical_seat: string | null
+    }>
+    channel_routing_policies: Array<{
+      channel_id: string
+      before_primary_agent_id: string | null
+      after_primary_agent_id: string | null
+      before_adapter_owner_agent_id: string | null
+      after_adapter_owner_agent_id: string | null
+      before_outbound_allowlist: string[]
+      after_outbound_allowlist: string[]
+      before_native_role_outbound_owners: Record<string, unknown>
+      after_native_role_outbound_owners: Record<string, unknown>
+      before_native_projection_identities: Record<string, unknown>
+      after_native_projection_identities: Record<string, unknown>
+    }>
   }
 }
 
+export type AuditRouteReconciliationPlan = {
+  ok: true
+  dry_run: boolean
+  reason: string
+  canonical_routes: Array<{
+    role_key: 'evidence_audit_gate' | 'scenario_verification_gate'
+    before: RoleRouteSnapshot | null
+    after: RoleRouteSnapshot
+    action: 'create' | 'activate' | 'noop'
+  }>
+  legacy_routes: Array<{
+    role_key: string
+    before: RoleRouteSnapshot
+    after: RoleRouteSnapshot
+    reason: 'ambiguous_legacy_audit_key'
+  }>
+}
+
+export type RoleRouteSnapshot = {
+  role_key: string
+  agent_id: string | null
+  active_function: string | null
+  canonical_seat: string | null
+  historical_only: boolean
+  new_work_allowed: boolean
+  description: string | null
+}
+
 type Queryable = Pick<DbAdapter, 'query' | 'execute' | 'transaction' | 'dialect'>
+
+const CANONICAL_AUDIT_ROLE_ROUTES: Array<{
+  role_key: 'evidence_audit_gate' | 'scenario_verification_gate'
+  agent_id: string
+  active_function: string
+  canonical_seat: string
+  description: string
+}> = [
+  {
+    role_key: 'evidence_audit_gate',
+    agent_id: 'codex-audit',
+    active_function: 'evidence_audit_gate',
+    canonical_seat: 'codex-audit',
+    description: 'Canonical Shirube V3 evidence audit gate; no l2auditor or devauditor fallback.',
+  },
+  {
+    role_key: 'scenario_verification_gate',
+    agent_id: 'devauditor',
+    active_function: 'scenario_verification_gate',
+    canonical_seat: 'devauditor',
+    description: 'Scenario verification gate for failure/recovery reproduction only.',
+  },
+]
+
+const AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS = [
+  'audit',
+  'contract_audit_viewpoint',
+  'pr_audit_l1',
+  'pr_audit_l2',
+  'primary_audit',
+  'secondary_audit',
+]
 
 function roleConfigPath(): string {
   if (process.env.AGENT_COM_ROLE_ROUTING_PATH) return process.env.AGENT_COM_ROLE_ROUTING_PATH
@@ -112,6 +230,15 @@ function normalize(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null
   const value = String(raw).trim()
   return value.length > 0 ? value : null
+}
+
+function normalizeRouteToken(raw: unknown): string | null {
+  const value = normalize(raw)?.toLowerCase().replace(/_/g, '-')
+  if (!value) return null
+  if (value.startsWith('needs:')) return value.slice('needs:'.length)
+  if (value.startsWith('role:')) return value.slice('role:'.length)
+  if (value.startsWith('owner:')) return value.slice('owner:'.length)
+  return value
 }
 
 function normalizeBool(raw: unknown, fallback = false): boolean {
@@ -263,6 +390,176 @@ export function resolveAuditSeatRoute(
   }
 }
 
+function configuredEvidenceRoute(config: AgentRoleRoutingConfig): {
+  activeFunction: string
+  canonicalSeat: string
+  agentId: string
+} {
+  const evidence = config.auditRouting?.evidenceAuditGate ?? {}
+  return {
+    activeFunction: evidence.activeFunction ?? 'evidence_audit_gate',
+    canonicalSeat: evidence.canonicalSeat ?? 'codex-audit',
+    agentId: evidence.agentId ?? evidence.canonicalSeat ?? 'codex-audit',
+  }
+}
+
+function configuredScenarioRoute(config: AgentRoleRoutingConfig): {
+  activeFunction: string
+  canonicalSeat: string
+  agentId: string
+} {
+  const scenario = config.auditRouting?.scenarioVerificationGate ?? {}
+  return {
+    activeFunction: scenario.activeFunction ?? 'scenario_verification_gate',
+    canonicalSeat: scenario.canonicalSeat ?? 'devauditor',
+    agentId: scenario.agentId ?? scenario.canonicalSeat ?? 'devauditor',
+  }
+}
+
+function canonicalRouteFromSeatResult(
+  input: CanonicalAuditRouteInput,
+  agentId: string | null,
+  result: Extract<AuditSeatRouteResult, { ok: true }>,
+  routeKind: CanonicalAuditRoute['route_kind'],
+  historicalInput = false,
+): CanonicalAuditRoute {
+  return {
+    active_function: result.active_function,
+    canonical_seat: result.canonical_seat,
+    agent_id: result.agent_id,
+    route_kind: routeKind,
+    legacy_input: {
+      role: input.role ?? null,
+      label: input.label ?? null,
+      agent_id: agentId,
+    },
+    historical_input: historicalInput,
+  }
+}
+
+function canonicalRouteError(result: Extract<AuditSeatRouteResult, { ok: false }>): CanonicalAuditRouteResolveResult {
+  return {
+    ok: false,
+    code: result.code,
+    detail: result.detail,
+    active_function: result.active_function,
+    canonical_seat: result.canonical_seat,
+    requested_agent_id: result.requested_agent_id,
+  }
+}
+
+export function resolveCanonicalAuditRouteForInputStrict(
+  input: CanonicalAuditRouteInput,
+  config = loadAgentRoleRoutingConfig(),
+): CanonicalAuditRouteResolveResult | null {
+  const role = normalizeRouteToken(input.role)
+  const label = normalizeRouteToken(input.label)
+  const agentId = normalize(input.agentId)
+  const agentToken = normalizeRouteToken(agentId)
+  const activeFunction = normalize(input.activeFunction)
+  const canonicalSeat = normalize(input.canonicalSeat)
+
+  const evidence = configuredEvidenceRoute(config)
+  const scenario = configuredScenarioRoute(config)
+  if (activeFunction === evidence.activeFunction) {
+    const resolved = resolveAuditSeatRoute({
+      active_function: activeFunction,
+      canonical_seat: canonicalSeat,
+      requested_agent_id: agentId,
+    }, config)
+    return resolved.ok
+      ? {
+          ok: true,
+          route: canonicalRouteFromSeatResult(input, agentId, resolved, 'evidence_audit_gate', Boolean(
+            role === 'l1-audit' ||
+            role === 'l2-audit' ||
+            agentToken === 'l1auditor' ||
+            agentToken === 'l2auditor' ||
+            agentToken === 'auditor',
+          )),
+        }
+      : canonicalRouteError(resolved)
+  }
+  if (activeFunction === scenario.activeFunction) {
+    const resolved = resolveAuditSeatRoute({
+      active_function: activeFunction,
+      canonical_seat: canonicalSeat,
+      requested_agent_id: agentId,
+    }, config)
+    return resolved.ok
+      ? {
+          ok: true,
+          route: canonicalRouteFromSeatResult(input, agentId, resolved, 'scenario_verification_gate'),
+        }
+      : canonicalRouteError(resolved)
+  }
+  if (activeFunction) {
+    return canonicalRouteError(resolveAuditSeatRoute({
+      active_function: activeFunction,
+      canonical_seat: canonicalSeat,
+      requested_agent_id: agentId,
+    }, config) as Extract<AuditSeatRouteResult, { ok: false }>)
+  }
+
+  const evidenceTokens = new Set([
+    'audit',
+    'l1-audit',
+    'l2-audit',
+    'pr-audit-l1',
+    'pr-audit-l2',
+    'evidence-audit',
+    'evidence-audit-gate',
+    evidence.activeFunction.replace(/_/g, '-'),
+    evidence.canonicalSeat.toLowerCase(),
+    evidence.agentId.toLowerCase(),
+    'auditor',
+    'l1auditor',
+    'l2auditor',
+  ])
+  const scenarioTokens = new Set([
+    'scenario-verification',
+    'scenario-verification-gate',
+    scenario.activeFunction.replace(/_/g, '-'),
+    scenario.canonicalSeat.toLowerCase(),
+    scenario.agentId.toLowerCase(),
+    'devauditor',
+  ])
+  const tokens = [role, label, normalizeRouteToken(activeFunction), normalizeRouteToken(canonicalSeat), agentToken]
+    .filter((token): token is string => Boolean(token))
+
+  const wantsEvidence = tokens.some((token) => evidenceTokens.has(token))
+  const wantsScenario = tokens.some((token) => scenarioTokens.has(token)) && !wantsEvidence
+  if (!wantsEvidence && !wantsScenario) return null
+
+  const target = wantsScenario ? scenario : evidence
+  const resolved = resolveAuditSeatRoute({
+    active_function: target.activeFunction,
+    canonical_seat: target.canonicalSeat,
+  }, config)
+  if (!resolved.ok) return canonicalRouteError(resolved)
+
+  return {
+    ok: true,
+    route: canonicalRouteFromSeatResult(input, agentId, resolved, wantsScenario ? 'scenario_verification_gate' : 'evidence_audit_gate', Boolean(
+      role === 'l1-audit' ||
+      role === 'l2-audit' ||
+      role === 'pr-audit-l1' ||
+      role === 'pr-audit-l2' ||
+      agentToken === 'l1auditor' ||
+      agentToken === 'l2auditor' ||
+      agentToken === 'auditor',
+    )),
+  }
+}
+
+export function resolveCanonicalAuditRouteForInput(
+  input: CanonicalAuditRouteInput,
+  config = loadAgentRoleRoutingConfig(),
+): CanonicalAuditRoute | null {
+  const result = resolveCanonicalAuditRouteForInputStrict(input, config)
+  return result?.ok ? result.route : null
+}
+
 function parseJsonObject(raw: unknown): Record<string, unknown> {
   if (!raw) return {}
   if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
@@ -290,6 +587,122 @@ function parseMembers(raw: unknown): string[] {
     return trimmed.slice(1, -1).split(',').map((item) => item.trim()).filter(Boolean)
   }
   return []
+}
+
+function removeObjectAgentReferences(input: Record<string, unknown>, agentId: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (key === agentId) continue
+    if (typeof value === 'string' && value === agentId) continue
+    if (Array.isArray(value)) {
+      const filtered = value.filter((item) => item !== agentId)
+      out[key] = filtered
+      continue
+    }
+    out[key] = value
+  }
+  return out
+}
+
+function roleRouteSnapshot(row: any): RoleRouteSnapshot {
+  return {
+    role_key: String(row.role_key),
+    agent_id: normalize(row.agent_id),
+    active_function: normalize(row.active_function),
+    canonical_seat: normalize(row.canonical_seat),
+    historical_only: normalizeBool(row.historical_only),
+    new_work_allowed: normalizeBool(row.new_work_allowed, true),
+    description: normalize(row.description),
+  }
+}
+
+function sameRoleRouteSnapshot(a: RoleRouteSnapshot | null, b: RoleRouteSnapshot): boolean {
+  return Boolean(a) &&
+    a?.agent_id === b.agent_id &&
+    a.active_function === b.active_function &&
+    a.canonical_seat === b.canonical_seat &&
+    a.historical_only === b.historical_only &&
+    a.new_work_allowed === b.new_work_allowed
+}
+
+async function queryRoleRouteRows(db: Queryable, whereSql: string, params: unknown[]): Promise<RoleRouteSnapshot[]> {
+  const rows = await db.query<any>(
+    `SELECT role_key, agent_id, active_function, canonical_seat, historical_only, new_work_allowed, description
+       FROM role_routing
+      ${whereSql}
+      ORDER BY role_key`,
+    params,
+  ).catch(() => [])
+  return rows.map(roleRouteSnapshot)
+}
+
+export async function buildAuditRouteReconciliationPlan(
+  db: Queryable,
+  input: { reason?: string; dryRun?: boolean } = {},
+): Promise<AuditRouteReconciliationPlan> {
+  const reason = input.reason?.trim() || 'audit route canonicalization'
+  const canonicalRows = await queryRoleRouteRows(
+    db,
+    `WHERE role_key IN ($1, $2)`,
+    ['evidence_audit_gate', 'scenario_verification_gate'],
+  )
+  const canonicalByKey = new Map(canonicalRows.map((row) => [row.role_key, row]))
+  const canonicalRoutes: AuditRouteReconciliationPlan['canonical_routes'] = CANONICAL_AUDIT_ROLE_ROUTES.map((route) => {
+    const before = canonicalByKey.get(route.role_key) ?? null
+    const after: RoleRouteSnapshot = {
+      role_key: route.role_key,
+      agent_id: route.agent_id,
+      active_function: route.active_function,
+      canonical_seat: route.canonical_seat,
+      historical_only: false,
+      new_work_allowed: true,
+      description: route.description,
+    }
+    return {
+      role_key: route.role_key,
+      before,
+      after,
+      action: before === null ? 'create' : sameRoleRouteSnapshot(before, after) ? 'noop' : 'activate',
+    }
+  })
+
+  const legacyRows = await queryRoleRouteRows(
+    db,
+    `WHERE role_key NOT IN ($1, $2)
+       AND (
+         lower(role_key) IN (${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.map((_, idx) => `$${idx + 3}`).join(', ')})
+         OR (agent_id = $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 3} AND lower(role_key) LIKE '%audit%')
+         OR (active_function = $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 4} AND agent_id <> $${AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS.length + 5})
+       )`,
+    [
+      'evidence_audit_gate',
+      'scenario_verification_gate',
+      ...AMBIGUOUS_LEGACY_AUDIT_ROLE_KEYS,
+      'devauditor',
+      'evidence_audit_gate',
+      'codex-audit',
+    ],
+  )
+  const legacyRoutes = legacyRows
+    .filter((row) => row.historical_only !== true || row.new_work_allowed !== false)
+    .map((before) => ({
+      role_key: before.role_key,
+      before,
+      after: {
+        ...before,
+        historical_only: true,
+        new_work_allowed: false,
+      },
+      reason: 'ambiguous_legacy_audit_key' as const,
+    }))
+
+  return {
+    ok: true,
+    dry_run: input.dryRun !== false,
+    reason,
+    canonical_routes: canonicalRoutes,
+    legacy_routes: legacyRoutes,
+  }
 }
 
 async function queryIds(db: Queryable, sql: string, params: unknown[], idColumn: string): Promise<string[]> {
@@ -332,11 +745,87 @@ async function queryChannelMemberships(db: Queryable, agentId: string): Promise<
   return memberships
 }
 
+async function queryRoleRouting(
+  db: Queryable,
+  agentId: string,
+  config: AgentRoleRoutingConfig,
+): Promise<AgentRetirementPlan['affected']['role_routing']> {
+  const canonicalAgentId = config.legacyAgentIds?.[agentId]?.canonicalAgentId ?? agentId
+  const rows = await db.query<any>(
+    `SELECT role_key, agent_id, active_function, canonical_seat, historical_only, new_work_allowed
+       FROM role_routing
+      WHERE agent_id = $1
+         OR (COALESCE(historical_only, false) = false AND role_key IN (
+              SELECT role_key
+                FROM role_routing
+               WHERE agent_id = $1
+            ))
+      ORDER BY role_key`,
+    [agentId],
+  ).catch(() => [])
+  return rows
+    .filter((row) => String(row.agent_id) === agentId)
+    .map((row) => ({
+      role_key: String(row.role_key),
+      before_agent_id: String(row.agent_id),
+      after_agent_id: canonicalAgentId,
+      before_historical_only: normalizeBool(row.historical_only),
+      before_new_work_allowed: normalizeBool(row.new_work_allowed, true),
+      after_historical_only: true as const,
+      after_new_work_allowed: false as const,
+      active_function: normalize(row.active_function),
+      canonical_seat: normalize(row.canonical_seat),
+    }))
+}
+
+async function queryChannelRoutingPolicies(
+  db: Queryable,
+  agentId: string,
+): Promise<AgentRetirementPlan['affected']['channel_routing_policies']> {
+  const rows = await db.query<any>(
+    `SELECT channel_id, primary_agent_id, adapter_owner_agent_id, outbound_allowlist,
+            native_role_outbound_owners, native_projection_identities
+       FROM channel_routing_policy
+      ORDER BY channel_id`,
+  ).catch(() => [])
+  const affected: AgentRetirementPlan['affected']['channel_routing_policies'] = []
+  for (const row of rows) {
+    const beforeOutbound = parseMembers(row.outbound_allowlist)
+    const beforeOwners = parseJsonObject(row.native_role_outbound_owners)
+    const beforeIdentities = parseJsonObject(row.native_projection_identities)
+    const beforePrimary = normalize(row.primary_agent_id)
+    const beforeAdapter = normalize(row.adapter_owner_agent_id)
+    const mentioned = beforePrimary === agentId ||
+      beforeAdapter === agentId ||
+      beforeOutbound.includes(agentId) ||
+      Object.keys(beforeOwners).includes(agentId) ||
+      Object.values(beforeOwners).includes(agentId) ||
+      Object.keys(beforeIdentities).includes(agentId) ||
+      Object.values(beforeIdentities).includes(agentId)
+    if (!mentioned) continue
+    affected.push({
+      channel_id: String(row.channel_id),
+      before_primary_agent_id: beforePrimary,
+      after_primary_agent_id: beforePrimary === agentId ? null : beforePrimary,
+      before_adapter_owner_agent_id: beforeAdapter,
+      after_adapter_owner_agent_id: beforeAdapter === agentId ? null : beforeAdapter,
+      before_outbound_allowlist: beforeOutbound,
+      after_outbound_allowlist: beforeOutbound.filter((member) => member !== agentId),
+      before_native_role_outbound_owners: beforeOwners,
+      after_native_role_outbound_owners: removeObjectAgentReferences(beforeOwners, agentId),
+      before_native_projection_identities: beforeIdentities,
+      after_native_projection_identities: removeObjectAgentReferences(beforeIdentities, agentId),
+    })
+  }
+  return affected
+}
+
 export async function buildAgentRetirementPlan(
   db: Queryable,
   input: { agentId: string; reason?: string; dryRun?: boolean },
 ): Promise<AgentRetirementPlan> {
   const agentId = input.agentId.trim()
+  const config = loadAgentRoleRoutingConfig()
   const reason = input.reason?.trim() || 'historical-only identity canonicalization'
   const rows = await db.query<any>(
     `SELECT agent_id
@@ -434,6 +923,8 @@ export async function buildAgentRetirementPlan(
         'runtime_instance_id',
       ),
       channel_memberships: await queryChannelMemberships(db, agentId),
+      role_routing: await queryRoleRouting(db, agentId, config),
+      channel_routing_policies: await queryChannelRoutingPolicies(db, agentId),
     },
   }
 }
@@ -498,6 +989,95 @@ async function writeRetirementAudit(db: Queryable, plan: AgentRetirementPlan): P
   ).catch(() => ({ rowCount: 0 }))
 }
 
+async function upsertRoleRoute(db: Queryable, route: RoleRouteSnapshot): Promise<void> {
+  const existing = await db.query<{ role_key: string }>(
+    `SELECT role_key FROM role_routing WHERE role_key = $1 LIMIT 1`,
+    [route.role_key],
+  )
+  if (existing.length === 0) {
+    await db.execute(
+      `INSERT INTO role_routing (
+         role_key, agent_id, description, new_work_allowed,
+         active_function, canonical_seat, historical_only, policy_source
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'audit_route_reconciliation')`,
+      [
+        route.role_key,
+        route.agent_id,
+        route.description,
+        route.new_work_allowed,
+        route.active_function,
+        route.canonical_seat,
+        route.historical_only,
+      ],
+    )
+    return
+  }
+  await db.execute(
+    `UPDATE role_routing
+        SET agent_id = $2,
+            description = COALESCE($3, description),
+            new_work_allowed = $4,
+            active_function = $5,
+            canonical_seat = $6,
+            historical_only = $7,
+            policy_source = 'audit_route_reconciliation',
+            updated_at = now()
+      WHERE role_key = $1`,
+    [
+      route.role_key,
+      route.agent_id,
+      route.description,
+      route.new_work_allowed,
+      route.active_function,
+      route.canonical_seat,
+      route.historical_only,
+    ],
+  )
+}
+
+async function writeAuditRouteReconciliationAudit(db: Queryable, plan: AuditRouteReconciliationPlan): Promise<void> {
+  await db.execute(
+    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+     VALUES ($1, $2, $3, $4, 'default')`,
+    ['audit_route.reconcile', 'cli', 'role_routing', JSON.stringify(plan)],
+  ).catch(() => ({ rowCount: 0 }))
+}
+
+export async function executeAuditRouteReconciliation(
+  db: Queryable,
+  input: { reason?: string } = {},
+): Promise<AuditRouteReconciliationPlan> {
+  let executedPlan: AuditRouteReconciliationPlan | null = null
+  await db.transaction(async (tx) => {
+    const plan = await buildAuditRouteReconciliationPlan(tx, {
+      reason: input.reason,
+      dryRun: false,
+    })
+    for (const route of plan.canonical_routes) {
+      if (route.action === 'noop') continue
+      await upsertRoleRoute(tx, route.after)
+    }
+    for (const route of plan.legacy_routes) {
+      await tx.execute(
+        `UPDATE role_routing
+            SET historical_only = true,
+                new_work_allowed = false,
+                policy_source = 'audit_route_reconciliation',
+                updated_at = now()
+          WHERE role_key = $1`,
+        [route.role_key],
+      )
+    }
+    await writeAuditRouteReconciliationAudit(tx, plan)
+    executedPlan = plan
+  })
+  return executedPlan ?? await buildAuditRouteReconciliationPlan(db, {
+    reason: input.reason,
+    dryRun: false,
+  })
+}
+
 export async function executeAgentRetirement(
   db: Queryable,
   input: { agentId: string; reason?: string },
@@ -542,6 +1122,65 @@ export async function executeAgentRetirement(
           membership.channel_id,
         ],
       )
+    }
+    for (const role of plan.affected.role_routing) {
+      await tx.execute(
+        `UPDATE role_routing
+            SET agent_id = $2,
+                active_function = COALESCE(active_function, $3),
+                canonical_seat = COALESCE(canonical_seat, $4),
+                historical_only = true,
+                new_work_allowed = false,
+                updated_at = now()
+          WHERE role_key = $1`,
+        [
+          role.role_key,
+          role.after_agent_id,
+          role.active_function ?? (role.after_agent_id === 'codex-audit' ? 'evidence_audit_gate' : null),
+          role.canonical_seat ?? role.after_agent_id,
+        ],
+      )
+    }
+    for (const policy of plan.affected.channel_routing_policies) {
+      if (tx.dialect === 'sqlite') {
+        await tx.execute(
+          `UPDATE channel_routing_policy
+              SET primary_agent_id = $2,
+                  adapter_owner_agent_id = $3,
+                  outbound_allowlist = $4,
+                  native_role_outbound_owners = $5,
+                  native_projection_identities = $6,
+                  updated_at = now()
+            WHERE channel_id = $1`,
+          [
+            policy.channel_id,
+            policy.after_primary_agent_id,
+            policy.after_adapter_owner_agent_id,
+            JSON.stringify(policy.after_outbound_allowlist),
+            JSON.stringify(policy.after_native_role_outbound_owners),
+            JSON.stringify(policy.after_native_projection_identities),
+          ],
+        )
+      } else {
+        await tx.execute(
+          `UPDATE channel_routing_policy
+              SET primary_agent_id = $2,
+                  adapter_owner_agent_id = $3,
+                  outbound_allowlist = $4,
+                  native_role_outbound_owners = $5::jsonb,
+                  native_projection_identities = $6::jsonb,
+                  updated_at = now()
+            WHERE channel_id = $1`,
+          [
+            policy.channel_id,
+            policy.after_primary_agent_id,
+            policy.after_adapter_owner_agent_id,
+            policy.after_outbound_allowlist,
+            JSON.stringify(policy.after_native_role_outbound_owners),
+            JSON.stringify(policy.after_native_projection_identities),
+          ],
+        )
+      }
     }
     await upsertTombstone(tx, plan.agent_id, plan.reason)
     await writeRetirementAudit(tx, plan)

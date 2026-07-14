@@ -118,6 +118,47 @@ function githubBackedHandoffRow(overrides: Record<string, unknown> = {}) {
   })
 }
 
+function shirubeHandoffContent(input: {
+  activeFunction: string
+  canonicalSeat: string
+  agentId: string
+}): string {
+  return [
+    'schema_version: shirube-v3/control_handoff/v1',
+    'execution_context:',
+    `  active_function: ${input.activeFunction}`,
+    'target:',
+    `  agent_id: ${input.agentId}`,
+    `  canonical_seat: ${input.canonicalSeat}`,
+    'cell:',
+    '  id: TEST-AUDIT-ROUTE-001',
+    'next_action:',
+    '  blocking: true',
+    '  action: verify route tuple',
+    'GitHub SSOT: https://github.com/watchout/agent-comms-mcp/pull/867',
+  ].join('\n')
+}
+
+function shirubeHandoffRow(input: {
+  rowAgentId: string
+  activeFunction: string
+  canonicalSeat: string
+  targetAgentId: string
+}) {
+  return receivedRow({
+    agent_id: input.rowAgentId,
+    payload: JSON.stringify({
+      author_id: 'codex-cto',
+      content: shirubeHandoffContent({
+        activeFunction: input.activeFunction,
+        canonicalSeat: input.canonicalSeat,
+        agentId: input.targetAgentId,
+      }),
+      message_type: 'phase_handoff',
+    }),
+  })
+}
+
 function okResult(overrides: Partial<QueueWorkResult> = {}): QueueWorkResult {
   return {
     schema_version: QUEUE_WORK_RESULT_VERSION,
@@ -174,6 +215,49 @@ describe('queue work envelope', () => {
       'message_type:phase_handoff',
       'github_url',
     ]))
+  })
+
+  test('content YAML evidence_audit_gate targeted to devauditor blocks instead of normalizing from agent id', () => {
+    const envelope = buildQueueWorkEnvelope(shirubeHandoffRow({
+      rowAgentId: 'devauditor',
+      activeFunction: 'evidence_audit_gate',
+      canonicalSeat: 'devauditor',
+      targetAgentId: 'devauditor',
+    }))
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'devauditor',
+      canonical_agent_id: null,
+      route_blocker: 'CANONICAL_SEAT_MISMATCH',
+    })
+    expect(envelope.handoff_contract.detected_from).toEqual(expect.arrayContaining([
+      'content:active_function',
+      'content:canonical_seat',
+      'content:agent_id',
+    ]))
+  })
+
+  test('content YAML evidence_audit_gate targeted to codex-audit resolves canonical route', () => {
+    const envelope = buildQueueWorkEnvelope(shirubeHandoffRow({
+      rowAgentId: 'codex-audit',
+      activeFunction: 'evidence_audit_gate',
+      canonicalSeat: 'codex-audit',
+      targetAgentId: 'codex-audit',
+    }))
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'codex-audit',
+      canonical_agent_id: 'codex-audit',
+      route_blocker: null,
+      audit_route: expect.objectContaining({
+        agent_id: 'codex-audit',
+        route_kind: 'evidence_audit_gate',
+      }),
+    })
   })
 })
 

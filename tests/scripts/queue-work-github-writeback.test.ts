@@ -12,7 +12,7 @@ function request(patch: Partial<QueueWorkMediatedPostingRequest> = {}): QueueWor
     '<!-- aun:l2-audit/v1 -->',
     'repo: watchout/agent-comms-mcp',
     'pr: 780',
-    'role: l2auditor',
+    'role: codex-audit',
     'source_queue_id: 122255',
     'source_message_id: msg-122255',
     'verdict: PASS',
@@ -24,7 +24,7 @@ function request(patch: Partial<QueueWorkMediatedPostingRequest> = {}): QueueWor
   return {
     schema_version: 'queue_work_mediated_posting_request_v1',
     queue_id: '122255',
-    agent_id: 'l2auditor',
+    agent_id: 'codex-audit',
     message_id: 'msg-122255',
     handoff_contract: {
       kind: 'github_backed_role_handoff',
@@ -32,6 +32,23 @@ function request(patch: Partial<QueueWorkMediatedPostingRequest> = {}): QueueWor
       required_writebacks: ['github_issue_comment'],
       posting_mode: 'mediated',
       detected_from: ['message_type:phase_handoff', 'github_url'],
+      audit_route: {
+        active_function: 'evidence_audit_gate',
+        canonical_seat: 'codex-audit',
+        agent_id: 'codex-audit',
+        route_kind: 'evidence_audit_gate',
+        legacy_input: {
+          role: 'l2-audit',
+          label: null,
+          agent_id: 'codex-audit',
+        },
+        historical_input: true,
+      },
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'codex-audit',
+      canonical_agent_id: 'codex-audit',
+      route_blocker: null,
+      route_blocker_detail: null,
     },
     writeback: {
       mode: 'github_issue_comment',
@@ -78,6 +95,24 @@ describe('queue-work GitHub mediated writeback wrapper', () => {
     })).toMatchObject({
       ok: false,
       error_code: 'APPROVED_MARKER_REQUIRED',
+    })
+  })
+
+  test('rejects historical l2auditor as evidence-audit writeback owner', () => {
+    const historical = request({
+      agent_id: 'l2auditor',
+      handoff_contract: {
+        ...request().handoff_contract,
+        canonical_agent_id: 'codex-audit',
+        route_blocker: 'historical_or_mismatched_audit_owner',
+      },
+    })
+
+    expect(validateMediatedPostingRequest(historical, {
+      allowRepos: ['watchout/agent-comms-mcp'],
+    })).toMatchObject({
+      ok: false,
+      error_code: 'AUDIT_ROUTE_BLOCKED',
     })
   })
 
