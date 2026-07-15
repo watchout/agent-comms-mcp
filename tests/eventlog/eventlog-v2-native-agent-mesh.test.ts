@@ -15,7 +15,7 @@ import {
   type V2NativeMeshScopeV1,
 } from '../../core/eventlog'
 import { deterministicV2NativeMeshRuntime } from '../../core/eventlog/runtimes'
-import { runV2NativeMeshTick } from '../../core/eventlog/worker'
+import { runV2NativeMeshTick, type TurnRuntime, type V2NativeMeshSeatBinding } from '../../core/eventlog/worker'
 
 const HEAD = 'e325d1e6607360a67d337a9b2a77d5df8dd11477'
 const agents: V2NativeMeshFrozenAgentV1[] = ['alpha', 'beta', 'gamma'].map((agent, index) => ({
@@ -50,6 +50,18 @@ function fence(s: V2NativeMeshScopeV1): V2NativeMeshExecutionFence {
     exact_implementation_head: s.exact_implementation_head,
     database_identity: s.database_identity,
     runtime_snapshot_sha256: s.runtime_snapshot_sha256,
+  }
+}
+
+function boundSeat(seatId: string, runtime: TurnRuntime): V2NativeMeshSeatBinding {
+  const agent = agents.find(candidate => candidate.agent_id === seatId)
+  if (!agent) throw new Error(`fixture agent ${seatId} not found`)
+  return {
+    seatId,
+    runtime,
+    runtimeInstanceId: agent.runtime_instance_id,
+    runtimeCheckoutRoot: agent.runtime_checkout_root,
+    runtimeCheckoutSha: agent.runtime_checkout_sha,
   }
 }
 
@@ -94,7 +106,7 @@ describe('V2-native all-agent mesh S0', () => {
     const runtime = deterministicV2NativeMeshRuntime(({ seatId, sourceAgentId, content }) =>
       content.startsWith('reply:') ? null : `reply:${seatId}:${sourceAgentId}`,
     )
-    const seats = ids.map(seatId => ({ seatId, runtime }))
+    const seats = ids.map(seatId => boundSeat(seatId, runtime))
     let guard = 0
     while ((await openTurnCount(db)) > 0 || (await pendingV2NativeInternalHandoffs(db, s, f)).length > 0) {
       await runV2NativeMeshTick(db, { scope: s, fence: f, seats, instanceId: `fixture-${guard}` })
@@ -151,9 +163,56 @@ describe('V2-native all-agent mesh S0', () => {
     await expect(runV2NativeMeshTick(db, {
       scope: s,
       fence: fence(s),
-      seats: [{ seatId: 'alpha', runtime }, { seatId: 'alpha', runtime }, { seatId: 'beta', runtime }],
+      seats: [boundSeat('alpha', runtime), boundSeat('alpha', runtime), boundSeat('beta', runtime)],
       instanceId: 'missing-gamma',
     })).rejects.toThrow('complete frozen_enabled_set')
+    await expect(runV2NativeMeshTick(db, {
+      scope: s,
+      fence: fence(s),
+      seats: agents.map(agent => ({
+        ...boundSeat(agent.agent_id, runtime),
+        runtimeCheckoutSha: agent.agent_id === 'beta' ? 'f'.repeat(40) : agent.runtime_checkout_sha,
+      })),
+      instanceId: 'runtime-drift',
+    })).rejects.toThrow('runtime identity drift for seat beta')
     expect(Number((await db.queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM event_log'))?.n ?? 0)).toBe(0)
+  })
+
+  test('deadline crossing during runtime rolls back every post-deadline worker mutation', async () => {
+    const s = { ...scope(), deadline_ms: Date.now() + 80 }
+    const f = fence(s)
+    await routeV2NativeMessage(db, s, f, {
+      route_id: 'deadline-crossing',
+      route_kind: 'direct',
+      source_agent_id: 'alpha',
+      recipient_agent_ids: ['beta'],
+      content: 'wait-past-deadline',
+    })
+    let countWhenRuntimeReturned = -1
+    const slowRuntime: TurnRuntime = {
+      async runTurn() {
+        while (Date.now() <= s.deadline_ms) await new Promise(resolve => setTimeout(resolve, 2))
+        countWhenRuntimeReturned = Number(
+          (await db.queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM event_log'))?.n ?? 0,
+        )
+        return { outcome: 'no_reply' }
+      },
+    }
+    const idleRuntime = deterministicV2NativeMeshRuntime(() => null)
+    await expect(runV2NativeMeshTick(db, {
+      scope: s,
+      fence: f,
+      seats: agents.map(agent => boundSeat(agent.agent_id, agent.agent_id === 'beta' ? slowRuntime : idleRuntime)),
+      instanceId: 'deadline-dispatcher',
+    })).rejects.toThrow('deadline_ms must be a future Unix epoch millisecond deadline')
+    const committedAfterFailure = Number(
+      (await db.queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM event_log'))?.n ?? 0,
+    )
+    const completions = Number(
+      (await db.queryOne<{ n: number }>("SELECT COUNT(*) AS n FROM event_log WHERE event_type='turn.completed'"))?.n ?? 0,
+    )
+    expect(countWhenRuntimeReturned).toBeGreaterThan(0)
+    expect(committedAfterFailure).toBe(countWhenRuntimeReturned)
+    expect(completions).toBe(0)
   })
 })

@@ -10,6 +10,7 @@ import {
   frozenEnabledSetSha256,
   openTurnCount,
   pendingV2NativeInternalHandoffs,
+  recordV2NativeInternalHandoffPredecessorDeath,
   recoverV2NativeInternalHandoffClaims,
   routeV2NativeMessage,
   runtimeSnapshotSha256,
@@ -18,7 +19,13 @@ import {
   type V2NativeMeshScopeV1,
 } from '../../core/eventlog'
 import { deterministicV2NativeMeshRuntime } from '../../core/eventlog/runtimes'
-import { recoverSeat, runSeatWorkerOnce, runV2NativeMeshTick } from '../../core/eventlog/worker'
+import {
+  recoverSeat,
+  runSeatWorkerOnce,
+  runV2NativeMeshTick,
+  type TurnRuntime,
+  type V2NativeMeshSeatBinding,
+} from '../../core/eventlog/worker'
 
 const agents: V2NativeMeshFrozenAgentV1[] = ['alpha', 'beta'].map((agent, index) => ({
   agent_id: agent,
@@ -52,6 +59,18 @@ function fence(s: V2NativeMeshScopeV1): V2NativeMeshExecutionFence {
     exact_implementation_head: s.exact_implementation_head,
     database_identity: s.database_identity,
     runtime_snapshot_sha256: s.runtime_snapshot_sha256,
+  }
+}
+
+function boundSeat(seatId: string, seatRuntime: TurnRuntime = runtime): V2NativeMeshSeatBinding {
+  const agent = agents.find(candidate => candidate.agent_id === seatId)
+  if (!agent) throw new Error(`fixture agent ${seatId} not found`)
+  return {
+    seatId,
+    runtime: seatRuntime,
+    runtimeInstanceId: agent.runtime_instance_id,
+    runtimeCheckoutRoot: agent.runtime_checkout_root,
+    runtimeCheckoutSha: agent.runtime_checkout_sha,
   }
 }
 
@@ -93,7 +112,7 @@ async function drain(s: V2NativeMeshScopeV1) {
     await runV2NativeMeshTick(db, {
       scope: s,
       fence: fence(s),
-      seats: [{ seatId: 'alpha', runtime }, { seatId: 'beta', runtime }],
+      seats: [boundSeat('alpha'), boundSeat('beta')],
       instanceId: `restart-${guard}`,
     })
     if (++guard > 6) throw new Error('restart fixture did not converge')
@@ -154,16 +173,72 @@ describe('V2-native four-boundary crash/restart', () => {
     await assertTerminalSet()
   })
 
-  test('after reply.delivery_claimed before internal handoff terminal', async () => {
+  test('live predecessor cannot be recovered without durable death proof', async () => {
     const s = await ingress()
     await runSeatWorkerOnce(db, { seatId: 'beta', seatInstanceId: 'worker', runtime })
-    await expect(dispatchV2NativeInternalHandoffs(db, s, fence(s), {
-      dispatcherInstanceId: 'dead-dispatcher',
-      onCommitPoint(point) {
-        if (point === 'after_delivery_claimed') throw new Error('fixture kill')
+    let releasePredecessor!: () => void
+    let claimed!: () => void
+    const predecessorPaused = new Promise<void>(resolve => { claimed = resolve })
+    const resumePredecessor = new Promise<void>(resolve => { releasePredecessor = resolve })
+    const predecessor = dispatchV2NativeInternalHandoffs(db, s, fence(s), {
+      dispatcherInstanceId: 'live-dispatcher',
+      async onCommitPoint(point) {
+        if (point === 'after_delivery_claimed') {
+          claimed()
+          await resumePredecessor
+        }
       },
-    })).rejects.toThrow('fixture kill')
-    expect(await recoverV2NativeInternalHandoffClaims(db, s, fence(s), 'new-dispatcher')).toHaveLength(1)
+    })
+    await predecessorPaused
+    await expect(recoverV2NativeInternalHandoffClaims(db, s, fence(s), {
+      activeInstanceId: 'new-dispatcher',
+      predecessorDeathEvidenceEventIds: {},
+    })).rejects.toThrow('missing durable predecessor-death evidence for live-dispatcher')
+    expect(Number((await db.queryOne<{ n: number }>("SELECT COUNT(*) AS n FROM event_log WHERE event_type='reply.failed'"))?.n ?? 0)).toBe(0)
+    releasePredecessor()
+    expect((await predecessor).accepted).toHaveLength(1)
+    await drain(s)
+    await assertTerminalSet()
+  })
+
+  test('proven-dead recovery fences a live stale continuation before placement', async () => {
+    const s = await ingress()
+    await runSeatWorkerOnce(db, { seatId: 'beta', seatInstanceId: 'worker', runtime })
+    let releasePredecessor!: () => void
+    let claimed!: () => void
+    const predecessorPaused = new Promise<void>(resolve => { claimed = resolve })
+    const resumePredecessor = new Promise<void>(resolve => { releasePredecessor = resolve })
+    const predecessor = dispatchV2NativeInternalHandoffs(db, s, fence(s), {
+      dispatcherInstanceId: 'dead-dispatcher',
+      async onCommitPoint(point) {
+        if (point === 'after_delivery_claimed') {
+          claimed()
+          await resumePredecessor
+        }
+      },
+    })
+    await predecessorPaused
+    const evidence = await recordV2NativeInternalHandoffPredecessorDeath(db, s, fence(s), {
+      predecessorDispatcherInstanceId: 'dead-dispatcher',
+      observerInstanceId: 'fixture-supervisor',
+      supervisorEvidenceRef: 'fixture://supervisor/dead-dispatcher/not-live',
+    })
+    expect(await recoverV2NativeInternalHandoffClaims(db, s, fence(s), {
+      activeInstanceId: 'new-dispatcher',
+      predecessorDeathEvidenceEventIds: { 'dead-dispatcher': evidence.event_id },
+    })).toEqual(['reply:turn:beta:mesh-message:s0-crash-run:alpha-to-beta:beta:0'])
+    releasePredecessor()
+    await expect(predecessor).rejects.toThrow('is no longer active')
+    const staleTerminals = Number((await db.queryOne<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM event_log WHERE event_type='reply.handoff_accepted'",
+    ))?.n ?? 0)
+    const stalePlacements = Number((await db.queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM event_log
+        WHERE event_type='message.received'
+          AND CAST(payload AS TEXT) LIKE '%"route_kind":"reply"%'`,
+    ))?.n ?? 0)
+    expect(staleTerminals).toBe(0)
+    expect(stalePlacements).toBe(0)
     const resumed = await dispatchV2NativeInternalHandoffs(db, s, fence(s), {
       dispatcherInstanceId: 'new-dispatcher',
     })

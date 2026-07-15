@@ -21,11 +21,14 @@ import {
   recoverSeatClaims,
   StaleClaimError,
   type ReplyInput,
+  type TurnMutationFence,
 } from './turns'
 import { parseEventPayload, type OutboxTransport, type QueueViewRow } from './types'
 import {
   assertV2NativeMeshExecutionFence,
+  V2NativeMeshFenceError,
   type V2NativeMeshExecutionFence,
+  type V2NativeMeshFrozenAgentV1,
 } from './v2-native-ingress'
 
 export interface TurnRuntimeResult {
@@ -54,6 +57,16 @@ export interface SeatWorkerOptions {
   runtime: TurnRuntime
   /** Max turns to process in one pass (bounded work per tick). */
   maxTurns?: number
+  /** Native S0 revalidation hook; invoked around every event-log mutation. */
+  mutationFence?: TurnMutationFence
+}
+
+export interface V2NativeMeshSeatBinding {
+  seatId: string
+  runtime: TurnRuntime
+  runtimeInstanceId: string
+  runtimeCheckoutRoot: string
+  runtimeCheckoutSha: string
 }
 
 export interface SeatWorkerPassResult {
@@ -102,10 +115,15 @@ export async function runSeatWorkerOnce(
     const claimed = await claimNextTurn(db, {
       seatId: opts.seatId,
       seatInstanceId: opts.seatInstanceId,
+      mutationFence: opts.mutationFence,
     })
     if (!claimed) break
     result.claimed++
-    await presentTurn(db, claimed, { seatId: opts.seatId, seatInstanceId: opts.seatInstanceId })
+    await presentTurn(db, claimed, {
+      seatId: opts.seatId,
+      seatInstanceId: opts.seatInstanceId,
+      mutationFence: opts.mutationFence,
+    })
 
     let runtimeResult: TurnRuntimeResult
     try {
@@ -131,6 +149,7 @@ export async function runSeatWorkerOnce(
         conversationId: claimed.turn.conversation_id,
         payload: runtimeResult.summary ? { summary: runtimeResult.summary } : {},
         replies: runtimeResult.outcome === 'replied' ? runtimeResult.replies ?? [] : [],
+        mutationFence: opts.mutationFence,
       })
       if (runtimeResult.outcome === 'failed') result.failed++
       else result.completed++
@@ -252,24 +271,43 @@ export async function runV2NativeMeshTick(
   opts: {
     scope: unknown
     fence: V2NativeMeshExecutionFence
-    seats: Array<{ seatId: string; runtime: TurnRuntime }>
+    seats: V2NativeMeshSeatBinding[]
     instanceId: string
     maxTurnsPerSeat?: number
   },
 ) {
   const scope = assertV2NativeMeshExecutionFence(opts.scope, opts.fence)
-  const frozen = new Set(scope.frozen_enabled_set.map(agent => agent.agent_id))
+  const frozen = new Map(scope.frozen_enabled_set.map(agent => [agent.agent_id, agent]))
   const seatIds = new Set(opts.seats.map(seat => seat.seatId))
   if (opts.seats.length !== frozen.size || seatIds.size !== frozen.size || opts.seats.some(seat => !frozen.has(seat.seatId))) {
-    throw new Error('native mesh tick seats must equal the complete frozen_enabled_set')
+    throw new V2NativeMeshFenceError('native mesh tick seats must equal the complete frozen_enabled_set')
   }
+
+  const assertSeatBinding = (seat: V2NativeMeshSeatBinding): V2NativeMeshFrozenAgentV1 => {
+    const currentScope = assertV2NativeMeshExecutionFence(opts.scope, opts.fence)
+    const agent = currentScope.frozen_enabled_set.find(candidate => candidate.agent_id === seat.seatId)
+    if (!agent) throw new V2NativeMeshFenceError(`seat ${seat.seatId} left frozen_enabled_set`)
+    if (
+      seat.runtimeInstanceId !== agent.runtime_instance_id ||
+      seat.runtimeCheckoutRoot !== agent.runtime_checkout_root ||
+      seat.runtimeCheckoutSha !== agent.runtime_checkout_sha
+    ) {
+      throw new V2NativeMeshFenceError(`runtime identity drift for seat ${seat.seatId}`)
+    }
+    return agent
+  }
+
+  // Validate the complete binding set before any seat can append a claim.
+  for (const seat of opts.seats) assertSeatBinding(seat)
   const seatResults: Record<string, SeatWorkerPassResult> = {}
   for (const seat of [...opts.seats].sort((a, b) => a.seatId.localeCompare(b.seatId))) {
+    const mutationFence: TurnMutationFence = async () => { assertSeatBinding(seat) }
     seatResults[seat.seatId] = await runSeatWorkerOnce(db, {
       seatId: seat.seatId,
-      seatInstanceId: opts.instanceId,
+      seatInstanceId: seat.runtimeInstanceId,
       runtime: seat.runtime,
       maxTurns: opts.maxTurnsPerSeat,
+      mutationFence,
     })
   }
   const { dispatchV2NativeInternalHandoffs } = await import('./internal-handoff')

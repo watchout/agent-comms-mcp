@@ -46,6 +46,8 @@ export const EVENT_TYPES = [
   'authority.retry_budget_issuer_registered',
   'authority.connector_registry_admission_recorded',
   'authority.reopen_scan_cursor_advanced',
+  // S0 supervisor evidence authorizing dead-predecessor claim recovery.
+  'runtime.predecessor_death_recorded',
   // conversation metadata
   'conversation.linked',
 ] as const

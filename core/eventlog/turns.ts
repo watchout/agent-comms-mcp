@@ -24,6 +24,19 @@ import {
 
 export class StaleClaimError extends Error {}
 
+export type TurnMutationBoundary =
+  | 'before_turn_claimed'
+  | 'after_turn_claimed'
+  | 'before_turn_presented'
+  | 'after_turn_presented'
+  | 'before_turn_completed'
+  | 'after_turn_completed'
+  | 'before_reply_enqueued'
+  | 'after_reply_enqueued'
+  | 'before_turn_commit'
+
+export type TurnMutationFence = (boundary: TurnMutationBoundary) => void | Promise<void>
+
 export interface ReceiveMessageInput {
   messageId: string
   seatId: string
@@ -50,6 +63,7 @@ export interface CompleteTurnInput {
   correlationId?: string | null
   payload?: Record<string, unknown>
   replies?: ReplyInput[]
+  mutationFence?: TurnMutationFence
 }
 
 export function turnIdFor(seatId: string, messageId: string): string {
@@ -93,24 +107,29 @@ async function nextClaimEpoch(db: DbAdapter, turnId: string): Promise<number> {
  */
 export async function claimNextTurn(
   db: DbAdapter,
-  opts: { seatId: string; seatInstanceId: string },
+  opts: { seatId: string; seatInstanceId: string; mutationFence?: TurnMutationFence },
 ): Promise<ClaimedTurn | null> {
   const log = new EventLog(db)
   const candidates = await claimableTurns(db, opts.seatId)
   for (const turn of candidates) {
-    const epoch = await nextClaimEpoch(db, turn.turn_id)
     try {
-      const result = await log.append({
-        eventId: randomUUID(),
-        eventType: 'turn.claimed',
-        seatId: opts.seatId,
-        seatInstanceId: opts.seatInstanceId,
-        conversationId: turn.conversation_id,
-        causationId: turn.received_event_id,
-        turnId: turn.turn_id,
-        claimEpoch: epoch,
-      })
-      return { turn, claimEventId: result.event.event_id, claimEpoch: epoch }
+      const claim = async (tx: DbAdapter) => {
+        const epoch = await nextClaimEpoch(tx, turn.turn_id)
+        await opts.mutationFence?.('before_turn_claimed')
+        const result = await log.append({
+          eventId: randomUUID(),
+          eventType: 'turn.claimed',
+          seatId: opts.seatId,
+          seatInstanceId: opts.seatInstanceId,
+          conversationId: turn.conversation_id,
+          causationId: turn.received_event_id,
+          turnId: turn.turn_id,
+          claimEpoch: epoch,
+        }, opts.mutationFence ? tx : undefined)
+        await opts.mutationFence?.('after_turn_claimed')
+        return { turn, claimEventId: result.event.event_id, claimEpoch: epoch }
+      }
+      return opts.mutationFence ? await db.transaction(claim) : await claim(db)
     } catch (err) {
       if (err instanceof ClaimLostError) continue
       throw err
@@ -259,19 +278,25 @@ export async function claimExactTurn(
 export async function presentTurn(
   db: DbAdapter,
   claimed: ClaimedTurn,
-  opts: { seatId: string; seatInstanceId: string },
+  opts: { seatId: string; seatInstanceId: string; mutationFence?: TurnMutationFence },
 ) {
   const log = new EventLog(db)
-  return log.append({
-    eventId: `present:${claimed.turn.turn_id}:${claimed.claimEpoch}`,
-    eventType: 'turn.presented',
-    seatId: opts.seatId,
-    seatInstanceId: opts.seatInstanceId,
-    conversationId: claimed.turn.conversation_id,
-    causationId: claimed.claimEventId,
-    turnId: claimed.turn.turn_id,
-    claimEpoch: claimed.claimEpoch,
-  })
+  const present = async (tx: DbAdapter) => {
+    await opts.mutationFence?.('before_turn_presented')
+    const result = await log.append({
+      eventId: `present:${claimed.turn.turn_id}:${claimed.claimEpoch}`,
+      eventType: 'turn.presented',
+      seatId: opts.seatId,
+      seatInstanceId: opts.seatInstanceId,
+      conversationId: claimed.turn.conversation_id,
+      causationId: claimed.claimEventId,
+      turnId: claimed.turn.turn_id,
+      claimEpoch: claimed.claimEpoch,
+    }, opts.mutationFence ? tx : undefined)
+    await opts.mutationFence?.('after_turn_presented')
+    return result
+  }
+  return opts.mutationFence ? db.transaction(present) : present(db)
 }
 
 async function assertActiveClaim(
@@ -327,6 +352,7 @@ export async function completeTurn(db: DbAdapter, input: CompleteTurnInput) {
     if (existing && existing.causation_id !== input.claimEventId) {
       throw new StaleClaimError(`turn ${input.turnId} already completed by another claim`)
     }
+    await input.mutationFence?.('before_turn_completed')
     const completion = await log.append(
       {
         eventId: `done:${input.turnId}`,
@@ -341,9 +367,11 @@ export async function completeTurn(db: DbAdapter, input: CompleteTurnInput) {
       },
       tx,
     )
+    await input.mutationFence?.('after_turn_completed')
     const replies = []
     for (const [i, reply] of (input.replies ?? []).entries()) {
       const replyId = reply.replyId ?? `reply:${input.turnId}:${i}`
+      await input.mutationFence?.('before_reply_enqueued')
       replies.push(
         await log.append(
           {
@@ -365,7 +393,9 @@ export async function completeTurn(db: DbAdapter, input: CompleteTurnInput) {
           tx,
         ),
       )
+      await input.mutationFence?.('after_reply_enqueued')
     }
+    await input.mutationFence?.('before_turn_commit')
     return { completion, replies }
   })
 }

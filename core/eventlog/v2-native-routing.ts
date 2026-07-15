@@ -115,6 +115,7 @@ export async function routeV2NativeMessage(
 ) {
   const { scope, plan } = buildV2NativeRoutePlan(scopeValue, fence, input)
   return db.transaction(async tx => {
+    assertV2NativeMeshExecutionFence(scopeValue, fence)
     const planEvent = await new EventLog(db).append({
       eventId: `mesh-route-planned:${scope.run_id}:${plan.route_id}`,
       eventType: 'message.route_planned',
@@ -123,7 +124,9 @@ export async function routeV2NativeMessage(
       correlationId: plan.correlation_id,
       payload: plan as unknown as Record<string, unknown>,
     }, tx)
+    assertV2NativeMeshExecutionFence(scopeValue, fence)
     await options.onCommitPoint?.({ point: 'after_plan' })
+    assertV2NativeMeshExecutionFence(scopeValue, fence)
     const placements = []
     for (const [index, child] of plan.children.entries()) {
       placements.push(await appendV2NativeInbound(db, scope, fence, {
@@ -138,8 +141,11 @@ export async function routeV2NativeMessage(
         correlation_id: plan.correlation_id,
         causation_id: planEvent.event.event_id,
       }, tx))
+      assertV2NativeMeshExecutionFence(scopeValue, fence)
       await options.onCommitPoint?.({ point: 'after_child', child_index: index })
+      assertV2NativeMeshExecutionFence(scopeValue, fence)
     }
+    assertV2NativeMeshExecutionFence(scopeValue, fence)
     return { plan, planEvent, placements, providerInvocations: 0 as const, V1Invocations: 0 as const }
   })
 }
