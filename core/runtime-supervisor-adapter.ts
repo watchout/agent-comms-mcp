@@ -331,3 +331,50 @@ export function evaluateRuntimeSupervisorConformance(
     warnings,
   }
 }
+
+export interface V2NativeMeshRuntimeIdentityEvidence {
+  agent_id: string
+  runtime_instance_id: string
+  runtime_checkout_root: string
+  runtime_checkout_sha: string
+  ready: boolean
+}
+
+export interface V2NativeMeshSupervisorFenceReport {
+  ok: boolean
+  mutation_performed: false
+  restart_performed: false
+  missing_or_drifted_agent_ids: string[]
+}
+
+/**
+ * Read-only supervisor fence used before a native stage. It cannot start or
+ * restart anything and it never shrinks the expected frozen membership.
+ */
+export function evaluateV2NativeMeshSupervisorFence(
+  expected: readonly Omit<V2NativeMeshRuntimeIdentityEvidence, 'ready'>[],
+  observed: readonly V2NativeMeshRuntimeIdentityEvidence[],
+): V2NativeMeshSupervisorFenceReport {
+  const byAgent = new Map(observed.map(item => [item.agent_id, item]))
+  const drifted = expected.flatMap(item => {
+    const actual = byAgent.get(item.agent_id)
+    if (
+      !actual ||
+      actual.ready !== true ||
+      actual.runtime_instance_id !== item.runtime_instance_id ||
+      actual.runtime_checkout_root !== item.runtime_checkout_root ||
+      actual.runtime_checkout_sha !== item.runtime_checkout_sha
+    ) return [item.agent_id]
+    return []
+  })
+  for (const actual of observed) {
+    if (!expected.some(item => item.agent_id === actual.agent_id)) drifted.push(actual.agent_id)
+  }
+  const unique = [...new Set(drifted)].sort()
+  return {
+    ok: unique.length === 0,
+    mutation_performed: false,
+    restart_performed: false,
+    missing_or_drifted_agent_ids: unique,
+  }
+}

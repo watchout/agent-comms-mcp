@@ -21,6 +21,7 @@
  *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
  *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
  *   - aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]
+ *   - aun v2-native-mesh validate --scope-file <path> --expected-head <sha> --database-identity <id> --runtime-snapshot-sha256 <sha> --json
  *   - aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json
  *   - aun connector verify-discord-identity --agent-id <id> --dry-run --json
  *   - aun connector discover-channel-access --agent-id <id> [--provider discord] --dry-run --json
@@ -42,6 +43,7 @@ import { lifecycleTransition, renewClaim } from './aun/lifecycle'
 import { memoryReadyBootstrap } from './aun/memory-ready'
 import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
 import { connectorChannelAccessDiscovery, connectorCredentialDiagnostic, connectorProviderIdentityVerify } from './aun/connector'
+import { validateV2NativeMeshScopeFile } from './aun/v2-native-mesh'
 
 function printHelp(): void {
   const lines = [
@@ -66,6 +68,7 @@ function printHelp(): void {
     '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
     '  aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
+    '  aun v2-native-mesh validate --scope-file <path> --expected-head <sha> --database-identity <id> --runtime-snapshot-sha256 <sha> --json',
     '  aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json',
     '  aun connector verify-discord-identity --agent-id <id> --dry-run --json',
     '  aun connector discover-channel-access --agent-id <id> [--provider discord] --dry-run --json',
@@ -264,6 +267,18 @@ export function run(argv: string[] = process.argv): number {
       })
       if (res.stdout) process.stdout.write(res.stdout)
       if (res.stderr) process.stderr.write(res.stderr)
+      return res.code
+    }
+    case 'v2-native-mesh': {
+      const res = validateV2NativeMeshScopeFile({
+        mode: extras[0],
+        scopeFile: typeof flags['scope-file'] === 'string' ? flags['scope-file'] : undefined,
+        expectedHead: typeof flags['expected-head'] === 'string' ? flags['expected-head'] : undefined,
+        databaseIdentity: typeof flags['database-identity'] === 'string' ? flags['database-identity'] : undefined,
+        runtimeSnapshotSha256: typeof flags['runtime-snapshot-sha256'] === 'string' ? flags['runtime-snapshot-sha256'] : undefined,
+        activate: !!flags.activate,
+      })
+      process.stdout.write(JSON.stringify(res.result, null, flags.json ? 2 : 0) + '\n')
       return res.code
     }
     case 'uninstall': {

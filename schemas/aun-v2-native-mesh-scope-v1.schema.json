@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-v2-native-mesh-scope-v1.schema.json",
+  "title": "AUN V2 native mesh stage scope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "stage_id",
+    "repository",
+    "exact_implementation_head",
+    "database_identity",
+    "frozen_enabled_set",
+    "frozen_enabled_set_sha256",
+    "runtime_snapshot_sha256",
+    "provider_dispatch",
+    "V1_mode",
+    "deadline_ms"
+  ],
+  "properties": {
+    "schema_version": { "const": "aun-v2-native-mesh-scope/v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "stage_id": {
+      "enum": ["S0_IMPLEMENTATION", "S1_TWO_AGENT", "S2_SELECTED_ENABLED", "S3_ALL_ENABLED"]
+    },
+    "repository": { "const": "watchout/agent-comms-mcp" },
+    "exact_implementation_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "database_identity": { "type": "string", "minLength": 1 },
+    "frozen_enabled_set": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agent_id",
+          "profile_revision",
+          "runtime_engine",
+          "runtime_instance_id",
+          "runtime_checkout_root",
+          "runtime_checkout_sha"
+        ],
+        "properties": {
+          "agent_id": { "type": "string", "minLength": 1 },
+          "profile_revision": { "type": "string", "minLength": 1 },
+          "runtime_engine": { "type": "string", "minLength": 1 },
+          "runtime_instance_id": { "type": "string", "minLength": 1 },
+          "runtime_checkout_root": { "type": "string", "minLength": 1 },
+          "runtime_checkout_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        }
+      }
+    },
+    "frozen_enabled_set_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "runtime_snapshot_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "provider_dispatch": { "const": "disabled" },
+    "V1_mode": { "const": "observe_only_no_traversal" },
+    "deadline_ms": { "type": "integer", "minimum": 1, "description": "Future Unix epoch milliseconds; every mutation rechecks this fence." }
+  }
+}

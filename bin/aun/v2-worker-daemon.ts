@@ -24,7 +24,6 @@
 
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { PgAdapter } from '../../core/db/pg-adapter'
 import type { DbAdapter } from '../../core/db/adapter'
 import { dispatchOutboxOnce, PermanentDeliveryError, recoverDispatcherClaims } from '../../core/eventlog/outbox'
 import { parseEventPayload, type OutboxDelivery, type OutboxTransport } from '../../core/eventlog/types'
@@ -51,6 +50,30 @@ export type NotifyCommandRunner = (
   cmd: string[],
   env: Record<string, string | undefined>,
 ) => Promise<NotifyCommandResult>
+
+export interface V2NativeMeshDaemonFence {
+  requested_mode: string
+  execute_allowed: false
+  activation_performed: false
+  provider_dispatch: 'disabled'
+  V1_mode: 'observe_only_no_traversal'
+  reason: 'default_off' | 'S0_validation_only_live_activation_forbidden'
+}
+
+/** S0 ships no daemon activation path; any native-mode request fails closed. */
+export function evaluateV2NativeMeshDaemonFence(
+  env: Record<string, string | undefined>,
+): V2NativeMeshDaemonFence {
+  const requested = env.AUN_V2_NATIVE_MESH_MODE?.trim() || 'disabled'
+  return {
+    requested_mode: requested,
+    execute_allowed: false,
+    activation_performed: false,
+    provider_dispatch: 'disabled',
+    V1_mode: 'observe_only_no_traversal',
+    reason: requested === 'disabled' ? 'default_off' : 'S0_validation_only_live_activation_forbidden',
+  }
+}
 
 async function runNotifyCommand(
   cmd: string[],
@@ -179,6 +202,10 @@ async function seatEngine(db: DbAdapter, seatId: string): Promise<string> {
 }
 
 async function main() {
+  const nativeFence = evaluateV2NativeMeshDaemonFence(process.env)
+  if (nativeFence.requested_mode !== 'disabled') {
+    throw new Error(`AUN_V2_NATIVE_MESH_ACTIVATION_FORBIDDEN: ${JSON.stringify(nativeFence)}`)
+  }
   const databaseUrl = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL
   const seats = (process.env.AUN_V2_WORKER_SEATS ?? '').split(',').map(s => s.trim()).filter(Boolean)
   const once = process.argv.includes('--once')
@@ -199,6 +226,7 @@ async function main() {
 
   const schemaPath = `/tmp/v2-turn-result-v1.${instance}.schema.json`
   writeFileSync(schemaPath, JSON.stringify(V2_TURN_RESULT_SCHEMA, null, 2))
+  const { PgAdapter } = await import('../../core/db/pg-adapter')
   const db: DbAdapter = new PgAdapter(databaseUrl)
   const cliPath = new URL('../../cli/index.ts', import.meta.url).pathname
   const transport = new NotifyTransport(db, cliPath, { env: { DATABASE_URL: databaseUrl } })

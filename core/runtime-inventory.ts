@@ -5,6 +5,7 @@ import {
   normalizeApprovedCheckoutRoots,
   type FleetCheckoutDriftResult,
 } from './fleet-checkout-drift'
+import type { V2NativeMeshFrozenAgentV1 } from './eventlog/v2-native-ingress'
 
 type RuntimeFreshness = 'fresh' | 'stale' | 'missing_heartbeat' | 'stopped' | 'unknown'
 
@@ -105,6 +106,92 @@ export type RuntimeInventoryReport = {
   policy_gaps: RuntimeInventoryPolicyGap[]
   blockers: string[]
   warnings: string[]
+}
+
+export interface V2NativeFrozenSetReadOptions {
+  nowMs?: number
+  maxHeartbeatAgeMs?: number
+}
+
+function metadataObject(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+/**
+ * Read the canonical production-enabled non-human membership and join each
+ * member to exactly one ready runtime. This is read-only and fails the whole
+ * freeze on missing, duplicate, stale, or incomplete runtime evidence.
+ */
+export async function readV2NativeFrozenEnabledSet(
+  db: DbAdapter,
+  options: V2NativeFrozenSetReadOptions = {},
+): Promise<V2NativeMeshFrozenAgentV1[]> {
+  const nowMs = options.nowMs ?? Date.now()
+  const maxAgeMs = options.maxHeartbeatAgeMs ?? 15 * 60_000
+  const rows = await db.query<any>(
+    `SELECT agent_id, profile_revision, runtime_engine_preference, metadata,
+            profile_enabled, disabled_at, agent_type
+       FROM agents
+      ORDER BY agent_id`,
+  )
+  const selected = rows.filter(row => {
+    const metadata = metadataObject(row.metadata)
+    return (row.profile_enabled === true || Number(row.profile_enabled) === 1)
+      && row.disabled_at === null
+      && String(row.agent_type) !== 'human'
+      && String(metadata.profile_class ?? '') !== 'test'
+  })
+  if (selected.length < 2) throw new Error('V2_NATIVE_FROZEN_SET_BLOCKED: fewer than two production-enabled non-human agents')
+
+  const result: V2NativeMeshFrozenAgentV1[] = []
+  for (const agent of selected) {
+    const runtimes = await db.query<any>(
+      `SELECT runtime_instance_id, runtime_engine, checkout_path, commit_sha,
+              status, stopped_at, last_seen_at
+         FROM agent_runtime_instances
+        WHERE agent_id = $1
+        ORDER BY started_at DESC`,
+      [agent.agent_id],
+    )
+    const live = runtimes.filter(runtime => {
+      const seen = parseTimestampMs(runtime.last_seen_at)
+      return runtime.stopped_at === null
+        && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
+        && seen !== null
+        && nowMs - seen <= maxAgeMs
+    })
+    if (live.length !== 1) throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} has ${live.length} selected live runtimes`)
+    const runtime = live[0]
+    const metadata = metadataObject(agent.metadata)
+    const companyDevOs = metadataObject(metadata.companyDevOs)
+    const engine = normalizeString(agent.runtime_engine_preference)
+      ?? normalizeString(companyDevOs.runtime_engine)
+      ?? normalizeString(runtime.runtime_engine)
+    const instanceId = normalizeString(runtime.runtime_instance_id)
+    const checkoutRoot = normalizeString(runtime.checkout_path)
+    const checkoutSha = normalizeString(runtime.commit_sha)
+    if (!engine || !instanceId || !checkoutRoot || !checkoutSha || !/^[0-9a-f]{40}$/.test(checkoutSha)) {
+      throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} runtime identity is incomplete`)
+    }
+    result.push({
+      agent_id: String(agent.agent_id),
+      profile_revision: String(agent.profile_revision),
+      runtime_engine: engine,
+      runtime_instance_id: instanceId,
+      runtime_checkout_root: checkoutRoot,
+      runtime_checkout_sha: checkoutSha,
+    })
+  }
+  return result
 }
 
 function parseTimestampMs(raw: unknown): number | null {

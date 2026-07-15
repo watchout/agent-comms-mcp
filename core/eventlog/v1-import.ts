@@ -369,3 +369,38 @@ export async function closeExactAnsweredV1Row(
     return true
   })
 }
+
+export interface V1NativeMeshResidualSnapshot {
+  message_queue_rows: number
+  agent_messages_rows: number
+  outbound_queue_rows: number
+  V1_import_source_events: number
+}
+
+/** Read-only S0 cutover evidence. Native mesh code never calls a V1 writer. */
+export async function readV1NativeMeshResidualSnapshot(db: DbAdapter): Promise<V1NativeMeshResidualSnapshot> {
+  const count = async (table: 'message_queue' | 'agent_messages' | 'outbound_queue') => {
+    const row = await db.queryOne<{ n: number | string }>(`SELECT COUNT(*) AS n FROM ${table}`)
+    return Number(row?.n ?? 0)
+  }
+  const imports = await db.queryOne<{ n: number | string }>(
+    `SELECT COUNT(*) AS n FROM event_log
+      WHERE event_type = 'message.received'
+        AND CAST(payload AS TEXT) LIKE '%"v1_queue_id"%'`,
+  )
+  return {
+    message_queue_rows: await count('message_queue'),
+    agent_messages_rows: await count('agent_messages'),
+    outbound_queue_rows: await count('outbound_queue'),
+    V1_import_source_events: Number(imports?.n ?? 0),
+  }
+}
+
+export function assertV1NativeMeshResidualUnchanged(
+  before: V1NativeMeshResidualSnapshot,
+  after: V1NativeMeshResidualSnapshot,
+): void {
+  for (const field of ['message_queue_rows', 'agent_messages_rows', 'outbound_queue_rows', 'V1_import_source_events'] as const) {
+    if (before[field] !== after[field]) throw new Error(`V1_NATIVE_MESH_BLEED: ${field} changed ${before[field]} -> ${after[field]}`)
+  }
+}

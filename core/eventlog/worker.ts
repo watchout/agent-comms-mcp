@@ -23,6 +23,10 @@ import {
   type ReplyInput,
 } from './turns'
 import { parseEventPayload, type OutboxTransport, type QueueViewRow } from './types'
+import {
+  assertV2NativeMeshExecutionFence,
+  type V2NativeMeshExecutionFence,
+} from './v2-native-ingress'
 
 export interface TurnRuntimeResult {
   outcome: 'replied' | 'no_reply' | 'failed'
@@ -108,7 +112,7 @@ export async function runSeatWorkerOnce(
       runtimeResult = await opts.runtime.runTurn({
         seatId: opts.seatId,
         turn: claimed.turn,
-        payload: payloadOfTurn(db, claimed.turn),
+        payload: await turnInboundPayload(db, claimed.turn),
       })
     } catch (err) {
       runtimeResult = {
@@ -177,7 +181,7 @@ export async function runExactTurnWorkerOnce(
   const runtimeResult = await opts.runtime.runTurn({
     seatId: opts.seatId,
     turn: claimed.turn,
-    payload: payloadOfTurn(db, claimed.turn),
+    payload: await turnInboundPayload(db, claimed.turn),
   })
   if (
     runtimeResult.outcome !== 'no_reply' ||
@@ -203,14 +207,6 @@ export async function runExactTurnWorkerOnce(
     claimEpoch: claimed.claimEpoch,
     completionEventId: completion.completion.event.event_id,
   }
-}
-
-function payloadOfTurn(db: DbAdapter, turn: QueueViewRow): Record<string, unknown> {
-  void db
-  // message_id is projected on the view; the full inbound payload rides on
-  // the received event row and is what the receive dual-write stored —
-  // callers get channel/thread/author/content from it.
-  return { message_id: turn.message_id }
 }
 
 /**
@@ -244,6 +240,43 @@ export async function runV2Tick(
     dispatcherInstanceId: opts.instanceId,
   })
   return { seatResults, dispatch }
+}
+
+/**
+ * Provider-free V2-native tick.  It shares the pull-claim worker but replaces
+ * the external transport drain with atomic EventLogCore internal placement.
+ * Scope validation is deliberately first so drift causes zero mutation.
+ */
+export async function runV2NativeMeshTick(
+  db: DbAdapter,
+  opts: {
+    scope: unknown
+    fence: V2NativeMeshExecutionFence
+    seats: Array<{ seatId: string; runtime: TurnRuntime }>
+    instanceId: string
+    maxTurnsPerSeat?: number
+  },
+) {
+  const scope = assertV2NativeMeshExecutionFence(opts.scope, opts.fence)
+  const frozen = new Set(scope.frozen_enabled_set.map(agent => agent.agent_id))
+  const seatIds = new Set(opts.seats.map(seat => seat.seatId))
+  if (opts.seats.length !== frozen.size || seatIds.size !== frozen.size || opts.seats.some(seat => !frozen.has(seat.seatId))) {
+    throw new Error('native mesh tick seats must equal the complete frozen_enabled_set')
+  }
+  const seatResults: Record<string, SeatWorkerPassResult> = {}
+  for (const seat of [...opts.seats].sort((a, b) => a.seatId.localeCompare(b.seatId))) {
+    seatResults[seat.seatId] = await runSeatWorkerOnce(db, {
+      seatId: seat.seatId,
+      seatInstanceId: opts.instanceId,
+      runtime: seat.runtime,
+      maxTurns: opts.maxTurnsPerSeat,
+    })
+  }
+  const { dispatchV2NativeInternalHandoffs } = await import('./internal-handoff')
+  const handoff = await dispatchV2NativeInternalHandoffs(db, scope, opts.fence, {
+    dispatcherInstanceId: opts.instanceId,
+  })
+  return { seatResults, handoff }
 }
 
 /**
