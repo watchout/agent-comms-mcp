@@ -728,11 +728,9 @@ export class StateDaemon {
         WHERE id=$1
           AND status=$2
           AND claimed_by IS NOT DISTINCT FROM $3
-          AND claimed_at IS NOT DISTINCT FROM $4
-          AND claim_expires_at IS NOT DISTINCT FROM $5
-          AND claim_expires_at < $6::timestamptz
+          AND claim_expires_at < $4::timestamptz
         RETURNING id`,
-      [row.id, row.status, row.claimed_by ?? null, row.claimed_at ?? null, row.claim_expires_at, now],
+      [row.id, row.status, row.claimed_by ?? null, now],
     )
     if (rowCount === 0) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaim_race_skipped' })

@@ -85,7 +85,7 @@ class RenewBeforeReclaimDb implements DBClient {
   }
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
-    if (sql.includes("SET status='pending'") && sql.includes('claim_expires_at IS NOT DISTINCT FROM')) {
+    if (sql.includes("SET status='pending'") && sql.includes('claim_expires_at <')) {
       this.casAttempts += 1
       if (!this.renewed) {
         this.renewed = true
@@ -225,6 +225,68 @@ describe('T10 received_expired_reclaim', () => {
       expect(row.claimed_by).toBeNull()
       expect(row.claimed_at).toBeNull()
       expect(row.claim_expires_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('PostgreSQL microsecond claim timestamps remain reclaimable at mutation time', async () => {
+    const T0 = new Date('2026-05-08T00:00:02.000Z')
+    const agent = makeAgentId('t10-microsecond-precision')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'idle' })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      claim_expires_at: new Date('2026-05-08T00:00:01.000Z'),
+      claimed_by: agent,
+      claimed_at: new Date('2026-05-08T00:00:00.000Z'),
+    })
+    await pg.query(
+      `UPDATE message_queue
+          SET claimed_at='2026-05-08T00:00:00.123456Z'::timestamptz,
+              claim_expires_at='2026-05-08T00:00:01.654321Z'::timestamptz
+        WHERE id=$1`,
+      [id],
+    )
+    const before = await pg.query<{ claimed_at: string; claim_expires_at: string }>(
+      `SELECT to_char(claimed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at,
+              to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claim_expires_at
+         FROM message_queue
+        WHERE id=$1`,
+      [id],
+    )
+    expect(before.rows[0]).toEqual({
+      claimed_at: '2026-05-08T00:00:00.123456Z',
+      claim_expires_at: '2026-05-08T00:00:01.654321Z',
+    })
+    const driverRead = await pg.query<{ claimed_at: Date; claim_expires_at: Date }>(
+      `SELECT claimed_at, claim_expires_at FROM message_queue WHERE id=$1`,
+      [id],
+    )
+    expect(driverRead.rows[0].claimed_at.toISOString()).toBe('2026-05-08T00:00:00.123Z')
+    expect(driverRead.rows[0].claim_expires_at.toISOString()).toBe('2026-05-08T00:00:01.654Z')
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.reclaimed).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaim_race_skipped' })).toBe(0)
+      expect(h.tmux.sentKeys).toEqual([])
+      const after = await pg.query<{
+        status: string
+        claimed_by: string | null
+        claimed_at: Date | null
+        claim_expires_at: Date | null
+      }>(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
+      expect(after.rows[0]).toEqual({
+        status: 'pending',
+        claimed_by: null,
+        claimed_at: null,
+        claim_expires_at: null,
+      })
     } finally {
       await h.daemon.stop()
     }
