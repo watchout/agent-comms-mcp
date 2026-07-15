@@ -15,11 +15,135 @@
 
 import type { DbAdapter } from '../db/adapter'
 import { receiveMessage, turnIdFor } from './turns'
+import { parseEventPayload } from './types'
 
 export interface ImportedRow {
   v1QueueId: number
   seatId: string
   messageId: string
+}
+
+export interface ExactV1QueueTuple {
+  seatId: 'aun'
+  queueId: number
+  messageId: string
+  createdAfter: string
+}
+
+export interface ExactV1QueueRow extends ImportedRow {
+  channelId: string | null
+  threadId: string | null
+  authorId: string
+  content: string
+  createdAt: string
+  status: string
+}
+
+export class ExactV1TupleMismatchError extends Error {
+  readonly code = 'EXACT_V1_TUPLE_MISMATCH' as const
+}
+
+function assertExactTuple(tuple: ExactV1QueueTuple): void {
+  if (tuple.seatId !== 'aun') throw new ExactV1TupleMismatchError('exact canary seat must be aun')
+  if (!Number.isSafeInteger(tuple.queueId) || tuple.queueId <= 0) {
+    throw new ExactV1TupleMismatchError('exact canary queueId must be a positive safe integer')
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tuple.messageId)) {
+    throw new ExactV1TupleMismatchError('exact canary messageId must be a UUID')
+  }
+  if (!tuple.createdAfter || Number.isNaN(Date.parse(tuple.createdAfter))) {
+    throw new ExactV1TupleMismatchError('exact canary createdAfter must be a valid timestamp')
+  }
+}
+
+async function selectExactPendingV1Row(
+  db: DbAdapter,
+  tuple: ExactV1QueueTuple,
+  lock: boolean,
+): Promise<ExactV1QueueRow> {
+  assertExactTuple(tuple)
+  const rows = await db.query<{
+    id: number
+    agent_id: string
+    message_id: string
+    status: string
+    created_at: string | Date
+    channel_id: string | null
+    thread_id: string | null
+    author_id: string
+    content: string
+  }>(
+    `SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.created_at,
+            am.channel_id, am.thread_id, am.author_id, am.content
+     FROM message_queue mq
+     JOIN agent_messages am ON am.id::text = mq.message_id
+     WHERE mq.id = $1
+       AND mq.message_id = $2
+       AND mq.agent_id = $3
+       AND mq.status = 'pending'
+       AND mq.created_at > $4
+     ${lock ? 'FOR UPDATE OF mq' : ''}`,
+    [tuple.queueId, tuple.messageId, tuple.seatId, tuple.createdAfter],
+  )
+  if (rows.length !== 1) {
+    throw new ExactV1TupleMismatchError(
+      `expected exactly one pending V1 row for queue=${tuple.queueId} message=${tuple.messageId} seat=${tuple.seatId}`,
+    )
+  }
+  const row = rows[0]
+  return {
+    v1QueueId: Number(row.id),
+    seatId: row.agent_id,
+    messageId: row.message_id,
+    channelId: row.channel_id,
+    threadId: row.thread_id,
+    authorId: row.author_id,
+    content: row.content,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    status: row.status,
+  }
+}
+
+/** Read-only negative-phase predicate. It never appends or mutates. */
+export async function readExactPendingV1Row(
+  db: DbAdapter,
+  tuple: ExactV1QueueTuple,
+): Promise<ExactV1QueueRow> {
+  return selectExactPendingV1Row(db, tuple, false)
+}
+
+/**
+ * Import exactly one V1 tuple. The qualifying row lock and deterministic
+ * message.received append share one transaction, so no seat-wide scan or
+ * time-of-check/time-of-use gap can widen the canary target.
+ */
+export async function importExactPendingV1Row(
+  db: DbAdapter,
+  tuple: ExactV1QueueTuple,
+): Promise<ExactV1QueueRow & { inserted: boolean; turnId: string }> {
+  return db.transaction(async tx => {
+    const row = await selectExactPendingV1Row(tx, tuple, true)
+    const result = await receiveMessage(tx, {
+      messageId: row.messageId,
+      seatId: row.seatId,
+      conversationId: row.threadId ?? row.channelId ?? 'unknown',
+      payload: {
+        channel_id: row.channelId,
+        thread_id: row.threadId,
+        author_id: row.authorId,
+        content: row.content,
+        v1_queue_id: row.v1QueueId,
+        v1_created_at: row.createdAt,
+        v1_created_after: tuple.createdAfter,
+        source: 'v1_exact_canary',
+      },
+    }, tx)
+    return {
+      ...row,
+      inserted: result.inserted,
+      turnId: turnIdFor(row.seatId, row.messageId),
+    }
+  })
 }
 
 export async function importPendingV1Rows(
@@ -170,4 +294,78 @@ export async function closeAnsweredV1Row(
     [opts.seatId, opts.messageId, `answered via V2 (${opts.evidenceRef})`],
   )
   return r.rowCount > 0
+}
+
+/**
+ * Exact-target V1 typed closure used only by the bounded canary executable.
+ * Queue id, message id, seat, created-after fence, pending status, and the
+ * committed no-reply completion are rechecked in the same transaction as
+ * the one permitted V1 mutation.
+ */
+export async function closeExactAnsweredV1Row(
+  db: DbAdapter,
+  opts: ExactV1QueueTuple & { turnId: string; evidenceRef: string },
+): Promise<boolean> {
+  assertExactTuple(opts)
+  const expectedTurnId = turnIdFor(opts.seatId, opts.messageId)
+  if (opts.turnId !== expectedTurnId) {
+    throw new ExactV1TupleMismatchError(`turnId differs from exact tuple: ${opts.turnId}`)
+  }
+  if (!opts.evidenceRef.trim()) throw new ExactV1TupleMismatchError('evidenceRef is required')
+  const reason = `answered via V2 exact canary (${opts.evidenceRef})`
+
+  return db.transaction(async tx => {
+    const rows = await tx.query<{
+      id: number
+      status: string
+      failed_reason: string | null
+    }>(
+      `SELECT id, status, failed_reason
+       FROM message_queue
+       WHERE id = $1
+         AND message_id = $2
+         AND agent_id = $3
+         AND created_at > $4
+       FOR UPDATE`,
+      [opts.queueId, opts.messageId, opts.seatId, opts.createdAfter],
+    )
+    if (rows.length !== 1) {
+      throw new ExactV1TupleMismatchError('exact V1 close tuple is absent or stale')
+    }
+    const row = rows[0]
+    if (row.status === 'skipped' && row.failed_reason === reason) return false
+    if (row.status !== 'pending') {
+      throw new ExactV1TupleMismatchError(`exact V1 close requires pending status; got ${row.status}`)
+    }
+
+    const completions = await tx.query<{ payload: unknown }>(
+      `SELECT payload FROM event_log
+       WHERE event_type = 'turn.completed'
+         AND turn_id = $1
+         AND seat_id = $2`,
+      [opts.turnId, opts.seatId],
+    )
+    if (completions.length !== 1) {
+      throw new ExactV1TupleMismatchError('exact V1 close requires one committed target completion')
+    }
+    const payload = parseEventPayload<Record<string, unknown>>(completions[0].payload)
+    if (payload.outcome !== 'no_reply') {
+      throw new ExactV1TupleMismatchError('exact V1 close requires deterministic no_reply completion')
+    }
+
+    const updated = await tx.execute(
+      `UPDATE message_queue
+       SET status = 'skipped', failed_reason = $5, done_at = now()
+       WHERE id = $1
+         AND message_id = $2
+         AND agent_id = $3
+         AND created_at > $4
+         AND status = 'pending'`,
+      [opts.queueId, opts.messageId, opts.seatId, opts.createdAfter, reason],
+    )
+    if (updated.rowCount !== 1) {
+      throw new ExactV1TupleMismatchError('exact V1 close lost its mutation-time fence')
+    }
+    return true
+  })
 }

@@ -14,6 +14,7 @@
 
 import type { DbAdapter } from '../db/adapter'
 import {
+  claimExactTurn,
   claimNextTurn,
   completeTurn,
   presentTurn,
@@ -21,7 +22,6 @@ import {
   StaleClaimError,
   type ReplyInput,
 } from './turns'
-import { dispatchOutboxOnce } from './outbox'
 import { parseEventPayload, type OutboxTransport, type QueueViewRow } from './types'
 
 export interface TurnRuntimeResult {
@@ -57,6 +57,19 @@ export interface SeatWorkerPassResult {
   completed: number
   failed: number
   staleLost: number
+}
+
+export class ExactTurnRuntimeViolationError extends Error {
+  readonly code = 'EXACT_TURN_RUNTIME_VIOLATION' as const
+}
+
+export interface ExactTurnWorkerResult {
+  claimed: 1
+  completed: 1
+  runtimeCalls: 1
+  claimEventId: string
+  claimEpoch: number
+  completionEventId: string
 }
 
 /** Startup recovery: release claims of this seat's dead predecessors. */
@@ -130,6 +143,68 @@ export async function runSeatWorkerOnce(
   return result
 }
 
+/**
+ * Canary-only one-shot worker seam. It names one turn, claims no fallback,
+ * invokes one injected runtime exactly once, accepts only deterministic
+ * no_reply, and never loads or dispatches an outbox transport.
+ */
+export async function runExactTurnWorkerOnce(
+  db: DbAdapter,
+  opts: {
+    seatId: 'aun'
+    turnId: string
+    queueId: number
+    messageId: string
+    createdAfter: string
+    seatInstanceId: string
+    runtime: TurnRuntime
+  },
+): Promise<ExactTurnWorkerResult> {
+  const claimed = await claimExactTurn(db, {
+    seatId: opts.seatId,
+    turnId: opts.turnId,
+    queueId: opts.queueId,
+    messageId: opts.messageId,
+    createdAfter: opts.createdAfter,
+    seatInstanceId: opts.seatInstanceId,
+  })
+  if (!claimed) throw new StaleClaimError(`exact target ${opts.turnId} is not claimable`)
+
+  await presentTurn(db, claimed, {
+    seatId: opts.seatId,
+    seatInstanceId: opts.seatInstanceId,
+  })
+  const runtimeResult = await opts.runtime.runTurn({
+    seatId: opts.seatId,
+    turn: claimed.turn,
+    payload: payloadOfTurn(db, claimed.turn),
+  })
+  if (
+    runtimeResult.outcome !== 'no_reply' ||
+    (runtimeResult.replies !== undefined && runtimeResult.replies.length !== 0)
+  ) {
+    throw new ExactTurnRuntimeViolationError('exact canary runtime must return no_reply with zero replies')
+  }
+  const completion = await completeTurn(db, {
+    turnId: claimed.turn.turn_id,
+    seatId: opts.seatId,
+    seatInstanceId: opts.seatInstanceId,
+    claimEventId: claimed.claimEventId,
+    outcome: 'no_reply',
+    conversationId: claimed.turn.conversation_id,
+    payload: { runtime: 'deterministic-no-reply', provider_dispatch: 'disabled' },
+    replies: [],
+  })
+  return {
+    claimed: 1,
+    completed: 1,
+    runtimeCalls: 1,
+    claimEventId: claimed.claimEventId,
+    claimEpoch: claimed.claimEpoch,
+    completionEventId: completion.completion.event.event_id,
+  }
+}
+
 function payloadOfTurn(db: DbAdapter, turn: QueueViewRow): Record<string, unknown> {
   void db
   // message_id is projected on the view; the full inbound payload rides on
@@ -152,6 +227,9 @@ export async function runV2Tick(
     maxTurnsPerSeat?: number
   },
 ) {
+  // Keep provider/outbox code outside the exact-canary module graph. The
+  // production tick loads it only when a dispatching tick is actually used.
+  const { dispatchOutboxOnce } = await import('./outbox')
   const seatResults: Record<string, SeatWorkerPassResult> = {}
   for (const seat of opts.seats) {
     seatResults[seat.seatId] = await runSeatWorkerOnce(db, {
