@@ -325,8 +325,8 @@ describe('AUN V2 exact-canary mechanism', () => {
   })
 
   test('ECAN-012-postgres-rollback: PostgreSQL fixture rolls back and leaves no live residue', async () => {
-    const url = process.env.AGENT_COM_TEST_DATABASE_URL
-    if (!url) throw new Error('ECAN-012 requires AGENT_COM_TEST_DATABASE_URL for an isolated migrated PostgreSQL DB')
+    const url = postgresTestUrl()
+    if (!url) throw new Error('ECAN-012 requires an isolated migrated PostgreSQL test DB')
     const pg = new PgAdapter(url)
     const messageId = randomUUID()
     let queueId = 0
@@ -373,6 +373,14 @@ describe('AUN V2 exact-canary mechanism', () => {
     await pg.close()
   })
 })
+
+function postgresTestUrl(): string | undefined {
+  if (process.env.AGENT_COM_TEST_DATABASE_URL) return process.env.AGENT_COM_TEST_DATABASE_URL
+  const url = process.env.DATABASE_URL
+  if (!url) return undefined
+  const dbName = url.split('?')[0]!.split('/').pop() ?? ''
+  return dbName.endsWith('_test') ? url : undefined
+}
 
 function validArgv(): string[] {
   return [
