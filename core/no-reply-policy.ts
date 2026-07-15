@@ -52,6 +52,77 @@ function stringValue(...values: unknown[]): string | null {
   return null
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function unquoteScalar(value: string): string {
+  const trimmed = value.trim()
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) return trimmed.slice(1, -1)
+  return trimmed
+}
+
+function isShirubeSchema(value: unknown): boolean {
+  return typeof value === 'string' && /^shirube-v3\/[a-z0-9][a-z0-9_-]*\/v[0-9]+$/i.test(value.trim())
+}
+
+function recordBlockingSignal(value: unknown, matchedPrefix: string): string | null {
+  const record = recordValue(value)
+  if (!record || !isShirubeSchema(record.schema_version)) return null
+  const nextAction = recordValue(record.next_action)
+  return nextAction?.blocking === true ? `${matchedPrefix}.next_action.blocking` : null
+}
+
+function yamlBlockingSignal(content: string): string | null {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n')
+  const schemaLine = lines.find(line => /^\s*schema_version\s*:/i.test(line))
+  if (!schemaLine) return null
+  const schemaMatch = schemaLine.match(/^\s*schema_version\s*:\s*(.+?)\s*$/i)
+  if (!schemaMatch || !isShirubeSchema(unquoteScalar(schemaMatch[1]))) return null
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const nextAction = lines[index].match(/^(\s*)next_action\s*:\s*(.*?)\s*$/i)
+    if (!nextAction) continue
+    const parentIndent = nextAction[1].length
+    if (/\bblocking\s*:\s*(?:true|"true"|'true')(?=\s*(?:[,}]|$))/i.test(nextAction[2])) {
+      return 'content.next_action.blocking'
+    }
+    let directChildIndent: number | null = null
+    for (let childIndex = index + 1; childIndex < lines.length; childIndex += 1) {
+      const child = lines[childIndex]
+      if (child.trim() === '' || child.trimStart().startsWith('#')) continue
+      const childIndent = child.match(/^\s*/)?.[0].length ?? 0
+      if (childIndent <= parentIndent) break
+      directChildIndent ??= childIndent
+      if (childIndent !== directChildIndent) continue
+      if (/^\s*blocking\s*:\s*(?:true|"true"|'true')\s*(?:#.*)?$/i.test(child)) {
+        return 'content.next_action.blocking'
+      }
+    }
+  }
+  return null
+}
+
+function structuredBlockingSignal(payload: Record<string, unknown>, content: string | null): string | null {
+  const payloadSignal = recordBlockingSignal(payload, 'payload')
+  if (payloadSignal) return payloadSignal
+  if (!content) return null
+  try {
+    const parsed = JSON.parse(content)
+    const jsonSignal = recordBlockingSignal(parsed, 'content')
+    if (jsonSignal) return jsonSignal
+  } catch {
+    // Canonical GitHub/AUN requests are commonly YAML-shaped rather than JSON.
+  }
+  return yamlBlockingSignal(content)
+}
+
 export function existingNoReplyBaton(payload: Record<string, unknown>): TerminalBaton | null {
   const raw = payload.terminal_baton
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
@@ -80,6 +151,16 @@ export function detectNoReplyIntent(input: {
   storedContent?: unknown
 }): NoReplyDecision {
   const payload = input.payload ?? {}
+  const content = stringValue(input.content, payload.content, input.storedContent)
+  const blockingSignal = structuredBlockingSignal(payload, content)
+  if (blockingSignal) {
+    return {
+      no_reply_required: false,
+      reason: 'structured_blocking_request_requires_reply',
+      matched: blockingSignal,
+    }
+  }
+
   const baton = existingNoReplyBaton(payload)
   if (baton) {
     return {
@@ -96,7 +177,6 @@ export function detectNoReplyIntent(input: {
     }
   }
 
-  const content = stringValue(input.content, payload.content, input.storedContent)
   if (!content) return { no_reply_required: false, reason: null, matched: null }
 
   const text = normalizeText(content)

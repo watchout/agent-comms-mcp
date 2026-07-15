@@ -15,6 +15,71 @@ import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './se
 
 let pg: Client
 
+const QUEUE_127801_BLOCKING_AUDIT_REQUEST = `schema_version: shirube-v3/audit_request/v1
+audit_request_id: AUDIT-CELL-KUSABI-PR252-RL-RECON-512A458-20260715
+control_source: https://github.com/watchout/agent-memory/issues/180
+control_handoff: https://github.com/watchout/agent-memory/pull/252#issuecomment-4977616868
+correction_gate_result: https://github.com/watchout/agent-memory/pull/252#issuecomment-4977871304
+cell: {id: CELL-KUSABI-PR252-RAPID-LITE-ROUTE-RECONCILIATION-001}
+execution_context:
+  from: {agent_id: kusabi, active_function: implementation_executor}
+  to: {agent_id: codex-audit, active_function: evidence_audit_gate}
+subject:
+  repository: watchout/agent-memory
+  pull_request: 252
+  exact_base: 3b3200ecbe83fbeec4a349f1ce1e0c705493436f
+  prior_blocked_head: 5aff61d2bbc905526a6a67950a3eda1179147ed7
+  exact_head: 512a458c4f4d68d681e9f7cbe9eff34a5b09a4e6
+  implementation_evidence: https://github.com/watchout/agent-memory/pull/252#issuecomment-4977920274
+trusted_github_provenance:
+  required_comment_author_login: iyasaka-ai
+  required_author_association: [MEMBER, COLLABORATOR]
+  reviewer_actor: codex-audit
+  execution_context_agent_id: codex-audit
+  marker: shirube-v3:evidence-audit-gate-result:PR252-512A458
+  posting_note: Use the configured iyasaka-ai GitHub credential without printing its token; after posting, read back user.login and author_association from GitHub API.
+required_response:
+  destination: PR 252 top-level comment
+  fenced_yaml_schema: shirube-structured-audit/v1
+  audit_checklist_id: AUDIT-CHECKLIST-KUSABI-PR252-RL-RECON-001
+  implementation_actor: kusabi
+  target:
+    repository: watchout/agent-memory
+    pull_request: 252
+    cell_id: CELL-KUSABI-PR252-RAPID-LITE-ROUTE-RECONCILIATION-001
+    control_handoff: https://github.com/watchout/agent-memory/pull/252#issuecomment-4977616868
+    exact_head: 512a458c4f4d68d681e9f7cbe9eff34a5b09a4e6
+  items_rule: KRL-001 through KRL-012 exactly once, each PASS or BLOCK
+  aggregate_rule: PASS only if all items PASS; passing next_action must be none
+audit_focus:
+  KRL-009: Verify watchout/OWNER self-authored audit is rejected and iyasaka-ai/COLLABORATOR audit provenance is accepted only with exact marker and execution-context actor.
+  KRL-010: Verify WRONG-CHECKLIST-ID is rejected and exact canonical checklist is required; rerun all negative cases.
+  all_items: Revalidate KRL-001 through KRL-012, not only the prior blockers.
+evidence_refs:
+  - https://github.com/watchout/agent-memory/pull/252#issuecomment-4977616868
+  - https://github.com/watchout/agent-memory/pull/252#issuecomment-4977871304
+  - https://github.com/watchout/agent-memory/pull/252#issuecomment-4977920274
+  - https://github.com/watchout/agent-memory/actions/runs/29396888522
+  - https://github.com/watchout/agent-memory/actions/runs/29396888951
+  - https://github.com/watchout/agent-memory/actions/runs/29397036854
+forbidden_operations: [edit_or_fix, owner_approval, merge, deploy, publish, release, protected_state_mutation, product_doc_edit, shirube_edit]
+lifecycle_state: AUDIT_REQUESTED
+next_action:
+  blocking: true
+  owner_agent: codex-audit
+  owner_function: evidence_audit_gate
+  action: Independently audit the exact head and publish terminal PASS or BLOCK.
+  handoff_method: Post one top-level PR 252 comment, verify GitHub author metadata, then return its exact URL through AUN.
+  input_refs:
+    - https://github.com/watchout/agent-memory/pull/252#issuecomment-4977616868
+    - https://github.com/watchout/agent-memory/pull/252#issuecomment-4977871304
+    - https://github.com/watchout/agent-memory/pull/252#issuecomment-4977920274
+    - https://github.com/watchout/agent-memory/actions/runs/29397036854
+  scope: read-only exact-head audit; no implementation or owner authority
+  deliverable: terminal PASS or BLOCK, KRL-001..012 exactly once
+  completion_evidence: provenance-bound PR audit URL plus AUN return
+  stop_reason: FRESH_INDEPENDENT_AUDIT_REQUIRED`
+
 beforeAll(async () => {
   pg = await openClient()
 })
@@ -670,6 +735,62 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(0)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(0)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('queue 127801 blocking audit request remains claimable without a terminal baton', async () => {
+    const agent = makeAgentId('codex-blocking-audit')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-227801227801',
+      payload: JSON.stringify({
+        author_id: 'kusabi',
+        content: QUEUE_127801_BLOCKING_AUDIT_REQUEST,
+        message_type: 'instruction',
+        source: 'agent-comms',
+      }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const h = daemon(clock, runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT',
+        id,
+        agent_id: agent,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]).toMatchObject({
+        agentId: agent,
+        queueId: id,
+        completeNoReply: false,
+        completionReason: null,
+      })
+      expect(runner.invocations[0].ackContent).toContain('final close requires explicit --close')
+      const result = await pg.query<{ status: string; payload: string }>(
+        `SELECT status, payload FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      expect(result.rows[0]?.status).toBe('pending')
+      expect(JSON.parse(result.rows[0]?.payload ?? '{}').terminal_baton).toBeUndefined()
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
