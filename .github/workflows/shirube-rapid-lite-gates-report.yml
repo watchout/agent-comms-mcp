@@ -141,8 +141,8 @@ jobs:
             {
               cellId: "CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001",
               handoffRef: ".shirube/control-handoffs/CH-AUN-V2-EXACT-CANARY-MECHANISM-20260715-001.yaml",
-              auditChecklistRef: "",
-              auditMachineEvidenceRef: "",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001.yaml",
             },
             {
               cellId: "CELL-MCP-AUN-V2-CUTOVER-M4-001",

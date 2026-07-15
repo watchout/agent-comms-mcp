@@ -1,0 +1,77 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-E325D1E-001
+target_repo: watchout/agent-comms-mcp
+target_pr: 868
+exact_base_sha: 64c4b76636e67562c37b097df1b0b4c38d3a82ec
+exact_head_sha: e325d1e6607360a67d337a9b2a77d5df8dd11477
+cell_id: CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001
+implementation_actor: aun
+evidence_scope: exact_fenced_single_turn_canary_mechanism
+not_structured_audit: true
+owner_decision_required_before_merge: true
+control_source_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4975131104
+implementation_evidence_ref: https://github.com/watchout/agent-comms-mcp/pull/868#issuecomment-4976491218
+audit_checklist_ref: .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001.yaml
+canonical_changed_paths:
+  - bin/aun/v2-exact-canary.ts
+  - core/eventlog/v1-import.ts
+  - core/eventlog/turns.ts
+  - core/eventlog/worker.ts
+  - tests/eventlog/eventlog-v2-exact-canary.test.ts
+claims:
+  exact_tuple_fence: queue_id_message_id_created_after_at_import_claim_recovery_and_v1_close
+  wrong_queue_stop: nonzero_and_zero_mutation
+  max_turns: 1
+  runtime: deterministic_no_reply
+  provider_dispatch: disabled
+  planned_crash_boundary: after_durable_exact_claim_before_presentation_completion_reply_or_v1_close
+  same_target_foreign_claim: zero_release_zero_completion_zero_close_zero_mutation
+  runtime_calls: 1
+  reply_enqueued: 0
+  external_send_attempts: 0
+  provider_effects: 0
+commands:
+  - command: DATABASE_URL=<isolated *_test URL> AGENT_COM_TEST_DATABASE_URL= bun test tests/eventlog/eventlog-v2-exact-canary.test.ts --timeout 30000
+    result: PASS_12_TESTS_0_FAIL_63_EXPECTS
+  - command: bun test tests/eventlog/eventlog-v1-import-m4.test.ts tests/eventlog/eventlog-worker-m3.test.ts tests/eventlog/eventlog-core.test.ts tests/eventlog/eventlog-turns.test.ts --timeout 30000
+    result: PASS_32_TESTS_0_FAIL_111_EXPECTS
+  - command: git diff --check
+    result: PASS
+  - command: Layer 0 exact-head workflow
+    result: PASS
+    evidence_ref: https://github.com/watchout/agent-comms-mcp/actions/runs/29385766962
+workflow_evidence:
+  rapid_lite_run_ref: https://github.com/watchout/agent-comms-mcp/actions/runs/29385767184
+  result: WORKFLOW_SUCCESS_REPORT_REMAINS_BLOCKED_UNTIL_PR869_ROUTE_MERGES
+fixture_results:
+  ECAN-001: PASS
+  ECAN-002: PASS
+  ECAN-003: PASS
+  ECAN-004: PASS
+  ECAN-005: PASS
+  ECAN-006: PASS
+  ECAN-007: PASS
+  ECAN-008: PASS
+  ECAN-009: PASS
+  ECAN-010: PASS
+  ECAN-011: PASS
+  ECAN-012: PASS
+evidence_refs:
+  - canonical_changed_paths_5_of_5
+  - exact_head:e325d1e6607360a67d337a9b2a77d5df8dd11477
+  - ECAN-001
+  - ECAN-002
+  - ECAN-003
+  - ECAN-004
+  - ECAN-005
+  - ECAN-006
+  - ECAN-007
+  - ECAN-008
+  - ECAN-009
+  - ECAN-010
+  - ECAN-011
+  - ECAN-012
+  - maker_checker_and_protected_surface_review
+notes:
+  - Machine evidence only; it is not an independent audit, owner approval, merge authority, live-canary authority, or activation authority.
+  - The e325d1e correction is limited to the focused test DB fallback and accepts DATABASE_URL only when the database name ends in _test.
