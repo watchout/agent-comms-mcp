@@ -12,7 +12,11 @@ import {
   readExactPendingV1Row,
   type ExactV1QueueTuple,
 } from '../../core/eventlog/v1-import'
-import { claimExactTurn, recoverExactTurnClaim } from '../../core/eventlog/turns'
+import {
+  claimExactTurn,
+  exactCanaryCrashInstanceId,
+  recoverExactTurnClaim,
+} from '../../core/eventlog/turns'
 import { runExactTurnWorkerOnce, type TurnRuntime } from '../../core/eventlog/worker'
 
 export const EXACT_CANARY_SCHEMA_VERSION = 'aun-v2-exact-canary/v1' as const
@@ -244,7 +248,7 @@ export async function runExactCanary(db: DbAdapter, args: ExactCanaryArgs): Prom
 
   const imported = await importExactPendingV1Row(db, tuple)
   if (args.phase === 'crash-after-claim') {
-    const instance = `ecan-crash-${args.queueId}`
+    const instance = exactCanaryCrashInstanceId(args.queueId)
     const claimed = await claimExactTurn(db, {
       ...tuple,
       turnId: imported.turnId,

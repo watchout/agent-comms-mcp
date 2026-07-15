@@ -14,6 +14,7 @@ import {
 } from '../../core/eventlog/v1-import'
 import {
   claimExactTurn,
+  claimNextTurn,
   recoverExactTurnClaim,
   StaleClaimError,
   turnIdFor,
@@ -279,24 +280,27 @@ describe('AUN V2 exact-canary mechanism', () => {
     ))?.status).toBe('skipped')
   })
 
-  test('ECAN-010-concurrent-wrong-worker: unrelated claim is never recovered, completed, or closed', async () => {
+  test('ECAN-010-concurrent-wrong-worker: same-target foreign claim is never recovered, completed, or closed', async () => {
     await seedV1(db, { queueId: 1001, messageId: TARGET_MESSAGE })
-    await seedV1(db, { queueId: 1002, messageId: OTHER_MESSAGE })
-    await importExactPendingV1Row(db, tupleFor(args({ queueId: 1002, messageId: OTHER_MESSAGE })))
-    const unrelatedTurn = turnIdFor('aun', OTHER_MESSAGE)
-    const unrelatedClaim = await claimExactTurn(db, {
-      ...tupleFor(args({ queueId: 1002, messageId: OTHER_MESSAGE })),
-      turnId: unrelatedTurn,
-      seatInstanceId: 'wrong-worker',
+    await importExactPendingV1Row(db, tupleFor(args()))
+    const targetTurn = turnIdFor('aun', TARGET_MESSAGE)
+    const foreignClaim = await claimNextTurn(db, {
+      seatId: 'aun',
+      seatInstanceId: 'foreign-production-worker',
     })
-    expect(unrelatedClaim).not.toBeNull()
+    expect(foreignClaim?.turn.turn_id).toBe(targetTurn)
+    const before = await snapshot(db)
 
-    await crash(db)
-    await resume(db)
-    expect(await eventCount(db, unrelatedTurn, 'turn.claim_released')).toBe(0)
-    expect(await eventCount(db, unrelatedTurn, 'turn.completed')).toBe(0)
+    await expect(resume(db)).rejects.toBeInstanceOf(StaleClaimError)
+    expect(await snapshot(db)).toBe(before)
+    expect(await eventCount(db, targetTurn, 'turn.claimed')).toBe(1)
+    expect(await eventCount(db, targetTurn, 'turn.claim_released')).toBe(0)
+    expect(await eventCount(db, targetTurn, 'turn.presented')).toBe(0)
+    expect(await eventCount(db, targetTurn, 'turn.completed')).toBe(0)
+    expect(await eventCount(db, targetTurn, 'reply.enqueued')).toBe(0)
+    expect(await eventCount(db, targetTurn, 'reply.provider_invocation_started')).toBe(0)
     expect((await db.queryOne<{ status: string }>(
-      `SELECT status FROM message_queue WHERE id = 1002`,
+      `SELECT status FROM message_queue WHERE id = 1001`,
     ))?.status).toBe('pending')
   })
 

@@ -127,6 +127,10 @@ export interface ExactTurnTarget {
   createdAfter: string
 }
 
+export function exactCanaryCrashInstanceId(queueId: number): string {
+  return `ecan-crash-${queueId}`
+}
+
 async function exactReceivedAuthority(
   db: DbAdapter,
   opts: ExactTurnTarget,
@@ -430,6 +434,33 @@ export interface RecoveredExactClaim {
   releaseEventId: string
 }
 
+function hasExactCanaryClaimProvenance(
+  claim: StoredEvent,
+  opts: ExactTurnTarget,
+  receivedEventId: string,
+): boolean {
+  let payload: Record<string, unknown>
+  try {
+    payload = parseEventPayload<Record<string, unknown>>(claim.payload)
+  } catch {
+    return false
+  }
+  if (payload === null || Array.isArray(payload)) return false
+
+  const payloadKeys = Object.keys(payload).sort()
+  const expectedKeys = ['claim_scope', 'created_after', 'message_id', 'queue_id']
+  return (
+    claim.seat_instance_id === exactCanaryCrashInstanceId(opts.queueId) &&
+    claim.causation_id === receivedEventId &&
+    payloadKeys.length === expectedKeys.length &&
+    payloadKeys.every((key, index) => key === expectedKeys[index]) &&
+    payload.claim_scope === 'exact_canary' &&
+    payload.queue_id === opts.queueId &&
+    payload.message_id === opts.messageId &&
+    payload.created_after === opts.createdAfter
+  )
+}
+
 /** Release only the exact target's stale claim; never scans or recovers a seat. */
 export async function recoverExactTurnClaim(
   db: DbAdapter,
@@ -467,6 +498,9 @@ export async function recoverExactTurnClaim(
     if (!claim.seat_instance_id) throw new StaleClaimError('exact target claim has no instance identity')
     if (claim.seat_instance_id === opts.activeInstanceId) return null
     if (claim.claim_epoch === null) throw new StaleClaimError('exact target claim has no epoch')
+    if (!hasExactCanaryClaimProvenance(claim, opts, received.event.event_id)) {
+      throw new StaleClaimError('exact target claim does not match planned exact-canary provenance')
+    }
 
     const release = await new EventLog(tx).append({
       eventId: `release:${opts.turnId}:${claim.claim_epoch}`,
