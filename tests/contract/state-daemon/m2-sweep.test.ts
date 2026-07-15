@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import type { Client } from 'pg'
 import { StateDaemon } from '../../../core/state-daemon'
-import { DEFAULT_CONFIG } from '../../../core/state-daemon/types'
+import { DEFAULT_CONFIG, type DBClient } from '../../../core/state-daemon/types'
 import {
   FakeAlertSink,
   FakeClock,
@@ -48,14 +48,18 @@ interface Harness {
   pgListen: FakePgListen
 }
 
-function buildHarness(t0: Date, configOverride: Partial<typeof DEFAULT_CONFIG> = {}): Harness {
+function buildHarness(
+  t0: Date,
+  configOverride: Partial<typeof DEFAULT_CONFIG> = {},
+  db: DBClient = new PgDBClient(pg),
+): Harness {
   const clock = new FakeClock(t0)
   const tmux = new FakeTmux()
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
   const pgListen = new FakePgListen()
   const daemon = new StateDaemon({
-    db: new PgDBClient(pg),
+    db,
     pgListen,
     tmux,
     clock,
@@ -64,6 +68,38 @@ function buildHarness(t0: Date, configOverride: Partial<typeof DEFAULT_CONFIG> =
     config: { agentIdPrefix: 'sd-test-', ...configOverride },
   })
   return { daemon, clock, tmux, metrics, alert, pgListen }
+}
+
+class RenewBeforeReclaimDb implements DBClient {
+  private readonly delegate: PgDBClient
+  private renewed = false
+  casAttempts = 0
+
+  constructor(
+    private readonly client: Client,
+    private readonly queueId: number,
+    private readonly renewedExpiry: Date,
+    private readonly renewedAt: Date,
+  ) {
+    this.delegate = new PgDBClient(client)
+  }
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes("SET status='pending'") && sql.includes('claim_expires_at IS NOT DISTINCT FROM')) {
+      this.casAttempts += 1
+      if (!this.renewed) {
+        this.renewed = true
+        await this.client.query(
+          `UPDATE message_queue
+              SET claim_expires_at=$2,
+                  last_heartbeat_at=$3
+            WHERE id=$1`,
+          [this.queueId, this.renewedExpiry, this.renewedAt],
+        )
+      }
+    }
+    return this.delegate.query<T>(sql, params)
+  }
 }
 
 // ── T8 ────────────────────────────────────────────────────────────────────────
@@ -189,6 +225,56 @@ describe('T10 received_expired_reclaim', () => {
       expect(row.claimed_by).toBeNull()
       expect(row.claimed_at).toBeNull()
       expect(row.claim_expires_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('renewal after expiry scan wins the reclaim CAS and produces no wake', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t10-renew-before-reclaim')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const claimedAt = new Date(T0.getTime() - 35_000)
+    const observedExpiry = new Date(T0.getTime() - 5_000)
+    const renewedExpiry = new Date(T0.getTime() + 900_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      created_at: new Date(T0.getTime() - 40_000),
+      claim_expires_at: observedExpiry,
+      claimed_by: agent,
+      claimed_at: claimedAt,
+    })
+    const raceDb = new RenewBeforeReclaimDb(pg, id, renewedExpiry, T0)
+    const h = buildHarness(T0, {}, raceDb)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.sweepStale()
+      expect(result.reclaimed).toBe(0)
+      expect(raceDb.casAttempts).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaim_race_skipped' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      expect(h.tmux.sentKeys).toEqual([])
+      const r = await pg.query(
+        `SELECT status, agent_id, claimed_by, claimed_at, claim_expires_at, last_heartbeat_at
+           FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      const row = (r.rows as Array<{
+        status: string
+        agent_id: string
+        claimed_by: string | null
+        claimed_at: Date | null
+        claim_expires_at: Date | null
+        last_heartbeat_at: Date | null
+      }>)[0]
+      expect(row.status).toBe('in_progress')
+      expect(row.agent_id).toBe(agent)
+      expect(row.claimed_by).toBe(agent)
+      expect(new Date(row.claimed_at!).getTime()).toBe(claimedAt.getTime())
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(renewedExpiry.getTime())
+      expect(new Date(row.last_heartbeat_at!).getTime()).toBe(T0.getTime())
     } finally {
       await h.daemon.stop()
     }

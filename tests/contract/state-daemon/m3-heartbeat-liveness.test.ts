@@ -92,6 +92,76 @@ describe('T21 active claim heartbeat refresh', () => {
     }
   })
 
+  test('longer exact-owner lease remains monotonic while last_heartbeat_at advances', async () => {
+    const T0 = new Date('2026-05-08T00:02:00.000Z')
+    const agent = makeAgentId('t21-monotonic-long-lease')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const renewedExpiry = new Date(T0.getTime() + 900_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: renewedExpiry,
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 10_000),
+      last_heartbeat_at: new Date(T0.getTime() - 30_000),
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60 })
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.refreshClaims()
+      expect(result.refreshed).toBe(1)
+      const r = await pg.query(
+        `SELECT status, agent_id, claimed_by, claim_expires_at, last_heartbeat_at
+           FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      const row = (r.rows as Array<{
+        status: string
+        agent_id: string
+        claimed_by: string | null
+        claim_expires_at: Date | null
+        last_heartbeat_at: Date | null
+      }>)[0]
+      expect(row.status).toBe('in_progress')
+      expect(row.agent_id).toBe(agent)
+      expect(row.claimed_by).toBe(agent)
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(renewedExpiry.getTime())
+      expect(Math.abs(new Date(row.last_heartbeat_at!).getTime() - T0.getTime())).toBeLessThan(1500)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('already-expired claim is never resurrected by heartbeat', async () => {
+    const T0 = new Date('2026-05-08T00:03:00.000Z')
+    const agent = makeAgentId('t21-expired-no-resurrection')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const expiredAt = new Date(T0.getTime() - 1_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: expiredAt,
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 30_000),
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60 })
+    await h.daemon.start()
+    try {
+      expect((await h.daemon.refreshClaims()).refreshed).toBe(0)
+      const r = await pg.query(
+        `SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`,
+        [id],
+      )
+      const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(expiredAt.getTime())
+      expect(row.last_heartbeat_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
   test('busy bot with aged in_progress claim is not refreshed forever', async () => {
     const T0 = new Date('2026-05-08T00:05:00.000Z')
     const agent = makeAgentId('t21-aged-in-progress')
@@ -137,6 +207,34 @@ describe('T21 active claim heartbeat refresh', () => {
       claim_expires_at: originalExpiry,
       claimed_by: `${agent}-other`,
       claimed_at: new Date(T0.getTime() - 10_000),
+    })
+
+    const h = buildHarness(T0, { claimTtlSec: 60, activeClaimMaxAgeSec: 300 })
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.refreshClaims()
+      expect(result.refreshed).toBe(0)
+      expect(result.skipped).toBe(1)
+      const r = await pg.query(`SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`, [id])
+      const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
+      expect(new Date(row.claim_expires_at!).getTime()).toBe(originalExpiry.getTime())
+      expect(row.last_heartbeat_at).toBeNull()
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('busy bot claim without claimed_at fails closed', async () => {
+    const T0 = new Date('2026-05-08T00:08:00.000Z')
+    const agent = makeAgentId('t21-missing-claimed-at')
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    const originalExpiry = new Date(T0.getTime() + 30_000)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: originalExpiry,
+      claimed_by: agent,
+      claimed_at: null,
     })
 
     const h = buildHarness(T0, { claimTtlSec: 60, activeClaimMaxAgeSec: 300 })

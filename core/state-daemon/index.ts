@@ -111,6 +111,7 @@ interface QueueRow {
   message_type?: string | null
   status: string
   claim_expires_at: Date | null
+  claimed_by?: string | null
   claimed_at?: Date | null
   created_at: Date
   last_wake_attempt_at: Date | null
@@ -372,8 +373,7 @@ export class StateDaemon {
         this.recordMemoryReadyBlocked(action, row, memoryReady)
         continue
       }
-      await this.reclaimRow(row)
-      result.reclaimed++
+      if (await this.reclaimRow(row)) result.reclaimed++
     }
 
     const observed = await this.fetchObservableWork()
@@ -467,7 +467,10 @@ export class StateDaemon {
   async refreshClaims(): Promise<RefreshResult> {
     if (this.status !== 'running') return { refreshed: 0, skipped: 0 }
     let sql = `UPDATE message_queue mq
-          SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
+          SET claim_expires_at = GREATEST(
+                mq.claim_expires_at,
+                $1::timestamptz + ($2 || ' seconds')::interval
+              ),
               last_heartbeat_at = $1::timestamptz
         WHERE mq.status IN ('received', 'in_progress')
           AND mq.claim_expires_at > $1::timestamptz
@@ -714,19 +717,31 @@ export class StateDaemon {
 
   // ── State transition helpers (§4.3) ────────────────────────────────────────
 
-  private async reclaimRow(row: QueueRow): Promise<void> {
-    await this.dbQuery(
+  private async reclaimRow(row: QueueRow): Promise<boolean> {
+    const now = this.clock.now()
+    const { rowCount } = await this.dbQuery(
       `UPDATE message_queue
           SET status='pending',
               claim_expires_at=NULL,
               claimed_by=NULL,
               claimed_at=NULL
-        WHERE id=$1`,
-      [row.id],
+        WHERE id=$1
+          AND status=$2
+          AND claimed_by IS NOT DISTINCT FROM $3
+          AND claimed_at IS NOT DISTINCT FROM $4
+          AND claim_expires_at IS NOT DISTINCT FROM $5
+          AND claim_expires_at < $6::timestamptz
+        RETURNING id`,
+      [row.id, row.status, row.claimed_by ?? null, row.claimed_at ?? null, row.claim_expires_at, now],
     )
+    if (rowCount === 0) {
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaim_race_skipped' })
+      return false
+    }
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
     // After reclaim, observe the pending row without prompt injection.
     await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null })
+    return true
   }
 
   private async recoverQueueWorkRunnerErrorRow(row: QueueRow): Promise<'reclaimed' | 'failed' | 'skipped'> {
@@ -1480,7 +1495,8 @@ export class StateDaemon {
   }
 
   private async fetchReceivedExpired(): Promise<QueueRow[]> {
-    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status,
+              mq.claimed_by, mq.claimed_at, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
               am.message_type
          FROM message_queue mq
