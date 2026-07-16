@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
 import { activeTurnProjection, claimNextTurn, completeTurn, receiveMessage, rebuildActiveTurnProjection } from '../../core/eventlog'
 import { canonicalJson } from '../../core/eventlog/transport-contract'
-import { createK1PostgresFixture } from './helpers/postgres-fixture'
+import { createK1PostgresFixture, isK1PostgresFixtureEnabled } from './helpers/postgres-fixture'
 
-test('incremental active projection is indexed and byte-identical after replay rebuild', async () => {
+test.skipIf(!isK1PostgresFixtureEnabled())('incremental active projection is indexed and byte-identical after replay rebuild', async () => {
   const fixture = await createK1PostgresFixture('projection_replay')
   try {
     await receiveMessage(fixture.db, { messageId: 'p1', seatId: 'beta', conversationId: 'c1', payload: { priority: 7 } })

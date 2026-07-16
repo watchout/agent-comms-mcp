@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { claimNextTurn, completeTurn, receiveMessage } from '../../core/eventlog'
-import { createK1PostgresFixture } from './helpers/postgres-fixture'
+import { createK1PostgresFixture, isK1PostgresFixtureEnabled } from './helpers/postgres-fixture'
 
-test('PostgreSQL SKIP LOCKED claim commits one winner and one completion', async () => {
+test.skipIf(!isK1PostgresFixtureEnabled())('PostgreSQL SKIP LOCKED claim commits one winner and one completion', async () => {
   const fixture = await createK1PostgresFixture('atomic_claim')
   const workerA = await fixture.connect()
   const workerB = await fixture.connect()

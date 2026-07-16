@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { claimNextTurn, completeTurn, receiveMessage, recoverSeatClaims, releaseClaim, StaleClaimError } from '../../core/eventlog'
-import { createK1PostgresFixture } from './helpers/postgres-fixture'
+import { createK1PostgresFixture, isK1PostgresFixtureEnabled } from './helpers/postgres-fixture'
 
-test('expired reclaim increments the fence and stale holder mutations are rejected', async () => {
+test.skipIf(!isK1PostgresFixtureEnabled())('expired reclaim increments the fence and stale holder mutations are rejected', async () => {
   const fixture = await createK1PostgresFixture('lease_fence')
   try {
     await receiveMessage(fixture.db, { messageId: 'lease-1', seatId: 'beta' })

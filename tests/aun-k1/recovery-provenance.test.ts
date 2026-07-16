@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { activeTurnProjection, claimNextTurn, receiveMessage, recoverSeatClaims } from '../../core/eventlog'
-import { createK1PostgresFixture } from './helpers/postgres-fixture'
+import { createK1PostgresFixture, isK1PostgresFixtureEnabled } from './helpers/postgres-fixture'
 
-test('generic recovery never releases a live foreign instance by identity alone', async () => {
+test.skipIf(!isK1PostgresFixtureEnabled())('generic recovery never releases a live foreign instance by identity alone', async () => {
   const fixture = await createK1PostgresFixture('recovery_provenance')
   try {
     await receiveMessage(fixture.db, { messageId: 'recovery-1', seatId: 'beta' })

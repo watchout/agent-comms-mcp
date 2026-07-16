@@ -7,6 +7,10 @@ const ROOT = resolve(import.meta.dir, '../../..')
 const UP = resolve(ROOT, 'db/migrations/2026-07-16-aun-k1-event-projection-claim.up.sql')
 const DOWN = resolve(ROOT, 'db/migrations/2026-07-16-aun-k1-event-projection-claim.down.sql')
 
+export function isK1PostgresFixtureEnabled(): boolean {
+  return process.env.AUN_K1_DB_SCOPE === 'isolated_disposable_fixture'
+}
+
 function guardedDatabaseUrl(): { url: string; databaseName: string } {
   if (process.env.AUN_K1_DB_SCOPE !== 'isolated_disposable_fixture') {
     throw new Error('AUN_K1_DB_SCOPE must equal isolated_disposable_fixture before K1 PostgreSQL DDL or DML')

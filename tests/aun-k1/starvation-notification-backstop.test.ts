@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { claimNextTurn, receiveMessage } from '../../core/eventlog'
-import { createK1PostgresFixture } from './helpers/postgres-fixture'
+import { createK1PostgresFixture, isK1PostgresFixtureEnabled } from './helpers/postgres-fixture'
 
-test('database scan converges after notification loss and historic unrelated work cannot starve a seat', async () => {
+test.skipIf(!isK1PostgresFixtureEnabled())('database scan converges after notification loss and historic unrelated work cannot starve a seat', async () => {
   const fixture = await createK1PostgresFixture('starvation_backstop')
   try {
     for (let index = 0; index < 40; index += 1) {

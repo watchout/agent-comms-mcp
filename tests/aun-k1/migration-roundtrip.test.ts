@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { receiveMessage } from '../../core/eventlog'
-import { createK1PostgresFixture } from './helpers/postgres-fixture'
+import { createK1PostgresFixture, isK1PostgresFixtureEnabled } from './helpers/postgres-fixture'
 
-test('K1 migration up/down/up is reversible and repeated up is idempotent', async () => {
+test.skipIf(!isK1PostgresFixtureEnabled())('K1 migration up/down/up is reversible and repeated up is idempotent', async () => {
   const fixture = await createK1PostgresFixture('migration_roundtrip')
   try {
     await receiveMessage(fixture.db, { messageId: 'migration-1', seatId: 'beta' })
