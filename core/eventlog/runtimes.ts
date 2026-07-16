@@ -14,6 +14,7 @@ import type { TurnRuntime, TurnRuntimeResult } from './worker'
 import { parseEventPayload, type QueueViewRow } from './types'
 import type { DbAdapter } from '../db/adapter'
 import { turnInboundPayload } from './worker'
+import { decodeV2NativeInboundPayload } from './v2-native-ingress'
 
 /** Spawn seam — production uses Bun.spawn; fixtures inject canned results. */
 export interface HeadlessInvoker {
@@ -209,4 +210,25 @@ export function runtimeForEngine(
     return claudeCodeRuntime({ db: deps.db, invoker: deps.invoker })
   }
   return codexExecRuntime({ db: deps.db, schemaPath: deps.schemaPath, invoker: deps.invoker })
+}
+
+/**
+ * S0 deterministic runtime fixture.  It can choose only typed outcome and
+ * content; recipient resolution remains in the internal-handoff adapter.
+ */
+export function deterministicV2NativeMeshRuntime(
+  render: (input: { seatId: string; sourceAgentId: string; content: string }) => string | null,
+): TurnRuntime {
+  return {
+    async runTurn({ seatId, payload }) {
+      const inbound = decodeV2NativeInboundPayload(payload)
+      const content = render({
+        seatId,
+        sourceAgentId: inbound.source_agent_id,
+        content: inbound.content,
+      })
+      if (content === null) return { outcome: 'no_reply' }
+      return { outcome: 'replied', replies: [{ content, channelExternalId: null }] }
+    },
+  }
 }

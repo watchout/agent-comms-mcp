@@ -15,6 +15,7 @@
 export const EVENT_TYPES = [
   // turn lifecycle
   'message.received', // opens a turn for a seat; deterministic event_id dedups redelivery
+  'message.route_planned', // V2-native immutable direct/fanout plan; no provider authority
   'turn.claimed', // pull-claim: conditional insert wins, losers back off
   'turn.claim_released', // claim released (seat-instance recovery / voluntary backoff)
   'turn.presented', // turn content handed to the seat runtime
@@ -45,6 +46,8 @@ export const EVENT_TYPES = [
   'authority.retry_budget_issuer_registered',
   'authority.connector_registry_admission_recorded',
   'authority.reopen_scan_cursor_advanced',
+  // S0 supervisor evidence authorizing dead-predecessor claim recovery.
+  'runtime.predecessor_death_recorded',
   // conversation metadata
   'conversation.linked',
 ] as const
