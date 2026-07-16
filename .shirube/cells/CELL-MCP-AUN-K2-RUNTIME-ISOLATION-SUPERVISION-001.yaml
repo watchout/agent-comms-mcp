@@ -1,0 +1,29 @@
+schema_version: shirube-cell/v1
+cell_id: CELL-MCP-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+control_source: https://github.com/watchout/agent-comms-mcp/issues/794
+authority_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989035140
+handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
+test_audit_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989397972
+sealed_base_owner_decision_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
+risk_tier: R4
+goal: Resolve an exact runtime binding before claim, invoke only an admitted isolated adapter, supervise each seat/outbox/reconciler independently, and recover DB connections without cross-seat mutation.
+primary_responsibility: K2 runtime binding, attempt-failure truth, retry projection, and process-local supervision only.
+implementation_boundary: EventLog worker/runtime binding and isolated process-local supervision; no host supervisor activation.
+verification_boundary: Guarded disposable PostgreSQL and fake runtime/subprocess fixtures; real model/provider calls zero.
+completes_parent_goal: false
+completion_rule: Exact-head independent audit, distinct scenario verification, owner exact-head merge decision, merge SHA, and post-merge rerun are required; merge alone is insufficient.
+lifecycle_state: implementation_in_progress
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Complete the exact K2 implementation and evidence, publish one draft PR, and route the exact head to an allowed independent auditor and distinct scenario verifier.
+  delivery: GitHub exact-head evidence plus direct AUN queue delivery.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989397972
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
+  scope:
+    allowed: exact K2 handoff paths and guarded disposable fixtures
+    forbidden: activation, shared or production DB, real model/provider, V1 traversal, approval, merge, deploy, self-audit
+  deliverable: one draft K2 PR with exact-head evidence and independent gate routes

@@ -1,0 +1,22 @@
+{
+  "agent_id": "arc",
+  "runtime_instance_id": "runtime-arc-001",
+  "workspace_realpath": "/workspace/agent-comms-mcp",
+  "active_function": "implementation_executor",
+  "memory_project": "agent-comms-mcp",
+  "model_adapter": "codex",
+  "sandbox_profile": "workspace-write",
+  "allowed_tools": [
+    "apply_patch",
+    "exec_command"
+  ],
+  "allowed_env_keys": [
+    "PATH",
+    "TMPDIR"
+  ],
+  "policy_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "authority_snapshot_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "build_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "tree_hash": "dddddddddddddddddddddddddddddddddddddddd",
+  "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}

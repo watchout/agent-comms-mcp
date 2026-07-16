@@ -15,10 +15,31 @@ import { parseEventPayload, type QueueViewRow } from './types'
 import type { DbAdapter } from '../db/adapter'
 import { turnInboundPayload } from './worker'
 import { decodeV2NativeInboundPayload } from './v2-native-ingress'
+import {
+  resolveRuntimeBinding,
+  RuntimeBindingResolutionError,
+  type ResolvedRuntimeBindingV1,
+} from './runtime-binding'
+
+export interface RuntimeSpawnOptions {
+  timeoutMs?: number
+  cwd: string
+  env: Record<string, string>
+  allowedTools: readonly string[]
+  sandboxProfile: string
+}
+
+export class RuntimeTimeoutError extends Error {
+  readonly code = 'RUNTIME_TIMEOUT' as const
+}
+
+export class UnknownRuntimeEngineError extends Error {
+  readonly code = 'RUNTIME_ENGINE_UNADMITTED' as const
+}
 
 /** Spawn seam — production uses Bun.spawn; fixtures inject canned results. */
 export interface HeadlessInvoker {
-  run(cmd: string[], opts?: { timeoutMs?: number }): Promise<{
+  run(cmd: string[], opts?: RuntimeSpawnOptions): Promise<{
     exitCode: number
     stdout: string
     stderr: string
@@ -27,15 +48,22 @@ export interface HeadlessInvoker {
 
 export const bunInvoker: HeadlessInvoker = {
   async run(cmd, opts) {
-    const proc = Bun.spawn({ cmd, stdout: 'pipe', stderr: 'pipe' })
+    if (!opts?.cwd || !opts.env || !opts.sandboxProfile) {
+      throw new Error('runtime spawn requires explicit cwd, env and sandbox profile')
+    }
+    const proc = Bun.spawn({ cmd, cwd: opts.cwd, env: opts.env, stdout: 'pipe', stderr: 'pipe' })
     const timeoutMs = opts?.timeoutMs ?? 180_000
-    const timer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      proc.kill('SIGKILL')
+    }, timeoutMs)
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
-    ])
-    clearTimeout(timer)
+    ]).finally(() => clearTimeout(timer))
+    if (timedOut) throw new RuntimeTimeoutError(`runtime exceeded ${timeoutMs}ms and was killed`)
     return { exitCode, stdout, stderr }
   },
 }
@@ -81,8 +109,9 @@ export function parseTurnResult(text: string): TurnResultShape | null {
   // enqueue a reply, regardless of the rest of the shape.
   if (v.ok !== true) return null
   if (v.outcome !== 'replied' && v.outcome !== 'no_reply') return null
-  if (v.reply !== null && typeof v.reply !== 'string') return null
-  if (v.outcome === 'replied' && (v.reply === null || v.reply.trim() === '')) return null
+  const reply = v.reply
+  if (reply !== null && typeof reply !== 'string') return null
+  if (v.outcome === 'replied' && (reply === null || reply.trim() === '')) return null
   return v as unknown as TurnResultShape
 }
 
@@ -136,6 +165,7 @@ export function codexExecRuntime(opts: {
   schemaPath: string
   sandbox?: string
   timeoutMs?: number
+  spawnOptions?: Omit<RuntimeSpawnOptions, 'timeoutMs'>
 }): TurnRuntime {
   const invoker = opts.invoker ?? bunInvoker
   return {
@@ -144,11 +174,20 @@ export function codexExecRuntime(opts: {
       const prompt = buildTurnPrompt(seatId, envelope)
       const r = await invoker.run([
         opts.codexBin ?? 'codex', 'exec',
+        '--strict-config',
+        '--ignore-user-config',
+        '--cd', opts.spawnOptions?.cwd ?? process.cwd(),
         '--output-schema', opts.schemaPath,
         '--sandbox', opts.sandbox ?? 'read-only',
         '--ephemeral',
         prompt,
-      ], { timeoutMs: opts.timeoutMs })
+      ], {
+        timeoutMs: opts.timeoutMs,
+        cwd: opts.spawnOptions?.cwd ?? process.cwd(),
+        env: opts.spawnOptions?.env ?? {},
+        allowedTools: opts.spawnOptions?.allowedTools ?? [],
+        sandboxProfile: opts.spawnOptions?.sandboxProfile ?? opts.sandbox ?? 'read-only',
+      })
       if (r.exitCode !== 0) {
         return failed(`codex exec exited ${r.exitCode}: ${r.stderr || r.stdout}`)
       }
@@ -172,6 +211,7 @@ export function claudeCodeRuntime(opts: {
   invoker?: HeadlessInvoker
   claudeBin?: string
   timeoutMs?: number
+  spawnOptions?: Omit<RuntimeSpawnOptions, 'timeoutMs'>
 }): TurnRuntime {
   const invoker = opts.invoker ?? bunInvoker
   return {
@@ -181,7 +221,20 @@ export function claudeCodeRuntime(opts: {
       const r = await invoker.run([
         opts.claudeBin ?? 'claude', '-p', prompt,
         '--output-format', 'json',
-      ], { timeoutMs: opts.timeoutMs })
+        '--no-session-persistence',
+        '--safe-mode',
+        '--strict-mcp-config',
+        '--mcp-config', '{}',
+        '--permission-mode', opts.spawnOptions?.sandboxProfile ?? 'dontAsk',
+        '--tools', (opts.spawnOptions?.allowedTools ?? []).join(','),
+        '--allowedTools', (opts.spawnOptions?.allowedTools ?? []).join(','),
+      ], {
+        timeoutMs: opts.timeoutMs,
+        cwd: opts.spawnOptions?.cwd ?? process.cwd(),
+        env: opts.spawnOptions?.env ?? {},
+        allowedTools: opts.spawnOptions?.allowedTools ?? [],
+        sandboxProfile: opts.spawnOptions?.sandboxProfile ?? 'dontAsk',
+      })
       if (r.exitCode !== 0) {
         return failed(`claude -p exited ${r.exitCode}: ${r.stderr || r.stdout}`)
       }
@@ -210,6 +263,73 @@ export function runtimeForEngine(
     return claudeCodeRuntime({ db: deps.db, invoker: deps.invoker })
   }
   return codexExecRuntime({ db: deps.db, schemaPath: deps.schemaPath, invoker: deps.invoker })
+}
+
+function allowlistedEnvironment(
+  binding: ResolvedRuntimeBindingV1,
+  source: Record<string, string | undefined>,
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const key of binding.allowed_env_keys) {
+    const value = source[key]
+    if (value !== undefined) env[key] = value
+  }
+  return env
+}
+
+/** Strict K2 runtime selection from an already resolved exact binding. */
+export function runtimeForBinding(
+  binding: ResolvedRuntimeBindingV1,
+  deps: {
+    db: DbAdapter
+    schemaPath: string
+    invoker?: HeadlessInvoker
+    parentEnv?: Record<string, string | undefined>
+    timeoutMs?: number
+    codexBin?: string
+    claudeBin?: string
+  },
+): TurnRuntime {
+  if (binding.model_adapter !== 'codex' && binding.model_adapter !== 'claude_code') {
+    throw new UnknownRuntimeEngineError(`model adapter ${(binding as { model_adapter?: unknown }).model_adapter} is not admitted`)
+  }
+  const resolved = resolveRuntimeBinding({ binding })
+  const admittedProfiles = resolved.model_adapter === 'codex'
+    ? ['read-only', 'workspace-write']
+    : ['acceptEdits', 'auto', 'manual', 'dontAsk', 'plan']
+  if (!admittedProfiles.includes(resolved.sandbox_profile)) {
+    throw new RuntimeBindingResolutionError(
+      'RUNTIME_POLICY_UNVERIFIED',
+      `${resolved.model_adapter} sandbox_profile ${resolved.sandbox_profile} is not mechanically admitted`,
+    )
+  }
+  const spawnOptions: Omit<RuntimeSpawnOptions, 'timeoutMs'> = {
+    cwd: resolved.workspace_realpath,
+    env: allowlistedEnvironment(resolved, deps.parentEnv ?? process.env),
+    allowedTools: resolved.allowed_tools,
+    sandboxProfile: resolved.sandbox_profile,
+  }
+  if (resolved.model_adapter === 'codex') {
+    return codexExecRuntime({
+      db: deps.db,
+      schemaPath: deps.schemaPath,
+      invoker: deps.invoker,
+      codexBin: deps.codexBin,
+      sandbox: resolved.sandbox_profile,
+      timeoutMs: deps.timeoutMs,
+      spawnOptions,
+    })
+  }
+  if (resolved.model_adapter === 'claude_code') {
+    return claudeCodeRuntime({
+      db: deps.db,
+      invoker: deps.invoker,
+      claudeBin: deps.claudeBin,
+      timeoutMs: deps.timeoutMs,
+      spawnOptions,
+    })
+  }
+  throw new UnknownRuntimeEngineError(`model adapter ${(resolved as { model_adapter?: unknown }).model_adapter} is not admitted`)
 }
 
 /**

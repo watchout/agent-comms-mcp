@@ -35,6 +35,10 @@ export {
   claimNextTurn,
   presentTurn,
   completeTurn,
+  failTurnAttempt,
+  scheduleTurnRetry,
+  blockTurn,
+  deadLetterTurn,
   releaseClaim,
   recoverSeatClaims,
   turnIdFor,
@@ -45,6 +49,8 @@ export {
   type ReplyInput,
   type CompleteTurnInput,
 } from './turns'
+export * from './runtime-binding'
+export * from './seat-supervisor'
 export {
   dispatchOutboxOnce,
   recoverDispatcherClaims,

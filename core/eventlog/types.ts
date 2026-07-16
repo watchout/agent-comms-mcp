@@ -19,6 +19,10 @@ export const EVENT_TYPES = [
   'turn.claimed', // pull-claim: conditional insert wins, losers back off
   'turn.claim_released', // claim released (seat-instance recovery / voluntary backoff)
   'turn.presented', // turn content handed to the seat runtime
+  'turn.attempt_failed', // runtime/process attempt failed; never semantic completion
+  'turn.retry_scheduled', // typed retry_wait availability with an exact next-attempt time
+  'turn.blocked', // terminal manual-intervention truth
+  'turn.dead_lettered', // terminal retry-budget exhaustion truth
   'turn.completed', // typed outcome: replied | no_reply | skipped | failed
   // outbox lifecycle
   'reply.enqueued', // written atomically with turn.completed (transactional outbox)
@@ -55,6 +59,46 @@ export const EVENT_TYPES = [
 export type EventType = (typeof EVENT_TYPES)[number]
 
 export type TurnOutcome = 'replied' | 'no_reply' | 'skipped' | 'failed'
+
+export type TurnAttemptFailureCode =
+  | 'RUNTIME_TIMEOUT'
+  | 'RUNTIME_EXIT_NONZERO'
+  | 'RUNTIME_OUTPUT_INVALID'
+  | 'RUNTIME_BINDING_DRIFT'
+  | 'RUNTIME_ENGINE_UNADMITTED'
+  | 'DATABASE_UNAVAILABLE'
+  | 'UNKNOWN_ATTEMPT_FAILURE'
+
+export interface TurnAttemptFailedPayloadV1 extends Record<string, unknown> {
+  schema_version: 'aun-turn-attempt-failed/v1'
+  failure_code: TurnAttemptFailureCode
+  failure_summary: string
+  retryable: boolean
+  fencing_token: number
+}
+
+export interface TurnRetryScheduledPayloadV1 extends Record<string, unknown> {
+  schema_version: 'aun-turn-retry-scheduled/v1'
+  failure_event_id: string
+  available_at: string
+  backoff_ms: number
+  fencing_token: number
+}
+
+export interface TurnBlockedPayloadV1 extends Record<string, unknown> {
+  schema_version: 'aun-turn-blocked/v1'
+  reason_code: string
+  reason_summary: string
+  fencing_token: number
+}
+
+export interface TurnDeadLetteredPayloadV1 extends Record<string, unknown> {
+  schema_version: 'aun-turn-dead-lettered/v1'
+  reason_code: string
+  reason_summary: string
+  attempt_count: number
+  fencing_token: number
+}
 
 export interface AppendEvent {
   eventId: string
@@ -146,7 +190,11 @@ export interface ActiveTurnProjectionRow {
   received_at: string
   message_id: string | null
   priority: number
-  availability: 'available' | 'claimed' | 'completed'
+  availability: 'available' | 'claimed' | 'retry_wait' | 'blocked' | 'dead_lettered' | 'completed'
+  available_at: string | null
+  attempt_count: number
+  terminal_reason: string | null
+  last_failure_code: string | null
   claim_event_id: string | null
   claim_epoch: number | null
   fencing_token: number | null

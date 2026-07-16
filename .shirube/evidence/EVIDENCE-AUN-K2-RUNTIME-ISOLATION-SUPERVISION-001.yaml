@@ -1,0 +1,67 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+cell_id: CELL-MCP-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+implementation_actor: aun
+not_independent_audit: true
+completes_cell: false
+completes_parent_goal: false
+exact_base_sha: bd1eba7c5806b32124535ec8db6649cd85c21fbd
+exact_base_tree: 0ee19ee8898d6a4b8ae9b1f3e7acb036232b74be
+migration_decision_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
+head_evidence_source: pending_draft_pr_exact_head
+validation_state: local_precommit_pass_pending_exact_head_publish
+local_evidence:
+  unit: 10_pass_0_fail
+  postgres_behavior_and_supervision: 8_pass_0_fail
+  full_eventlog_k1_k2_regression: 163_pass_0_skip_0_fail_883_expectations
+  core_typecheck: 0_errors
+  changed_entry_bundle: PASS
+  yaml_parse: 4_pass_0_fail
+  benchmark_plans: A0_A1_A2_pass_plan_only_behavior_not_proven
+  benchmark_A0_harness_smoke: PASS_not_exact_head_evidence
+  guarded_database_identity: aun_k2_fixture_20260716_codex_128k2
+  guarded_regression_database_identities:
+    - aun_k1_fixture_k2reg_20260716
+    - aun_k2_fixture_fullreg_20260716_r2_test
+  shared_or_production_database_mutations: 0
+  real_model_calls: 0
+  provider_calls: 0
+  V1_calls: 0
+  runtime_or_supervisor_activation: 0
+command_results_by_test_id:
+  K2-TC-001: PASS_digest_884dad9171c1800576b689fec0ec336a04322d412583a960a80d74904e535cd5
+  K2-TC-002: PASS_invalid_acceptance_0
+  K2-TC-003: PASS_claim_model_terminal_projection_mutation_0_all_axes
+  K2-TC-004: PASS_child_spawns_0
+  K2-TC-005: PASS_exact_cwd_env_tools_sandbox
+  K2-TC-006: PASS_typed_timeout_model_success_0
+  K2-TC-007: PASS_exact_event_order_completion_reply_provider_V1_0_epoch_fence_plus_1
+  K2-TC-008: PASS_stale_accepted_0_terminal_winner_1_duplicate_0
+  K2-TC-009: PASS_beta_100_outbox_100_cross_mutation_0_added_latency_at_most_100ms
+  K2-TC-010: PASS_alpha_budget_3_beta_restarts_0_global_exit_false
+  K2-TC-011: PASS_RTO_below_30s_RPO_0_adapters_2_completed_1_duplicates_0
+  K2-TC-012: PASS_up_down_up_idempotent_replay_equal_unrepresentable_down_rejected
+  K2-TC-013: PASS_notify_consumed_false_intended_claimed_poll_below_2000ms
+  K2-TC-014: PLAN_PASS_exact_head_measurement_pending
+binding_field_readback:
+  exact_handoff_and_fixture_resolved_fields: 14
+  separately_observed_checkout_dirty_axis: 1
+  invented_fields: 0
+pending:
+  - exact_head_sha_and_tree
+  - ordered_changed_paths_and_sha256
+  - exact_head_benchmark_result_digests
+  - independent_audit_ref
+  - distinct_scenario_verification_ref
+  - owner_exact_head_merge_decision
+  - merge_and_post_merge_rerun
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Finish deterministic validation, publish the exact draft head and replace pending evidence fields before independent gate delivery.
+  delivery: draft PR exact-head evidence comment
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989397972
+  deliverable: reproducible exact-head machine evidence
