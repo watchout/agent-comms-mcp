@@ -3,6 +3,7 @@ import fixture from './fixtures/runtime-binding-valid-v1.json'
 import type { DbAdapter } from '../../core/db/adapter'
 import type { QueueViewRow } from '../../core/eventlog/types'
 import {
+  codexExecRuntime,
   RuntimeTimeoutError,
   UnknownRuntimeEngineError,
   runtimeForBinding,
@@ -91,6 +92,17 @@ describe('K2 runtime adapter isolation', () => {
       expect((error as RuntimeBindingResolutionError).code).toBe('RUNTIME_POLICY_UNVERIFIED')
     }
     expect(childSpawns).toBe(0)
+  })
+
+  test('K2-TOOL-LIMIT-ENFORCEMENT-001 production invoker cannot bypass a signed tool binding', async () => {
+    const runtime = codexExecRuntime({ db: readOnlyDb(), schemaPath: '/tmp/schema.json' })
+    try {
+      await runtime.runTurn({ seatId: 'arc', turn, payload: { message_id: 'm1' } })
+      throw new Error('expected missing signed binding rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeBindingResolutionError)
+      expect((error as RuntimeBindingResolutionError).code).toBe('RUNTIME_POLICY_UNVERIFIED')
+    }
   })
 
   test('K2-TC-006 timeout is typed and never converted to a model result', async () => {
