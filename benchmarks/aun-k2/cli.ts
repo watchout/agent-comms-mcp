@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { buildK2BenchmarkPlan, runK2IdleBenchmark } from './harness'
 import { isK2ProfileName } from './profiles'
 
@@ -11,9 +12,7 @@ function value(flag: string): string | null {
 }
 
 function git(...args: string[]): string {
-  const result = Bun.spawnSync(['git', ...args], { stdout: 'pipe', stderr: 'pipe' })
-  if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr).trim())
-  return new TextDecoder().decode(result.stdout).trim()
+  return execFileSync('git', args, { encoding: 'utf8' }).trim()
 }
 
 function sha256(value: string): string {
@@ -29,7 +28,6 @@ const context = {
   treeHash: git('rev-parse', 'HEAD^{tree}'),
   configDigest: sha256(JSON.stringify({ profile, runtime: 'fake_only', provider: 'fake_only' })),
   policyDigest: sha256('AUN-K2-REQ-006:cpu<1,poll<=0.5,rss<=256,model=0,provider=0'),
-  databaseVersion: process.env.AUN_K2_DATABASE_VERSION ?? 'not_observed_plan_only',
 }
 const result = process.argv.includes('--plan')
   ? buildK2BenchmarkPlan(profile, context)

@@ -27,6 +27,7 @@ export interface RuntimeSpawnOptions {
   env: Record<string, string>
   allowedTools: readonly string[]
   sandboxProfile: string
+  signal?: AbortSignal
 }
 
 export class RuntimeTimeoutError extends Error {
@@ -46,14 +47,39 @@ export interface HeadlessInvoker {
   }>
 }
 
+interface BunRuntimeProcess {
+  stdout: ReadableStream<Uint8Array>
+  stderr: ReadableStream<Uint8Array>
+  exited: Promise<number>
+  kill(signal: string): void
+}
+
+interface BunRuntime {
+  spawn(options: {
+    cmd: string[]
+    cwd: string
+    env: Record<string, string>
+    stdout: 'pipe'
+    stderr: 'pipe'
+  }): BunRuntimeProcess
+}
+
 export const bunInvoker: HeadlessInvoker = {
   async run(cmd, opts) {
     if (!opts?.cwd || !opts.env || !opts.sandboxProfile) {
       throw new Error('runtime spawn requires explicit cwd, env and sandbox profile')
     }
-    const proc = Bun.spawn({ cmd, cwd: opts.cwd, env: opts.env, stdout: 'pipe', stderr: 'pipe' })
+    const runtime = (globalThis as unknown as { Bun?: BunRuntime }).Bun
+    if (!runtime) throw new Error('Bun runtime is required for production child invocation')
+    const proc = runtime.spawn({ cmd, cwd: opts.cwd, env: opts.env, stdout: 'pipe', stderr: 'pipe' })
     const timeoutMs = opts?.timeoutMs ?? 180_000
     let timedOut = false
+    let aborted = false
+    const abort = () => {
+      aborted = true
+      proc.kill('SIGKILL')
+    }
+    opts.signal?.addEventListener('abort', abort, { once: true })
     const timer = setTimeout(() => {
       timedOut = true
       proc.kill('SIGKILL')
@@ -62,8 +88,12 @@ export const bunInvoker: HeadlessInvoker = {
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
-    ]).finally(() => clearTimeout(timer))
+    ]).finally(() => {
+      clearTimeout(timer)
+      opts.signal?.removeEventListener('abort', abort)
+    })
     if (timedOut) throw new RuntimeTimeoutError(`runtime exceeded ${timeoutMs}ms and was killed`)
+    if (aborted) throw new RuntimeTimeoutError('runtime was cancelled by the seat supervision fence')
     return { exitCode, stdout, stderr }
   },
 }
@@ -110,8 +140,11 @@ export function parseTurnResult(text: string): TurnResultShape | null {
   if (v.ok !== true) return null
   if (v.outcome !== 'replied' && v.outcome !== 'no_reply') return null
   const reply = v.reply
-  if (reply !== null && typeof reply !== 'string') return null
-  if (v.outcome === 'replied' && (reply === null || reply.trim() === '')) return null
+  if (v.outcome === 'replied') {
+    if (typeof reply !== 'string' || reply.trim() === '') return null
+  } else if (reply !== null) {
+    return null
+  }
   return v as unknown as TurnResultShape
 }
 
@@ -169,13 +202,58 @@ export function codexExecRuntime(opts: {
 }): TurnRuntime {
   const invoker = opts.invoker ?? bunInvoker
   return {
-    async runTurn({ seatId, turn, payload }) {
+    async runTurn({ seatId, turn, payload, signal }) {
       const envelope = await envelopeFor(opts.db, turn, payload)
       const prompt = buildTurnPrompt(seatId, envelope)
+      const exactCodexTools = ['apply_patch', 'exec_command'] as const
+      if (!opts.spawnOptions && invoker === bunInvoker) {
+        throw new RuntimeBindingResolutionError(
+          'RUNTIME_POLICY_UNVERIFIED',
+          'production Codex invocation requires a signed RuntimeSpawnOptions tool binding',
+        )
+      }
+      // Compatibility-only fake invokers used by pre-K2 deterministic tests
+      // have no production child. A real bunInvoker must always arrive through
+      // runtimeForBinding with the signed exact list above.
+      const allowedTools = opts.spawnOptions?.allowedTools ?? exactCodexTools
+      if (
+        allowedTools.length !== exactCodexTools.length ||
+        exactCodexTools.some((tool, index) => allowedTools[index] !== tool)
+      ) {
+        throw new RuntimeBindingResolutionError(
+          'RUNTIME_POLICY_UNVERIFIED',
+          `Codex tool restriction is unrepresented: expected ${exactCodexTools.join(',')}, received ${allowedTools.join(',')}`,
+        )
+      }
       const r = await invoker.run([
         opts.codexBin ?? 'codex', 'exec',
         '--strict-config',
         '--ignore-user-config',
+        '-c', 'web_search="disabled"',
+        '-c', 'mcp_servers={}',
+        '-c', 'plugins={}',
+        '--disable', 'apps',
+        '--disable', 'auth_elicitation',
+        '--disable', 'browser_use',
+        '--disable', 'browser_use_external',
+        '--disable', 'browser_use_full_cdp_access',
+        '--disable', 'computer_use',
+        '--disable', 'goals',
+        '--disable', 'guardian_approval',
+        '--disable', 'hooks',
+        '--disable', 'image_generation',
+        '--disable', 'in_app_browser',
+        '--disable', 'multi_agent',
+        '--disable', 'multi_agent_v2',
+        '--disable', 'plugins',
+        '--disable', 'remote_plugin',
+        '--disable', 'request_permissions_tool',
+        '--disable', 'shell_tool',
+        '--disable', 'skill_mcp_dependency_install',
+        '--disable', 'tool_call_mcp_elicitation',
+        '--disable', 'tool_suggest',
+        '--disable', 'workspace_dependencies',
+        '--enable', 'unified_exec',
         '--cd', opts.spawnOptions?.cwd ?? process.cwd(),
         '--output-schema', opts.schemaPath,
         '--sandbox', opts.sandbox ?? 'read-only',
@@ -185,8 +263,9 @@ export function codexExecRuntime(opts: {
         timeoutMs: opts.timeoutMs,
         cwd: opts.spawnOptions?.cwd ?? process.cwd(),
         env: opts.spawnOptions?.env ?? {},
-        allowedTools: opts.spawnOptions?.allowedTools ?? [],
+        allowedTools,
         sandboxProfile: opts.spawnOptions?.sandboxProfile ?? opts.sandbox ?? 'read-only',
+        signal,
       })
       if (r.exitCode !== 0) {
         return failed(`codex exec exited ${r.exitCode}: ${r.stderr || r.stdout}`)
@@ -215,7 +294,7 @@ export function claudeCodeRuntime(opts: {
 }): TurnRuntime {
   const invoker = opts.invoker ?? bunInvoker
   return {
-    async runTurn({ seatId, turn, payload }) {
+    async runTurn({ seatId, turn, payload, signal }) {
       const envelope = await envelopeFor(opts.db, turn, payload)
       const prompt = buildTurnPrompt(seatId, envelope)
       const r = await invoker.run([
@@ -234,6 +313,7 @@ export function claudeCodeRuntime(opts: {
         env: opts.spawnOptions?.env ?? {},
         allowedTools: opts.spawnOptions?.allowedTools ?? [],
         sandboxProfile: opts.spawnOptions?.sandboxProfile ?? 'dontAsk',
+        signal,
       })
       if (r.exitCode !== 0) {
         return failed(`claude -p exited ${r.exitCode}: ${r.stderr || r.stdout}`)

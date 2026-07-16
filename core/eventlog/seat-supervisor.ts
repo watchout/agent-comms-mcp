@@ -54,6 +54,74 @@ class UnitTimeoutError extends Error {
   readonly code = 'UNIT_TIMEOUT' as const
 }
 
+class RevokedUnitAdapterError extends Error {
+  readonly code = 'UNIT_ADAPTER_REVOKED' as const
+}
+
+interface RevocableAdapterBoundary {
+  adapter: DbAdapter
+  revoke(): Promise<void>
+}
+
+/**
+ * Gives one supervision attempt a revocable capability instead of the raw
+ * adapter. Revocation is synchronous at the authority boundary, then waits
+ * for operations already admitted by that boundary to settle. Detached or
+ * non-cooperative unit work can therefore keep computing, but cannot issue a
+ * late query/mutation or retain a transaction-capable adapter after timeout.
+ */
+function revocableAdapter(raw: DbAdapter): RevocableAdapterBoundary {
+  let active = true
+  const inFlight = new Set<Promise<unknown>>()
+
+  const admitted = <T>(operation: () => Promise<T>): Promise<T> => {
+    if (!active) return Promise.reject(new RevokedUnitAdapterError('unit DB adapter authority has been revoked'))
+    const pending = operation()
+    inFlight.add(pending)
+    pending.then(
+      () => { inFlight.delete(pending) },
+      () => { inFlight.delete(pending) },
+    )
+    return pending
+  }
+
+  const wrap = (target: DbAdapter): DbAdapter => {
+    const adapter: DbAdapter = {
+      dialect: target.dialect,
+      claimCapabilities: target.claimCapabilities,
+      query: <T = unknown>(sql: string, params?: unknown[]) => admitted(() => target.query<T>(sql, params)),
+      queryOne: <T = unknown>(sql: string, params?: unknown[]) => admitted(() => target.queryOne<T>(sql, params)),
+      execute: (sql: string, params?: unknown[]) => admitted(() => target.execute(sql, params)),
+      transaction: <T>(fn: (tx: DbAdapter) => Promise<T>) => admitted(
+        () => target.transaction(tx => fn(wrap(tx))),
+      ),
+      close: async () => {
+        // A connection-loss fixture/driver may close its own connection before
+        // surfacing ECONNRESET. Revoke first so that adapter cannot be reused;
+        // the supervisor still owns replacement and idempotent final cleanup.
+        if (!active) throw new RevokedUnitAdapterError('unit DB adapter authority has been revoked')
+        active = false
+        await target.close()
+      },
+    }
+    if (target.listen) {
+      adapter.listen = (channel, callback) => admitted(() => target.listen!(channel, callback))
+    }
+    if (target.notify) {
+      adapter.notify = (channel, payload) => admitted(() => target.notify!(channel, payload))
+    }
+    return adapter
+  }
+
+  return {
+    adapter: wrap(raw),
+    async revoke() {
+      active = false
+      while (inFlight.size > 0) await Promise.allSettled([...inFlight])
+    },
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -74,19 +142,29 @@ function jitter(seed: number, attempt: number, ceiling: number): number {
 async function runWithTimeout<T>(
   run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
+  revoke: () => Promise<void>,
 ): Promise<T> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
+  let timeoutTriggered = false
+  const never = () => new Promise<T>(() => {})
+  const work = run(controller.signal).then(
+    value => timeoutTriggered ? never() : value,
+    error => timeoutTriggered ? never() : Promise.reject(error),
+  )
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      timeoutTriggered = true
+      const error = new UnitTimeoutError(`unit exceeded ${timeoutMs}ms`)
+      // revoke() flips the capability synchronously before its first await.
+      // Abort then lets cooperative unit/runtime code terminate promptly.
+      const drained = revoke()
+      controller.abort(error)
+      drained.then(() => reject(error), reject)
+    }, timeoutMs)
+  })
   try {
-    return await Promise.race([
-      run(controller.signal),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort()
-          reject(new UnitTimeoutError(`unit exceeded ${timeoutMs}ms`))
-        }, timeoutMs)
-      }),
-    ])
+    return await Promise.race([work, timeout])
   } finally {
     if (timer) clearTimeout(timer)
   }
@@ -107,10 +185,17 @@ export async function runWithReconnect<T>(input: {
   let lastError: unknown
   for (let attempt = 1; attempt <= input.maxAttempts; attempt++) {
     let db: DbAdapter | null = null
+    let boundary: RevocableAdapterBoundary | null = null
     try {
       db = await input.unit.adapterFactory()
       adapters += 1
-      const value = await runWithTimeout(signal => input.unit.run(db!, signal), input.timeoutMs)
+      boundary = revocableAdapter(db)
+      const value = await runWithTimeout(
+        signal => input.unit.run(boundary!.adapter, signal),
+        input.timeoutMs,
+        () => boundary!.revoke(),
+      )
+      await boundary.revoke()
       await db.close()
       closed += 1
       return {
@@ -128,6 +213,7 @@ export async function runWithReconnect<T>(input: {
       }
     } catch (error) {
       lastError = error
+      if (boundary) await boundary.revoke()
       if (db) {
         try {
           await db.close()

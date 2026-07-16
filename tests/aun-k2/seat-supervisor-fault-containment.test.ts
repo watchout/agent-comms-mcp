@@ -16,13 +16,61 @@ function adapter(connectionId: string): FakeAdapter {
     dialect: 'sqlite',
     async query() { return [] },
     async queryOne() { return null },
-    async execute() { return { rowCount: 0 } },
+    async execute(_sql, params) {
+      const [owner, cycle, at] = params ?? []
+      if (typeof owner === 'string' && typeof cycle === 'number' && typeof at === 'number') {
+        this.mutations.push({ owner, cycle, at })
+      }
+      return { rowCount: 0 }
+    },
     async transaction<T>(fn: (tx: DbAdapter) => Promise<T>) { return fn(this) },
     async close() { this.closed = true },
   }
 }
 
 describe('K2 seat supervisor fault containment', () => {
+  test('K2-SUPERVISOR-NONCOOPERATIVE-TIMEOUT-001 revokes late DB authority before terminal report', async () => {
+    const raw = adapter('alpha:noncooperative')
+    let lateRejections = 0
+    let mutationsAfterClose = 0
+    const originalExecute = raw.execute.bind(raw)
+    raw.execute = async (sql, params) => {
+      if (raw.closed) mutationsAfterClose += 1
+      raw.mutations.push({ owner: 'alpha', cycle: 1, at: performance.now() })
+      return originalExecute(sql, params)
+    }
+
+    const report = await runSeatSupervisorCycle({
+      units: [{
+        unitId: 'seat:alpha', kind: 'seat', seatId: 'alpha', adapterFactory: async () => raw,
+        run: async db => {
+          await new Promise(resolve => setTimeout(resolve, 30))
+          try {
+            await db.execute('UPDATE forbidden_late_mutation SET value = 1')
+          } catch {
+            lateRejections += 1
+          }
+          return { ignored_abort: true }
+        },
+      }],
+      maxConcurrency: 1,
+      unitTimeoutMs: 5,
+      reconnectMaxAttempts: 1,
+      reconnectBaseDelayMs: 1,
+      reconnectMaxDelayMs: 1,
+    })
+
+    const alpha = report.units[0]
+    expect(alpha.status).toBe('unhealthy_exit')
+    expect(alpha.stop_code).toBe('UNIT_TIMEOUT')
+    expect(raw.closed).toBeTrue()
+    expect(raw.mutations).toHaveLength(0)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(lateRejections).toBe(1)
+    expect(raw.mutations).toHaveLength(0)
+    expect(mutationsAfterClose).toBe(0)
+  })
+
   test('K2-TC-009 hung alpha does not delay beta or outbox deterministic cycles', async () => {
     const instances = new Map<string, FakeAdapter[]>()
     const started = performance.now()
@@ -32,12 +80,13 @@ describe('K2 seat supervisor fault containment', () => {
       return db
     }
     const runCycles = (owner: string) => async (db: DbAdapter) => {
-      const owned = db as FakeAdapter
+      let lastAt = 0
       for (let cycle = 1; cycle <= 100; cycle++) {
-        owned.mutations.push({ owner, cycle, at: performance.now() - started })
+        lastAt = performance.now() - started
+        await db.execute('SELECT $1::text, $2::int, $3::float8', [owner, cycle, lastAt])
         await Promise.resolve()
       }
-      return { completed: 100, last_at_ms: owned.mutations.at(-1)!.at }
+      return { completed: 100, last_at_ms: lastAt }
     }
 
     const report = await runSeatSupervisorCycle({

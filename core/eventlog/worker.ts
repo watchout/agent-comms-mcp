@@ -63,6 +63,7 @@ export interface TurnRuntime {
     seatId: string
     turn: QueueViewRow
     payload: Record<string, unknown>
+    signal?: AbortSignal
   }): Promise<TurnRuntimeResult>
 }
 
@@ -83,6 +84,8 @@ export interface SeatWorkerOptions {
   currentRuntimeBinding?: () => RuntimeBindingCurrentSnapshotV1
   retryBackoffMs?: number
   now?: () => Date
+  /** Supervision cancellation fence. Aborted work must append no later mutation. */
+  signal?: AbortSignal
 }
 
 export interface V2NativeMeshSeatBinding {
@@ -144,7 +147,14 @@ export async function runSeatWorkerOnce(
 ): Promise<SeatWorkerPassResult> {
   const result: SeatWorkerPassResult = { claimed: 0, completed: 0, failed: 0, staleLost: 0 }
   const maxTurns = opts.maxTurns ?? 10
+  const assertActive = () => {
+    if (!opts.signal?.aborted) return
+    throw opts.signal.reason instanceof Error
+      ? opts.signal.reason
+      : new Error('seat worker cancelled by supervision fence')
+  }
   const assertBinding = () => {
+    assertActive()
     if (opts.runtimeBinding && opts.currentRuntimeBinding) {
       assertRuntimeBindingCurrent(opts.runtimeBinding, opts.currentRuntimeBinding())
     } else if (opts.runtimeBinding || opts.currentRuntimeBinding) {
@@ -162,6 +172,7 @@ export async function runSeatWorkerOnce(
       leaseDurationMs: opts.claimLeaseDurationMs,
     })
     if (!claimed) break
+    assertActive()
     result.claimed++
     await presentTurn(db, claimed, {
       seatId: opts.seatId,
@@ -176,6 +187,7 @@ export async function runSeatWorkerOnce(
         seatId: opts.seatId,
         turn: claimed.turn,
         payload: await turnInboundPayload(db, claimed.turn),
+        signal: opts.signal,
       })
     } catch (err) {
       runtimeResult = {
@@ -185,6 +197,7 @@ export async function runSeatWorkerOnce(
     }
 
     try {
+      assertActive()
       assertBinding()
       if (runtimeResult.outcome === 'failed' && claimed.fencingToken !== undefined) {
         const summary = runtimeResult.summary ?? 'runtime attempt failed'
@@ -208,6 +221,7 @@ export async function runSeatWorkerOnce(
           retryable: true,
           mutationFence: opts.mutationFence,
         })
+        assertActive()
         assertBinding()
         const backoffMs = opts.retryBackoffMs ?? 1_000
         const availableAt = new Date((opts.now?.() ?? new Date()).getTime() + backoffMs).toISOString()
@@ -426,7 +440,7 @@ export async function runV2NativeMeshTick(
         kind: 'seat' as const,
         seatId: seat.seatId,
         adapterFactory: () => opts.dbFactory!({ unitId: `seat:${seat.seatId}`, kind: 'seat', seatId: seat.seatId }),
-        run: async unitDb => runSeatWorkerOnce(unitDb, {
+        run: async (unitDb, signal) => runSeatWorkerOnce(unitDb, {
           seatId: seat.seatId,
           seatInstanceId: seat.runtimeInstanceId,
           runtime: runtimes.get(seat.seatId)!,
@@ -435,6 +449,7 @@ export async function runV2NativeMeshTick(
           runtimeBinding: resolvedBindings.get(seat.seatId),
           currentRuntimeBinding: seat.currentRuntimeBinding,
           claimExecutionMode: unitDb.dialect === 'postgres' ? 'production_multi_worker' : 'unit_conformance',
+          signal,
         }),
         retryable: () => true,
       }))

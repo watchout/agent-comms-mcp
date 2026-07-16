@@ -9,7 +9,11 @@ import {
   type HeadlessInvoker,
   type RuntimeSpawnOptions,
 } from '../../core/eventlog/runtimes'
-import { resolveRuntimeBinding, type ResolvedRuntimeBindingV1 } from '../../core/eventlog/runtime-binding'
+import {
+  resolveRuntimeBinding,
+  RuntimeBindingResolutionError,
+  type ResolvedRuntimeBindingV1,
+} from '../../core/eventlog/runtime-binding'
 
 const turn: QueueViewRow = {
   turn_id: 'turn:arc:m1', seat_id: 'arc', conversation_id: null,
@@ -52,6 +56,41 @@ describe('K2 runtime adapter isolation', () => {
     expect(captured?.cmd).toContain('--ignore-user-config')
     expect(captured?.cmd).toContain('--strict-config')
     expect(captured?.cmd).toContain('--cd')
+    expect(captured?.cmd).toContain('web_search="disabled"')
+    expect(captured?.cmd).toContain('mcp_servers={}')
+    expect(captured?.cmd).toContain('plugins={}')
+    expect(captured?.cmd).toContain('unified_exec')
+    for (const disabled of [
+      'apps', 'browser_use', 'computer_use', 'goals', 'hooks', 'image_generation',
+      'multi_agent', 'plugins', 'remote_plugin', 'shell_tool', 'tool_suggest',
+    ]) {
+      const index = captured?.cmd.findIndex((value, position) => value === disabled && captured?.cmd[position - 1] === '--disable') ?? -1
+      expect(index).toBeGreaterThan(0)
+    }
+  })
+
+  test('K2-TOOL-LIMIT-ENFORCEMENT-001 unrepresented Codex tool fails before child spawn', async () => {
+    const source = structuredClone(fixture) as Record<string, unknown>
+    source.allowed_tools = ['apply_patch', 'exec_command', 'web_search']
+    let childSpawns = 0
+    const runtime = runtimeForBinding(resolveRuntimeBinding({ binding: source }), {
+      db: readOnlyDb(), schemaPath: '/tmp/schema.json',
+      invoker: {
+        async run() {
+          childSpawns += 1
+          return { exitCode: 0, stdout: '{"ok":true,"outcome":"no_reply","reply":null}', stderr: '' }
+        },
+      },
+      parentEnv: { PATH: '/bin', TMPDIR: '/tmp' },
+    })
+    try {
+      await runtime.runTurn({ seatId: 'arc', turn, payload: { message_id: 'm1' } })
+      throw new Error('expected runtime policy rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeBindingResolutionError)
+      expect((error as RuntimeBindingResolutionError).code).toBe('RUNTIME_POLICY_UNVERIFIED')
+    }
+    expect(childSpawns).toBe(0)
   })
 
   test('K2-TC-006 timeout is typed and never converted to a model result', async () => {
