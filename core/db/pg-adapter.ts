@@ -3,6 +3,11 @@ import type { DbAdapter } from './adapter'
 
 export class PgAdapter implements DbAdapter {
   readonly dialect = 'postgres' as const
+  readonly claimCapabilities = {
+    productionMultiWorker: true,
+    skipLocked: true,
+    transactionLeaseClock: true,
+  } as const
   private client: Client
   private connected = false
   private connecting: Promise<void> | null = null

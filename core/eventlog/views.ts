@@ -23,6 +23,7 @@ function jsonText(db: DbAdapter, column: string, key: string): string {
 import {
   FanoutParentLinkMismatchError,
   parseEventPayload,
+  type ActiveTurnProjectionRow,
   type OutboxViewRow,
   type QueueViewRow,
   type StoredEvent,
@@ -143,6 +144,113 @@ export async function claimableTurns(db: DbAdapter, seatId: string): Promise<Que
     if (!row.conversation_id) return true
     return earliestOpenByConversation.get(row.conversation_id) === row.received_seq
   })
+}
+
+function normalizeActiveTurnProjectionRow(row: ActiveTurnProjectionRow): ActiveTurnProjectionRow {
+  return {
+    ...row,
+    received_seq: Number(row.received_seq),
+    priority: Number(row.priority),
+    claim_epoch: row.claim_epoch === null ? null : Number(row.claim_epoch),
+    fencing_token: row.fencing_token === null ? null : Number(row.fencing_token),
+    updated_seq: Number(row.updated_seq),
+  }
+}
+
+/** Indexed K1 read model; it is derived authority and is always replayable. */
+export async function activeTurnProjection(
+  db: DbAdapter,
+  opts: { seatId?: string; availability?: ActiveTurnProjectionRow['availability'] } = {},
+): Promise<ActiveTurnProjectionRow[]> {
+  const clauses: string[] = []
+  const params: unknown[] = []
+  if (opts.seatId) {
+    params.push(opts.seatId)
+    clauses.push(`seat_id = $${params.length}`)
+  }
+  if (opts.availability) {
+    params.push(opts.availability)
+    clauses.push(`availability = $${params.length}`)
+  }
+  const rows = await db.query<ActiveTurnProjectionRow>(
+    `SELECT * FROM event_log_turn_projection
+     ${clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''}
+     ORDER BY seat_id ASC, priority DESC, received_seq ASC`,
+    params,
+  )
+  return rows.map(normalizeActiveTurnProjectionRow)
+}
+
+/** Recreate the mutable K1 read model from canonical event_log sequence. */
+export async function rebuildActiveTurnProjection(db: DbAdapter): Promise<ActiveTurnProjectionRow[]> {
+  if (db.dialect === 'postgres') {
+    await db.query('SELECT aun_k1_rebuild_turn_projection()')
+    return activeTurnProjection(db)
+  }
+
+  await db.transaction(async tx => {
+    await tx.execute('DELETE FROM event_log_turn_projection')
+    const events = await tx.query<StoredEvent>('SELECT * FROM event_log ORDER BY seq ASC')
+    for (const event of events) {
+      if (!event.turn_id) continue
+      const payload = parseEventPayload<Record<string, unknown>>(event.payload)
+      if (event.event_type === 'message.received') {
+        await tx.execute(
+          `INSERT OR IGNORE INTO event_log_turn_projection (
+             turn_id, received_event_id, seat_id, conversation_id, correlation_id,
+             received_seq, received_at, message_id, priority, availability, updated_seq
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'available',$6)`,
+          [
+            event.turn_id, event.event_id, event.seat_id, event.conversation_id,
+            event.correlation_id, event.seq, event.occurred_at, payload.message_id ?? null,
+            Number.isSafeInteger(payload.priority) ? payload.priority : 0,
+          ],
+        )
+        continue
+      }
+      if (event.event_type === 'turn.claimed') {
+        await tx.execute(
+          `UPDATE event_log_turn_projection
+              SET availability='claimed', claim_event_id=$1, claim_epoch=$2,
+                  fencing_token=$3, claim_profile=$4, claimed_by_seat=$5,
+                  claimed_by_instance=$6, lease_expires_at=$7,
+                  terminal_event_id=NULL, updated_seq=$8
+            WHERE turn_id=$9 AND availability='available'
+              AND $2 = COALESCE(claim_epoch + 1, 0)`,
+          [
+            event.event_id, event.claim_epoch, payload.fencing_token ?? null,
+            payload.claim_profile ?? null, event.seat_id, event.seat_instance_id,
+            payload.lease_expires_at ?? null, event.seq, event.turn_id,
+          ],
+        )
+        // Legacy conformance fixtures may append isolated lifecycle evidence
+        // without a message.received row; such rows do not enter the K1 model.
+        continue
+      }
+      if (event.event_type === 'turn.claim_released') {
+        await tx.execute(
+          `UPDATE event_log_turn_projection
+              SET availability='available', claim_event_id=NULL, claim_profile=NULL,
+                  claimed_by_seat=NULL, claimed_by_instance=NULL, lease_expires_at=NULL,
+                  terminal_event_id=NULL, updated_seq=$1
+            WHERE turn_id=$2 AND availability='claimed'
+              AND claim_event_id=$3 AND claim_epoch=$4`,
+          [event.seq, event.turn_id, event.causation_id, event.claim_epoch],
+        )
+        continue
+      }
+      if (event.event_type === 'turn.completed') {
+        await tx.execute(
+          `UPDATE event_log_turn_projection
+              SET availability='completed', terminal_event_id=$1, updated_seq=$2
+            WHERE turn_id=$3 AND availability='claimed' AND claim_event_id=$4
+              AND ($5 IS NULL OR claim_epoch=$5)`,
+          [event.event_id, event.seq, event.turn_id, event.causation_id, event.claim_epoch],
+        )
+      }
+    }
+  })
+  return activeTurnProjection(db)
 }
 
 // A reply is PENDING iff enqueued, not delivered, not permanently failed.

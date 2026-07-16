@@ -21,6 +21,7 @@ import {
   recoverSeatClaims,
   StaleClaimError,
   type ReplyInput,
+  type ClaimExecutionMode,
   type TurnMutationFence,
 } from './turns'
 import { parseEventPayload, type OutboxTransport, type QueueViewRow } from './types'
@@ -59,6 +60,10 @@ export interface SeatWorkerOptions {
   maxTurns?: number
   /** Native S0 revalidation hook; invoked around every event-log mutation. */
   mutationFence?: TurnMutationFence
+  /** PostgreSQL production workers use the guarded multi-worker path. */
+  claimExecutionMode?: ClaimExecutionMode
+  /** Database-clock lease duration for a production PostgreSQL claim. */
+  claimLeaseDurationMs?: number
 }
 
 export interface V2NativeMeshSeatBinding {
@@ -116,6 +121,8 @@ export async function runSeatWorkerOnce(
       seatId: opts.seatId,
       seatInstanceId: opts.seatInstanceId,
       mutationFence: opts.mutationFence,
+      executionMode: opts.claimExecutionMode,
+      leaseDurationMs: opts.claimLeaseDurationMs,
     })
     if (!claimed) break
     result.claimed++
@@ -145,6 +152,7 @@ export async function runSeatWorkerOnce(
         seatId: opts.seatId,
         seatInstanceId: opts.seatInstanceId,
         claimEventId: claimed.claimEventId,
+        fencingToken: claimed.fencingToken,
         outcome: runtimeResult.outcome,
         conversationId: claimed.turn.conversation_id,
         payload: runtimeResult.summary ? { summary: runtimeResult.summary } : {},

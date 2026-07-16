@@ -130,6 +130,32 @@ export interface ClaimedTurn {
   turn: QueueViewRow
   claimEventId: string
   claimEpoch: number
+  /** Monotonic K1 token. Present for PostgreSQL production claims. */
+  fencingToken?: number
+  /** Database-clock lease expiry. Present for PostgreSQL production claims. */
+  leaseExpiresAt?: string
+}
+
+export interface ActiveTurnProjectionRow {
+  turn_id: string
+  received_event_id: string
+  seat_id: string
+  conversation_id: string | null
+  correlation_id: string | null
+  received_seq: number
+  received_at: string
+  message_id: string | null
+  priority: number
+  availability: 'available' | 'claimed' | 'completed'
+  claim_event_id: string | null
+  claim_epoch: number | null
+  fencing_token: number | null
+  claim_profile: string | null
+  claimed_by_seat: string | null
+  claimed_by_instance: string | null
+  lease_expires_at: string | null
+  terminal_event_id: string | null
+  updated_seq: number
 }
 
 export interface OutboxViewRow {
