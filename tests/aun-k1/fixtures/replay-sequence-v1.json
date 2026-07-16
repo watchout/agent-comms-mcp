@@ -1,0 +1,13 @@
+{
+  "schema_version": "aun-k1-replay-sequence/v1",
+  "events": [
+    "message.received",
+    "turn.claimed",
+    "turn.presented",
+    "turn.completed"
+  ],
+  "projection_terminal": "completed",
+  "stale_holder_terminal_mutations_accepted": 0,
+  "provider_invocations": 0,
+  "v1_row_deltas": 0
+}

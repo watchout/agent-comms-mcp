@@ -16,6 +16,7 @@ import { claimableTurns, inboxView } from './views'
 import {
   ClaimLostError,
   parseEventPayload,
+  type ActiveTurnProjectionRow,
   type ClaimedTurn,
   type QueueViewRow,
   type StoredEvent,
@@ -23,6 +24,12 @@ import {
 } from './types'
 
 export class StaleClaimError extends Error {}
+
+export class UnsupportedClaimCapabilityError extends Error {
+  readonly code = 'UNSUPPORTED_CLAIM_CAPABILITY' as const
+}
+
+export type ClaimExecutionMode = 'unit_conformance' | 'production_multi_worker'
 
 export type TurnMutationBoundary =
   | 'before_turn_claimed'
@@ -58,6 +65,8 @@ export interface CompleteTurnInput {
   seatId: string
   seatInstanceId: string
   claimEventId: string
+  /** Required for a PostgreSQL K1 claim; omitted for legacy/unit claims. */
+  fencingToken?: number
   outcome: TurnOutcome
   conversationId?: string | null
   correlationId?: string | null
@@ -99,6 +108,111 @@ async function nextClaimEpoch(db: DbAdapter, turnId: string): Promise<number> {
   return row?.max_epoch === null || row?.max_epoch === undefined ? 0 : row.max_epoch + 1
 }
 
+function projectionTurn(row: ActiveTurnProjectionRow): QueueViewRow {
+  return {
+    turn_id: row.turn_id,
+    seat_id: row.seat_id,
+    conversation_id: row.conversation_id,
+    received_seq: Number(row.received_seq),
+    received_event_id: row.received_event_id,
+    received_at: row.received_at,
+    message_id: row.message_id,
+    claim_event_id: null,
+    claim_epoch: null,
+    claimed_by_seat: null,
+    claimed_by_instance: null,
+    claim_seq: null,
+  }
+}
+
+async function claimNextTurnPostgres(
+  db: DbAdapter,
+  opts: {
+    seatId: string
+    seatInstanceId: string
+    leaseDurationMs: number
+    mutationFence?: TurnMutationFence
+  },
+): Promise<ClaimedTurn | null> {
+  return db.transaction(async tx => {
+    const candidate = await tx.queryOne<ActiveTurnProjectionRow>(
+      `SELECT p.*
+         FROM event_log_turn_projection p
+        WHERE p.seat_id = $1
+          AND (
+            p.availability = 'available'
+            OR (
+              p.availability = 'claimed'
+              AND p.claim_profile = 'postgres_multi_worker_v1'
+              AND p.lease_expires_at IS NOT NULL
+              AND p.lease_expires_at <= transaction_timestamp()
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM event_log_turn_projection earlier
+             WHERE earlier.seat_id = p.seat_id
+               AND earlier.conversation_id = p.conversation_id
+               AND p.conversation_id IS NOT NULL
+               AND earlier.availability <> 'completed'
+               AND earlier.received_seq < p.received_seq
+          )
+        ORDER BY p.priority DESC, p.received_seq ASC
+        LIMIT 1
+        FOR UPDATE OF p SKIP LOCKED`,
+      [opts.seatId],
+    )
+    if (!candidate) return null
+
+    const claimEpoch = candidate.claim_epoch === null ? 0 : Number(candidate.claim_epoch) + 1
+    const fencingToken = candidate.fencing_token === null ? 1 : Number(candidate.fencing_token) + 1
+    const clock = await tx.queryOne<{ claimed_at: string; lease_expires_at: string }>(
+      `SELECT
+         to_char(transaction_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at,
+         to_char(
+           (transaction_timestamp() + make_interval(secs => $1::double precision / 1000.0)) AT TIME ZONE 'UTC',
+           'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+         ) AS lease_expires_at`,
+      [opts.leaseDurationMs],
+    )
+    if (!clock) throw new Error('PostgreSQL claim clock did not return a lease tuple')
+
+    await opts.mutationFence?.('before_turn_claimed')
+    const result = await new EventLog(tx).append({
+      eventId: randomUUID(),
+      eventType: 'turn.claimed',
+      seatId: opts.seatId,
+      seatInstanceId: opts.seatInstanceId,
+      conversationId: candidate.conversation_id,
+      causationId: candidate.received_event_id,
+      correlationId: candidate.correlation_id,
+      turnId: candidate.turn_id,
+      claimEpoch,
+      payload: {
+        claim_profile: 'postgres_multi_worker_v1',
+        claimed_at: clock.claimed_at,
+        lease_expires_at: clock.lease_expires_at,
+        fencing_token: fencingToken,
+      },
+    }, tx)
+    await opts.mutationFence?.('after_turn_claimed')
+
+    const readback = await tx.queryOne<ActiveTurnProjectionRow>(
+      `SELECT * FROM event_log_turn_projection
+        WHERE turn_id=$1 AND claim_event_id=$2 AND claim_epoch=$3 AND fencing_token=$4`,
+      [candidate.turn_id, result.event.event_id, claimEpoch, fencingToken],
+    )
+    if (!readback?.lease_expires_at) throw new Error('K1 claim projection readback did not match the committed fence')
+    return {
+      turn: projectionTurn(candidate),
+      claimEventId: result.event.event_id,
+      claimEpoch,
+      fencingToken,
+      leaseExpiresAt: readback.lease_expires_at,
+    }
+  })
+}
+
 /**
  * Pull-claim: try to claim the next claimable turn for this seat.
  * Claim = appending turn.claimed; the (turn_id, claim_epoch) unique index
@@ -107,8 +221,32 @@ async function nextClaimEpoch(db: DbAdapter, turnId: string): Promise<number> {
  */
 export async function claimNextTurn(
   db: DbAdapter,
-  opts: { seatId: string; seatInstanceId: string; mutationFence?: TurnMutationFence },
+  opts: {
+    seatId: string
+    seatInstanceId: string
+    mutationFence?: TurnMutationFence
+    executionMode?: ClaimExecutionMode
+    leaseDurationMs?: number
+  },
 ): Promise<ClaimedTurn | null> {
+  const executionMode = opts.executionMode ?? (db.dialect === 'postgres' ? 'production_multi_worker' : 'unit_conformance')
+  if (executionMode === 'production_multi_worker') {
+    const capability = db.claimCapabilities
+    if (!capability?.productionMultiWorker || !capability.skipLocked || !capability.transactionLeaseClock) {
+      throw new UnsupportedClaimCapabilityError(
+        `${db.dialect ?? 'unknown'} cannot provide production multi-worker SKIP LOCKED lease arbitration`,
+      )
+    }
+    if (db.dialect !== 'postgres') {
+      throw new UnsupportedClaimCapabilityError('PostgreSQL is the only production multi-worker claim authority')
+    }
+    const leaseDurationMs = opts.leaseDurationMs ?? 30_000
+    if (!Number.isSafeInteger(leaseDurationMs) || leaseDurationMs <= 0 || leaseDurationMs > 3_600_000) {
+      throw new RangeError('leaseDurationMs must be an integer from 1 through 3600000')
+    }
+    return claimNextTurnPostgres(db, { ...opts, leaseDurationMs })
+  }
+
   const log = new EventLog(db)
   const candidates = await claimableTurns(db, opts.seatId)
   for (const turn of candidates) {
@@ -282,6 +420,11 @@ export async function presentTurn(
 ) {
   const log = new EventLog(db)
   const present = async (tx: DbAdapter) => {
+    await assertActiveClaim(tx, claimed.turn.turn_id, claimed.claimEventId, {
+      seatId: opts.seatId,
+      seatInstanceId: opts.seatInstanceId,
+      fencingToken: claimed.fencingToken,
+    })
     await opts.mutationFence?.('before_turn_presented')
     const result = await log.append({
       eventId: `present:${claimed.turn.turn_id}:${claimed.claimEpoch}`,
@@ -292,17 +435,18 @@ export async function presentTurn(
       causationId: claimed.claimEventId,
       turnId: claimed.turn.turn_id,
       claimEpoch: claimed.claimEpoch,
-    }, opts.mutationFence ? tx : undefined)
+    }, tx)
     await opts.mutationFence?.('after_turn_presented')
     return result
   }
-  return opts.mutationFence ? db.transaction(present) : present(db)
+  return db.transaction(present)
 }
 
 async function assertActiveClaim(
   db: DbAdapter,
   turnId: string,
   claimEventId: string,
+  expected: { seatId: string; seatInstanceId: string; fencingToken?: number },
 ): Promise<StoredEvent> {
   const claim = await db.queryOne<StoredEvent>(
     `SELECT * FROM event_log WHERE event_id = $1 AND event_type = 'turn.claimed'`,
@@ -310,6 +454,45 @@ async function assertActiveClaim(
   )
   if (!claim || claim.turn_id !== turnId) {
     throw new StaleClaimError(`claim ${claimEventId} does not hold turn ${turnId}`)
+  }
+  if (claim.seat_id !== expected.seatId || claim.seat_instance_id !== expected.seatInstanceId) {
+    throw new StaleClaimError(`claim ${claimEventId} holder identity differs`)
+  }
+  const claimPayload = parseEventPayload<Record<string, unknown>>(claim.payload)
+  if (claimPayload.claim_profile === 'postgres_multi_worker_v1') {
+    const persistedFence = Number(claimPayload.fencing_token)
+    if (!Number.isSafeInteger(persistedFence) || expected.fencingToken !== persistedFence) {
+      throw new StaleClaimError(`claim ${claimEventId} fencing token differs`)
+    }
+    const projection = await db.queryOne<ActiveTurnProjectionRow & { lease_valid: boolean }>(
+      `SELECT p.*, (p.lease_expires_at > clock_timestamp()) AS lease_valid
+         FROM event_log_turn_projection p
+        WHERE p.turn_id=$1
+        FOR UPDATE OF p`,
+      [turnId],
+    )
+    if (
+      projection?.availability === 'completed' &&
+      projection.claim_event_id === claimEventId &&
+      Number(projection.fencing_token) === persistedFence
+    ) {
+      const terminal = await db.queryOne<StoredEvent>(
+        `SELECT * FROM event_log WHERE event_type='turn.completed' AND turn_id=$1`,
+        [turnId],
+      )
+      if (terminal?.causation_id === claimEventId) return claim
+    }
+    if (
+      projection?.availability !== 'claimed' ||
+      projection.claim_event_id !== claimEventId ||
+      Number(projection.claim_epoch) !== Number(claim.claim_epoch) ||
+      Number(projection.fencing_token) !== persistedFence ||
+      projection.claimed_by_seat !== expected.seatId ||
+      projection.claimed_by_instance !== expected.seatInstanceId ||
+      projection.lease_valid !== true
+    ) {
+      throw new StaleClaimError(`claim ${claimEventId} lease or active projection fence is stale`)
+    }
   }
   const newer = await db.queryOne<{ n: number }>(
     `SELECT COUNT(*) AS n FROM event_log
@@ -344,7 +527,15 @@ async function assertActiveClaim(
 export async function completeTurn(db: DbAdapter, input: CompleteTurnInput) {
   const log = new EventLog(db)
   return db.transaction(async tx => {
-    await assertActiveClaim(tx, input.turnId, input.claimEventId)
+    const claim = await assertActiveClaim(tx, input.turnId, input.claimEventId, {
+      seatId: input.seatId,
+      seatInstanceId: input.seatInstanceId,
+      fencingToken: input.fencingToken,
+    })
+    const claimPayload = parseEventPayload<Record<string, unknown>>(claim.payload)
+    const k1FencePayload = claimPayload.claim_profile === 'postgres_multi_worker_v1'
+      ? { fencing_token: input.fencingToken }
+      : {}
     const existing = await tx.queryOne<StoredEvent>(
       `SELECT * FROM event_log WHERE event_type = 'turn.completed' AND turn_id = $1`,
       [input.turnId],
@@ -363,7 +554,8 @@ export async function completeTurn(db: DbAdapter, input: CompleteTurnInput) {
         correlationId: input.correlationId ?? null,
         causationId: input.claimEventId,
         turnId: input.turnId,
-        payload: { outcome: input.outcome, ...(input.payload ?? {}) },
+        claimEpoch: claim.claim_epoch,
+        payload: { outcome: input.outcome, ...(input.payload ?? {}), ...k1FencePayload },
       },
       tx,
     )
@@ -410,19 +602,32 @@ export async function releaseClaim(
     seatId: string
     seatInstanceId: string
     reason: string
+    fencingToken?: number
   },
 ) {
-  const log = new EventLog(db)
-  return log.append({
-    eventId: `release:${opts.turnId}:${opts.claimEpoch}`,
-    eventType: 'turn.claim_released',
-    seatId: opts.seatId,
-    seatInstanceId: opts.seatInstanceId,
-    causationId: opts.claimEventId,
-    turnId: opts.turnId,
-    claimEpoch: opts.claimEpoch,
-    payload: { reason: opts.reason },
-  })
+  const append = async (tx: DbAdapter) => {
+    let fencePayload: Record<string, unknown> = {}
+    if (db.dialect === 'postgres') {
+      const claim = await assertActiveClaim(tx, opts.turnId, opts.claimEventId, {
+        seatId: opts.seatId,
+        seatInstanceId: opts.seatInstanceId,
+        fencingToken: opts.fencingToken,
+      })
+      const payload = parseEventPayload<Record<string, unknown>>(claim.payload)
+      if (payload.claim_profile === 'postgres_multi_worker_v1') fencePayload = { fencing_token: opts.fencingToken }
+    }
+    return new EventLog(tx).append({
+      eventId: `release:${opts.turnId}:${opts.claimEpoch}`,
+      eventType: 'turn.claim_released',
+      seatId: opts.seatId,
+      seatInstanceId: opts.seatInstanceId,
+      causationId: opts.claimEventId,
+      turnId: opts.turnId,
+      claimEpoch: opts.claimEpoch,
+      payload: { reason: opts.reason, ...fencePayload },
+    }, tx)
+  }
+  return db.dialect === 'postgres' ? db.transaction(append) : append(db)
 }
 
 /**
@@ -435,6 +640,35 @@ export async function recoverSeatClaims(
   db: DbAdapter,
   opts: { seatId: string; activeInstanceId: string },
 ): Promise<QueueViewRow[]> {
+  if (db.dialect === 'postgres') {
+    const expired = await db.query<ActiveTurnProjectionRow>(
+      `SELECT * FROM event_log_turn_projection
+        WHERE seat_id=$1
+          AND availability='claimed'
+          AND claim_profile='postgres_multi_worker_v1'
+          AND claim_event_id IS NOT NULL
+          AND claim_epoch IS NOT NULL
+          AND fencing_token IS NOT NULL
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at <= transaction_timestamp()
+        ORDER BY priority DESC, received_seq ASC`,
+      [opts.seatId],
+    )
+    return expired.map(row => ({
+      turn_id: row.turn_id,
+      seat_id: row.seat_id,
+      conversation_id: row.conversation_id,
+      received_seq: Number(row.received_seq),
+      received_event_id: row.received_event_id,
+      received_at: row.received_at,
+      message_id: row.message_id,
+      claim_event_id: row.claim_event_id,
+      claim_epoch: Number(row.claim_epoch),
+      claimed_by_seat: row.claimed_by_seat,
+      claimed_by_instance: row.claimed_by_instance,
+      claim_seq: Number(row.updated_seq),
+    }))
+  }
   const rows = await inboxView(db, opts.seatId)
   const stale = rows.filter(
     r =>

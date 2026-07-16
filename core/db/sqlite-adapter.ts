@@ -41,6 +41,11 @@ function reorderParams(sql: string, params: any[]): { sql: string; params: any[]
 
 export class SqliteAdapter implements DbAdapter {
   readonly dialect = 'sqlite' as const
+  readonly claimCapabilities = {
+    productionMultiWorker: false,
+    skipLocked: false,
+    transactionLeaseClock: false,
+  } as const
   private db: Database
 
   constructor(path?: string, options: { readonly?: boolean; create?: boolean } = {}) {
