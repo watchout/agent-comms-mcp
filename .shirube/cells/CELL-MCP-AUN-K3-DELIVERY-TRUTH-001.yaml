@@ -12,7 +12,7 @@ implementation_boundary: Existing append-only EventLog contracts and dedicated V
 verification_boundary: Fake provider, isolated disposable database, replay fixtures, and bounded local benchmark only.
 completes_parent_goal: false
 completion_rule: Exact-head independent audit, distinct scenario verification, owner exact-head merge decision, merge SHA, and post-merge rerun are required; activation remains a separate cell.
-lifecycle_state: implementation_qualification_pass_pending_immutable_head
+lifecycle_state: implementation_qualification_pass_pending_exact_head_receipt_and_independent_gates
 next_action:
   blocking: false
   actor: aun

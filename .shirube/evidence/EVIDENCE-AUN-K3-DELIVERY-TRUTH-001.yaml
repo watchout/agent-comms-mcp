@@ -11,6 +11,13 @@ sealed_base_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecom
 registered_adapter_byte_authority_addendum_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
 registered_adapter_byte_authority_addendum_sha256: f875b58b6d9fb375ea2aaada90bd4acb80154e49143caafc84dad6d2d00eab99
 validation_state: author_qualification_pass_pending_immutable_head_and_independent_gates
+qualification_git:
+  source_sha: 4712e8800e8787238e9cac88a2a11576576d8d67
+  source_tree: d2fe760f2d4243819b5c9f9b015d1b7b0d758929
+  exact_changed_paths: 25
+  changed_paths_order: exact_allowed_paths_in_order_filtered_to_changed_paths
+  changed_paths_serialization: UTF-8_LF_terminated
+  changed_paths_sha256: 8244f70fb0aae2685fc5d7df5aa13d7f27861e3c5f61cd9a12ba7b1649fdf6c3
 local_evidence:
   conformance: 6_pass_0_fail_21_expectations
   complete_k3_local_suite: 15_pass_4_postgresql_skip_0_fail_60_expectations
@@ -50,7 +57,6 @@ local_evidence:
   V1_calls: 0
   activation_mutations: 0
 pending:
-  - final_exact_head_sha_and_tree
   - exact_head_evidence_receipt
   - independent_audit_ref
   - distinct_scenario_verification_ref
