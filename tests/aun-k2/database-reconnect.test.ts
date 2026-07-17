@@ -96,7 +96,7 @@ class TrackedAdapter implements DbAdapter {
   }
 }
 
-describe.skipIf(!fixtureEnabled())('K2 database reconnect and poll backstop', () => {
+describe.if(fixtureEnabled())('K2 database reconnect and poll backstop', () => {
   test('K2-TC-011 committed input survives one connection loss and a fresh adapter finishes it', async () => {
     const fixture = await createFixture('reconnect')
     const adapters: TrackedAdapter[] = []

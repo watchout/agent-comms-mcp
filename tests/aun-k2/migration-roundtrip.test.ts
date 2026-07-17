@@ -84,7 +84,7 @@ function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-describe.skipIf(!fixtureEnabled())('K2 migration roundtrip', () => {
+describe.if(fixtureEnabled())('K2 migration roundtrip', () => {
   test('K2-TC-012 guarded up/down/up is lossless, replay-equal and downgrade fails closed', async () => {
     const fixture = await createFixture('migration_roundtrip')
     try {

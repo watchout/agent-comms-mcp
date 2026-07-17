@@ -85,7 +85,7 @@ async function createFixture(label: string) {
   }
 }
 
-describe.skipIf(!fixtureEnabled())('K2 timeout, retry and stale-fence truth', () => {
+describe.if(fixtureEnabled())('K2 timeout, retry and stale-fence truth', () => {
   test('K2-TC-007 timeout records failure/retry/release and increments the next claim fence', async () => {
     const fixture = await createFixture('timeout_retry')
     try {
