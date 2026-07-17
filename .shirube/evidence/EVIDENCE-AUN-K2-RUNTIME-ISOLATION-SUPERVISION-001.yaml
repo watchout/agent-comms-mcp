@@ -8,7 +8,7 @@ completes_parent_goal: false
 exact_base_sha: bd1eba7c5806b32124535ec8db6649cd85c21fbd
 exact_base_tree: 0ee19ee8898d6a4b8ae9b1f3e7acb036232b74be
 migration_decision_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
-head_evidence_source: bounded_inflight_db_timeout_remediation_commit_pending
+head_evidence_source: bounded_inflight_db_timeout_remediation_commit_f8cd22bb83a74f1e71843f265f64436747802f2d
 validation_state: author_qualification_pass_fresh_exact_head_and_independent_gates_pending
 remediation_authority:
   original_control_handoff: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
@@ -21,6 +21,12 @@ remediation_authority:
 remediation_qualification_git:
   source_sha: 9dba17e33d0fe92b4d2d6ec53ae5a4d33a7a3b97
   source_tree: 0586e88373f6c49e6d1417414f2cc0b06c4a9b75
+bounded_inflight_db_timeout_qualification_git:
+  source_sha: f8cd22bb83a74f1e71843f265f64436747802f2d
+  source_tree: 4de72ab8981c406f100b129f755cbbf15ce59228
+  parent_sha: 3e7a982be2d625c9eac600ce11f381cd7dddcd4f
+  exact_changed_paths: 4
+  changed_paths_sha256: c615d97ac1ef6f8dc419bc6bf7e3c8de9261a2ed97d04e7b5599ab23b05928cc
 local_evidence:
   unit_and_runtime_isolation: 12_pass_0_fail_117_expectations
   focused_supervisor_fault_containment: 4_pass_0_fail_43_expectations
@@ -96,7 +102,6 @@ binding_field_readback:
   separately_observed_checkout_dirty_axis: 1
   invented_fields: 0
 pending:
-  - bounded_inflight_db_timeout_remediation_commit_sha_and_tree
   - final_exact_head_sha_and_tree_after_evidence_commit
   - ordered_changed_paths_and_sha256
   - exact_final_head_A1_benchmark_result_digest
