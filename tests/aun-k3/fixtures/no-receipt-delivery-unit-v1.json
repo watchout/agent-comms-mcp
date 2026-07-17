@@ -1,0 +1,5 @@
+{
+  "schema_version": "aun-k3-fixture/v1",
+  "required_receipt_mode": "none",
+  "expected_truth": "reply.delivery_unknown"
+}

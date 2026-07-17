@@ -378,6 +378,8 @@ export async function runV2NativeMeshTick(
     maxTurnsPerSeat?: number
     dbFactory?: V2NativeMeshDbFactory
     supervision?: Partial<Omit<SeatSupervisionConfigV1, 'units'>>
+    /** K3 provider dispatcher; production-only and independently supervised. */
+    v2DeliveryDispatcher?: (db: DbAdapter, signal: AbortSignal) => Promise<unknown>
     reconciler?: (db: DbAdapter, signal: AbortSignal) => Promise<unknown>
   },
 ) {
@@ -433,6 +435,7 @@ export async function runV2NativeMeshTick(
     ]))
     const seatResults: Record<string, SeatWorkerPassResult> = {}
     let handoff: unknown = null
+    let deliveryDispatch: unknown = null
     const units: SeatSupervisionUnitV1[] = [...opts.seats]
       .sort((a, b) => a.seatId.localeCompare(b.seatId))
       .map(seat => ({
@@ -463,6 +466,15 @@ export async function runV2NativeMeshTick(
       },
       retryable: () => true,
     })
+    if (opts.v2DeliveryDispatcher) {
+      units.push({
+        unitId: 'outbox:v2-delivery-truth',
+        kind: 'outbox',
+        adapterFactory: () => opts.dbFactory!({ unitId: 'outbox:v2-delivery-truth', kind: 'outbox' }),
+        run: opts.v2DeliveryDispatcher,
+        retryable: () => true,
+      })
+    }
     if (opts.reconciler) {
       units.push({
         unitId: 'reconciler:v2-native',
@@ -486,9 +498,10 @@ export async function runV2NativeMeshTick(
       if (unit.kind === 'seat' && unit.seat_id && unit.status === 'completed') {
         seatResults[unit.seat_id] = unit.value as SeatWorkerPassResult
       }
-      if (unit.kind === 'outbox' && unit.status === 'completed') handoff = unit.value
+      if (unit.unit_id === 'outbox:v2-native-internal-handoff' && unit.status === 'completed') handoff = unit.value
+      if (unit.unit_id === 'outbox:v2-delivery-truth' && unit.status === 'completed') deliveryDispatch = unit.value
     }
-    return { seatResults, handoff, supervision: report }
+    return { seatResults, handoff, deliveryDispatch, supervision: report }
   }
 
   const seatResults: Record<string, SeatWorkerPassResult> = {}

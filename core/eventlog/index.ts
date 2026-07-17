@@ -27,6 +27,8 @@ export {
   rebuildActiveTurnProjection,
   outboxView,
   pendingDeliveries,
+  deliveryTruthView,
+  rebuildDeliveryTruthView,
   fanoutParentAggregate,
   threadView,
 } from './views'
@@ -53,6 +55,7 @@ export * from './runtime-binding'
 export * from './seat-supervisor'
 export {
   dispatchOutboxOnce,
+  dispatchV2OutboxOnce,
   recoverDispatcherClaims,
   deliveryNonce,
   PermanentDeliveryError,
@@ -61,7 +64,10 @@ export {
   startProviderInvocation,
   DEFAULT_MAX_DELIVERY_ATTEMPTS,
   type DispatchResult,
+  type V2DispatchResult,
+  type V2OutboxDispatcherOptions,
 } from './outbox'
+export * from './delivery'
 export * from './v2-native-ingress'
 export * from './v2-native-routing'
 export * from './internal-handoff'

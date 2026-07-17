@@ -1,0 +1,30 @@
+schema_version: shirube-cell/v1
+cell_id: CELL-MCP-AUN-K3-DELIVERY-TRUTH-001
+control_source: https://github.com/watchout/agent-comms-mcp/issues/794
+handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989407828
+test_audit_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+sealed_base_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000235031
+registered_adapter_byte_authority_addendum_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
+risk_tier: R4
+goal: Commit only validated provider acknowledgement, durable handoff, typed failure, or delivery-unknown truth while preserving one provider effect per frozen delivery identity.
+primary_responsibility: K3 delivery truth, nonce/invocation-start effect fencing, crash reconciliation, and independently supervised V2 dispatch.
+implementation_boundary: Existing append-only EventLog contracts and dedicated V2 adapters; no schema or migration change.
+verification_boundary: Fake provider, isolated disposable database, replay fixtures, and bounded local benchmark only.
+completes_parent_goal: false
+completion_rule: Exact-head independent audit, distinct scenario verification, owner exact-head merge decision, merge SHA, and post-merge rerun are required; activation remains a separate cell.
+lifecycle_state: implementation_qualification_pass_pending_immutable_head
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Complete K3 implementation and evidence on the sealed base, publish one draft PR, and route its exact head to independent audit and scenario verification.
+  delivery: GitHub exact-head evidence plus direct AUN gate delivery.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989407828
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000235031
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
+  scope:
+    allowed: exact 27-path K3 handoff allowlist including sealed registered adapter catalog digest addendum
+    forbidden: schema migration, activation, shared DB, real provider, V1 traversal, approval, merge, deploy, self-audit
+  deliverable: one draft K3 PR with reproducible exact-head evidence

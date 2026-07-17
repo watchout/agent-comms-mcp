@@ -1,0 +1,32 @@
+schema_version: shirube-audit-checklist/v1
+checklist_id: AUDIT-AUN-K3-DELIVERY-TRUTH-001
+cell_id: CELL-MCP-AUN-K3-DELIVERY-TRUTH-001
+authority_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+allowed_auditors: [codex-audit, discord-auditor]
+forbidden_auditors: [arc, implementation_author]
+exact_head_required: true
+items:
+  - {audit_item_id: K3-AUDIT-001, test_ids: [K3-TC-001, K3-TC-002, K3-TC-003], pass_predicate: provider acknowledgement, durable handoff, and unknown map to distinct exact truth; no synthetic receipt}
+  - {audit_item_id: K3-AUDIT-002, test_ids: [K3-TC-004, K3-TC-005, K3-TC-006], pass_predicate: one nonce/start/effect; collision and Discord 40062 never produce delivered truth}
+  - {audit_item_id: K3-AUDIT-003, test_ids: [K3-TC-007, K3-TC-008, K3-TC-009, K3-TC-010], pass_predicate: all crash boundaries preserve RPO zero and reconciliation appends one CAS terminal}
+  - {audit_item_id: K3-AUDIT-004, test_ids: [K3-TC-011], pass_predicate: internal handoff places one received and one accepted truth with provider and V1 zero}
+  - {audit_item_id: K3-AUDIT-005, test_ids: [K3-TC-012, K3-TC-015], pass_predicate: hung seat cannot block dispatcher or reconciler; A1 p95 added latency at most 100ms; adapters distinct}
+  - {audit_item_id: K3-AUDIT-006, test_ids: [K3-TC-013], pass_predicate: terminal prefix cannot starve pending; poll at most 2000ms; replay byte equality}
+  - {audit_item_id: K3-AUDIT-007, test_ids: [K3-TC-014], pass_predicate: N=4 matrix exact claim, reservation, start, effect, and terminal formulas}
+  - {audit_item_id: K3-AUDIT-008, test_ids: [K3-TC-016], pass_predicate: wrong target, foreign owner, invalid queue, and invalid registration all have zero mutation and zero effect}
+  - {audit_item_id: K3-AUDIT-009, test_ids: [ALL_K3], pass_predicate: exact sealed base/head/tree/path hash; allowed-path drift and schema changes zero}
+  - {audit_item_id: K3-AUDIT-010, test_ids: [ALL_K3], pass_predicate: real provider, network, V1, activation, shared DB, approval, and self-audit effects zero}
+verdict_contract:
+  PASS: every item passes on one exact head with reproducible evidence
+  PASS_WITH_WARN: nonblocking residual risk only; no missing truth, effect, scope, or crash evidence
+  BLOCK: any stale evidence, path drift, duplicate effect, synthetic success, unknown retry, schema change, shared DB, V1/provider effect, or self-audit
+next_action:
+  blocking: true
+  actor: codex-audit or discord-auditor
+  active_function: evidence_audit_gate
+  action: Independently audit the published K3 draft PR exact head without implementing fixes.
+  delivery: durable structured verdict on the K3 draft PR
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+    - exact draft PR head evidence
+  deliverable: exact-head PASS, PASS_WITH_WARN, or BLOCK with complete next_action

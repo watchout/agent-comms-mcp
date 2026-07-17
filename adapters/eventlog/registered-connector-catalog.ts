@@ -67,7 +67,7 @@ const embedded = deepFreeze({
 })
 
 const connectorInstanceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-const adapterBuildDigest = '4d1237a6b080e06711be9ab2db1821563acdfc7e5c7c4794c6bdb3a9aeeb015e'
+const adapterBuildDigest = '4792797fa065b0d7ae1eb4e6e530947c60a8a91fee3d0cbbb463ec9dcab6c371'
 const fixtureManifestDigest = shaBytes(embedded.fixture_manifest)
 const loadedBuildAttestationDigest = shaBytes(embedded.loaded_build_attestation)
 const producerBuildDigest = shaBytes(embedded.producer_build)

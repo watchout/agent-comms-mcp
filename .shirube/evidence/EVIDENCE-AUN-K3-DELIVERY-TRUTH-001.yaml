@@ -1,0 +1,69 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-AUN-K3-DELIVERY-TRUTH-001
+cell_id: CELL-MCP-AUN-K3-DELIVERY-TRUTH-001
+implementation_actor: aun
+not_independent_audit: true
+completes_cell: false
+completes_parent_goal: false
+exact_base_sha: f793b71d44af08b69490bf1e4f80f53493330d40
+exact_base_tree: 48823507df10d2ec7a273d2f50e2f90344c7f5aa
+sealed_base_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000235031
+registered_adapter_byte_authority_addendum_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
+registered_adapter_byte_authority_addendum_sha256: f875b58b6d9fb375ea2aaada90bd4acb80154e49143caafc84dad6d2d00eab99
+validation_state: author_qualification_pass_pending_immutable_head_and_independent_gates
+local_evidence:
+  conformance: 6_pass_0_fail_21_expectations
+  complete_k3_local_suite: 15_pass_4_postgresql_skip_0_fail_60_expectations
+  disposable_postgres16: 16_pass_0_fail_61_expectations
+  registered_loader_focused: 10_pass_1_skip_0_fail_72_expectations
+  full_eventlog_regression: 170_pass_16_skip_0_fail_895_expectations
+  registered_loader_installed_bytes_mismatch_before_addendum: 7
+  registered_loader_installed_bytes_mismatch_after_addendum: 0
+  registered_adapter_build_digest: 4792797fa065b0d7ae1eb4e6e530947c60a8a91fee3d0cbbb463ec9dcab6c371
+  installed_discord_adapter_sha256: 4792797fa065b0d7ae1eb4e6e530947c60a8a91fee3d0cbbb463ec9dcab6c371
+  registered_adapter_bytes_match: true
+  benchmark_A1:
+    pass: true
+    cycles: 100
+    budget_ms: 100
+    p50_added_latency_ms: 0.00045899999999932106
+    p95_added_latency_ms: 0.000542000000002929
+    max_added_latency_ms: 0.04224999999999923
+  changed_implementation_typecheck: 0_errors
+  yaml_parse: 4_pass_0_fail
+  exact_allowed_paths: 27
+  exact_allowed_paths_sha256: 63f91493634066d3b0597ad3bb031508e3379c120f6b65975aa52bdcc8105e65
+  current_changed_paths: 25
+  current_changed_paths_order: exact_allowed_paths_in_order_filtered_to_changed_paths
+  current_changed_paths_serialization: UTF-8_LF_terminated
+  current_changed_paths_sha256: 8244f70fb0aae2685fc5d7df5aa13d7f27861e3c5f61cd9a12ba7b1649fdf6c3
+  blocker_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000592047
+  blocker_queue_id: 128496
+  blocker_message_id: 174387e5-7be9-419f-aa49-9eb463bc2082
+  blocker_resolution_queue_id: 128502
+  blocker_resolution_message_id: a5cc1740-b786-4668-b764-fe71a099bc1a
+  blocker_resolution: SEALED_ADDENDUM_APPLIED_AND_QUALIFIED
+  schema_or_migration_changes: 0
+  shared_or_production_database_mutations: 0
+  real_provider_calls: 0
+  external_network_calls: 0
+  V1_calls: 0
+  activation_mutations: 0
+pending:
+  - final_exact_head_sha_and_tree
+  - exact_head_evidence_receipt
+  - independent_audit_ref
+  - distinct_scenario_verification_ref
+  - owner_exact_head_merge_decision
+  - merge_and_post_merge_rerun
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Create the immutable K3 head, rerun exact-head qualification, publish one draft PR, and route independent gates.
+  delivery: draft PR exact-head evidence plus direct audit and QA gate delivery
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989407828
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
+  deliverable: immutable exact-head implementation and reproducible qualification evidence for independent gates

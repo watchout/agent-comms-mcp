@@ -38,7 +38,15 @@ import {
   type ProviderNonceReservationPayloadV1,
   type DeliveryUnitV1,
   type ReplyDeliveryUnknownPayloadV1,
+  validateDeliveryUnit,
+  type LoadedConnectorRegistrationV1,
 } from './transport-contract'
+import {
+  commitValidatedDeliveryTruth,
+  dispatchV2DeliveryOnce,
+  type V2DeliveryAttemptResult,
+  type V2DeliveryTransportAdapter,
+} from './delivery'
 
 export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
 
@@ -121,6 +129,179 @@ async function nextDeliveryEpoch(db: DbAdapter, replyId: string): Promise<number
     [replyId],
   )
   return row?.max_epoch === null || row?.max_epoch === undefined ? 0 : row.max_epoch + 1
+}
+
+export interface V2DispatchResult extends DispatchResult {
+  skippedNonV2: string[]
+  rejectedAuthority: string[]
+  providerInvocations: number
+}
+
+export interface V2OutboxDispatcherOptions {
+  dispatcherId: string
+  dispatcherInstanceId: string
+  /** A connector-specific dispatcher must never claim another connector's row. */
+  targetConnectorInstanceId: string
+  loadRegistration(unit: DeliveryUnitV1): LoadedConnectorRegistrationV1 | Promise<LoadedConnectorRegistrationV1>
+  maxAttempts?: number
+}
+
+/**
+ * K3 dispatcher. Strict decode, persisted loaded authority, target ownership,
+ * and effect-free request preparation all complete before a claim is written.
+ */
+export async function dispatchV2OutboxOnce(
+  db: DbAdapter,
+  adapter: V2DeliveryTransportAdapter,
+  opts: V2OutboxDispatcherOptions,
+): Promise<V2DispatchResult> {
+  const log = new EventLog(db)
+  const result: V2DispatchResult = {
+    delivered: [],
+    failedRetryable: [],
+    failedPermanent: [],
+    deliveryUnknown: [],
+    lostClaims: [],
+    skippedNonV2: [],
+    rejectedAuthority: [],
+    providerInvocations: 0,
+  }
+
+  for (const row of await pendingDeliveries(db)) {
+    const raw = parseEventPayload<Record<string, unknown>>(row.payload)
+    if (raw.schema_version !== 'aun-delivery-unit/v1') {
+      result.skippedNonV2.push(row.reply_id)
+      continue
+    }
+
+    let unit: DeliveryUnitV1
+    let registration: LoadedConnectorRegistrationV1
+    let prepared: Awaited<ReturnType<V2DeliveryTransportAdapter['prepare']>>
+    try {
+      unit = raw as unknown as DeliveryUnitV1
+      registration = await opts.loadRegistration(unit)
+      validateDeliveryUnit(unit, registration)
+      if (
+        unit.destination.connector_instance_id !== opts.targetConnectorInstanceId ||
+        row.reply_id !== unit.reply_id ||
+        row.turn_id !== unit.turn_id ||
+        row.conversation_id !== unit.conversation_id ||
+        row.seat_id !== unit.sender_seat_id
+      ) {
+        result.rejectedAuthority.push(row.reply_id)
+        continue
+      }
+      prepared = await adapter.prepare(unit, registration)
+      const request = prepared.request
+      if (
+        request.connector_instance_id !== unit.destination.connector_instance_id ||
+        request.provider_request_digest.length !== 64 ||
+        prepared.concrete_dedupe_scope_identity.length !== 64
+      ) throw new Error('prepared request identity differs from delivery authority')
+    } catch {
+      // Pre-claim authority failure is deliberately zero-mutation/zero-effect.
+      result.rejectedAuthority.push(row.reply_id)
+      continue
+    }
+
+    const reservation: ProviderNonceReservationPayloadV1 = {
+      key: {
+        connector_instance_id: unit.destination.connector_instance_id,
+        concrete_dedupe_scope_identity: prepared.concrete_dedupe_scope_identity,
+        provider_nonce: unit.idempotency.provider_nonce,
+      },
+      value: {
+        business_nonce: unit.business_nonce,
+        delivery_digest: unit.idempotency.delivery_digest,
+        adapter_build_digest: unit.capability_authority.adapter_build_digest,
+      },
+    }
+
+    try {
+      await reserveProviderNonce(db, reservation)
+    } catch (error) {
+      if (error instanceof ProviderNonceCollisionError) {
+        // Collision is rejected before claim/provider/terminal mutation.
+        result.rejectedAuthority.push(row.reply_id)
+        continue
+      }
+      throw error
+    }
+
+    const epoch = await nextDeliveryEpoch(db, row.reply_id)
+    let claimEventId: string
+    try {
+      const claim = await log.append({
+        eventId: randomUUID(),
+        eventType: 'reply.delivery_claimed',
+        seatId: opts.dispatcherId,
+        seatInstanceId: opts.dispatcherInstanceId,
+        conversationId: row.conversation_id,
+        correlationId: unit.correlation_id,
+        causationId: row.enqueued_event_id,
+        turnId: row.turn_id,
+        replyId: row.reply_id,
+        claimEpoch: epoch,
+        payload: { kind: 'v2_delivery_truth', delivery_id: unit.delivery_id },
+      })
+      claimEventId = claim.event.event_id
+    } catch (error) {
+      if (error instanceof ClaimLostError) {
+        result.lostClaims.push(row.reply_id)
+        continue
+      }
+      throw error
+    }
+
+    const invocation: ProviderInvocationStartPayloadV1 = {
+      delivery_id: unit.delivery_id,
+      reply_id: unit.reply_id,
+      recipient_seat_id: unit.recipient_seat_id,
+      attempt_ordinal: epoch,
+      provider_nonce: unit.idempotency.provider_nonce,
+      delivery_digest: unit.idempotency.delivery_digest,
+      provider_request_digest: prepared.request.provider_request_digest,
+    }
+    const started = await startProviderInvocation(db, invocation)
+    let attempted: V2DeliveryAttemptResult
+    if (!started.providerInvocationAuthorized) {
+      attempted = {
+        outcome: 'delivery_unknown',
+        request: prepared.request,
+        failure_code: 'PROVIDER_INVOCATION_ALREADY_STARTED',
+      }
+    } else {
+      result.providerInvocations += 1
+      try {
+        attempted = await dispatchV2DeliveryOnce(adapter, prepared, unit, registration)
+      } catch (error) {
+        // Once invocation-start is durable, an exception cannot prove zero
+        // external effect. Preserve unknown truth and require reconciliation.
+        attempted = {
+          outcome: 'delivery_unknown',
+          request: prepared.request,
+          failure_code: error instanceof Error ? error.message : String(error),
+        }
+      }
+    }
+
+    const committed = await commitValidatedDeliveryTruth(db, unit, registration, attempted, {
+      dispatcherId: opts.dispatcherId,
+      dispatcherInstanceId: opts.dispatcherInstanceId,
+      conversationId: row.conversation_id,
+      correlationId: unit.correlation_id,
+      turnId: row.turn_id,
+      claimEventId,
+      claimEpoch: epoch,
+      invocationStart: invocation,
+      invocationStartedEventId: started.eventId,
+    })
+    if (committed.outcome === 'delivered') result.delivered.push(row.reply_id)
+    else if (committed.outcome === 'delivery_unknown') result.deliveryUnknown.push(row.reply_id)
+    else if (committed.outcome === 'failed_retryable') result.failedRetryable.push(row.reply_id)
+    else if (committed.outcome === 'failed_permanent') result.failedPermanent.push(row.reply_id)
+  }
+  return result
 }
 
 /**
