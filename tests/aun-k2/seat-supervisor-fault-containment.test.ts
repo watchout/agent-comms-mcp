@@ -71,6 +71,92 @@ describe('K2 seat supervisor fault containment', () => {
     expect(mutationsAfterClose).toBe(0)
   })
 
+  test('K2-SUPERVISOR-NONCOOPERATIVE-TIMEOUT-001 closes once and reports while an admitted DB operation is hung', async () => {
+    const alpha = adapter('alpha:hung-in-flight')
+    const beta = adapter('beta:healthy')
+    let alphaCloseCalls = 0
+    let alphaExecuteCalls = 0
+    let lateMutations = 0
+    let leakedAlphaDb: DbAdapter | null = null
+    let releaseHung!: () => void
+    let finishHung!: () => void
+    const hung = new Promise<void>(resolve => { releaseHung = resolve })
+    const hungFinished = new Promise<void>(resolve => { finishHung = resolve })
+    alpha.close = async () => {
+      alphaCloseCalls += 1
+      alpha.closed = true
+    }
+    alpha.execute = async () => {
+      alphaExecuteCalls += 1
+      await hung
+      if (!alpha.closed) {
+        lateMutations += 1
+        alpha.mutations.push({ owner: 'alpha', cycle: 1, at: performance.now() })
+      }
+      finishHung()
+      return { rowCount: 0 }
+    }
+
+    const started = performance.now()
+    const guarded = await Promise.race([
+      runSeatSupervisorCycle({
+        units: [
+          {
+            unitId: 'seat:alpha', kind: 'seat', seatId: 'alpha', adapterFactory: async () => alpha,
+            run: async db => {
+              leakedAlphaDb = db
+              await db.execute('SELECT never_settles')
+              return { impossible: true }
+            },
+          },
+          {
+            unitId: 'seat:beta', kind: 'seat', seatId: 'beta', adapterFactory: async () => beta,
+            run: async db => {
+              await db.execute('SELECT $1::text, $2::int, $3::float8', ['beta', 1, performance.now()])
+              return { completed: 1 }
+            },
+          },
+        ],
+        maxConcurrency: 2,
+        unitTimeoutMs: 20,
+        reconnectMaxAttempts: 1,
+        reconnectBaseDelayMs: 1,
+        reconnectMaxDelayMs: 1,
+      }).then(report => ({ kind: 'report' as const, report })),
+      new Promise<{ kind: 'guard' }>(resolve => setTimeout(() => resolve({ kind: 'guard' }), 250)),
+    ])
+
+    expect(guarded.kind).toBe('report')
+    if (guarded.kind !== 'report') throw new Error('supervisor stalled beyond the independent finite guard')
+    const alphaReport = guarded.report.units.find(unit => unit.unit_id === 'seat:alpha')!
+    const betaReport = guarded.report.units.find(unit => unit.unit_id === 'seat:beta')!
+    expect(performance.now() - started).toBeLessThan(250)
+    expect(alphaReport).toMatchObject({
+      status: 'unhealthy_exit', stop_code: 'UNIT_TIMEOUT', closed_adapters: 1,
+    })
+    expect(betaReport).toMatchObject({ status: 'completed', stop_code: null, closed_adapters: 1 })
+    expect(alphaCloseCalls).toBe(1)
+    expect(alphaExecuteCalls).toBe(1)
+    expect(alpha.mutations).toHaveLength(0)
+    expect(beta.mutations).toHaveLength(1)
+    expect(beta.mutations[0].owner).toBe('beta')
+
+    let lateAuthorityReacquisitions = 0
+    try {
+      await leakedAlphaDb!.execute('UPDATE forbidden_after_timeout SET value = 1')
+      lateAuthorityReacquisitions += 1
+    } catch {}
+    expect(lateAuthorityReacquisitions).toBe(0)
+    expect(alphaExecuteCalls).toBe(1)
+
+    releaseHung()
+    await hungFinished
+    expect(lateMutations).toBe(0)
+    expect(alpha.mutations).toHaveLength(0)
+    expect(alphaCloseCalls).toBe(1)
+    expect(beta.mutations.every(mutation => mutation.owner === 'beta')).toBeTrue()
+  })
+
   test('K2-TC-009 hung alpha does not delay beta or outbox deterministic cycles', async () => {
     const instances = new Map<string, FakeAdapter[]>()
     const started = performance.now()

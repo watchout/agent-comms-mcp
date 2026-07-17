@@ -43,6 +43,23 @@ environment_guards:
   model_runtime: fake_only
   provider_dispatch: disabled
   V1_mode: observe_only_no_traversal
+bounded_remediation:
+  artifact_id: CH-AUN-K2-INFLIGHT-DB-TIMEOUT-REMEDIATION-20260717-001
+  published_handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997670757
+  blocking_audit_ref: https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4997515597
+  finding_id: K2-SUPERVISOR-NONCOOPERATIVE-TIMEOUT-001
+  exact_start_head_sha: 3e7a982be2d625c9eac600ce11f381cd7dddcd4f
+  exact_start_head_tree: 9da308f451139f5612ed3a15ecef30fc1b15d35d
+  exact_allowed_paths_in_order:
+    - core/eventlog/seat-supervisor.ts
+    - tests/aun-k2/seat-supervisor-fault-containment.test.ts
+    - .shirube/control-handoffs/CH-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+    - .shirube/evidence/EVIDENCE-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+  contract:
+    - synchronous DB authority revocation never awaits already-admitted work
+    - one supervisor-owned idempotent raw-adapter close path is used by unit and supervisor cleanup
+    - timeout truth is returned only after the one close path completes
+    - late settlement restores no authority and produces zero late or cross-seat mutation
 forbidden_operations:
   - live daemon, LaunchAgent, tmux, scheduler, runtime, or host supervisor mutation
   - real model or provider invocation
@@ -53,9 +70,9 @@ next_action:
   blocking: false
   actor: aun
   active_function: implementation_executor
-  action: Continue K2-01 through K2-08 without another control round-trip.
-  delivery: draft PR and exact-head GitHub evidence
+  action: Commit and publish only the bounded four-path timeout remediation, then deliver fresh exact-head evidence to independent audit and scenario verification.
+  delivery: existing draft PR #876, exact-head GitHub evidence, and direct AUN gate deliveries
   input_refs:
-    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
-    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
-  deliverable: exact K2 draft PR and independent gate deliveries
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997670757
+    - https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4997515597
+  deliverable: fresh immutable K2 remediation head and two independent gate delivery receipts

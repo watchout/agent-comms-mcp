@@ -60,29 +60,34 @@ class RevokedUnitAdapterError extends Error {
 
 interface RevocableAdapterBoundary {
   adapter: DbAdapter
-  revoke(): Promise<void>
+  revoke(): void
+  close(): Promise<void>
 }
 
 /**
  * Gives one supervision attempt a revocable capability instead of the raw
- * adapter. Revocation is synchronous at the authority boundary, then waits
- * for operations already admitted by that boundary to settle. Detached or
- * non-cooperative unit work can therefore keep computing, but cannot issue a
- * late query/mutation or retain a transaction-capable adapter after timeout.
+ * adapter. Revocation is synchronous at the authority boundary and never
+ * waits for already-admitted work. Raw-adapter cleanup is supervisor-owned
+ * and idempotent, so timeout can cancel the connection exactly once without
+ * giving detached or non-cooperative work any late DB authority.
  */
 function revocableAdapter(raw: DbAdapter): RevocableAdapterBoundary {
   let active = true
-  const inFlight = new Set<Promise<unknown>>()
+  let closePromise: Promise<void> | null = null
+
+  const revoke = () => {
+    active = false
+  }
+
+  const close = () => {
+    revoke()
+    if (!closePromise) closePromise = Promise.resolve().then(() => raw.close())
+    return closePromise
+  }
 
   const admitted = <T>(operation: () => Promise<T>): Promise<T> => {
     if (!active) return Promise.reject(new RevokedUnitAdapterError('unit DB adapter authority has been revoked'))
-    const pending = operation()
-    inFlight.add(pending)
-    pending.then(
-      () => { inFlight.delete(pending) },
-      () => { inFlight.delete(pending) },
-    )
-    return pending
+    return operation()
   }
 
   const wrap = (target: DbAdapter): DbAdapter => {
@@ -96,12 +101,10 @@ function revocableAdapter(raw: DbAdapter): RevocableAdapterBoundary {
         () => target.transaction(tx => fn(wrap(tx))),
       ),
       close: async () => {
-        // A connection-loss fixture/driver may close its own connection before
-        // surfacing ECONNRESET. Revoke first so that adapter cannot be reused;
-        // the supervisor still owns replacement and idempotent final cleanup.
-        if (!active) throw new RevokedUnitAdapterError('unit DB adapter authority has been revoked')
-        active = false
-        await target.close()
+        if (!active && !closePromise) {
+          throw new RevokedUnitAdapterError('unit DB adapter authority has been revoked')
+        }
+        await close()
       },
     }
     if (target.listen) {
@@ -115,10 +118,8 @@ function revocableAdapter(raw: DbAdapter): RevocableAdapterBoundary {
 
   return {
     adapter: wrap(raw),
-    async revoke() {
-      active = false
-      while (inFlight.size > 0) await Promise.allSettled([...inFlight])
-    },
+    revoke,
+    close,
   }
 }
 
@@ -142,7 +143,7 @@ function jitter(seed: number, attempt: number, ceiling: number): number {
 async function runWithTimeout<T>(
   run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
-  revoke: () => Promise<void>,
+  revoke: () => void,
 ): Promise<T> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -156,11 +157,11 @@ async function runWithTimeout<T>(
     timer = setTimeout(() => {
       timeoutTriggered = true
       const error = new UnitTimeoutError(`unit exceeded ${timeoutMs}ms`)
-      // revoke() flips the capability synchronously before its first await.
-      // Abort then lets cooperative unit/runtime code terminate promptly.
-      const drained = revoke()
+      // Revoke before abort delivery and reject without awaiting work that may
+      // never settle. The caller closes the raw adapter before reporting.
+      revoke()
       controller.abort(error)
-      drained.then(() => reject(error), reject)
+      reject(error)
     }, timeoutMs)
   })
   try {
@@ -186,6 +187,20 @@ export async function runWithReconnect<T>(input: {
   for (let attempt = 1; attempt <= input.maxAttempts; attempt++) {
     let db: DbAdapter | null = null
     let boundary: RevocableAdapterBoundary | null = null
+    let closeCounted = false
+    const closeAttempt = async () => {
+      if (!boundary) return
+      if (closeCounted) {
+        await boundary.close()
+        return
+      }
+      closeCounted = true
+      try {
+        await boundary.close()
+      } finally {
+        closed += 1
+      }
+    }
     try {
       db = await input.unit.adapterFactory()
       adapters += 1
@@ -195,9 +210,8 @@ export async function runWithReconnect<T>(input: {
         input.timeoutMs,
         () => boundary!.revoke(),
       )
-      await boundary.revoke()
-      await db.close()
-      closed += 1
+      boundary.revoke()
+      await closeAttempt()
       return {
         unit_id: input.unit.unitId,
         kind: input.unit.kind,
@@ -213,8 +227,10 @@ export async function runWithReconnect<T>(input: {
       }
     } catch (error) {
       lastError = error
-      if (boundary) await boundary.revoke()
-      if (db) {
+      if (boundary) {
+        boundary.revoke()
+        await closeAttempt()
+      } else if (db) {
         try {
           await db.close()
         } finally {
