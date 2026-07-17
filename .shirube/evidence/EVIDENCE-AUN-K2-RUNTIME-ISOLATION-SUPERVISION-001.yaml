@@ -1,0 +1,121 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+cell_id: CELL-MCP-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+implementation_actor: aun
+not_independent_audit: true
+completes_cell: false
+completes_parent_goal: false
+exact_base_sha: bd1eba7c5806b32124535ec8db6649cd85c21fbd
+exact_base_tree: 0ee19ee8898d6a4b8ae9b1f3e7acb036232b74be
+migration_decision_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
+head_evidence_source: bounded_inflight_db_timeout_remediation_commit_f8cd22bb83a74f1e71843f265f64436747802f2d
+validation_state: author_qualification_pass_fresh_exact_head_and_independent_gates_pending
+remediation_authority:
+  original_control_handoff: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
+  terminal_audit_block: https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4996664490
+  bounded_handoff_request: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4996745189
+  persistent_block: https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4997515597
+  fresh_bounded_handoff_request: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997605157
+  fresh_bounded_handoff: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997670757
+  original_handoff_next_action: Continue K2-01 through K2-08 without another control round-trip.
+remediation_qualification_git:
+  source_sha: 9dba17e33d0fe92b4d2d6ec53ae5a4d33a7a3b97
+  source_tree: 0586e88373f6c49e6d1417414f2cc0b06c4a9b75
+bounded_inflight_db_timeout_qualification_git:
+  source_sha: f8cd22bb83a74f1e71843f265f64436747802f2d
+  source_tree: 4de72ab8981c406f100b129f755cbbf15ce59228
+  parent_sha: 3e7a982be2d625c9eac600ce11f381cd7dddcd4f
+  exact_changed_paths: 4
+  changed_paths_sha256: c615d97ac1ef6f8dc419bc6bf7e3c8de9261a2ed97d04e7b5599ab23b05928cc
+local_evidence:
+  unit_and_runtime_isolation: 12_pass_0_fail_117_expectations
+  focused_supervisor_fault_containment: 4_pass_0_fail_43_expectations
+  postgres16_behavior_and_supervision: 10_pass_0_fail_99_expectations
+  complete_k2_suite: 22_pass_0_fail_216_expectations
+  full_eventlog_k1_k2_regression: 161_pass_6_k1_postgresql_skip_0_fail_891_expectations
+  changed_implementation_typecheck: 0_errors
+  changed_implementation_typecheck_command: >-
+    bunx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler
+    --lib ES2022,DOM --types node --skipLibCheck core/eventlog/runtimes.ts
+    core/eventlog/seat-supervisor.ts core/eventlog/worker.ts benchmarks/aun-k2/profiles.ts
+    benchmarks/aun-k2/harness.ts benchmarks/aun-k2/cli.ts
+  codex_restriction_config_parse: PASS_no_model_invocation
+  changed_entry_bundle: PASS
+  yaml_parse: 4_pass_0_fail
+  benchmark_plans: A0_A1_A2_pass_plan_only_behavior_not_proven
+  benchmark_A0_harness_smoke: PASS_uncommitted_smoke_not_exact_head_evidence
+  benchmark_A1_postgresql16_qualification:
+    result: PASS
+    behavior_proven: true
+    source_sha: 9dba17e33d0fe92b4d2d6ec53ae5a4d33a7a3b97
+    source_tree: 0586e88373f6c49e6d1417414f2cc0b06c4a9b75
+    database_identity: aun_k2_fixture_pr876_a1
+    database_version: 16.13 (Debian 16.13-1.pgdg13+1)
+    actual_query_count: 902
+    safety_poll_query_count: 900
+    measurement_dimensions_present: true
+    connection_closed: true
+    fixture_container_removed: true
+    config_digest: f1ea9fa5d6e9f31d30daa8bfdd712686bbfa8fb76412d796da5df6589bd087be
+    policy_digest: 624ee65f68b564d7c7bd078e51c3d8e3812038a7c96ea49d1828e8268f57eacb
+    plan_digest: f8f58e66593da5e9b18aed2ae7cd9440ecdba31b4f59e52f9cecd29633b129e1
+    result_digest: 5a11f7c1546e594f6cf4265c654a5d0c254b804719ac174b38300433aba1ac92
+    repetitions:
+      - {repetition: 1, elapsed_ms: 600002.1907080001, cpu_percent: 0.22995599372260817, poll_qps: 0.4999981744166655, rss_mib: 40.390625, queries: 300, passed: true}
+      - {repetition: 2, elapsed_ms: 600002.83775, cpu_percent: 0.23421205894121624, poll_qps: 0.49999763521951784, rss_mib: 35.921875, queries: 300, passed: true}
+      - {repetition: 3, elapsed_ms: 600003.682208, cpu_percent: 0.2562549273600941, poll_qps: 0.4999969315121647, rss_mib: 37.125, queries: 300, passed: true}
+  guarded_database_identity: aun_k2_fixture_pr876_test
+  guarded_database_version: PostgreSQL_16.13
+  guarded_regression_database_identities:
+    - aun_k2_fixture_pr876_test
+    - aun_k2_fixture_pr876_regression_test
+  disposable_container_cleanup: PASS_removed_after_each_run
+  residual_additional_aun_k2_fixture_databases: 0
+  shared_or_production_database_mutations: 0
+  real_model_calls: 0
+  provider_calls: 0
+  V1_calls: 0
+  runtime_or_supervisor_activation: 0
+command_results_by_test_id:
+  K2-TC-001: PASS_digest_884dad9171c1800576b689fec0ec336a04322d412583a960a80d74904e535cd5
+  K2-TC-002: PASS_invalid_acceptance_0
+  K2-TC-003: PASS_claim_model_terminal_projection_mutation_0_all_axes
+  K2-TC-004: PASS_child_spawns_0
+  K2-TC-005: PASS_exact_cwd_env_tools_sandbox_and_actual_codex_argv_restrictions
+  K2-TC-006: PASS_typed_timeout_model_success_0
+  K2-TC-007: PASS_exact_event_order_completion_reply_provider_V1_0_epoch_fence_plus_1
+  K2-TC-008: PASS_stale_accepted_0_terminal_winner_1_duplicate_0
+  K2-TC-009: PASS_beta_100_outbox_100_cross_mutation_0_added_latency_at_most_100ms
+  K2-SUPERVISOR-NONCOOPERATIVE-TIMEOUT-001: AUTHOR_PASS_terminal_approximately_22ms_under_250ms_guard_close_calls_1_late_mutations_0_cross_seat_mutations_0_late_authority_reacquisition_0
+  K2-TC-010: PASS_alpha_budget_3_beta_restarts_0_global_exit_false
+  K2-TC-011: PASS_RTO_below_30s_RPO_0_adapters_2_completed_1_duplicates_0
+  K2-TC-012: PASS_up_down_up_idempotent_replay_equal_unrepresentable_down_rejected
+  K2-TC-013: PASS_notify_consumed_false_intended_claimed_poll_below_2000ms
+  K2-TC-014: PASS_qualification_PG16_actual_queries_902_three_A1_repetitions_all_thresholds
+remediation_findings:
+  K2-TOOL-LIMIT-ENFORCEMENT-001: RESOLVED_qualification
+  K2-SUPERVISOR-NONCOOPERATIVE-TIMEOUT-001: AUTHOR_QUALIFICATION_PASS_INDEPENDENT_REAUDIT_REQUIRED
+  K2-TC014-MEASUREMENT-TRUTH-001: RESOLVED_qualification
+  K2-EVIDENCE-TYPECHECK-001: RESOLVED_qualification
+binding_field_readback:
+  exact_handoff_and_fixture_resolved_fields: 14
+  separately_observed_checkout_dirty_axis: 1
+  invented_fields: 0
+pending:
+  - final_exact_head_sha_and_tree_after_evidence_commit
+  - ordered_changed_paths_and_sha256
+  - exact_final_head_A1_benchmark_result_digest
+  - independent_audit_ref
+  - distinct_scenario_verification_ref
+  - owner_exact_head_merge_decision
+  - merge_and_post_merge_rerun
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Commit the bounded timeout remediation and evidence, run the same A1 receipt on the clean final exact head, then directly deliver independent audit and scenario verification.
+  delivery: draft PR exact-head evidence comment
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997670757
+    - https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4997515597
+  deliverable: reproducible exact-head machine evidence

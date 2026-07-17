@@ -20,7 +20,12 @@ import {
   type ClaimedTurn,
   type QueueViewRow,
   type StoredEvent,
+  type TurnAttemptFailedPayloadV1,
+  type TurnAttemptFailureCode,
+  type TurnBlockedPayloadV1,
+  type TurnDeadLetteredPayloadV1,
   type TurnOutcome,
+  type TurnRetryScheduledPayloadV1,
 } from './types'
 
 export class StaleClaimError extends Error {}
@@ -38,6 +43,14 @@ export type TurnMutationBoundary =
   | 'after_turn_presented'
   | 'before_turn_completed'
   | 'after_turn_completed'
+  | 'before_turn_attempt_failed'
+  | 'after_turn_attempt_failed'
+  | 'before_turn_retry_scheduled'
+  | 'after_turn_retry_scheduled'
+  | 'before_turn_blocked'
+  | 'after_turn_blocked'
+  | 'before_turn_dead_lettered'
+  | 'after_turn_dead_lettered'
   | 'before_reply_enqueued'
   | 'after_reply_enqueued'
   | 'before_turn_commit'
@@ -135,8 +148,47 @@ async function claimNextTurnPostgres(
   },
 ): Promise<ClaimedTurn | null> {
   return db.transaction(async tx => {
+    const projectionVersion = await tx.queryOne<{ has_k2: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_schema=current_schema()
+            AND table_name='event_log_turn_projection'
+            AND column_name='available_at'
+       ) AS has_k2`,
+    )
+    const k2Projection = projectionVersion?.has_k2 === true
     const candidate = await tx.queryOne<ActiveTurnProjectionRow>(
-      `SELECT p.*
+      k2Projection
+        ? `SELECT p.*
+         FROM event_log_turn_projection p
+        WHERE p.seat_id = $1
+          AND (
+            p.availability = 'available'
+            OR (
+              p.availability = 'retry_wait'
+              AND p.available_at IS NOT NULL
+              AND p.available_at <= transaction_timestamp()
+            )
+            OR (
+              p.availability = 'claimed'
+              AND p.claim_profile = 'postgres_multi_worker_v1'
+              AND p.lease_expires_at IS NOT NULL
+              AND p.lease_expires_at <= transaction_timestamp()
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM event_log_turn_projection earlier
+             WHERE earlier.seat_id = p.seat_id
+               AND earlier.conversation_id = p.conversation_id
+               AND p.conversation_id IS NOT NULL
+               AND earlier.availability NOT IN ('completed', 'blocked', 'dead_lettered')
+               AND earlier.received_seq < p.received_seq
+          )
+        ORDER BY p.priority DESC, p.received_seq ASC
+        LIMIT 1
+        FOR UPDATE OF p SKIP LOCKED`
+        : `SELECT p.*
          FROM event_log_turn_projection p
         WHERE p.seat_id = $1
           AND (
@@ -589,6 +641,194 @@ export async function completeTurn(db: DbAdapter, input: CompleteTurnInput) {
     }
     await input.mutationFence?.('before_turn_commit')
     return { completion, replies }
+  })
+}
+
+interface FencedAttemptInput {
+  turnId: string
+  seatId: string
+  seatInstanceId: string
+  claimEventId: string
+  claimEpoch: number
+  fencingToken: number
+  conversationId?: string | null
+  correlationId?: string | null
+  mutationFence?: TurnMutationFence
+}
+
+async function requireFencedAttempt(
+  tx: DbAdapter,
+  input: FencedAttemptInput,
+): Promise<StoredEvent> {
+  if (!Number.isSafeInteger(input.claimEpoch) || input.claimEpoch < 0) {
+    throw new StaleClaimError('claim epoch is required for an attempt mutation')
+  }
+  if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1) {
+    throw new StaleClaimError('fencing token is required for an attempt mutation')
+  }
+  const claim = await assertActiveClaim(tx, input.turnId, input.claimEventId, {
+    seatId: input.seatId,
+    seatInstanceId: input.seatInstanceId,
+    fencingToken: input.fencingToken,
+  })
+  if (Number(claim.claim_epoch) !== input.claimEpoch) {
+    throw new StaleClaimError(`claim ${input.claimEventId} epoch differs`)
+  }
+  return claim
+}
+
+export async function failTurnAttempt(
+  db: DbAdapter,
+  input: FencedAttemptInput & {
+    failureCode: TurnAttemptFailureCode
+    failureSummary: string
+    retryable: boolean
+  },
+) {
+  return db.transaction(async tx => {
+    await requireFencedAttempt(tx, input)
+    await input.mutationFence?.('before_turn_attempt_failed')
+    const payload: TurnAttemptFailedPayloadV1 = {
+      schema_version: 'aun-turn-attempt-failed/v1',
+      failure_code: input.failureCode,
+      failure_summary: input.failureSummary.slice(0, 2000),
+      retryable: input.retryable,
+      fencing_token: input.fencingToken,
+    }
+    const result = await new EventLog(tx).append({
+      eventId: `attempt-failed:${input.turnId}:${input.claimEpoch}`,
+      eventType: 'turn.attempt_failed',
+      seatId: input.seatId,
+      seatInstanceId: input.seatInstanceId,
+      conversationId: input.conversationId ?? null,
+      correlationId: input.correlationId ?? null,
+      causationId: input.claimEventId,
+      turnId: input.turnId,
+      claimEpoch: input.claimEpoch,
+      payload,
+    }, tx)
+    await input.mutationFence?.('after_turn_attempt_failed')
+    return result
+  })
+}
+
+export async function scheduleTurnRetry(
+  db: DbAdapter,
+  input: FencedAttemptInput & {
+    failureEventId: string
+    availableAt: string
+    backoffMs: number
+  },
+) {
+  if (!Number.isSafeInteger(input.backoffMs) || input.backoffMs < 0) {
+    throw new RangeError('backoffMs must be a nonnegative safe integer')
+  }
+  if (!Number.isFinite(Date.parse(input.availableAt))) throw new RangeError('availableAt must be an RFC3339 timestamp')
+  return db.transaction(async tx => {
+    await requireFencedAttempt(tx, input)
+    const failure = await tx.queryOne<StoredEvent>(
+      `SELECT * FROM event_log
+        WHERE event_id=$1 AND event_type='turn.attempt_failed' AND turn_id=$2
+          AND causation_id=$3 AND claim_epoch=$4`,
+      [input.failureEventId, input.turnId, input.claimEventId, input.claimEpoch],
+    )
+    if (!failure) throw new StaleClaimError('retry schedule does not bind the active attempt failure')
+    await input.mutationFence?.('before_turn_retry_scheduled')
+    const payload: TurnRetryScheduledPayloadV1 = {
+      schema_version: 'aun-turn-retry-scheduled/v1',
+      failure_event_id: input.failureEventId,
+      available_at: input.availableAt,
+      backoff_ms: input.backoffMs,
+      fencing_token: input.fencingToken,
+    }
+    const scheduled = await new EventLog(tx).append({
+      eventId: `retry-scheduled:${input.turnId}:${input.claimEpoch}`,
+      eventType: 'turn.retry_scheduled',
+      seatId: input.seatId,
+      seatInstanceId: input.seatInstanceId,
+      conversationId: input.conversationId ?? null,
+      correlationId: input.correlationId ?? null,
+      causationId: input.failureEventId,
+      turnId: input.turnId,
+      claimEpoch: input.claimEpoch,
+      payload,
+    }, tx)
+    await input.mutationFence?.('after_turn_retry_scheduled')
+    const released = await new EventLog(tx).append({
+      eventId: `release:${input.turnId}:${input.claimEpoch}`,
+      eventType: 'turn.claim_released',
+      seatId: input.seatId,
+      seatInstanceId: input.seatInstanceId,
+      causationId: input.claimEventId,
+      turnId: input.turnId,
+      claimEpoch: input.claimEpoch,
+      payload: { reason: 'retry_scheduled', fencing_token: input.fencingToken },
+    }, tx)
+    return { scheduled, released }
+  })
+}
+
+export async function blockTurn(
+  db: DbAdapter,
+  input: FencedAttemptInput & { reasonCode: string; reasonSummary: string },
+) {
+  return db.transaction(async tx => {
+    await requireFencedAttempt(tx, input)
+    await input.mutationFence?.('before_turn_blocked')
+    const payload: TurnBlockedPayloadV1 = {
+      schema_version: 'aun-turn-blocked/v1',
+      reason_code: input.reasonCode,
+      reason_summary: input.reasonSummary.slice(0, 2000),
+      fencing_token: input.fencingToken,
+    }
+    const result = await new EventLog(tx).append({
+      eventId: `blocked:${input.turnId}:${input.claimEpoch}`,
+      eventType: 'turn.blocked',
+      seatId: input.seatId,
+      seatInstanceId: input.seatInstanceId,
+      conversationId: input.conversationId ?? null,
+      correlationId: input.correlationId ?? null,
+      causationId: input.claimEventId,
+      turnId: input.turnId,
+      claimEpoch: input.claimEpoch,
+      payload,
+    }, tx)
+    await input.mutationFence?.('after_turn_blocked')
+    return result
+  })
+}
+
+export async function deadLetterTurn(
+  db: DbAdapter,
+  input: FencedAttemptInput & { reasonCode: string; reasonSummary: string; attemptCount: number },
+) {
+  if (!Number.isSafeInteger(input.attemptCount) || input.attemptCount < 1) {
+    throw new RangeError('attemptCount must be a positive safe integer')
+  }
+  return db.transaction(async tx => {
+    await requireFencedAttempt(tx, input)
+    await input.mutationFence?.('before_turn_dead_lettered')
+    const payload: TurnDeadLetteredPayloadV1 = {
+      schema_version: 'aun-turn-dead-lettered/v1',
+      reason_code: input.reasonCode,
+      reason_summary: input.reasonSummary.slice(0, 2000),
+      attempt_count: input.attemptCount,
+      fencing_token: input.fencingToken,
+    }
+    const result = await new EventLog(tx).append({
+      eventId: `dead-lettered:${input.turnId}:${input.claimEpoch}`,
+      eventType: 'turn.dead_lettered',
+      seatId: input.seatId,
+      seatInstanceId: input.seatInstanceId,
+      conversationId: input.conversationId ?? null,
+      correlationId: input.correlationId ?? null,
+      causationId: input.claimEventId,
+      turnId: input.turnId,
+      claimEpoch: input.claimEpoch,
+      payload,
+    }, tx)
+    await input.mutationFence?.('after_turn_dead_lettered')
+    return result
   })
 }
 

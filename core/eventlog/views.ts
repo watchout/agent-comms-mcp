@@ -130,6 +130,64 @@ export async function openTurnCount(
  * (freely claimable by seat pools).
  */
 export async function claimableTurns(db: DbAdapter, seatId: string): Promise<QueueViewRow[]> {
+  if (db.dialect === 'postgres') {
+    const projectionVersion = await db.queryOne<{ has_k2: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_schema=current_schema()
+            AND table_name='event_log_turn_projection'
+            AND column_name='available_at'
+       ) AS has_k2`,
+    )
+    const k2Projection = projectionVersion?.has_k2 === true
+    const rows = await db.query<ActiveTurnProjectionRow>(
+      k2Projection
+        ? `SELECT p.*
+         FROM event_log_turn_projection p
+        WHERE p.seat_id=$1
+          AND (
+            p.availability='available'
+            OR (p.availability='retry_wait' AND p.available_at IS NOT NULL AND p.available_at <= transaction_timestamp())
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_log_turn_projection earlier
+             WHERE earlier.seat_id=p.seat_id
+               AND earlier.conversation_id=p.conversation_id
+               AND p.conversation_id IS NOT NULL
+               AND earlier.availability NOT IN ('completed','blocked','dead_lettered')
+               AND earlier.received_seq < p.received_seq
+          )
+        ORDER BY p.priority DESC, p.available_at ASC NULLS FIRST, p.received_seq ASC`
+        : `SELECT p.*
+         FROM event_log_turn_projection p
+        WHERE p.seat_id=$1
+          AND p.availability='available'
+          AND NOT EXISTS (
+            SELECT 1 FROM event_log_turn_projection earlier
+             WHERE earlier.seat_id=p.seat_id
+               AND earlier.conversation_id=p.conversation_id
+               AND p.conversation_id IS NOT NULL
+               AND earlier.availability <> 'completed'
+               AND earlier.received_seq < p.received_seq
+          )
+        ORDER BY p.priority DESC, p.received_seq ASC`,
+      [seatId],
+    )
+    return rows.map(row => ({
+      turn_id: row.turn_id,
+      seat_id: row.seat_id,
+      conversation_id: row.conversation_id,
+      received_seq: Number(row.received_seq),
+      received_event_id: row.received_event_id,
+      received_at: row.received_at,
+      message_id: row.message_id,
+      claim_event_id: null,
+      claim_epoch: null,
+      claimed_by_seat: null,
+      claimed_by_instance: null,
+      claim_seq: null,
+    }))
+  }
   const rows = await inboxView(db, seatId)
   const earliestOpenByConversation = new Map<string, number>()
   for (const row of rows) {
@@ -153,6 +211,10 @@ function normalizeActiveTurnProjectionRow(row: ActiveTurnProjectionRow): ActiveT
     priority: Number(row.priority),
     claim_epoch: row.claim_epoch === null ? null : Number(row.claim_epoch),
     fencing_token: row.fencing_token === null ? null : Number(row.fencing_token),
+    available_at: row.available_at ?? null,
+    attempt_count: Number(row.attempt_count ?? 0),
+    terminal_reason: row.terminal_reason ?? null,
+    last_failure_code: row.last_failure_code ?? null,
     updated_seq: Number(row.updated_seq),
   }
 }

@@ -1,0 +1,78 @@
+schema_version: shirube-v3/control_handoff/v1
+artifact_id: CH-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-20260716-002
+cell_id: CELL-MCP-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+published_handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989385136
+published_test_audit_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989397972
+sealed_base_owner_decision_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4990999495
+execution_context:
+  agent_id: aun
+  active_function: implementation_executor
+  base_commit: bd1eba7c5806b32124535ec8db6649cd85c21fbd
+  base_tree: 0ee19ee8898d6a4b8ae9b1f3e7acb036232b74be
+  branch_name: agent/aun-k2-runtime-isolation-supervision-20260716
+  activation: false
+exact_allowed_paths_in_order:
+  - core/eventlog/runtime-binding.ts
+  - core/eventlog/runtimes.ts
+  - core/eventlog/types.ts
+  - core/eventlog/turns.ts
+  - core/eventlog/views.ts
+  - core/eventlog/seat-supervisor.ts
+  - core/eventlog/worker.ts
+  - core/eventlog/index.ts
+  - db/migrations/2026-07-16-aun-k2-runtime-supervision.up.sql
+  - db/migrations/2026-07-16-aun-k2-runtime-supervision.down.sql
+  - tests/aun-k2/fixtures/runtime-binding-valid-v1.json
+  - tests/aun-k2/runtime-binding.test.ts
+  - tests/aun-k2/runtime-adapter-isolation.test.ts
+  - tests/aun-k2/runtime-timeout-retry.test.ts
+  - tests/aun-k2/seat-supervisor-fault-containment.test.ts
+  - tests/aun-k2/database-reconnect.test.ts
+  - tests/aun-k2/migration-roundtrip.test.ts
+  - benchmarks/aun-k2/profiles.ts
+  - benchmarks/aun-k2/harness.ts
+  - benchmarks/aun-k2/cli.ts
+  - .shirube/cells/CELL-MCP-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+  - .shirube/control-handoffs/CH-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+  - .shirube/audit-checklists/AUDIT-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+  - .shirube/evidence/EVIDENCE-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+environment_guards:
+  AUN_K2_DB_SCOPE: isolated_disposable_fixture
+  database_url_source: AUN_K2_TEST_DATABASE_URL
+  database_name_prefix: aun_k2_fixture_
+  model_runtime: fake_only
+  provider_dispatch: disabled
+  V1_mode: observe_only_no_traversal
+bounded_remediation:
+  artifact_id: CH-AUN-K2-INFLIGHT-DB-TIMEOUT-REMEDIATION-20260717-001
+  published_handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997670757
+  blocking_audit_ref: https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4997515597
+  finding_id: K2-SUPERVISOR-NONCOOPERATIVE-TIMEOUT-001
+  exact_start_head_sha: 3e7a982be2d625c9eac600ce11f381cd7dddcd4f
+  exact_start_head_tree: 9da308f451139f5612ed3a15ecef30fc1b15d35d
+  exact_allowed_paths_in_order:
+    - core/eventlog/seat-supervisor.ts
+    - tests/aun-k2/seat-supervisor-fault-containment.test.ts
+    - .shirube/control-handoffs/CH-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+    - .shirube/evidence/EVIDENCE-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001.yaml
+  contract:
+    - synchronous DB authority revocation never awaits already-admitted work
+    - one supervisor-owned idempotent raw-adapter close path is used by unit and supervisor cleanup
+    - timeout truth is returned only after the one close path completes
+    - late settlement restores no authority and produces zero late or cross-seat mutation
+forbidden_operations:
+  - live daemon, LaunchAgent, tmux, scheduler, runtime, or host supervisor mutation
+  - real model or provider invocation
+  - production, staging, shared, or pre-existing database DDL/DML
+  - V1 import, receive, close, send, notify, or queue traversal
+  - approval, ready-for-review, merge, deploy, activation, or self-audit
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Commit and publish only the bounded four-path timeout remediation, then deliver fresh exact-head evidence to independent audit and scenario verification.
+  delivery: existing draft PR #876, exact-head GitHub evidence, and direct AUN gate deliveries
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4997670757
+    - https://github.com/watchout/agent-comms-mcp/pull/876#issuecomment-4997515597
+  deliverable: fresh immutable K2 remediation head and two independent gate delivery receipts

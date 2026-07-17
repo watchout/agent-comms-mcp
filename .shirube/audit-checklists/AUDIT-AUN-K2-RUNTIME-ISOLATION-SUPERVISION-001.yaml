@@ -1,0 +1,32 @@
+schema_version: shirube-audit-checklist/v1
+checklist_id: AUDIT-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+cell_id: CELL-MCP-AUN-K2-RUNTIME-ISOLATION-SUPERVISION-001
+authority_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989397972
+allowed_auditors: [codex-audit, discord-auditor]
+forbidden_auditors: [arc, implementation_author]
+exact_head_required: true
+items:
+  - {audit_item_id: K2-AUDIT-001, requirement_id: AUN-K2-REQ-001, test_ids: [K2-TC-001, K2-TC-002], pass_predicate: exact binding keys and canonical digest; invalid acceptance zero}
+  - {audit_item_id: K2-AUDIT-002, requirement_id: AUN-K2-REQ-002, test_ids: [K2-TC-003, K2-TC-004], pass_predicate: drift or unknown engine yields zero claim, spawn, event, and model mutation}
+  - {audit_item_id: K2-AUDIT-003, requirement_id: AUN-K2-REQ-003, test_ids: [K2-TC-005, K2-TC-006], pass_predicate: exact cwd/env/tool/sandbox and timeout completion zero}
+  - {audit_item_id: K2-AUDIT-004, requirement_id: AUN-K2-REQ-006, test_ids: [K2-TC-007, K2-TC-008], pass_predicate: exact failure event order; stale accepted zero; epoch and fence increment one; duplicate terminal zero}
+  - {audit_item_id: K2-AUDIT-005, requirement_id: AUN-K2-REQ-004, test_ids: [K2-TC-009, K2-TC-010], pass_predicate: independent adapters; hung-seat added p95 at most 100ms; cross-seat mutation zero}
+  - {audit_item_id: K2-AUDIT-006, requirement_id: AUN-K2-REQ-005, test_ids: [K2-TC-011, K2-TC-013], pass_predicate: RTO at most 30s; RPO zero; old adapter closed; notification loss converges within 2s}
+  - {audit_item_id: K2-AUDIT-007, requirement_id: AUN-K2-REQ-006, test_ids: [K2-TC-012], pass_predicate: exact protected decision; fixture guard; up/down/up; fail-closed downgrade; replay byte equality}
+  - {audit_item_id: K2-AUDIT-008, requirement_id: AUN-K2-REQ-006, test_ids: [K2-TC-014], pass_predicate: CPU below 1 percent; poll at most 0.5 qps/process; RSS at most 256 MiB; all measurement dimensions present}
+  - {audit_item_id: K2-AUDIT-009, requirement_id: AUN-K2-REQ-001..006, test_ids: [ALL_K2], pass_predicate: exact base/head/tree/path hash; allowed-path and traceability gaps zero}
+  - {audit_item_id: K2-AUDIT-010, requirement_id: AUN-K2-REQ-001..006, test_ids: [ALL_K2], pass_predicate: V1/provider/external/live-supervisor/shared-DB effects and real model calls zero}
+verdict_contract:
+  PASS: every item passes on the same exact head with reproducible evidence
+  PASS_WITH_WARN: nonblocking residual risk only; no missing path, test, evidence, or live-effect ambiguity
+  BLOCK: any stale evidence, path drift, traceability gap, stale mutation, shared DB, V1/provider effect, or self-audit
+next_action:
+  blocking: true
+  actor: codex-audit or discord-auditor
+  active_function: evidence_audit_gate
+  action: Independently audit the published draft PR exact head against K2-AUDIT-001 through K2-AUDIT-010 without implementing fixes.
+  delivery: durable structured verdict on the K2 draft PR
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989397972
+    - exact draft PR head evidence
+  deliverable: exact-head PASS, PASS_WITH_WARN, or BLOCK with complete next_action

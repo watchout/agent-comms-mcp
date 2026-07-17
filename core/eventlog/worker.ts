@@ -17,8 +17,10 @@ import {
   claimExactTurn,
   claimNextTurn,
   completeTurn,
+  failTurnAttempt,
   presentTurn,
   recoverSeatClaims,
+  scheduleTurnRetry,
   StaleClaimError,
   type ReplyInput,
   type ClaimExecutionMode,
@@ -31,6 +33,18 @@ import {
   type V2NativeMeshExecutionFence,
   type V2NativeMeshFrozenAgentV1,
 } from './v2-native-ingress'
+import {
+  assertRuntimeBindingCurrent,
+  resolveRuntimeBinding,
+  type ResolvedRuntimeBindingV1,
+  type RuntimeBindingCurrentSnapshotV1,
+} from './runtime-binding'
+import {
+  runSeatSupervisorCycle,
+  type SeatSupervisionConfigV1,
+  type SeatSupervisionUnitV1,
+  type SupervisionUnitKind,
+} from './seat-supervisor'
 
 export interface TurnRuntimeResult {
   outcome: 'replied' | 'no_reply' | 'failed'
@@ -49,6 +63,7 @@ export interface TurnRuntime {
     seatId: string
     turn: QueueViewRow
     payload: Record<string, unknown>
+    signal?: AbortSignal
   }): Promise<TurnRuntimeResult>
 }
 
@@ -64,6 +79,13 @@ export interface SeatWorkerOptions {
   claimExecutionMode?: ClaimExecutionMode
   /** Database-clock lease duration for a production PostgreSQL claim. */
   claimLeaseDurationMs?: number
+  /** K2 exact binding fence, re-read before claim, runtime and terminal mutation. */
+  runtimeBinding?: ResolvedRuntimeBindingV1
+  currentRuntimeBinding?: () => RuntimeBindingCurrentSnapshotV1
+  retryBackoffMs?: number
+  now?: () => Date
+  /** Supervision cancellation fence. Aborted work must append no later mutation. */
+  signal?: AbortSignal
 }
 
 export interface V2NativeMeshSeatBinding {
@@ -72,7 +94,17 @@ export interface V2NativeMeshSeatBinding {
   runtimeInstanceId: string
   runtimeCheckoutRoot: string
   runtimeCheckoutSha: string
+  resolvedRuntimeBinding?: ResolvedRuntimeBindingV1
+  currentRuntimeBinding?: () => RuntimeBindingCurrentSnapshotV1
+  /** K2 production constructs an adapter only after all bindings pass. */
+  runtimeFactory?: (binding: ResolvedRuntimeBindingV1) => TurnRuntime
 }
+
+export type V2NativeMeshDbFactory = (unit: {
+  unitId: string
+  kind: SupervisionUnitKind
+  seatId?: string
+}) => Promise<DbAdapter>
 
 export interface SeatWorkerPassResult {
   claimed: number
@@ -115,8 +147,23 @@ export async function runSeatWorkerOnce(
 ): Promise<SeatWorkerPassResult> {
   const result: SeatWorkerPassResult = { claimed: 0, completed: 0, failed: 0, staleLost: 0 }
   const maxTurns = opts.maxTurns ?? 10
+  const assertActive = () => {
+    if (!opts.signal?.aborted) return
+    throw opts.signal.reason instanceof Error
+      ? opts.signal.reason
+      : new Error('seat worker cancelled by supervision fence')
+  }
+  const assertBinding = () => {
+    assertActive()
+    if (opts.runtimeBinding && opts.currentRuntimeBinding) {
+      assertRuntimeBindingCurrent(opts.runtimeBinding, opts.currentRuntimeBinding())
+    } else if (opts.runtimeBinding || opts.currentRuntimeBinding) {
+      throw new Error('runtime binding and current snapshot reader must be supplied together')
+    }
+  }
 
   for (let i = 0; i < maxTurns; i++) {
+    assertBinding()
     const claimed = await claimNextTurn(db, {
       seatId: opts.seatId,
       seatInstanceId: opts.seatInstanceId,
@@ -125,6 +172,7 @@ export async function runSeatWorkerOnce(
       leaseDurationMs: opts.claimLeaseDurationMs,
     })
     if (!claimed) break
+    assertActive()
     result.claimed++
     await presentTurn(db, claimed, {
       seatId: opts.seatId,
@@ -134,19 +182,65 @@ export async function runSeatWorkerOnce(
 
     let runtimeResult: TurnRuntimeResult
     try {
+      assertBinding()
       runtimeResult = await opts.runtime.runTurn({
         seatId: opts.seatId,
         turn: claimed.turn,
         payload: await turnInboundPayload(db, claimed.turn),
+        signal: opts.signal,
       })
     } catch (err) {
       runtimeResult = {
         outcome: 'failed',
-        summary: err instanceof Error ? err.message : String(err),
+        summary: `${typeof err === 'object' && err && 'code' in err ? String((err as { code: unknown }).code) : 'UNKNOWN_ATTEMPT_FAILURE'}: ${err instanceof Error ? err.message : String(err)}`,
       }
     }
 
     try {
+      assertActive()
+      assertBinding()
+      if (runtimeResult.outcome === 'failed' && claimed.fencingToken !== undefined) {
+        const summary = runtimeResult.summary ?? 'runtime attempt failed'
+        const failureCode = summary.includes('RUNTIME_TIMEOUT')
+          ? 'RUNTIME_TIMEOUT'
+          : summary.includes('exited')
+            ? 'RUNTIME_EXIT_NONZERO'
+            : summary.includes('violated')
+              ? 'RUNTIME_OUTPUT_INVALID'
+              : 'UNKNOWN_ATTEMPT_FAILURE'
+        const failure = await failTurnAttempt(db, {
+          turnId: claimed.turn.turn_id,
+          seatId: opts.seatId,
+          seatInstanceId: opts.seatInstanceId,
+          claimEventId: claimed.claimEventId,
+          claimEpoch: claimed.claimEpoch,
+          fencingToken: claimed.fencingToken,
+          conversationId: claimed.turn.conversation_id,
+          failureCode,
+          failureSummary: summary,
+          retryable: true,
+          mutationFence: opts.mutationFence,
+        })
+        assertActive()
+        assertBinding()
+        const backoffMs = opts.retryBackoffMs ?? 1_000
+        const availableAt = new Date((opts.now?.() ?? new Date()).getTime() + backoffMs).toISOString()
+        await scheduleTurnRetry(db, {
+          turnId: claimed.turn.turn_id,
+          seatId: opts.seatId,
+          seatInstanceId: opts.seatInstanceId,
+          claimEventId: claimed.claimEventId,
+          claimEpoch: claimed.claimEpoch,
+          fencingToken: claimed.fencingToken,
+          conversationId: claimed.turn.conversation_id,
+          failureEventId: failure.event.event_id,
+          availableAt,
+          backoffMs,
+          mutationFence: opts.mutationFence,
+        })
+        result.failed++
+        continue
+      }
       await completeTurn(db, {
         turnId: claimed.turn.turn_id,
         seatId: opts.seatId,
@@ -282,6 +376,9 @@ export async function runV2NativeMeshTick(
     seats: V2NativeMeshSeatBinding[]
     instanceId: string
     maxTurnsPerSeat?: number
+    dbFactory?: V2NativeMeshDbFactory
+    supervision?: Partial<Omit<SeatSupervisionConfigV1, 'units'>>
+    reconciler?: (db: DbAdapter, signal: AbortSignal) => Promise<unknown>
   },
 ) {
   const scope = assertV2NativeMeshExecutionFence(opts.scope, opts.fence)
@@ -307,6 +404,93 @@ export async function runV2NativeMeshTick(
 
   // Validate the complete binding set before any seat can append a claim.
   for (const seat of opts.seats) assertSeatBinding(seat)
+
+  if (opts.dbFactory) {
+    const resolvedBindings = new Map<string, ResolvedRuntimeBindingV1>()
+    for (const seat of opts.seats) {
+      if (!seat.resolvedRuntimeBinding || !seat.currentRuntimeBinding || !seat.runtimeFactory) {
+        throw new V2NativeMeshFenceError(`K2 production seat ${seat.seatId} has no exact runtime binding and adapter factory`)
+      }
+      const resolved = resolveRuntimeBinding({
+        binding: seat.resolvedRuntimeBinding,
+        current: seat.currentRuntimeBinding(),
+      })
+      if (
+        resolved.agent_id !== seat.seatId ||
+        resolved.runtime_instance_id !== seat.runtimeInstanceId ||
+        resolved.workspace_realpath !== seat.runtimeCheckoutRoot ||
+        resolved.build_sha !== seat.runtimeCheckoutSha
+      ) {
+        throw new V2NativeMeshFenceError(`resolved K2 runtime binding does not match frozen seat ${seat.seatId}`)
+      }
+      resolvedBindings.set(seat.seatId, resolved)
+    }
+    // Construction happens only after the complete set passes; partial
+    // admission can therefore create neither a DB nor a runtime adapter.
+    const runtimes = new Map(opts.seats.map(seat => [
+      seat.seatId,
+      seat.runtimeFactory!(resolvedBindings.get(seat.seatId)!),
+    ]))
+    const seatResults: Record<string, SeatWorkerPassResult> = {}
+    let handoff: unknown = null
+    const units: SeatSupervisionUnitV1[] = [...opts.seats]
+      .sort((a, b) => a.seatId.localeCompare(b.seatId))
+      .map(seat => ({
+        unitId: `seat:${seat.seatId}`,
+        kind: 'seat' as const,
+        seatId: seat.seatId,
+        adapterFactory: () => opts.dbFactory!({ unitId: `seat:${seat.seatId}`, kind: 'seat', seatId: seat.seatId }),
+        run: async (unitDb, signal) => runSeatWorkerOnce(unitDb, {
+          seatId: seat.seatId,
+          seatInstanceId: seat.runtimeInstanceId,
+          runtime: runtimes.get(seat.seatId)!,
+          maxTurns: opts.maxTurnsPerSeat,
+          mutationFence: async () => { assertSeatBinding(seat) },
+          runtimeBinding: resolvedBindings.get(seat.seatId),
+          currentRuntimeBinding: seat.currentRuntimeBinding,
+          claimExecutionMode: unitDb.dialect === 'postgres' ? 'production_multi_worker' : 'unit_conformance',
+          signal,
+        }),
+        retryable: () => true,
+      }))
+    units.push({
+      unitId: 'outbox:v2-native-internal-handoff',
+      kind: 'outbox',
+      adapterFactory: () => opts.dbFactory!({ unitId: 'outbox:v2-native-internal-handoff', kind: 'outbox' }),
+      run: async unitDb => {
+        const { dispatchV2NativeInternalHandoffs } = await import('./internal-handoff')
+        return dispatchV2NativeInternalHandoffs(unitDb, scope, opts.fence, { dispatcherInstanceId: opts.instanceId })
+      },
+      retryable: () => true,
+    })
+    if (opts.reconciler) {
+      units.push({
+        unitId: 'reconciler:v2-native',
+        kind: 'reconciler',
+        adapterFactory: () => opts.dbFactory!({ unitId: 'reconciler:v2-native', kind: 'reconciler' }),
+        run: opts.reconciler,
+        retryable: () => true,
+      })
+    }
+    const report = await runSeatSupervisorCycle({
+      units,
+      maxConcurrency: opts.supervision?.maxConcurrency ?? units.length,
+      unitTimeoutMs: opts.supervision?.unitTimeoutMs ?? 30_000,
+      reconnectMaxAttempts: opts.supervision?.reconnectMaxAttempts ?? 5,
+      reconnectBaseDelayMs: opts.supervision?.reconnectBaseDelayMs ?? 50,
+      reconnectMaxDelayMs: opts.supervision?.reconnectMaxDelayMs ?? 2_000,
+      jitterSeed: opts.supervision?.jitterSeed ?? 20260716,
+      sleep: opts.supervision?.sleep,
+    })
+    for (const unit of report.units) {
+      if (unit.kind === 'seat' && unit.seat_id && unit.status === 'completed') {
+        seatResults[unit.seat_id] = unit.value as SeatWorkerPassResult
+      }
+      if (unit.kind === 'outbox' && unit.status === 'completed') handoff = unit.value
+    }
+    return { seatResults, handoff, supervision: report }
+  }
+
   const seatResults: Record<string, SeatWorkerPassResult> = {}
   for (const seat of [...opts.seats].sort((a, b) => a.seatId.localeCompare(b.seatId))) {
     const mutationFence: TurnMutationFence = async () => { assertSeatBinding(seat) }
