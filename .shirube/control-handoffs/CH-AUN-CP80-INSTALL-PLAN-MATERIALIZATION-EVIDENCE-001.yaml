@@ -1,0 +1,181 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-AUN-V2V3-FOUNDATION-001.md
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+control_source:
+  dispatch_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880599909
+  unblock_plan_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880267054
+  prior_cp80_gap_001_pr: https://github.com/watchout/agent-comms-mcp/pull/840
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: codex-implementation-bot
+next_role: independent_audit
+protected_surfaces:
+  - active workflows
+protected_surface_details:
+  - CP80-GAP-004 install-plan checkout materialization evidence and dry-run contract only.
+  - Adds explicit install-plan evidence for materialization_required, approved_checkout_ref, no_apply, restart_performed false, and host apply disabled status.
+  - Does not create, place, checkout, or modify runtime checkout paths.
+  - Does not apply or restart launchd, state_daemon, scheduler, queue runner, or runtime processes.
+  - Does not mutate DB, queue, FIFO, credentials, secrets, deployment state, branch protection, required checks, or PR #839 state.
+  - No active workflows are changed beyond this report-only route table entry.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this implementation Cell.
+    - Exact-head evidence and owner decision requirements before ready or merge handling.
+    - Audit checklist coverage for the CP80-GAP-004 install-plan materialization evidence PR.
+  shirube_does_not_own:
+    - Checkout creation or placement, launchd apply or restart, state_daemon restart, DB or queue mutation, FIFO drain, credential or secret mutation, deployment action, branch protection, required checks, PR #839 ready or merge handling, live canary, or live Discord smoke.
+cell:
+  CELL-ID: CELL-MCP-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001
+  slice_id: CP80-GAP-004
+  cell_type: implementation
+  risk_class: R3
+  goal: Harden state-daemon install-plan dry-run output so checkout materialization evidence is explicit and machine-auditable without applying or creating anything.
+  governance_route: R3 report-only route-table update plus dry-run install-plan diagnostic implementation, with independent audit and owner exact-head decision before ready or merge handling.
+  non_scope:
+    - launchd apply
+    - launchd restart
+    - state_daemon restart
+    - scheduler or runtime activation
+    - checkout creation or placement
+    - mutating repair
+    - DB mutation
+    - queue or FIFO mutation
+    - credential or secret mutation
+    - deployment action
+    - queue runner enablement
+    - live canary
+    - live Discord smoke
+    - PR #839 ready or merge handling
+    - full CP80 GO claim
+    - branch protection, ruleset, or required-check activation
+  allowed_paths:
+    - core/local-supervisor-adapter.ts
+    - tests/local-supervisor-adapter.test.ts
+    - tests/state-daemon-install-plan-cli.test.ts
+    - .shirube/control-handoffs/CH-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001.yaml
+    - .github/workflows/shirube-rapid-lite-gates-report.yml
+  forbidden_paths:
+    - server.ts
+    - cli/**
+    - adapters/**
+    - db/**
+    - migrations/**
+    - core/state-daemon/**
+    - bin/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - active workflows
+    touched: true
+    details:
+      - Active workflow touch is limited to adding this Cell to the report-only Rapid/Lite route table.
+      - Install-plan code must remain dry-run only and must not create checkout paths or write host supervisor files.
+      - Install-plan output must expose no_apply true and host_apply fields proving launchd apply/restart were not performed.
+      - CP80-GAP-003 queue runner enablement remains protected_surface_gate/operator scope and is not implemented by this Cell.
+  stop_conditions:
+    - checkout creation or placement is required
+    - launchd apply or restart is required
+    - state_daemon, scheduler, runtime, DB, queue, FIFO, credential, secret, deployment, branch protection, ruleset, or required-check mutation is required
+    - PR #839 ready or merge handling is required
+    - independent audit fails
+implementation_boundary:
+  summary: Add machine-readable install-plan checkout materialization evidence for CP80-GAP-004 without host, runtime, checkout, DB, queue, credential, or deployment mutation.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - launchd apply
+    - launchd restart
+    - state_daemon restart
+    - runtime activation
+    - checkout creation
+    - checkout placement
+    - mutating repair
+    - DB mutation
+    - queue mutation
+    - FIFO mutation
+    - credential mutation
+    - secret mutation
+    - deployment mutation
+    - queue runner enablement
+    - live canary
+    - live Discord smoke
+    - PR #839 ready handling
+    - PR #839 merge handling
+acceptance_criteria:
+  - Install-plan dry-run JSON includes no_apply true.
+  - Install-plan dry-run JSON includes approved_checkout_ref matching the requested commit.
+  - Install-plan dry-run JSON includes materialization_required.
+  - Missing checkout fixtures report materialization_required true with missing checkout, working_directory, and entry path evidence.
+  - Materialized checkout fixtures report materialization_required false with materialization_status materialized and no missing paths.
+  - Install-plan dry-run JSON includes host_apply evidence with launchd_apply_performed false and restart_performed false.
+  - State-daemon readiness and read-only gate pack remain read-only and report no mutation.
+  - Overall CP80 may remain NO_GO for non-scope operational blockers; this Cell does not claim full CP80 GO.
+validation:
+  required_commands:
+    - git diff --check origin/main...HEAD
+    - YAML parse for .shirube/**/*.yaml
+    - YAML parse for .shirube/**/*.yaml and .github/workflows/*.yml
+    - node --check scripts/shirube-current-overlay-check.mjs
+    - bash scripts/detect-breaking-changes.sh origin/main
+    - bun test tests/state-daemon-install-plan-cli.test.ts
+    - bun test tests/local-supervisor-adapter.test.ts
+    - bun test tests/recovery-readonly-gate-pack.test.ts
+    - bun test tests/state-daemon-readiness.test.ts
+    - bun cli/index.ts state-daemon install-plan --commit <PR_HEAD_SHA> --format json
+    - bun scripts/recovery-readonly-gate-pack.ts with read-only CP80 scope and --install-plan-commit <PR_HEAD_SHA>
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - install_plan_json_contract
+    - read_only_gate_pack_summary
+    - audit_checklist_report
+  required_evidence_refs:
+    install_plan_json_contract:
+      ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782
+      content: "install_plan_probe block records exact-head dry-run JSON contract fields and blocker codes."
+    read_only_gate_pack_summary:
+      ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782
+      supplemental_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880654692
+      content: "read_only_gate_pack block records repo_head_sha, mutation/restart false, install-plan blockers, and final remote-check update."
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step

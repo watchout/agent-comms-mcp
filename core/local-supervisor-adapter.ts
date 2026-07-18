@@ -86,6 +86,11 @@ export interface LocalLaunchdInstallDryRunPlan {
   mutation_performed: false
   restart_performed: false
   execute_allowed: false
+  no_apply: true
+  approved_checkout_ref: string
+  materialization_required: boolean
+  checkout_materialization: LocalLaunchdCheckoutMaterializationEvidence
+  host_apply: LocalLaunchdHostApplyEvidence
   plan: StateDaemonRestorePlan
   plist_text: string
   preflight: StateDaemonPreflightResult
@@ -101,6 +106,33 @@ export interface LocalLaunchdInstallDryRunPlan {
     reason: string
   }>
   cleanup: LocalLaunchdCleanupDryRunPlan | null
+}
+
+export interface LocalLaunchdCheckoutMaterializationEvidence {
+  approved_checkout_ref: string
+  materialization_required: boolean
+  materialization_status: 'materialized' | 'missing'
+  checkout_path: string
+  entry_path: string
+  working_directory: string
+  missing_paths: Array<{
+    role: 'checkout' | 'entry' | 'working_directory'
+    path: string
+    blocker_code: 'state_daemon_entry_missing' | 'working_directory_missing'
+  }>
+  operator_instructions: Array<{
+    action: 'materialize_checkout' | 'verify_entrypoint'
+    path: string
+    requires_operator_approval: true
+    no_apply: true
+  }>
+}
+
+export interface LocalLaunchdHostApplyEvidence {
+  no_apply: true
+  launchd_apply_performed: false
+  restart_performed: false
+  disabled_actions: LocalLaunchdInstallDryRunPlan['disabled_host_actions']
 }
 
 export interface LocalLaunchdCleanupDryRunPlan {
@@ -184,6 +216,68 @@ function defaultCapabilities(overrides: RuntimeSupervisorCapability[] | undefine
     byName.set(capability.name, capability)
   }
   return [...byName.values()]
+}
+
+function missingCheckoutMaterializationPaths(
+  plan: StateDaemonRestorePlan,
+  preflight: StateDaemonPreflightResult,
+): LocalLaunchdCheckoutMaterializationEvidence['missing_paths'] {
+  const missing: LocalLaunchdCheckoutMaterializationEvidence['missing_paths'] = []
+  const entryMissing = preflight.errors.some((issue) => issue.code === 'state_daemon_entry_missing' && issue.path === plan.entryPath)
+  const workingDirectoryMissing = preflight.errors.some((issue) => issue.code === 'working_directory_missing' && issue.path === plan.checkoutPath)
+  if (workingDirectoryMissing) {
+    missing.push({
+      role: 'checkout',
+      path: plan.checkoutPath,
+      blocker_code: 'working_directory_missing',
+    })
+    missing.push({
+      role: 'working_directory',
+      path: plan.checkoutPath,
+      blocker_code: 'working_directory_missing',
+    })
+  }
+  if (entryMissing) {
+    missing.push({
+      role: 'entry',
+      path: plan.entryPath,
+      blocker_code: 'state_daemon_entry_missing',
+    })
+  }
+  return missing
+}
+
+function checkoutMaterializationEvidence(
+  plan: StateDaemonRestorePlan,
+  preflight: StateDaemonPreflightResult,
+): LocalLaunchdCheckoutMaterializationEvidence {
+  const missingPaths = missingCheckoutMaterializationPaths(plan, preflight)
+  const materializationRequired = missingPaths.length > 0
+  return {
+    approved_checkout_ref: plan.commit,
+    materialization_required: materializationRequired,
+    materialization_status: materializationRequired ? 'missing' : 'materialized',
+    checkout_path: plan.checkoutPath,
+    entry_path: plan.entryPath,
+    working_directory: plan.checkoutPath,
+    missing_paths: missingPaths,
+    operator_instructions: materializationRequired
+      ? [
+        {
+          action: 'materialize_checkout',
+          path: plan.checkoutPath,
+          requires_operator_approval: true,
+          no_apply: true,
+        },
+        {
+          action: 'verify_entrypoint',
+          path: plan.entryPath,
+          requires_operator_approval: true,
+          no_apply: true,
+        },
+      ]
+      : [],
+  }
 }
 
 function endpointIdentity(label: string | null, agentId: string): RuntimeEndpointIdentity {
@@ -279,6 +373,12 @@ export function buildLocalLaunchdInstallDryRunPlan(
       keep: options.keepCheckouts,
     })
     : null
+  const disabledHostActions = [
+    { action: 'write_plist' as const, reason: 'this slice is dry-run only' },
+    { action: 'rename_plist' as const, reason: 'atomic LaunchAgent update requires a separate approved execution slice' },
+    { action: 'load_or_start_job' as const, reason: 'host supervisor state mutation is outside this slice' },
+  ]
+  const materialization = checkoutMaterializationEvidence(plan, supervisorReport.preflight)
 
   return {
     mode: 'dry_run',
@@ -287,6 +387,16 @@ export function buildLocalLaunchdInstallDryRunPlan(
     mutation_performed: false,
     restart_performed: false,
     execute_allowed: false,
+    no_apply: true,
+    approved_checkout_ref: plan.commit,
+    materialization_required: materialization.materialization_required,
+    checkout_materialization: materialization,
+    host_apply: {
+      no_apply: true,
+      launchd_apply_performed: false,
+      restart_performed: false,
+      disabled_actions: disabledHostActions,
+    },
     plan,
     plist_text: plistText,
     preflight: supervisorReport.preflight,
@@ -297,11 +407,7 @@ export function buildLocalLaunchdInstallDryRunPlan(
       method: 'write_temp_then_rename',
       approval_required_before_execute: true,
     },
-    disabled_host_actions: [
-      { action: 'write_plist', reason: 'this slice is dry-run only' },
-      { action: 'rename_plist', reason: 'atomic LaunchAgent update requires a separate approved execution slice' },
-      { action: 'load_or_start_job', reason: 'host supervisor state mutation is outside this slice' },
-    ],
+    disabled_host_actions: disabledHostActions,
     cleanup,
   }
 }
@@ -347,6 +453,9 @@ export function formatLocalLaunchdInstallDryRunText(plan: LocalLaunchdInstallDry
     `Mutation Performed: ${plan.mutation_performed}`,
     `Restart Performed: ${plan.restart_performed}`,
     `Execute Allowed: ${plan.execute_allowed}`,
+    `No Apply: ${plan.no_apply}`,
+    `Approved Checkout Ref: ${plan.approved_checkout_ref}`,
+    `Materialization Required: ${plan.materialization_required}`,
     '',
     'Persistent Paths:',
     `  checkout: ${plan.plan.checkoutPath}`,
@@ -366,6 +475,11 @@ export function formatLocalLaunchdInstallDryRunText(plan: LocalLaunchdInstallDry
   }
   for (const issue of plan.preflight.warnings) {
     lines.push(`  warning ${issue.code}: ${issue.message}${issue.path ? ` (${issue.path})` : ''}`)
+  }
+  lines.push('', 'Checkout Materialization:')
+  lines.push(`  status: ${plan.checkout_materialization.materialization_status}`)
+  for (const missing of plan.checkout_materialization.missing_paths) {
+    lines.push(`  missing ${missing.role}: ${missing.path} (${missing.blocker_code})`)
   }
   lines.push('', 'Disabled Host Actions:')
   for (const action of plan.disabled_host_actions) {

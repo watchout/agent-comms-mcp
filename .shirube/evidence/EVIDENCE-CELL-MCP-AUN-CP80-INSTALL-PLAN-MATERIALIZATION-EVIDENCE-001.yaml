@@ -1,0 +1,114 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-MCP-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 841
+cell_id: "CELL-MCP-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001"
+slice_id: "CP80-GAP-004"
+implementation_actor: "codex-implementation-bot"
+evidence_scope: "cp80_install_plan_checkout_materialization_evidence"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-INSTALL-PLAN-MATERIALIZATION-EVIDENCE-001.yaml"
+claims:
+  implementation_summary:
+    - "Implementation adds machine-readable install-plan dry-run evidence for checkout materialization status."
+    - "Implementation exposes approved_checkout_ref, materialization_required, checkout_materialization, no_apply, and host_apply fields."
+    - "Missing checkout paths are reported as evidence and operator instructions remain no_apply true."
+    - "Materialized fixtures report materialization_required false with no missing paths."
+  protected_surface_boundary:
+    runtime_activation: false
+    launchd_apply_or_restart: false
+    state_daemon_restart: false
+    checkout_creation_or_placement: false
+    database_mutation: false
+    queue_or_fifo_mutation: false
+    credential_or_secret_mutation: false
+    deployment_mutation: false
+    queue_runner_enablement: false
+    live_canary: false
+    live_discord_smoke: false
+    pr_839_ready_or_merge: false
+    full_cp80_go_claim: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    active_workflow_changed: true
+    active_workflow_change_scope: "report-only route table entry for this Cell"
+  remaining_non_scope_blockers:
+    - "CP80-GAP-002 runtime-fleet drift may remain operational NO_GO outside this Cell."
+    - "CP80-GAP-003 queue runner enablement remains protected_surface_gate/operator scope."
+commands:
+  - command: "git diff --check origin/main...HEAD"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml"
+    result: "PASS"
+  - command: "YAML parse for .shirube/**/*.yaml and .github/workflows/*.yml"
+    result: "PASS"
+  - command: "node --check scripts/shirube-current-overlay-check.mjs"
+    result: "PASS"
+  - command: "bash scripts/detect-breaking-changes.sh origin/main"
+    result: "PASS"
+  - command: "bun test tests/state-daemon-install-plan-cli.test.ts"
+    result: "PASS_4_PASS_0_FAIL"
+  - command: "bun test tests/local-supervisor-adapter.test.ts"
+    result: "PASS_9_PASS_0_FAIL"
+  - command: "bun test tests/recovery-readonly-gate-pack.test.ts"
+    result: "PASS_13_PASS_0_FAIL"
+  - command: "bun test tests/state-daemon-readiness.test.ts"
+    result: "PASS_12_PASS_0_FAIL"
+  - command: "bun cli/index.ts state-daemon install-plan --commit PR_HEAD_SHA --format json"
+    result: "EXPECTED_NO_GO_WITH_MATERIALIZATION_EVIDENCE_AND_NO_MUTATION"
+  - command: "bun scripts/recovery-readonly-gate-pack.ts --output-dir tmp_cp80_gap004_evidence --scope-id cp80-recovery-canary-602 --agent-id codex-cto --to-agent ceo --channel-id 1487368919613444156 --install-plan-commit PR_HEAD_SHA"
+    result: "EXPECTED_NO_GO_NON_SCOPE_AND_INSTALL_PLAN_MATERIALIZATION_BLOCKERS_WITH_NO_MUTATION"
+validation_results:
+  - "Focused and adjacent tests pass: 38 pass / 0 fail."
+  - "Read-only gate pack may remain overall NO_GO for non-scope operational blockers, but install-plan materialization evidence must be explicit."
+  - "Install-plan dry-run must report mutation_performed false and restart_performed false."
+  - "Install-plan dry-run reports no_apply true, approved_checkout_ref, materialization_required true for missing checkout, materialization_status missing, and host_apply launchd_apply_performed false."
+evidence_refs:
+  - "PR_head_SHA"
+  - "changed_files"
+  - "PR_body_validation_section"
+  - "install_plan_json_contract"
+  - "read_only_gate_pack_summary"
+  - "core/local-supervisor-adapter.ts"
+  - "tests/state-daemon-install-plan-cli.test.ts"
+  - "tests/local-supervisor-adapter.test.ts"
+  - "tests/recovery-readonly-gate-pack.test.ts"
+  - "tests/state-daemon-readiness.test.ts"
+  - "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782"
+  - "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880654692"
+  - "audit_checklist_report"
+concrete_evidence_refs:
+  install_plan_json_contract:
+    ref: "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782"
+    summary:
+      command: "bun cli/index.ts state-daemon install-plan --commit PR_HEAD_SHA --format json"
+      result: "EXPECTED_NO_GO_EXIT_1"
+      no_apply: true
+      approved_checkout_ref: "PR_HEAD_SHA"
+      materialization_required: true
+      materialization_status: "missing"
+      mutation_performed: false
+      restart_performed: false
+      host_apply_launchd_apply_performed: false
+      host_apply_restart_performed: false
+      blocker_codes:
+        - working_directory_missing
+        - state_daemon_entry_missing
+  read_only_gate_pack_summary:
+    ref: "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880642782"
+    supplemental_ref: "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880654692"
+    summary:
+      command: "bun scripts/recovery-readonly-gate-pack.ts --output-dir /tmp/cp80-gap004-install-plan-evidence-rework --scope-id cp80-recovery-canary-602 --agent-id codex-cto --to-agent ceo --channel-id 1487368919613444156 --install-plan-commit PR_HEAD_SHA"
+      result: "EXPECTED_NO_GO"
+      repo_head_sha: "PR_HEAD_SHA"
+      mutation_performed: false
+      restart_performed: false
+      install_plan_blockers:
+        - state_daemon_entry_missing
+        - working_directory_missing
+      final_remote_checks_ref: "https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4880654692"
+notes:
+  - "This file records machine evidence for the CP80-GAP-004 implementation PR."
+  - "It is not a structured audit and does not approve owner decision, ready handling, merge handling, runtime activation, launchd apply, checkout creation, credential mutation, live canary, DB or queue mutation, or PR #839 handling."

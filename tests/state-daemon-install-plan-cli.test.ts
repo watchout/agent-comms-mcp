@@ -42,7 +42,41 @@ describe('state-daemon install-plan CLI dry-run', () => {
     expect(json.mutation_performed).toBe(false)
     expect(json.restart_performed).toBe(false)
     expect(json.execute_allowed).toBe(false)
+    expect(json.no_apply).toBe(true)
     expect(json.go_no_go).toBe('NO_GO')
+    expect(json.approved_checkout_ref).toBe(COMMIT)
+    expect(json.materialization_required).toBe(true)
+    expect(json.checkout_materialization).toMatchObject({
+      approved_checkout_ref: COMMIT,
+      materialization_required: true,
+      materialization_status: 'missing',
+      checkout_path: `${restoreRoot}/${COMMIT}`,
+      entry_path: `${restoreRoot}/${COMMIT}/bin/state-daemon.ts`,
+      working_directory: `${restoreRoot}/${COMMIT}`,
+    })
+    expect(json.checkout_materialization.missing_paths).toEqual(expect.arrayContaining([
+      {
+        role: 'checkout',
+        path: `${restoreRoot}/${COMMIT}`,
+        blocker_code: 'working_directory_missing',
+      },
+      {
+        role: 'working_directory',
+        path: `${restoreRoot}/${COMMIT}`,
+        blocker_code: 'working_directory_missing',
+      },
+      {
+        role: 'entry',
+        path: `${restoreRoot}/${COMMIT}/bin/state-daemon.ts`,
+        blocker_code: 'state_daemon_entry_missing',
+      },
+    ]))
+    expect(json.checkout_materialization.operator_instructions.every((instruction: { no_apply: boolean }) => instruction.no_apply)).toBe(true)
+    expect(json.host_apply).toMatchObject({
+      no_apply: true,
+      launchd_apply_performed: false,
+      restart_performed: false,
+    })
     expect(json.plan.checkoutPath).toBe(`${restoreRoot}/${COMMIT}`)
     expect(json.plan.buildOutfile).toBe(`/Users/yuji/.agent-comms/state-daemon/build-artifacts/${COMMIT}/state-daemon-build.js`)
     expect(json.atomic_update.method).toBe('write_temp_then_rename')

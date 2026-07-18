@@ -186,8 +186,26 @@ describe('#602/#603 local supervisor adapter dry-run evidence', () => {
 
     expect(dryRun.mode).toBe('dry_run')
     expect(dryRun.execute_allowed).toBe(false)
+    expect(dryRun.no_apply).toBe(true)
     expect(dryRun.mutation_performed).toBe(false)
     expect(dryRun.restart_performed).toBe(false)
+    expect(dryRun.approved_checkout_ref).toBe(COMMIT)
+    expect(dryRun.materialization_required).toBe(false)
+    expect(dryRun.checkout_materialization).toMatchObject({
+      approved_checkout_ref: COMMIT,
+      materialization_required: false,
+      materialization_status: 'materialized',
+      checkout_path: expected.checkoutPath,
+      entry_path: expected.entryPath,
+      working_directory: expected.checkoutPath,
+      missing_paths: [],
+      operator_instructions: [],
+    })
+    expect(dryRun.host_apply).toMatchObject({
+      no_apply: true,
+      launchd_apply_performed: false,
+      restart_performed: false,
+    })
     expect(dryRun.atomic_update).toEqual({
       staged_plist_path: expected.tempPlistPath,
       final_plist_path: expected.plistPath,
