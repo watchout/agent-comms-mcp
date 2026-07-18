@@ -1,5 +1,6 @@
-import type { DbAdapter } from './db'
+import type { DbAdapter } from './db/adapter'
 import { TOKEN_EVIDENCE_COLUMNS, collectTokenEvidence } from './token-evidence'
+import { isHistoricalOnlyAgentId } from './audit-identity'
 
 export type BindingRole = 'inbound' | 'outbound' | 'bidirectional' | 'projection' | 'presence' | 'worker'
 export type OrderingScope = 'none' | 'channel' | 'thread' | 'custom'
@@ -35,6 +36,7 @@ export interface ChannelConnectorSyncSkipped {
     | 'missing_token_evidence'
     | 'connector_disabled'
     | 'active_binding_conflict'
+    | 'adapter_owner_not_routable'
   details?: Record<string, unknown>
 }
 
@@ -62,9 +64,14 @@ interface PolicyRow {
 
 interface AgentRow {
   agent_id: string
+  status: string | null
   discord_token: string | null
   provider_token_source_ref: string | null
   metadata: unknown
+  profile_enabled?: unknown
+  disabled_at?: unknown
+  historical_only?: unknown
+  new_work_allowed?: unknown
 }
 
 interface ConnectorRow {
@@ -98,6 +105,49 @@ interface BindingRow {
 
 function connectorUri(provider: string, agentId: string): string {
   return `${provider}://agents/${agentId}`
+}
+
+function parseJsonObject(raw: unknown): Record<string, unknown> {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw !== 'string') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function truthy(raw: unknown, fallback = false): boolean {
+  if (raw === null || raw === undefined) return fallback
+  if (typeof raw === 'boolean') return raw
+  if (typeof raw === 'number') return raw !== 0
+  const value = String(raw).trim().toLowerCase()
+  if (!value) return fallback
+  return ['1', 'true', 'yes', 'on'].includes(value)
+}
+
+function isRoutableAgent(agent: AgentRow): boolean {
+  const metadata = parseJsonObject(agent.metadata)
+  const lifecycle = typeof metadata.lifecycle === 'string' ? metadata.lifecycle.trim().toLowerCase() : ''
+  const historicalOnly =
+    truthy(agent.historical_only) ||
+    truthy(metadata.historical_only) ||
+    truthy(metadata.non_routable) ||
+    lifecycle === 'historical_only' ||
+    isHistoricalOnlyAgentId(agent.agent_id)
+  const newWorkAllowed = agent.new_work_allowed === undefined || agent.new_work_allowed === null
+    ? !historicalOnly
+    : truthy(agent.new_work_allowed, true)
+  const profileEnabled = truthy(agent.profile_enabled, true)
+  const status = typeof agent.status === 'string' ? agent.status.trim().toLowerCase() : ''
+  return !historicalOnly &&
+    newWorkAllowed &&
+    profileEnabled &&
+    !agent.disabled_at &&
+    status !== 'disabled' &&
+    status !== 'retired'
 }
 
 function missingOptionalEvidence(err: unknown): boolean {
@@ -171,7 +221,8 @@ async function buildSyncPlan(
     }
 
     const agent = await db.queryOne<AgentRow>(
-      `SELECT agent_id, NULL AS discord_token, provider_token_source_ref, metadata
+      `SELECT agent_id, status, NULL AS discord_token, provider_token_source_ref, metadata,
+              profile_enabled, disabled_at, historical_only, new_work_allowed
          FROM agents
         WHERE agent_id = $1`,
       [adapterOwner],
@@ -182,6 +233,15 @@ async function buildSyncPlan(
         channel_name: channelName,
         adapter_owner_agent_id: adapterOwner,
         reason: 'unknown_adapter_owner',
+      })
+      continue
+    }
+    if (!isRoutableAgent(agent)) {
+      skipped.push({
+        channel_id: channelId,
+        channel_name: channelName,
+        adapter_owner_agent_id: adapterOwner,
+        reason: 'adapter_owner_not_routable',
       })
       continue
     }

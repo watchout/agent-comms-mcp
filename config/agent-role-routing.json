@@ -38,15 +38,37 @@
       "selfSendTo": ["codex-cto"],
       "selfSendInterpretation": "If an AUN lead session cannot notify codex-cto because of SELF_SEND, the local MCP registration is running as codex-cto and must be fixed before governance handoff."
     },
+    "evidence_audit_gate": {
+      "agentId": "codex-audit",
+      "description": "Canonical Shirube V3 evidence audit gate. Requires activeFunction=evidence_audit_gate and canonicalSeat=codex-audit; no fallback to l2auditor or devauditor.",
+      "activeFunction": "evidence_audit_gate",
+      "canonicalSeat": "codex-audit",
+      "expectedRuntime": "codex",
+      "fallbackAgentIds": [],
+      "forbiddenFallbackAgentIds": ["l2auditor", "devauditor"],
+      "newWorkAllowed": true
+    },
+    "scenario_verification_gate": {
+      "agentId": "devauditor",
+      "description": "Scenario verification gate for failure/recovery reproduction only. This seat cannot issue evidence_audit_gate verdicts.",
+      "activeFunction": "scenario_verification_gate",
+      "canonicalSeat": "devauditor",
+      "forbiddenActiveFunctions": ["evidence_audit_gate"],
+      "newWorkAllowed": true
+    },
     "pr_audit_l1": {
       "agentId": "auditor",
-      "description": "Independent L1 PR audit",
-      "expectedRuntime": "TUI"
+      "description": "Historical L1 PR audit key retained for old artifacts only. New work must use active_function routing.",
+      "expectedRuntime": "TUI",
+      "historicalOnly": true,
+      "newWorkAllowed": false
     },
     "pr_audit_l2": {
       "agentId": "codex-audit",
-      "description": "Independent L2 PR audit",
-      "expectedRuntime": "runtime row decides dispatch path"
+      "description": "Historical L2 PR audit key retained for old artifacts only. New evidence audit work must use evidence_audit_gate with canonicalSeat=codex-audit.",
+      "expectedRuntime": "runtime row decides dispatch path",
+      "historicalOnly": true,
+      "newWorkAllowed": false
     },
     "pr_approval_l3": {
       "agentId": "codex-cto",
@@ -56,11 +78,32 @@
     }
   },
   "legacyAgentIds": {
+    "l2auditor": {
+      "canonicalAgentId": "codex-audit",
+      "status": "disabled",
+      "historicalOnly": true,
+      "newWorkAllowed": false,
+      "reason": "Retired L2 audit identity retained only as a historical tombstone. New evidence_audit_gate work targets codex-audit and never falls back to l2auditor."
+    },
     "cto": {
       "canonicalAgentId": "codex-cto",
       "status": "disabled",
+      "historicalOnly": true,
       "newWorkAllowed": false,
       "reason": "The legacy CTO identity is retained for history only. New L3 approval work targets codex-cto."
+    }
+  },
+  "auditRouting": {
+    "evidenceAuditGate": {
+      "activeFunction": "evidence_audit_gate",
+      "canonicalSeat": "codex-audit",
+      "agentId": "codex-audit",
+      "forbiddenFallbackAgentIds": ["l2auditor", "devauditor"]
+    },
+    "scenarioVerificationGate": {
+      "activeFunction": "scenario_verification_gate",
+      "canonicalSeat": "devauditor",
+      "agentId": "devauditor"
     }
   },
   "mcpNamespacePolicy": {

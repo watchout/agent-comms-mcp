@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { resolveCanonicalAuditRouteForInput, type CanonicalAuditRoute } from '../audit-identity'
 import type { DBClient } from './types'
 
 export type GithubWorkKind = 'issue' | 'pull_request'
@@ -40,6 +41,9 @@ export interface GithubWorkClassification {
   fingerprint: string
   role: string | null
   owner: string | null
+  activeFunction: string | null
+  canonicalSeat: string | null
+  auditRoute: CanonicalAuditRoute | null
   route: GithubWorkRoute
   runnerPolicy: GithubRunnerPolicy
   labelMatches: string[]
@@ -104,6 +108,7 @@ export const DEFAULT_ROLE_OWNER_MAP: Record<string, string> = {
   audit: 'codex-audit',
   'l1-audit': 'codex-audit',
   'l2-audit': 'codex-audit',
+  'scenario-verification': 'devauditor',
   qa: 'qa',
   check: 'check',
   cto: 'codex-cto',
@@ -120,6 +125,7 @@ export const DEFAULT_GITHUB_WORK_PULLER_LABELS = [
   'needs:audit',
   'needs:l1-audit',
   'needs:l2-audit',
+  'needs:scenario-verification',
   'needs:qa',
   'needs:check',
   'needs:cto',
@@ -185,10 +191,12 @@ export function classifyGithubWorkItem(
   const rawRole = firstPrefixed(normalized, ROLE_LABEL_PREFIX)
   const role = normalizeGithubWorkRole(rawRole)
   const ownerFromLabel = firstPrefixed(labels, OWNER_LABEL_PREFIX)
+  const auditRoute = resolveCanonicalAuditRouteForInput({ role: rawRole ?? role })
   const ownerFromRole = rawRole
-    ? config.roleOwnerMap[rawRole] ?? (role ? config.roleOwnerMap[role] ?? null : null)
+    ? auditRoute?.agent_id ?? config.roleOwnerMap[rawRole] ?? (role ? config.roleOwnerMap[role] ?? null : null)
     : null
   const owner = ownerFromLabel ?? ownerFromRole
+  const auditOwnerMismatch = Boolean(auditRoute && ownerFromLabel && ownerFromLabel !== auditRoute.agent_id)
   const routeLabel = firstPrefixed(normalized, ROUTE_LABEL_PREFIX)
   const blockedLabels = labels.filter((label) => normalizeLabelValue(label).startsWith(BLOCKED_LABEL_PREFIX))
   const runnerLabel = firstPrefixed(normalized, RUNNER_LABEL_PREFIX)
@@ -206,15 +214,20 @@ export function classifyGithubWorkItem(
     ? 'no_configured_label_match'
     : owner === null
       ? 'missing_owner'
-      : !ownerAllowed
-        ? 'owner_not_allowlisted'
-        : null
+      : auditOwnerMismatch
+        ? 'audit_route_owner_mismatch'
+        : !ownerAllowed
+          ? 'owner_not_allowlisted'
+          : null
 
   return {
     item,
     fingerprint: githubWorkFingerprint(item),
     role,
     owner,
+    activeFunction: auditRoute?.active_function ?? null,
+    canonicalSeat: auditRoute?.canonical_seat ?? null,
+    auditRoute,
     route,
     runnerPolicy,
     labelMatches,
@@ -530,6 +543,9 @@ export class StateDaemonGithubWorkPuller {
       github_url: item.url,
       role: classification.role,
       owner: classification.owner,
+      active_function: classification.activeFunction,
+      canonical_seat: classification.canonicalSeat,
+      audit_route: classification.auditRoute,
       route: classification.route,
       runner_policy: classification.runnerPolicy,
       protected: classification.protected,
@@ -570,6 +586,9 @@ export class StateDaemonGithubWorkPuller {
           fingerprint: classification.fingerprint,
           role: classification.role,
           owner: classification.owner,
+          active_function: classification.activeFunction,
+          canonical_seat: classification.canonicalSeat,
+          audit_route: classification.auditRoute,
           route: classification.route,
           runner_policy: classification.runnerPolicy,
           protected: classification.protected,
@@ -598,6 +617,8 @@ export function renderGithubWorkNotification(classification: GithubWorkClassific
     `URL: ${item.url}`,
     `Role: ${classification.role ?? 'unknown'}`,
     `Owner: ${classification.owner ?? 'unresolved'}`,
+    `Active function: ${classification.activeFunction ?? 'n/a'}`,
+    `Canonical seat: ${classification.canonicalSeat ?? 'n/a'}`,
     `Route: ${classification.route}`,
     `Runner policy: ${classification.runnerPolicy}`,
     mode,
@@ -614,6 +635,8 @@ export function renderGithubWorkWriteback(input: GithubWorkWritebackInput): stri
     `Queue ID: ${input.queueId ?? 'none'}`,
     `Owner: ${c.owner ?? 'unresolved'}`,
     `Role: ${c.role ?? 'unknown'}`,
+    `Active function: ${c.activeFunction ?? 'n/a'}`,
+    `Canonical seat: ${c.canonicalSeat ?? 'n/a'}`,
     `Route: ${c.route}`,
     `Runner policy: ${c.runnerPolicy}`,
     `Protected: ${String(c.protected)}`,
@@ -721,7 +744,7 @@ function resolveRoute(role: string | null, routeLabel: string | null, blockedLab
   if (routeLabel === 'protected') return 'protected'
   if (routeLabel === 'fast') return 'fast'
   if (role === 'cto' || role === 'ceo') return 'protected'
-  if (role === 'audit' || role === 'qa' || role === 'check') return 'protected'
+  if (role === 'audit' || role === 'scenario-verification' || role === 'qa' || role === 'check') return 'protected'
   return 'manual'
 }
 

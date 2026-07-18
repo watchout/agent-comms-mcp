@@ -6,6 +6,7 @@ import type {
   QueueWorkHandoffContract,
   QueueWorkRuntimeResultSummary,
 } from '../core/queue-work'
+import { resolveCanonicalAuditRouteForInput } from '../core/audit-identity'
 
 export interface QueueWorkMediatedPostingRequest {
   schema_version: 'queue_work_mediated_posting_request_v1'
@@ -107,7 +108,8 @@ function envAllowRepos(env: NodeJS.ProcessEnv): string[] {
 }
 
 function approvedMarkersForAgent(agentId: string): Set<string> {
-  if (/^(l1auditor|l2auditor|auditor|codex-audit)$/i.test(agentId)) {
+  const auditRoute = resolveCanonicalAuditRouteForInput({ agentId })
+  if (auditRoute?.route_kind === 'evidence_audit_gate' && auditRoute.agent_id === agentId) {
     return new Set(['aun:l2-audit/v1'])
   }
   if (/^qa$/i.test(agentId)) return new Set(['aun:qa-check/v1'])
@@ -163,6 +165,12 @@ export function validateMediatedPostingRequest(
   if (!request.agent_id || typeof request.agent_id !== 'string') return { ok: false, error_code: 'AGENT_ID_REQUIRED', summary: 'agent_id is required' }
   if (!request.handoff_contract?.github_backed || !request.handoff_contract.required_writebacks?.includes('github_issue_comment')) {
     return { ok: false, error_code: 'HANDOFF_CONTRACT_NOT_GITHUB_BACKED', summary: 'handoff_contract must require github_issue_comment writeback' }
+  }
+  if (request.handoff_contract.route_blocker) {
+    return { ok: false, error_code: 'AUDIT_ROUTE_BLOCKED', summary: `handoff_contract route_blocker=${request.handoff_contract.route_blocker}` }
+  }
+  if (request.handoff_contract.audit_route?.route_kind === 'evidence_audit_gate' && request.agent_id !== request.handoff_contract.audit_route.agent_id) {
+    return { ok: false, error_code: 'AUDIT_ROUTE_BLOCKED', summary: `${request.agent_id} is not the canonical evidence audit seat` }
   }
   const writebackError = validateWritebackObject(request.writeback)
   if (writebackError) return { ok: false, error_code: 'INVALID_WRITEBACK', summary: writebackError }

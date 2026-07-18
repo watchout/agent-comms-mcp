@@ -13,9 +13,14 @@ Current PR governance routing:
 | Role | Canonical agent_id | Notes |
 |---|---|---|
 | AUN development lead | `codex-aun` | Codex/AUN operator session. Its MCP registration must run with `AGENT_ID=codex-aun`. |
-| L1 PR audit | `auditor` | Independent L1 audit recipient. |
-| L2 PR audit | `codex-audit` | Independent L2 audit recipient. Runtime dispatch is determined by the live `agents.runtime` row. |
+| Evidence audit gate | `codex-audit` | Requires `active_function=evidence_audit_gate` and `canonical_seat=codex-audit`. There is no fallback to `l2auditor` or `devauditor`. |
+| Scenario verification gate | `devauditor` | Failure/recovery reproduction only. It cannot issue `evidence_audit_gate` verdicts. |
 | L3 / CTO approval | `codex-cto` | CTO approval recipient. Legacy `cto` is history-only and must not receive new governance work. |
+
+Historical `pr_audit_l1` / `pr_audit_l2` role keys and the `l2auditor`
+identity are retained only for old artifacts. They are not normal search,
+directory, mention, or routing targets. Use explicit include-historical
+diagnostics to inspect them.
 
 ## Per-Slice Overrides
 
@@ -23,14 +28,19 @@ CEO may override the default route for a specific slice. The override must be
 recorded in the slice plan so later gates do not silently fall back to the
 default table.
 
-| Slice | L1 | L2 | L3 | Source |
-|---|---|---|---|---|
-| NORM-022 runtime endpoint lease | `devauditor` | `l2auditor` | `cto` | CEO directive 2026-05-27 |
+The row below is historical_only, non-routable, and closed to new work. It is
+retained as provenance for old NORM-022 artifacts, not as current operational
+guidance.
+
+| Slice | L1 | L2 | L3 | Source | Current status |
+|---|---|---|---|---|---|
+| NORM-022 runtime endpoint lease | `devauditor` | `l2auditor` | `cto` | CEO directive 2026-05-27 | historical_only / non-routable / no new work |
 
 At the time of the NORM-022 route update, live DB rows existed for
-`devauditor`, `l2auditor`, and `cto`; `cto` was disabled. If L3 delivery is
-required through `cto`, repair or enable that route before sending the L3
-approval request.
+`devauditor`, `l2auditor`, and `cto`; `cto` was disabled. Under current
+Shirube V3 routing, this record must not activate a delivery route:
+`l2auditor` and `cto` are historical-only tombstones, and `devauditor` is
+active only for `scenario_verification_gate`.
 
 ## Failure Mode This Prevents
 
@@ -91,27 +101,31 @@ Pass criteria after restart:
 ## Read-Only Preflight
 
 Before PR governance handoff, verify the role map against live registration
-facts without mutating production state:
+facts without mutating production state. Use canonical CLI diagnostics, not
+direct SQL:
 
 ```bash
-psql 'postgresql:///agent_comms?host=/tmp' -P pager=off -c "
-BEGIN READ ONLY;
-SELECT agent_id, display_name, agent_type, runtime, status,
-       metadata->>'tmux_session' AS tmux_session
-  FROM agents
-  WHERE agent_id IN ('codex-aun','auditor','codex-audit','codex-cto','cto')
-  ORDER BY agent_id;
-SELECT id, members
-  FROM channels
-  WHERE id = '1487368919613444156';
-ROLLBACK;"
+bun cli/index.ts audit-route --active-function evidence_audit_gate --canonical-seat codex-audit
+bun cli/index.ts audit-route --active-function evidence_audit_gate --canonical-seat devauditor
+bun cli/index.ts audit-route --active-function scenario_verification_gate --agent-id devauditor
+bun cli/index.ts directory --format json
+bun cli/index.ts directory --include-historical --format json
+bun cli/index.ts agent retire l2auditor --dry-run --reason "role-routing live dry-run"
 ```
 
 Pass criteria:
 
-- `codex-aun`, `auditor`, `codex-audit`, and `codex-cto` exist.
-- `cto` may exist only as a disabled or history-only legacy alias.
-- Channel `1487368919613444156` includes the canonical role recipients.
+- `codex-aun`, `codex-audit`, and `codex-cto` exist as active routable
+  identities.
+- `l2auditor` and `cto` may exist only as disabled or historical-only legacy
+  identities.
+- Default directory output omits `l2auditor`; include-historical diagnostics
+  expose the historical tombstone, and `agent retire l2auditor --dry-run`
+  lists any active projections that execute mode would disable before the
+  final tombstone.
+- `evidence_audit_gate` without `canonical_seat=codex-audit` fails closed.
+- `devauditor` is accepted only for `scenario_verification_gate`.
+- Channel `1487368919613444156` includes the canonical current role recipients.
 - No new PR governance request targets `cto` unless a per-slice CEO override
   records that legacy target and its live route has been repaired.
 - AUN lead MCP registration uses `AGENT_ID=codex-aun`; if it sends as

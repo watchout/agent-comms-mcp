@@ -554,6 +554,13 @@ describe('T10 — queue doctor CLI surface', () => {
     expect(QUEUE_TERMINAL_STATE_PREFLIGHT_SRC).not.toMatch(/payload_preview/)
   })
 
+  test('agent retire dry-run reports typed blockers as command failure', () => {
+    const agentRetireBlock = CLI_SRC.match(/async function agentRetire\(args: string\[\]\) \{[\s\S]*?\n\}\n\nasync function auditRoute/)?.[0] ?? ''
+    expect(agentRetireBlock).toContain('async function agentRetire')
+    expect(agentRetireBlock).toMatch(/buildAgentRetirementPlan\(\(db as any\)\.__adapter,[\s\S]*?dryRun: true/)
+    expect(agentRetireBlock).toMatch(/process\.stdout\.write\(`\$\{JSON\.stringify\(report, null, 2\)\}\\n`\)\s*\n\s*if \(!report\.ok\) process\.exitCode = 1\s*\n\s*\} finally \{/)
+  })
+
   test('CP-70 doctor pins active prompt-backlog scan and dry-run exact-id policy', () => {
     expect(CP70_DOCTOR_SRC).toMatch(/LOOP_PROMPT_BACKLOG/)
     expect(CP70_DOCTOR_SRC).toMatch(/STUCK_ACTIVE_QUEUE_ROW/)

@@ -256,7 +256,7 @@ describe('T7 — isKnownAgent closure over refreshAgentCache() array (Phase 5 ho
   })
 
   test('resolvePhase5 with post-fix isKnownAgent closure → ok for known mention', () => {
-    const knownAgents: string[] = ['cto', 'ceo', 'agent-com-dev']
+    const knownAgents: string[] = ['cto', 'codex-cto', 'ceo', 'agent-com-dev']
     const result = resolvePhase5({
       sender: 'agent-com-dev',
       channel_id: 'ch-test',

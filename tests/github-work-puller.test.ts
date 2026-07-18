@@ -178,9 +178,48 @@ describe('GitHub work puller planner', () => {
     expect(classification.labelMatches).toEqual(['needs:l2-audit'])
     expect(classification.role).toBe('audit')
     expect(classification.owner).toBe('codex-audit')
+    expect(classification.activeFunction).toBe('evidence_audit_gate')
+    expect(classification.canonicalSeat).toBe('codex-audit')
+    expect(classification.auditRoute).toMatchObject({
+      route_kind: 'evidence_audit_gate',
+      agent_id: 'codex-audit',
+      historical_input: true,
+    })
     expect(classification.route).toBe('protected')
     expect(classification.runnerPolicy).toBe('stop_lane')
     expect(classification.dispatchable).toBe(true)
+  })
+
+  test('evidence audit label with devauditor owner fails closed instead of falling back', () => {
+    const classification = classifyGithubWorkItem(item({
+      labels: ['needs:l2-audit', 'owner:devauditor', 'audit:l2-pending'],
+    }), {
+      ...config,
+      labels: DEFAULT_GITHUB_WORK_PULLER_LABELS,
+    })
+
+    expect(classification.role).toBe('audit')
+    expect(classification.owner).toBe('devauditor')
+    expect(classification.activeFunction).toBe('evidence_audit_gate')
+    expect(classification.canonicalSeat).toBe('codex-audit')
+    expect(classification.dispatchable).toBe(false)
+    expect(classification.dispatchBlocker).toBe('audit_route_owner_mismatch')
+  })
+
+  test('scenario verification label resolves only to devauditor', () => {
+    const classification = classifyGithubWorkItem(item({
+      labels: ['needs:scenario-verification'],
+    }), {
+      ...config,
+      labels: DEFAULT_GITHUB_WORK_PULLER_LABELS,
+    })
+
+    expect(classification.role).toBe('scenario-verification')
+    expect(classification.owner).toBe('devauditor')
+    expect(classification.activeFunction).toBe('scenario_verification_gate')
+    expect(classification.canonicalSeat).toBe('devauditor')
+    expect(classification.dispatchable).toBe(true)
+    expect(classification.route).toBe('protected')
   })
 
   test('PR conveyor L3 review label resolves to protected CTO review', () => {
@@ -232,10 +271,36 @@ describe('StateDaemonGithubWorkPuller dispatch', () => {
     expect(db.queueRows[0].payload.github_url).toBe('https://github.com/watchout/agent-comms-mcp/issues/744')
     expect(db.queueRows[0].payload.ssot).toBe('github')
     expect(db.queueRows[0].payload.aun_is_acceleration_only).toBe(true)
+    expect(db.queueRows[0].payload.active_function).toBeNull()
+    expect(db.queueRows[0].payload.canonical_seat).toBeNull()
     const audit = db.audits.find((row) => row.event_type === 'github_work.dispatch_attempt')
     expect(audit?.detail.dispatch_status).toBe('queued')
     expect(audit?.detail.queue_id).toBe('100')
     expect(audit?.detail.github_url).toBe('https://github.com/watchout/agent-comms-mcp/issues/744')
+  })
+
+  test('queues L2 audit compatibility labels to codex-audit with canonical route payload', async () => {
+    const db = new FakeDispatchDb()
+    const puller = new StateDaemonGithubWorkPuller({
+      db,
+      client: new FakeGithubClient([item({
+        labels: ['needs:l2-audit', 'audit:l2-pending', 'state:impl-l2'],
+      })]),
+      config: { ...config, labels: DEFAULT_GITHUB_WORK_PULLER_LABELS },
+    })
+
+    const result = await puller.pollOnce()
+
+    expect(result.queued).toBe(1)
+    expect(db.queueRows[0].agent_id).toBe('codex-audit')
+    expect(db.queueRows[0].payload).toMatchObject({
+      active_function: 'evidence_audit_gate',
+      canonical_seat: 'codex-audit',
+      audit_route: expect.objectContaining({
+        agent_id: 'codex-audit',
+        route_kind: 'evidence_audit_gate',
+      }),
+    })
   })
 
   test('suppresses duplicate dispatch across restarts using persisted audit fingerprint', async () => {
