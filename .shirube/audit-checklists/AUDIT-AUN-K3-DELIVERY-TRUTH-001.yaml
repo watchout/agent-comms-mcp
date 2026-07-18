@@ -1,0 +1,32 @@
+schema_version: shirube-audit-checklist/v1
+checklist_id: AUDIT-AUN-K3-DELIVERY-TRUTH-001
+cell_id: CELL-MCP-AUN-K3-DELIVERY-TRUTH-001
+authority_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+allowed_auditors: [codex-audit, discord-auditor]
+forbidden_auditors: [arc, implementation_author]
+exact_head_required: true
+items:
+  - {audit_item_id: K3-AUDIT-001, requirement_id: AUN-K3-REQ-001, implementation_path_and_symbol: core/eventlog/delivery.ts#dispatchV2DeliveryOnce; core/eventlog/seat-supervisor.ts#runSeatSupervisorCycle, test_id: K3-TC-012,K3-TC-015, exact_evidence_ref: evidence.tests.K3-TC-012,K3-TC-015, pass_predicate: independent DB unit and p95<=100ms, severity: BLOCK, reproduce: bun test tests/aun-k3/dedicated-outbox-dispatcher.test.ts}
+  - {audit_item_id: K3-AUDIT-002, requirement_id: AUN-K3-REQ-002, implementation_path_and_symbol: core/eventlog/delivery.ts#commitValidatedDeliveryTruth, test_id: K3-TC-001..003,K3-TC-006, exact_evidence_ref: evidence.tests.K3-TC-001..003,K3-TC-006, pass_predicate: receipt-mode writer mapping exact and receipt-free delivered=0, severity: BLOCK, reproduce: bun test tests/aun-k3/delivery-truth.test.ts}
+  - {audit_item_id: K3-AUDIT-003, requirement_id: AUN-K3-REQ-003, implementation_path_and_symbol: core/eventlog/outbox.ts#reserveProviderNonce,startProviderInvocation,dispatchV2OutboxOnce, test_id: K3-TC-004,K3-TC-005, exact_evidence_ref: evidence.tests.K3-TC-004..005, pass_predicate: reservation=1 invocation-start=1 effect=1 and collision second-attempt=0, severity: BLOCK, reproduce: bun test tests/aun-k3/nonce-effect.test.ts}
+  - {audit_item_id: K3-AUDIT-004, requirement_id: AUN-K3-REQ-004, implementation_path_and_symbol: core/eventlog/delivery.ts#reconcileUnknownDeliveryOnce; core/eventlog/store.ts#commitReconciliationTerminalCAS reuse, test_id: K3-TC-007..010, exact_evidence_ref: evidence.tests.K3-TC-007..010, pass_predicate: every crash boundary loss=duplicates=0 and ambiguous automatic retry=0, severity: BLOCK, reproduce: bun test tests/aun-k3/crash-reconciliation.test.ts}
+  - {audit_item_id: K3-AUDIT-005, requirement_id: AUN-K3-REQ-005, implementation_path_and_symbol: core/eventlog/internal-handoff.ts#dispatchV2NativeInternalHandoffs, test_id: K3-TC-011, exact_evidence_ref: evidence.tests.K3-TC-011, pass_predicate: received=handoff=1 and V1/provider/external=0, severity: BLOCK, reproduce: bun test tests/aun-k3/internal-handoff-exactly-once.test.ts}
+  - {audit_item_id: K3-AUDIT-006, requirement_id: AUN-K3-REQ-006, implementation_path_and_symbol: core/eventlog/views.ts#deliveryTruthView,rebuildDeliveryTruthView, test_id: K3-TC-013,K3-TC-014, exact_evidence_ref: evidence.tests.K3-TC-013..014, pass_predicate: replay byte equality and exact N formulas with all residuals zero, severity: BLOCK, reproduce: bun test tests/aun-k3/replay-starvation.test.ts tests/aun-k3/matrix-evidence.test.ts}
+  - {audit_item_id: K3-AUDIT-007, requirement_id: AUN-K3-REQ-001..006, implementation_path_and_symbol: full K3 path manifest, test_id: ALL_K3, exact_evidence_ref: evidence.git_and_traceability, pass_predicate: exact base/head/tree/path hash and requirement-code-test gaps=0, severity: BLOCK, reproduce: git diff --name-only "$SEALED_K2_MAIN_MERGE_SHA"...HEAD | LC_ALL=C sort}
+  - {audit_item_id: K3-AUDIT-008, requirement_id: AUN-K3-REQ-001..006, implementation_path_and_symbol: full K3 execution path, test_id: K3-TC-016, exact_evidence_ref: evidence.zero_effect, pass_predicate: wrong target/queue/foreign owner and V1/provider/live/shared-DB effects all zero, severity: BLOCK, reproduce: bun test tests/aun-k3}
+  - {audit_item_id: K3-AUDIT-009, requirement_id: AUN-K3-REQ-001..006, implementation_path_and_symbol: schema_and_migration_boundary, test_id: ALL_K3, exact_evidence_ref: evidence.changed_paths, pass_predicate: migrations changed=0 and transport-contract/store/registered-loader blobs unchanged, severity: BLOCK, reproduce: git diff --name-only "$SEALED_K2_MAIN_MERGE_SHA"...HEAD}
+  - {audit_item_id: K3-AUDIT-010, requirement_id: AUN-K3-REQ-001..006, implementation_path_and_symbol: adapter and evidence identities, test_id: ALL_K3, exact_evidence_ref: evidence.author_auditor_identity, pass_predicate: author differs from auditor and scenario verifier; all evidence same exact head, severity: BLOCK, reproduce: Shirube identity and digest readback}
+verdict_contract:
+  PASS: every item passes on one exact head with reproducible evidence
+  PASS_WITH_WARN: nonblocking residual risk only; no missing truth, effect, scope, or crash evidence
+  BLOCK: any stale evidence, path drift, duplicate effect, synthetic success, unknown retry, schema change, shared DB, V1/provider effect, or self-audit
+next_action:
+  blocking: true
+  actor: codex-audit or discord-auditor
+  active_function: evidence_audit_gate
+  action: Independently audit the published K3 draft PR exact head without implementing fixes.
+  delivery: durable structured verdict on the K3 draft PR
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+    - exact draft PR head evidence
+  deliverable: exact-head PASS, PASS_WITH_WARN, or BLOCK with complete next_action

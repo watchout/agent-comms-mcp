@@ -1,0 +1,72 @@
+schema_version: shirube-v3/control_handoff/v1
+artifact_id: CH-AUN-K3-DELIVERY-TRUTH-20260716-002
+cell_id: CELL-MCP-AUN-K3-DELIVERY-TRUTH-001
+published_handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989407828
+published_test_audit_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+sealed_base_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000235031
+registered_adapter_byte_authority_addendum_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
+registered_adapter_byte_authority_addendum_sha256: f875b58b6d9fb375ea2aaada90bd4acb80154e49143caafc84dad6d2d00eab99
+execution_context:
+  agent_id: aun
+  active_function: implementation_executor
+  base_commit: f793b71d44af08b69490bf1e4f80f53493330d40
+  base_tree: 48823507df10d2ec7a273d2f50e2f90344c7f5aa
+  branch_name: agent/aun-k3-delivery-truth-20260716
+  activation: false
+exact_allowed_paths_in_order:
+  - core/eventlog/delivery.ts
+  - core/eventlog/outbox.ts
+  - core/eventlog/types.ts
+  - core/eventlog/views.ts
+  - core/eventlog/internal-handoff.ts
+  - core/eventlog/worker.ts
+  - core/eventlog/seat-supervisor.ts
+  - core/eventlog/index.ts
+  - adapters/eventlog/discord-transport.ts
+  - adapters/eventlog/registered-connector-catalog.ts
+  - tests/aun-k3/fixtures/provider-ack-delivery-unit-v1.json
+  - tests/aun-k3/fixtures/durable-handoff-delivery-unit-v1.json
+  - tests/aun-k3/fixtures/no-receipt-delivery-unit-v1.json
+  - tests/aun-k3/dedicated-outbox-dispatcher.test.ts
+  - tests/aun-k3/delivery-truth.test.ts
+  - tests/aun-k3/nonce-effect.test.ts
+  - tests/aun-k3/crash-reconciliation.test.ts
+  - tests/aun-k3/internal-handoff-exactly-once.test.ts
+  - tests/aun-k3/replay-starvation.test.ts
+  - tests/aun-k3/matrix-evidence.test.ts
+  - benchmarks/aun-k3/profiles.ts
+  - benchmarks/aun-k3/harness.ts
+  - benchmarks/aun-k3/cli.ts
+  - .shirube/cells/CELL-MCP-AUN-K3-DELIVERY-TRUTH-001.yaml
+  - .shirube/control-handoffs/CH-AUN-K3-DELIVERY-TRUTH-001.yaml
+  - .shirube/audit-checklists/AUDIT-AUN-K3-DELIVERY-TRUTH-001.yaml
+  - .shirube/evidence/EVIDENCE-AUN-K3-DELIVERY-TRUTH-001.yaml
+environment_guards:
+  AUN_K3_DB_SCOPE: isolated_disposable_fixture
+  database_url_source: AUN_K3_TEST_DATABASE_URL
+  provider: fake_only
+  DISCORD_TOKEN: unset
+  V1_mode: observe_only_no_traversal
+forbidden_operations:
+  - schema or migration creation or mutation
+  - live daemon, runtime, scheduler, or host supervisor activation
+  - real provider invocation or external network send
+  - production, staging, shared, or pre-existing database mutation
+  - V1 import, receive, close, send, notify, or queue traversal
+  - approval, ready-for-review, merge, deploy, activation, or self-audit
+stop_conditions:
+  - any implementation need outside exact_allowed_paths_in_order
+  - any schema or migration requirement
+  - any real provider, V1, shared database, or activation requirement
+  - independent gate BLOCK or owner NO-GO
+next_action:
+  blocking: false
+  actor: aun
+  active_function: implementation_executor
+  action: Continue K3 implementation and author qualification without waiting for generic acknowledgements.
+  delivery: local branch followed by draft PR exact-head evidence
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989407828
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4989429763
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5000873855
+  deliverable: exact-head implementation, tests, benchmark result, and scope evidence

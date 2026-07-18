@@ -232,9 +232,12 @@ export interface OutboxDelivery {
   payload: Record<string, unknown>
 }
 
-export interface TransportSendResult {
+export interface LegacyTransportSendResult {
   transportMessageId: string
 }
+
+/** @deprecated V1-compatible transport result; K3 uses V2DeliveryAttemptResult. */
+export type TransportSendResult = LegacyTransportSendResult
 
 /**
  * Transport adapter consumed by the outbox dispatcher. Discord/Slack/CLI
@@ -242,9 +245,12 @@ export interface TransportSendResult {
  * Legacy compatibility transport. The Transport-Neutral direct adapter uses
  * frozen request/ack envelopes; a thrown nonce error never means delivered.
  */
-export interface OutboxTransport {
+export interface LegacyOutboxTransport {
   send(delivery: OutboxDelivery): Promise<TransportSendResult>
 }
+
+/** @deprecated Compatibility dispatcher only; K3 uses V2DeliveryTransportAdapter. */
+export type OutboxTransport = LegacyOutboxTransport
 
 export class AppendOnlyViolationError extends Error {}
 

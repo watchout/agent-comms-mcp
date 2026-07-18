@@ -394,6 +394,125 @@ export async function pendingDeliveries(db: DbAdapter): Promise<OutboxViewRow[]>
   return rows.filter(r => r.delivery_claim_event_id === null)
 }
 
+export interface DeliveryTruthViewV1 {
+  schema_version: 'aun-delivery-truth-view/v1'
+  reply_id: string
+  delivery_id: string
+  recipient_seat_id: string
+  enqueued_event_id: string
+  enqueued_seq: number
+  state: 'pending' | 'claimed' | 'delivered' | 'handoff_accepted' | 'delivery_unknown' | 'failed_retryable' | 'failed_permanent'
+  claim_epoch: number | null
+  truth_event_id: string | null
+  truth_seq: number | null
+  provider_invocation_started: boolean
+}
+
+/** Replay-only K3 delivery projection. There is no mutable delivery table. */
+function replayDeliveryTruth(events: StoredEvent[]): DeliveryTruthViewV1[] {
+  const rows = new Map<string, DeliveryTruthViewV1>()
+  for (const event of events) {
+    if (event.event_type === 'reply.enqueued') {
+      const raw = parseEventPayload<Record<string, unknown>>(event.payload)
+      if (raw.schema_version !== 'aun-delivery-unit/v1') continue
+      const unit = raw as unknown as DeliveryUnitV1
+      if (
+        typeof unit.reply_id !== 'string' ||
+        typeof unit.delivery_id !== 'string' ||
+        typeof unit.recipient_seat_id !== 'string' ||
+        event.reply_id !== unit.reply_id
+      ) continue
+      rows.set(unit.reply_id, {
+        schema_version: 'aun-delivery-truth-view/v1',
+        reply_id: unit.reply_id,
+        delivery_id: unit.delivery_id,
+        recipient_seat_id: unit.recipient_seat_id,
+        enqueued_event_id: event.event_id,
+        enqueued_seq: Number(event.seq),
+        state: 'pending',
+        claim_epoch: null,
+        truth_event_id: null,
+        truth_seq: null,
+        provider_invocation_started: false,
+      })
+      continue
+    }
+    if (!event.reply_id) continue
+    const row = rows.get(event.reply_id)
+    if (!row) continue
+    if (event.event_type === 'reply.delivery_claimed') {
+      row.state = 'claimed'
+      row.claim_epoch = event.claim_epoch === null ? null : Number(event.claim_epoch)
+      row.truth_event_id = null
+      row.truth_seq = null
+    } else if (event.event_type === 'reply.provider_invocation_started') {
+      row.provider_invocation_started = true
+    } else if (event.event_type === 'reply.delivered') {
+      const payload = decodeReplyDeliveredPayload(parseEventPayload(event.payload))
+      if (payload.delivery_id === row.delivery_id) {
+        row.state = 'delivered'
+        row.truth_event_id = event.event_id
+        row.truth_seq = Number(event.seq)
+      }
+    } else if (event.event_type === 'reply.handoff_accepted') {
+      const payload = decodeReplyHandoffAcceptedPayload(parseEventPayload(event.payload))
+      if (payload.delivery_id === row.delivery_id) {
+        row.state = 'handoff_accepted'
+        row.truth_event_id = event.event_id
+        row.truth_seq = Number(event.seq)
+      }
+    } else if (event.event_type === 'reply.delivery_unknown') {
+      const payload = decodeReplyDeliveryUnknownPayload(parseEventPayload(event.payload))
+      if (payload.delivery_id === row.delivery_id) {
+        row.state = 'delivery_unknown'
+        row.truth_event_id = event.event_id
+        row.truth_seq = Number(event.seq)
+      }
+    } else if (event.event_type === 'reply.failed') {
+      const raw = parseEventPayload<Record<string, unknown>>(event.payload)
+      if (raw.delivery_id !== row.delivery_id) continue
+      const payload = decodeReplyFailedPayload(raw)
+      row.state = payload.permanent ? 'failed_permanent' : 'failed_retryable'
+      row.truth_event_id = event.event_id
+      row.truth_seq = Number(event.seq)
+    } else if (event.event_type === 'reply.delivery_reopened') {
+      row.state = 'pending'
+      row.claim_epoch = event.claim_epoch === null ? null : Number(event.claim_epoch)
+      row.truth_event_id = event.event_id
+      row.truth_seq = Number(event.seq)
+      row.provider_invocation_started = false
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.enqueued_seq - b.enqueued_seq)
+}
+
+/** Dedicated V2 query: legacy rows never enter this projection. */
+export async function deliveryTruthView(db: DbAdapter): Promise<DeliveryTruthViewV1[]> {
+  const events = await db.query<StoredEvent>(
+    `SELECT e.* FROM event_log e
+      WHERE e.event_type = 'reply.enqueued'
+         OR (
+           e.reply_id IS NOT NULL
+           AND e.event_type IN (
+             'reply.delivery_claimed','reply.provider_invocation_started','reply.delivered',
+             'reply.handoff_accepted','reply.delivery_unknown','reply.failed','reply.delivery_reopened'
+           )
+           AND EXISTS (
+             SELECT 1 FROM event_log q
+              WHERE q.event_type='reply.enqueued' AND q.reply_id=e.reply_id
+                AND ${jsonText(db, 'q.payload', 'schema_version')}='aun-delivery-unit/v1'
+           )
+         )
+      ORDER BY e.seq ASC`,
+  )
+  return replayDeliveryTruth(events)
+}
+
+/** Read-back replay used by crash tests; output is byte-equivalent to the view. */
+export async function rebuildDeliveryTruthView(db: DbAdapter): Promise<DeliveryTruthViewV1[]> {
+  return deliveryTruthView(db)
+}
+
 export interface FanoutParentAggregateV1 {
   schema_version: 'aun-fanout-parent-aggregate/v1'
   fanout_planned_event_id: string

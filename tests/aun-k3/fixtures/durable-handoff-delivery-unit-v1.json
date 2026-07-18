@@ -1,0 +1,5 @@
+{
+  "schema_version": "aun-k3-fixture/v1",
+  "required_receipt_mode": "durable_handoff",
+  "expected_truth": "reply.handoff_accepted"
+}
