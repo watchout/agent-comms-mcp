@@ -14,6 +14,8 @@ const labels = new Set((pr?.labels ?? []).map((label) => String(label.name ?? ""
 const headSha = String(pr?.head?.sha ?? process.env.GITHUB_SHA ?? "");
 const errors = [];
 const warnings = [];
+const supportedMergeMethods = new Set(["merge", "squash", "rebase"]);
+const mergeMethodLabelPrefix = "merge-method:";
 const isRapidLiteAdoptionPr = /(?:^|\n)\s*CELL-ID\s*:\s*CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001(?:\s|$)/iu.test(body);
 
 const adoptionForbiddenRuntimePatterns = [
@@ -139,6 +141,12 @@ requirePullRequestTypes(".github/workflows/pr-checks.yml", [
   "unlabeled",
   "edited",
 ]);
+requireText(".github/workflows/pr-checks.yml", [
+  "Auto-merge (explicit owner-selected squash)",
+  "contains(github.event.pull_request.labels.*.name, 'merge-method:squash')",
+  "Squash-merge PR (explicit owner-selected method)",
+  "--squash",
+]);
 
 if (pr) {
   requirePrBodyText([
@@ -161,7 +169,8 @@ if (pr) {
     if (!labels.has("shirube-current-overlay")) {
       errors.push("Non-draft PRs require label shirube-current-overlay.");
     }
-    await requireOwnerDecisionArtifact();
+    const ownerDecision = await requireOwnerDecisionArtifact();
+    requireMergeMethodSelection(ownerDecision);
   }
 }
 
@@ -219,8 +228,42 @@ async function requireOwnerDecisionArtifact() {
     errors.push(
       [
         "Non-draft PRs require a machine-verifiable shirube_owner_decision comment for the current exact head.",
-        `Expected schema_version=shirube-owner-decision/v1, target_repo=${repo}, target_pr=${prNumber}, exact_head_sha=${headSha}, verdict=APPROVED_EXACT_HEAD, actor equal to the comment author, and decision_ref equal to the comment URL.`,
+        `Expected schema_version=shirube-owner-decision/v1, target_repo=${repo}, target_pr=${prNumber}, exact_head_sha=${headSha}, verdict=APPROVED_EXACT_HEAD, merge_method=merge|squash|rebase, actor equal to the comment author, and decision_ref equal to the comment URL.`,
       ].join(" "),
+    );
+  }
+  return exactDecision ?? null;
+}
+
+function requireMergeMethodSelection(ownerDecision) {
+  const mergeMethodLabels = [...labels]
+    .filter((label) => label.startsWith(mergeMethodLabelPrefix));
+
+  if (mergeMethodLabels.length !== 1) {
+    errors.push(
+      `Non-draft PRs require exactly one merge-method label; found ${mergeMethodLabels.length}: ${mergeMethodLabels.join(", ") || "<none>"}.`,
+    );
+    return;
+  }
+
+  const selectedMethod = mergeMethodLabels[0].slice(mergeMethodLabelPrefix.length);
+  if (!supportedMergeMethods.has(selectedMethod)) {
+    errors.push(
+      `Unsupported merge method label ${mergeMethodLabels[0]}; supported methods are merge, squash, and rebase.`,
+    );
+    return;
+  }
+
+  if (!ownerDecision) return;
+  if (!supportedMergeMethods.has(ownerDecision.merge_method)) {
+    errors.push(
+      `Owner decision must select merge_method=merge, squash, or rebase; got ${ownerDecision.merge_method || "<empty>"}.`,
+    );
+    return;
+  }
+  if (ownerDecision.merge_method !== selectedMethod) {
+    errors.push(
+      `Owner decision merge_method=${ownerDecision.merge_method} does not match label ${mergeMethodLabels[0]}.`,
     );
   }
 }
@@ -272,8 +315,16 @@ function parseOwnerDecisionComment(comment) {
   if (!text.includes("shirube_owner_decision:")) return null;
 
   const fields = {};
-  for (const line of text.split(/\r?\n/u)) {
-    const match = line.match(/^\s{0,4}([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/u);
+  const lines = text.split(/\r?\n/u);
+  const blockStart = lines.findIndex((line) => /^\s*shirube_owner_decision:\s*$/u.test(line));
+  if (blockStart < 0) return null;
+  const blockIndent = lines[blockStart].match(/^\s*/u)?.[0].length ?? 0;
+
+  for (const line of lines.slice(blockStart + 1)) {
+    if (!line.trim()) continue;
+    const indent = line.match(/^\s*/u)?.[0].length ?? 0;
+    if (indent <= blockIndent) break;
+    const match = line.match(/^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/u);
     if (!match) continue;
     const [, key, rawValue] = match;
     fields[key] = cleanScalar(rawValue);
@@ -285,6 +336,7 @@ function parseOwnerDecisionComment(comment) {
     target_pr: fields.target_pr,
     exact_head_sha: fields.exact_head_sha,
     verdict: fields.verdict,
+    merge_method: fields.merge_method,
     actor: fields.actor,
     decision_ref: fields.decision_ref,
     commentAuthor: String(comment?.user?.login ?? ""),

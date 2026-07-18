@@ -141,12 +141,14 @@ jobs:
           path: route.json
           retention-days: 7
 
-  # ── Auto-merge (owner exact-head gated) ─────────────────────────────────
+  # ── Auto-merge (owner exact-head + explicit method gated) ────────────────
   # route:fast-merge + all Layer 0 checks pass is not sufficient.
-  # The PR must be non-draft and carry owner exact-head current-overlay labels.
+  # The PR must be non-draft, carry owner exact-head current-overlay labels,
+  # and have merge-method:squash matching the exact-head owner decision.
+  # merge-method:merge and merge-method:rebase remain human-executed methods.
   # route:ceo-approval PRs are skipped here for human maintainer handling.
   auto-merge:
-    name: Auto-merge (owner exact-head gated)
+    name: Auto-merge (explicit owner-selected squash)
     runs-on: ubuntu-latest
     needs: [layer0]
     if: |
@@ -154,6 +156,7 @@ jobs:
       github.event.pull_request.draft == false &&
       contains(github.event.pull_request.labels.*.name, 'owner-exact-head-approved') &&
       contains(github.event.pull_request.labels.*.name, 'shirube-current-overlay') &&
+      contains(github.event.pull_request.labels.*.name, 'merge-method:squash') &&
       needs.layer0.result == 'success' &&
       needs.layer0.outputs.route != 'ceo-approval'
     permissions:
@@ -164,7 +167,7 @@ jobs:
       # job fails with "not a git repository" (observed on PR #736).
       - uses: actions/checkout@v4
 
-      - name: Squash-merge PR
+      - name: Squash-merge PR (explicit owner-selected method)
         run: |
           gh pr merge ${{ github.event.pull_request.number }} \
             --squash \
