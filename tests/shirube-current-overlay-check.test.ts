@@ -16,6 +16,7 @@ function runGate(
     ownerMergeMethod?: string;
     trailingCommentBody?: string;
     expectedHeadSha?: string;
+    requiredMergeMethod?: string;
     eventHeadSha?: string;
     ownerDecisions?: Array<{
       mergeMethod: string;
@@ -80,6 +81,7 @@ function runGate(
       "--comments",
       commentsPath,
       ...(options.expectedHeadSha ? ["--expected-head", options.expectedHeadSha] : []),
+      ...(options.requiredMergeMethod ? ["--required-merge-method", options.requiredMergeMethod] : []),
     ], {
       cwd: repoRoot,
       encoding: "utf8",
@@ -305,4 +307,47 @@ describe("shirube-current-overlay-check", () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain(`Live PR head ${headSha} does not match checked head ${checkedHead}.`);
   });
+
+  test("allows auto-squash revalidation only while the live decision and label remain squash", () => {
+    const result = runGate(
+      baseBody("CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001", "R1"),
+      ["tests/aun-runtime-v2-claim-plan.test.ts"],
+      {
+        draft: false,
+        labels: ["owner-exact-head-approved", "shirube-current-overlay", "merge-method:squash"],
+        ownerMergeMethod: "squash",
+        expectedHeadSha: headSha,
+        requiredMergeMethod: "squash",
+      },
+    );
+
+    expect(result.status).toBe(0);
+  });
+
+  test.each(["merge", "rebase"])(
+    "fails a stale auto-squash run after the live authority changes to %s",
+    (currentMethod) => {
+      const result = runGate(
+        baseBody("CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001", "R1"),
+        ["tests/aun-runtime-v2-claim-plan.test.ts"],
+        {
+          draft: false,
+          labels: ["owner-exact-head-approved", "shirube-current-overlay", `merge-method:${currentMethod}`],
+          ownerDecisions: [
+            { mergeMethod: "squash" },
+            {
+              mergeMethod: currentMethod,
+              supersedesDecisionRef: "https://github.com/watchout/agent-comms-mcp/pull/999#issuecomment-1",
+            },
+          ],
+          expectedHeadSha: headSha,
+          requiredMergeMethod: "squash",
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`Execution requires merge_method=squash, but the live label selects ${currentMethod}.`);
+      expect(result.stdout).toContain(`Execution requires merge_method=squash, but the authoritative owner decision selects ${currentMethod}.`);
+    },
+  );
 });

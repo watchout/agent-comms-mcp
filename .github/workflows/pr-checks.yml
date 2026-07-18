@@ -188,7 +188,8 @@ jobs:
             --event live-pr-event.json \
             --comments live-owner-comments.json \
             --changed-files live-changed-files.txt \
-            --expected-head "$CHECKED_HEAD"
+            --expected-head "$CHECKED_HEAD" \
+            --required-merge-method squash
 
           PR_TITLE="$(gh pr view "$PR_NUMBER" --json title --jq .title)"
           MERGE_RESULT="$(gh api --method PUT \

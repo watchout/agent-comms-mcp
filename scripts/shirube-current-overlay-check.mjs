@@ -6,6 +6,7 @@ const repo = stringArg(args.repo) ?? process.env.GITHUB_REPOSITORY ?? "";
 const eventPath = stringArg(args.event) ?? process.env.GITHUB_EVENT_PATH ?? "";
 const changedFilesPath = stringArg(args["changed-files"]);
 const expectedHeadSha = stringArg(args["expected-head"]);
+const requiredMergeMethod = stringArg(args["required-merge-method"]);
 const changedFiles = readChangedFiles(changedFilesPath);
 const event = readJsonIfPresent(eventPath);
 const pr = event?.pull_request ?? null;
@@ -149,6 +150,7 @@ requireText(".github/workflows/pr-checks.yml", [
   '--expected-head "$CHECKED_HEAD"',
   '-f sha="$CHECKED_HEAD"',
   "-f merge_method=squash",
+  "--required-merge-method squash",
 ]);
 
 if (pr) {
@@ -282,6 +284,11 @@ function requireMergeMethodSelection(ownerDecision) {
     );
     return;
   }
+  if (requiredMergeMethod && selectedMethod !== requiredMergeMethod) {
+    errors.push(
+      `Execution requires merge_method=${requiredMergeMethod}, but the live label selects ${selectedMethod}.`,
+    );
+  }
 
   if (!ownerDecision) return;
   if (!supportedMergeMethods.has(ownerDecision.merge_method)) {
@@ -293,6 +300,11 @@ function requireMergeMethodSelection(ownerDecision) {
   if (ownerDecision.merge_method !== selectedMethod) {
     errors.push(
       `Owner decision merge_method=${ownerDecision.merge_method} does not match label ${mergeMethodLabels[0]}.`,
+    );
+  }
+  if (requiredMergeMethod && ownerDecision.merge_method !== requiredMergeMethod) {
+    errors.push(
+      `Execution requires merge_method=${requiredMergeMethod}, but the authoritative owner decision selects ${ownerDecision.merge_method}.`,
     );
   }
 }
