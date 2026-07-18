@@ -43,7 +43,7 @@ export interface V2NativeMeshScopeV1 {
 }
 
 export interface V2NativeMeshExecutionFence {
-  stage_id: 'S0_IMPLEMENTATION'
+  stage_id: V2NativeMeshStageId
   exact_implementation_head: string
   database_identity: string
   runtime_snapshot_sha256: string

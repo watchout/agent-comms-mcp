@@ -44,6 +44,7 @@ import { memoryReadyBootstrap } from './aun/memory-ready'
 import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
 import { connectorChannelAccessDiscovery, connectorCredentialDiagnostic, connectorProviderIdentityVerify } from './aun/connector'
 import { validateV2NativeMeshScopeFile } from './aun/v2-native-mesh'
+import { runV2NativeStageCommand, V2_NATIVE_STAGE_CLI_FLAGS } from './aun/v2-native-stage-executor'
 
 function printHelp(): void {
   const lines = [
@@ -69,6 +70,7 @@ function printHelp(): void {
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
     '  aun runtime-v2 --agent-id <policy-agent> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] [--runtime echo|codex-exec|command-json] [--finalize] [--dry-run]',
     '  aun v2-native-mesh validate --scope-file <path> --expected-head <sha> --database-identity <id> --runtime-snapshot-sha256 <sha> --json',
+    '  aun v2-native-stage preflight|execute --binding-file <path> --binding-url <url> --binding-sha256 <sha> --owner-decision-body-file <path> --owner-decision-url <url> --owner-decision-body-sha256 <sha> --exact-implementation-sha <sha> --exact-implementation-tree <tree> --json',
     '  aun connector credential-diagnostic [--agent-id <id>] [--provider discord] --json',
     '  aun connector verify-discord-identity --agent-id <id> --dry-run --json',
     '  aun connector discover-channel-access --agent-id <id> [--provider discord] --dry-run --json',
@@ -330,8 +332,29 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'renew-claim' &&
     subcommand !== 'memory-ready-bootstrap' &&
     subcommand !== 'runtime-v2' &&
-    subcommand !== 'connector'
+    subcommand !== 'connector' &&
+    subcommand !== 'v2-native-stage'
   ) return run(argv)
+
+  if (subcommand === 'v2-native-stage') {
+    const admitted = new Set<string>(V2_NATIVE_STAGE_CLI_FLAGS)
+    const res = await runV2NativeStageCommand({
+      mode: extras[0],
+      extraModes: extras.slice(1),
+      bindingFile: typeof flags['binding-file'] === 'string' ? flags['binding-file'] : undefined,
+      bindingUrl: typeof flags['binding-url'] === 'string' ? flags['binding-url'] : undefined,
+      bindingSha256: typeof flags['binding-sha256'] === 'string' ? flags['binding-sha256'] : undefined,
+      ownerDecisionBodyFile: typeof flags['owner-decision-body-file'] === 'string' ? flags['owner-decision-body-file'] : undefined,
+      ownerDecisionUrl: typeof flags['owner-decision-url'] === 'string' ? flags['owner-decision-url'] : undefined,
+      ownerDecisionBodySha256: typeof flags['owner-decision-body-sha256'] === 'string' ? flags['owner-decision-body-sha256'] : undefined,
+      exactImplementationSha: typeof flags['exact-implementation-sha'] === 'string' ? flags['exact-implementation-sha'] : undefined,
+      exactImplementationTree: typeof flags['exact-implementation-tree'] === 'string' ? flags['exact-implementation-tree'] : undefined,
+      json: flags.json === true,
+      unknownFlags: Object.keys(flags).filter(flag => !admitted.has(flag)),
+    })
+    process.stdout.write(JSON.stringify(res.result, null, 2) + '\n')
+    return res.code
+  }
 
   if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
     const res = await receiveTargeted({
