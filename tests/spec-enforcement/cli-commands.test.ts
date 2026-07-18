@@ -309,13 +309,12 @@ describe('T4b — `agent-com next` guards message_queue status vocabulary drift'
 // Pre-v2.1.0 the CLI delegated fanout to the daemon via
 // `SELECT pg_notify('agent_inbox', …)`; in SQLite mode no LISTEN-er was
 // attached, so recipients never saw the message (auditor BLOCKER on PR #224).
-// The delegation was replaced with a direct call to `fanoutToRecipients()`
-// which INSERTs one `message_queue` row per recipient and signals their
-// bot-runner, working identically on PG and SQLite. Pin both:
-//   (a) the call is invoked with `recipients: mentions` (per-mention fanout)
+// The delegation is transaction-native and shared with queue-work finalization.
+// It writes exactly one active-owner queue row in the caller transaction. Pin:
+//   (a) the shared core is invoked with the resolved active owner
 //   (b) the old `SELECT pg_notify('agent_inbox', …)` path is GONE
 describe('T5 — `agent-com send` fans out message_queue rows per recipient', () => {
-  test('sendMessage calls fanoutToRecipients with recipients: mentions', () => {
+  test('sendMessage calls the shared anchored reply core with the active owner', () => {
     // Find the sendMessage function body so the regex doesn't accidentally
     // match an unrelated fanout site (there's also one in notifyMessage).
     const fnStart = CLI_SRC.indexOf('async function sendMessage')
@@ -324,9 +323,9 @@ describe('T5 — `agent-com send` fans out message_queue rows per recipient', ()
     const fnEnd = CLI_SRC.indexOf('\nasync function ', fnStart + 1)
     const body = CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 
-    // (a) Body invokes fanoutToRecipients and passes `recipients: mentions`.
-    expect(body).toMatch(/fanoutToRecipients\(/)
-    expect(body).toMatch(/recipients:\s*mentions\b/)
+    // (a) Body invokes the transaction-native shared core for one active owner.
+    expect(body).toMatch(/persistAnchoredReplyMessageAndRecipientInTransaction\(/)
+    expect(body).toMatch(/recipientAgentId:\s*activeOwner\b/)
 
     // (b) Negative: the old PG LISTEN delegation must not reappear.
     expect(body).not.toMatch(/SELECT pg_notify\('agent_inbox'/)
@@ -466,11 +465,9 @@ describe('T8 — thread_id flows from next → send → outbound', () => {
     // Queue resolution branch defaults null:
     expect(body).toMatch(/thread_id:\s*payload\.thread_id\s*\?\?\s*null/)
   })
-  test('sendMessage INSERTs thread_id (not the literal NULL)', () => {
+  test('sendMessage passes thread_id to the shared transaction-native reply core', () => {
     const body = sendMessageBody()
-    // The INSERT must bind threadId rather than the previous hardcoded NULL.
-    expect(body).toMatch(/'agent-comms',\s*\$8,\s*'outbound'/)
-    expect(body).toMatch(/JSON\.stringify\(metadata\),\s*threadId/)
+    expect(body).toMatch(/persistAnchoredReplyMessageAndRecipientInTransaction\([\s\S]*?threadId,/)
     // Negative: the previous shape hardcoded NULL between 'agent-comms' and 'outbound'.
     expect(body).not.toMatch(/'agent-comms',\s*NULL,\s*'outbound'/)
   })

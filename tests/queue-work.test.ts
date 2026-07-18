@@ -5,7 +5,6 @@ import {
   finalizeDoneQueueWork,
   runReceivedQueueWork,
   type LlmRuntimeAdapter,
-  type QueueReplySender,
   type QueueWorkDb,
   type QueueWorkEnvelope,
   type QueueWorkResult,
@@ -315,7 +314,7 @@ describe('runReceivedQueueWork', () => {
 })
 
 describe('finalizeDoneQueueWork', () => {
-  test('holds the finalize transaction across select, reply send, and replied update', async () => {
+  test('returns a typed retryable failure and rolls back when the transaction-native reply unit fails', async () => {
     const row = receivedRow({
       status: 'done',
       payload: JSON.stringify({
@@ -325,88 +324,47 @@ describe('finalizeDoneQueueWork', () => {
         runner_result: okResult({ reply: 'L3 LGTM', next_action: 'reply' }),
       }),
     })
-    const events: string[] = []
     const db = new FakeQueueDb(row)
-    const query = db.query.bind(db)
-    db.query = async (sql, params) => {
-      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
-        events.push(sql)
-      } else if (sql.includes('FOR UPDATE')) {
-        events.push('SELECT_FOR_UPDATE')
-      } else if (sql.includes("SET status = 'replied'")) {
-        events.push('UPDATE_REPLIED')
-      }
-      return query(sql, params)
-    }
-    const replySender: QueueReplySender = {
-      async sendReply() {
-        events.push('SEND_REPLY')
-        return { message_id: 'reply-1' }
-      },
-    }
 
     const outcome = await finalizeDoneQueueWork(db, {
       queueId: 42,
-      replySender,
       now: () => new Date('2026-05-21T01:05:00.000Z'),
     })
 
-    expect(outcome).toMatchObject({ ok: true, code: 'REPLIED' })
-    expect(events).toEqual([
+    expect(outcome).toMatchObject({ ok: false, code: 'RETRYABLE_FINALIZER_FAILURE' })
+    expect(db.calls.map((call) => call.sql)).toEqual([
       'BEGIN',
-      'SELECT_FOR_UPDATE',
-      'SEND_REPLY',
-      'UPDATE_REPLIED',
-      'COMMIT',
+      expect.stringContaining('FOR UPDATE'),
+      expect.stringContaining('INSERT INTO agent_messages'),
+      'ROLLBACK',
     ])
-    expect(events).not.toContain('ROLLBACK')
+    expect(db.row.status).toBe('done')
   })
 
-  test('sends the stored reply and closes done rows as replied', async () => {
+  test('returns the durable replied_with id for an already-replied row', async () => {
     const row = receivedRow({
-      status: 'done',
-      payload: JSON.stringify({
-        channel_id: 'audit',
-        author_id: 'codex-cto',
-        content: 'Audit PR #489',
-        runner_result: okResult({ reply: 'L3 LGTM', next_action: 'reply' }),
-      }),
+      status: 'replied',
+      replied_with: 'reply-1',
     })
     const db = new FakeQueueDb(row)
-    const sent: Array<{ queue_id: string; content: string; mention: string | null }> = []
-    const replySender: QueueReplySender = {
-      async sendReply(input) {
-        sent.push({
-          queue_id: input.queue_id,
-          content: input.content,
-          mention: input.mention,
-        })
-        return { message_id: 'reply-1' }
-      },
-    }
 
     const outcome = await finalizeDoneQueueWork(db, {
       queueId: 42,
-      replySender,
       now: () => new Date('2026-05-21T01:05:00.000Z'),
     })
 
     expect(outcome).toMatchObject({
       ok: true,
-      code: 'REPLIED',
+      code: 'ALREADY_REPLIED',
       queue_id: '42',
       replied_with: 'reply-1',
     })
-    expect(sent).toEqual([{ queue_id: '42', content: 'L3 LGTM', mention: 'codex-cto' }])
-    expect(db.row.status).toBe('replied')
-    expect(db.row.claimed_by).toBeNull()
   })
 
-  test('rolls back without sending when a reply result has no reply sender', async () => {
+  test('rolls back when a reply result lacks anchored channel context', async () => {
     const row = receivedRow({
       status: 'done',
       payload: JSON.stringify({
-        channel_id: 'audit',
         author_id: 'codex-cto',
         content: 'Audit PR #489',
         runner_result: okResult({ reply: 'L3 LGTM', next_action: 'reply' }),
@@ -421,7 +379,7 @@ describe('finalizeDoneQueueWork', () => {
 
     expect(outcome).toMatchObject({
       ok: false,
-      code: 'MISSING_REPLY_SENDER',
+      code: 'MISSING_REPLY_CONTEXT',
       queue_id: '42',
     })
     const sqls = db.calls.map((call) => call.sql)
@@ -432,7 +390,7 @@ describe('finalizeDoneQueueWork', () => {
     expect(db.row.status).toBe('done')
   })
 
-  test('closes non-reply results without calling a reply sender', async () => {
+  test('closes non-reply results without writing an anchored reply', async () => {
     const row = receivedRow({
       status: 'done',
       payload: JSON.stringify({
@@ -622,17 +580,8 @@ describe('finalizeDoneQueueWork', () => {
       }),
     })
     const db = new FakeQueueDb(row)
-    let sendCount = 0
-    const replySender: QueueReplySender = {
-      async sendReply() {
-        sendCount += 1
-        return { message_id: 'reply-should-not-exist' }
-      },
-    }
-
     const outcome = await finalizeDoneQueueWork(db, {
       queueId: 42,
-      replySender,
       now: () => new Date('2026-05-21T01:05:00.000Z'),
     })
 
@@ -641,7 +590,6 @@ describe('finalizeDoneQueueWork', () => {
       code: 'RETRY_NOT_IMPLEMENTED',
       queue_id: '42',
     })
-    expect(sendCount).toBe(0)
     expect(db.calls.map((call) => call.sql)).toEqual([
       'BEGIN',
       expect.stringContaining('FOR UPDATE'),
