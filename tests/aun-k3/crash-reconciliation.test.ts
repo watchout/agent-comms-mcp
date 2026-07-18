@@ -65,19 +65,49 @@ async function withDb<T>(run: (db: SqliteAdapter) => Promise<T>): Promise<T> {
 }
 
 describe('K3 crash boundaries and reconciliation', () => {
-  test('TC007 crash/preflight failure before claim leaves delivery pending with zero effect', async () => withDb(async db => {
+  test('TC007 subprocess crash before claim recovers with loss=0, claims=1, provider_attempts=1, terminal=1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-k3-before-claim-'))
+    const path = join(dir, 'eventlog.db')
+    let db = new SqliteAdapter(path)
+    await ensureEventLogSchema(db)
     const fixture = makeDeliveryFixture('provider_ack', 'before-claim')
     const adapter = new FakeV2Adapter('provider_ack')
-    await appendUnit(db, fixture)
-    const result = await dispatchV2OutboxOnce(db, adapter, {
-      dispatcherId: 'dispatcher', dispatcherInstanceId: 'old',
-      targetConnectorInstanceId: '99999999-9999-4999-8999-999999999999',
-      loadRegistration: () => fixture.registration,
-    })
-    expect(result.rejectedAuthority).toEqual([fixture.unit.reply_id])
-    expect(adapter.calls).toBe(0)
-    expect((await pendingDeliveries(db)).map(row => row.reply_id)).toEqual([fixture.unit.reply_id])
-  }))
+    try {
+      await appendUnit(db, fixture)
+      expect((await pendingDeliveries(db)).map(row => row.reply_id)).toEqual([fixture.unit.reply_id])
+      await db.close()
+
+      const crash = Bun.spawn([process.execPath, '-e', `
+        import { SqliteAdapter } from './core/db/sqlite-adapter.ts'
+        import { pendingDeliveries } from './core/eventlog/views.ts'
+        const db = new SqliteAdapter(process.argv[1])
+        const pending = await pendingDeliveries(db)
+        if (pending.length !== 1) process.exit(2)
+        process.exit(73)
+      `, path], { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' })
+      const stderr = await new Response(crash.stderr).text()
+      expect(await crash.exited).toBe(73)
+      expect(stderr).toBe('')
+
+      db = new SqliteAdapter(path)
+      const result = await dispatchV2OutboxOnce(db, adapter, {
+        dispatcherId: 'dispatcher', dispatcherInstanceId: 'recovery',
+        targetConnectorInstanceId: fixture.unit.destination.connector_instance_id,
+        loadRegistration: () => fixture.registration,
+      })
+      const count = async (types: string[]) => Number((await db.queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM event_log WHERE event_type IN (${types.map(() => '?').join(',')})`, types,
+      ))?.n ?? 0)
+      expect(result.delivered).toEqual([fixture.unit.reply_id])
+      expect(await count(['reply.delivery_claimed'])).toBe(1)
+      expect(adapter.calls).toBe(1)
+      expect(await count(['reply.delivered', 'reply.handoff_accepted', 'reply.delivery_unknown'])).toBe(1)
+      expect(await pendingDeliveries(db)).toHaveLength(0)
+    } finally {
+      await db.close().catch(() => {})
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
   test('TC008 stale claim before invocation-start is released to a new epoch without duplication', async () => withDb(async db => {
     const fixture = makeDeliveryFixture('provider_ack', 'claim-before-start')
