@@ -67,6 +67,7 @@ shirube_owner_decision:
   exact_head_sha: <current PR head SHA>
   verdict: APPROVED_EXACT_HEAD
   merge_method: merge | squash | rebase
+  supersedes_decision_ref: <prior decision URL, required only when replacing a decision for the same exact head>
   actor: <GitHub comment author>
   decision_ref: <this GitHub comment URL>
 ```

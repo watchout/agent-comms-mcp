@@ -5,6 +5,7 @@ const args = parseArgs(process.argv.slice(2));
 const repo = stringArg(args.repo) ?? process.env.GITHUB_REPOSITORY ?? "";
 const eventPath = stringArg(args.event) ?? process.env.GITHUB_EVENT_PATH ?? "";
 const changedFilesPath = stringArg(args["changed-files"]);
+const expectedHeadSha = stringArg(args["expected-head"]);
 const changedFiles = readChangedFiles(changedFilesPath);
 const event = readJsonIfPresent(eventPath);
 const pr = event?.pull_request ?? null;
@@ -144,11 +145,16 @@ requirePullRequestTypes(".github/workflows/pr-checks.yml", [
 requireText(".github/workflows/pr-checks.yml", [
   "Auto-merge (explicit owner-selected squash)",
   "contains(github.event.pull_request.labels.*.name, 'merge-method:squash')",
-  "Squash-merge PR (explicit owner-selected method)",
-  "--squash",
+  "Revalidate live authority and squash checked head",
+  '--expected-head "$CHECKED_HEAD"',
+  '-f sha="$CHECKED_HEAD"',
+  "-f merge_method=squash",
 ]);
 
 if (pr) {
+  if (expectedHeadSha && headSha !== expectedHeadSha) {
+    errors.push(`Live PR head ${headSha || "<empty>"} does not match checked head ${expectedHeadSha}.`);
+  }
   requirePrBodyText([
     "CELL-ID:",
     "Risk Tier:",
@@ -211,9 +217,9 @@ console.log("Shirube current-overlay gate passed.");
 async function requireOwnerDecisionArtifact() {
   const comments = await loadIssueComments();
   const decisions = comments
-    .map(parseOwnerDecisionComment)
+    .map((comment, commentIndex) => parseOwnerDecisionComment(comment, commentIndex))
     .filter(Boolean);
-  const exactDecision = decisions.find((decision) => {
+  const exactDecisions = decisions.filter((decision) => {
     return decision.schema_version === "shirube-owner-decision/v1"
       && decision.target_repo === repo
       && String(decision.target_pr) === String(prNumber)
@@ -224,15 +230,38 @@ async function requireOwnerDecisionArtifact() {
       && ["OWNER", "MEMBER", "COLLABORATOR"].includes(decision.authorAssociation);
   });
 
-  if (!exactDecision) {
+  if (exactDecisions.length === 0) {
     errors.push(
       [
         "Non-draft PRs require a machine-verifiable shirube_owner_decision comment for the current exact head.",
         `Expected schema_version=shirube-owner-decision/v1, target_repo=${repo}, target_pr=${prNumber}, exact_head_sha=${headSha}, verdict=APPROVED_EXACT_HEAD, merge_method=merge|squash|rebase, actor equal to the comment author, and decision_ref equal to the comment URL.`,
       ].join(" "),
     );
+    return null;
   }
-  return exactDecision ?? null;
+
+  const decisionsByRef = new Map(exactDecisions.map((decision) => [decision.decision_ref, decision]));
+  const supersededRefs = new Set();
+  for (const decision of exactDecisions) {
+    if (!decision.supersedes_decision_ref) continue;
+    const superseded = decisionsByRef.get(decision.supersedes_decision_ref);
+    if (!superseded || superseded.commentIndex >= decision.commentIndex) {
+      errors.push(
+        `Owner decision ${decision.decision_ref} has invalid supersedes_decision_ref=${decision.supersedes_decision_ref}; it must reference a prior valid decision for the same exact head.`,
+      );
+      continue;
+    }
+    supersededRefs.add(superseded.decision_ref);
+  }
+
+  const currentDecisions = exactDecisions.filter((decision) => !supersededRefs.has(decision.decision_ref));
+  if (currentDecisions.length !== 1) {
+    errors.push(
+      `Exact head ${headSha} requires exactly one authoritative owner decision after explicit supersession; found ${currentDecisions.length}: ${currentDecisions.map((decision) => decision.decision_ref).join(", ") || "<none>"}.`,
+    );
+    return null;
+  }
+  return currentDecisions[0];
 }
 
 function requireMergeMethodSelection(ownerDecision) {
@@ -310,7 +339,7 @@ async function loadIssueComments() {
   return comments;
 }
 
-function parseOwnerDecisionComment(comment) {
+function parseOwnerDecisionComment(comment, commentIndex) {
   const text = String(comment?.body ?? "");
   if (!text.includes("shirube_owner_decision:")) return null;
 
@@ -337,11 +366,13 @@ function parseOwnerDecisionComment(comment) {
     exact_head_sha: fields.exact_head_sha,
     verdict: fields.verdict,
     merge_method: fields.merge_method,
+    supersedes_decision_ref: fields.supersedes_decision_ref,
     actor: fields.actor,
     decision_ref: fields.decision_ref,
     commentAuthor: String(comment?.user?.login ?? ""),
     authorAssociation: String(comment?.author_association ?? ""),
     commentUrl: String(comment?.html_url ?? ""),
+    commentIndex,
   };
 }
 
