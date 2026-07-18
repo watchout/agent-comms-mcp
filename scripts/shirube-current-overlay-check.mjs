@@ -5,6 +5,8 @@ const args = parseArgs(process.argv.slice(2));
 const repo = stringArg(args.repo) ?? process.env.GITHUB_REPOSITORY ?? "";
 const eventPath = stringArg(args.event) ?? process.env.GITHUB_EVENT_PATH ?? "";
 const changedFilesPath = stringArg(args["changed-files"]);
+const expectedHeadSha = stringArg(args["expected-head"]);
+const requiredMergeMethod = stringArg(args["required-merge-method"]);
 const changedFiles = readChangedFiles(changedFilesPath);
 const event = readJsonIfPresent(eventPath);
 const pr = event?.pull_request ?? null;
@@ -14,6 +16,8 @@ const labels = new Set((pr?.labels ?? []).map((label) => String(label.name ?? ""
 const headSha = String(pr?.head?.sha ?? process.env.GITHUB_SHA ?? "");
 const errors = [];
 const warnings = [];
+const supportedMergeMethods = new Set(["merge", "squash", "rebase"]);
+const mergeMethodLabelPrefix = "merge-method:";
 const isRapidLiteAdoptionPr = /(?:^|\n)\s*CELL-ID\s*:\s*CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001(?:\s|$)/iu.test(body);
 
 const adoptionForbiddenRuntimePatterns = [
@@ -139,8 +143,20 @@ requirePullRequestTypes(".github/workflows/pr-checks.yml", [
   "unlabeled",
   "edited",
 ]);
+requireText(".github/workflows/pr-checks.yml", [
+  "Auto-merge (explicit owner-selected squash)",
+  "contains(github.event.pull_request.labels.*.name, 'merge-method:squash')",
+  "Revalidate live authority and squash checked head",
+  '--expected-head "$CHECKED_HEAD"',
+  '-f sha="$CHECKED_HEAD"',
+  "-f merge_method=squash",
+  "--required-merge-method squash",
+]);
 
 if (pr) {
+  if (expectedHeadSha && headSha !== expectedHeadSha) {
+    errors.push(`Live PR head ${headSha || "<empty>"} does not match checked head ${expectedHeadSha}.`);
+  }
   requirePrBodyText([
     "CELL-ID:",
     "Risk Tier:",
@@ -161,7 +177,8 @@ if (pr) {
     if (!labels.has("shirube-current-overlay")) {
       errors.push("Non-draft PRs require label shirube-current-overlay.");
     }
-    await requireOwnerDecisionArtifact();
+    const ownerDecision = await requireOwnerDecisionArtifact();
+    requireMergeMethodSelection(ownerDecision);
   }
 }
 
@@ -202,9 +219,9 @@ console.log("Shirube current-overlay gate passed.");
 async function requireOwnerDecisionArtifact() {
   const comments = await loadIssueComments();
   const decisions = comments
-    .map(parseOwnerDecisionComment)
+    .map((comment, commentIndex) => parseOwnerDecisionComment(comment, commentIndex))
     .filter(Boolean);
-  const exactDecision = decisions.find((decision) => {
+  const exactDecisions = decisions.filter((decision) => {
     return decision.schema_version === "shirube-owner-decision/v1"
       && decision.target_repo === repo
       && String(decision.target_pr) === String(prNumber)
@@ -215,12 +232,79 @@ async function requireOwnerDecisionArtifact() {
       && ["OWNER", "MEMBER", "COLLABORATOR"].includes(decision.authorAssociation);
   });
 
-  if (!exactDecision) {
+  if (exactDecisions.length === 0) {
     errors.push(
       [
         "Non-draft PRs require a machine-verifiable shirube_owner_decision comment for the current exact head.",
-        `Expected schema_version=shirube-owner-decision/v1, target_repo=${repo}, target_pr=${prNumber}, exact_head_sha=${headSha}, verdict=APPROVED_EXACT_HEAD, actor equal to the comment author, and decision_ref equal to the comment URL.`,
+        `Expected schema_version=shirube-owner-decision/v1, target_repo=${repo}, target_pr=${prNumber}, exact_head_sha=${headSha}, verdict=APPROVED_EXACT_HEAD, merge_method=merge|squash|rebase, actor equal to the comment author, and decision_ref equal to the comment URL.`,
       ].join(" "),
+    );
+    return null;
+  }
+
+  const decisionsByRef = new Map(exactDecisions.map((decision) => [decision.decision_ref, decision]));
+  const supersededRefs = new Set();
+  for (const decision of exactDecisions) {
+    if (!decision.supersedes_decision_ref) continue;
+    const superseded = decisionsByRef.get(decision.supersedes_decision_ref);
+    if (!superseded || superseded.commentIndex >= decision.commentIndex) {
+      errors.push(
+        `Owner decision ${decision.decision_ref} has invalid supersedes_decision_ref=${decision.supersedes_decision_ref}; it must reference a prior valid decision for the same exact head.`,
+      );
+      continue;
+    }
+    supersededRefs.add(superseded.decision_ref);
+  }
+
+  const currentDecisions = exactDecisions.filter((decision) => !supersededRefs.has(decision.decision_ref));
+  if (currentDecisions.length !== 1) {
+    errors.push(
+      `Exact head ${headSha} requires exactly one authoritative owner decision after explicit supersession; found ${currentDecisions.length}: ${currentDecisions.map((decision) => decision.decision_ref).join(", ") || "<none>"}.`,
+    );
+    return null;
+  }
+  return currentDecisions[0];
+}
+
+function requireMergeMethodSelection(ownerDecision) {
+  const mergeMethodLabels = [...labels]
+    .filter((label) => label.startsWith(mergeMethodLabelPrefix));
+
+  if (mergeMethodLabels.length !== 1) {
+    errors.push(
+      `Non-draft PRs require exactly one merge-method label; found ${mergeMethodLabels.length}: ${mergeMethodLabels.join(", ") || "<none>"}.`,
+    );
+    return;
+  }
+
+  const selectedMethod = mergeMethodLabels[0].slice(mergeMethodLabelPrefix.length);
+  if (!supportedMergeMethods.has(selectedMethod)) {
+    errors.push(
+      `Unsupported merge method label ${mergeMethodLabels[0]}; supported methods are merge, squash, and rebase.`,
+    );
+    return;
+  }
+  if (requiredMergeMethod && selectedMethod !== requiredMergeMethod) {
+    errors.push(
+      `Execution requires merge_method=${requiredMergeMethod}, but the live label selects ${selectedMethod}.`,
+    );
+  }
+
+  if (!ownerDecision) return;
+  if (!supportedMergeMethods.has(ownerDecision.merge_method)) {
+    errors.push(
+      `Owner decision must select merge_method=merge, squash, or rebase; got ${ownerDecision.merge_method || "<empty>"}.`,
+    );
+    return;
+  }
+  if (ownerDecision.merge_method !== selectedMethod) {
+    errors.push(
+      `Owner decision merge_method=${ownerDecision.merge_method} does not match label ${mergeMethodLabels[0]}.`,
+    );
+  }
+  if (requiredMergeMethod && ownerDecision.merge_method !== requiredMergeMethod) {
+    errors.push(
+      `Execution requires merge_method=${requiredMergeMethod}, but the authoritative owner decision selects ${ownerDecision.merge_method}.`,
     );
   }
 }
@@ -267,13 +351,21 @@ async function loadIssueComments() {
   return comments;
 }
 
-function parseOwnerDecisionComment(comment) {
+function parseOwnerDecisionComment(comment, commentIndex) {
   const text = String(comment?.body ?? "");
   if (!text.includes("shirube_owner_decision:")) return null;
 
   const fields = {};
-  for (const line of text.split(/\r?\n/u)) {
-    const match = line.match(/^\s{0,4}([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/u);
+  const lines = text.split(/\r?\n/u);
+  const blockStart = lines.findIndex((line) => /^\s*shirube_owner_decision:\s*$/u.test(line));
+  if (blockStart < 0) return null;
+  const blockIndent = lines[blockStart].match(/^\s*/u)?.[0].length ?? 0;
+
+  for (const line of lines.slice(blockStart + 1)) {
+    if (!line.trim()) continue;
+    const indent = line.match(/^\s*/u)?.[0].length ?? 0;
+    if (indent <= blockIndent) break;
+    const match = line.match(/^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/u);
     if (!match) continue;
     const [, key, rawValue] = match;
     fields[key] = cleanScalar(rawValue);
@@ -285,11 +377,14 @@ function parseOwnerDecisionComment(comment) {
     target_pr: fields.target_pr,
     exact_head_sha: fields.exact_head_sha,
     verdict: fields.verdict,
+    merge_method: fields.merge_method,
+    supersedes_decision_ref: fields.supersedes_decision_ref,
     actor: fields.actor,
     decision_ref: fields.decision_ref,
     commentAuthor: String(comment?.user?.login ?? ""),
     authorAssociation: String(comment?.author_association ?? ""),
     commentUrl: String(comment?.html_url ?? ""),
+    commentIndex,
   };
 }
 

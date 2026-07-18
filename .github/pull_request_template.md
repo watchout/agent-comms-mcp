@@ -45,11 +45,15 @@ declared:
 ## Owner Decision
 
 Owner approval must name the exact head SHA before ready-for-review or merge handling.
+For non-draft handling, exactly one `merge-method:merge`, `merge-method:squash`, or
+`merge-method:rebase` label must match the owner decision. Only an explicitly matched
+`merge-method:squash` selection is eligible for repository auto-merge.
 
 ```text
 verdict:
 actor:
 exact_head_sha:
+merge_method: merge | squash | rebase
 decision_ref:
 ```
 
@@ -62,6 +66,8 @@ shirube_owner_decision:
   target_pr: <PR number>
   exact_head_sha: <current PR head SHA>
   verdict: APPROVED_EXACT_HEAD
+  merge_method: merge | squash | rebase
+  supersedes_decision_ref: <prior decision URL, required only when replacing a decision for the same exact head>
   actor: <GitHub comment author>
   decision_ref: <this GitHub comment URL>
 ```

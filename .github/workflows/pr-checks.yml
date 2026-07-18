@@ -141,12 +141,14 @@ jobs:
           path: route.json
           retention-days: 7
 
-  # ── Auto-merge (owner exact-head gated) ─────────────────────────────────
+  # ── Auto-merge (owner exact-head + explicit method gated) ────────────────
   # route:fast-merge + all Layer 0 checks pass is not sufficient.
-  # The PR must be non-draft and carry owner exact-head current-overlay labels.
+  # The PR must be non-draft, carry owner exact-head current-overlay labels,
+  # and have merge-method:squash matching the exact-head owner decision.
+  # merge-method:merge and merge-method:rebase remain human-executed methods.
   # route:ceo-approval PRs are skipped here for human maintainer handling.
   auto-merge:
-    name: Auto-merge (owner exact-head gated)
+    name: Auto-merge (explicit owner-selected squash)
     runs-on: ubuntu-latest
     needs: [layer0]
     if: |
@@ -154,6 +156,7 @@ jobs:
       github.event.pull_request.draft == false &&
       contains(github.event.pull_request.labels.*.name, 'owner-exact-head-approved') &&
       contains(github.event.pull_request.labels.*.name, 'shirube-current-overlay') &&
+      contains(github.event.pull_request.labels.*.name, 'merge-method:squash') &&
       needs.layer0.result == 'success' &&
       needs.layer0.outputs.route != 'ceo-approval'
     permissions:
@@ -163,13 +166,39 @@ jobs:
       # gh pr merge requires a git repository context — without checkout the
       # job fails with "not a git repository" (observed on PR #736).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Squash-merge PR
+      - name: Revalidate live authority and squash checked head
         run: |
-          gh pr merge ${{ github.event.pull_request.number }} \
-            --squash \
-            --delete-branch \
-            --subject "$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)"
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          CHECKED_HEAD="${{ github.event.pull_request.head.sha }}"
+
+          gh pr view "$PR_NUMBER" \
+            --json number,isDraft,body,labels,headRefOid \
+            --jq '{number, pull_request: {number: .number, draft: .isDraft, body: .body, labels: .labels, head: {sha: .headRefOid}}}' \
+            > live-pr-event.json
+          gh api --paginate "repos/${{ github.repository }}/issues/$PR_NUMBER/comments?per_page=100" \
+            --jq '.[]' | jq -s '.' > live-owner-comments.json
+          git diff --name-only origin/main...HEAD > live-changed-files.txt
+
+          node scripts/shirube-current-overlay-check.mjs \
+            --repo "${{ github.repository }}" \
+            --event live-pr-event.json \
+            --comments live-owner-comments.json \
+            --changed-files live-changed-files.txt \
+            --expected-head "$CHECKED_HEAD" \
+            --required-merge-method squash
+
+          PR_TITLE="$(gh pr view "$PR_NUMBER" --json title --jq .title)"
+          MERGE_RESULT="$(gh api --method PUT \
+            "repos/${{ github.repository }}/pulls/$PR_NUMBER/merge" \
+            -f sha="$CHECKED_HEAD" \
+            -f merge_method=squash \
+            -f commit_title="$PR_TITLE")"
+          echo "$MERGE_RESULT" | jq .
+          test "$(echo "$MERGE_RESULT" | jq -r .merged)" = "true"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
