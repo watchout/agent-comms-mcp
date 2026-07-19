@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
@@ -28,13 +28,21 @@ function timestamp(deltaMs: number): string {
 }
 
 function fixture() {
-  const rows: V2NativeStageEnabledRowV1[] = ['alpha', 'beta'].map(agentId => ({
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'aun-stage-cli-')))
+  tempDirs.push(dir)
+  const trueExe = realpathSync('/usr/bin/true')
+  const rows: V2NativeStageEnabledRowV1[] = ['alpha', 'beta'].map(agentId => {
+    const workspace = join(dir, 'workspace', agentId)
+    const checkout = join(dir, 'checkout', agentId)
+    mkdirSync(workspace, { recursive: true })
+    mkdirSync(checkout, { recursive: true })
+    return {
     agent_id: agentId,
     enabled: true,
     active_function: 'implementation_executor',
     runtime_instance_id: `runtime-${agentId}`,
-    workspace_realpath: `/fixture/workspace/${agentId}`,
-    checkout_root_realpath: `/fixture/checkout/${agentId}`,
+    workspace_realpath: realpathSync(workspace),
+    checkout_root_realpath: realpathSync(checkout),
     checkout_sha: COMMIT,
     checkout_tree: TREE,
     engine: 'codex',
@@ -43,7 +51,8 @@ function fixture() {
     runtime_policy_sha256: SHA,
     runtime_build_sha256: SHA,
     config_sha256: SHA,
-  }))
+    }
+  })
   const dbIdentity = {
     engine: 'PostgreSQL' as const,
     server_version: '17.5',
@@ -86,14 +95,14 @@ function fixture() {
       runtime_instance_id: row.runtime_instance_id,
       pid: 3000 + index,
       process_start_time: timestamp(-10_000),
-      executable_realpath: '/usr/bin/true',
+      executable_realpath: trueExe,
       executable_sha256: SHA,
       checkout_sha: COMMIT,
       database_identity_sha256: database.identity_sha256,
     })),
     command_catalog: rows.map(row => ({
       command_id: `seat:${row.agent_id}`,
-      exact_argv: ['/usr/bin/true'],
+      exact_argv: [trueExe],
       cwd_realpath: row.checkout_root_realpath,
       allowed_env_keys: [],
       env_value_hashes: {},
@@ -124,8 +133,6 @@ function fixture() {
   const bodySha = sha256Utf8(body)
   binding.approval_ref.exact_binding_sha256 = bindingSha
   binding.approval_ref.body_sha256 = bodySha
-  const dir = mkdtempSync(join(tmpdir(), 'aun-stage-cli-'))
-  tempDirs.push(dir)
   const bindingFile = join(dir, 'binding.json')
   const decisionFile = join(dir, 'decision.json')
   writeFileSync(bindingFile, JSON.stringify(binding))

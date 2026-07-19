@@ -42,7 +42,7 @@
       }
     },
     "direct_fanout_correlated_matrix_counts": { "$ref": "#/$defs/matrix" },
-    "crash_boundary_receipts": { "type": "array", "items": { "type": "object" } },
+    "crash_boundary_receipts": { "type": "array", "items": { "$ref": "#/$defs/crashBoundaryReceipt" } },
     "replay_before_after_sha256": {
       "type": "object", "additionalProperties": false,
       "required": ["before", "after", "byte_equal"],
@@ -96,6 +96,73 @@
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "nonnegative": { "type": "integer", "minimum": 0 },
     "timestamp": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "crashBoundaryReceipt": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/crashReceiptCommon" },
+        {
+          "oneOf": [
+            {
+              "required": ["boundary", "eventual_claims"],
+              "properties": {
+                "boundary": { "const": "before_claim" },
+                "eventual_claims": { "const": 1 }
+              }
+            },
+            {
+              "required": ["boundary", "claim_epoch_before", "claim_epoch_after", "stale_holder_terminal"],
+              "properties": {
+                "boundary": { "const": "after_claim" },
+                "claim_epoch_before": { "$ref": "#/$defs/nonnegative" },
+                "claim_epoch_after": { "$ref": "#/$defs/nonnegative" },
+                "stale_holder_terminal": { "const": 0 }
+              }
+            },
+            {
+              "required": ["boundary", "completion_cardinality", "enqueue_cardinality", "reply_delivery_cardinality"],
+              "properties": {
+                "boundary": { "const": "after_completion_enqueue" },
+                "completion_cardinality": { "const": 1 },
+                "enqueue_cardinality": { "const": 1 },
+                "reply_delivery_cardinality": { "const": 1 }
+              }
+            },
+            {
+              "required": ["boundary", "delivery_unknown", "reconciliation_cas_winners"],
+              "properties": {
+                "boundary": { "const": "after_delivery_claim" },
+                "delivery_unknown": { "const": 1 },
+                "reconciliation_cas_winners": { "const": 1 }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "crashReceiptCommon": {
+      "type": "object",
+      "required": [
+        "schema_version", "run_id", "stage_id", "boundary", "subject_agent_id",
+        "crashed_runtime_instance_id", "supervisor_evidence_ref", "occurred_at",
+        "rto_ms", "rpo_events", "loss", "duplicate_terminal", "automatic_retry"
+      ],
+      "properties": {
+        "schema_version": { "const": "aun-v2-native-crash-boundary-receipt/v1" },
+        "run_id": { "type": "string", "format": "uuid" },
+        "stage_id": { "enum": ["S2_SELECTED_ENABLED", "S3_ALL_ENABLED"] },
+        "boundary": { "enum": ["before_claim", "after_claim", "after_completion_enqueue", "after_delivery_claim"] },
+        "subject_agent_id": { "type": "string", "minLength": 1 },
+        "crashed_runtime_instance_id": { "type": "string", "minLength": 1 },
+        "supervisor_evidence_ref": { "type": "string", "minLength": 1 },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "rto_ms": { "type": "integer", "minimum": 0, "maximum": 30000 },
+        "rpo_events": { "const": 0 },
+        "loss": { "const": 0 },
+        "duplicate_terminal": { "const": 0 },
+        "automatic_retry": { "const": 0 }
+      }
+    },
     "realpath": { "type": "string", "pattern": "^/", "minLength": 2 },
     "supervisorProcess": {
       "type": "object", "additionalProperties": false,

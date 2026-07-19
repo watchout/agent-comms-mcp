@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   canonicalV2NativeStageBindingSha256,
   decodeV2NativeStageBinding,
@@ -16,6 +19,10 @@ const COMMIT = 'a'.repeat(40)
 const TREE = 'b'.repeat(40)
 const SHA = 'c'.repeat(64)
 const DECISION_URL = 'https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-1234567890'
+const PATH_FIXTURE_ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'aun-stage-binding-paths-')))
+const TRUE_EXE = realpathSync('/usr/bin/true')
+
+afterAll(() => rmSync(PATH_FIXTURE_ROOT, { recursive: true, force: true }))
 
 function timestamp(deltaMs: number): string {
   return new Date(Date.now() + deltaMs).toISOString()
@@ -34,13 +41,18 @@ function database() {
 }
 
 function rows(): V2NativeStageEnabledRowV1[] {
-  return ['alpha', 'beta', 'delta', 'gamma'].map(agentId => ({
+  return ['alpha', 'beta', 'delta', 'gamma'].map(agentId => {
+    const workspace = join(PATH_FIXTURE_ROOT, 'workspace', agentId)
+    const checkout = join(PATH_FIXTURE_ROOT, 'checkout', agentId)
+    mkdirSync(workspace, { recursive: true })
+    mkdirSync(checkout, { recursive: true })
+    return {
     agent_id: agentId,
     enabled: true,
     active_function: 'implementation_executor',
     runtime_instance_id: `runtime-${agentId}`,
-    workspace_realpath: `/fixture/workspace/${agentId}`,
-    checkout_root_realpath: `/fixture/checkout/${agentId}`,
+    workspace_realpath: realpathSync(workspace),
+    checkout_root_realpath: realpathSync(checkout),
     checkout_sha: COMMIT,
     checkout_tree: TREE,
     engine: 'codex',
@@ -49,7 +61,8 @@ function rows(): V2NativeStageEnabledRowV1[] {
     runtime_policy_sha256: SHA,
     runtime_build_sha256: SHA,
     config_sha256: SHA,
-  }))
+    }
+  })
 }
 
 function stageMembers(stageId: V2NativeActivationStageId): string[] {
@@ -118,15 +131,15 @@ function fixture(stageId: V2NativeActivationStageId = 'S1_TWO_AGENT') {
       runtime_instance_id: `runtime-${agentId}`,
       pid: 1000 + index,
       process_start_time: timestamp(-10_000),
-      executable_realpath: '/usr/bin/true',
+      executable_realpath: TRUE_EXE,
       executable_sha256: SHA,
       checkout_sha: COMMIT,
       database_identity_sha256: db.identity_sha256,
     })),
     command_catalog: members.map(agentId => ({
       command_id: `seat:${agentId}`,
-      exact_argv: ['/usr/bin/true'],
-      cwd_realpath: `/fixture/checkout/${agentId}`,
+      exact_argv: [TRUE_EXE],
+      cwd_realpath: enabledRows.find(row => row.agent_id === agentId)!.checkout_root_realpath,
       allowed_env_keys: [],
       env_value_hashes: {},
       timeout_seconds: 120,
@@ -308,6 +321,16 @@ describe('AUN V2 native stage binding', () => {
     expect(() => decodeV2NativeStageBinding(foreign)).toThrow(/foreign or disabled/)
   })
 
+  test('rejects a normalized absolute symlink alias instead of trusting path spelling', () => {
+    const aliased = structuredClone(fixture().binding)
+    const target = aliased.frozen_enabled_snapshot.rows[0].workspace_realpath
+    const alias = join(PATH_FIXTURE_ROOT, 'workspace-alpha-alias')
+    symlinkSync(target, alias, 'dir')
+    aliased.frozen_enabled_snapshot.rows[0].workspace_realpath = alias
+    aliased.frozen_enabled_snapshot.canonical_json_sha256 = sha256Utf8(canonicalJson(aliased.frozen_enabled_snapshot.rows))
+    expect(() => decodeV2NativeStageBinding(aliased)).toThrow(/realpath without a symlink alias/)
+  })
+
   test('schemas keep strict additionalProperties fences', async () => {
     const bindingSchema = await Bun.file(new URL('../../schemas/aun-v2-native-stage-binding-v1.schema.json', import.meta.url)).json()
     const evidenceSchema = await Bun.file(new URL('../../schemas/aun-v2-native-stage-evidence-v1.schema.json', import.meta.url)).json()
@@ -316,6 +339,7 @@ describe('AUN V2 native stage binding', () => {
     expect(bindingSchema.$defs.command.additionalProperties).toBe(false)
     expect(evidenceSchema.additionalProperties).toBe(false)
     expect(evidenceSchema.$defs.eventIdentity.additionalProperties).toBe(false)
+    expect(evidenceSchema.$defs.crashBoundaryReceipt.unevaluatedProperties).toBe(false)
     expect(evidenceSchema.$defs.terminalResult.oneOf).toHaveLength(3)
   })
 })

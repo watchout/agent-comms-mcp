@@ -135,6 +135,44 @@ export interface V2NativeStageMatrixCountsV1 {
   external_send_attempts: number
 }
 
+interface V2NativeStageCrashReceiptCommonV1 {
+  schema_version: 'aun-v2-native-crash-boundary-receipt/v1'
+  run_id: string
+  stage_id: 'S2_SELECTED_ENABLED' | 'S3_ALL_ENABLED'
+  subject_agent_id: string
+  crashed_runtime_instance_id: string
+  supervisor_evidence_ref: string
+  occurred_at: string
+  rto_ms: number
+  rpo_events: 0
+  loss: 0
+  duplicate_terminal: 0
+  automatic_retry: 0
+}
+
+export type V2NativeStageCrashBoundaryReceiptV1 =
+  | (V2NativeStageCrashReceiptCommonV1 & {
+      boundary: 'before_claim'
+      eventual_claims: 1
+    })
+  | (V2NativeStageCrashReceiptCommonV1 & {
+      boundary: 'after_claim'
+      claim_epoch_before: number
+      claim_epoch_after: number
+      stale_holder_terminal: 0
+    })
+  | (V2NativeStageCrashReceiptCommonV1 & {
+      boundary: 'after_completion_enqueue'
+      completion_cardinality: 1
+      enqueue_cardinality: 1
+      reply_delivery_cardinality: 1
+    })
+  | (V2NativeStageCrashReceiptCommonV1 & {
+      boundary: 'after_delivery_claim'
+      delivery_unknown: 1
+      reconciliation_cas_winners: 1
+    })
+
 export interface V2NativeStageEvidenceV1 {
   schema_version: typeof V2_NATIVE_STAGE_EVIDENCE_SCHEMA_VERSION
   stage_binding_url: string
@@ -160,7 +198,7 @@ export interface V2NativeStageEvidenceV1 {
     status: 'BOUND_NOT_STARTED_BY_EXECUTOR' | 'EXECUTED_BY_BOUND_SEAT'
   }>
   direct_fanout_correlated_matrix_counts: V2NativeStageMatrixCountsV1
-  crash_boundary_receipts: Array<Record<string, unknown>>
+  crash_boundary_receipts: V2NativeStageCrashBoundaryReceiptV1[]
   replay_before_after_sha256: {
     before: string
     after: string
@@ -205,6 +243,8 @@ export interface V2NativeStageEvidenceV1 {
 
 export interface V2NativeStageExecutionPortsV1 {
   seats: V2NativeStageSeatBindingV1[]
+  /** Re-read the exact durable binding and owner-decision sources; no cached bytes. */
+  readDurableAuthority: (plan: V2NativeStageExecutionPlanV1) => V2NativeStagePreflightInputV1 | Promise<V2NativeStagePreflightInputV1>
   readOfflineState: (plan: V2NativeStageExecutionPlanV1) => V2NativeStageOfflineReadbackV1 | Promise<V2NativeStageOfflineReadbackV1>
   openBoundDatabase: (binding: V2NativeStageBindingV1) => Promise<DbAdapter>
   readDatabaseState: (db: DbAdapter, binding: V2NativeStageBindingV1) => Promise<V2NativeStageDatabaseReadbackV1>
@@ -217,8 +257,11 @@ export interface V2NativeStageExecutionPortsV1 {
   runCrashScenario?: (input: {
     plan: V2NativeStageExecutionPlanV1
     db: DbAdapter
-  }) => Promise<Array<Record<string, unknown>>>
+    mutationFence: () => Promise<void>
+  }) => Promise<V2NativeStageCrashBoundaryReceiptV1[]>
   onCommitPoint?: (point: V2NativeRouteCommitPoint) => void | Promise<void>
+  /** Test-only drift seam; full authority/state revalidation brackets the callback. */
+  onMeshMutationBoundary?: (boundary: string) => void | Promise<void>
   now?: () => Date
 }
 
@@ -259,6 +302,20 @@ const EVENT_IDENTITY_FIELDS = [
   'run_id', 'stage_id', 'turn_id', 'message_id', 'reply_id', 'delivery_id', 'claim_epoch',
   'runtime_instance_id', 'event_id', 'seq', 'payload_sha256', 'occurred_at',
 ] as const
+const CRASH_RECEIPT_COMMON_FIELDS = [
+  'schema_version', 'run_id', 'stage_id', 'boundary', 'subject_agent_id',
+  'crashed_runtime_instance_id', 'supervisor_evidence_ref', 'occurred_at',
+  'rto_ms', 'rpo_events', 'loss', 'duplicate_terminal', 'automatic_retry',
+] as const
+const CRASH_BOUNDARY_FIELDS = {
+  before_claim: ['eventual_claims'],
+  after_claim: ['claim_epoch_before', 'claim_epoch_after', 'stale_holder_terminal'],
+  after_completion_enqueue: ['completion_cardinality', 'enqueue_cardinality', 'reply_delivery_cardinality'],
+  after_delivery_claim: ['delivery_unknown', 'reconciliation_cas_winners'],
+} as const
+const S3_CRASH_BOUNDARIES = [
+  'before_claim', 'after_claim', 'after_completion_enqueue', 'after_delivery_claim',
+] as const
 
 function evidenceFailure(message: string): never {
   stop('EVIDENCE_INCOMPLETE_OR_STALE', message)
@@ -290,6 +347,84 @@ function evidenceSha(value: unknown, field: string, length: 40 | 64 = 64, nullab
 function evidenceInteger(value: unknown, field: string, nonnegative = true, nullable = false): void {
   if (nullable && value === null) return
   if (!Number.isSafeInteger(value) || (nonnegative && (value as number) < 0)) evidenceFailure(`${field} must be ${nullable ? 'null or ' : ''}a ${nonnegative ? 'non-negative ' : ''}integer`)
+}
+
+function decodeCrashBoundaryReceipt(
+  value: unknown,
+  index: number,
+  expectedPlan?: V2NativeStageExecutionPlanV1,
+): V2NativeStageCrashBoundaryReceiptV1 {
+  evidenceRecord(value, `crash_boundary_receipts[${index}]`)
+  const boundary = value.boundary
+  if (!S3_CRASH_BOUNDARIES.includes(boundary as typeof S3_CRASH_BOUNDARIES[number])) {
+    evidenceFailure(`crash_boundary_receipts[${index}].boundary differs`)
+  }
+  const boundaryFields = CRASH_BOUNDARY_FIELDS[boundary as keyof typeof CRASH_BOUNDARY_FIELDS]
+  evidenceExact(value, [...CRASH_RECEIPT_COMMON_FIELDS, ...boundaryFields], `crash_boundary_receipts[${index}]`)
+  const receipt = value as unknown as V2NativeStageCrashBoundaryReceiptV1
+  if (receipt.schema_version !== 'aun-v2-native-crash-boundary-receipt/v1') evidenceFailure(`crash_boundary_receipts[${index}].schema_version differs`)
+  if (!['S2_SELECTED_ENABLED', 'S3_ALL_ENABLED'].includes(receipt.stage_id)) evidenceFailure(`crash_boundary_receipts[${index}].stage_id differs`)
+  for (const field of ['run_id', 'subject_agent_id', 'crashed_runtime_instance_id', 'supervisor_evidence_ref', 'occurred_at'] as const) {
+    evidenceString(receipt[field], `crash_boundary_receipts[${index}].${field}`)
+  }
+  if (!Number.isFinite(Date.parse(receipt.occurred_at)) || !receipt.occurred_at.endsWith('Z')) evidenceFailure(`crash_boundary_receipts[${index}].occurred_at must be RFC3339 UTC`)
+  evidenceInteger(receipt.rto_ms, `crash_boundary_receipts[${index}].rto_ms`)
+  if (receipt.rto_ms > 30_000) evidenceFailure(`crash_boundary_receipts[${index}].rto_ms exceeds 30000`)
+  for (const field of ['rpo_events', 'loss', 'duplicate_terminal', 'automatic_retry'] as const) {
+    if (receipt[field] !== 0) evidenceFailure(`crash_boundary_receipts[${index}].${field} must be zero`)
+  }
+  if (receipt.boundary === 'before_claim') {
+    if (receipt.eventual_claims !== 1) evidenceFailure(`crash_boundary_receipts[${index}].eventual_claims must be one`)
+  } else if (receipt.boundary === 'after_claim') {
+    evidenceInteger(receipt.claim_epoch_before, `crash_boundary_receipts[${index}].claim_epoch_before`)
+    evidenceInteger(receipt.claim_epoch_after, `crash_boundary_receipts[${index}].claim_epoch_after`)
+    if (receipt.claim_epoch_after !== receipt.claim_epoch_before + 1 || receipt.stale_holder_terminal !== 0) {
+      evidenceFailure(`crash_boundary_receipts[${index}] claim recovery differs`)
+    }
+  } else if (receipt.boundary === 'after_completion_enqueue') {
+    if (receipt.completion_cardinality !== 1 || receipt.enqueue_cardinality !== 1 || receipt.reply_delivery_cardinality !== 1) {
+      evidenceFailure(`crash_boundary_receipts[${index}] completion/enqueue/delivery cardinality differs`)
+    }
+  } else if (receipt.delivery_unknown !== 1 || receipt.reconciliation_cas_winners !== 1) {
+    evidenceFailure(`crash_boundary_receipts[${index}] delivery reconciliation differs`)
+  }
+  if (expectedPlan) {
+    if (
+      receipt.run_id !== expectedPlan.binding.run_id ||
+      receipt.stage_id !== expectedPlan.binding.stage_id ||
+      !expectedPlan.binding.stage_members.agent_ids.includes(receipt.subject_agent_id)
+    ) evidenceFailure(`crash_boundary_receipts[${index}] is not bound to the exact stage`)
+    const row = expectedPlan.stage_member_rows.find(candidate => candidate.agent_id === receipt.subject_agent_id)
+    if (receipt.crashed_runtime_instance_id !== row?.runtime_instance_id) evidenceFailure(`crash_boundary_receipts[${index}] runtime identity differs`)
+  }
+  return receipt
+}
+
+function validateCompleteCrashReceiptSet(
+  receipts: V2NativeStageCrashBoundaryReceiptV1[],
+  plan: V2NativeStageExecutionPlanV1,
+): void {
+  if (plan.binding.stage_id === 'S1_TWO_AGENT') {
+    if (receipts.length !== 0) evidenceFailure('S1 crash_boundary_receipts must be empty')
+    return
+  }
+  const expected = plan.binding.stage_id === 'S2_SELECTED_ENABLED' ? ['after_claim'] : [...S3_CRASH_BOUNDARIES]
+  const actual = receipts.map(receipt => receipt.boundary)
+  if (canonicalJson(actual) !== canonicalJson(expected)) evidenceFailure(`${plan.binding.stage_id} crash boundary set differs`)
+}
+
+function validateCrashReceiptsForExecution(
+  value: unknown,
+  plan: V2NativeStageExecutionPlanV1,
+): V2NativeStageCrashBoundaryReceiptV1[] {
+  try {
+    if (!Array.isArray(value)) evidenceFailure('crash scenario result must be an array')
+    const receipts = value.map((receipt, index) => decodeCrashBoundaryReceipt(receipt, index, plan))
+    validateCompleteCrashReceiptSet(receipts, plan)
+    return receipts
+  } catch (error) {
+    stop('CRASH_RECOVERY_AMBIGUOUS', error instanceof Error ? error.message : String(error))
+  }
 }
 
 /** Strict runtime validation for immutable stage evidence, including ACCEPT gating. */
@@ -341,7 +476,8 @@ export function decodeV2NativeStageEvidence(
 
   evidenceExact(evidence.direct_fanout_correlated_matrix_counts, MATRIX_FIELDS, 'direct_fanout_correlated_matrix_counts')
   for (const field of MATRIX_FIELDS) evidenceInteger(evidence.direct_fanout_correlated_matrix_counts[field], `matrix.${field}`, !['V1_invocations', 'provider_attempts', 'provider_effects', 'external_send_attempts'].includes(field))
-  if (!Array.isArray(evidence.crash_boundary_receipts) || evidence.crash_boundary_receipts.some(item => typeof item !== 'object' || item === null || Array.isArray(item))) evidenceFailure('crash_boundary_receipts must contain objects')
+  if (!Array.isArray(evidence.crash_boundary_receipts)) evidenceFailure('crash_boundary_receipts must be an array')
+  const decodedCrashReceipts = evidence.crash_boundary_receipts.map((receipt, index) => decodeCrashBoundaryReceipt(receipt, index, expectedPlan))
   evidenceExact(evidence.replay_before_after_sha256, ['before', 'after', 'byte_equal'], 'replay_before_after_sha256')
   evidenceSha(evidence.replay_before_after_sha256.before, 'replay before')
   evidenceSha(evidence.replay_before_after_sha256.after, 'replay after')
@@ -411,6 +547,7 @@ export function decodeV2NativeStageEvidence(
   if (terminal.auto_advance !== false) evidenceFailure('auto_advance must be false')
 
   if (expectedPlan) {
+    if (terminal.kind !== 'ROLLBACK_REQUEST') validateCompleteCrashReceiptSet(decodedCrashReceipts, expectedPlan)
     const expectedCommands = expectedPlan.binding.command_catalog.map(command => ({
       command_id: command.command_id,
       executable_sha256: command.executable_sha256,
@@ -558,6 +695,23 @@ function validateSeats(plan: V2NativeStageExecutionPlanV1, seats: V2NativeStageS
   }
 }
 
+function validateDurableAuthorityReadback(
+  plan: V2NativeStageExecutionPlanV1,
+  current: V2NativeStagePreflightInputV1,
+  now?: Date,
+): void {
+  const currentPlan = preflightV2NativeStage({ ...current, now })
+  if (
+    currentPlan.exact_binding_sha256 !== plan.exact_binding_sha256 ||
+    !same(currentPlan.revalidation_input, plan.revalidation_input)
+  ) {
+    stop(
+      'OWNER_DECISION_MISSING_STALE_SUPERSEDED_OR_HASH_MISMATCH',
+      'durable binding or owner-decision readback differs from the frozen execution plan',
+    )
+  }
+}
+
 function validateOfflineReadback(plan: V2NativeStageExecutionPlanV1, readback: V2NativeStageOfflineReadbackV1): void {
   if (
     readback.exact_implementation_main_sha !== plan.binding.exact_implementation_main_sha ||
@@ -580,27 +734,70 @@ function validateDatabaseReadback(binding: V2NativeStageBindingV1, readback: V2N
   }
 }
 
-async function stageEvents(db: DbAdapter, plan: V2NativeStageExecutionPlanV1) {
-  const rows = await db.query<{
-    seq: number | string
-    event_id: string
-    event_type: string
-    occurred_at: string | Date
-    seat_id: string | null
-    seat_instance_id: string | null
-    turn_id: string | null
-    reply_id: string | null
-    claim_epoch: number | string | null
-    payload: unknown
-  }>('SELECT seq, event_id, event_type, occurred_at, seat_id, seat_instance_id, turn_id, reply_id, claim_epoch, payload FROM event_log WHERE seq > $1 ORDER BY seq', [plan.binding.pre_run_baselines.event_log_max_seq])
+interface V2NativeStageProvenanceEventV1 {
+  seq: number | string
+  event_id: string
+  event_type: string
+  occurred_at: string | Date
+  seat_id: string | null
+  seat_instance_id: string | null
+  conversation_id: string | null
+  causation_id: string | null
+  correlation_id: string | null
+  turn_id: string | null
+  reply_id: string | null
+  claim_epoch: number | string | null
+  payload: Record<string, unknown>
+}
+
+async function readEventProvenance(db: DbAdapter, baselineSeq: number): Promise<V2NativeStageProvenanceEventV1[]> {
+  const rows = await db.query<Omit<V2NativeStageProvenanceEventV1, 'payload'> & { payload: unknown }>(
+    `SELECT seq, event_id, event_type, occurred_at, seat_id, seat_instance_id,
+            conversation_id, causation_id, correlation_id, turn_id, reply_id, claim_epoch, payload
+       FROM event_log
+      WHERE seq > $1
+      ORDER BY seq`,
+    [baselineSeq],
+  )
   return rows.map(row => ({ ...row, payload: parseEventPayload<Record<string, unknown>>(row.payload) }))
-    .filter(row => row.payload.run_id === plan.binding.run_id && (
-      row.payload.stage_id === plan.binding.stage_id ||
-      (
-        row.payload.schema_version === 'aun-v2-native-route-plan/v1' &&
-        row.payload.scope_sha256 === v2NativeMeshScopeSha256(plan.scope)
-      )
-    ))
+}
+
+async function readQueueMutationProvenance(db: DbAdapter, baselineSeq: number): Promise<V2NativeStageProvenanceEventV1[]> {
+  const rows = await db.query<Omit<V2NativeStageProvenanceEventV1, 'payload'> & { payload: unknown }>(
+    `SELECT seq, event_id, event_type, occurred_at, seat_id, seat_instance_id,
+            conversation_id, causation_id, correlation_id, turn_id, reply_id, claim_epoch, payload
+       FROM event_log
+      WHERE seq > $1
+        AND (event_type = 'message.received' OR event_type LIKE 'turn.%' OR event_type = 'reply.enqueued')
+      ORDER BY seq`,
+    [baselineSeq],
+  )
+  return rows.map(row => ({ ...row, payload: parseEventPayload<Record<string, unknown>>(row.payload) }))
+}
+
+async function readOwnerMutationProvenance(db: DbAdapter, baselineSeq: number): Promise<V2NativeStageProvenanceEventV1[]> {
+  const rows = await db.query<Omit<V2NativeStageProvenanceEventV1, 'payload'> & { payload: unknown }>(
+    `SELECT seq, event_id, event_type, occurred_at, seat_id, seat_instance_id,
+            conversation_id, causation_id, correlation_id, turn_id, reply_id, claim_epoch, payload
+       FROM event_log
+      WHERE seq > $1 AND seat_id IS NOT NULL
+      ORDER BY seq`,
+    [baselineSeq],
+  )
+  return rows.map(row => ({ ...row, payload: parseEventPayload<Record<string, unknown>>(row.payload) }))
+}
+
+function isExactStageEvent(row: V2NativeStageProvenanceEventV1, plan: V2NativeStageExecutionPlanV1): boolean {
+  return row.payload.run_id === plan.binding.run_id && (
+    row.payload.stage_id === plan.binding.stage_id ||
+    row.payload.schema_version === 'aun-v2-native-route-plan/v1' &&
+      row.payload.scope_sha256 === v2NativeMeshScopeSha256(plan.scope)
+  )
+}
+
+async function stageEvents(db: DbAdapter, plan: V2NativeStageExecutionPlanV1) {
+  return (await readEventProvenance(db, plan.binding.pre_run_baselines.event_log_max_seq))
+    .filter(row => isExactStageEvent(row, plan))
 }
 
 function payloadEdge(payload: Record<string, unknown>): string {
@@ -609,6 +806,90 @@ function payloadEdge(payload: Record<string, unknown>): string {
 
 function duplicateCount(values: string[]): number {
   return values.length - new Set(values).size
+}
+
+const QUEUE_OWNER_EVENT_TYPES = new Set([
+  'turn.claimed', 'turn.presented', 'turn.completed', 'turn.attempt_failed',
+  'turn.retry_scheduled', 'turn.blocked', 'turn.dead_lettered', 'reply.enqueued',
+])
+
+function stageTurnOwners(
+  rows: V2NativeStageProvenanceEventV1[],
+): Map<string, { owner: string; received: V2NativeStageProvenanceEventV1 }> {
+  const owners = new Map<string, { owner: string; received: V2NativeStageProvenanceEventV1 }>()
+  for (const row of rows) {
+    if (row.event_type !== 'message.received' || row.turn_id === null || typeof row.payload.recipient_agent_id !== 'string') continue
+    owners.set(row.turn_id, { owner: row.payload.recipient_agent_id, received: row })
+  }
+  return owners
+}
+
+function correlatedReplyEdges(
+  stageRows: V2NativeStageProvenanceEventV1[],
+  provenanceRows: V2NativeStageProvenanceEventV1[],
+): number {
+  const byEventId = new Map(provenanceRows.map(row => [row.event_id, row]))
+  const directByTurn = new Map(stageRows
+    .filter(row => row.event_type === 'message.received' && row.payload.route_kind === 'direct' && row.turn_id !== null)
+    .map(row => [row.turn_id!, row]))
+  const edges = new Set<string>()
+  for (const reply of stageRows.filter(row => row.event_type === 'message.received' && row.payload.route_kind === 'reply')) {
+    const enqueued = reply.causation_id ? byEventId.get(reply.causation_id) : undefined
+    const request = enqueued?.turn_id ? directByTurn.get(enqueued.turn_id) : undefined
+    if (
+      enqueued?.event_type !== 'reply.enqueued' || !request ||
+      enqueued.seat_id !== request.payload.recipient_agent_id ||
+      reply.seat_id !== reply.payload.recipient_agent_id ||
+      reply.payload.source_agent_id !== request.payload.recipient_agent_id ||
+      reply.payload.recipient_agent_id !== request.payload.source_agent_id ||
+      reply.correlation_id !== request.correlation_id
+    ) continue
+    edges.add(payloadEdge(request.payload))
+  }
+  return edges.size
+}
+
+function wrongQueueMutationCount(
+  stageRows: V2NativeStageProvenanceEventV1[],
+  queueProvenanceRows: V2NativeStageProvenanceEventV1[],
+): number {
+  const turns = stageTurnOwners(stageRows)
+  const wrong = new Set<string>()
+  for (const row of stageRows) {
+    if (row.event_type === 'message.received' && row.seat_id !== row.payload.recipient_agent_id) wrong.add(row.event_id)
+  }
+  for (const row of queueProvenanceRows) {
+    if (row.turn_id === null || !QUEUE_OWNER_EVENT_TYPES.has(row.event_type)) continue
+    const expected = turns.get(row.turn_id)?.owner
+    if (expected && row.seat_id !== expected) wrong.add(row.event_id)
+  }
+  return wrong.size
+}
+
+function foreignOwnerMutationCount(
+  stageRows: V2NativeStageProvenanceEventV1[],
+  ownerProvenanceRows: V2NativeStageProvenanceEventV1[],
+  plan: V2NativeStageExecutionPlanV1,
+): number {
+  const members = new Set(plan.binding.stage_members.agent_ids)
+  const stageEventIds = new Set(stageRows.map(row => row.event_id))
+  const turns = stageTurnOwners(stageRows)
+  const foreign = new Set<string>()
+  for (const row of ownerProvenanceRows) {
+    const stageRelated = stageEventIds.has(row.event_id) || row.turn_id !== null && turns.has(row.turn_id)
+    if (!stageRelated || row.seat_id === null || row.seat_id === 'v2-native-internal-handoff') continue
+    if (!members.has(row.seat_id)) foreign.add(row.event_id)
+  }
+  return foreign.size
+}
+
+function completeStageProvenance(
+  stageRows: V2NativeStageProvenanceEventV1[],
+  provenanceRows: V2NativeStageProvenanceEventV1[],
+): V2NativeStageProvenanceEventV1[] {
+  const eventIds = new Set(stageRows.map(row => row.event_id))
+  const turns = stageTurnOwners(stageRows)
+  return provenanceRows.filter(row => eventIds.has(row.event_id) || row.turn_id !== null && turns.has(row.turn_id))
 }
 
 function eventIdentities(
@@ -637,6 +918,12 @@ async function measureMatrix(
   after: V2NativeStageDatabaseReadbackV1,
 ): Promise<{ counts: V2NativeStageMatrixCountsV1; events: V2NativeStageEventIdentityV1[] }> {
   const rows = await stageEvents(db, plan)
+  // These are deliberately separate immutable provenance reads. A zero for
+  // wrong-target, wrong-queue, foreign-owner or correlation is never inferred
+  // from another counter.
+  const correlationProvenance = await readEventProvenance(db, plan.binding.pre_run_baselines.event_log_max_seq)
+  const queueProvenance = await readQueueMutationProvenance(db, plan.binding.pre_run_baselines.event_log_max_seq)
+  const ownerProvenance = await readOwnerMutationProvenance(db, plan.binding.pre_run_baselines.event_log_max_seq)
   const received = rows.filter(row => row.event_type === 'message.received')
   const direct = received.filter(row => row.payload.route_kind === 'direct').map(row => payloadEdge(row.payload))
   const fanout = received.filter(row => row.payload.route_kind === 'fanout_child').map(row => payloadEdge(row.payload))
@@ -655,6 +942,8 @@ async function measureMatrix(
   const deltas = baselineDelta(plan.binding.pre_run_baselines, after.baselines)
   const openTurns = await openTurnCount(db)
   const pending = (await pendingV2NativeInternalHandoffs(db, plan.scope, plan.fence)).length
+  const wrongQueue = wrongQueueMutationCount(rows, queueProvenance)
+  const foreignOwner = foreignOwnerMutationCount(rows, ownerProvenance, plan)
   return {
     counts: {
       member_count: n,
@@ -662,12 +951,12 @@ async function measureMatrix(
       terminal_replies: replies.length,
       fanout_parents: fanoutParents.length,
       fanout_children: fanout.length,
-      correlated_reply_edges: new Set(replies).size,
+      correlated_reply_edges: correlatedReplyEdges(rows, correlationProvenance),
       missing: Math.max(0, expectedTotal - actualTotal),
       duplicates: duplicateCount(direct) + duplicateCount(fanout) + duplicateCount(replies),
       unexpected_recipients: unexpected,
-      wrong_queue_mutations: unexpected,
-      foreign_owner_mutations: unexpected,
+      wrong_queue_mutations: wrongQueue,
+      foreign_owner_mutations: foreignOwner,
       open_turns_after_drain: openTurns,
       pending_internal_deliveries_after_drain: pending,
       V1_invocations: deltas.V1_message_queue_row_count + deltas.V1_agent_messages_row_count + deltas.V1_outbound_queue_row_count,
@@ -675,7 +964,7 @@ async function measureMatrix(
       provider_effects: deltas.provider_effect_count,
       external_send_attempts: deltas.external_send_attempt_count,
     },
-    events: eventIdentities(plan, rows),
+    events: eventIdentities(plan, completeStageProvenance(rows, correlationProvenance)),
   }
 }
 
@@ -700,11 +989,13 @@ async function replayViewHashes(db: DbAdapter): Promise<{ before: string; after:
 function assertMatrix(counts: V2NativeStageMatrixCountsV1): void {
   const n = counts.member_count
   const edges = n * (n - 1)
+  if (counts.wrong_queue_mutations !== 0 || counts.foreign_owner_mutations !== 0) {
+    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'independent queue or owner provenance query detected a forbidden mutation')
+  }
   if (
     counts.directed_requests !== edges || counts.terminal_replies !== edges ||
     counts.fanout_parents !== n || counts.fanout_children !== edges || counts.correlated_reply_edges !== edges ||
-    counts.missing !== 0 || counts.duplicates !== 0 || counts.unexpected_recipients !== 0 ||
-    counts.wrong_queue_mutations !== 0 || counts.foreign_owner_mutations !== 0
+    counts.missing !== 0 || counts.duplicates !== 0 || counts.unexpected_recipients !== 0
   ) stop('MATRIX_COUNT_MISMATCH', 'direct/fanout/correlated matrix counts differ')
   if (counts.open_turns_after_drain !== 0 || counts.pending_internal_deliveries_after_drain !== 0) stop('RESIDUAL_OPEN_WORK', 'stage has residual open work')
   if (counts.V1_invocations !== 0) stop('V1_TRAVERSAL_DETECTED', 'V1 row count changed')
@@ -741,7 +1032,7 @@ function evidenceBase(
   events: V2NativeStageEventIdentityV1[],
   replay: { before: string; after: string; byte_equal: boolean },
   after: V2NativeStageBaselinesV1,
-  crashReceipts: Array<Record<string, unknown>>,
+  crashReceipts: V2NativeStageCrashBoundaryReceiptV1[],
   executedCommandIds: readonly string[] = [],
 ): Omit<V2NativeStageEvidenceV1, 'terminal_result'> {
   const delta = baselineDelta(plan.binding.pre_run_baselines, after)
@@ -826,11 +1117,15 @@ export async function executeV2NativeStage(
 ): Promise<V2NativeStageExecutionResultV1> {
   const plan = preflightV2NativeStage(input)
   validateSeats(plan, ports.seats)
-  if (ports.enableCrashHooks) {
-    if (plan.binding.stage_id === 'S1_TWO_AGENT' || plan.authority.decision.crash_hooks !== 'planned_stage_bound' || !ports.runCrashScenario) {
-      stop('CRASH_RECOVERY_AMBIGUOUS', 'crash hooks require an exact S2/S3 decision, explicit enablement and a bound hook')
-    }
+  if (typeof ports.readDurableAuthority !== 'function') {
+    stop('OWNER_DECISION_MISSING_STALE_SUPERSEDED_OR_HASH_MISMATCH', 'durable authority readback port is required')
   }
+  if (plan.binding.stage_id === 'S1_TWO_AGENT') {
+    if (ports.enableCrashHooks) stop('CRASH_RECOVERY_AMBIGUOUS', 'S1 cannot enable crash hooks')
+  } else if (!ports.enableCrashHooks || plan.authority.decision.crash_hooks !== 'planned_stage_bound' || !ports.runCrashScenario) {
+    stop('CRASH_RECOVERY_AMBIGUOUS', 'S2/S3 execution requires an exact stage decision, explicit crash enablement and a bound hook')
+  }
+  validateDurableAuthorityReadback(plan, await ports.readDurableAuthority(plan), ports.now?.())
   validateOfflineReadback(plan, await ports.readOfflineState(plan))
   let db: DbAdapter | null = null
   let partialEvidence: Omit<V2NativeStageEvidenceV1, 'terminal_result'> | undefined
@@ -839,13 +1134,20 @@ export async function executeV2NativeStage(
     const initial = await ports.readDatabaseState(db, plan.binding)
     validateDatabaseReadback(plan.binding, initial, true)
     const revalidate = async () => {
-      preflightV2NativeStage({ ...plan.revalidation_input, now: ports.now?.() })
+      validateDurableAuthorityReadback(plan, await ports.readDurableAuthority(plan), ports.now?.())
       validateOfflineReadback(plan, await ports.readOfflineState(plan))
       const current = await ports.readDatabaseState(db!, plan.binding)
       validateDatabaseReadback(plan.binding, current, false)
     }
     const route = ports.routeMessage ?? routeV2NativeMessage
     const tick = ports.runMeshTick ?? runV2NativeMeshTick
+    const meshMutationFence = async (boundary: string) => {
+      await revalidate()
+      if (ports.onMeshMutationBoundary) {
+        await ports.onMeshMutationBoundary(boundary)
+        await revalidate()
+      }
+    }
     const ids = plan.binding.stage_members.agent_ids
     for (const source of ids) {
       const recipients = ids.filter(agentId => agentId !== source)
@@ -857,7 +1159,7 @@ export async function executeV2NativeStage(
           source_agent_id: source,
           recipient_agent_ids: [recipient],
           content: `stage-direct-request:${plan.binding.run_id}:${source}:${recipient}`,
-        }, { onCommitPoint: async point => { await revalidate(); await ports.onCommitPoint?.(point) } })
+        }, { onCommitPoint: async point => { await revalidate(); await ports.onCommitPoint?.(point); await revalidate() } })
         await revalidate()
       }
       await route(db, plan.scope, plan.fence, {
@@ -866,7 +1168,7 @@ export async function executeV2NativeStage(
         source_agent_id: source,
         recipient_agent_ids: recipients,
         content: `stage-fanout-observation:${plan.binding.run_id}:${source}`,
-      }, { onCommitPoint: async point => { await revalidate(); await ports.onCommitPoint?.(point) } })
+      }, { onCommitPoint: async point => { await revalidate(); await ports.onCommitPoint?.(point); await revalidate() } })
       await revalidate()
     }
     let drainTicks = 0
@@ -880,6 +1182,7 @@ export async function executeV2NativeStage(
         instanceId: `stage:${plan.binding.run_id}:tick:${drainTicks}`,
         maxTurnsPerSeat: 100,
         dbFactory: ports.dbFactory,
+        mutationFence: meshMutationFence,
         supervision: {
           reconnectMaxAttempts: 1,
           reconnectBaseDelayMs: 1,
@@ -890,7 +1193,9 @@ export async function executeV2NativeStage(
       await revalidate()
       if (++drainTicks > maxDrainTicks) stop('RESIDUAL_OPEN_WORK', 'stage matrix did not drain before the bounded tick limit')
     }
-    const crashReceipts = ports.enableCrashHooks ? await ports.runCrashScenario!({ plan, db }) : []
+    const crashReceipts = ports.enableCrashHooks
+      ? validateCrashReceiptsForExecution(await ports.runCrashScenario!({ plan, db, mutationFence: revalidate }), plan)
+      : []
     await revalidate()
     const after = await ports.readDatabaseState(db, plan.binding)
     validateDatabaseReadback(plan.binding, after, false)

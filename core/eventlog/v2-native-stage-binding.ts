@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import { isAbsolute, normalize } from 'node:path'
 import { canonicalJson, sha256Utf8 } from './transport-contract'
 import {
@@ -267,7 +268,13 @@ function durableUrl(value: unknown, field: string): asserts value is string {
 
 function realpath(value: unknown, field: string): asserts value is string {
   string(value, field)
-  if (!isAbsolute(value) || normalize(value) !== value) {
+  let resolved: string
+  try {
+    resolved = realpathSync.native(value)
+  } catch {
+    fail('RUNTIME_BINDING_DRIFT', `${field} must resolve to an existing realpath`)
+  }
+  if (!isAbsolute(value) || normalize(value) !== value || resolved !== value) {
     fail('RUNTIME_BINDING_DRIFT', `${field} must be an absolute normalized realpath without a symlink alias`)
   }
 }
@@ -426,6 +433,7 @@ function decodeCommands(value: unknown): V2NativeStageCommandV1[] {
     if (!Array.isArray(command.exact_argv) || command.exact_argv.length === 0) fail('COMMAND_CATALOG_DRIFT', `command ${command.command_id} exact_argv is empty`)
     command.exact_argv.forEach((arg, argIndex) => string(arg, `command_catalog[${index}].exact_argv[${argIndex}]`))
     if (!isAbsolute(command.exact_argv[0])) fail('COMMAND_CATALOG_DRIFT', `command ${command.command_id} executable must be an absolute path`)
+    realpath(command.exact_argv[0], `command_catalog[${index}].exact_argv[0]`)
     realpath(command.cwd_realpath, `command_catalog[${index}].cwd_realpath`)
     orderedStrings(command.allowed_env_keys, `command_catalog[${index}].allowed_env_keys`, true)
     if (!isRecord(command.env_value_hashes)) fail('COMMAND_CATALOG_DRIFT', `command ${command.command_id} env_value_hashes must be an object`)
