@@ -900,7 +900,9 @@ function foreignOwnerMutationCount(
   return foreign.size
 }
 
-function completeStageProvenance(
+type StageOwnedProjectionDelta = { activeTurns: number; openDeliveries: number }
+
+function stageRelatedProvenanceForEvidence(
   stageRows: V2NativeStageProvenanceEventV1[],
   provenanceRows: V2NativeStageProvenanceEventV1[],
 ): V2NativeStageProvenanceEventV1[] {
@@ -909,11 +911,286 @@ function completeStageProvenance(
   return provenanceRows.filter(row => eventIds.has(row.event_id) || row.turn_id !== null && turns.has(row.turn_id))
 }
 
+function text(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function safeEpoch(value: number | string | null): number | null {
+  if (value === null) return null
+  const epoch = Number(value)
+  return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : null
+}
+
+function exactObjectKeys(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  return same(Object.keys(value).sort(), [...fields].sort())
+}
+
+function stageRuntimeInstance(plan: V2NativeStageExecutionPlanV1, seatId: string | null): string | null {
+  if (seatId === null) return null
+  return plan.stage_member_rows.find(row => row.agent_id === seatId)?.runtime_instance_id ?? null
+}
+
+function earlier(parent: V2NativeStageProvenanceEventV1 | undefined, child: V2NativeStageProvenanceEventV1): parent is V2NativeStageProvenanceEventV1 {
+  return Boolean(parent) && Number(parent!.seq) < Number(child.seq)
+}
+
+function exactStageRoutePlan(
+  row: V2NativeStageProvenanceEventV1,
+  plan: V2NativeStageExecutionPlanV1,
+): boolean {
+  const payload = row.payload
+  const routeId = text(payload.route_id)
+  const routeKind = payload.route_kind
+  const source = text(payload.source_agent_id)
+  const conversation = text(payload.conversation_id)
+  const correlation = text(payload.correlation_id)
+  const children = Array.isArray(payload.children) ? payload.children : []
+  const members = plan.binding.stage_members.agent_ids
+  if (
+    !exactObjectKeys(payload, [
+      'schema_version', 'run_id', 'scope_sha256', 'route_id', 'route_kind', 'source_agent_id',
+      'conversation_id', 'correlation_id', 'content_sha256', 'children', 'provider_dispatch', 'V1_mode',
+    ]) ||
+    payload.schema_version !== 'aun-v2-native-route-plan/v1' ||
+    payload.run_id !== plan.binding.run_id ||
+    payload.scope_sha256 !== v2NativeMeshScopeSha256(plan.scope) ||
+    (routeKind !== 'direct' && routeKind !== 'fanout') ||
+    routeId === null || source === null || !members.includes(source) ||
+    conversation === null || correlation === null ||
+    row.event_id !== `mesh-route-planned:${plan.binding.run_id}:${routeId}` ||
+    row.seat_id !== source || row.seat_instance_id !== null ||
+    row.conversation_id !== conversation || row.correlation_id !== correlation ||
+    row.causation_id !== null || row.turn_id !== null || row.reply_id !== null || row.claim_epoch !== null ||
+    typeof payload.content_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(payload.content_sha256) ||
+    payload.provider_dispatch !== 'disabled' || payload.V1_mode !== 'observe_only_no_traversal'
+  ) return false
+  const expectedRecipients = routeKind === 'fanout'
+    ? members.filter(member => member !== source).sort()
+    : null
+  if (children.length !== (routeKind === 'direct' ? 1 : expectedRecipients!.length)) return false
+  const recipients: string[] = []
+  for (const childValue of children) {
+    if (typeof childValue !== 'object' || childValue === null || Array.isArray(childValue)) return false
+    const child = childValue as Record<string, unknown>
+    const recipient = text(child.recipient_agent_id)
+    if (
+      !exactObjectKeys(child, ['recipient_agent_id', 'message_id', 'delivery_id']) ||
+      recipient === null || recipient === source || !members.includes(recipient) ||
+      child.message_id !== `mesh-message:${plan.binding.run_id}:${routeId}:${recipient}` ||
+      child.delivery_id !== `mesh-delivery:${plan.binding.run_id}:${routeId}:${recipient}`
+    ) return false
+    recipients.push(recipient)
+  }
+  if (new Set(recipients).size !== recipients.length) return false
+  if (routeKind === 'direct') {
+    return routeId === `stage:${plan.binding.run_id}:direct:${source}:${recipients[0]}` &&
+      conversation === `mesh:${plan.binding.run_id}:${routeId}` &&
+      correlation === `mesh-correlation:${plan.binding.run_id}:${routeId}` &&
+      payload.content_sha256 === sha256Utf8(`stage-direct-request:${plan.binding.run_id}:${source}:${recipients[0]}`)
+  }
+  return same(recipients, expectedRecipients) &&
+    routeId === `stage:${plan.binding.run_id}:fanout:${source}` &&
+    conversation === `mesh:${plan.binding.run_id}:${routeId}` &&
+    correlation === `mesh-correlation:${plan.binding.run_id}:${routeId}` &&
+    payload.content_sha256 === sha256Utf8(`stage-fanout-observation:${plan.binding.run_id}:${source}`)
+}
+
+function exactStageReceived(
+  row: V2NativeStageProvenanceEventV1,
+  provenance: V2NativeStageProvenanceEventV1[],
+  byEventId: Map<string, V2NativeStageProvenanceEventV1>,
+  plan: V2NativeStageExecutionPlanV1,
+): boolean {
+  const payload = row.payload
+  const messageId = text(payload.message_id)
+  const deliveryId = text(payload.delivery_id)
+  const routeId = text(payload.route_id)
+  const routeKind = payload.route_kind
+  const source = text(payload.source_agent_id)
+  const recipient = text(payload.recipient_agent_id)
+  const members = plan.binding.stage_members.agent_ids
+  if (
+    !exactObjectKeys(payload, [
+      'schema_version', 'mesh_native', 'message_id', 'run_id', 'stage_id', 'scope_sha256',
+      'delivery_id', 'route_id', 'route_kind', 'source_agent_id', 'recipient_agent_id', 'content',
+      'provider_dispatch', 'V1_mode',
+    ]) ||
+    payload.schema_version !== 'aun-v2-native-message/v1' || payload.mesh_native !== true ||
+    payload.run_id !== plan.binding.run_id || payload.stage_id !== plan.binding.stage_id ||
+    payload.scope_sha256 !== v2NativeMeshScopeSha256(plan.scope) ||
+    messageId === null || deliveryId === null || routeId === null ||
+    (routeKind !== 'direct' && routeKind !== 'fanout_child' && routeKind !== 'reply') ||
+    source === null || recipient === null || source === recipient ||
+    !members.includes(source) || !members.includes(recipient) ||
+    row.event_id !== `recv:${recipient}:${messageId}` || row.seat_id !== recipient ||
+    row.seat_instance_id !== null || row.turn_id !== `turn:${recipient}:${messageId}` ||
+    row.reply_id !== null || row.claim_epoch !== null ||
+    provenance.some(candidate =>
+      candidate.event_type === 'message.received' && candidate.turn_id === row.turn_id && Number(candidate.seq) < Number(row.seq)
+    ) ||
+    payload.provider_dispatch !== 'disabled' || payload.V1_mode !== 'observe_only_no_traversal'
+  ) return false
+  const parent = row.causation_id ? byEventId.get(row.causation_id) : undefined
+  if (!earlier(parent, row)) return false
+  if (routeKind === 'reply') {
+    if (
+      parent.event_type !== 'reply.enqueued' || parent.reply_id === null ||
+      messageId !== `mesh-reply-message:${parent.reply_id}` ||
+      deliveryId !== `mesh-internal:${parent.reply_id}` ||
+      routeId !== `mesh-reply-route:${parent.reply_id}` ||
+      row.conversation_id !== parent.conversation_id || payload.content !== parent.payload.content
+    ) return false
+    const root = provenance.find(candidate =>
+      candidate.event_type === 'message.received' && candidate.turn_id === parent.turn_id && Number(candidate.seq) < Number(parent.seq),
+    )
+    if (!root) return false
+    return source === root.payload.recipient_agent_id && recipient === root.payload.source_agent_id &&
+      row.correlation_id === root.correlation_id
+  }
+  if (parent.event_type !== 'message.route_planned' || !exactStageRoutePlan(parent, plan)) return false
+  const parentChildren = parent.payload.children as Array<Record<string, unknown>>
+  const child = parentChildren.find(candidate => candidate.recipient_agent_id === recipient)
+  return Boolean(child) &&
+    parent.payload.route_id === routeId && parent.payload.source_agent_id === source &&
+    parent.payload.conversation_id === row.conversation_id && parent.payload.correlation_id === row.correlation_id &&
+    child!.message_id === messageId && child!.delivery_id === deliveryId &&
+    payload.content === (parent.payload.route_kind === 'direct'
+      ? `stage-direct-request:${plan.binding.run_id}:${source}:${recipient}`
+      : `stage-fanout-observation:${plan.binding.run_id}:${source}`) &&
+    (parent.payload.route_kind === 'direct' ? routeKind === 'direct' : routeKind === 'fanout_child')
+}
+
+function closedStageEventDelta(
+  row: V2NativeStageProvenanceEventV1,
+  provenance: V2NativeStageProvenanceEventV1[],
+  byEventId: Map<string, V2NativeStageProvenanceEventV1>,
+  receivedByTurn: Map<string, V2NativeStageProvenanceEventV1>,
+  plan: V2NativeStageExecutionPlanV1,
+  boundary: string | null,
+): StageOwnedProjectionDelta | null {
+  const parent = row.causation_id ? byEventId.get(row.causation_id) : undefined
+  const exactSeat = row.seat_id !== null && plan.binding.stage_members.agent_ids.includes(row.seat_id)
+  const exactRuntime = exactSeat && row.seat_instance_id === stageRuntimeInstance(plan, row.seat_id)
+  if (row.event_type === 'message.route_planned') {
+    return boundary === 'route:after_plan' && exactStageRoutePlan(row, plan)
+      ? { activeTurns: 0, openDeliveries: 0 }
+      : null
+  }
+  if (row.event_type === 'message.received') {
+    const expectedBoundary = row.payload.route_kind === 'reply'
+      ? 'internal-handoff:after_reply_placement_append'
+      : 'route:after_child'
+    return boundary === expectedBoundary && exactStageReceived(row, provenance, byEventId, plan)
+      ? { activeTurns: 1, openDeliveries: 0 }
+      : null
+  }
+  if (row.turn_id === null || !earlier(parent, row)) return null
+  const received = receivedByTurn.get(row.turn_id)
+  if (!received || row.conversation_id !== received.conversation_id) return null
+  if (row.event_type === 'turn.claimed') {
+    const claimPayloadKeys = Object.keys(row.payload).sort()
+    const exactClaimPayload = claimPayloadKeys.length === 0 || exactObjectKeys(row.payload, [
+      'claim_profile', 'claimed_at', 'lease_expires_at', 'fencing_token',
+    ]) && row.payload.claim_profile === 'postgres_multi_worker_v1' &&
+      typeof row.payload.claimed_at === 'string' && typeof row.payload.lease_expires_at === 'string' &&
+      Number.isSafeInteger(Number(row.payload.fencing_token))
+    return boundary === `seat:${row.seat_id}:after_turn_claimed` &&
+      parent.event_type === 'message.received' && parent.event_id === received.event_id &&
+      exactSeat && exactRuntime && exactClaimPayload && row.seat_id === received.seat_id &&
+      row.reply_id === null && (row.correlation_id === null || row.correlation_id === received.correlation_id) &&
+      safeEpoch(row.claim_epoch) === 0
+      ? { activeTurns: 0, openDeliveries: 0 }
+      : null
+  }
+  if (row.event_type === 'turn.presented') {
+    return boundary === `seat:${row.seat_id}:after_turn_presented` &&
+      parent.event_type === 'turn.claimed' && parent.turn_id === row.turn_id &&
+      exactSeat && exactRuntime && row.seat_id === parent.seat_id && row.seat_instance_id === parent.seat_instance_id &&
+      safeEpoch(row.claim_epoch) !== null && safeEpoch(row.claim_epoch) === safeEpoch(parent.claim_epoch) &&
+      row.event_id === `present:${row.turn_id}:${safeEpoch(row.claim_epoch)}` && row.reply_id === null &&
+      row.correlation_id === null && exactObjectKeys(row.payload, [])
+      ? { activeTurns: 0, openDeliveries: 0 }
+      : null
+  }
+  if (row.event_type === 'turn.completed') {
+    const completionKeys = Object.keys(row.payload).sort()
+    const completionPayloadAllowed = completionKeys.every(key => ['outcome', 'summary', 'fencing_token'].includes(key)) &&
+      completionKeys.includes('outcome') &&
+      (row.payload.summary === undefined || typeof row.payload.summary === 'string') &&
+      (row.payload.fencing_token === undefined || Number.isSafeInteger(Number(row.payload.fencing_token)))
+    return boundary === `seat:${row.seat_id}:after_turn_completed` &&
+      parent.event_type === 'turn.claimed' && parent.turn_id === row.turn_id &&
+      exactSeat && exactRuntime && row.seat_id === parent.seat_id && row.seat_instance_id === parent.seat_instance_id &&
+      safeEpoch(row.claim_epoch) !== null && safeEpoch(row.claim_epoch) === safeEpoch(parent.claim_epoch) &&
+      row.event_id === `done:${row.turn_id}` && row.reply_id === null && row.correlation_id === null &&
+      completionPayloadAllowed && ['replied', 'no_reply', 'failed'].includes(String(row.payload.outcome))
+      ? { activeTurns: -1, openDeliveries: 0 }
+      : null
+  }
+  if (row.event_type === 'reply.enqueued') {
+    return boundary === `seat:${row.seat_id}:after_reply_enqueued` &&
+      parent.event_type === 'turn.completed' && parent.turn_id === row.turn_id && parent.payload.outcome === 'replied' &&
+      exactSeat && exactRuntime && row.seat_id === parent.seat_id && row.seat_instance_id === parent.seat_instance_id &&
+      row.reply_id === `reply:${row.turn_id}:0` && row.event_id === `enq:${row.reply_id}` &&
+      row.conversation_id === parent.conversation_id && row.correlation_id === parent.correlation_id &&
+      row.claim_epoch === null && exactObjectKeys(row.payload, ['content', 'channel_external_id']) &&
+      typeof row.payload.content === 'string' && row.payload.channel_external_id === null
+      ? { activeTurns: 0, openDeliveries: 1 }
+      : null
+  }
+  if (row.event_type === 'reply.delivery_claimed') {
+    return boundary === 'internal-handoff:after_delivery_claimed_append' &&
+      parent.event_type === 'reply.enqueued' && row.reply_id !== null && row.reply_id === parent.reply_id &&
+      row.seat_id === 'v2-native-internal-handoff' && text(row.seat_instance_id) !== null &&
+      row.seat_instance_id!.startsWith(`stage:${plan.binding.run_id}:tick:`) &&
+      row.turn_id === parent.turn_id && row.conversation_id === parent.conversation_id && row.correlation_id === null &&
+      safeEpoch(row.claim_epoch) === 0 &&
+      exactObjectKeys(row.payload, ['kind', 'run_id']) &&
+      row.payload.kind === 'v2_native_internal_handoff' && row.payload.run_id === plan.binding.run_id
+      ? { activeTurns: 0, openDeliveries: 0 }
+      : null
+  }
+  if (row.event_type === 'reply.handoff_accepted') {
+    const enqueued = row.reply_id === null ? undefined : provenance.find(candidate =>
+      candidate.event_type === 'reply.enqueued' && candidate.reply_id === row.reply_id && Number(candidate.seq) < Number(row.seq),
+    )
+    const placement = enqueued && provenance.find(candidate =>
+      candidate.event_type === 'message.received' && candidate.causation_id === enqueued.event_id &&
+      candidate.payload.route_kind === 'reply' && Number(candidate.seq) < Number(row.seq),
+    )
+    const expectedReceiptDigest = placement && row.reply_id
+      ? sha256Utf8(canonicalJson({
+          schema_version: 'aun-v2-native-handoff-receipt/v1',
+          delivery_id: `mesh-internal:${row.reply_id}`,
+          reply_id: row.reply_id,
+          recipient_agent_id: placement.seat_id,
+          recipient_received_event_id: placement.event_id,
+        }))
+      : null
+    return boundary === 'internal-handoff:after_handoff_accepted_append' &&
+      parent.event_type === 'reply.delivery_claimed' && enqueued !== undefined && placement !== undefined &&
+      row.reply_id === parent.reply_id && row.reply_id === enqueued.reply_id &&
+      row.seat_id === 'v2-native-internal-handoff' && row.seat_instance_id === parent.seat_instance_id &&
+      row.turn_id === parent.turn_id && row.conversation_id === parent.conversation_id && row.correlation_id === null &&
+      safeEpoch(row.claim_epoch) === safeEpoch(parent.claim_epoch) && row.event_id === `mesh-handoff-accepted:${row.reply_id}` &&
+      exactObjectKeys(row.payload, [
+        'reply_id', 'delivery_id', 'recipient_seat_id', 'receipt_digest', 'fanout_child_provenance_digest',
+      ]) &&
+      row.payload.reply_id === row.reply_id && row.payload.delivery_id === `mesh-internal:${row.reply_id}` &&
+      row.payload.recipient_seat_id === placement.seat_id && row.payload.receipt_digest === expectedReceiptDigest &&
+      row.payload.fanout_child_provenance_digest === null
+      ? { activeTurns: 0, openDeliveries: -1 }
+      : null
+  }
+  return null
+}
+
 async function validateStageOwnedProjectionReadback(
   db: DbAdapter,
   plan: V2NativeStageExecutionPlanV1,
   current: V2NativeStageBaselinesV1,
   accepted: V2NativeStageBaselinesV1,
+  boundary: string | null,
 ): Promise<void> {
   if (current.event_log_max_seq < accepted.event_log_max_seq) {
     stop('DATABASE_OR_MIGRATION_DRIFT', 'EventLog projection moved behind the last accepted revalidation snapshot')
@@ -926,27 +1203,40 @@ async function validateStageOwnedProjectionReadback(
   if (observedMaxSeq !== current.event_log_max_seq) {
     stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'EventLog projection readback is not backed by exact durable event provenance')
   }
-  const exactStageRows = provenance.filter(row => isExactStageEvent(row, plan))
-  const stageOwned = completeStageProvenance(exactStageRows, provenance)
-  const stageOwnedEventIds = new Set(stageOwned.map(row => row.event_id))
-  if (provenance.some(row => !stageOwnedEventIds.has(row.event_id))) {
-    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'foreign or unbound EventLog projection appeared during exact-stage execution')
+  const byEventId = new Map(provenance.map(row => [row.event_id, row]))
+  const receivedByTurn = new Map<string, V2NativeStageProvenanceEventV1>()
+  for (const row of provenance) {
+    if (row.event_type === 'message.received' && row.turn_id !== null && !receivedByTurn.has(row.turn_id)) {
+      receivedByTurn.set(row.turn_id, row)
+    }
+  }
+  const interval = provenance.filter(row => {
+    const seq = Number(row.seq)
+    return seq > accepted.event_log_max_seq && seq <= current.event_log_max_seq
+  })
+  let expectedActiveDelta = 0
+  let expectedOpenDelta = 0
+  for (const row of interval) {
+    const delta = closedStageEventDelta(row, provenance, byEventId, receivedByTurn, plan, boundary)
+    if (!delta) {
+      stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', `unbound ${row.event_type} event ${row.event_id} appeared at ${boundary ?? 'no admitted boundary'}`)
+    }
+    expectedActiveDelta += delta.activeTurns
+    expectedOpenDelta += delta.openDeliveries
+  }
+  for (const value of [
+    current.active_turn_count, accepted.active_turn_count,
+    current.open_delivery_count, accepted.open_delivery_count,
+  ]) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'mutable stage projection contains an invalid count')
+    }
   }
   if (
-    wrongQueueMutationCount(exactStageRows, provenance) !== 0 ||
-    foreignOwnerMutationCount(exactStageRows, provenance, plan) !== 0
+    current.active_turn_count - accepted.active_turn_count !== expectedActiveDelta ||
+    current.open_delivery_count - accepted.open_delivery_count !== expectedOpenDelta
   ) {
-    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'stage projection contains a wrong-queue or foreign-owner mutation')
-  }
-  const eventLogAdvanced = current.event_log_max_seq > accepted.event_log_max_seq
-  if (
-    !eventLogAdvanced &&
-    (
-      current.active_turn_count !== accepted.active_turn_count ||
-      current.open_delivery_count !== accepted.open_delivery_count
-    )
-  ) {
-    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'mutable stage projection changed without a newly accepted exact-stage EventLog event')
+    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'mutable stage projection delta is not owned by the exact accepted lifecycle interval')
   }
 }
 
@@ -1022,7 +1312,7 @@ async function measureMatrix(
       provider_effects: deltas.provider_effect_count,
       external_send_attempts: deltas.external_send_attempt_count,
     },
-    events: eventIdentities(plan, completeStageProvenance(rows, correlationProvenance)),
+    events: eventIdentities(plan, stageRelatedProvenanceForEvidence(rows, correlationProvenance)),
   }
 }
 
@@ -1192,21 +1482,21 @@ export async function executeV2NativeStage(
     const initial = await ports.readDatabaseState(db, plan.binding)
     validateDatabaseReadback(plan.binding, initial, true)
     let acceptedProjection = clone(initial.baselines)
-    const revalidate = async () => {
+    const revalidate = async (boundary: string | null = null) => {
       validateDurableAuthorityReadback(plan, await ports.readDurableAuthority(plan), ports.now?.())
       validateOfflineReadback(plan, await ports.readOfflineState(plan))
       const current = await ports.readDatabaseState(db!, plan.binding)
       validateDatabaseReadback(plan.binding, current, false)
-      await validateStageOwnedProjectionReadback(db!, plan, current.baselines, acceptedProjection)
+      await validateStageOwnedProjectionReadback(db!, plan, current.baselines, acceptedProjection, boundary)
       acceptedProjection = clone(current.baselines)
     }
     const route = ports.routeMessage ?? routeV2NativeMessage
     const tick = ports.runMeshTick ?? runV2NativeMeshTick
     const meshMutationFence = async (boundary: string) => {
-      await revalidate()
+      await revalidate(boundary)
       if (ports.onMeshMutationBoundary) {
         await ports.onMeshMutationBoundary(boundary)
-        await revalidate()
+        await revalidate(boundary)
       }
     }
     const ids = plan.binding.stage_members.agent_ids
@@ -1220,7 +1510,12 @@ export async function executeV2NativeStage(
           source_agent_id: source,
           recipient_agent_ids: [recipient],
           content: `stage-direct-request:${plan.binding.run_id}:${source}:${recipient}`,
-        }, { onCommitPoint: async point => { await revalidate(); await ports.onCommitPoint?.(point); await revalidate() } })
+        }, { onCommitPoint: async point => {
+          const boundary = `route:${point.point}`
+          await revalidate(boundary)
+          await ports.onCommitPoint?.(point)
+          await revalidate(boundary)
+        } })
         await revalidate()
       }
       await route(db, plan.scope, plan.fence, {
@@ -1229,7 +1524,12 @@ export async function executeV2NativeStage(
         source_agent_id: source,
         recipient_agent_ids: recipients,
         content: `stage-fanout-observation:${plan.binding.run_id}:${source}`,
-      }, { onCommitPoint: async point => { await revalidate(); await ports.onCommitPoint?.(point); await revalidate() } })
+      }, { onCommitPoint: async point => {
+        const boundary = `route:${point.point}`
+        await revalidate(boundary)
+        await ports.onCommitPoint?.(point)
+        await revalidate(boundary)
+      } })
       await revalidate()
     }
     let drainTicks = 0
