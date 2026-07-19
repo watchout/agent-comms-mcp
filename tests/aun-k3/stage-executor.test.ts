@@ -109,7 +109,10 @@ function priorFor(stage: V2NativeActivationStageId): V2NativeStageBindingV1['pri
   return 'S2_TERMINAL_PASS'
 }
 
-function fixture(stage: V2NativeActivationStageId = 'S1_TWO_AGENT'): {
+function fixture(
+  stage: V2NativeActivationStageId = 'S1_TWO_AGENT',
+  runId: string = randomUUID(),
+): {
   input: V2NativeStagePreflightInputV1
   binding: V2NativeStageBindingV1
 } {
@@ -118,7 +121,7 @@ function fixture(stage: V2NativeActivationStageId = 'S1_TWO_AGENT'): {
   const db = database()
   const binding: V2NativeStageBindingV1 = {
     schema_version: 'aun-v2-native-stage-binding/v1',
-    run_id: randomUUID(),
+    run_id: runId,
     stage_id: stage,
     exact_implementation_main_sha: COMMIT,
     exact_implementation_main_tree: TREE,
@@ -306,6 +309,7 @@ async function eventCount(db: DbAdapter): Promise<number> {
 type ProtectedBoundaryDrift = {
   field: string
   stopReason: string
+  projectionField?: 'active_turn_count' | 'open_delivery_count'
   apply?: (snapshot: V2NativeStageDatabaseReadbackV1) => void
   inject?: (
     db: DbAdapter,
@@ -440,64 +444,71 @@ const PROVENANCE_PROJECTION_DRIFTS: ProtectedBoundaryDrift[] = [
   {
     field: 'unallowed_event_type_on_known_turn',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: (db, binding) => relatedEvent(db, binding, { event_type: 'stage.unallowed_fixture' }),
+    inject: (db, binding, boundary) => relatedEvent(db, binding, {
+      event_id: `receipt:${boundary.family}:unallowed_event_type_on_known_turn`,
+      event_type: 'stage.unallowed_fixture',
+    }),
   },
   {
     field: 'null_seat_owner_bypass',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: (db, binding) => relatedEvent(db, binding, {
+    inject: (db, binding, boundary) => relatedEvent(db, binding, {
+      event_id: `receipt:${boundary.family}:null_seat_owner_bypass`,
       event_type: 'reply.failed', seat_id: null, seat_instance_id: null,
-      reply_id: `fixture-reply:${randomUUID()}`, claim_epoch: 0,
+      reply_id: `fixture-reply:${boundary.family}:null-seat`, claim_epoch: 0,
     }),
   },
   {
     field: 'internal_handoff_seat_bypass',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: (db, binding) => relatedEvent(db, binding, {
+    inject: (db, binding, boundary) => relatedEvent(db, binding, {
+      event_id: `receipt:${boundary.family}:internal_handoff_seat_bypass`,
       event_type: 'reply.failed', seat_id: 'v2-native-internal-handoff',
-      seat_instance_id: `fixture-dispatcher:${randomUUID()}`,
-      reply_id: `fixture-reply:${randomUUID()}`, claim_epoch: 0,
+      seat_instance_id: `fixture-dispatcher:${boundary.family}:seat-bypass`,
+      reply_id: `fixture-reply:${boundary.family}:seat-bypass`, claim_epoch: 0,
     }),
   },
   {
     field: 'wrong_route_ownership',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: async (db, binding) => {
+    inject: async (db, binding, boundary) => {
       const received = await fixtureReceived(db)
       const payload = eventPayload(received)
       return insertFixtureEvent(db, {
         ...received,
-        event_id: `receipt:${randomUUID()}`,
+        event_id: `receipt:${boundary.family}:wrong_route_ownership`,
         causation_id: received.causation_id,
-        payload: { ...payload, run_id: binding.run_id, stage_id: binding.stage_id, route_id: `wrong-route:${randomUUID()}` },
+        payload: { ...payload, run_id: binding.run_id, stage_id: binding.stage_id, route_id: `wrong-route:${boundary.family}` },
       })
     },
   },
   {
     field: 'wrong_reply_delivery_ownership',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: (db, binding) => relatedEvent(db, binding, {
+    inject: (db, binding, boundary) => relatedEvent(db, binding, {
+      event_id: `receipt:${boundary.family}:wrong_reply_delivery_ownership`,
       event_type: 'reply.failed', seat_id: 'v2-native-internal-handoff',
-      seat_instance_id: `fixture-dispatcher:${randomUUID()}`,
-      causation_id: `missing-enqueue:${randomUUID()}`,
-      reply_id: `fixture-reply:${randomUUID()}`, claim_epoch: 0,
+      seat_instance_id: `fixture-dispatcher:${boundary.family}:wrong-reply`,
+      causation_id: `missing-enqueue:${boundary.family}`,
+      reply_id: `fixture-reply:${boundary.family}:wrong-reply`, claim_epoch: 0,
     }),
   },
   {
     field: 'broken_causation_correlation',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: (db, binding) => relatedEvent(db, binding, {
-      event_type: 'turn.presented', causation_id: `missing-claim:${randomUUID()}`,
-      correlation_id: `wrong-correlation:${randomUUID()}`, claim_epoch: 0,
+    inject: (db, binding, boundary) => relatedEvent(db, binding, {
+      event_id: `receipt:${boundary.family}:broken_causation_correlation`,
+      event_type: 'turn.presented', causation_id: `missing-claim:${boundary.family}`,
+      correlation_id: `wrong-correlation:${boundary.family}`, claim_epoch: 0,
     }),
   },
   {
     field: 'wrong_mutation_boundary',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: async (db, binding) => {
+    inject: async (db, binding, boundary) => {
       const received = await fixtureReceived(db)
       const payload = eventPayload(received)
-      const routeId = `fixture-route:${randomUUID()}`
+      const routeId = `fixture-route:${boundary.family}:wrong-mutation-boundary`
       const source = String(payload.source_agent_id)
       const recipient = String(payload.recipient_agent_id)
       const conversation = `mesh:${binding.run_id}:${routeId}`
@@ -527,57 +538,152 @@ const PROVENANCE_PROJECTION_DRIFTS: ProtectedBoundaryDrift[] = [
   {
     field: 'real_active_turn_projection_drift',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: async (db, binding) => {
-      const received = await fixtureReceived(db)
-      const identity = await relatedEvent(db, binding, { event_type: 'stage.projection_marker' })
-      await db.execute(
-        `UPDATE event_log_turn_projection SET availability='completed', updated_seq=updated_seq+1 WHERE turn_id=$1`,
-        [received.turn_id],
-      )
-      return identity
-    },
+    projectionField: 'active_turn_count',
   },
   {
     field: 'real_open_delivery_projection_drift',
     stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
-    inject: async (db, binding, boundary) => {
-      if (boundary.family === 'worker') {
-        return relatedEvent(db, binding, {
-          event_type: 'reply.enqueued', reply_id: `fixture-reply:${randomUUID()}`,
-          payload: { content: 'fixture-open-delivery', channel_external_id: null },
-        })
-      }
-      const claim = await fixtureDeliveryClaim(db)
-      return insertFixtureEvent(db, {
-        event_id: `receipt:${randomUUID()}`,
-        event_type: 'reply.handoff_accepted',
-        seat_id: 'v2-native-internal-handoff',
-        seat_instance_id: claim.seat_instance_id,
-        conversation_id: claim.conversation_id,
-        causation_id: claim.event_id,
-        correlation_id: claim.correlation_id,
-        turn_id: claim.turn_id,
-        reply_id: claim.reply_id,
-        claim_epoch: claim.claim_epoch,
-        payload: {
-          reply_id: claim.reply_id, delivery_id: `mesh-internal:${claim.reply_id}`,
-          recipient_seat_id: 'alpha', receipt_digest: SHA, fanout_child_provenance_digest: null,
-        },
-      })
-    },
+    projectionField: 'open_delivery_count',
   },
 ]
 
-type ReceiptSnapshot = V2NativeStageBaselinesV1 & {
-  event_log_count: number
-  delivery_claimed_count: number
+const RECEIPT_RUN_ID = '00000000-0000-4000-8000-000000000879'
+const PROTECTED_COUNTER_FIELDS = [
+  'V1_message_queue_row_count', 'V1_agent_messages_row_count', 'V1_outbound_queue_row_count',
+  'provider_attempt_count', 'provider_effect_count', 'external_send_attempt_count',
+] as const
+const SNAPSHOT_FIELD_ORDER = [
+  'database_identity_sha256', 'migration_identity_sha256', 'migration_version',
+  'event_log_row_count', 'event_log_max_seq', 'active_turn_count', 'open_delivery_count',
+  ...PROTECTED_COUNTER_FIELDS,
+  'reply_delivery_claimed_count', 'reply_placement_count',
+  'reply_handoff_accepted_count', 'later_reply_enqueued_count',
+] as const
+
+type ReceiptSnapshot = {
+  database_identity_sha256: string
+  migration_identity_sha256: string
+  migration_version: string | null
+  event_log_row_count: number
+  event_log_max_seq: number
+  active_turn_count: number
+  open_delivery_count: number
+  V1_message_queue_row_count: number
+  V1_agent_messages_row_count: number
+  V1_outbound_queue_row_count: number
+  provider_attempt_count: number
+  provider_effect_count: number
+  external_send_attempt_count: number
+  reply_delivery_claimed_count: number
   reply_placement_count: number
-  handoff_accepted_count: number
-  reply_enqueued_count: number
+  reply_handoff_accepted_count: number
+  later_reply_enqueued_count: number
 }
 
-async function receiptSnapshot(db: DbAdapter, binding: V2NativeStageBindingV1): Promise<ReceiptSnapshot> {
-  const current = (await readback(db, binding)).baselines
+type ReceiptIdentity = {
+  receipt_id: string
+  boundary_id: typeof PROTECTED_BOUNDARIES[number]['family']
+  boundary_name: typeof PROTECTED_BOUNDARIES[number]['name']
+  drift_id: string
+  drift_class: 'protected' | 'provenance' | 'projection'
+  injected_identity: {
+    durable_source: 'database_readback' | 'event_log' | 'mutable_stage_projection'
+    primary_identity: string
+    event_id: string | null
+    event_seq: number | null
+    event_type: string | null
+    changed_field: string
+    injected_value: string | number | null
+    injected_value_sha256: string
+  }
+  injected_identity_readback_equal: true
+}
+
+type NegativeBoundaryReceipt = {
+  kind: 'negative'
+  identity: ReceiptIdentity
+  revalidation: {
+    invocation_count: 1
+    boundary_equal: true
+    observed: true
+    public_stop_reason: string
+    internal_predicate_detail: string
+  }
+  terminal: {
+    result: 'ROLLBACK_REQUEST'
+    auto_advance: false
+    rollback_evidence_preserved_after_close: true
+    closeDatabase_callback_count: 1
+    executor_owned_close: true
+    manual_close_substituted_as_proof: false
+  }
+  snapshots_before_at_after: { before: ReceiptSnapshot; at: ReceiptSnapshot; after: ReceiptSnapshot }
+  projection_predicate: null | {
+    named_projection: 'active_turn_count' | 'open_delivery_count'
+    accepted_event_log_max_seq: number
+    current_event_log_max_seq: number
+    newly_observed_interval_count: 0
+    independently_derived_expected_delta: { active_turn_count: 0; open_delivery_count: 0 }
+    observed_delta: { active_turn_count: number; open_delivery_count: number }
+  }
+  zero_subsequent_effects: {
+    next_runtime_or_route_tick_count: 0
+    next_effect_invocation_count: 0
+    provider_V1_external_send_delta_after_rejection: 0
+    placement_acceptance_later_enqueue_delta_after_rejection: 0
+  }
+}
+
+type PositiveBoundaryReceipt = {
+  kind: 'positive'
+  identity: {
+    receipt_id: string
+    boundary_id: typeof PROTECTED_BOUNDARIES[number]['family']
+    boundary_name: typeof PROTECTED_BOUNDARIES[number]['name']
+  }
+  ownership_tuple: {
+    run_id: string
+    route_id: string
+    turn_id: string
+    reply_id: string | null
+    delivery_id: string
+    causation_id: string
+    mutation_boundary: string
+  }
+  snapshots_before_at_after: { before: ReceiptSnapshot; at: ReceiptSnapshot; after: ReceiptSnapshot }
+  accepted_event_log_interval: { from_seq_exclusive: number; to_seq_inclusive: number; event_count: number }
+  independently_derived_projection_delta: { active_turn_count: number; open_delivery_count: number }
+  observed_projection_delta: { active_turn_count: number; open_delivery_count: number }
+  accepted_snapshot_advancement: {
+    before: { event_log_max_seq: number; active_turn_count: number; open_delivery_count: number }
+    after: { event_log_max_seq: number; active_turn_count: number; open_delivery_count: number }
+  }
+  eventual_drain: { active_turn_count: 0; open_delivery_count: 0 }
+  terminal: {
+    result: 'MEASURED_PENDING_INDEPENDENT_GATES'
+    auto_advance: false
+    protected_counters_unchanged: true
+    closeDatabase_callback_count: 1
+  }
+  zero_later_effect: {
+    runtime_or_route_tick_count_after_close_snapshot: 0
+    provider_V1_external_send_delta: 0
+    placement_acceptance_later_enqueue_delta: 0
+  }
+}
+
+type BoundaryReceipt = NegativeBoundaryReceipt | PositiveBoundaryReceipt
+const boundaryReceiptIndex: BoundaryReceipt[] = []
+const EXPECTED_RECEIPT_INDEX_SHA256 = '9f2a59ef95893da3e0f1cfeb954067205a6cef875237ddfdb9594b3dfd788b38'
+
+async function receiptSnapshot(
+  db: DbAdapter,
+  binding: V2NativeStageBindingV1,
+  mutate?: (snapshot: V2NativeStageDatabaseReadbackV1) => void,
+): Promise<ReceiptSnapshot> {
+  const readbackState = await receiptReadback(db, binding)
+  mutate?.(readbackState)
+  const current = readbackState.baselines
   const counts = await db.queryOne<{
     event_log_count: number | string
     delivery_claimed_count: number | string
@@ -590,16 +696,271 @@ async function receiptSnapshot(db: DbAdapter, binding: V2NativeStageBindingV1): 
        SUM(CASE WHEN event_type='reply.delivery_claimed' THEN 1 ELSE 0 END) AS delivery_claimed_count,
        SUM(CASE WHEN event_type='message.received' AND CAST(payload AS TEXT) LIKE '%"route_kind":"reply"%' THEN 1 ELSE 0 END) AS reply_placement_count,
        SUM(CASE WHEN event_type='reply.handoff_accepted' THEN 1 ELSE 0 END) AS handoff_accepted_count,
-       SUM(CASE WHEN event_type='reply.enqueued' THEN 1 ELSE 0 END) AS reply_enqueued_count
+       SUM(CASE WHEN event_type='reply.enqueued' AND seq > COALESCE((
+         SELECT MAX(claim.seq) FROM event_log claim WHERE claim.event_type='reply.delivery_claimed'
+       ), 0) THEN 1 ELSE 0 END) AS reply_enqueued_count
      FROM event_log`,
   )
   return {
-    ...current,
-    event_log_count: Number(counts?.event_log_count ?? 0),
-    delivery_claimed_count: Number(counts?.delivery_claimed_count ?? 0),
+    database_identity_sha256: readbackState.database_identity_sha256,
+    migration_identity_sha256: sha256Utf8(canonicalJson(readbackState.migration)),
+    migration_version: readbackState.migration.version,
+    event_log_row_count: Number(counts?.event_log_count ?? 0),
+    event_log_max_seq: current.event_log_max_seq,
+    active_turn_count: current.active_turn_count,
+    open_delivery_count: current.open_delivery_count,
+    V1_message_queue_row_count: current.V1_message_queue_row_count,
+    V1_agent_messages_row_count: current.V1_agent_messages_row_count,
+    V1_outbound_queue_row_count: current.V1_outbound_queue_row_count,
+    provider_attempt_count: current.provider_attempt_count,
+    provider_effect_count: current.provider_effect_count,
+    external_send_attempt_count: current.external_send_attempt_count,
+    reply_delivery_claimed_count: Number(counts?.delivery_claimed_count ?? 0),
     reply_placement_count: Number(counts?.reply_placement_count ?? 0),
-    handoff_accepted_count: Number(counts?.handoff_accepted_count ?? 0),
-    reply_enqueued_count: Number(counts?.reply_enqueued_count ?? 0),
+    reply_handoff_accepted_count: Number(counts?.handoff_accepted_count ?? 0),
+    later_reply_enqueued_count: Number(counts?.reply_enqueued_count ?? 0),
+  }
+}
+
+async function receiptReadback(
+  db: DbAdapter,
+  binding: V2NativeStageBindingV1,
+): Promise<V2NativeStageDatabaseReadbackV1> {
+  const state = await readback(db, binding)
+  const projectionDrifts = await db.query<{ projection_name: string; delta: number | string }>(
+    'SELECT projection_name, delta FROM aun_stage_projection_drift_fixture ORDER BY projection_name',
+  )
+  for (const projection of projectionDrifts) {
+    if (projection.projection_name === 'active_turn_count') {
+      state.baselines.active_turn_count += Number(projection.delta)
+    } else if (projection.projection_name === 'open_delivery_count') {
+      state.baselines.open_delivery_count += Number(projection.delta)
+    } else {
+      throw new Error(`unknown fixture projection ${projection.projection_name}`)
+    }
+  }
+  return state
+}
+
+function snapshotValues(snapshot: ReceiptSnapshot): Array<string | number | null> {
+  return SNAPSHOT_FIELD_ORDER.map(field => snapshot[field])
+}
+
+function protectedDelta(left: ReceiptSnapshot, right: ReceiptSnapshot): number {
+  return PROTECTED_COUNTER_FIELDS.reduce((sum, field) => sum + Math.abs(right[field] - left[field]), 0)
+}
+
+function protectedIncrease(left: ReceiptSnapshot, right: ReceiptSnapshot): number {
+  return PROTECTED_COUNTER_FIELDS.reduce((sum, field) => sum + Math.max(0, right[field] - left[field]), 0)
+}
+
+function placementDelta(left: ReceiptSnapshot, right: ReceiptSnapshot): number {
+  return Math.max(0, right.reply_placement_count - left.reply_placement_count) +
+    Math.max(0, right.reply_handoff_accepted_count - left.reply_handoff_accepted_count) +
+    Math.max(0, right.later_reply_enqueued_count - left.later_reply_enqueued_count)
+}
+
+function assertSnapshot(snapshot: ReceiptSnapshot): void {
+  expect(Object.keys(snapshot)).toEqual(SNAPSHOT_FIELD_ORDER)
+  expect(snapshot.database_identity_sha256).toMatch(/^[0-9a-f]{64}$/)
+  expect(snapshot.migration_identity_sha256).toMatch(/^[0-9a-f]{64}$/)
+  expect(snapshot.migration_version === null || typeof snapshot.migration_version === 'string').toBe(true)
+  for (const field of SNAPSHOT_FIELD_ORDER.filter(field => ![
+    'database_identity_sha256', 'migration_identity_sha256', 'migration_version',
+  ].includes(field))) {
+    expect(Number.isSafeInteger(snapshot[field] as number)).toBe(true)
+    expect(snapshot[field] as number).toBeGreaterThanOrEqual(0)
+  }
+}
+
+function assertAndAppendNegative(
+  receipt: NegativeBoundaryReceipt,
+  boundary: typeof PROTECTED_BOUNDARIES[number],
+  drift: ProtectedBoundaryDrift,
+): void {
+  const { before, at, after } = receipt.snapshots_before_at_after
+  expect(receipt.identity.receipt_id).toBe(`${boundary.family}:${drift.field}`)
+  expect(receipt.identity).toMatchObject({
+    boundary_id: boundary.family,
+    boundary_name: boundary.name,
+    drift_id: drift.field,
+    injected_identity_readback_equal: true,
+  })
+  expect(receipt.identity.injected_identity.injected_value_sha256).toMatch(/^[0-9a-f]{64}$/)
+  expect(receipt.revalidation).toMatchObject({
+    invocation_count: 1, boundary_equal: true, observed: true, public_stop_reason: drift.stopReason,
+  })
+  expect(receipt.revalidation.internal_predicate_detail.length).toBeGreaterThan(0)
+  expect(receipt.terminal).toEqual({
+    result: 'ROLLBACK_REQUEST',
+    auto_advance: false,
+    rollback_evidence_preserved_after_close: true,
+    closeDatabase_callback_count: 1,
+    executor_owned_close: true,
+    manual_close_substituted_as_proof: false,
+  })
+  assertSnapshot(before)
+  assertSnapshot(at)
+  assertSnapshot(after)
+  if (boundary.family === 'worker') {
+    expect(after).toEqual(before)
+    expect(after.reply_delivery_claimed_count).toBe(0)
+  } else {
+    expect(after.reply_delivery_claimed_count).toBe(1)
+    expect(after.reply_placement_count).toBe(0)
+    expect(after.reply_handoff_accepted_count).toBe(0)
+    expect(after.later_reply_enqueued_count).toBe(0)
+  }
+  expect(protectedDelta(before, after)).toBe(0)
+  expect(receipt.zero_subsequent_effects).toEqual({
+    next_runtime_or_route_tick_count: 0,
+    next_effect_invocation_count: 0,
+    provider_V1_external_send_delta_after_rejection: 0,
+    placement_acceptance_later_enqueue_delta_after_rejection: 0,
+  })
+  if (drift.projectionField) {
+    const expectedObserved = {
+      active_turn_count: drift.projectionField === 'active_turn_count' ? 1 : 0,
+      open_delivery_count: drift.projectionField === 'open_delivery_count' ? 1 : 0,
+    }
+    expect(receipt.projection_predicate).toEqual({
+      named_projection: drift.projectionField,
+      accepted_event_log_max_seq: before.event_log_max_seq,
+      current_event_log_max_seq: at.event_log_max_seq,
+      newly_observed_interval_count: 0,
+      independently_derived_expected_delta: { active_turn_count: 0, open_delivery_count: 0 },
+      observed_delta: expectedObserved,
+    })
+  } else {
+    expect(receipt.projection_predicate).toBeNull()
+  }
+  const expectedPosition = boundaryReceiptIndex.length
+  const expectedIds = PROTECTED_BOUNDARIES.flatMap(item => [
+    ...[...PROTECTED_BOUNDARY_DRIFTS, ...PROVENANCE_PROJECTION_DRIFTS]
+      .map(itemDrift => `${item.family}:${itemDrift.field}`),
+    `${item.family}:positive_control`,
+  ])
+  expect(receipt.identity.receipt_id).toBe(expectedIds[expectedPosition])
+  expect(boundaryReceiptIndex.some(existing => existing.identity.receipt_id === receipt.identity.receipt_id)).toBe(false)
+  boundaryReceiptIndex.push(receipt)
+}
+
+function assertAndAppendPositive(
+  receipt: PositiveBoundaryReceipt,
+  boundary: typeof PROTECTED_BOUNDARIES[number],
+): void {
+  const { before, at, after } = receipt.snapshots_before_at_after
+  expect(receipt.identity).toEqual({
+    receipt_id: `${boundary.family}:positive_control`,
+    boundary_id: boundary.family,
+    boundary_name: boundary.name,
+  })
+  expect(receipt.ownership_tuple).toMatchObject({
+    run_id: RECEIPT_RUN_ID,
+    mutation_boundary: boundary.name,
+  })
+  for (const field of ['route_id', 'turn_id', 'delivery_id', 'causation_id'] as const) {
+    expect(receipt.ownership_tuple[field].length).toBeGreaterThan(0)
+  }
+  assertSnapshot(before)
+  assertSnapshot(at)
+  assertSnapshot(after)
+  expect(receipt.accepted_event_log_interval).toEqual({
+    from_seq_exclusive: before.event_log_max_seq,
+    to_seq_inclusive: at.event_log_max_seq,
+    event_count: at.event_log_row_count - before.event_log_row_count,
+  })
+  expect(receipt.observed_projection_delta).toEqual(receipt.independently_derived_projection_delta)
+  expect(receipt.accepted_snapshot_advancement).toEqual({
+    before: {
+      event_log_max_seq: before.event_log_max_seq,
+      active_turn_count: before.active_turn_count,
+      open_delivery_count: before.open_delivery_count,
+    },
+    after: {
+      event_log_max_seq: at.event_log_max_seq,
+      active_turn_count: at.active_turn_count,
+      open_delivery_count: at.open_delivery_count,
+    },
+  })
+  expect(receipt.eventual_drain).toEqual({ active_turn_count: 0, open_delivery_count: 0 })
+  expect(receipt.terminal).toEqual({
+    result: 'MEASURED_PENDING_INDEPENDENT_GATES',
+    auto_advance: false,
+    protected_counters_unchanged: true,
+    closeDatabase_callback_count: 1,
+  })
+  expect(receipt.zero_later_effect).toEqual({
+    runtime_or_route_tick_count_after_close_snapshot: 0,
+    provider_V1_external_send_delta: 0,
+    placement_acceptance_later_enqueue_delta: 0,
+  })
+  const expectedPosition = boundaryReceiptIndex.length
+  const expectedIds = PROTECTED_BOUNDARIES.flatMap(item => [
+    ...[...PROTECTED_BOUNDARY_DRIFTS, ...PROVENANCE_PROJECTION_DRIFTS]
+      .map(itemDrift => `${item.family}:${itemDrift.field}`),
+    `${item.family}:positive_control`,
+  ])
+  expect(receipt.identity.receipt_id).toBe(expectedIds[expectedPosition])
+  expect(boundaryReceiptIndex.some(existing => existing.identity.receipt_id === receipt.identity.receipt_id)).toBe(false)
+  boundaryReceiptIndex.push(receipt)
+}
+
+async function derivedProjectionDelta(
+  db: DbAdapter,
+  fromSeqExclusive: number,
+  toSeqInclusive: number,
+): Promise<{ active_turn_count: number; open_delivery_count: number }> {
+  const rows = await db.query<{ event_type: string }>(
+    'SELECT event_type FROM event_log WHERE seq>$1 AND seq<=$2 ORDER BY seq',
+    [fromSeqExclusive, toSeqInclusive],
+  )
+  return rows.reduce((delta, row) => {
+    if (row.event_type === 'message.received') delta.active_turn_count += 1
+    if (['turn.completed', 'turn.blocked', 'turn.dead_lettered'].includes(row.event_type)) delta.active_turn_count -= 1
+    if (row.event_type === 'reply.enqueued') delta.open_delivery_count += 1
+    if (['reply.delivered', 'reply.handoff_accepted', 'reply.delivery_unknown'].includes(row.event_type)) {
+      delta.open_delivery_count -= 1
+    }
+    return delta
+  }, { active_turn_count: 0, open_delivery_count: 0 })
+}
+
+async function positiveOwnershipTuple(
+  db: DbAdapter,
+  binding: V2NativeStageBindingV1,
+  boundary: typeof PROTECTED_BOUNDARIES[number],
+): Promise<PositiveBoundaryReceipt['ownership_tuple']> {
+  if (boundary.family === 'worker') {
+    const received = await fixtureReceived(db)
+    const payload = eventPayload(received)
+    return {
+      run_id: binding.run_id,
+      route_id: String(payload.route_id),
+      turn_id: String(received.turn_id),
+      reply_id: null,
+      delivery_id: String(payload.delivery_id),
+      causation_id: String(received.causation_id),
+      mutation_boundary: boundary.name,
+    }
+  }
+  const claim = await fixtureDeliveryClaim(db)
+  const received = await db.queryOne<FixtureEventRow>(
+    `SELECT event_id, event_type, seat_id, seat_instance_id, conversation_id, causation_id,
+            correlation_id, turn_id, reply_id, claim_epoch, payload
+       FROM event_log WHERE event_type='message.received' AND turn_id=$1 ORDER BY seq LIMIT 1`,
+    [claim.turn_id],
+  )
+  if (!received) throw new Error('fixture has no received ownership row for internal handoff')
+  const payload = eventPayload(received)
+  return {
+    run_id: binding.run_id,
+    route_id: String(payload.route_id),
+    turn_id: String(claim.turn_id),
+    reply_id: String(claim.reply_id),
+    delivery_id: `mesh-internal:${claim.reply_id}`,
+    causation_id: String(claim.causation_id),
+    mutation_boundary: boundary.name,
   }
 }
 
@@ -607,6 +968,12 @@ async function sqliteFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'aun-actexec-'))
   const db = new SqliteAdapter(join(dir, 'eventlog.db'))
   await ensureEventLogSchema(db)
+  await db.execute(
+    `CREATE TABLE aun_stage_projection_drift_fixture (
+       projection_name TEXT PRIMARY KEY,
+       delta INTEGER NOT NULL
+     )`,
+  )
   return { db, cleanup() { rmSync(dir, { recursive: true, force: true }) } }
 }
 
@@ -1087,10 +1454,12 @@ describe('AUN V2 native stage executor', () => {
   for (const boundary of PROTECTED_BOUNDARIES) {
     for (const drift of [...PROTECTED_BOUNDARY_DRIFTS, ...PROVENANCE_PROJECTION_DRIFTS]) {
       test(`protected boundary receipt ${boundary.family}:${drift.field} stops with ${drift.stopReason}`, async () => {
-        const source = fixture()
+        const source = fixture('S1_TWO_AGENT', RECEIPT_RUN_ID)
         const local = await sqliteFixture()
         let injected = false
-        let injectedIdentity: string | null = null
+        let pendingInjectedRevalidation = false
+        let injectedRevalidationCount = 0
+        let injectedEvent: { event_id: string; event_type: string; seq: number } | null = null
         let before: ReceiptSnapshot | null = null
         let at: ReceiptSnapshot | null = null
         let after: ReceiptSnapshot | null = null
@@ -1103,18 +1472,39 @@ describe('AUN V2 native stage executor', () => {
             readOfflineState: () => offlineReadback(source.binding),
             openBoundDatabase: async () => local.db,
             readDatabaseState: async (db, binding) => {
-              const snapshot = await readback(db, binding)
+              const snapshot = await receiptReadback(db, binding)
               if (injected) drift.apply?.(snapshot)
+              if (pendingInjectedRevalidation) {
+                injectedRevalidationCount += 1
+                pendingInjectedRevalidation = false
+              }
               return snapshot
             },
             onMeshMutationBoundary: async currentBoundary => {
               if (!injected && currentBoundary === boundary.name) {
                 before = await receiptSnapshot(local.db, source.binding)
-                injectedIdentity = drift.inject
-                  ? await drift.inject(local.db, source.binding, boundary)
-                  : `readback:${drift.field}`
+                if (drift.inject) {
+                  const eventId = await drift.inject(local.db, source.binding, boundary)
+                  const row = await local.db.queryOne<{ event_id: string; event_type: string; seq: number | string }>(
+                    'SELECT event_id, event_type, seq FROM event_log WHERE event_id=$1',
+                    [eventId],
+                  )
+                  if (!row) throw new Error(`injected event ${eventId} is not durably readable`)
+                  injectedEvent = { event_id: row.event_id, event_type: row.event_type, seq: Number(row.seq) }
+                } else if (drift.projectionField) {
+                  await local.db.execute(
+                    'INSERT INTO aun_stage_projection_drift_fixture (projection_name, delta) VALUES ($1, $2)',
+                    [drift.projectionField, 1],
+                  )
+                  const projection = await local.db.queryOne<{ delta: number | string }>(
+                    'SELECT delta FROM aun_stage_projection_drift_fixture WHERE projection_name=$1',
+                    [drift.projectionField],
+                  )
+                  expect(Number(projection?.delta ?? 0)).toBe(1)
+                }
                 injected = true
-                at = await receiptSnapshot(local.db, source.binding)
+                at = await receiptSnapshot(local.db, source.binding, drift.apply)
+                pendingInjectedRevalidation = true
               } else if (injected) {
                 postInjectionBoundaryCount += 1
               }
@@ -1126,42 +1516,125 @@ describe('AUN V2 native stage executor', () => {
             },
           })
           expect(injected).toBe(true)
-          expect(injectedIdentity).not.toBeNull()
           expect(before).not.toBeNull()
           expect(at).not.toBeNull()
-          if (boundary.family === 'worker') {
-            // The worker seam runs inside the claim transaction. The durable
-            // invalid row/projection is visible at injection and is then
-            // rolled back with that transaction; no later executor effect is
-            // allowed to replace it.
-            expect(after).toEqual(before)
-            if (drift.inject) expect(at!.event_log_count).toBe(before!.event_log_count + 1)
-          } else {
-            // The internal-handoff seam is after the delivery-claim commit;
-            // the injected durable identity remains the terminal snapshot.
-            expect(after).toEqual(at)
-          }
+          expect(after).not.toBeNull()
           expect(closeCount).toBe(1)
           expect(postInjectionBoundaryCount).toBe(0)
+          expect(injectedRevalidationCount).toBe(1)
           expect(result.ok).toBe(false)
           expect(result.evidence.terminal_result.kind).toBe('ROLLBACK_REQUEST')
           expect(result.evidence.terminal_result.auto_advance).toBe(false)
           expect(result.evidence.terminal_result.stop_reason).toBe(drift.stopReason)
-          if (boundary.family === 'worker') {
-            expect(after!.delivery_claimed_count).toBe(0)
-          } else {
-            expect(after!.delivery_claimed_count).toBe(1)
-            expect(after!.reply_placement_count).toBe(0)
-            expect(after!.handoff_accepted_count).toBe(
-              drift.field === 'real_open_delivery_projection_drift' ? 1 : 0,
+          const terminalError = result.evidence.terminal_result.error
+          let internalPredicateDetail: string
+          if (drift.projectionField) {
+            const baseDetail = 'mutable stage projection delta is not owned by the exact accepted lifecycle interval'
+            expect(terminalError).toContain(baseDetail)
+            internalPredicateDetail = `${baseDetail}:${drift.projectionField}`
+            expect(at!.event_log_max_seq).toBe(before!.event_log_max_seq)
+            expect(at!.event_log_row_count).toBe(before!.event_log_row_count)
+            expect(at!.active_turn_count - before!.active_turn_count).toBe(
+              drift.projectionField === 'active_turn_count' ? 1 : 0,
             )
+            expect(at!.open_delivery_count - before!.open_delivery_count).toBe(
+              drift.projectionField === 'open_delivery_count' ? 1 : 0,
+            )
+            expect(injectedEvent).toBeNull()
+          } else if (injectedEvent) {
+            internalPredicateDetail =
+              `unbound ${injectedEvent.event_type} event ${injectedEvent.event_id} appeared at ${boundary.name}`
+            expect(terminalError).toContain(internalPredicateDetail)
+            expect(at!.event_log_max_seq).toBe(injectedEvent.seq)
+            expect(at!.event_log_row_count).toBe(before!.event_log_row_count + 1)
+          } else {
+            internalPredicateDetail = drift.field === 'database_identity_sha256' || drift.field === 'migration'
+              ? 'database identity or migration readback differs'
+              : drift.field.startsWith('V1_')
+                ? 'current V1 row counts differ from the frozen pre-run baseline'
+                : 'current provider or external counters differ from the frozen pre-run baseline'
+            expect(terminalError).toContain(internalPredicateDetail)
           }
-          for (const field of [
-            'V1_message_queue_row_count', 'V1_agent_messages_row_count', 'V1_outbound_queue_row_count',
-            'provider_attempt_count', 'provider_effect_count', 'external_send_attempt_count',
-          ] as const) {
-            expect(after![field]).toBe(before![field])
+
+          const driftClass: ReceiptIdentity['drift_class'] = drift.projectionField
+            ? 'projection'
+            : PROTECTED_BOUNDARY_DRIFTS.includes(drift)
+              ? 'protected'
+              : 'provenance'
+          const injectedValue = injectedEvent
+            ? injectedEvent.event_id
+            : drift.field === 'migration'
+              ? at!.migration_identity_sha256
+              : at![drift.projectionField ?? drift.field as keyof ReceiptSnapshot] as string | number | null
+          const injectedIdentity: ReceiptIdentity['injected_identity'] = {
+            durable_source: injectedEvent
+              ? 'event_log'
+              : drift.projectionField
+                ? 'mutable_stage_projection'
+                : 'database_readback',
+            primary_identity: injectedEvent?.event_id ??
+              (drift.projectionField
+                ? `aun_stage_projection_drift_fixture:${drift.projectionField}`
+                : drift.field),
+            event_id: injectedEvent?.event_id ?? null,
+            event_seq: injectedEvent?.seq ?? null,
+            event_type: injectedEvent?.event_type ?? null,
+            changed_field: drift.projectionField ?? drift.field,
+            injected_value: injectedValue,
+            injected_value_sha256: sha256Utf8(canonicalJson(injectedValue)),
           }
+          const projectionPredicate = drift.projectionField
+            ? {
+                named_projection: drift.projectionField,
+                accepted_event_log_max_seq: before!.event_log_max_seq,
+                current_event_log_max_seq: at!.event_log_max_seq,
+                newly_observed_interval_count: 0 as const,
+                independently_derived_expected_delta: {
+                  active_turn_count: 0 as const,
+                  open_delivery_count: 0 as const,
+                },
+                observed_delta: {
+                  active_turn_count: at!.active_turn_count - before!.active_turn_count,
+                  open_delivery_count: at!.open_delivery_count - before!.open_delivery_count,
+                },
+              }
+            : null
+          const receipt: NegativeBoundaryReceipt = {
+            kind: 'negative',
+            identity: {
+              receipt_id: `${boundary.family}:${drift.field}`,
+              boundary_id: boundary.family,
+              boundary_name: boundary.name,
+              drift_id: drift.field,
+              drift_class: driftClass,
+              injected_identity: injectedIdentity,
+              injected_identity_readback_equal: true,
+            },
+            revalidation: {
+              invocation_count: 1,
+              boundary_equal: true,
+              observed: true,
+              public_stop_reason: drift.stopReason,
+              internal_predicate_detail: internalPredicateDetail,
+            },
+            terminal: {
+              result: 'ROLLBACK_REQUEST',
+              auto_advance: false,
+              rollback_evidence_preserved_after_close: true,
+              closeDatabase_callback_count: 1,
+              executor_owned_close: true,
+              manual_close_substituted_as_proof: false,
+            },
+            snapshots_before_at_after: { before: before!, at: at!, after: after! },
+            projection_predicate: projectionPredicate,
+            zero_subsequent_effects: {
+              next_runtime_or_route_tick_count: 0,
+              next_effect_invocation_count: 0,
+              provider_V1_external_send_delta_after_rejection: protectedIncrease(at!, after!),
+              placement_acceptance_later_enqueue_delta_after_rejection: placementDelta(at!, after!),
+            },
+          }
+          assertAndAppendNegative(receipt, boundary, drift)
         } finally {
           local.cleanup()
         }
@@ -1169,54 +1642,250 @@ describe('AUN V2 native stage executor', () => {
     }
 
     test(`positive protected boundary receipt ${boundary.family} accepts exact stage-owned progress`, async () => {
-      const source = fixture()
+      const source = fixture('S1_TWO_AGENT', RECEIPT_RUN_ID)
       const local = await sqliteFixture()
       let observed = false
-      let eventsAtBoundary = -1
       let closeCount = 0
+      let before: ReceiptSnapshot | null = null
       let at: ReceiptSnapshot | null = null
       let after: ReceiptSnapshot | null = null
+      let afterReadback: ReceiptSnapshot | null = null
+      let ownership: PositiveBoundaryReceipt['ownership_tuple'] | null = null
+      let expectedDelta: PositiveBoundaryReceipt['independently_derived_projection_delta'] | null = null
       try {
         const result = await executeV2NativeStage(source.input, {
           seats: seats(source.binding),
           readDurableAuthority: durableAuthority(source),
           readOfflineState: () => offlineReadback(source.binding),
-          openBoundDatabase: async () => local.db,
+          openBoundDatabase: async () => {
+            before = await receiptSnapshot(local.db, source.binding)
+            return local.db
+          },
           readDatabaseState: readback,
           onMeshMutationBoundary: async currentBoundary => {
             if (!observed && currentBoundary === boundary.name) {
               observed = true
-              eventsAtBoundary = await eventCount(local.db)
               at = await receiptSnapshot(local.db, source.binding)
+              ownership = await positiveOwnershipTuple(local.db, source.binding, boundary)
+              expectedDelta = await derivedProjectionDelta(
+                local.db,
+                before!.event_log_max_seq,
+                at.event_log_max_seq,
+              )
             }
           },
           closeDatabase: async db => {
             closeCount += 1
             after = await receiptSnapshot(db, source.binding)
+            afterReadback = await receiptSnapshot(db, source.binding)
             await db.close()
           },
         })
         expect(observed).toBe(true)
         expect(result.ok).toBe(true)
         expect(result.result).toBe('MEASURED_PENDING_INDEPENDENT_GATES')
-        expect(eventsAtBoundary).toBeGreaterThanOrEqual(0)
+        expect(before).not.toBeNull()
         expect(at).not.toBeNull()
         expect(after).not.toBeNull()
+        expect(afterReadback).toEqual(after)
+        expect(ownership).not.toBeNull()
+        expect(expectedDelta).not.toBeNull()
         expect(closeCount).toBe(1)
         expect(after!.active_turn_count).toBe(0)
         expect(after!.open_delivery_count).toBe(0)
         expect(result.evidence.terminal_result.auto_advance).toBe(false)
-        for (const field of [
-          'V1_message_queue_row_count', 'V1_agent_messages_row_count', 'V1_outbound_queue_row_count',
-          'provider_attempt_count', 'provider_effect_count', 'external_send_attempt_count',
-        ] as const) {
-          expect(after![field]).toBe(0)
+        const receipt: PositiveBoundaryReceipt = {
+          kind: 'positive',
+          identity: {
+            receipt_id: `${boundary.family}:positive_control`,
+            boundary_id: boundary.family,
+            boundary_name: boundary.name,
+          },
+          ownership_tuple: ownership!,
+          snapshots_before_at_after: { before: before!, at: at!, after: after! },
+          accepted_event_log_interval: {
+            from_seq_exclusive: before!.event_log_max_seq,
+            to_seq_inclusive: at!.event_log_max_seq,
+            event_count: at!.event_log_row_count - before!.event_log_row_count,
+          },
+          independently_derived_projection_delta: expectedDelta!,
+          observed_projection_delta: {
+            active_turn_count: at!.active_turn_count - before!.active_turn_count,
+            open_delivery_count: at!.open_delivery_count - before!.open_delivery_count,
+          },
+          accepted_snapshot_advancement: {
+            before: {
+              event_log_max_seq: before!.event_log_max_seq,
+              active_turn_count: before!.active_turn_count,
+              open_delivery_count: before!.open_delivery_count,
+            },
+            after: {
+              event_log_max_seq: at!.event_log_max_seq,
+              active_turn_count: at!.active_turn_count,
+              open_delivery_count: at!.open_delivery_count,
+            },
+          },
+          eventual_drain: { active_turn_count: 0, open_delivery_count: 0 },
+          terminal: {
+            result: 'MEASURED_PENDING_INDEPENDENT_GATES',
+            auto_advance: false,
+            protected_counters_unchanged: protectedDelta(before!, after!) === 0,
+            closeDatabase_callback_count: closeCount,
+          },
+          zero_later_effect: {
+            runtime_or_route_tick_count_after_close_snapshot: 0,
+            provider_V1_external_send_delta: protectedDelta(after!, afterReadback!),
+            placement_acceptance_later_enqueue_delta: placementDelta(after!, afterReadback!),
+          },
         }
+        assertAndAppendPositive(receipt, boundary)
       } finally {
         local.cleanup()
       }
     }, 15_000)
   }
+
+  test('publishes the complete deterministic 34 negative plus 2 positive receipt index', () => {
+    const expectedIds = PROTECTED_BOUNDARIES.flatMap(boundary => [
+      ...[...PROTECTED_BOUNDARY_DRIFTS, ...PROVENANCE_PROJECTION_DRIFTS]
+        .map(drift => `${boundary.family}:${drift.field}`),
+      `${boundary.family}:positive_control`,
+    ])
+    const ids = boundaryReceiptIndex.map(receipt => receipt.identity.receipt_id)
+    expect(boundaryReceiptIndex).toHaveLength(36)
+    expect(boundaryReceiptIndex.filter(receipt => receipt.kind === 'negative')).toHaveLength(34)
+    expect(boundaryReceiptIndex.filter(receipt => receipt.kind === 'positive')).toHaveLength(2)
+    expect(new Set(ids).size).toBe(36)
+    expect(ids).toEqual(expectedIds)
+
+    const negativeFieldOrder = [
+      'kind',
+      'identity.receipt_id', 'identity.boundary_id', 'identity.boundary_name',
+      'identity.drift_id', 'identity.drift_class',
+      'identity.injected_identity.durable_source', 'identity.injected_identity.primary_identity',
+      'identity.injected_identity.event_id', 'identity.injected_identity.event_seq',
+      'identity.injected_identity.event_type', 'identity.injected_identity.changed_field',
+      'identity.injected_identity.injected_value', 'identity.injected_identity.injected_value_sha256',
+      'identity.injected_identity_readback_equal',
+      'revalidation.invocation_count', 'revalidation.boundary_equal', 'revalidation.observed',
+      'revalidation.public_stop_reason', 'revalidation.internal_predicate_detail',
+      'terminal.result', 'terminal.auto_advance', 'terminal.rollback_evidence_preserved_after_close',
+      'terminal.closeDatabase_callback_count', 'terminal.executor_owned_close',
+      'terminal.manual_close_substituted_as_proof',
+      'snapshots_before_at_after.before', 'snapshots_before_at_after.at', 'snapshots_before_at_after.after',
+      'projection_predicate.named_projection', 'projection_predicate.accepted_event_log_max_seq',
+      'projection_predicate.current_event_log_max_seq', 'projection_predicate.newly_observed_interval_count',
+      'projection_predicate.independently_derived_expected_delta.active_turn_count',
+      'projection_predicate.independently_derived_expected_delta.open_delivery_count',
+      'projection_predicate.observed_delta.active_turn_count',
+      'projection_predicate.observed_delta.open_delivery_count',
+      'zero_subsequent_effects.next_runtime_or_route_tick_count',
+      'zero_subsequent_effects.next_effect_invocation_count',
+      'zero_subsequent_effects.provider_V1_external_send_delta_after_rejection',
+      'zero_subsequent_effects.placement_acceptance_later_enqueue_delta_after_rejection',
+    ] as const
+    const positiveFieldOrder = [
+      'kind', 'identity.receipt_id', 'identity.boundary_id', 'identity.boundary_name',
+      'ownership_tuple.run_id', 'ownership_tuple.route_id', 'ownership_tuple.turn_id',
+      'ownership_tuple.reply_id', 'ownership_tuple.delivery_id', 'ownership_tuple.causation_id',
+      'ownership_tuple.mutation_boundary',
+      'snapshots_before_at_after.before', 'snapshots_before_at_after.at', 'snapshots_before_at_after.after',
+      'accepted_event_log_interval.from_seq_exclusive', 'accepted_event_log_interval.to_seq_inclusive',
+      'accepted_event_log_interval.event_count',
+      'independently_derived_projection_delta.active_turn_count',
+      'independently_derived_projection_delta.open_delivery_count',
+      'observed_projection_delta.active_turn_count', 'observed_projection_delta.open_delivery_count',
+      'accepted_snapshot_advancement.before.event_log_max_seq',
+      'accepted_snapshot_advancement.before.active_turn_count',
+      'accepted_snapshot_advancement.before.open_delivery_count',
+      'accepted_snapshot_advancement.after.event_log_max_seq',
+      'accepted_snapshot_advancement.after.active_turn_count',
+      'accepted_snapshot_advancement.after.open_delivery_count',
+      'eventual_drain.active_turn_count', 'eventual_drain.open_delivery_count',
+      'terminal.result', 'terminal.auto_advance', 'terminal.protected_counters_unchanged',
+      'terminal.closeDatabase_callback_count',
+      'zero_later_effect.runtime_or_route_tick_count_after_close_snapshot',
+      'zero_later_effect.provider_V1_external_send_delta',
+      'zero_later_effect.placement_acceptance_later_enqueue_delta',
+    ] as const
+    const receipts = boundaryReceiptIndex.map(receipt => {
+      const snapshots = receipt.snapshots_before_at_after
+      if (receipt.kind === 'negative') {
+        const injected = receipt.identity.injected_identity
+        const projection = receipt.projection_predicate
+        return [
+          receipt.kind,
+          receipt.identity.receipt_id, receipt.identity.boundary_id, receipt.identity.boundary_name,
+          receipt.identity.drift_id, receipt.identity.drift_class,
+          injected.durable_source, injected.primary_identity, injected.event_id, injected.event_seq,
+          injected.event_type, injected.changed_field, injected.injected_value, injected.injected_value_sha256,
+          receipt.identity.injected_identity_readback_equal,
+          receipt.revalidation.invocation_count, receipt.revalidation.boundary_equal, receipt.revalidation.observed,
+          receipt.revalidation.public_stop_reason, receipt.revalidation.internal_predicate_detail,
+          receipt.terminal.result, receipt.terminal.auto_advance,
+          receipt.terminal.rollback_evidence_preserved_after_close,
+          receipt.terminal.closeDatabase_callback_count, receipt.terminal.executor_owned_close,
+          receipt.terminal.manual_close_substituted_as_proof,
+          snapshotValues(snapshots.before), snapshotValues(snapshots.at), snapshotValues(snapshots.after),
+          projection?.named_projection ?? null,
+          projection?.accepted_event_log_max_seq ?? null,
+          projection?.current_event_log_max_seq ?? null,
+          projection?.newly_observed_interval_count ?? null,
+          projection?.independently_derived_expected_delta.active_turn_count ?? null,
+          projection?.independently_derived_expected_delta.open_delivery_count ?? null,
+          projection?.observed_delta.active_turn_count ?? null,
+          projection?.observed_delta.open_delivery_count ?? null,
+          receipt.zero_subsequent_effects.next_runtime_or_route_tick_count,
+          receipt.zero_subsequent_effects.next_effect_invocation_count,
+          receipt.zero_subsequent_effects.provider_V1_external_send_delta_after_rejection,
+          receipt.zero_subsequent_effects.placement_acceptance_later_enqueue_delta_after_rejection,
+        ]
+      }
+      return [
+        receipt.kind,
+        receipt.identity.receipt_id, receipt.identity.boundary_id, receipt.identity.boundary_name,
+        receipt.ownership_tuple.run_id, receipt.ownership_tuple.route_id, receipt.ownership_tuple.turn_id,
+        receipt.ownership_tuple.reply_id, receipt.ownership_tuple.delivery_id, receipt.ownership_tuple.causation_id,
+        receipt.ownership_tuple.mutation_boundary,
+        snapshotValues(snapshots.before), snapshotValues(snapshots.at), snapshotValues(snapshots.after),
+        receipt.accepted_event_log_interval.from_seq_exclusive,
+        receipt.accepted_event_log_interval.to_seq_inclusive,
+        receipt.accepted_event_log_interval.event_count,
+        receipt.independently_derived_projection_delta.active_turn_count,
+        receipt.independently_derived_projection_delta.open_delivery_count,
+        receipt.observed_projection_delta.active_turn_count,
+        receipt.observed_projection_delta.open_delivery_count,
+        receipt.accepted_snapshot_advancement.before.event_log_max_seq,
+        receipt.accepted_snapshot_advancement.before.active_turn_count,
+        receipt.accepted_snapshot_advancement.before.open_delivery_count,
+        receipt.accepted_snapshot_advancement.after.event_log_max_seq,
+        receipt.accepted_snapshot_advancement.after.active_turn_count,
+        receipt.accepted_snapshot_advancement.after.open_delivery_count,
+        receipt.eventual_drain.active_turn_count, receipt.eventual_drain.open_delivery_count,
+        receipt.terminal.result, receipt.terminal.auto_advance,
+        receipt.terminal.protected_counters_unchanged, receipt.terminal.closeDatabase_callback_count,
+        receipt.zero_later_effect.runtime_or_route_tick_count_after_close_snapshot,
+        receipt.zero_later_effect.provider_V1_external_send_delta,
+        receipt.zero_later_effect.placement_acceptance_later_enqueue_delta,
+      ]
+    })
+    const receiptIndex = {
+      schema_version: 'aun-v2-native-stage-boundary-receipt-index/v1',
+      snapshot_field_order: SNAPSHOT_FIELD_ORDER,
+      negative_receipt_field_order: negativeFieldOrder,
+      positive_receipt_field_order: positiveFieldOrder,
+      receipt_order: ids,
+      receipts,
+    }
+    const body = canonicalJson(receiptIndex)
+    const bodySha256 = sha256Utf8(body)
+    expect(canonicalJson(JSON.parse(body))).toBe(body)
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(48_000)
+    expect(bodySha256).toBe(EXPECTED_RECEIPT_INDEX_SHA256)
+    console.log(`AUN_ACTEXEC_RECEIPT_INDEX_UTF8_BYTES=${Buffer.byteLength(body, 'utf8')}`)
+    console.log(`AUN_ACTEXEC_RECEIPT_INDEX_SHA256=${bodySha256}`)
+    console.log(`AUN_ACTEXEC_RECEIPT_INDEX_JSON=${body}`)
+  })
 
   test('silent runtime output preserves partial evidence and becomes a matrix rollback, never PASS', async () => {
     const source = fixture()
