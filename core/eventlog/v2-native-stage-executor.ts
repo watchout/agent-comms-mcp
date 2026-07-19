@@ -732,6 +732,23 @@ function validateDatabaseReadback(binding: V2NativeStageBindingV1, readback: V2N
   if (requireBaseline && !same(readback.baselines, binding.pre_run_baselines)) {
     stop('DATABASE_OR_MIGRATION_DRIFT', 'pre-run baselines differ')
   }
+  if (!requireBaseline) {
+    const delta = baselineDelta(binding.pre_run_baselines, readback.baselines)
+    if (
+      delta.V1_message_queue_row_count !== 0 ||
+      delta.V1_agent_messages_row_count !== 0 ||
+      delta.V1_outbound_queue_row_count !== 0
+    ) {
+      stop('V1_TRAVERSAL_DETECTED', 'current V1 row counts differ from the frozen pre-run baseline')
+    }
+    if (
+      delta.provider_attempt_count !== 0 ||
+      delta.provider_effect_count !== 0 ||
+      delta.external_send_attempt_count !== 0
+    ) {
+      stop('PROVIDER_OR_EXTERNAL_EFFECT_DETECTED', 'current provider or external counters differ from the frozen pre-run baseline')
+    }
+  }
 }
 
 interface V2NativeStageProvenanceEventV1 {
@@ -890,6 +907,47 @@ function completeStageProvenance(
   const eventIds = new Set(stageRows.map(row => row.event_id))
   const turns = stageTurnOwners(stageRows)
   return provenanceRows.filter(row => eventIds.has(row.event_id) || row.turn_id !== null && turns.has(row.turn_id))
+}
+
+async function validateStageOwnedProjectionReadback(
+  db: DbAdapter,
+  plan: V2NativeStageExecutionPlanV1,
+  current: V2NativeStageBaselinesV1,
+  accepted: V2NativeStageBaselinesV1,
+): Promise<void> {
+  if (current.event_log_max_seq < accepted.event_log_max_seq) {
+    stop('DATABASE_OR_MIGRATION_DRIFT', 'EventLog projection moved behind the last accepted revalidation snapshot')
+  }
+  const provenance = await readEventProvenance(db, plan.binding.pre_run_baselines.event_log_max_seq)
+  const observedMaxSeq = provenance.reduce(
+    (max, row) => Math.max(max, Number(row.seq)),
+    plan.binding.pre_run_baselines.event_log_max_seq,
+  )
+  if (observedMaxSeq !== current.event_log_max_seq) {
+    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'EventLog projection readback is not backed by exact durable event provenance')
+  }
+  const exactStageRows = provenance.filter(row => isExactStageEvent(row, plan))
+  const stageOwned = completeStageProvenance(exactStageRows, provenance)
+  const stageOwnedEventIds = new Set(stageOwned.map(row => row.event_id))
+  if (provenance.some(row => !stageOwnedEventIds.has(row.event_id))) {
+    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'foreign or unbound EventLog projection appeared during exact-stage execution')
+  }
+  if (
+    wrongQueueMutationCount(exactStageRows, provenance) !== 0 ||
+    foreignOwnerMutationCount(exactStageRows, provenance, plan) !== 0
+  ) {
+    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'stage projection contains a wrong-queue or foreign-owner mutation')
+  }
+  const eventLogAdvanced = current.event_log_max_seq > accepted.event_log_max_seq
+  if (
+    !eventLogAdvanced &&
+    (
+      current.active_turn_count !== accepted.active_turn_count ||
+      current.open_delivery_count !== accepted.open_delivery_count
+    )
+  ) {
+    stop('WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION', 'mutable stage projection changed without a newly accepted exact-stage EventLog event')
+  }
 }
 
 function eventIdentities(
@@ -1133,11 +1191,14 @@ export async function executeV2NativeStage(
     db = await ports.openBoundDatabase(plan.binding)
     const initial = await ports.readDatabaseState(db, plan.binding)
     validateDatabaseReadback(plan.binding, initial, true)
+    let acceptedProjection = clone(initial.baselines)
     const revalidate = async () => {
       validateDurableAuthorityReadback(plan, await ports.readDurableAuthority(plan), ports.now?.())
       validateOfflineReadback(plan, await ports.readOfflineState(plan))
       const current = await ports.readDatabaseState(db!, plan.binding)
       validateDatabaseReadback(plan.binding, current, false)
+      await validateStageOwnedProjectionReadback(db!, plan, current.baselines, acceptedProjection)
+      acceptedProjection = clone(current.baselines)
     }
     const route = ports.routeMessage ?? routeV2NativeMessage
     const tick = ports.runMeshTick ?? runV2NativeMeshTick

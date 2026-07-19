@@ -283,6 +283,53 @@ async function eventCount(db: DbAdapter): Promise<number> {
   return Number((await db.queryOne<{ n: number | string }>('SELECT COUNT(*) AS n FROM event_log'))?.n ?? 0)
 }
 
+type ProtectedBoundaryDrift = {
+  field: string
+  stopReason: string
+  apply: (snapshot: V2NativeStageDatabaseReadbackV1) => void
+}
+
+const PROTECTED_BOUNDARY_DRIFTS: ProtectedBoundaryDrift[] = [
+  {
+    field: 'database_identity_sha256',
+    stopReason: 'DATABASE_OR_MIGRATION_DRIFT',
+    apply: snapshot => { snapshot.database_identity_sha256 = 'f'.repeat(64) },
+  },
+  {
+    field: 'migration',
+    stopReason: 'DATABASE_OR_MIGRATION_DRIFT',
+    apply: snapshot => { snapshot.migration = { ...snapshot.migration, version: 'foreign-migration' } },
+  },
+  ...([
+    'V1_message_queue_row_count',
+    'V1_agent_messages_row_count',
+    'V1_outbound_queue_row_count',
+  ] as const).map(field => ({
+    field,
+    stopReason: 'V1_TRAVERSAL_DETECTED',
+    apply: (snapshot: V2NativeStageDatabaseReadbackV1) => { snapshot.baselines[field] += 1 },
+  })),
+  ...([
+    'provider_attempt_count',
+    'provider_effect_count',
+    'external_send_attempt_count',
+  ] as const).map(field => ({
+    field,
+    stopReason: 'PROVIDER_OR_EXTERNAL_EFFECT_DETECTED',
+    apply: (snapshot: V2NativeStageDatabaseReadbackV1) => { snapshot.baselines[field] += 1 },
+  })),
+  {
+    field: 'foreign_unbound_event_log_projection',
+    stopReason: 'WRONG_QUEUE_OR_FOREIGN_OWNER_MUTATION',
+    apply: snapshot => { snapshot.baselines.event_log_max_seq += 1 },
+  },
+]
+
+const PROTECTED_BOUNDARIES = [
+  { family: 'worker', name: 'seat:alpha:before_turn_claimed' },
+  { family: 'internal_handoff', name: 'internal-handoff:after_injected_delivery_claimed_commit_point' },
+] as const
+
 async function sqliteFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'aun-actexec-'))
   const db = new SqliteAdapter(join(dir, 'eventlog.db'))
@@ -763,6 +810,93 @@ describe('AUN V2 native stage executor', () => {
       local.cleanup()
     }
   }, 10_000)
+
+  for (const boundary of PROTECTED_BOUNDARIES) {
+    for (const drift of PROTECTED_BOUNDARY_DRIFTS) {
+      test(`protected boundary receipt ${boundary.family}:${drift.field} stops with ${drift.stopReason}`, async () => {
+        const source = fixture()
+        const local = await sqliteFixture()
+        let injected = false
+        let eventsAtDrift = -1
+        try {
+          const result = await executeV2NativeStage(source.input, {
+            seats: seats(source.binding),
+            readDurableAuthority: durableAuthority(source),
+            readOfflineState: () => offlineReadback(source.binding),
+            openBoundDatabase: async () => local.db,
+            readDatabaseState: async (db, binding) => {
+              const snapshot = await readback(db, binding)
+              if (injected) drift.apply(snapshot)
+              return snapshot
+            },
+            onMeshMutationBoundary: async currentBoundary => {
+              if (!injected && currentBoundary === boundary.name) {
+                eventsAtDrift = await eventCount(local.db)
+                injected = true
+              }
+            },
+            closeDatabase: async () => {},
+          })
+          const eventsAfter = await eventCount(local.db)
+          const deliveryClaims = Number((await local.db.queryOne<{ n: number | string }>(
+            "SELECT COUNT(*) AS n FROM event_log WHERE event_type = 'reply.delivery_claimed'",
+          ))?.n ?? 0)
+          const placements = Number((await local.db.queryOne<{ n: number | string }>(
+            "SELECT COUNT(*) AS n FROM event_log WHERE event_type = 'message.received' AND payload LIKE '%\"route_kind\":\"reply\"%'",
+          ))?.n ?? 0)
+          const accepted = Number((await local.db.queryOne<{ n: number | string }>(
+            "SELECT COUNT(*) AS n FROM event_log WHERE event_type = 'reply.handoff_accepted'",
+          ))?.n ?? 0)
+          expect(injected).toBe(true)
+          expect(result.ok).toBe(false)
+          expect(result.evidence.terminal_result.kind).toBe('ROLLBACK_REQUEST')
+          expect(result.evidence.terminal_result.auto_advance).toBe(false)
+          expect(result.evidence.terminal_result.stop_reason).toBe(drift.stopReason)
+          expect(eventsAfter).toBe(eventsAtDrift)
+          if (boundary.family === 'worker') {
+            expect(deliveryClaims).toBe(0)
+          } else {
+            expect(deliveryClaims).toBe(1)
+            expect(placements).toBe(0)
+            expect(accepted).toBe(0)
+          }
+          await local.db.close()
+        } finally {
+          local.cleanup()
+        }
+      }, 10_000)
+    }
+
+    test(`positive protected boundary receipt ${boundary.family} accepts exact stage-owned progress`, async () => {
+      const source = fixture()
+      const local = await sqliteFixture()
+      let observed = false
+      let eventsAtBoundary = -1
+      try {
+        const result = await executeV2NativeStage(source.input, {
+          seats: seats(source.binding),
+          readDurableAuthority: durableAuthority(source),
+          readOfflineState: () => offlineReadback(source.binding),
+          openBoundDatabase: async () => local.db,
+          readDatabaseState: readback,
+          onMeshMutationBoundary: async currentBoundary => {
+            if (!observed && currentBoundary === boundary.name) {
+              observed = true
+              eventsAtBoundary = await eventCount(local.db)
+            }
+          },
+          closeDatabase: async () => {},
+        })
+        expect(observed).toBe(true)
+        expect(result.ok).toBe(true)
+        expect(result.result).toBe('MEASURED_PENDING_INDEPENDENT_GATES')
+        expect(eventsAtBoundary).toBeGreaterThanOrEqual(0)
+        await local.db.close()
+      } finally {
+        local.cleanup()
+      }
+    }, 15_000)
+  }
 
   test('silent runtime output preserves partial evidence and becomes a matrix rollback, never PASS', async () => {
     const source = fixture()
