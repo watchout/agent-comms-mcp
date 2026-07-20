@@ -285,29 +285,14 @@ type ExplicitReplyQueueRow = {
   payload: string | null
   status: string
   claimed_by: string | null
+  claimed_at: string | Date | null
   claim_expires_at: string | Date | null
+  claimed_runtime_instance_id: string | null
   replied_with: string | null
-}
-
-type ClaimRenewalEvidence = {
-  renewed: true
-  mode: 'exact_queue_id_same_owner'
-  reason: 'expired_same_owner_before_reply_close'
-  queue_id: number | string
-  message_id: string | null
-  agent_id: string
-  claimed_by: string
-  prior_claim_expires_at: string | null
-  new_claim_expires_at: string
-  ttl_seconds: number
-  audit_event_type: 'queue.claim_renewed'
-  authorization: 'exact_queue_id_and_same_claim_owner'
-  free_form_text_authorizes_renewal: false
 }
 
 const ACTIVE_REPLY_CLAIM_STATUSES = new Set(['received', 'in_progress'])
 const TERMINAL_REPLY_CLOSE_STATUSES = new Set(['replied', 'done', 'skipped', 'failed'])
-const MAX_CLAIM_RENEWAL_TTL_SEC = 15 * 60
 
 function parseQueuePayloadLoose(payload: string | null): Record<string, any> {
   if (!payload) return {}
@@ -327,68 +312,18 @@ function normalizeDateString(value: string | Date | null): string | null {
 
 function dateMs(value: string | Date | null): number | null {
   if (!value) return null
-  const ms = new Date(value).getTime()
+  const normalized = value instanceof Date
+    ? value.toISOString()
+    : /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+      ? `${value.replace(' ', 'T')}Z`
+      : value
+  const ms = Date.parse(normalized)
   return Number.isFinite(ms) ? ms : null
-}
-
-function claimRenewalTtlSeconds(): number {
-  const raw = Number.parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '60', 10)
-  const ttl = Number.isFinite(raw) && raw > 0 ? raw : 60
-  return Math.min(ttl, MAX_CLAIM_RENEWAL_TTL_SEC)
 }
 
 function replyToForQueueRow(row: ExplicitReplyQueueRow): string | null {
   const payload = parseQueuePayloadLoose(row.payload)
   return row.message_id ?? (typeof payload.message_id === 'string' ? payload.message_id : null)
-}
-
-async function renewSameOwnerClaimForReplyClose(
-  db: Client,
-  row: ExplicitReplyQueueRow,
-  agentId: string,
-): Promise<ClaimRenewalEvidence> {
-  if (!ACTIVE_REPLY_CLAIM_STATUSES.has(row.status)) {
-    throw new Error(`INVALID_STATE: queue_id=${row.id} status=${row.status}; expected received|in_progress`)
-  }
-  if (row.agent_id !== agentId || row.claimed_by !== agentId) {
-    throw new Error(`NOT_CLAIM_OWNER: queue_id=${row.id} is not claimed by ${agentId}`)
-  }
-  const ttlSeconds = claimRenewalTtlSeconds()
-  const newClaimExpiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString()
-  const evidence: ClaimRenewalEvidence = {
-    renewed: true,
-    mode: 'exact_queue_id_same_owner',
-    reason: 'expired_same_owner_before_reply_close',
-    queue_id: row.id,
-    message_id: replyToForQueueRow(row),
-    agent_id: agentId,
-    claimed_by: agentId,
-    prior_claim_expires_at: normalizeDateString(row.claim_expires_at),
-    new_claim_expires_at: newClaimExpiresAt,
-    ttl_seconds: ttlSeconds,
-    audit_event_type: 'queue.claim_renewed',
-    authorization: 'exact_queue_id_and_same_claim_owner',
-    free_form_text_authorizes_renewal: false,
-  }
-  await auditLog(db, 'queue.claim_renewed', agentId, String(row.id), {
-    ...evidence,
-    surface: 'cli.send.explicit_close',
-  })
-  const updated = await db.query(
-    `UPDATE message_queue
-        SET claim_expires_at = $1,
-            claimed_at = COALESCE(claimed_at, now())
-      WHERE id = $2
-        AND agent_id = $3
-        AND claimed_by = $3
-        AND status IN ('received', 'in_progress')
-      RETURNING id`,
-    [newClaimExpiresAt, row.id, agentId],
-  )
-  if (updated.rows.length !== 1) {
-    throw new Error(`RACE: queue_id=${row.id} changed before claim renewal`)
-  }
-  return evidence
 }
 
 async function loadReplyCloseReplay(
@@ -2633,7 +2568,7 @@ async function nextMessage() {
     // concurrent `agent-com next` calls now both succeed in parallel,
     // each grabbing a distinct message_queue row via FOR UPDATE SKIP
     // LOCKED — the §A multi in-flight contract.
-    let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date } | null = null
+    let row: { id: string | number; message_id: string | null; payload: string; priority: number; created_at: Date; claim_expires_at?: string } | null = null
     await db.query('BEGIN')
     try {
       // Step 1: pop the oldest pending row with an exclusive lock so a
@@ -2658,6 +2593,7 @@ async function nextMessage() {
         // sweeper flips it to IMPLICIT_ABANDON.
         const popped = pop.rows[0]
         const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
+        const runtimeInstanceId = process.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim() || null
         // claim_expires_at is computed in JS rather than via
         // `now() + ($N || ' seconds')::interval` so this UPDATE works
         // identically in PG and SQLite modes (the latter is exercised
@@ -2670,10 +2606,12 @@ async function nextMessage() {
                   read_at = now(),
                   claimed_by = $1,
                   claimed_at = now(),
-                  claim_expires_at = $2
-            WHERE id = $3`,
-          [agentId, claimExpiresAt, popped.id],
+                  claim_expires_at = $2,
+                  claimed_runtime_instance_id = $3
+            WHERE id = $4`,
+          [agentId, claimExpiresAt, runtimeInstanceId, popped.id],
         )
+        popped.claim_expires_at = claimExpiresAt
         // spec §4.1 step 4 — mark agent busy. Issue #278 cycle 1
         // (auditor BLOCK 1): EXISTS-derive over the open-claim set so
         // multi in-flight stays visible on agents.status.
@@ -2754,6 +2692,10 @@ async function nextMessage() {
       message_type: payload.message_type ?? 'chat',
       source: payload.source ?? null,
       created_at: row.created_at,
+      claim_lease: {
+        runtime_instance_id: process.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim() || null,
+        claim_expires_at: row.claim_expires_at ?? null,
+      },
       reply_chain: replyChain,
     }) + '\n')
   } finally {
@@ -2812,6 +2754,7 @@ async function sendMessage(args: string[]) {
   const messageIdRaw = flags['message-id']
   const noClose = flagEnabled(flags['no-close'])
   const closeRequested = flagEnabled(flags.close)
+  const runtimeInstanceId = process.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim() || null
 
   if (!content) {
     console.error('Error: --content is required')
@@ -2907,8 +2850,6 @@ async function sendMessage(args: string[]) {
       }
       let target: Target | null = null
       const explicitClose = !!queueIdRaw || !!messageIdRaw
-      let claimRenewalEvidence: ClaimRenewalEvidence | null = null
-
       if (explicitClose) {
         let qres
         if (queueIdRaw) {
@@ -2917,7 +2858,8 @@ async function sendMessage(args: string[]) {
             writeFailureJson('QUEUE_NOT_FOUND', `invalid queue_id: ${queueIdRaw}`, { queue_id: queueIdRaw })
           }
           qres = await db.query(
-            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+            `SELECT id, agent_id, message_id, payload, status, claimed_by, claimed_at,
+                    claim_expires_at, claimed_runtime_instance_id, replied_with
                FROM message_queue
               WHERE id = $1
               FOR UPDATE`,
@@ -2925,7 +2867,8 @@ async function sendMessage(args: string[]) {
           )
         } else {
           qres = await db.query(
-            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+            `SELECT id, agent_id, message_id, payload, status, claimed_by, claimed_at,
+                    claim_expires_at, claimed_runtime_instance_id, replied_with
                FROM message_queue
               WHERE agent_id = $1 AND message_id = $2
               ORDER BY created_at DESC
@@ -2980,20 +2923,32 @@ async function sendMessage(args: string[]) {
         }
         if (
           ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) &&
+          qrow.claimed_runtime_instance_id &&
+          qrow.claimed_runtime_instance_id !== runtimeInstanceId
+        ) {
+          writeFailureJson('CLAIM_FENCED', 'stale runtime cannot close a claim after takeover', {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            claimed_runtime_instance_id: qrow.claimed_runtime_instance_id,
+            caller_runtime_instance_id: runtimeInstanceId,
+            outbound_queued: false,
+          })
+        }
+        if (
+          ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) &&
           qrow.claimed_by === agentId &&
           (dateMs(qrow.claim_expires_at) === null || dateMs(qrow.claim_expires_at)! <= Date.now())
         ) {
-          if (!queueIdRaw) {
-            writeFailureJson('QUEUE_ID_REQUIRED_FOR_RENEWAL', 'expired same-owner claim renewal requires explicit --queue-id', {
-              queue_id: null,
-              message_id: qrow.message_id,
-              status: qrow.status,
-              claimed_by: qrow.claimed_by,
-              claim_expires_at: normalizeDateString(qrow.claim_expires_at),
-            }, 2)
-          }
-          claimRenewalEvidence = await renewSameOwnerClaimForReplyClose(db, qrow, agentId)
-          qrow.claim_expires_at = claimRenewalEvidence.new_claim_expires_at
+          writeFailureJson('CLAIM_EXPIRED', 'expired work must use exact fenced recovery before a new claim is established', {
+            queue_id: qrow.id,
+            message_id: qrow.message_id,
+            status: qrow.status,
+            claimed_by: qrow.claimed_by,
+            claimed_runtime_instance_id: qrow.claimed_runtime_instance_id,
+            expected_claim_expires_at: normalizeDateString(qrow.claim_expires_at),
+            recovery: 'agent-com queue reclaim-expired --queue-id <id> --expected-claim-expires-at <iso> --execute',
+            outbound_queued: false,
+          })
         }
         if (!ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
           writeFailureJson('INVALID_STATE', `queue row status=${qrow.status}; expected received|in_progress for explicit close`, {
@@ -3044,10 +2999,15 @@ async function sendMessage(args: string[]) {
         const claimRow = await db.query(
           `SELECT id, message_id, payload FROM message_queue
               WHERE claimed_by = $1 AND status = 'received'
+                AND claim_expires_at IS NOT NULL AND claim_expires_at > now()
+                AND (($2::text IS NULL AND claimed_runtime_instance_id IS NULL)
+                  OR ($2::text IS NOT NULL AND (
+                    claimed_runtime_instance_id IS NULL OR claimed_runtime_instance_id = $2
+                  )))
               ORDER BY claimed_at DESC NULLS LAST
               LIMIT 1
               FOR UPDATE`,
-          [agentId],
+          [agentId, runtimeInstanceId],
         )
         if (claimRow.rows.length > 0) {
           const qrow = claimRow.rows[0]
@@ -3451,7 +3411,8 @@ async function sendMessage(args: string[]) {
                   replied_with = $1,
                   claimed_by = NULL,
                   claimed_at = NULL,
-                  claim_expires_at = NULL
+                  claim_expires_at = NULL,
+                  claimed_runtime_instance_id = NULL
            WHERE id = $2`,
           [id, target.queue_id],
         )
@@ -3466,6 +3427,16 @@ async function sendMessage(args: string[]) {
              status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
              status_updated_at = now()
            WHERE agent_id = $1`,
+          [agentId],
+        )
+        await db.query(
+          `UPDATE agents
+              SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now()
+            WHERE agent_id = $1
+              AND EXISTS(
+                SELECT 1 FROM message_queue
+                 WHERE claimed_by = $1 AND status = 'in_progress'
+              )`,
           [agentId],
         )
       }
@@ -3499,7 +3470,6 @@ async function sendMessage(args: string[]) {
         work_closed: workClosed,
         close_mode: workClosed ? (explicitClose || closeRequested ? 'explicit' : 'active_claim') : 'none',
         queue_id: target.queue_id,
-        ...(claimRenewalEvidence ? { claim_renewal: claimRenewalEvidence } : {}),
         ...(conversationControlPlaneSummary ? { conversation_control_plane: conversationControlPlaneSummary } : {}),
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
       }) + '\n')
@@ -4753,6 +4723,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       const report = await reclaimExpiredQueueClaims(db as any, {
         agentId: flags['agent-id'] ?? null,
         queueId: flags['queue-id'] ?? null,
+        expectedClaimExpiresAt: flags['expected-claim-expires-at'] ?? null,
         dryRun,
       })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
@@ -6042,7 +6013,8 @@ Message I/O (requires AGENT_ID env var):
   queue close-outbound-obsolete [--agent-id <agent>] [--consumer-agent-id <agent>] --reason <text> [--max-age 12h] [--execute|--dry-run]
                                                        — dry-run by default; close stale outbound projection rows
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
-                                                       — dry-run by default; roll expired received/in_progress claims back to pending
+                         [--queue-id <id> --expected-claim-expires-at <iso>]
+                                                       — dry-run by default; bulk recovery is received-only; exact fenced recovery may target expired in_progress
   queue daemon-status [--format json|text]             — read-only DB-observed queue daemon liveness and queue status
   queue smoke --agent-id <agent> [--execute|--dry-run] — queue smoke readiness; execute command is reported, not run by default
   directory [--format json|text]                       — bot/channel directory and sendability report

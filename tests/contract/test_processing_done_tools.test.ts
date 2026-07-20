@@ -36,6 +36,8 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     expect(procBlock).toContain("required: ['queue_id']")
     expect(procBlock.toLowerCase()).toContain('received')
     expect(procBlock.toLowerCase()).toContain('in_progress')
+    expect(procBlock.toLowerCase()).toContain('renew')
+    expect(procBlock.toLowerCase()).toContain('heartbeat')
   })
 
   test('server.ts registers `done` tool with queue_id required + in_progress→done + done_at', () => {
@@ -60,6 +62,21 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     expect(SERVER_SRC).toContain('terminal_baton.no_reply_required')
     // done writes done_at, processing does not.
     expect(SERVER_SRC).toContain("status = 'done', done_at = now()")
+    expect(SERVER_SRC).toContain('CLAIM_EXPIRED')
+    expect(SERVER_SRC).toContain('CLAIM_FENCED')
+    expect(SERVER_SRC).toContain('claimed_runtime_instance_id')
+    expect(SERVER_SRC).toMatch(/status IN \('received', 'in_progress'\)[\s\S]*claim_expires_at > now\(\)/)
+  })
+
+  test('server.ts exposes exact fenced recovery and expired in-progress diagnostics', () => {
+    const reclaimBlock = SERVER_SRC.split("name: 'reclaim'")[1]?.split("name: 'processing'")[0] ?? ''
+    expect(reclaimBlock).toContain('queue_id')
+    expect(reclaimBlock).toContain('expected_claim_expires_at')
+    expect(SERVER_SRC).toContain('CLAIM_FENCE_REQUIRED')
+    expect(SERVER_SRC).toContain('CLAIM_FENCE_MISMATCH')
+    expect(SERVER_SRC).toContain("status = 'in_progress'")
+    expect(SERVER_SRC).toContain('expired_in_progress=')
+    expect(SERVER_SRC).toContain('expired_in_progress_oldest=')
   })
 
   test('server.ts lifecycle lookup casts agent_messages.id for Postgres uuid/text compatibility', () => {

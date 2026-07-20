@@ -40,6 +40,9 @@ export interface LifecycleTransitionSummary {
   already_transitioned?: boolean
   no_reply_required?: boolean
   terminal_baton?: TerminalBaton
+  lease_renewed?: boolean
+  claimed_runtime_instance_id?: string | null
+  claim_expires_at?: string | null
   final_close_contract: string
 }
 
@@ -56,6 +59,7 @@ export interface RenewClaimSummary {
   message_id: string | null
   status: 'received' | 'in_progress'
   claimed_by: string
+  claimed_runtime_instance_id: string | null
   prior_claim_expires_at: string | null
   new_claim_expires_at: string
   ttl_seconds: number
@@ -152,6 +156,16 @@ function normalizeDate(value: unknown): string | null {
   return String(value)
 }
 
+function dateMillis(value: unknown): number {
+  if (value instanceof Date) return value.getTime()
+  const normalized = normalizeDate(value)?.trim()
+  if (!normalized) return Number.NaN
+  const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(normalized)
+    ? `${normalized.replace(' ', 'T')}Z`
+    : normalized
+  return Date.parse(sqliteUtc)
+}
+
 export async function renewClaim(opts: LifecycleOptions = {}): Promise<RenewClaimResult> {
   let plan: CommandPlan
   let queueId: string
@@ -183,9 +197,11 @@ export async function renewClaim(opts: LifecycleOptions = {}): Promise<RenewClai
           status: string
           claimed_by: string | null
           claim_expires_at: string | Date | null
+          claimed_runtime_instance_id: string | null
           replied_with: string | null
         }>(
-          `SELECT id, agent_id, message_id, status, claimed_by, claim_expires_at, replied_with
+          `SELECT id, agent_id, message_id, status, claimed_by, claim_expires_at,
+                  claimed_runtime_instance_id, replied_with
              FROM message_queue
             WHERE id = $1
             FOR UPDATE`,
@@ -202,6 +218,14 @@ export async function renewClaim(opts: LifecycleOptions = {}): Promise<RenewClai
         }
         if (row.claimed_by !== plan.env.AGENT_ID) {
           throw new Error(`NOT_CLAIM_OWNER: queue_id=${queueId} claimed_by=${row.claimed_by ?? 'null'}; expected ${plan.env.AGENT_ID}`)
+        }
+        const runtimeInstanceId = plan.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim() || null
+        if (row.claimed_runtime_instance_id && row.claimed_runtime_instance_id !== runtimeInstanceId) {
+          throw new Error(`CLAIM_FENCED: queue_id=${queueId} belongs to runtime_instance_id=${row.claimed_runtime_instance_id}`)
+        }
+        const expiresAtMs = dateMillis(row.claim_expires_at)
+        if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+          throw new Error(`CLAIM_EXPIRED: queue_id=${queueId} requires exact fenced recovery before renewal`)
         }
 
         const ttlSeconds = boundedRenewTtlSeconds(opts, plan.env)
@@ -220,6 +244,7 @@ export async function renewClaim(opts: LifecycleOptions = {}): Promise<RenewClai
               message_id: row.message_id,
               status: row.status,
               claimed_by: row.claimed_by,
+              claimed_runtime_instance_id: runtimeInstanceId,
               prior_claim_expires_at: normalizeDate(row.claim_expires_at),
               new_claim_expires_at: newClaimExpiresAt,
               ttl_seconds: ttlSeconds,
@@ -233,12 +258,15 @@ export async function renewClaim(opts: LifecycleOptions = {}): Promise<RenewClai
         const updated = await tx.execute(
           `UPDATE message_queue
               SET claim_expires_at = $1,
-                  claimed_at = COALESCE(claimed_at, now())
+                  claimed_at = COALESCE(claimed_at, now()),
+                  claimed_runtime_instance_id = $4
             WHERE id = $2
               AND agent_id = $3
               AND claimed_by = $3
-              AND status IN ('received', 'in_progress')`,
-          [newClaimExpiresAt, queueId, plan.env.AGENT_ID],
+              AND status IN ('received', 'in_progress')
+              AND claim_expires_at > now()
+              AND (claimed_runtime_instance_id IS NULL OR claimed_runtime_instance_id = $4)`,
+          [newClaimExpiresAt, queueId, plan.env.AGENT_ID, runtimeInstanceId],
         )
         if (updated.rowCount !== 1) {
           throw new Error(`RACE: queue_id=${queueId} changed before renew-claim`)
@@ -252,6 +280,7 @@ export async function renewClaim(opts: LifecycleOptions = {}): Promise<RenewClai
           message_id: row.message_id,
           status: row.status as 'received' | 'in_progress',
           claimed_by: row.claimed_by,
+          claimed_runtime_instance_id: runtimeInstanceId,
           prior_claim_expires_at: normalizeDate(row.claim_expires_at),
           new_claim_expires_at: newClaimExpiresAt,
           ttl_seconds: ttlSeconds,
@@ -310,8 +339,14 @@ export async function lifecycleTransition(
           payload: string | null
           stored_content: string | null
           stored_message_type: string | null
+          claimed_by: string | null
+          claimed_at: string | Date | null
+          claim_expires_at: string | Date | null
+          claimed_runtime_instance_id: string | null
         }>(
           `SELECT mq.id, mq.agent_id, mq.message_id, mq.status, mq.payload,
+                  mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  mq.claimed_runtime_instance_id,
                   am.content AS stored_content, am.message_type AS stored_message_type
              FROM message_queue mq
              LEFT JOIN agent_messages am ON am.id::text = mq.message_id
@@ -338,7 +373,7 @@ export async function lifecycleTransition(
         const stampedPayload = terminalBaton && !existingBaton
           ? JSON.stringify(withTerminalBaton(payload, terminalBaton))
           : null
-        if (row.status === toStatus) {
+        if (row.status === toStatus && mode !== 'processing') {
           return {
             ok: true,
             mode,
@@ -354,11 +389,26 @@ export async function lifecycleTransition(
           }
         }
 
+        const activeStatus = row.status === 'received' || row.status === 'in_progress'
+        const runtimeInstanceId = plan.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim() || null
+        if (activeStatus) {
+          if (row.claimed_by !== plan.env.AGENT_ID) {
+            throw new Error(`NOT_CLAIM_OWNER: queue_id=${queueId} claimed_by=${row.claimed_by ?? 'null'}; expected ${plan.env.AGENT_ID}`)
+          }
+          if (row.claimed_runtime_instance_id && row.claimed_runtime_instance_id !== runtimeInstanceId) {
+            throw new Error(`CLAIM_FENCED: queue_id=${queueId} belongs to runtime_instance_id=${row.claimed_runtime_instance_id}`)
+          }
+          const expiresAtMs = dateMillis(row.claim_expires_at)
+          if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+            throw new Error(`CLAIM_EXPIRED: queue_id=${queueId} requires exact fenced recovery before ${mode}`)
+          }
+        }
+
         let expectedStatus = 'received'
         let updateStatus = 'received'
         if (mode === 'processing') {
-          if (row.status !== 'received') {
-            throw new Error(`INVALID_STATE: queue_id=${queueId} status=${row.status}; expected received`)
+          if (row.status !== 'received' && row.status !== 'in_progress') {
+            throw new Error(`INVALID_STATE: queue_id=${queueId} status=${row.status}; expected received|in_progress`)
           }
         } else {
           const canDirectCloseReceived = row.status === 'received' && noReplyRequired
@@ -373,22 +423,33 @@ export async function lifecycleTransition(
           updateStatus = row.status
         }
 
+        const renewedClaimExpiresAt = mode === 'processing'
+          ? new Date(Date.now() + boundedRenewTtlSeconds(opts, plan.env) * 1000).toISOString()
+          : null
         const updated = mode === 'processing'
           ? await tx.execute(
               `UPDATE message_queue
-                  SET status = 'in_progress'
-                WHERE id = $1 AND agent_id = $2 AND status = $3`,
-              [queueId, plan.env.AGENT_ID, 'received'],
+                  SET status = 'in_progress',
+                      claimed_at = COALESCE(claimed_at, now()),
+                      claim_expires_at = $3,
+                      claimed_runtime_instance_id = $4
+                WHERE id = $1
+                  AND agent_id = $2
+                  AND claimed_by = $2
+                  AND status IN ('received', 'in_progress')
+                  AND claim_expires_at > now()
+                  AND (claimed_runtime_instance_id IS NULL OR claimed_runtime_instance_id = $4)`,
+              [queueId, plan.env.AGENT_ID, renewedClaimExpiresAt, runtimeInstanceId],
             )
           : stampedPayload
             ? await tx.execute(
-                `UPDATE message_queue
+              `UPDATE message_queue
                     SET status = 'done', done_at = now(), payload = $4
                   WHERE id = $1 AND agent_id = $2 AND status = $3`,
                 [queueId, plan.env.AGENT_ID, updateStatus, stampedPayload],
               )
             : await tx.execute(
-                `UPDATE message_queue
+              `UPDATE message_queue
                     SET status = 'done', done_at = now()
                   WHERE id = $1 AND agent_id = $2 AND status = $3`,
                 [queueId, plan.env.AGENT_ID, updateStatus],
@@ -418,6 +479,10 @@ export async function lifecycleTransition(
           queue_id: String(row.id),
           message_id: row.message_id,
           status: toStatus,
+          already_transitioned: mode === 'processing' && row.status === 'in_progress' ? true : undefined,
+          lease_renewed: mode === 'processing' ? true : undefined,
+          claimed_runtime_instance_id: mode === 'processing' ? runtimeInstanceId : undefined,
+          claim_expires_at: renewedClaimExpiresAt,
           no_reply_required: noReplyRequired || undefined,
           terminal_baton: terminalBaton,
           final_close_contract: finalCloseContract(noReplyRequired),

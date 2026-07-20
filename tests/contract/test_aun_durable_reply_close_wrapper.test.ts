@@ -9,7 +9,10 @@ import { Database } from 'bun:sqlite'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
+const AGENT_COM = join(REPO_ROOT, 'cli', 'index.ts')
 const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
+const RUNTIME_ONE = '11111111-1111-4111-8111-111111111111'
+const RUNTIME_TWO = '22222222-2222-4222-8222-222222222222'
 
 let tmpDir: string
 let dbPath: string
@@ -17,6 +20,16 @@ let env: Record<string, string>
 
 function runAun(args: string[]): { status: number; stdout: string; stderr: string } {
   const r = spawnSync('bun', ['run', AUN, ...args], {
+    cwd: '/tmp',
+    env,
+    encoding: 'utf-8',
+    timeout: 15_000,
+  })
+  return { status: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
+}
+
+function runAgentCom(args: string[]): { status: number; stdout: string; stderr: string } {
+  const r = spawnSync('bun', ['run', AGENT_COM, ...args], {
     cwd: '/tmp',
     env,
     encoding: 'utf-8',
@@ -73,6 +86,10 @@ function explicitReply(queueId: number, extra: string[] = []): { status: number;
   ])
 }
 
+function useRuntime(runtimeInstanceId = RUNTIME_ONE): void {
+  env.AGENT_COM_RUNTIME_INSTANCE_ID = runtimeInstanceId
+}
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-durable-close-'))
   dbPath = join(tmpDir, 'test.db')
@@ -92,6 +109,10 @@ beforeEach(() => {
       VALUES ('probe-dev', 'probe-dev', 'dev', 'idle'),
              ('other-dev', 'other-dev', 'dev', 'idle'),
              ('codex-cto', 'codex-cto', 'cto', 'idle');
+    INSERT INTO agent_runtime_instances
+      (runtime_instance_id, agent_id, runtime_engine, status, last_seen_at, metadata)
+      VALUES ('${RUNTIME_ONE}', 'probe-dev', 'codex', 'active', datetime('now'), '{}'),
+             ('${RUNTIME_TWO}', 'probe-dev', 'codex', 'active', datetime('now'), '{}');
     INSERT INTO channels (id, name, members)
       VALUES ('probe-ch', 'probe-ch', '["probe-dev","other-dev","codex-cto"]'),
              ('no-probe-ch', 'no-probe-ch', '["codex-cto"]');
@@ -131,8 +152,9 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
     expect(next.status).toBe(0)
     expect(JSON.parse(next.stdout)).toMatchObject({ queue_id: queueId, message_id: messageId })
 
+    useRuntime()
     const processing = runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)])
-    expect(processing.status).toBe(0)
+    expect(processing.status, processing.stderr).toBe(0)
     expect(JSON.parse(processing.stdout)).toMatchObject({
       ok: true,
       mode: 'processing',
@@ -223,41 +245,36 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
     expect(dbRead(`SELECT count(*) AS n FROM outbound_queue`)[0].n).toBe(beforeOutbound)
   })
 
-  test('expired caller-owned claim closes by explicit queue id', () => {
+  test('expired caller-owned claim fails closed before reply projection', () => {
     const { queueId } = seedPending({ content: 'expired self claim' })
     expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
+    useRuntime()
+    expect(runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
     dbExec(`UPDATE message_queue
       SET claim_expires_at='2000-01-01T00:00:00.000Z'
       WHERE id=${queueId}`)
 
+    const beforeMessages = dbRead(`SELECT count(*) AS n FROM agent_messages WHERE author_id='probe-dev'`)[0].n
     const reply = explicitReply(queueId)
 
-    expect(reply.status).toBe(0)
+    expect(reply.status).toBe(1)
     const body = JSON.parse(reply.stdout)
-    expect(body.close_mode).toBe('explicit')
-    expect(body.claim_renewal).toMatchObject({
-      renewed: true,
-      mode: 'exact_queue_id_same_owner',
-      reason: 'expired_same_owner_before_reply_close',
+    expect(body).toMatchObject({
+      ok: false,
+      code: 'CLAIM_EXPIRED',
       queue_id: queueId,
-      agent_id: 'probe-dev',
       claimed_by: 'probe-dev',
-      prior_claim_expires_at: '2000-01-01T00:00:00.000Z',
-      audit_event_type: 'queue.claim_renewed',
-      authorization: 'exact_queue_id_and_same_claim_owner',
-      free_form_text_authorizes_renewal: false,
+      claimed_runtime_instance_id: RUNTIME_ONE,
+      expected_claim_expires_at: '2000-01-01T00:00:00.000Z',
+      outbound_queued: false,
     })
+    expect(reply.stderr).toContain('EXACT_FENCED_RECOVERY_REQUIRED')
     expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
-      .toEqual({ status: 'replied', replied_with: body.message_id })
-    const audit = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type='queue.claim_renewed'`)[0]
-    expect(audit).toMatchObject({ event_type: 'queue.claim_renewed', agent_id: 'probe-dev', target: String(queueId) })
-    expect(JSON.parse(audit.detail)).toMatchObject({
-      authorization: 'exact_queue_id_and_same_claim_owner',
-      free_form_text_authorizes_renewal: false,
-    })
+      .toEqual({ status: 'in_progress', replied_with: null })
+    expect(dbRead(`SELECT count(*) AS n FROM agent_messages WHERE author_id='probe-dev'`)[0].n).toBe(beforeMessages)
   })
 
-  test('expired caller-owned claim cannot renew through message-id-only close', () => {
+  test('expired caller-owned claim cannot bypass recovery through message-id-only close', () => {
     const { queueId, messageId } = seedPending({ content: 'expired self claim message-id only' })
     expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
     dbExec(`UPDATE message_queue
@@ -273,18 +290,18 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
       '--close',
     ])
 
-    expect(reply.status).toBe(2)
+    expect(reply.status).toBe(1)
     const body = JSON.parse(reply.stdout)
     expect(body).toMatchObject({
       ok: false,
-      code: 'QUEUE_ID_REQUIRED_FOR_RENEWAL',
+      code: 'CLAIM_EXPIRED',
+      queue_id: queueId,
       message_id: messageId,
       status: 'received',
       claimed_by: 'probe-dev',
     })
     expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
       .toEqual({ status: 'received', replied_with: null })
-    expect(dbRead(`SELECT count(*) AS n FROM audit_log WHERE event_type='queue.claim_renewed'`)[0].n).toBe(0)
     expect(dbRead(`SELECT count(*) AS n FROM agent_messages WHERE author_id='probe-dev' AND reply_to=?`, [messageId])[0].n).toBe(0)
   })
 
@@ -472,6 +489,77 @@ describe('test_aun_durable_reply_close_wrapper - explicit queue close', () => {
     })
   })
 
+  test('exact expired recovery fences stale runtime and permits one canonical terminal reply', () => {
+    const { queueId, messageId } = seedPending({ content: 'recover and fence' })
+    expect(runAun(['receive', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
+    useRuntime()
+    expect(runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
+    const expiredAt = '2000-01-01T00:00:00.000Z'
+    dbExec(`UPDATE message_queue SET claim_expires_at='${expiredAt}' WHERE id=${queueId}`)
+
+    const staleFence = runAgentCom([
+      'queue', 'reclaim-expired',
+      '--agent-id', 'probe-dev',
+      '--queue-id', String(queueId),
+      '--expected-claim-expires-at', '2000-01-01T00:00:00.001Z',
+      '--execute',
+    ])
+    expect(staleFence.status).toBe(1)
+    expect(staleFence.stderr).toContain('CLAIM_FENCE_MISMATCH')
+    expect(dbRead(`SELECT status, claimed_runtime_instance_id FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'in_progress', claimed_runtime_instance_id: RUNTIME_ONE })
+
+    const recovered = runAgentCom([
+      'queue', 'reclaim-expired',
+      '--agent-id', 'probe-dev',
+      '--queue-id', String(queueId),
+      '--expected-claim-expires-at', expiredAt,
+      '--execute',
+    ])
+    expect(recovered.status, `${recovered.stderr}\n${recovered.stdout}`).toBe(0)
+    expect(JSON.parse(recovered.stdout)).toMatchObject({
+      action: 'reclaim_expired',
+      affected_count: 1,
+      dry_run: false,
+    })
+    expect(dbRead(`SELECT status, claimed_by, claimed_runtime_instance_id FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null, claimed_runtime_instance_id: null })
+
+    env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_TWO
+    expect(runAun(['receive', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
+    expect(runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
+
+    env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_ONE
+    const stale = explicitReply(queueId, ['--message-id', messageId, '--close'])
+    expect(stale.status).toBe(1)
+    expect(JSON.parse(stale.stdout)).toMatchObject({
+      ok: false,
+      code: 'CLAIM_FENCED',
+      queue_id: queueId,
+      claimed_runtime_instance_id: RUNTIME_TWO,
+      caller_runtime_instance_id: RUNTIME_ONE,
+      outbound_queued: false,
+    })
+    expect(stale.stderr).toContain('STALE_CLAIMANT_REJECTED')
+    expect(dbRead(`SELECT count(*) AS n FROM agent_messages WHERE author_id='probe-dev' AND reply_to=?`, [messageId])[0].n).toBe(0)
+
+    env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_TWO
+    const first = explicitReply(queueId, ['--message-id', messageId, '--close'])
+    expect(first.status).toBe(0)
+    const firstBody = JSON.parse(first.stdout)
+    expect(firstBody.work_closed).toBe(true)
+    const outboundAfterFirst = dbRead(`SELECT count(*) AS n FROM outbound_queue WHERE message_id=?`, [firstBody.message_id])[0].n
+
+    const duplicate = explicitReply(queueId, ['--message-id', messageId, '--close'])
+    expect(duplicate.status).toBe(0)
+    expect(JSON.parse(duplicate.stdout)).toMatchObject({
+      code: 'IDEMPOTENT_REPLY_CLOSE',
+      replied_with: firstBody.message_id,
+    })
+    expect(dbRead(`SELECT count(*) AS n FROM agent_messages WHERE author_id='probe-dev' AND reply_to=?`, [messageId])[0].n).toBe(1)
+    expect(dbRead(`SELECT count(*) AS n FROM outbound_queue WHERE message_id=?`, [firstBody.message_id])[0].n).toBe(outboundAfterFirst)
+  })
+
   test('notify remains non-close and refuses queue id', () => {
     const { queueId } = seedPending({ content: 'notify cannot close' })
 
@@ -520,10 +608,9 @@ describe('test_aun_durable_reply_close_wrapper - exact claim renewal', () => {
   test('renew-claim extends only exact in-progress same-owner claim and records audit evidence', () => {
     const { queueId, messageId } = seedPending({ content: 'renew exact in progress' })
     expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
+    useRuntime()
     expect(runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
-    dbExec(`UPDATE message_queue
-      SET claim_expires_at='2000-01-01T00:00:00.000Z'
-      WHERE id=${queueId}`)
+    const priorExpiry = dbRead(`SELECT claim_expires_at FROM message_queue WHERE id = ?`, [queueId])[0].claim_expires_at
 
     const renew = runAun([
       'renew-claim',
@@ -542,7 +629,8 @@ describe('test_aun_durable_reply_close_wrapper - exact claim renewal', () => {
       message_id: messageId,
       status: 'in_progress',
       claimed_by: 'probe-dev',
-      prior_claim_expires_at: '2000-01-01T00:00:00.000Z',
+      claimed_runtime_instance_id: RUNTIME_ONE,
+      prior_claim_expires_at: priorExpiry,
       ttl_seconds: 90,
       reason: 'long running reply close',
       audit_event_type: 'queue.claim_renewed',
@@ -550,11 +638,12 @@ describe('test_aun_durable_reply_close_wrapper - exact claim renewal', () => {
       free_form_text_authorizes_renewal: false,
     })
     expect(new Date(body.new_claim_expires_at).getTime()).toBeGreaterThan(Date.now())
-    const row = dbRead(`SELECT status, claimed_by, replied_with, claim_expires_at FROM message_queue WHERE id = ?`, [queueId])[0]
+    const row = dbRead(`SELECT status, claimed_by, claimed_runtime_instance_id, replied_with, claim_expires_at FROM message_queue WHERE id = ?`, [queueId])[0]
     expect(row.status).toBe('in_progress')
     expect(row.claimed_by).toBe('probe-dev')
+    expect(row.claimed_runtime_instance_id).toBe(RUNTIME_ONE)
     expect(row.replied_with).toBe(null)
-    expect(row.claim_expires_at).not.toBe('2000-01-01T00:00:00.000Z')
+    expect(new Date(row.claim_expires_at).getTime()).toBeGreaterThan(new Date(priorExpiry).getTime())
     const audit = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type='queue.claim_renewed'`)[0]
     expect(audit).toMatchObject({ event_type: 'queue.claim_renewed', agent_id: 'probe-dev', target: String(queueId) })
     expect(JSON.parse(audit.detail)).toMatchObject({
@@ -563,6 +652,43 @@ describe('test_aun_durable_reply_close_wrapper - exact claim renewal', () => {
       authorization: 'exact_queue_id_and_same_claim_owner',
       free_form_text_authorizes_renewal: false,
     })
+  })
+
+  test('repeated processing heartbeats the same live in-progress owner lease', () => {
+    const { queueId } = seedPending({ content: 'processing heartbeat' })
+    expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
+    useRuntime()
+    const first = runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)])
+    expect(first.status).toBe(0)
+    const firstBody = JSON.parse(first.stdout)
+
+    const second = runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)])
+    expect(second.status).toBe(0)
+    expect(JSON.parse(second.stdout)).toMatchObject({
+      ok: true,
+      status: 'in_progress',
+      already_transitioned: true,
+      lease_renewed: true,
+      claimed_runtime_instance_id: RUNTIME_ONE,
+    })
+    const secondBody = JSON.parse(second.stdout)
+    expect(new Date(secondBody.claim_expires_at).getTime())
+      .toBeGreaterThanOrEqual(new Date(firstBody.claim_expires_at).getTime())
+  })
+
+  test('renew-claim rejects an expired in-progress lease until exact recovery', () => {
+    const { queueId } = seedPending({ content: 'expired cannot heartbeat' })
+    expect(runAun(['receive', '--agent-id', 'probe-dev']).status).toBe(0)
+    useRuntime()
+    expect(runAun(['processing', '--agent-id', 'probe-dev', '--queue-id', String(queueId)]).status).toBe(0)
+    dbExec(`UPDATE message_queue SET claim_expires_at='2000-01-01T00:00:00.000Z' WHERE id=${queueId}`)
+
+    const renew = runAun(['renew-claim', '--agent-id', 'probe-dev', '--queue-id', String(queueId)])
+
+    expect(renew.status).toBe(1)
+    expect(renew.stderr).toContain('CLAIM_EXPIRED')
+    expect(dbRead(`SELECT claim_expires_at FROM message_queue WHERE id = ?`, [queueId])[0].claim_expires_at)
+      .toBe('2000-01-01T00:00:00.000Z')
   })
 
   test('renew-claim rejects another owner exact id', () => {

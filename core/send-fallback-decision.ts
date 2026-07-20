@@ -45,9 +45,12 @@ export type SendFallbackDecision =
   | { kind: 'claim_present'; claimedMqId: number | string }
   | {
       kind: 'claim_unavailable'
-      reason: 'claim_closed' | 'claim_expired' | 'claim_missing'
+      reason: 'claim_closed' | 'claim_expired' | 'claim_fenced' | 'claim_missing'
       queueId?: number | string
       status?: string
+      claimedAt?: string | Date | null
+      claimExpiresAt?: string | Date | null
+      claimedRuntimeInstanceId?: string | null
     }
   | { kind: 'invalid_reply_to' }
 
@@ -71,6 +74,7 @@ export async function decideSendFallback(
   txClient: FallbackQueryClient,
   reply_to: string,
   agentId: string,
+  runtimeInstanceId?: string | null,
 ): Promise<SendFallbackDecision> {
   // 1. Strict claim probe (FOR UPDATE so the caller can rely on the
   //    row lock for the remainder of the handler).
@@ -86,8 +90,13 @@ export async function decideSendFallback(
           AND status IN ('received', 'in_progress')
           AND claim_expires_at IS NOT NULL
           AND claim_expires_at > now()
+          AND (($3::text IS NULL AND claimed_runtime_instance_id IS NULL)
+               OR ($3::text IS NOT NULL AND (
+                 claimed_runtime_instance_id IS NULL
+                 OR claimed_runtime_instance_id::text = $3
+               )))
         FOR UPDATE`,
-    [reply_to, agentId],
+    [reply_to, agentId, runtimeInstanceId ?? null],
   )
   if (claimRow.rows.length > 0) {
     return { kind: 'claim_present', claimedMqId: claimRow.rows[0].id }
@@ -112,8 +121,12 @@ export async function decideSendFallback(
     id: number | string
     status: string
     claimed_by: string | null
+    claimed_at: string | Date | null
+    claim_expires_at: string | Date | null
+    claimed_runtime_instance_id: string | null
   }>(
-    `SELECT id, status, claimed_by
+    `SELECT id, status, claimed_by, claimed_at, claim_expires_at,
+            claimed_runtime_instance_id::text AS claimed_runtime_instance_id
        FROM message_queue
       WHERE message_id = $1 AND agent_id = $2
       ORDER BY created_at ASC, id ASC
@@ -125,13 +138,18 @@ export async function decideSendFallback(
     const reason = ['replied', 'done', 'skipped', 'failed'].includes(row.status)
       ? 'claim_closed'
       : row.claimed_by === agentId && ['received', 'in_progress'].includes(row.status)
-        ? 'claim_expired'
+        ? row.claimed_runtime_instance_id && row.claimed_runtime_instance_id !== (runtimeInstanceId ?? null)
+          ? 'claim_fenced'
+          : 'claim_expired'
         : 'claim_missing'
     return {
       kind: 'claim_unavailable',
       reason,
       queueId: row.id,
       status: row.status,
+      claimedAt: row.claimed_at,
+      claimExpiresAt: row.claim_expires_at,
+      claimedRuntimeInstanceId: row.claimed_runtime_instance_id,
     }
   }
   return {

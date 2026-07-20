@@ -175,6 +175,42 @@ describe('queue repair primitives', () => {
     expect(result.affected_count).toBe(1)
     expect(db.called(/id = \$2/)).toBe(true)
     expect(db.calls[0].params).toContain('71026')
+    expect(db.calls[0].sql).toContain("status IN ('received', 'in_progress')")
+  })
+
+  test('bulk reclaim excludes in-progress work and exact execute requires a lease fence', async () => {
+    const db = new FakeDb([])
+
+    await reclaimExpiredQueueClaims(db as any, { agentId: 'agent-com-dev' })
+    expect(db.calls[0].sql).toContain("status = 'received'")
+    expect(db.calls[0].sql).not.toContain("status IN ('received', 'in_progress')")
+
+    await expect(reclaimExpiredQueueClaims(db as any, {
+      queueId: '71026',
+      dryRun: false,
+    })).rejects.toThrow('CLAIM_FENCE_REQUIRED')
+  })
+
+  test('exact expired execute binds expected lease and clears runtime fence', async () => {
+    const db = new FakeDb([{
+      id: 71026,
+      agent_id: 'agent-com-dev',
+      status: 'in_progress',
+      message_id: 'm3',
+      claimed_runtime_instance_id: 'old-runtime',
+      claim_expires_at: '2000-01-01T00:00:00.000Z',
+      created_at: '2026-05-15 00:00:00+00',
+    }])
+
+    const result = await reclaimExpiredQueueClaims(db as any, {
+      queueId: '71026',
+      expectedClaimExpiresAt: '2000-01-01T00:00:00.000Z',
+      dryRun: false,
+    })
+
+    expect(result.dry_run).toBe(false)
+    expect(db.calls.some((call) => call.params?.includes('2000-01-01T00:00:00.000Z'))).toBe(true)
+    expect(db.called(/claimed_runtime_instance_id = NULL/)).toBe(true)
   })
 
   test('close-duplicates closes only pending rows already present on the target identity', async () => {
