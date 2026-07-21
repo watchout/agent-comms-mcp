@@ -309,6 +309,11 @@ const ACTIVE_REPLY_CLAIM_STATUSES = new Set(['received', 'in_progress'])
 const TERMINAL_REPLY_CLOSE_STATUSES = new Set(['replied', 'done', 'skipped', 'failed'])
 const MAX_CLAIM_RENEWAL_TTL_SEC = 15 * 60
 
+function deterministicD1MessageId(invocationKey: string): string {
+  const hex = createHash('sha256').update(`shirube-d1-internal-reply\n${invocationKey}`, 'utf8').digest('hex').slice(0, 32)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20)}`
+}
+
 function parseQueuePayloadLoose(payload: string | null): Record<string, any> {
   if (!payload) return {}
   try {
@@ -2812,6 +2817,7 @@ async function sendMessage(args: string[]) {
   const messageIdRaw = flags['message-id']
   const noClose = flagEnabled(flags['no-close'])
   const closeRequested = flagEnabled(flags.close)
+  const d1InvocationKey = flags['d1-invocation-key']
 
   if (!content) {
     console.error('Error: --content is required')
@@ -2819,6 +2825,19 @@ async function sendMessage(args: string[]) {
   }
   if (noClose && closeRequested) {
     console.error('Error: --no-close and --close are mutually exclusive')
+    process.exit(2)
+  }
+  if (
+    d1InvocationKey !== undefined
+    && (
+      d1InvocationKey.length === 0
+      || d1InvocationKey !== d1InvocationKey.trim()
+      || d1InvocationKey.length > 512
+      || !queueIdRaw
+      || !noClose
+    )
+  ) {
+    console.error('Error: --d1-invocation-key requires a trimmed key, --queue-id, and --no-close')
     process.exit(2)
   }
   let mentions: string[] = []
@@ -2956,7 +2975,8 @@ async function sendMessage(args: string[]) {
             message_id: qrow.message_id,
           })
         }
-        if (qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) {
+        const d1DoneReply = d1InvocationKey !== undefined && qrow.status === 'done' && !qrow.replied_with
+        if ((qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) && !d1DoneReply) {
           const replay = await loadReplyCloseReplay(db, qrow, agentId)
           if (replay.kind === 'idempotent') {
             await db.query('COMMIT')
@@ -2971,14 +2991,51 @@ async function sendMessage(args: string[]) {
             response,
           )
         }
-        if (ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
+        if (d1DoneReply) {
+          if (qrow.claimed_by !== agentId) {
+            writeFailureJson('NOT_CLAIM_OWNER', `D1 done row is not owned by ${agentId}`, {
+              queue_id: qrow.id,
+              message_id: qrow.message_id,
+              status: qrow.status,
+              claimed_by: qrow.claimed_by,
+            })
+          }
+          const payload = parseQueuePayloadLoose(qrow.payload)
+          const authorizationDigest = payload.shirube_v4_d1?.authorization?.authorization_digest
+          const expectedClaimKey = typeof authorizationDigest === 'string'
+            ? `d1:claim:${authorizationDigest}:${qrow.id}`
+            : null
+          const authority = expectedClaimKey
+            ? await db.query(
+              `SELECT i.invocation_key
+                 FROM shirube_d1_invocations i
+                 JOIN shirube_d1_effect_deliveries d ON d.invocation_key = i.invocation_key
+                WHERE i.invocation_key = $1
+                  AND i.claim_key = $2
+                  AND i.effect = 'internal_reply'
+                  AND i.status = 'reserved'
+                  AND d.effect = 'internal_reply'
+                  AND d.status = 'reserved'
+                  AND d.lease_owner IS NOT NULL`,
+              [d1InvocationKey, expectedClaimKey],
+            )
+            : { rows: [] }
+          if (authority.rows.length !== 1) {
+            writeFailureJson('D1_INVOCATION_UNAUTHORIZED', 'no exact reserved D1 internal-reply authority exists', {
+              queue_id: qrow.id,
+              message_id: qrow.message_id,
+              invocation_key: d1InvocationKey,
+            })
+          }
+        }
+        if (!d1DoneReply && ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is actively claimed by ${qrow.claimed_by}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
             claimed_by: qrow.claimed_by,
           })
         }
-        if (
+        if (!d1DoneReply &&
           ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) &&
           qrow.claimed_by === agentId &&
           (dateMs(qrow.claim_expires_at) === null || dateMs(qrow.claim_expires_at)! <= Date.now())
@@ -2995,7 +3052,7 @@ async function sendMessage(args: string[]) {
           claimRenewalEvidence = await renewSameOwnerClaimForReplyClose(db, qrow, agentId)
           qrow.claim_expires_at = claimRenewalEvidence.new_claim_expires_at
         }
-        if (!ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
+        if (!d1DoneReply && !ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
           writeFailureJson('INVALID_STATE', `queue row status=${qrow.status}; expected received|in_progress for explicit close`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
@@ -3003,7 +3060,7 @@ async function sendMessage(args: string[]) {
             claimed_by: qrow.claimed_by,
           })
         }
-        if (qrow.claimed_by !== agentId) {
+        if (!d1DoneReply && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is not actively claimed by ${agentId}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
@@ -3209,7 +3266,7 @@ async function sendMessage(args: string[]) {
       }
       let conversationControlPlaneSummary: Record<string, unknown> | null = null
 
-      const id = randomUUID()
+      const id = d1InvocationKey ? deterministicD1MessageId(d1InvocationKey) : randomUUID()
       // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
       // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
       // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
@@ -3228,6 +3285,13 @@ async function sendMessage(args: string[]) {
         mentions,
         cli: 'agent-com next/send (MVP)',
         routing_scope: routingScope,
+        ...(d1InvocationKey ? {
+          shirube_v4_d1: {
+            invocation_key: d1InvocationKey,
+            queue_id: String(target.queue_id),
+            effect: 'internal_reply',
+          },
+        } : {}),
         aun_control_plane: {
           active_owner: mentions[0] ?? null,
           cc: ccObservers,
@@ -3235,6 +3299,67 @@ async function sendMessage(args: string[]) {
           observers: [...new Set([...ccObservers, ...fyiObservers])],
         },
         ...(authMeta ?? {}),
+      }
+      if (d1InvocationKey) {
+        const existing = await db.query<{
+          id: string
+          channel_id: string | null
+          author_id: string
+          content: string
+          message_type: string
+          reply_to: string | null
+          metadata: Record<string, unknown> | string | null
+          thread_id: string | null
+        }>(
+          `SELECT id, channel_id, author_id, content, message_type, reply_to, metadata, thread_id
+             FROM agent_messages WHERE id = $1`,
+          [id],
+        )
+        if (existing.rows.length > 0) {
+          const prior = existing.rows[0]!
+          const priorMetadata = typeof prior.metadata === 'string'
+            ? parseQueuePayloadLoose(prior.metadata)
+            : prior.metadata ?? {}
+          const priorD1 = priorMetadata.shirube_v4_d1 as Record<string, unknown> | undefined
+          if (
+            existing.rows.length !== 1
+            || prior.channel_id !== channelId
+            || prior.author_id !== agentId
+            || prior.content !== content
+            || prior.message_type !== messageType
+            || prior.reply_to !== replyTo
+            || prior.thread_id !== threadId
+            || priorD1?.invocation_key !== d1InvocationKey
+            || String(priorD1?.queue_id ?? '') !== String(target.queue_id)
+            || priorD1?.effect !== 'internal_reply'
+          ) {
+            writeFailureJson('D1_INTERNAL_REPLY_CONFLICT', 'deterministic D1 message id is already bound to different material', {
+              queue_id: target.queue_id,
+              message_id: id,
+              invocation_key: d1InvocationKey,
+            })
+          }
+          await db.query('COMMIT')
+          committed = true
+          process.stdout.write(JSON.stringify({
+            ok: true,
+            message_id: id,
+            channel_id: channelId,
+            thread_id: threadId,
+            reply_to: replyTo,
+            mentions,
+            active_owner: mentions[0] ?? null,
+            cc: ccObservers,
+            fyi: fyiObservers,
+            outbound_queued: null,
+            work_closed: false,
+            close_mode: 'none',
+            queue_id: target.queue_id,
+            d1_invocation_key: d1InvocationKey,
+            idempotent_replay: true,
+          }) + '\n')
+          return
+        }
       }
       await db.query(
         `INSERT INTO agent_messages
@@ -3502,6 +3627,7 @@ async function sendMessage(args: string[]) {
         ...(claimRenewalEvidence ? { claim_renewal: claimRenewalEvidence } : {}),
         ...(conversationControlPlaneSummary ? { conversation_control_plane: conversationControlPlaneSummary } : {}),
         ...(outboundSkipReason ? { outbound_skip_reason: outboundSkipReason } : {}),
+        ...(d1InvocationKey ? { d1_invocation_key: d1InvocationKey, idempotent_replay: false } : {}),
       }) + '\n')
     } finally {
       // If we threw without committing (validation error, INVALID_REPLY_TO,

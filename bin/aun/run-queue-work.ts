@@ -417,6 +417,7 @@ class AgentComCliReplySender implements QueueReplySender {
     message_id: string | null
     content: string
     mention: string | null
+    idempotency_key?: string | null
   }): Promise<{ message_id?: string | null }> {
     if (!input.mention) {
       throw new Error('reply mention is required for agent-com send')
@@ -431,6 +432,7 @@ class AgentComCliReplySender implements QueueReplySender {
       '--queue-id',
       input.queue_id,
       ...(input.message_id ? ['--message-id', input.message_id] : []),
+      ...(input.idempotency_key ? ['--d1-invocation-key', input.idempotency_key, '--no-close'] : []),
     ], {
       cwd: this.repoRoot,
       env: {
@@ -514,7 +516,7 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
   }
 }
 
-function createWritebackSender(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): QueueWorkWritebackSender | undefined {
+export function createWritebackSender(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): QueueWorkWritebackSender | undefined {
   if (plan.github_writeback_mode !== 'mediated') return undefined
   const command = env.AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND
     ?? env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND

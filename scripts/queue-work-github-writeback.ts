@@ -221,25 +221,40 @@ async function githubFetchJson<T>(
   return await res.json() as T
 }
 
-async function hasDuplicateComment(input: {
+async function findDuplicateComment(input: {
   fetchImpl: typeof fetch
   token: string
   repo: string
   issueNumber: number
   body: string
   idempotencyKey?: string | null
-}): Promise<boolean> {
-  const comments = await githubFetchJson<Array<{ body?: string | null }>>(
-    input.fetchImpl,
-    input.token,
-    `https://api.github.com/repos/${input.repo}/issues/${input.issueNumber}/comments?per_page=100`,
-  )
-  return comments.some((comment) => {
-    const body = comment.body ?? ''
-    if (body === input.body) return true
-    if (input.idempotencyKey && new RegExp(`^idempotency_key:\\s*${input.idempotencyKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'im').test(body)) return true
-    return false
-  })
+}): Promise<{ receipt: string | null; conflict: boolean }> {
+  const matches: Array<{ receipt: string | null; exactBody: boolean }> = []
+  for (let page = 1; page <= 10; page++) {
+    const comments = await githubFetchJson<Array<{
+      body?: string | null
+      html_url?: string | null
+      url?: string | null
+    }>>(
+      input.fetchImpl,
+      input.token,
+      `https://api.github.com/repos/${input.repo}/issues/${input.issueNumber}/comments?per_page=100&page=${page}`,
+    )
+    for (const comment of comments) {
+      const body = comment.body ?? ''
+      const exactBody = body === input.body
+      const sameKey = Boolean(input.idempotencyKey && new RegExp(`^idempotency_key:\\s*${input.idempotencyKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'im').test(body))
+      if (exactBody || sameKey) {
+        matches.push({ receipt: comment.html_url ?? comment.url ?? null, exactBody })
+      }
+    }
+    if (comments.length < 100) break
+  }
+  if (matches.length === 0) return { receipt: null, conflict: false }
+  if (matches.length !== 1 || !matches[0]!.exactBody || !matches[0]!.receipt) {
+    return { receipt: matches[0]?.receipt ?? null, conflict: true }
+  }
+  return { receipt: matches[0]!.receipt, conflict: false }
 }
 
 export async function queueWorkGithubWriteback(
@@ -257,7 +272,7 @@ export async function queueWorkGithubWriteback(
   const { token } = resolveGithubTokenFromEnv(env, options.readTokenFile ?? ((path) => readFileSync(path, 'utf8')))
   if (!token) return { ok: false, error_code: 'GITHUB_TOKEN_MISSING', summary: 'GitHub token is required for mediated posting' }
   const fetchImpl = options.fetchImpl ?? fetch
-  const duplicate = await hasDuplicateComment({
+  const duplicate = await findDuplicateComment({
     fetchImpl,
     token,
     repo: request.writeback.repo,
@@ -265,8 +280,21 @@ export async function queueWorkGithubWriteback(
     body: request.writeback.body,
     idempotencyKey: request.writeback.idempotency_key,
   })
-  if (duplicate) {
-    return { ok: false, error_code: 'DUPLICATE_WRITEBACK', summary: 'matching GitHub writeback already exists', body_sha256: validation.body_sha256 }
+  if (duplicate.conflict) {
+    return {
+      ok: false,
+      error_code: 'DUPLICATE_WRITEBACK_CONFLICT',
+      body_sha256: validation.body_sha256,
+      summary: 'idempotency readback found multiple comments or mismatched body evidence',
+    }
+  }
+  if (duplicate.receipt) {
+    return {
+      ok: true,
+      posted_with: duplicate.receipt,
+      body_sha256: validation.body_sha256,
+      summary: 'matching GitHub writeback already exists; returned the durable receipt',
+    }
   }
   const posted = await githubFetchJson<{ html_url?: string; url?: string }>(
     fetchImpl,

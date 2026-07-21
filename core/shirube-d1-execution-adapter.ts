@@ -20,14 +20,14 @@ export interface D1ExecutionState {
   external_send_receipt: string | null
 }
 
-type D1Effect = 'internal_reply' | 'github_writeback' | 'external_send'
+export type D1Effect = 'internal_reply' | 'github_writeback' | 'external_send'
 
-interface D1PersistencePort {
+export interface D1PersistencePort {
   load(key: string): Promise<D1ExecutionState | null>
   persist_once(state: D1ExecutionState): Promise<D1ExecutionState>
 }
 
-interface D1InvocationPersistencePort {
+export interface D1InvocationPersistencePort {
   load(key: string): Promise<D1ExecutionState | null>
   /** Atomically create one reserved record by invocation_key, or return the existing record. */
   reserve_once(state: D1ExecutionState): Promise<{
@@ -41,13 +41,13 @@ interface D1InvocationPersistencePort {
   complete_once(state: D1ExecutionState): Promise<D1ExecutionState>
 }
 
-interface D1EffectResult {
+export interface D1EffectResult {
   invocation_key: string
   effect: D1Effect
   receipt: string
 }
 
-interface D1EffectPort {
+export interface D1EffectPort {
   /**
    * Perform the actual effect at most once for state.invocation_key.
    *

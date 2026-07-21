@@ -48,6 +48,15 @@ export interface StateDaemonRuntimeReadiness {
     queue_work_scheduler_enabled: string | null
     agent_allowlist: string | null
     agent_denylist: string | null
+    shirube_d1_enabled?: string | null
+    shirube_d1_kill_switch?: string | null
+    shirube_d1_target_allowlist?: string | null
+    shirube_d1_authorization_digest?: string | null
+    shirube_d1_adapter_head_sha?: string | null
+    shirube_d1_audit_ref?: string | null
+    shirube_d1_qa_ref?: string | null
+    shirube_d1_check_ref?: string | null
+    shirube_d1_cto_go_ref?: string | null
   }
   stderr: {
     path: string | null
@@ -479,6 +488,15 @@ export function inspectStateDaemonRuntime(options: StateDaemonRuntimeOptions = {
       queue_work_scheduler_enabled: launchctlEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED ?? plistEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED ?? null,
       agent_allowlist: launchctlEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? plistEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? null,
       agent_denylist: launchctlEnv.STATE_DAEMON_AGENT_DENYLIST ?? plistEnv.STATE_DAEMON_AGENT_DENYLIST ?? null,
+      shirube_d1_enabled: launchctlEnv.SHIRUBE_D1_ENABLED ?? plistEnv.SHIRUBE_D1_ENABLED ?? null,
+      shirube_d1_kill_switch: launchctlEnv.SHIRUBE_D1_KILL_SWITCH ?? plistEnv.SHIRUBE_D1_KILL_SWITCH ?? null,
+      shirube_d1_target_allowlist: launchctlEnv.SHIRUBE_D1_TARGET_ALLOWLIST ?? plistEnv.SHIRUBE_D1_TARGET_ALLOWLIST ?? null,
+      shirube_d1_authorization_digest: launchctlEnv.SHIRUBE_D1_AUTHORIZATION_DIGEST ?? plistEnv.SHIRUBE_D1_AUTHORIZATION_DIGEST ?? null,
+      shirube_d1_adapter_head_sha: launchctlEnv.SHIRUBE_D1_ADAPTER_HEAD_SHA ?? plistEnv.SHIRUBE_D1_ADAPTER_HEAD_SHA ?? null,
+      shirube_d1_audit_ref: launchctlEnv.SHIRUBE_D1_AUDIT_REF ?? plistEnv.SHIRUBE_D1_AUDIT_REF ?? null,
+      shirube_d1_qa_ref: launchctlEnv.SHIRUBE_D1_QA_REF ?? plistEnv.SHIRUBE_D1_QA_REF ?? null,
+      shirube_d1_check_ref: launchctlEnv.SHIRUBE_D1_CHECK_REF ?? plistEnv.SHIRUBE_D1_CHECK_REF ?? null,
+      shirube_d1_cto_go_ref: launchctlEnv.SHIRUBE_D1_CTO_GO_REF ?? plistEnv.SHIRUBE_D1_CTO_GO_REF ?? null,
     },
     stderr: {
       path: stderrPath,

@@ -122,10 +122,13 @@ describe('queue-work GitHub mediated writeback wrapper', () => {
     expect(calls[1].init?.method).toBe('POST')
   })
 
-  test('fails closed on duplicate idempotency evidence before posting', async () => {
+  test('replays duplicate idempotency evidence as the same durable receipt without posting', async () => {
     const fetchImpl = (async (url: string | URL | Request) => {
       if (String(url).includes('/comments?')) {
-        return new Response(JSON.stringify([{ body: request().writeback.body }]), { status: 200 })
+        return new Response(JSON.stringify([{
+          body: request().writeback.body,
+          html_url: 'https://github.com/watchout/agent-comms-mcp/pull/780#issuecomment-existing',
+        }]), { status: 200 })
       }
       throw new Error('POST should not be called')
     }) as typeof fetch
@@ -137,9 +140,28 @@ describe('queue-work GitHub mediated writeback wrapper', () => {
     })
 
     expect(result).toMatchObject({
-      ok: false,
-      error_code: 'DUPLICATE_WRITEBACK',
+      ok: true,
+      posted_with: 'https://github.com/watchout/agent-comms-mcp/pull/780#issuecomment-existing',
+      body_sha256: request().writeback.body_sha256,
     })
+  })
+
+  test('fails closed when idempotency readback finds more than one matching comment', async () => {
+    const fetchImpl = (async (url: string | URL | Request) => {
+      if (String(url).includes('/comments?')) {
+        return new Response(JSON.stringify([
+          { body: request().writeback.body, html_url: 'https://github.com/watchout/agent-comms-mcp/issues/780#issuecomment-1' },
+          { body: request().writeback.body, html_url: 'https://github.com/watchout/agent-comms-mcp/issues/780#issuecomment-2' },
+        ]), { status: 200 })
+      }
+      throw new Error('POST should not be called')
+    }) as typeof fetch
+    const result = await queueWorkGithubWriteback(request(), {
+      allowRepos: ['watchout/agent-comms-mcp'],
+      env: { GITHUB_TOKEN: 'test-token' } as NodeJS.ProcessEnv,
+      fetchImpl,
+    })
+    expect(result).toMatchObject({ ok: false, error_code: 'DUPLICATE_WRITEBACK_CONFLICT' })
   })
 
   test('probe requires allowlist and token readiness', () => {

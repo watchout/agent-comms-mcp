@@ -91,6 +91,7 @@ export interface QueueReplySender {
     message_id: string | null
     content: string
     mention: string | null
+    idempotency_key?: string | null
   }): Promise<{ message_id?: string | null }>
 }
 
@@ -402,7 +403,7 @@ async function persistRunnerError(
             last_heartbeat_at = $3
       WHERE id = $1
         AND status = 'in_progress'`,
-    [row.id, payload, now],
+    [row.id, payload, now.toISOString()],
   ).catch(() => {})
 }
 
@@ -450,7 +451,7 @@ export async function runReceivedQueueWork(
         WHERE id = $1
           AND status = 'received'
         RETURNING id`,
-      [row.id, now],
+      [row.id, now.toISOString()],
     )
     if (rowCount(advanced) === 0) {
       await db.query('ROLLBACK')
@@ -537,7 +538,7 @@ export async function runReceivedQueueWork(
         WHERE id = $1
           AND status = 'in_progress'
         RETURNING id`,
-      [row.id, completedAt, payload],
+      [row.id, completedAt.toISOString(), payload],
     )
     if (rowCount(done) === 0) {
       await db.query('ROLLBACK')
@@ -651,7 +652,7 @@ export async function finalizeDoneQueueWork(
           WHERE id = $1
             AND status = 'done'
           RETURNING id`,
-        [row.id, closedAt, repliedWith, nextPayload],
+        [row.id, closedAt.toISOString(), repliedWith, nextPayload],
       )
       if (rowCount(updated) === 0) {
         await db.query('ROLLBACK')
@@ -692,7 +693,7 @@ export async function finalizeDoneQueueWork(
                 last_heartbeat_at = $3
           WHERE id = $1
             AND status = 'done'`,
-        [row.id, nextPayload, failedAt],
+        [row.id, nextPayload, failedAt.toISOString()],
       )
       await db.query('COMMIT')
       committed = true
