@@ -10,15 +10,32 @@
  *   5. re-running execute is idempotent (0 additional rows)
  *   6. reason taxonomy is emitted to stderr and persisted in failed_reason.
  *
- * Skipped automatically when no DATABASE_URL is reachable so CI without
- * Postgres does not red-line.
+ * PostgreSQL execute cases run only when AGENT_COM_TEST_DATABASE_URL names an
+ * isolated test database. Generic DATABASE_URL and the operator default are
+ * intentionally ignored so this test file can never clean a live local queue.
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { Client } from 'pg'
 import { join } from 'node:path'
 import { runQueueCleanup, _internal } from '../../scripts/queue-cleanup'
+import { assertDestructiveMigrationTestDatabase } from '../../db/destructive-migration-gate'
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+function resolveQueueCleanupTestDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const explicit = env.AGENT_COM_TEST_DATABASE_URL?.trim()
+  return explicit || undefined
+}
+
+function requireQueueCleanupTestDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const databaseUrl = resolveQueueCleanupTestDatabaseUrl(env)
+  if (!databaseUrl) {
+    throw new Error('AGENT_COM_TEST_DATABASE_URL is required for queue-cleanup execute tests')
+  }
+  assertDestructiveMigrationTestDatabase(databaseUrl, env)
+  return databaseUrl
+}
+
+const TEST_DATABASE_URL = resolveQueueCleanupTestDatabaseUrl()
+const dbDescribe = TEST_DATABASE_URL ? describe : describe.skip
 const TEST_AGENT_PREFIX = '__test_qcleanup_'
 
 let client: Client | null = null
@@ -26,7 +43,7 @@ let available = false
 
 async function probe(): Promise<boolean> {
   try {
-    const c = new Client({ connectionString: DATABASE_URL })
+    const c = new Client({ connectionString: requireQueueCleanupTestDatabaseUrl() })
     await c.connect()
     await c.query('SELECT 1 FROM message_queue LIMIT 1')
     await c.end()
@@ -74,9 +91,10 @@ async function statusOf(id: number): Promise<{ status: string; failed_reason: st
 }
 
 beforeAll(async () => {
+  if (!TEST_DATABASE_URL) return
   available = await probe()
   if (!available) return
-  client = new Client({ connectionString: DATABASE_URL })
+  client = new Client({ connectionString: requireQueueCleanupTestDatabaseUrl() })
   await client.connect()
 })
 
@@ -91,13 +109,28 @@ beforeEach(async () => {
   if (available) await clearTestRows()
 })
 
-describe('PR-Q1 queue-cleanup script', () => {
+describe('PR-Q1 queue-cleanup test database safety', () => {
+  test('generic DATABASE_URL never opts destructive integration cases in', () => {
+    expect(resolveQueueCleanupTestDatabaseUrl({
+      DATABASE_URL: 'postgresql://localhost/agent_comms',
+    })).toBeUndefined()
+  })
+
+  test('the production database is rejected even when passed as the test variable', () => {
+    const unsafe = 'postgresql://localhost/agent_comms'
+    expect(() => requireQueueCleanupTestDatabaseUrl({
+      AGENT_COM_TEST_DATABASE_URL: unsafe,
+    })).toThrow(/Refusing target database agent_comms/)
+  })
+})
+
+dbDescribe('PR-Q1 queue-cleanup script', () => {
   test('case 1: dry-run does not mutate (BEGIN/ROLLBACK)', async () => {
     if (!available) return
     const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c1`, ageHours: 24 })
     const pre = await statusOf(id)
 
-    const matched = await runQueueCleanup('dry-run', DATABASE_URL)
+    const matched = await runQueueCleanup('dry-run', requireQueueCleanupTestDatabaseUrl())
 
     const post = await statusOf(id)
     expect(pre.status).toBe('pending')
@@ -109,7 +142,7 @@ describe('PR-Q1 queue-cleanup script', () => {
     if (!available) return
     const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c2`, ageHours: 24 })
 
-    const matched = await runQueueCleanup('execute', DATABASE_URL)
+    const matched = await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
 
     const post = await statusOf(id)
     expect(post.status).toBe('skipped')
@@ -123,7 +156,7 @@ describe('PR-Q1 queue-cleanup script', () => {
     const youngId = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c3y`, ageHours: 1 })
     const oldId = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c3o`, ageHours: 24 })
 
-    await runQueueCleanup('execute', DATABASE_URL)
+    await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
 
     const young = await statusOf(youngId)
     const old = await statusOf(oldId)
@@ -143,7 +176,7 @@ describe('PR-Q1 queue-cleanup script', () => {
       ageHours: 24,
     })
 
-    await runQueueCleanup('execute', DATABASE_URL)
+    await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
 
     const claimed = await statusOf(claimedId)
     const unclaimed = await statusOf(unclaimedId)
@@ -155,10 +188,10 @@ describe('PR-Q1 queue-cleanup script', () => {
     if (!available) return
     await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c5`, ageHours: 24 })
 
-    const first = await runQueueCleanup('execute', DATABASE_URL)
+    const first = await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
     expect(first).toBeGreaterThanOrEqual(1)
 
-    const second = await runQueueCleanup('execute', DATABASE_URL)
+    const second = await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
     expect(second).toBe(0)
   })
 
@@ -176,7 +209,7 @@ describe('PR-Q1 queue-cleanup script', () => {
       return true
     }) as typeof process.stderr.write
     try {
-      await runQueueCleanup('execute', DATABASE_URL)
+      await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
     } finally {
       process.stderr.write = orig
     }
@@ -217,7 +250,7 @@ describe('PR-Q1 queue-cleanup script', () => {
       return true
     }) as typeof process.stderr.write
     try {
-      await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+      await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl(), { maxAge: '30d' })
     } finally {
       process.stderr.write = orig
     }
@@ -240,9 +273,9 @@ describe('PR-Q1 queue-cleanup script', () => {
       ageHours: 31 * 24,
     })
 
-    const first = await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+    const first = await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl(), { maxAge: '30d' })
     expect(first).toBeGreaterThanOrEqual(1)
-    const second = await runQueueCleanup('execute', DATABASE_URL, { maxAge: '30d' })
+    const second = await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl(), { maxAge: '30d' })
     expect(second).toBe(0)
   })
 
@@ -250,7 +283,7 @@ describe('PR-Q1 queue-cleanup script', () => {
     if (!available) return
     const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c9`, ageHours: 24 })
 
-    await runQueueCleanup('execute', DATABASE_URL)
+    await runQueueCleanup('execute', requireQueueCleanupTestDatabaseUrl())
 
     const post = await statusOf(id)
     expect(post.status).toBe('skipped')
