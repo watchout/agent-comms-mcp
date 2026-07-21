@@ -2,7 +2,7 @@ schema_version: shirube-adoption-intake/v1
 adoption_id: ADOPT-AGENT-COMMS-MCP-001
 lane: adoption_intake
 repo: watchout/agent-comms-mcp
-framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
 profile: hotel-lite
 current_status: PARTIAL_SHIRUBE_PILOT
 target_status_after_merge: RAPID_LITE_REPORT_ONLY

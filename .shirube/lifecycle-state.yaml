@@ -3,7 +3,7 @@ mode: rapid-lite
 profile: hotel-lite
 repo: watchout/agent-comms-mcp
 current_phase: HANDOFF_READY
-framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
 adoption_report_ref: null
 repo_spec_ref: .shirube/repo-spec.yaml
 handoff_ref: .shirube/control-handoffs/CH-001.yaml
