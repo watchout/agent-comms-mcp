@@ -156,6 +156,12 @@ jobs:
               auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
               auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
             },
+            {
+              cellId: "CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001",
+              handoffRef: ".shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml",
+              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml",
+              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml",
+            },
           ];
           const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
 
