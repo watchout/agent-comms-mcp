@@ -28,6 +28,7 @@ import {
 } from '../core/aun-runtime-v2'
 import {
   QUEUE_WORK_RESULT_VERSION,
+  finalizeDoneQueueWork,
   type LlmRuntimeAdapter,
   type QueueWorkGithubIssueCommentWriteback,
 } from '../core/queue-work'
@@ -335,6 +336,92 @@ describe('Shirube V4 D1 production runtime', () => {
       const completed = await first
       expect(completed.github_writeback_receipt).toBe('github:invoke:expired-live:receipt')
       expect(effects).toBe(1)
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  test('final close rejects a completed receipt belonging to a different queue', async () => {
+    const { adapter, db } = sqliteFixture()
+    try {
+      const currentBinding = binding(['internal_reply'])
+      await adapter.execute(
+        `INSERT INTO message_queue
+           (agent_id, message_id, payload, status, priority, created_at)
+         VALUES ($1, $2, $3, 'done', 1, $4)`,
+        [
+          'dev-001',
+          'message-current-queue',
+          JSON.stringify({
+            content: 'current queue',
+            author_id: 'qa',
+            shirube_v4_d1: currentBinding,
+            runner_result: {
+              schema_version: QUEUE_WORK_RESULT_VERSION,
+              ok: true,
+              summary: 'reply',
+              reply: 'done',
+              evidence: ['semantic_outcome=reply', 'outcome_reason=done'],
+              next_action: 'reply',
+            },
+          }),
+          '2026-07-21T08:00:00.000Z',
+        ],
+      )
+      const foreignClaimKey = `d1:claim:${currentBinding.authorization.authorization_digest}:999`
+      const foreignInvocationKey = 'd1:invoke:foreign-queue-completed'
+      const foreignReceipt = 'foreign-queue-receipt'
+      await adapter.execute(
+        `INSERT INTO shirube_d1_claims
+           (claim_key, handoff_id, authorization_digest, control_source,
+            exact_base_sha, allowed_paths_digest, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'claimed')`,
+        [
+          foreignClaimKey,
+          currentBinding.authorization.handoff_id,
+          currentBinding.authorization.authorization_digest,
+          currentBinding.authorization.control_source,
+          currentBinding.authorization.exact_base_sha,
+          'f'.repeat(64),
+        ],
+      )
+      await adapter.execute(
+        `INSERT INTO shirube_d1_invocations
+           (invocation_key, claim_key, handoff_id, authorization_digest, effect,
+            status, internal_reply_receipt, completed_at)
+         VALUES ($1, $2, $3, $4, 'internal_reply', 'completed', $5, $6)`,
+        [
+          foreignInvocationKey,
+          foreignClaimKey,
+          currentBinding.authorization.handoff_id,
+          currentBinding.authorization.authorization_digest,
+          foreignReceipt,
+          '2026-07-21T08:01:00.000Z',
+        ],
+      )
+      await adapter.execute(
+        `INSERT INTO shirube_d1_effect_deliveries
+           (invocation_key, effect, status, receipt)
+         VALUES ($1, 'internal_reply', 'completed', $2)`,
+        [foreignInvocationKey, foreignReceipt],
+      )
+
+      const outcome = await finalizeDoneQueueWork(db, {
+        queueId: 1,
+        messageId: 'message-current-queue',
+        d1CompletionFence: {
+          invocation_key: foreignInvocationKey,
+          claim_key: foreignClaimKey,
+          authorization_digest: currentBinding.authorization.authorization_digest,
+          effect: 'internal_reply',
+          receipt: foreignReceipt,
+        },
+      })
+
+      expect(outcome).toMatchObject({ ok: false, code: 'D1_COMPLETION_RECEIPT_REQUIRED' })
+      expect(await adapter.query<{ status: string; replied_with: string | null }>(
+        'SELECT status, replied_with FROM message_queue WHERE id = 1',
+      )).toEqual([{ status: 'done', replied_with: null }])
     } finally {
       await adapter.close()
     }

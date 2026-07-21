@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
 
@@ -213,6 +215,30 @@ export interface QueueWorkD1CompletionFence {
   authorization_digest: string
   effect: 'internal_reply' | 'github_writeback' | 'external_send'
   receipt: string
+}
+
+export function computeQueueWorkD1ClaimKey(authorizationDigest: string, queueId: string | number): string {
+  return `d1:claim:${authorizationDigest}:${String(queueId)}`
+}
+
+export function computeQueueWorkD1InvocationKey(input: {
+  authorizationDigest: string
+  queueId: string | number
+  effect: QueueWorkD1CompletionFence['effect']
+  repository: string
+  controlSource: string
+  adapterHeadSha: string
+}): string {
+  const canaryIssue = input.controlSource.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/(\d+)$/)?.[1]
+  if (input.effect === 'github_writeback' && canaryIssue) {
+    const repositoryName = input.repository.split('/')[1]
+    if (!repositoryName) throw new Error('D1_TARGET_REPOSITORY_INVALID')
+    return `d1-canary:${repositoryName}:${canaryIssue}:${input.adapterHeadSha}`
+  }
+  return `d1:invoke:${createHash('sha256').update(
+    `${input.authorizationDigest}\n${String(input.queueId)}\n${input.effect}`,
+    'utf8',
+  ).digest('hex')}`
 }
 
 export interface FinalizeDoneQueueWorkOptions {
@@ -749,12 +775,44 @@ export async function finalizeDoneQueueWork(
       return { ok: false, code, queue_id: queueIdOf(row), detail }
     }
 
+    const handoffContract = detectQueueWorkHandoffContract({
+      agentId: row.agent_id,
+      payload: row.payload,
+    })
     let d1CompletedReceipt: string | null = null
     const d1Binding = payload.shirube_v4_d1
     if (d1Binding && typeof d1Binding === 'object' && !Array.isArray(d1Binding)) {
       const fence = opts.d1CompletionFence
       const bindingDigest = typeof d1Binding.authorization?.authorization_digest === 'string'
         ? d1Binding.authorization.authorization_digest
+        : null
+      const expectedEffects: QueueWorkD1CompletionFence['effect'][] = []
+      if (handoffContract.github_backed && result.writeback) expectedEffects.push('github_writeback')
+      if (result.next_action === 'reply' && typeof result.reply === 'string' && result.reply.trim()) {
+        expectedEffects.push(d1Binding.external_event ? 'external_send' : 'internal_reply')
+      }
+      const expectedEffect = expectedEffects.length === 1 ? expectedEffects[0]! : null
+      const targetRepository = typeof d1Binding.target?.repository === 'string'
+        ? d1Binding.target.repository
+        : null
+      const targetControlSource = typeof d1Binding.target?.control_source === 'string'
+        ? d1Binding.target.control_source
+        : null
+      const adapterHeadSha = typeof d1Binding.activation_evidence?.adapter_head_sha === 'string'
+        ? d1Binding.activation_evidence.adapter_head_sha
+        : null
+      const expectedClaimKey = bindingDigest
+        ? computeQueueWorkD1ClaimKey(bindingDigest, row.id)
+        : null
+      const expectedInvocationKey = bindingDigest && expectedEffect && targetRepository && targetControlSource && adapterHeadSha
+        ? computeQueueWorkD1InvocationKey({
+            authorizationDigest: bindingDigest,
+            queueId: row.id,
+            effect: expectedEffect,
+            repository: targetRepository,
+            controlSource: targetControlSource,
+            adapterHeadSha,
+          })
         : null
       if (
         !fence
@@ -763,10 +821,15 @@ export async function finalizeDoneQueueWork(
         || !fence.authorization_digest
         || !fence.receipt
         || fence.authorization_digest !== bindingDigest
+        || fence.claim_key !== expectedClaimKey
+        || fence.effect !== expectedEffect
+        || fence.invocation_key !== expectedInvocationKey
+        || !Array.isArray(d1Binding.allowed_effects)
+        || !d1Binding.allowed_effects.includes(expectedEffect)
       ) {
         return failClosed(
           'D1_COMPLETION_RECEIPT_REQUIRED',
-          'D1 queue work requires an exact completed invocation/effect receipt fence before final close',
+          'D1 queue work requires the current queue claim, selected effect, invocation, and completed receipt before final close',
         )
       }
       const completed = await db.query<{
@@ -819,10 +882,6 @@ export async function finalizeDoneQueueWork(
       d1CompletedReceipt = fence.receipt
     }
 
-    const handoffContract = detectQueueWorkHandoffContract({
-      agentId: row.agent_id,
-      payload: row.payload,
-    })
     const validation = opts.resultValidator?.({
       row,
       payload,

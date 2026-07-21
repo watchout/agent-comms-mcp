@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 import type { DbAdapter } from './db'
-import { detectQueueWorkHandoffContract } from './queue-work'
+import {
+  computeQueueWorkD1ClaimKey,
+  computeQueueWorkD1InvocationKey,
+  detectQueueWorkHandoffContract,
+} from './queue-work'
 import type {
   QueueReplySender,
   QueueWorkD1CompletionFence,
@@ -207,17 +211,22 @@ function sameTarget(left: ShirubeD1RuntimeTarget, right: ShirubeD1RuntimeTarget)
 }
 
 function claimKey(binding: ShirubeD1RuntimeBinding, queueId: string): string {
-  return `d1:claim:${binding.authorization.authorization_digest}:${queueId}`
+  return computeQueueWorkD1ClaimKey(binding.authorization.authorization_digest, queueId)
 }
 
 export function computeShirubeD1InvocationKey(binding: ShirubeD1RuntimeBinding, queueId: string, effect: D1Effect): string {
-  const canaryIssue = binding.target.control_source.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/(\d+)$/)?.[1]
-  if (effect === 'github_writeback' && canaryIssue) {
-    const repositoryName = binding.target.repository.split('/')[1]
-    if (!repositoryName) throw new ShirubeD1RuntimeError('D1_TARGET_MISMATCH', 'repository must be owner/name')
-    return `d1-canary:${repositoryName}:${canaryIssue}:${binding.activation_evidence.adapter_head_sha}`
+  try {
+    return computeQueueWorkD1InvocationKey({
+      authorizationDigest: binding.authorization.authorization_digest,
+      queueId,
+      effect,
+      repository: binding.target.repository,
+      controlSource: binding.target.control_source,
+      adapterHeadSha: binding.activation_evidence.adapter_head_sha,
+    })
+  } catch {
+    throw new ShirubeD1RuntimeError('D1_TARGET_MISMATCH', 'repository must be owner/name')
   }
-  return `d1:invoke:${createHash('sha256').update(`${binding.authorization.authorization_digest}\n${queueId}\n${effect}`, 'utf8').digest('hex')}`
 }
 
 export function computeShirubeD1InternalReplyMessageId(invocationKey: string): string {
