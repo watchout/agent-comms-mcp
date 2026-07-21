@@ -1,0 +1,164 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001
+parent_ssot: watchout/agent-comms-mcp#881
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/881#issuecomment-5028335630
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5028741687
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5028781569
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/881
+source_mirror_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5028741687
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: dev-001
+next_role: independent_audit
+protected_surfaces:
+  - runtime code
+  - active workflows
+  - queue lifecycle and durable reply-close behavior
+protected_surface_details:
+  - PR 882 is the existing implementation subject; this route metadata PR does not modify its head.
+  - Future implementation may renew claim leases and fence stale claimants, but no production queue, DB, runtime, deploy, activation, or rollout mutation is authorized here.
+  - Report-only Rapid/Lite routing may be added for this Cell; required checks, branch protection, rulesets, merge, and Ready state are unchanged.
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for the claim-lease incident implementation Cell.
+    - Exact changed-path enforcement for PR 882, including the approved three-path docs and CLI completion.
+    - Independent audit evidence and owner exact-head decision requirements before merge.
+  shirube_does_not_own:
+    - Production queue repair, DB mutation, runtime execution, deploy, activation, canary, or fleet rollout.
+    - Required-check activation, branch protection, rulesets, self-audit, Ready state, or merge.
+cell:
+  CELL-ID: CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001
+  cell_type: implementation
+  risk_class: R3
+  goal: Complete and independently verify PR 882's claim-lease renewal and fenced-reclaim implementation, including its three approved operator-facing docs and CLI paths.
+  governance_route: R3 protected runtime implementation with independent audit, QA, and owner exact-head authorization before merge.
+  non_scope:
+    - production queue or DB repair
+    - runtime execution, deployment, activation, canary, or rollout
+    - provider calls or delivery
+    - schema or migration changes
+    - state-daemon or LaunchAgent changes
+    - required-check activation, branch protection, or ruleset mutation
+    - self-audit, self-approval, Ready state, or merge
+  allowed_paths:
+    - bin/aun/lifecycle.ts
+    - bin/aun/reply.ts
+    - cli/index.ts
+    - core/queue-repair.ts
+    - core/send-fallback-decision.ts
+    - server.ts
+    - tests/contract/test_aun_durable_reply_close_wrapper.test.ts
+    - tests/contract/test_processing_done_tools.test.ts
+    - tests/queue-operations.test.ts
+    - tests/spec-enforcement/behavioral-spec-alignment.test.ts
+    - docs/operations/codex-runtime-adapter-bootstrap.md
+    - docs/design/durable-reply-close-path.md
+  forbidden_paths:
+    - db/**
+    - migrations/**
+    - adapters/**
+    - core/state-daemon/**
+    - scripts/state-daemon-launchagent.ts
+    - package.json
+    - package-lock.json
+    - bun.lock
+    - bun.lockb
+    - pnpm-lock.yaml
+    - .github/**
+    - .shirube/**
+    - .env*
+    - secrets/**
+    - deploy/**
+  protected_surfaces:
+    declared:
+      - runtime code
+      - queue lifecycle and durable reply-close behavior
+    touched: true
+    details:
+      - Claim renewal must use an exact queue_id and expected_claim_expires_at fence.
+      - Reclaim must fail closed for a stale claimant and must not permit duplicate terminal effects.
+      - Durable reply-close must preserve exactly-once terminal semantics even when notify delivery is absent or fails.
+      - Operator docs and CLI must expose the exact fence inputs without adding a bypass or defaulting unsafe values.
+  stop_conditions:
+    - any implementation need falls outside the twelve allowed paths
+    - DB schema or migration is required
+    - production queue or DB mutation is required for validation
+    - provider delivery, runtime activation, deploy, canary, or rollout is required
+    - claim renewal cannot be fenced by queue_id and expected_claim_expires_at
+    - independent audit or QA returns BLOCK, NO-GO, REJECT, or CHANGES_REQUIRED
+    - owner exact-head approval is missing before merge
+implementation_boundary:
+  summary: Finish only the existing PR 882 claim-lease implementation and its two operator docs plus existing CLI path, then hand the exact head to independent audit and QA.
+  expected_pr_count: 1
+  subject_pr: https://github.com/watchout/agent-comms-mcp/pull/882
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - force push, rebase, or amend
+    - production queue or DB mutation
+    - runtime execution, deployment, activation, canary, or rollout
+    - schema or migration change
+    - required-check activation
+    - branch protection or ruleset mutation
+acceptance_criteria:
+  - Active claims renew only when queue_id and expected_claim_expires_at match the current lease fence.
+  - A stale claimant cannot renew, reclaim, reply, close, or otherwise produce terminal effects after losing the lease.
+  - Fenced reclaim permits only the current claimant to progress and preserves exactly-once terminal behavior.
+  - Durable reply-close remains correct when notify delivery is absent or fails; notification status does not substitute for durable terminal evidence.
+  - CLI help and behavior require the exact queue_id and expected_claim_expires_at inputs for the operator claim-renewal path.
+  - docs/operations/codex-runtime-adapter-bootstrap.md documents the operator invocation, success evidence, stale-fence failure, and no-mutation safety boundary.
+  - docs/design/durable-reply-close-path.md documents lease fencing, exactly-once reply-close, and notify-absent semantics.
+  - The final PR 882 diff contains only the twelve allowed paths and contains no workflow, control, DB schema, migration, deploy, activation, canary, or rollout mutation.
+validation:
+  required_commands:
+    - git diff --check
+    - bun test tests/contract/test_aun_durable_reply_close_wrapper.test.ts tests/contract/test_processing_done_tools.test.ts tests/queue-operations.test.ts tests/spec-enforcement/behavioral-spec-alignment.test.ts
+    - bun test tests/
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+    - audit_checklist_report
+    - QA_result
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - one_AUN_canary_result
+    - sequential_rollout_or_rollback_result
+    - next_step
+next_action:
+  owner_agent: dev-001
+  action: Complete the three approved docs and CLI paths on PR 882, preserve the ten existing runtime and test paths, run the required validation, and hand the immutable exact head to independent audit and QA.
+  handoff_method: Existing PR 882 branch and a machine-readable PR comment referencing this handoff, checklist, and evidence file.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/pull/882
+    - https://github.com/watchout/agent-comms-mcp/issues/881#issuecomment-5028335630
+    - https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-5028741687
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml
+  scope: Only the twelve cell.allowed_paths; no merge, runtime, DB, deploy, activation, canary, or rollout mutation.
+  deliverable: One updated Draft PR 882 exact head with the three approved docs and CLI paths, validation evidence, and an independent-audit-ready handoff.
+  completion_evidence: Exact head SHA, exact changed-file list, command results, audit checklist report, QA result, and owner exact-head decision before merge.
+  blocking: false
