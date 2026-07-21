@@ -4625,6 +4625,26 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
     process.exit(2)
   }
   const dryRun = parseRepairDryRun(flags)
+  if (subcommand === 'reclaim-expired') {
+    const queueId = flags['queue-id']?.trim()
+    const expectedClaimExpiresAt = flags['expected-claim-expires-at']?.trim()
+    if (queueId && !/^\d+$/.test(queueId)) {
+      console.error('Error [CLAIM_QUEUE_ID_INVALID]: --queue-id must be an exact numeric queue row id')
+      process.exit(2)
+    }
+    if (expectedClaimExpiresAt && !queueId) {
+      console.error('Error [CLAIM_QUEUE_ID_REQUIRED]: --expected-claim-expires-at is valid only with exact --queue-id')
+      process.exit(2)
+    }
+    if (expectedClaimExpiresAt && !Number.isFinite(Date.parse(expectedClaimExpiresAt))) {
+      console.error('Error [CLAIM_FENCE_INVALID]: --expected-claim-expires-at must be the exact ISO timestamp returned by CLAIM_EXPIRED')
+      process.exit(2)
+    }
+    if (!dryRun && queueId && !expectedClaimExpiresAt) {
+      console.error('Error [CLAIM_FENCE_REQUIRED]: exact reclaim execute requires --queue-id and --expected-claim-expires-at from CLAIM_EXPIRED')
+      process.exit(2)
+    }
+  }
   const db = await getDb()
 
   try {
@@ -6012,9 +6032,10 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run by default; close pending rows already represented on the target identity
   queue close-outbound-obsolete [--agent-id <agent>] [--consumer-agent-id <agent>] --reason <text> [--max-age 12h] [--execute|--dry-run]
                                                        — dry-run by default; close stale outbound projection rows
+  queue reclaim-expired --queue-id <id> --expected-claim-expires-at <iso> --execute
+                                                       — exact fenced recovery for one expired received/in_progress row; both values are required and must match
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
-                         [--queue-id <id> --expected-claim-expires-at <iso>]
-                                                       — dry-run by default; bulk recovery is received-only; exact fenced recovery may target expired in_progress
+                                                       — legacy bulk recovery is received-only and never reclaims in_progress work
   queue daemon-status [--format json|text]             — read-only DB-observed queue daemon liveness and queue status
   queue smoke --agent-id <agent> [--execute|--dry-run] — queue smoke readiness; execute command is reported, not run by default
   directory [--format json|text]                       — bot/channel directory and sendability report

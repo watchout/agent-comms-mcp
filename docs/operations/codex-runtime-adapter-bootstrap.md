@@ -78,10 +78,89 @@ least:
 - `thread_id`
 - sender agent id
 - received content
+- `claim_lease.runtime_instance_id`
+- `claim_lease.claim_expires_at`
 
 For long-running reviews, `queue_id` and `message_id` must survive summarization
-and task handoff. They are the durable identifiers needed by the reply close
-path after claim TTL expiration.
+and task handoff. The lease expiry and runtime instance must survive with them.
+These values distinguish a live claimant from an expired or fenced runtime.
+
+## Keep A Live Claim Renewed
+
+After targeted work enters `received`, mark it `in_progress` and renew it before
+the current lease expires:
+
+```bash
+AGENT_ID=codex-aun \
+AGENT_COM_EXPECTED_AGENT_ID=codex-aun \
+AGENT_COM_RUNTIME_INSTANCE_ID="<runtime-instance-id>" \
+DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
+bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/bin/aun.ts processing \
+  --agent-id codex-aun \
+  --queue-id 71552
+
+AGENT_ID=codex-aun \
+AGENT_COM_EXPECTED_AGENT_ID=codex-aun \
+AGENT_COM_RUNTIME_INSTANCE_ID="<runtime-instance-id>" \
+DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
+bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/bin/aun.ts renew-claim \
+  --agent-id codex-aun \
+  --queue-id 71552 \
+  --reason "long-running review"
+```
+
+Renewal is exact-row, same-owner, same-runtime, and live-lease only. Success
+returns `prior_claim_expires_at`, `new_claim_expires_at`, the runtime instance,
+and `queue.claim_renewed` audit evidence. `CLAIM_EXPIRED` and `CLAIM_FENCED`
+must fail without reply, close, or outbound projection.
+
+## Exact Recovery After Expiry
+
+An expired `in_progress` row must not be renewed or closed directly. Copy both
+`queue_id` and `expected_claim_expires_at` from the `CLAIM_EXPIRED` result and
+preview the exact row:
+
+```bash
+AGENT_ID=codex-aun \
+DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
+bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/cli/index.ts queue reclaim-expired \
+  --agent-id codex-aun \
+  --queue-id 71552 \
+  --expected-claim-expires-at 2026-07-21T00:00:00.000Z \
+  --dry-run
+```
+
+After confirming that the preview names exactly one intended expired row, use
+the same immutable fence values with `--execute`:
+
+```bash
+AGENT_ID=codex-aun \
+DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
+bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/cli/index.ts queue reclaim-expired \
+  --agent-id codex-aun \
+  --queue-id 71552 \
+  --expected-claim-expires-at 2026-07-21T00:00:00.000Z \
+  --execute
+```
+
+Success moves only that row to `pending`, clears the old claim and runtime
+fence, and writes `queue.reclaim_expired` audit evidence. It does not create a
+message, enqueue outbound delivery, reply, or close work. Reclaim the same row
+through the normal targeted receive path before processing or replying:
+
+```bash
+AGENT_ID=codex-aun \
+AGENT_COM_EXPECTED_AGENT_ID=codex-aun \
+AGENT_COM_RUNTIME_INSTANCE_ID="<new-runtime-instance-id>" \
+DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
+bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/bin/aun.ts receive \
+  --agent-id codex-aun \
+  --queue-id 71552
+```
+
+If the expected timestamp is absent or differs from the locked row, the command
+returns `CLAIM_FENCE_REQUIRED` or `CLAIM_FENCE_MISMATCH` and changes nothing.
+Never replace exact recovery with a bulk `in_progress` reclaim.
 
 ## Standard Reply Path
 
@@ -97,8 +176,9 @@ bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/bin/aun.ts reply \
   --content "..."
 ```
 
-When #404 lands, long-running Codex work must be able to close by explicit
-queue identity:
+Long-running Codex work closes by explicit queue identity only while the caller
+holds the current live claim. An expired row must complete the exact recovery
+and targeted receive sequence above first:
 
 ```bash
 AGENT_ID=codex-aun \
@@ -116,28 +196,15 @@ bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/bin/aun.ts reply \
 Codex adapters should keep and pass both identifiers when available. A mismatch
 must fail closed rather than replying to the wrong work item.
 
-## Notify Fallback Policy
+## Notify Policy
 
 `aun notify` is not a reply substitute. It creates a new message and must not
 close queue rows.
 
-Before #404 durable close support is available, Codex may use notify fallback
-only when all of the following are true:
-
-- `aun reply` failed with `INVALID_REPLY_TO` or
-  `CLAIM_EXPIRED_OR_MISSING`.
-- The operator explicitly needs a visible status update.
-- The fallback content states that the reply claim expired or the durable close
-  path is unavailable.
-
-After #404 durable close support is available, Codex must prefer:
-
-```text
-reply --queue-id [--message-id]
-```
-
-over notify fallback for long reviews. Notify remains appropriate for
-self-originated status, startup, watchdog, and out-of-band messages only.
+Codex must not use notify after `CLAIM_EXPIRED`, `CLAIM_FENCED`,
+`CLAIM_EXPIRED_OR_MISSING`, or another reply failure. Notify remains appropriate
+only for self-originated status, startup, watchdog, and genuinely out-of-band
+messages that do not claim to answer or close a queue item.
 
 ## Failure-Code Handling
 
@@ -145,10 +212,13 @@ Codex adapters should branch on stable machine-readable codes.
 
 | Code | Codex behavior |
 |---|---|
-| `CLAIM_EXPIRED` | Retry with explicit `reply --queue-id --message-id`. |
-| `CLAIM_EXPIRED_OR_MISSING` | Before #404, notify only if a visible fallback is required; after #404, retry explicit close. |
-| `INVALID_REPLY_TO` | Treat as legacy active-claim failure; retry explicit close when queue identity is available. |
-| `RECLAIM_REQUIRED` | Retry explicit close with retained `queue_id`. |
+| `CLAIM_EXPIRED` | Stop reply/close. Use the returned exact `queue_id` and `expected_claim_expires_at` for fenced recovery, then targeted receive. |
+| `CLAIM_FENCED` | Stop. This runtime is stale and must not retry, reply, close, or notify. |
+| `CLAIM_FENCE_REQUIRED` | Supply both exact fence inputs from `CLAIM_EXPIRED`; no state changed. |
+| `CLAIM_FENCE_MISMATCH` | Stop and re-read current state; the row or lease changed and no state was mutated. |
+| `CLAIM_EXPIRED_OR_MISSING` | Treat as legacy active-claim failure; diagnose the exact queue row and do not notify. |
+| `INVALID_REPLY_TO` | Treat as legacy active-claim failure; diagnose the retained queue identity and do not notify. |
+| `RECLAIM_REQUIRED` | Use exact fenced recovery when the row is expired; do not retry close directly. |
 | `ALREADY_CLOSED` | Do not retry; report closing metadata. |
 | `NOT_CLAIM_OWNER` | Do not steal; report conflict and wait or escalate. |
 | `NOT_MENTIONED` | Do not retry without routing or queue correction. |
@@ -166,8 +236,12 @@ notify automatically.
 true:
 
 - `aun drain` returns `queue_id` and `message_id` for every claimed item.
-- `aun reply --queue-id <id>` can close a Codex-owned work item after the
-  original claim TTL has expired.
+- A live same-owner, same-runtime claim renews only through exact
+  `aun renew-claim --queue-id <id>`.
+- An expired `in_progress` item requires exact `queue_id` plus
+  `expected_claim_expires_at` fenced recovery, followed by targeted receive,
+  before reply-close.
+- A stale runtime is fenced before any message or outbound write.
 - `aun reply --queue-id <id> --message-id <uuid>` verifies both identifiers
   identify the same queue row.
 - Active-claim reply without explicit queue id remains compatible for short
@@ -175,6 +249,7 @@ true:
 - A row actively claimed by another agent fails with a stable conflict code and
   is not stolen.
 - `aun notify` rejects queue-close flags and never marks queue rows replied.
+- Notify absence or failure does not change durable reply-close evidence.
 - Reply failures return JSON with `ok:false`, `code`, and enough context for a
   Codex script to choose retry, wait, or operator escalation.
 - No #404 contract test touches the operator's production PostgreSQL socket by

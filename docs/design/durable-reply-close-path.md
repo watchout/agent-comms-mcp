@@ -1,26 +1,33 @@
 # Durable Reply Close Path
 
-Issue: #401
+Issues: #401, #881
 
 ## Decision
 
-Long-running reviews need a durable reply close path that does not treat a
-short claim TTL as the only proof of reply authority.
+Long-running work uses a renewable lease and a runtime fence. Explicit queue
+identity selects the intended row, but does not let an expired or stale runtime
+revive and close it.
 
-The public invariant is:
+The current public invariant is:
 
 ```text
-claim = concurrency control
-reply authority = routed queue identity + agent identity + channel membership
+live reply authority
+  = routed queue identity
+  + agent identity and channel membership
+  + current claim owner
+  + current runtime fence
+  + unexpired lease
+
+expired recovery
+  = exact queue_id
+  + exact expected_claim_expires_at
+  + compare-and-swap to pending
+  + targeted receive by the next runtime
 ```
 
-`notify` remains a new-message operation. It must never close a queue row,
-update `replied_at`, or set `replied_with`.
-
-`reply` remains the queue-closing operation. It must be able to close an
-intended row by explicit `queue_id` and/or `message_id` after validating that
-the caller is the routed agent for that queue item and is permitted to reply in
-the destination channel.
+`reply` is the only queue-closing message operation. `notify` remains a new,
+out-of-band message operation and is neither required for nor evidence of a
+durable terminal close.
 
 ## Problem
 
@@ -30,14 +37,14 @@ The current CLI reply path is claim-relative:
 2. `send` finds the caller's active `received` claim.
 3. `send` posts a reply and marks that queue row `replied`.
 
-That is correct for short work, but long reviews can exceed the claim TTL. Once
-the row is reclaimed or no longer active, the reply path fails with
-`INVALID_REPLY_TO`. Operators then have a tempting fallback: `notify`. That
-posts a visible message, but it does not close the original queue row. The
-result is public conversation drift and private queue-state drift.
+That is correct for short work, but long reviews can exceed the claim TTL. A
+runtime may also be replaced while the original process still has queue ids in
+memory. Allowing either process to revive the old claim at reply time creates a
+stale-writer and duplicate-terminal risk.
 
-The durable close design separates "who may reply to this work item" from "who
-currently holds the short-lived processing lock."
+The current design renews a live same-owner claim during processing, rejects an
+expired or stale runtime before message/outbound projection, and requires exact
+fenced recovery before another runtime receives the row.
 
 ## Non-Negotiable Invariants
 
@@ -51,14 +58,17 @@ currently holds the short-lived processing lock."
    - It can target the active claim, as today.
    - It can target `--queue-id <id>` and/or `--message-id <uuid>`.
    - If both are supplied, they must identify the same queue row.
+   - Explicit identity never bypasses the live lease or runtime fence.
    - Success writes `agent_messages`, enqueues outbound delivery, then marks
      the target row `replied` with `replied_at` and `replied_with`.
 
-3. A claim is a lock, not a capability token.
-   - Active `claimed_by = agent_id` is sufficient to reply.
-   - Expired or missing claim is not automatically sufficient to reject a
-     reply if explicit queue identity and permission checks pass.
-   - A different active owner is still a hard conflict.
+3. A claim is a fenced, renewable lock.
+   - A live claim renews only for the exact `queue_id`, same agent, and same
+     runtime instance.
+   - Renewal fails after expiry; reply-close cannot renew implicitly.
+   - A stale runtime fails `CLAIM_FENCED` before message or outbound writes.
+   - An expired row returns its exact lease timestamp as
+     `expected_claim_expires_at` for recovery.
 
 4. Close is idempotent and observable.
    - Already closed rows return `ALREADY_CLOSED` with the closing message id
@@ -73,39 +83,27 @@ currently holds the short-lived processing lock."
      `message_queue` rows.
    - Tests must prove no accidental notify fallback closes a queue item.
 
-## Initial Implementation Scope
+6. Notify is outside the terminal proof.
+   - Notify absence or delivery failure does not block durable reply-close.
+   - Notify success does not prove that the queue row closed.
+   - A reply error must never be converted into notify automatically.
 
-Initial implementation should include:
+## Lease Lifecycle
 
-- explicit reply close by `queue_id`
-- optional cross-check by `message_id`
-- claim conflict detection
-- bounded reclaim-at-close for expired/self-owned or unowned rows
-- machine-readable failure codes
-- isolated DB contract tests
+1. `receive` establishes `claimed_by`, `claim_expires_at`, and the current
+   `claimed_runtime_instance_id` when runtime evidence is available.
+2. `processing` advances `received` to `in_progress` and renews a live lease.
+   Repeated `processing` heartbeats may renew the same exact live row.
+3. `renew-claim --queue-id <id>` extends only a live `received` or
+   `in_progress` same-owner claim for the same runtime instance.
+4. `reply` or `done` rejects expired work with `CLAIM_EXPIRED` and rejects a
+   displaced runtime with `CLAIM_FENCED` before any terminal effect.
+5. Exact recovery moves one expired row back to `pending` only when both
+   `queue_id` and `expected_claim_expires_at` still match under lock.
+6. A targeted `receive --queue-id <id>` establishes the next live claim. Only
+   then may processing and reply-close continue.
 
-Initial implementation should not include:
-
-- DB migrations
-- `state-daemon` rewrite
-- heartbeat-driven claim extension
-- long-lived claim leases stored outside `message_queue`
-- silent conversion of notify into reply
-
-### Why Bounded Reclaim First
-
-For #401, bounded reclaim-at-close is the smallest safe bridge:
-
-- It fixes the operator-visible long-review failure.
-- It keeps the durable authority check in one close transaction.
-- It does not require background heartbeats to be correct before reply close is
-  reliable.
-- It preserves the existing claim TTL as a concurrency lock.
-
-Claim extension and heartbeat refresh are useful later, but they solve a
-different problem: keeping work visibly active while processing continues. They
-should be designed after the durable close path exists, because extending a
-claim still does not define reply authority when the runtime loses state.
+Bulk legacy reclaim is `received`-only. It never selects `in_progress` rows.
 
 ## Proposed CLI Surface
 
@@ -149,13 +147,12 @@ The close path should run in one DB transaction:
    - mentions must resolve through the existing send/route policy
    - no channel membership means `NOT_MENTIONED` or `NOT_CHANNEL_MEMBER`
 
-5. Reclaim if needed:
-   - if row is `pending` or `received` with no active owner, set
-     `claimed_by = caller`, refresh `claimed_at`, and set a short
-     `claim_expires_at`
-   - if row is `received` by caller but expired, refresh the claim inside the
-     same transaction before close
-   - if row is actively held by another owner, fail `NOT_CLAIM_OWNER`
+5. Validate the lease and runtime fence:
+   - current runtime must match `claimed_runtime_instance_id` when present
+   - `claim_expires_at` must be present and later than current time
+   - an expired lease fails `CLAIM_EXPIRED`; it is not refreshed in the close
+     transaction
+   - a mismatched runtime fails `CLAIM_FENCED`
 
 6. Insert outbound reply:
    - create `agent_messages` for the reply
@@ -176,8 +173,11 @@ scripts to decide whether to retry, reclaim, or escalate.
 
 | Code | Meaning | Retry policy |
 |---|---|---|
-| `CLAIM_EXPIRED` | Active claim was held by caller but expired before close. | Retry via explicit close path. |
-| `RECLAIM_REQUIRED` | Row is reclaimable but caller did not opt into durable close. | Retry with explicit `queue_id` close. |
+| `CLAIM_EXPIRED` | The selected claim expired before renewal or close. | Stop terminal work; exact fenced recovery, then targeted receive. |
+| `CLAIM_FENCED` | Another runtime instance owns the current fence. | Stop; stale runtime must not retry or notify. |
+| `CLAIM_FENCE_REQUIRED` | Exact recovery omitted `queue_id` or `expected_claim_expires_at`. | Supply both values from the expiry evidence. |
+| `CLAIM_FENCE_MISMATCH` | The row, state, or lease timestamp changed. | Stop and re-read; no mutation occurred. |
+| `RECLAIM_REQUIRED` | Legacy active-claim reply has no current row. | Diagnose exact queue state; never close an expired row directly. |
 | `ALREADY_CLOSED` | Row is already `replied` or otherwise terminal. | Do not retry; surface closing metadata. |
 | `NOT_CLAIM_OWNER` | Another agent owns an active claim. | Do not steal; wait or escalate. |
 | `NOT_MENTIONED` | Caller is not the routed recipient for this queue item. | Do not retry without route change. |
@@ -199,8 +199,12 @@ Required tests:
 - `notify --queue-id` fails with `NOTIFY_IS_NOT_REPLY` and leaves queue rows
   unchanged.
 - active claim by caller closes by `queue_id`.
-- expired claim by caller closes by explicit `queue_id`.
-- unclaimed pending row for caller closes by explicit `queue_id`.
+- live claim renews only for exact same-owner, same-runtime `queue_id`.
+- expired claim cannot renew, reply, or close.
+- stale runtime fails before message and outbound projection.
+- exact recovery requires matching `queue_id` and
+  `expected_claim_expires_at`, then clears the old runtime fence.
+- a mismatched expected expiry changes no state.
 - row actively claimed by another agent fails `NOT_CLAIM_OWNER`.
 - already replied row fails `ALREADY_CLOSED` and returns `replied_with`.
 - queue id and message id mismatch fails `QUEUE_MESSAGE_MISMATCH`.
@@ -209,6 +213,9 @@ Required tests:
 - non-member caller fails `NOT_CHANNEL_MEMBER`.
 - no test connects to the production PostgreSQL socket or uses the operator's
   default `DATABASE_URL`.
+- exactly one terminal reply and outbound projection exist after a successful
+  recovery, targeted receive, and retry.
+- notify remains absent from the successful terminal path.
 
 Optional PostgreSQL parity tests can run against disposable CI services, but the
 core contract must pass on SQLite to keep local OSS installs safe.
@@ -225,12 +232,18 @@ The durable reply close path should compose with drain:
 - notify remains available for out-of-band status but never closes the drained
   work item
 
-## Rollout Plan
+## Operator Recovery Sequence
 
-1. Land this design PR as public contract.
-2. Add contract tests for the failure-code matrix.
-3. Implement explicit close in the lower-level send path or a dedicated helper.
-4. Expose stable AUN wrapper flags.
-5. Update operator docs to prefer `aun reply --queue-id` for long reviews.
-6. Later, design heartbeat/claim extension as observability and scheduling
-   improvements, not as the sole reply authority mechanism.
+```text
+CLAIM_EXPIRED(queue_id, expected_claim_expires_at)
+  -> exact reclaim dry-run
+  -> exact reclaim execute with the same two values
+  -> row is pending and old runtime fence is cleared
+  -> targeted receive of the same queue_id
+  -> processing / live renewal
+  -> exactly one reply-close
+```
+
+Every arrow is fail-closed. A failure before targeted receive produces no
+reply, no close, and no outbound projection. A notification is not part of the
+sequence.
