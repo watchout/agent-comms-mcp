@@ -35,7 +35,6 @@ function requireQueueCleanupTestDatabaseUrl(env: NodeJS.ProcessEnv = process.env
 }
 
 const TEST_DATABASE_URL = resolveQueueCleanupTestDatabaseUrl()
-const dbDescribe = TEST_DATABASE_URL ? describe : describe.skip
 const TEST_AGENT_PREFIX = '__test_qcleanup_'
 
 let client: Client | null = null
@@ -124,7 +123,7 @@ describe('PR-Q1 queue-cleanup test database safety', () => {
   })
 })
 
-dbDescribe('PR-Q1 queue-cleanup script', () => {
+if (TEST_DATABASE_URL) describe('PR-Q1 queue-cleanup script', () => {
   test('case 1: dry-run does not mutate (BEGIN/ROLLBACK)', async () => {
     if (!available) return
     const id = await seedRow({ agent_id: `${TEST_AGENT_PREFIX}c1`, ageHours: 24 })
