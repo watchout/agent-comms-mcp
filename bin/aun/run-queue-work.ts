@@ -453,6 +453,7 @@ class AgentComCliReplySender implements QueueReplySender {
 
 interface MediatedPostingRequest {
   schema_version: 'queue_work_mediated_posting_request_v1'
+  operation?: 'perform' | 'readback'
   queue_id: string
   agent_id: string
   message_id: string | null
@@ -469,16 +470,17 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
     private readonly env: NodeJS.ProcessEnv,
   ) {}
 
-  async sendWriteback(input: {
+  private async invoke(input: {
     queue_id: string
     agent_id: string
     message_id: string | null
     handoff_contract: QueueWorkHandoffContract
     writeback: QueueWorkGithubIssueCommentWriteback
     runtime_result_summary: QueueWorkRuntimeResultSummary
-  }): Promise<{ posted_with?: string | null; body_sha256?: string | null }> {
+  }, operation: 'perform' | 'readback'): Promise<{ posted_with?: string | null; body_sha256?: string | null }> {
     const request: MediatedPostingRequest = {
       schema_version: 'queue_work_mediated_posting_request_v1',
+      operation,
       queue_id: input.queue_id,
       agent_id: input.agent_id,
       message_id: input.message_id,
@@ -513,6 +515,14 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
       posted_with: typeof parsed.posted_with === 'string' ? parsed.posted_with : null,
       body_sha256: typeof parsed.body_sha256 === 'string' ? parsed.body_sha256 : null,
     }
+  }
+
+  async sendWriteback(input: Parameters<QueueWorkWritebackSender['sendWriteback']>[0]) {
+    return this.invoke(input, 'perform')
+  }
+
+  async readWriteback(input: Parameters<QueueWorkWritebackSender['sendWriteback']>[0]) {
+    return this.invoke(input, 'readback')
   }
 }
 

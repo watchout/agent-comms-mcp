@@ -104,6 +104,14 @@ export interface QueueWorkWritebackSender {
     writeback: QueueWorkGithubIssueCommentWriteback
     runtime_result_summary: QueueWorkRuntimeResultSummary
   }): Promise<{ posted_with?: string | null; body_sha256?: string | null }>
+  readWriteback?(input: {
+    queue_id: string
+    agent_id: string
+    message_id: string | null
+    handoff_contract: QueueWorkHandoffContract
+    writeback: QueueWorkGithubIssueCommentWriteback
+    runtime_result_summary: QueueWorkRuntimeResultSummary
+  }): Promise<{ posted_with?: string | null; body_sha256?: string | null }>
 }
 
 export interface QueueWorkRuntimeResultSummary {
@@ -184,6 +192,7 @@ export type QueueWorkFinalizeOutcome =
         | 'NO_DONE_ROW'
         | 'INVALID_STATE'
         | 'MESSAGE_FENCE_MISMATCH'
+        | 'D1_COMPLETION_RECEIPT_REQUIRED'
         | 'MISSING_RUNNER_RESULT'
         | 'TERMINAL_EVIDENCE_INVALID'
         | 'MISSING_REPLY'
@@ -198,9 +207,18 @@ export type QueueWorkFinalizeOutcome =
       detail?: string
     }
 
+export interface QueueWorkD1CompletionFence {
+  invocation_key: string
+  claim_key: string
+  authorization_digest: string
+  effect: 'internal_reply' | 'github_writeback' | 'external_send'
+  receipt: string
+}
+
 export interface FinalizeDoneQueueWorkOptions {
   queueId: string | number
   messageId?: string | null
+  d1CompletionFence?: QueueWorkD1CompletionFence
   replySender?: QueueReplySender
   writebackSender?: QueueWorkWritebackSender
   resultValidator?: (input: {
@@ -640,6 +658,7 @@ export async function finalizeDoneQueueWork(
             },
           })
         : row.payload
+      const closeFence = opts.d1CompletionFence
       const updated = await db.query<{ id: string | number }>(
         `UPDATE message_queue
             SET status = 'replied',
@@ -651,8 +670,38 @@ export async function finalizeDoneQueueWork(
                 claim_expires_at = NULL
           WHERE id = $1
             AND status = 'done'
+            ${closeFence ? `AND EXISTS (
+              SELECT 1
+                FROM shirube_d1_invocations i
+                JOIN shirube_d1_effect_deliveries d ON d.invocation_key = i.invocation_key
+               WHERE i.invocation_key = $5
+                 AND i.claim_key = $6
+                 AND i.authorization_digest = $7
+                 AND i.effect = $9
+                 AND i.status = 'completed'
+                 AND d.effect = $9
+                 AND d.status = 'completed'
+                 AND d.receipt = $8
+                 AND CASE i.effect
+                       WHEN 'internal_reply' THEN i.internal_reply_receipt
+                       WHEN 'github_writeback' THEN i.github_writeback_receipt
+                       WHEN 'external_send' THEN i.external_send_receipt
+                     END = $8
+            )` : ''}
           RETURNING id`,
-        [row.id, closedAt.toISOString(), repliedWith, nextPayload],
+        [
+          row.id,
+          closedAt.toISOString(),
+          repliedWith,
+          nextPayload,
+          ...(closeFence ? [
+            closeFence.invocation_key,
+            closeFence.claim_key,
+            closeFence.authorization_digest,
+            closeFence.receipt,
+            closeFence.effect,
+          ] : []),
+        ],
       )
       if (rowCount(updated) === 0) {
         await db.query('ROLLBACK')
@@ -700,6 +749,76 @@ export async function finalizeDoneQueueWork(
       return { ok: false, code, queue_id: queueIdOf(row), detail }
     }
 
+    let d1CompletedReceipt: string | null = null
+    const d1Binding = payload.shirube_v4_d1
+    if (d1Binding && typeof d1Binding === 'object' && !Array.isArray(d1Binding)) {
+      const fence = opts.d1CompletionFence
+      const bindingDigest = typeof d1Binding.authorization?.authorization_digest === 'string'
+        ? d1Binding.authorization.authorization_digest
+        : null
+      if (
+        !fence
+        || !fence.invocation_key
+        || !fence.claim_key
+        || !fence.authorization_digest
+        || !fence.receipt
+        || fence.authorization_digest !== bindingDigest
+      ) {
+        return failClosed(
+          'D1_COMPLETION_RECEIPT_REQUIRED',
+          'D1 queue work requires an exact completed invocation/effect receipt fence before final close',
+        )
+      }
+      const completed = await db.query<{
+        invocation_key: string
+        claim_key: string
+        authorization_digest: string
+        invocation_effect: QueueWorkD1CompletionFence['effect']
+        invocation_status: string
+        internal_reply_receipt: string | null
+        github_writeback_receipt: string | null
+        external_send_receipt: string | null
+        delivery_effect: QueueWorkD1CompletionFence['effect']
+        delivery_status: string
+        delivery_receipt: string | null
+      }>(
+        `SELECT i.invocation_key, i.claim_key, i.authorization_digest,
+                i.effect AS invocation_effect, i.status AS invocation_status,
+                i.internal_reply_receipt, i.github_writeback_receipt, i.external_send_receipt,
+                d.effect AS delivery_effect, d.status AS delivery_status,
+                d.receipt AS delivery_receipt
+           FROM shirube_d1_invocations i
+           JOIN shirube_d1_effect_deliveries d ON d.invocation_key = i.invocation_key
+          WHERE i.invocation_key = $1
+            AND i.claim_key = $2
+            AND i.authorization_digest = $3
+            AND i.effect = $4
+            AND d.effect = $4`,
+        [fence.invocation_key, fence.claim_key, fence.authorization_digest, fence.effect],
+      )
+      const receiptRow = completed.rows[0]
+      const invocationReceipt = fence.effect === 'internal_reply'
+        ? receiptRow?.internal_reply_receipt
+        : fence.effect === 'github_writeback'
+          ? receiptRow?.github_writeback_receipt
+          : receiptRow?.external_send_receipt
+      if (
+        completed.rows.length !== 1
+        || receiptRow?.invocation_status !== 'completed'
+        || receiptRow?.delivery_status !== 'completed'
+        || receiptRow?.invocation_effect !== fence.effect
+        || receiptRow?.delivery_effect !== fence.effect
+        || invocationReceipt !== fence.receipt
+        || receiptRow?.delivery_receipt !== fence.receipt
+      ) {
+        return failClosed(
+          'D1_COMPLETION_RECEIPT_REQUIRED',
+          'D1 invocation and effect delivery must both contain the same completed receipt before final close',
+        )
+      }
+      d1CompletedReceipt = fence.receipt
+    }
+
     const handoffContract = detectQueueWorkHandoffContract({
       agentId: row.agent_id,
       payload: row.payload,
@@ -720,33 +839,41 @@ export async function finalizeDoneQueueWork(
       if (!result.writeback) {
         return failClosed('MISSING_WRITEBACK')
       }
-      if (!opts.writebackSender) {
-        return failClosed('MISSING_WRITEBACK_SENDER')
+      if (d1CompletedReceipt) {
+        // D1 already performed and durably recorded the selected effect before
+        // this row lock was acquired. Final close consumes only that DB receipt
+        // and must never call a network-capable sender under the transaction.
+        writebackPostedWith = d1CompletedReceipt
+        writebackBodySha256 = result.writeback.body_sha256 ?? null
+      } else {
+        if (!opts.writebackSender) {
+          return failClosed('MISSING_WRITEBACK_SENDER')
+        }
+        const sent = await opts.writebackSender.sendWriteback({
+          queue_id: queueIdOf(row),
+          agent_id: row.agent_id,
+          message_id: row.message_id,
+          handoff_contract: handoffContract,
+          writeback: result.writeback,
+          runtime_result_summary: {
+            ok: result.ok,
+            summary: result.summary,
+            next_action: result.next_action,
+            evidence: result.evidence ?? [],
+          },
+        }).catch((err) => null)
+        if (!sent) {
+          return failClosed('WRITEBACK_FAILED', 'mediated writeback sender failed')
+        }
+        const postedWith = typeof sent.posted_with === 'string' && sent.posted_with.trim().length > 0
+          ? sent.posted_with.trim()
+          : null
+        if (!postedWith) {
+          return failClosed('WRITEBACK_FAILED', 'mediated writeback sender did not return posted_with')
+        }
+        writebackPostedWith = postedWith
+        writebackBodySha256 = sent.body_sha256 ?? result.writeback.body_sha256 ?? null
       }
-      const sent = await opts.writebackSender.sendWriteback({
-        queue_id: queueIdOf(row),
-        agent_id: row.agent_id,
-        message_id: row.message_id,
-        handoff_contract: handoffContract,
-        writeback: result.writeback,
-        runtime_result_summary: {
-          ok: result.ok,
-          summary: result.summary,
-          next_action: result.next_action,
-          evidence: result.evidence ?? [],
-        },
-      }).catch((err) => null)
-      if (!sent) {
-        return failClosed('WRITEBACK_FAILED', 'mediated writeback sender failed')
-      }
-      const postedWith = typeof sent.posted_with === 'string' && sent.posted_with.trim().length > 0
-        ? sent.posted_with.trim()
-        : null
-      if (!postedWith) {
-        return failClosed('WRITEBACK_FAILED', 'mediated writeback sender did not return posted_with')
-      }
-      writebackPostedWith = postedWith
-      writebackBodySha256 = sent.body_sha256 ?? result.writeback.body_sha256 ?? null
     }
 
     if (result.next_action === 'reply') {
@@ -755,13 +882,16 @@ export async function finalizeDoneQueueWork(
         committed = true
         return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
       }
-      if (!opts.replySender) {
+      if (!d1CompletedReceipt && !opts.replySender) {
         await db.query('ROLLBACK')
         committed = true
         return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
       }
+      if (d1CompletedReceipt) {
+        return closeDirectly(d1CompletedReceipt, 'REPLIED', writebackPostedWith, writebackBodySha256)
+      }
       const envelope = buildQueueWorkEnvelope(row)
-      const sent = await opts.replySender.sendReply({
+      const sent = await opts.replySender!.sendReply({
         queue_id: queueIdOf(row),
         agent_id: row.agent_id,
         message_id: row.message_id,

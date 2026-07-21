@@ -3,6 +3,7 @@ import type { DbAdapter } from './db'
 import { detectQueueWorkHandoffContract } from './queue-work'
 import type {
   QueueReplySender,
+  QueueWorkD1CompletionFence,
   QueueWorkGithubIssueCommentWriteback,
   QueueWorkRow,
   QueueWorkWritebackSender,
@@ -98,6 +99,10 @@ export interface ShirubeD1RuntimeControllerOptions extends D1EffectPortOptions {
 export interface ShirubeD1FinalizationSenders {
   replySender?: QueueReplySender
   writebackSender?: QueueWorkWritebackSender
+}
+
+export interface ShirubeD1PreparedFinalization extends ShirubeD1FinalizationSenders {
+  d1CompletionFence?: QueueWorkD1CompletionFence
 }
 
 const cleanString = (value: unknown): string | null => (
@@ -215,6 +220,11 @@ export function computeShirubeD1InvocationKey(binding: ShirubeD1RuntimeBinding, 
   return `d1:invoke:${createHash('sha256').update(`${binding.authorization.authorization_digest}\n${queueId}\n${effect}`, 'utf8').digest('hex')}`
 }
 
+export function computeShirubeD1InternalReplyMessageId(invocationKey: string): string {
+  const hex = createHash('sha256').update(`shirube-d1-internal-reply\n${invocationKey}`, 'utf8').digest('hex').slice(0, 32)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20)}`
+}
+
 function rejectPerformers(): Record<D1Effect, (key: string) => Promise<string>> {
   const reject = async () => { throw new Error('D1_EFFECT_NOT_AVAILABLE') }
   return { internal_reply: reject, github_writeback: reject, external_send: reject }
@@ -323,10 +333,15 @@ export class ShirubeD1RuntimeController {
     binding: ShirubeD1RuntimeBinding,
     effect: D1Effect,
     performers: Record<D1Effect, (key: string) => Promise<string>>,
+    effectReadbacks: D1EffectPortOptions['effectReadbacks'] = {},
   ): Promise<D1ExecutionState> {
     const queueId = String(row.id)
     if (!binding.allowed_effects.includes(effect)) throw new ShirubeD1RuntimeError('D1_EFFECT_NOT_ALLOWED', `${effect} is not authorized`)
-    const ports = createShirubeD1DatabasePorts(this.db, binding.authorization, performers, { ...this.options, now: this.now })
+    const ports = createShirubeD1DatabasePorts(this.db, binding.authorization, performers, {
+      ...this.options,
+      now: this.now,
+      effectReadbacks,
+    })
     const claimed = await claimD1Execution(binding.authorization, claimKey(binding, queueId), ports)
     return invokeD1Execution(binding.authorization, claimed, computeShirubeD1InvocationKey(binding, queueId, effect), effect, ports)
   }
@@ -334,7 +349,7 @@ export class ShirubeD1RuntimeController {
   async prepareFinalizationSenders(
     queueId: string,
     senders: ShirubeD1FinalizationSenders,
-  ): Promise<ShirubeD1FinalizationSenders> {
+  ): Promise<ShirubeD1PreparedFinalization> {
     const row = await this.row(queueId)
     const binding = this.validateBinding(row)
     if (!binding) return senders
@@ -352,11 +367,12 @@ export class ShirubeD1RuntimeController {
     }
     const effect = candidates[0]!
     const performers = rejectPerformers()
+    const effectReadbacks: NonNullable<D1EffectPortOptions['effectReadbacks']> = {}
     if (effect === 'github_writeback') {
       if (!senders.writebackSender || !result.writeback) throw new ShirubeD1RuntimeError('D1_EFFECT_NOT_ALLOWED', 'GitHub sender is unavailable')
-      performers.github_writeback = async (key) => {
+      const writebackInput = (key: string) => {
         const body = `${result.writeback!.body.replace(/\s+$/u, '')}\nidempotency_key: ${key}`
-        const sent = await senders.writebackSender!.sendWriteback({
+        return {
           queue_id: String(row.id),
           agent_id: row.agent_id,
           message_id: row.message_id,
@@ -374,10 +390,18 @@ export class ShirubeD1RuntimeController {
             evidence: Array.isArray((result as Record<string, unknown>).evidence)
               ? (result as Record<string, unknown>).evidence as string[] : [],
           },
-        })
+        }
+      }
+      performers.github_writeback = async (key) => {
+        const sent = await senders.writebackSender!.sendWriteback(writebackInput(key))
         const receipt = cleanString(sent.posted_with)
         if (!receipt) throw new Error('D1_GITHUB_WRITEBACK_RECEIPT_REQUIRED')
         return receipt
+      }
+      effectReadbacks.github_writeback = async (key) => {
+        if (!senders.writebackSender!.readWriteback) return null
+        const sent = await senders.writebackSender!.readWriteback(writebackInput(key))
+        return cleanString(sent.posted_with)
       }
     } else if (effect === 'internal_reply') {
       if (!senders.replySender) throw new ShirubeD1RuntimeError('D1_EFFECT_NOT_ALLOWED', 'internal reply sender is unavailable')
@@ -391,17 +415,65 @@ export class ShirubeD1RuntimeController {
         if (!receipt) throw new Error('D1_INTERNAL_REPLY_RECEIPT_REQUIRED')
         return receipt
       }
+      effectReadbacks.internal_reply = async (key) => {
+        const id = computeShirubeD1InternalReplyMessageId(key)
+        const prior = await this.db.queryOne<{ id: string; metadata: string | Record<string, unknown> | null }>(
+          'SELECT id, metadata FROM agent_messages WHERE id = $1',
+          [id],
+        )
+        if (!prior) return null
+        const metadata = typeof prior.metadata === 'string'
+          ? parsePayload(prior.metadata)
+          : prior.metadata ?? {}
+        const d1 = metadata.shirube_v4_d1 as Record<string, unknown> | undefined
+        if (
+          prior.id !== id
+          || d1?.invocation_key !== key
+          || String(d1?.queue_id ?? '') !== String(row.id)
+          || d1?.effect !== 'internal_reply'
+        ) throw new Error('D1_INTERNAL_REPLY_RECEIPT_CONFLICT')
+        return id
+      }
     } else {
       if (!binding.external_event) throw new ShirubeD1RuntimeError('D1_EFFECT_NOT_ALLOWED', 'external EventLog projection is unavailable')
       if (binding.external_event.payload.content.text !== String(result.reply)) {
         throw new ShirubeD1RuntimeError('D1_EFFECT_NOT_ALLOWED', 'external DeliveryUnit content differs from the admitted runtime reply')
       }
       performers.external_send = (key) => enqueueD1ExternalEvent(this.db, key, binding.external_event!)
+      effectReadbacks.external_send = async (key) => {
+        const expectedEventId = `d1:reply-enqueued:${key}`
+        const expectedReplyId = `d1:${key}`
+        const event = await this.db.queryOne<{ event_id: string; reply_id: string | null }>(
+          'SELECT event_id, reply_id FROM event_log WHERE event_id = $1',
+          [expectedEventId],
+        )
+        if (!event) return null
+        if (event.event_id !== expectedEventId || event.reply_id !== expectedReplyId) {
+          throw new Error('D1_EXTERNAL_RECEIPT_CONFLICT')
+        }
+        return expectedReplyId
+      }
     }
 
-    const completed = await this.invoke(row, binding, effect, performers)
+    const completed = await this.invoke(row, binding, effect, performers, effectReadbacks)
+    const completedReceipt = effect === 'internal_reply'
+      ? completed.internal_reply_receipt
+      : effect === 'github_writeback'
+        ? completed.github_writeback_receipt
+        : completed.external_send_receipt
+    if (!completed.invocation_key || !completedReceipt || completed.status !== 'completed') {
+      throw new ShirubeD1RuntimeError('D1_EFFECT_NOT_ALLOWED', 'completed D1 invocation receipt is unavailable')
+    }
+    const d1CompletionFence: QueueWorkD1CompletionFence = {
+      invocation_key: completed.invocation_key,
+      claim_key: completed.claim_key,
+      authorization_digest: completed.authorization_digest,
+      effect,
+      receipt: completedReceipt,
+    }
     if (effect === 'github_writeback') {
       return {
+        d1CompletionFence,
         replySender: senders.replySender,
         writebackSender: {
           async sendWriteback(input) {
@@ -412,6 +484,7 @@ export class ShirubeD1RuntimeController {
     }
     const replyReceipt = effect === 'internal_reply' ? completed.internal_reply_receipt : completed.external_send_receipt
     return {
+      d1CompletionFence,
       writebackSender: senders.writebackSender,
       replySender: { async sendReply() { return { message_id: replyReceipt } } },
     }

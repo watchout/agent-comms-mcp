@@ -8,7 +8,9 @@ import {
   type QueueReplySender,
   type QueueWorkDb,
   type QueueWorkFinalizeOutcome,
+  type QueueWorkD1CompletionFence,
   type QueueWorkRow,
+  type QueueWorkResult,
   type QueueWorkRunOutcome,
   type QueueWorkWritebackSender,
 } from './queue-work'
@@ -509,6 +511,7 @@ export async function selectAunRuntimeV2CandidateRow(
 function validateCandidate(
   plan: AunRuntimeV2Plan,
   row: QueueWorkRow | null,
+  allowedStatuses: readonly string[] = ['pending'],
 ): { ok: true; candidate: AunRuntimeV2Candidate } | {
   ok: false
   code: AunRuntimeV2FailureCode
@@ -534,7 +537,7 @@ function validateCandidate(
       status: candidate.status,
     }
   }
-  if (candidate.status !== 'pending') {
+  if (!allowedStatuses.includes(candidate.status)) {
     return {
       ok: false,
       code: 'TARGET_QUEUE_NOT_PENDING',
@@ -741,37 +744,81 @@ export async function runAunRuntimeV2(
   const preDbFailure = nonDryRunPreDbFailure(plan, opts.d1Runtime)
   if (preDbFailure) return preDbFailure
 
-  if (!opts.adapter) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: 'ADAPTER_REQUIRED',
-      detail: 'adapter is required when dry_run=false',
-    })
-  }
+  let claimed: AunRuntimeV2Candidate
+  let runner: QueueWorkRunOutcome
+  const resumeRow = plan.queue_id && opts.d1Runtime?.allowsAgent(plan.agent_id) && plan.finalize
+    ? await selectPendingCandidate(db, plan, false)
+    : null
+  if (resumeRow && (resumeRow.status === 'done' || resumeRow.status === 'replied')) {
+    const resumeCandidate = validateCandidate(plan, resumeRow, ['done', 'replied'])
+    if (!resumeCandidate.ok) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: resumeCandidate.code,
+        candidate: resumeCandidate.candidate,
+        detail: resumeCandidate.detail,
+        status: resumeCandidate.status,
+      })
+    }
+    const storedResult = parsePayload(resumeRow.payload).runner_result as QueueWorkResult | undefined
+    if (
+      !storedResult
+      || storedResult.schema_version !== 'queue_work_result_v1'
+      || typeof storedResult.ok !== 'boolean'
+      || typeof storedResult.summary !== 'string'
+      || !['reply', 'close', 'none', 'retry'].includes(storedResult.next_action)
+    ) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'RUNNER_FAILED',
+        candidate: resumeCandidate.candidate,
+        detail: 'D1 finalization resume requires the exact stored queue_work_result_v1',
+        status: resumeRow.status,
+      })
+    }
+    claimed = resumeCandidate.candidate
+    runner = {
+      ok: true,
+      code: 'DONE',
+      queue_id: String(resumeRow.id),
+      final_status: 'done',
+      result: storedResult,
+    }
+  } else {
+    if (!opts.adapter) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'ADAPTER_REQUIRED',
+        detail: 'adapter is required when dry_run=false',
+      })
+    }
 
-  const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
-  if (!claimedOutcome.ok) return claimedOutcome
-  const claimed = claimedOutcome.claimed
+    const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
+    if (!claimedOutcome.ok) return claimedOutcome
+    claimed = claimedOutcome.claimed
 
-  const runner = await runReceivedQueueWork(db, {
-    queueId: claimed.queue_id,
-    agentId: plan.agent_id ?? undefined,
-    adapter: opts.adapter,
-    invocationSource: plan.invocation_source,
-    expectedClaimSource: plan.expected_claim_source,
-    now: opts.now,
-  })
-  if (!runner.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: 'RUNNER_FAILED',
-      claimed,
-      runner,
-      detail: runner.detail,
-      status: runner.status,
+    runner = await runReceivedQueueWork(db, {
+      queueId: claimed.queue_id,
+      agentId: plan.agent_id ?? undefined,
+      adapter: opts.adapter,
+      invocationSource: plan.invocation_source,
+      expectedClaimSource: plan.expected_claim_source,
+      now: opts.now,
     })
+    if (!runner.ok) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'RUNNER_FAILED',
+        claimed,
+        runner,
+        detail: runner.detail,
+        status: runner.status,
+      })
+    }
   }
 
   let finalizer: QueueWorkFinalizeOutcome | undefined
@@ -779,6 +826,7 @@ export async function runAunRuntimeV2(
   if (plan.finalize) {
     let replySender = opts.replySender
     let writebackSender = opts.writebackSender
+    let d1CompletionFence: QueueWorkD1CompletionFence | undefined
     if (opts.d1Runtime) {
       try {
         const guarded = await opts.d1Runtime.prepareFinalizationSenders(runner.queue_id, {
@@ -787,6 +835,7 @@ export async function runAunRuntimeV2(
         })
         replySender = guarded.replySender
         writebackSender = guarded.writebackSender
+        d1CompletionFence = guarded.d1CompletionFence
       } catch (err) {
         return failure({
           dryRun: false,
@@ -803,6 +852,7 @@ export async function runAunRuntimeV2(
       messageId: plan.message_id,
       replySender,
       writebackSender,
+      d1CompletionFence,
       now: opts.now,
     })
     if ('error' in mediated) {

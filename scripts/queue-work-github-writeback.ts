@@ -9,6 +9,7 @@ import type {
 
 export interface QueueWorkMediatedPostingRequest {
   schema_version: 'queue_work_mediated_posting_request_v1'
+  operation?: 'perform' | 'readback'
   queue_id: string
   agent_id: string
   message_id: string | null
@@ -159,6 +160,9 @@ export function validateMediatedPostingRequest(
   if (request.schema_version !== 'queue_work_mediated_posting_request_v1') {
     return { ok: false, error_code: 'INVALID_SCHEMA', summary: 'schema_version must be queue_work_mediated_posting_request_v1' }
   }
+  if (request.operation !== undefined && request.operation !== 'perform' && request.operation !== 'readback') {
+    return { ok: false, error_code: 'INVALID_OPERATION', summary: 'operation must be perform or readback' }
+  }
   if (!request.queue_id || typeof request.queue_id !== 'string') return { ok: false, error_code: 'QUEUE_ID_REQUIRED', summary: 'queue_id is required' }
   if (!request.agent_id || typeof request.agent_id !== 'string') return { ok: false, error_code: 'AGENT_ID_REQUIRED', summary: 'agent_id is required' }
   if (!request.handoff_contract?.github_backed || !request.handoff_contract.required_writebacks?.includes('github_issue_comment')) {
@@ -294,6 +298,14 @@ export async function queueWorkGithubWriteback(
       posted_with: duplicate.receipt,
       body_sha256: validation.body_sha256,
       summary: 'matching GitHub writeback already exists; returned the durable receipt',
+    }
+  }
+  if (request.operation === 'readback') {
+    return {
+      ok: true,
+      posted_with: null,
+      body_sha256: validation.body_sha256,
+      summary: 'no matching GitHub writeback exists; readback performed no mutation',
     }
   }
   const posted = await githubFetchJson<{ html_url?: string; url?: string }>(

@@ -24,6 +24,7 @@ export interface D1EffectPortOptions {
   effectLeaseMs?: number
   effectWaitMs?: number
   effectPollMs?: number
+  effectReadbacks?: Partial<Record<D1Effect, (invocationKey: string) => Promise<string | null>>>
 }
 
 const cleanString = (value: unknown): string | null => (
@@ -50,6 +51,7 @@ export function createD1EffectPort(
   db: DbAdapter,
   effect: D1Effect,
   perform: (invocationKey: string) => Promise<string>,
+  readback: ((invocationKey: string) => Promise<string | null>) | undefined,
   options: D1EffectPortOptions = {},
 ): D1EffectPort {
   const now = options.now ?? (() => new Date())
@@ -83,25 +85,34 @@ export function createD1EffectPort(
         const observedAt = now()
         const expiry = existing.lease_expires_at ? new Date(existing.lease_expires_at).getTime() : 0
         if (!Number.isFinite(expiry) || expiry <= observedAt.getTime()) {
-          acquired = await runD1Transaction(db, async (tx) => {
-            const claimed = await tx.execute(
+          // Never replace an expired performer lease. The old performer may
+          // still be executing outside the DB transaction, and a takeover
+          // would permit the same external effect to run concurrently. An
+          // expired reservation is recovered only through a read-only
+          // mediated readback of the invocation key.
+          const recoveredReceipt = cleanString(await readback?.(invocationKey))
+          if (!recoveredReceipt) throw new Error(`D1_EFFECT_OUTCOME_UNKNOWN: ${invocationKey}`)
+          return runD1Transaction(db, async (tx) => {
+            await tx.execute(
               `UPDATE shirube_d1_effect_deliveries
-                  SET lease_owner = $2, lease_expires_at = $3, updated_at = $4
+                  SET status = 'completed', receipt = $3, lease_owner = NULL,
+                      lease_expires_at = NULL, updated_at = $4
                 WHERE invocation_key = $1
-                  AND effect = $5
+                  AND effect = $2
                   AND status = 'reserved'
-                  AND (lease_expires_at IS NULL OR lease_expires_at <= $4)`,
-              [
-                invocationKey,
-                leaseOwner,
-                new Date(observedAt.getTime() + effectLeaseMs).toISOString(),
-                observedAt.toISOString(),
-                effect,
-              ],
+                  AND receipt IS NULL`,
+              [invocationKey, effect, recoveredReceipt, observedAt.toISOString()],
             )
-            return claimed.rowCount === 1
+            const completed = await tx.queryOne<EffectRow>(
+              `SELECT invocation_key, effect, status, receipt, lease_owner, lease_expires_at
+                 FROM shirube_d1_effect_deliveries WHERE invocation_key = $1`,
+              [invocationKey],
+            )
+            if (!completed || completed.effect !== effect || completed.receipt !== recoveredReceipt) {
+              throw new Error('D1_EFFECT_RECEIPT_CONFLICT')
+            }
+            return result(completed)
           })
-          if (acquired) break
         }
         if (observedAt.getTime() >= deadline) throw new Error(`D1_EFFECT_IN_PROGRESS: ${invocationKey}`)
         await pause(effectPollMs)
@@ -144,9 +155,9 @@ export function createD1EffectPorts(
   options: D1EffectPortOptions = {},
 ) {
   return {
-    internal_reply: createD1EffectPort(db, 'internal_reply', performers.internal_reply, options),
-    github_writeback: createD1EffectPort(db, 'github_writeback', performers.github_writeback, options),
-    external_send: createD1EffectPort(db, 'external_send', performers.external_send, options),
+    internal_reply: createD1EffectPort(db, 'internal_reply', performers.internal_reply, options.effectReadbacks?.internal_reply, options),
+    github_writeback: createD1EffectPort(db, 'github_writeback', performers.github_writeback, options.effectReadbacks?.github_writeback, options),
+    external_send: createD1EffectPort(db, 'external_send', performers.external_send, options.effectReadbacks?.external_send, options),
   }
 }
 

@@ -315,6 +315,36 @@ describe('runReceivedQueueWork', () => {
 })
 
 describe('finalizeDoneQueueWork', () => {
+  test('D1 done rows cannot close without an exact completed receipt DB fence', async () => {
+    const row = receivedRow({
+      status: 'done',
+      payload: JSON.stringify({
+        content: 'D1 protected task',
+        shirube_v4_d1: {
+          authorization: { authorization_digest: 'a'.repeat(64) },
+        },
+        runner_result: okResult({ reply: undefined, next_action: 'close' }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      now: () => new Date('2026-07-21T09:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'D1_COMPLETION_RECEIPT_REQUIRED',
+      queue_id: '42',
+    })
+    expect(db.row.status).toBe('done')
+    expect(JSON.parse(db.row.payload).finalizer_error).toMatchObject({
+      code: 'D1_COMPLETION_RECEIPT_REQUIRED',
+    })
+    expect(db.calls.some((call) => call.sql.includes("SET status = 'replied'"))).toBe(false)
+  })
+
   test('holds the finalize transaction across select, reply send, and replied update', async () => {
     const row = receivedRow({
       status: 'done',

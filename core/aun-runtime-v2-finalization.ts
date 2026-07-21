@@ -2,6 +2,7 @@ import {
   finalizeDoneQueueWork,
   QUEUE_WORK_RESULT_VERSION,
   type QueueReplySender,
+  type QueueWorkD1CompletionFence,
   type QueueWorkDb,
   type QueueWorkFinalizeOutcome,
   type QueueWorkResult,
@@ -31,6 +32,7 @@ export interface AunRuntimeV2FinalizationOptions {
   messageId?: string | null
   replySender?: QueueReplySender
   writebackSender?: QueueWorkWritebackSender
+  d1CompletionFence?: QueueWorkD1CompletionFence
   now?: () => Date
 }
 
@@ -175,6 +177,7 @@ export async function finalizeAunRuntimeV2MediatedQueueWork(
     messageId: args.messageId,
     replySender: opts.replySender,
     writebackSender: opts.writebackSender,
+    d1CompletionFence: opts.d1CompletionFence,
     now: opts.now,
     resultValidator: ({ result }) => {
       terminalEvidence = parseAunRuntimeV2TerminalEvidence(result)

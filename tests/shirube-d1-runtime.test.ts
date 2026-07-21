@@ -262,6 +262,9 @@ describe('Shirube V4 D1 production runtime', () => {
         effectLeaseMs: 1,
         effectWaitMs: 100,
         effectPollMs: 1,
+        effectReadbacks: {
+          external_send: async (key) => durableDownstream.get(key) ?? null,
+        },
       })
       const claimed = await claimD1Execution(authorization, 'claim:ack-loss', firstPorts)
       await expect(invokeD1Execution(
@@ -276,6 +279,9 @@ describe('Shirube V4 D1 production runtime', () => {
         effectLeaseMs: 1,
         effectWaitMs: 100,
         effectPollMs: 1,
+        effectReadbacks: {
+          external_send: async (key) => durableDownstream.get(key) ?? null,
+        },
       })
       const replayed = await invokeD1Execution(
         authorization,
@@ -286,6 +292,49 @@ describe('Shirube V4 D1 production runtime', () => {
       )
       expect(actualEffects).toBe(1)
       expect(replayed.external_send_receipt).toBe(durableDownstream.get('invoke:ack-loss'))
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  test('expired lease never starts a second performer while the original performer is still alive', async () => {
+    const { adapter } = sqliteFixture()
+    try {
+      let effects = 0
+      let release!: () => void
+      let started!: () => void
+      const performerStarted = new Promise<void>((resolve) => { started = resolve })
+      const performerRelease = new Promise<void>((resolve) => { release = resolve })
+      const performers = noOpPerformers()
+      performers.github_writeback = async (key) => {
+        effects += 1
+        started()
+        await performerRelease
+        return `github:${key}:receipt`
+      }
+      const authorization = envelope()
+      const ports = createShirubeD1DatabasePorts(adapter, authorization, performers, {
+        effectLeaseMs: 1,
+        effectWaitMs: 100,
+        effectPollMs: 1,
+        effectReadbacks: { github_writeback: async () => null },
+      })
+      const claimed = await claimD1Execution(authorization, 'claim:expired-live', ports)
+      const first = invokeD1Execution(authorization, claimed, 'invoke:expired-live', 'github_writeback', ports)
+      await performerStarted
+      await Bun.sleep(5)
+      await expect(invokeD1Execution(
+        authorization,
+        claimed,
+        'invoke:expired-live',
+        'github_writeback',
+        ports,
+      )).rejects.toThrow('D1_EFFECT_OUTCOME_UNKNOWN')
+      expect(effects).toBe(1)
+      release()
+      const completed = await first
+      expect(completed.github_writeback_receipt).toBe('github:invoke:expired-live:receipt')
+      expect(effects).toBe(1)
     } finally {
       await adapter.close()
     }
@@ -415,6 +464,38 @@ describe('Shirube V4 D1 production runtime', () => {
         receipt: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-canary',
       }])
       expect(await adapter.query<{ status: string }>('SELECT status FROM message_queue WHERE id = 1')).toEqual([{ status: 'replied' }])
+
+      const replayed = await runAunRuntimeV2(db, {
+        agentId: 'dev-001', queueId: 1, messageId: 'message-canary',
+        createdAfter: '2026-07-21T07:59:00.000Z', finalize: true, d1Runtime: controller,
+        adapter: {
+          runtime_id: 'must-not-rerun',
+          capabilities: {
+            input: 'stdin_context', output: 'schema_json', supportsBareMode: true,
+            supportsResume: false, supportsToolAllowlist: false, supportsSandbox: true,
+            supportsUsageMetadata: false,
+          },
+          async invoke() { throw new Error('completed D1 work must not rerun the model') },
+        },
+        writebackSender: {
+          async sendWriteback() {
+            writebackEffects += 1
+            throw new Error('completed D1 work must not repost')
+          },
+        },
+      })
+      expect(replayed).toMatchObject({
+        ok: true,
+        code: 'E2E_DONE',
+        finalizer: { code: 'ALREADY_REPLIED' },
+        shirube_v4_d1: {
+          durable_receipts: [{
+            receipt: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-canary',
+          }],
+          duplicate_effects: 0,
+        },
+      })
+      expect(writebackEffects).toBe(1)
 
       const killed = new ShirubeD1RuntimeController(adapter, { env: enabledEnv(true) })
       expect(await killed.effectReadback('1')).toMatchObject({

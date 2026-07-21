@@ -64,6 +64,14 @@ only a validated K3 `DeliveryUnitV1` plus its loaded connector registration;
 it appends `reply.enqueued` and leaves the provider effect to the existing K3
 dispatcher.
 
+An effect lease is never reassigned after expiry: the original performer may
+still be alive outside the database transaction. Recovery performs only a
+read-only invocation-key readback. A matching durable receipt completes the
+reservation; no receipt returns `D1_EFFECT_OUTCOME_UNKNOWN` and performs no
+second effect. Final queue close then rechecks the completed invocation and
+effect receipt in the close CAS and does not call a sender while holding the
+queue-row lock.
+
 ## Protected GitHub canary
 
 Use one newly created queue row and fence the execution with its exact queue
@@ -105,8 +113,10 @@ A passing response must contain all of these values:
 - `duplicate_effects: 0`
 - the same GitHub comment URL in the durable receipt and finalizer result
 
-Retry the exact execution once. It must return the same receipt without posting
-a second comment.
+Retry the exact execution once with the same queue, message, creation-time, and
+activation fences. Runtime-v2 resumes only the stored `DONE` result, performs
+read-only receipt recovery when needed, and must return the same receipt
+without rerunning the model or posting a second comment.
 
 ## Rollback
 

@@ -26,6 +26,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
+import { computeShirubeD1InternalReplyMessageId } from '../core/shirube-d1-runtime'
 import { execFileSync } from 'node:child_process'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
@@ -308,11 +309,6 @@ type ClaimRenewalEvidence = {
 const ACTIVE_REPLY_CLAIM_STATUSES = new Set(['received', 'in_progress'])
 const TERMINAL_REPLY_CLOSE_STATUSES = new Set(['replied', 'done', 'skipped', 'failed'])
 const MAX_CLAIM_RENEWAL_TTL_SEC = 15 * 60
-
-function deterministicD1MessageId(invocationKey: string): string {
-  const hex = createHash('sha256').update(`shirube-d1-internal-reply\n${invocationKey}`, 'utf8').digest('hex').slice(0, 32)
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20)}`
-}
 
 function parseQueuePayloadLoose(payload: string | null): Record<string, any> {
   if (!payload) return {}
@@ -3266,7 +3262,7 @@ async function sendMessage(args: string[]) {
       }
       let conversationControlPlaneSummary: Record<string, unknown> | null = null
 
-      const id = d1InvocationKey ? deterministicD1MessageId(d1InvocationKey) : randomUUID()
+      const id = d1InvocationKey ? computeShirubeD1InternalReplyMessageId(d1InvocationKey) : randomUUID()
       // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
       // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
       // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no

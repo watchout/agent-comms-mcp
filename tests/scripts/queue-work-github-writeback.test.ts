@@ -122,6 +122,24 @@ describe('queue-work GitHub mediated writeback wrapper', () => {
     expect(calls[1].init?.method).toBe('POST')
   })
 
+  test('readback operation never posts when no matching comment exists', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      return new Response(JSON.stringify([]), { status: 200 })
+    }) as typeof fetch
+
+    const result = await queueWorkGithubWriteback(request({ operation: 'readback' }), {
+      allowRepos: ['watchout/agent-comms-mcp'],
+      env: { GITHUB_TOKEN: 'test-token' } as NodeJS.ProcessEnv,
+      fetchImpl,
+    })
+
+    expect(result).toMatchObject({ ok: true, posted_with: null })
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every((call) => call.init?.method !== 'POST')).toBe(true)
+  })
+
   test('replays duplicate idempotency evidence as the same durable receipt without posting', async () => {
     const fetchImpl = (async (url: string | URL | Request) => {
       if (String(url).includes('/comments?')) {
