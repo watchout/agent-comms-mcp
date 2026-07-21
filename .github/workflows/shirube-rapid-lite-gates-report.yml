@@ -196,6 +196,7 @@ jobs:
       owner_decision_ref: ""
       enforcement_policy_ref: .shirube/enforcement-policy.yaml
       audit_checklist_ref: ${{ needs.collect-shirube-pr-inputs.outputs.audit_checklist_ref }}
+      generate_current_run_audit_request: true
       structured_audit_ref: ""
       structured_audit_comment_ref: ${{ needs.collect-shirube-pr-inputs.outputs.structured_audit_comment_ref }}
       additional_review_ref: ${{ needs.collect-shirube-pr-inputs.outputs.additional_review_ref }}
