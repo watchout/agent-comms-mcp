@@ -71,7 +71,7 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     expect(SEND_FALLBACK_SRC).toMatch(/status IN \('received', 'in_progress'\)/)
     expect(SEND_FALLBACK_SRC).toMatch(/claim_expires_at IS NOT NULL/)
     expect(SEND_FALLBACK_SRC).toMatch(/claim_expires_at > now\(\)/)
-    expect(SEND_FALLBACK_SRC).toMatch(/reason: 'claim_closed' \| 'claim_expired' \| 'claim_missing'/)
+    expect(SEND_FALLBACK_SRC).toMatch(/reason: 'claim_closed' \| 'claim_expired' \| 'claim_fenced' \| 'claim_missing'/)
     expect(SEND_FALLBACK_SRC).toMatch(/row\.claimed_by === agentId[\s\S]*?'claim_expired'/)
 
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
@@ -83,6 +83,21 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
     expect(expiredIdx).toBeGreaterThan(-1)
     expect(expiredIdx).toBeLessThan(saveIdx)
     expect(expiredIdx).toBeLessThan(outboundIdx)
+  })
+
+  test('runtime takeover fences stale send before projection', () => {
+    expect(SEND_FALLBACK_SRC).toMatch(/claimed_runtime_instance_id/)
+    expect(SEND_FALLBACK_SRC).toMatch(/'claim_fenced'/)
+    const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
+    const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
+    const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
+    expect(handler).toMatch(/decideSendFallback\(txClient, reply_to, agentId, QUEUE_CLAIM_RUNTIME_INSTANCE_ID\)/)
+    const fencedIdx = handler.indexOf('Error [CLAIM_FENCED]')
+    const saveIdx = handler.indexOf('saveMessage({')
+    const outboundIdx = handler.indexOf('INSERT INTO outbound_queue')
+    expect(fencedIdx).toBeGreaterThan(-1)
+    expect(fencedIdx).toBeLessThan(saveIdx)
+    expect(fencedIdx).toBeLessThan(outboundIdx)
   })
 
   test('projection success response carries outbound_queued terminal evidence (Issue #580)', () => {
@@ -189,6 +204,7 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
     expect(handler).toMatch(
       /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
+    expect(handler).toMatch(/SET status = 'busy'[^`]*status = 'in_progress'/)
     // Negative pins.
     expect(handler).not.toMatch(/UPDATE agents SET current_message_id = NULL/)
     expect(handler).not.toMatch(/UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/)
@@ -197,6 +213,7 @@ describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time 
     expect(CLI_SRC).toMatch(
       /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
     )
+    expect(CLI_SRC).toMatch(/SET status = 'busy'[^`]*status = 'in_progress'/)
     expect(CLI_SRC).not.toMatch(/UPDATE agents SET current_message_id = NULL, status = 'idle'/)
   })
 })

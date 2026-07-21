@@ -93,6 +93,16 @@ export function buildNotifyPlan(opts: NotifyOptions = {}): CommandPlan {
 }
 
 export function clarifyReplyFailure(stderr: string, agentId: string): string {
+  if (stderr.includes('CLAIM_EXPIRED')) {
+    return stderr +
+      'Error [EXACT_FENCED_RECOVERY_REQUIRED]: use the queue_id and expected_claim_expires_at from the failure with ' +
+      '`agent-com queue reclaim-expired --queue-id <id> --expected-claim-expires-at <iso> --execute`, then receive the exact row again. ' +
+      'Do not use notify as a reply workaround.\n'
+  }
+  if (stderr.includes('CLAIM_FENCED')) {
+    return stderr +
+      `Error [STALE_CLAIMANT_REJECTED]: runtime takeover already fenced this ${agentId} caller; do not retry or use notify.\n`
+  }
   if (!stderr.includes('INVALID_REPLY_TO')) return stderr
   if (stderr.includes('CLAIM_EXPIRED_OR_MISSING')) return stderr
   return stderr +

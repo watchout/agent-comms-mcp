@@ -5,6 +5,7 @@ export type QueueRepairSample = {
   message_id: string | null
   created_at: string | Date | null
   content: string | null
+  claim_expires_at?: string | null
 }
 
 export type QueueRepairResult = {
@@ -31,6 +32,9 @@ function samplesFromRows(rows: any[]): QueueRepairSample[] {
     message_id: row.message_id ?? null,
     created_at: row.created_at ?? null,
     content: row.content ?? null,
+    ...(Object.prototype.hasOwnProperty.call(row, 'claim_expires_at')
+      ? { claim_expires_at: row.claim_expires_at ?? null }
+      : {}),
   }))
 }
 
@@ -309,22 +313,41 @@ export async function closeObsoletePendingQueueRows(
 
 export async function reclaimExpiredQueueClaims(
   db: Queryable,
-  input: { agentId?: string | null; dryRun?: boolean; queueId?: string | number | null } = {},
+  input: {
+    agentId?: string | null
+    dryRun?: boolean
+    queueId?: string | number | null
+    expectedClaimExpiresAt?: string | null
+  } = {},
 ): Promise<QueueRepairResult> {
   const dryRun = input.dryRun ?? true
   const params: unknown[] = [input.agentId ?? null]
   let filter = ` AND ($1::text IS NULL OR agent_id = $1)`
-  if (input.queueId !== undefined && input.queueId !== null && String(input.queueId).trim() !== '') {
+  const exactQueue = input.queueId !== undefined && input.queueId !== null && String(input.queueId).trim() !== ''
+  if (exactQueue) {
     params.push(input.queueId)
     filter += ` AND id = $${params.length}`
   }
+  if (!dryRun && exactQueue) {
+    const expected = input.expectedClaimExpiresAt?.trim()
+    if (!expected || !Number.isFinite(new Date(expected).getTime())) {
+      throw new Error('CLAIM_FENCE_REQUIRED: exact reclaim requires --expected-claim-expires-at from the locked expired row')
+    }
+    params.push(expected)
+    filter += ` AND claim_expires_at = $${params.length}::timestamptz`
+  }
+  const statusPredicate = exactQueue
+    ? `status IN ('received', 'in_progress')`
+    : `status = 'received'`
 
   const selectSql = `
-    SELECT id, agent_id, status, message_id, created_at,
+    SELECT id, agent_id, status, message_id, created_at, claimed_by,
+           claimed_at, claim_expires_at::text AS claim_expires_at,
+           claimed_runtime_instance_id,
            count(*) OVER ()::int AS total_count,
-           left(payload, 180) AS content
+           substr(payload, 1, 180) AS content
       FROM message_queue
-     WHERE status IN ('received', 'in_progress')
+     WHERE ${statusPredicate}
        AND claim_expires_at IS NOT NULL
        AND claim_expires_at < now()
        ${filter}
@@ -338,11 +361,95 @@ export async function reclaimExpiredQueueClaims(
 
   await db.query('BEGIN')
   try {
+    if (exactQueue) {
+      const before = await db.query(`${selectSql} FOR UPDATE`, params)
+      const candidate = before.rows[0]
+      if (!candidate) {
+        throw new Error('CLAIM_FENCE_MISMATCH: exact queue row is absent, still active, already recovered, or its lease changed')
+      }
+      let rows: any[] = []
+      const updated = await db.query(
+        `UPDATE message_queue
+              SET status = 'pending',
+                  read_at = NULL,
+                  claimed_by = NULL,
+                  claimed_at = NULL,
+                  claim_expires_at = NULL,
+                  claimed_runtime_instance_id = NULL
+            WHERE id = $1
+              AND status = $2
+              AND claim_expires_at = $3::timestamptz
+              AND claim_expires_at < now()
+              AND EXISTS (
+                SELECT 1 FROM message_queue AS locked
+                 WHERE locked.id = message_queue.id
+                   AND locked.status = $2
+                   AND locked.claim_expires_at = $3::timestamptz
+                   AND locked.claim_expires_at < now()
+              )
+          RETURNING id, agent_id, status, message_id, created_at,
+                    substr(payload, 1, 180) AS content`,
+        [candidate.id, candidate.status, input.expectedClaimExpiresAt],
+      )
+      rows = updated.rows.map((row) => ({
+        ...row,
+        before_status: candidate.status,
+        total_count: updated.rows.length,
+      }))
+      if (rows.length !== 1) {
+        throw new Error('CLAIM_RECOVERY_RACE: exact queue row changed before compare-and-swap')
+      }
+      await db.query(
+        `UPDATE agents
+                SET status = CASE
+                      WHEN EXISTS(
+                        SELECT 1 FROM message_queue mq
+                         WHERE mq.claimed_by = agents.agent_id
+                           AND mq.status IN ('received', 'in_progress')
+                      ) AND status IN ('busy', 'idle') THEN 'busy'
+                      WHEN NOT EXISTS(
+                        SELECT 1 FROM message_queue mq
+                         WHERE mq.claimed_by = agents.agent_id
+                           AND mq.status IN ('received', 'in_progress')
+                      ) AND status = 'busy' THEN 'idle'
+                      ELSE status
+                    END,
+                    status_detail = CASE
+                      WHEN EXISTS(
+                        SELECT 1 FROM message_queue mq
+                         WHERE mq.claimed_by = agents.agent_id
+                           AND mq.status IN ('received', 'in_progress')
+                      ) AND status IN ('busy', 'idle') THEN 'message processing'
+                      WHEN NOT EXISTS(
+                        SELECT 1 FROM message_queue mq
+                         WHERE mq.claimed_by = agents.agent_id
+                           AND mq.status IN ('received', 'in_progress')
+                      ) AND status IN ('busy', 'idle') THEN NULL
+                      ELSE status_detail
+                    END,
+                    status_updated_at = now()
+              WHERE agent_id = $1`,
+        [candidate.agent_id],
+      )
+      await writeAuditLog(db, 'queue.reclaim_expired', input.agentId ?? null, input.agentId ?? null, {
+        agent_id: input.agentId ?? null,
+        affected_count: rows.length,
+        before_statuses: statusCounts(rows),
+        after_status: 'pending',
+        recovery: 'exact_expired_claim_compare_and_swap',
+        expected_claim_expires_at: input.expectedClaimExpiresAt ?? null,
+        stale_runtime_fenced: true,
+        sample_queue_ids: rows.map((row) => row.id),
+      })
+      await db.query('COMMIT')
+      return result('reclaim_expired', false, rows)
+    }
+
     const reclaimed = await db.query(
       `WITH before AS (
          SELECT id, agent_id, status, message_id
            FROM message_queue
-          WHERE status IN ('received', 'in_progress')
+          WHERE ${statusPredicate}
             AND claim_expires_at IS NOT NULL
             AND claim_expires_at < now()
             ${filter}
@@ -353,7 +460,8 @@ export async function reclaimExpiredQueueClaims(
                 read_at = NULL,
                 claimed_by = NULL,
                 claimed_at = NULL,
-                claim_expires_at = NULL
+                claim_expires_at = NULL,
+                claimed_runtime_instance_id = NULL
            FROM before b
           WHERE mq.id = b.id
           RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
@@ -397,6 +505,9 @@ export async function reclaimExpiredQueueClaims(
       affected_count: Number(reclaimed.rows[0]?.total_count ?? reclaimed.rows.length),
       before_statuses: statusCounts(reclaimed.rows),
       after_status: 'pending',
+      recovery: exactQueue ? 'exact_expired_claim_compare_and_swap' : 'legacy_received_only',
+      expected_claim_expires_at: exactQueue ? input.expectedClaimExpiresAt ?? null : null,
+      stale_runtime_fenced: exactQueue,
       sample_queue_ids: reclaimed.rows.map((row) => row.id),
     })
     await db.query('COMMIT')

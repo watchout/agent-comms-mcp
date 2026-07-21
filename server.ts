@@ -273,6 +273,7 @@ const AGENT_ID = config.agent_id
 const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID || randomUUID()
 process.env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_INSTANCE_ID
 const RUNTIME_HEARTBEAT_DISABLED = process.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED === '1'
+const QUEUE_CLAIM_RUNTIME_INSTANCE_ID = RUNTIME_HEARTBEAT_DISABLED ? null : RUNTIME_INSTANCE_ID
 const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
 if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
   process.stderr.write(
@@ -2156,11 +2157,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
     {
       name: 'reclaim',
-      description: 'Manual orphan reclaim for a crashed bot. Rolls any status=\'received\' row whose read_at is older than 15 minutes back to pending and flips the agent to idle. Safe to call even when nothing is orphaned (cleanup-only). Matches `agent-com reclaim --agent-id X`.',
+      description: 'Recover an expired claim. For in_progress rows, queue_id and expected_claim_expires_at are required and recovery is exact-row compare-and-swap fenced. Without queue_id, only legacy received rows older than 15 minutes are reclaimed; in_progress rows are never bulk reclaimed.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           agent_id: { type: 'string', description: 'Agent whose orphan in-flight row should be reclaimed. Falls back to the caller\'s AGENT_ID.' },
+          queue_id: { type: 'string', description: 'Exact message_queue.id. Required to recover status=in_progress.' },
+          expected_claim_expires_at: { type: 'string', description: 'Exact expired lease returned by CLAIM_EXPIRED. Required with queue_id for fenced recovery.' },
         },
       },
     },
@@ -2170,7 +2173,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     // CHECK constraint forbids 'in_progress' / 'done'.
     {
       name: 'processing',
-      description: 'Mark a claimed message as in_progress (LLM turn started). Pre: status=\'received\'. Post: status=\'in_progress\'. Idempotent — a second call on an already-in_progress row returns ALREADY_TRANSITIONED + ok:true. Spec §1.2.',
+      description: 'Mark an owned live claim in_progress and renew its lease. Repeated same-runtime processing calls heartbeat only the exact queue_id. Expired or runtime-fenced claims fail closed and require exact reclaim. Spec §1.2.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -2289,15 +2292,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // structural via the sweeper. TTL default 30s, env-overridable
       // per Issue #278 §5 Open decisions.
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-      await client.query(
+      const claimed = await client.query<{ claim_expires_at: string }>(
         `UPDATE message_queue
             SET status = 'received',
                 read_at = now(),
                 claimed_by = $1,
                 claimed_at = now(),
-                claim_expires_at = now() + ($2 || ' seconds')::interval
-          WHERE id = $3`,
-        [agentId, String(claimTtlSec), row.id],
+                claim_expires_at = now() + ($2 || ' seconds')::interval,
+                claimed_runtime_instance_id = $3
+          WHERE id = $4
+          RETURNING claim_expires_at::text AS claim_expires_at`,
+        [agentId, String(claimTtlSec), QUEUE_CLAIM_RUNTIME_INSTANCE_ID, row.id],
       )
       // spec §4.1 step 4 — mark agent busy while processing this message.
       // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
@@ -2386,6 +2391,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         message_type: payload.message_type ?? 'chat',
         source: payload.source ?? null,
         created_at: row.created_at,
+        claim_lease: {
+          runtime_instance_id: QUEUE_CLAIM_RUNTIME_INSTANCE_ID,
+          claim_expires_at: claimed.rows[0]?.claim_expires_at ?? null,
+        },
         reply_chain: replyChain,
       }
       return { content: [{ type: 'text', text: JSON.stringify(result) }] }
@@ -2475,7 +2484,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // The decision helper locks active claims and returns terminal evidence
       // for closed/missing rows so this handler cannot duplicate Discord output
       // through a notify-style fallback.
-      const decision = await decideSendFallback(txClient, reply_to, agentId)
+      const decision = await decideSendFallback(txClient, reply_to, agentId, QUEUE_CLAIM_RUNTIME_INSTANCE_ID)
       if (decision.kind === 'invalid_reply_to') {
         await txClient.query('ROLLBACK')
         txCommitted = true
@@ -2497,10 +2506,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (decision.reason === 'claim_expired') {
           const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
           const statusSuffix = decision.status ? ` status=${decision.status}` : ''
+          const leaseSuffix = decision.claimExpiresAt
+            ? ` claim_expires_at=${decision.claimExpiresAt}`
+            : ''
           return {
             content: [{
               type: 'text',
-              text: `Error [CLAIM_EXPIRED]: active claim expired for reply_to=${reply_to}${queueSuffix}${statusSuffix}; reclaim or call next before send. No outbound projection queued.`,
+              text: `Error [CLAIM_EXPIRED]: active claim expired for reply_to=${reply_to}${queueSuffix}${statusSuffix}${leaseSuffix}; recover the exact queue row with that expected lease before calling next. No outbound projection queued.`,
+            }],
+            isError: true,
+          }
+        }
+        if (decision.reason === 'claim_fenced') {
+          const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
+          const runtimeSuffix = decision.claimedRuntimeInstanceId
+            ? ` active_runtime_instance_id=${decision.claimedRuntimeInstanceId}`
+            : ''
+          return {
+            content: [{
+              type: 'text',
+              text: `Error [CLAIM_FENCED]: stale runtime cannot reply_to=${reply_to}${queueSuffix}${runtimeSuffix}; no outbound projection queued.`,
             }],
             isError: true,
           }
@@ -2971,7 +2996,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               replied_with = $1,
               claimed_by = NULL,
               claimed_at = NULL,
-              claim_expires_at = NULL
+              claim_expires_at = NULL,
+              claimed_runtime_instance_id = NULL
         WHERE id = $2`,
       [id, claimedMqId],
     )
@@ -2988,6 +3014,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
          status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
          status_updated_at = now()
        WHERE agent_id = $1`,
+      [agentId],
+    )
+    await txClient.query(
+      `UPDATE agents
+          SET status = 'busy', status_detail = 'メッセージ処理中', status_updated_at = now()
+        WHERE agent_id = $1
+          AND EXISTS(
+            SELECT 1 FROM message_queue
+             WHERE claimed_by = $1 AND status = 'in_progress'
+          )`,
       [agentId],
     )
 
@@ -3819,10 +3855,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Issue #277 (D) — augment process-level health (registry/tmux/port) with
     // postgres-truth queue + heartbeat metrics in a single SQL.
     let dbStatus: Map<string, BotStatusDbRow> = new Map()
+    let expiredInProgress = new Map<string, { count: number; oldest: Date | string | null }>()
     const dbClient = await tryGetDb()
     if (dbClient) {
       try {
         dbStatus = await fetchBotStatusFromDb(dbClient)
+        const expiredRows = await dbClient.query<{
+          agent_id: string
+          expired_count: string | number
+          oldest_expired_at: Date | string | null
+        }>(
+          `SELECT agent_id, count(*)::int AS expired_count,
+                  min(claim_expires_at) AS oldest_expired_at
+             FROM message_queue
+            WHERE status = 'in_progress'
+              AND claim_expires_at IS NOT NULL
+              AND claim_expires_at < now()
+            GROUP BY agent_id`,
+        )
+        expiredInProgress = new Map(expiredRows.rows.map((row) => [
+          row.agent_id,
+          { count: Number(row.expired_count), oldest: row.oldest_expired_at },
+        ]))
       } catch (err) {
         process.stderr.write(`agent-comms: bot_status DB query failed (non-fatal): ${err}\n`)
       }
@@ -3839,8 +3893,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                    health.status === 'exited' ? '🚪' :
                    health.status === 'misconfigured' ? '⚠️' : '❓'
       const dbRow = dbStatus.get(entry.agentId)
+      const expired = expiredInProgress.get(entry.agentId)
       const dbSuffix = dbRow
-        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} active_claims=${dbRow.active_claim_count} wake=${dbRow.queue_wake_state} wake_at=${dbRow.latest_wake_progress_at ?? '-'} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count} discord_gateway=${dbRow.discord_gateway_state}`
+        ? ` | health=${dbRow.health_state} pending=${dbRow.pending_count} oldest=${formatPendingAge(dbRow.oldest_pending_at)} active_claims=${dbRow.active_claim_count} expired_in_progress=${expired?.count ?? 0} expired_in_progress_oldest=${expired ? formatPendingAge(expired.oldest) : '-'} wake=${dbRow.queue_wake_state} wake_at=${dbRow.latest_wake_progress_at ?? '-'} hb=${dbRow.heartbeat_ok ? 'ok' : 'stale'} endpoint=${dbRow.endpoint_lease_state} leases=${dbRow.active_endpoint_lease_count}/${dbRow.runtime_linked_connector_count} discord_gateway=${dbRow.discord_gateway_state}`
         : ' | (no db row)'
       const sourceSuffix = entry.source ? ` | source=${entry.source}` : ''
       const blockerSuffix = entry.blockers && entry.blockers.length > 0 ? ` | blockers=${entry.blockers.join(',')}` : ''
@@ -3931,18 +3986,130 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: 'Error: DATABASE_URL not configured — reclaim requires PG access.' }], isError: true }
     }
     const targetAgent = (typeof args?.agent_id === 'string' && args.agent_id.length > 0) ? args.agent_id : AGENT_ID
+    const queueIdRaw = typeof args?.queue_id === 'string' ? args.queue_id.trim() : ''
+    const expectedClaimExpiresAt = typeof args?.expected_claim_expires_at === 'string'
+      ? args.expected_claim_expires_at.trim()
+      : ''
     try {
       await client.query('BEGIN')
       try {
+        if (queueIdRaw) {
+          const queueId = Number.parseInt(queueIdRaw, 10)
+          if (!Number.isFinite(queueId) || queueId <= 0 || String(queueId) !== queueIdRaw) {
+            await client.query('ROLLBACK')
+            return { content: [{ type: 'text', text: `Error [INVALID_QUEUE_ID]: reclaim queue_id must be a positive integer, got '${queueIdRaw}'.` }], isError: true }
+          }
+          if (!expectedClaimExpiresAt || !Number.isFinite(new Date(expectedClaimExpiresAt).getTime())) {
+            await client.query('ROLLBACK')
+            return { content: [{ type: 'text', text: 'Error [CLAIM_FENCE_REQUIRED]: exact reclaim requires expected_claim_expires_at from CLAIM_EXPIRED.' }], isError: true }
+          }
+          const current = await client.query<{
+            id: number | string
+            agent_id: string
+            status: string
+            claimed_by: string | null
+            claimed_at: Date | string | null
+            claim_expires_at: string | null
+            claim_is_expired: boolean | null
+            claimed_runtime_instance_id: string | null
+          }>(
+            `SELECT id, agent_id, status, claimed_by, claimed_at,
+                    claim_expires_at::text AS claim_expires_at,
+                    claim_expires_at < now() AS claim_is_expired,
+                    claimed_runtime_instance_id::text AS claimed_runtime_instance_id
+               FROM message_queue
+              WHERE id = $1
+              FOR UPDATE`,
+            [queueId],
+          )
+          if (current.rows.length === 0 || current.rows[0]!.agent_id !== targetAgent) {
+            await client.query('ROLLBACK')
+            return { content: [{ type: 'text', text: `Error [NOT_FOUND]: queue_id=${queueId} is not addressed to agent_id=${targetAgent}.` }], isError: true }
+          }
+          const row = current.rows[0]!
+          if (row.status !== 'in_progress') {
+            await client.query('ROLLBACK')
+            return { content: [{ type: 'text', text: `Error [INVALID_STATE]: exact crashed-claim recovery requires status='in_progress', got '${row.status}' (queue_id=${queueId}).` }], isError: true }
+          }
+          if (!row.claim_is_expired) {
+            await client.query('ROLLBACK')
+            return { content: [{ type: 'text', text: `Error [CLAIM_STILL_ACTIVE]: queue_id=${queueId} lease is not expired; live work must heartbeat, not be reclaimed.` }], isError: true }
+          }
+          const recovered = await client.query(
+            `UPDATE message_queue
+                SET status = 'pending',
+                    read_at = NULL,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL,
+                    claimed_runtime_instance_id = NULL
+              WHERE id = $1
+                AND agent_id = $2
+                AND status = 'in_progress'
+                AND claim_expires_at = $3::timestamptz
+                AND claim_expires_at < now()
+              RETURNING id`,
+            [queueId, targetAgent, expectedClaimExpiresAt],
+          )
+          if (recovered.rows.length !== 1) {
+            await client.query('ROLLBACK')
+            return { content: [{ type: 'text', text: `Error [CLAIM_FENCE_MISMATCH]: queue_id=${queueId} expected_claim_expires_at does not match the locked row; no state changed.` }], isError: true }
+          }
+          await client.query(
+            `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+             VALUES ('queue.claim_recovered', $1, $2, $3, 'default')`,
+            [AGENT_ID, String(queueId), JSON.stringify({
+              queue_id: String(queueId),
+              target_agent_id: targetAgent,
+              recovered_by: AGENT_ID,
+              expected_claim_expires_at: expectedClaimExpiresAt,
+              prior_claimed_by: row.claimed_by,
+              prior_claimed_at: row.claimed_at,
+              prior_claimed_runtime_instance_id: row.claimed_runtime_instance_id,
+              recovery: 'exact_expired_in_progress_compare_and_swap',
+              next_status: 'pending',
+              stale_runtime_fenced: true,
+            })],
+          )
+          await client.query(
+            `UPDATE agents SET
+               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
+               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'メッセージ処理中' ELSE NULL END,
+               status_updated_at = now()
+             WHERE agent_id = $1`,
+            [targetAgent],
+          )
+          await client.query('COMMIT')
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                ok: true,
+                agent_id: targetAgent,
+                queue_id: queueId,
+                status: 'pending',
+                recovered_count: 1,
+                recovery: 'exact_expired_in_progress_compare_and_swap',
+                prior_claimed_runtime_instance_id: row.claimed_runtime_instance_id,
+                stale_runtime_fenced: true,
+                next_action: 'call next to establish a new runtime-fenced claim',
+              }),
+            }],
+          }
+        }
+
         const rollback = await client.query(
           `UPDATE message_queue
               SET status = 'pending',
                   read_at = NULL,
                   claimed_by = NULL,
                   claimed_at = NULL,
-                  claim_expires_at = NULL
+                  claim_expires_at = NULL,
+                  claimed_runtime_instance_id = NULL
             WHERE agent_id = $1
               AND status = 'received'
+              AND claim_expires_at IS NOT NULL
+              AND claim_expires_at < now()
               AND read_at < now() - INTERVAL '15 minutes'
             RETURNING id`,
           [targetAgent],
@@ -3954,8 +4121,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // those visible.
         await client.query(
           `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'メッセージ処理中' ELSE NULL END,
              status_updated_at = now()
            WHERE agent_id = $1`,
           [targetAgent],
@@ -4019,12 +4186,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message_id: string | null
           agent_id: string
           stored_content: string | null
+          claimed_by: string | null
+          claimed_at: Date | string | null
+          claim_expires_at: Date | string | null
+          claim_expires_at_exact: string | null
+          claimed_runtime_instance_id: string | null
         }>(
           `SELECT mq.status, mq.payload, mq.message_id, mq.agent_id,
+                  mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  mq.claim_expires_at::text AS claim_expires_at_exact,
+                  mq.claimed_runtime_instance_id::text AS claimed_runtime_instance_id,
                   am.content AS stored_content
              FROM message_queue mq
              LEFT JOIN agent_messages am ON am.id::text = mq.message_id
-            WHERE mq.id = $1`,
+            WHERE mq.id = $1
+            FOR UPDATE OF mq`,
           [queueId],
         )
         if (cur.rows.length === 0) {
@@ -4036,6 +4212,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const row = cur.rows[0]!
         const status = row.status
+        if (row.agent_id !== agentId) {
+          await client.query('ROLLBACK')
+          return {
+            content: [{ type: 'text', text: `Error [NOT_FOUND]: queue_id=${queueId} is not owned by agent_id=${agentId}.` }],
+            isError: true,
+          }
+        }
         const payload = parseQueuePayload(row.payload)
         const decision = detectNoReplyIntent({ payload, storedContent: row.stored_content })
         const existingBaton = existingNoReplyBaton(payload)
@@ -4049,7 +4232,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const stampedPayload = terminalBaton && !existingBaton
           ? JSON.stringify(withTerminalBaton(payload, terminalBaton))
           : null
-        if (status === toStatus) {
+        if (status === toStatus && name === 'done') {
           if (name === 'done' && stampedPayload) {
             await client.query('ROLLBACK')
           } else {
@@ -4069,12 +4252,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }],
           }
         }
-        if (name === 'processing' && status !== 'received') {
+        if (status === 'received' || status === 'in_progress') {
+          if (row.claimed_by !== agentId) {
+            await client.query('ROLLBACK')
+            return {
+              content: [{ type: 'text', text: `Error [NOT_CLAIM_OWNER]: queue_id=${queueId} claimed_by=${row.claimed_by ?? 'null'}; expected ${agentId}.` }],
+              isError: true,
+            }
+          }
+          if (row.claimed_runtime_instance_id && row.claimed_runtime_instance_id !== QUEUE_CLAIM_RUNTIME_INSTANCE_ID) {
+            await client.query('ROLLBACK')
+            return {
+              content: [{ type: 'text', text: `Error [CLAIM_FENCED]: queue_id=${queueId} belongs to runtime_instance_id=${row.claimed_runtime_instance_id}; stale runtime rejected.` }],
+              isError: true,
+            }
+          }
+          const expiresAtMs = row.claim_expires_at ? new Date(row.claim_expires_at).getTime() : Number.NaN
+          if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+            const lease = row.claim_expires_at_exact ?? 'null'
+            await client.query('ROLLBACK')
+            return {
+              content: [{ type: 'text', text: `Error [CLAIM_EXPIRED]: queue_id=${queueId} claim_expires_at=${lease}; use exact fenced reclaim before next.` }],
+              isError: true,
+            }
+          }
+        }
+        if (name === 'processing' && status !== 'received' && status !== 'in_progress') {
           await client.query('ROLLBACK')
           return {
             content: [{
               type: 'text',
-              text: `Error [INVALID_STATE]: processing requires status='received', got '${status}' (queue_id=${queueId}).`,
+              text: `Error [INVALID_STATE]: processing requires status='received'|'in_progress', got '${status}' (queue_id=${queueId}).`,
             }],
             isError: true,
           }
@@ -4089,18 +4297,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           }
         }
+        const claimTtlSec = Math.max(1, Math.min(15 * 60, Number.parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '60', 10) || 60))
         const upd = name === 'processing'
           ? await client.query(
-              `UPDATE message_queue SET status = 'in_progress' WHERE id = $1 AND status = $2 RETURNING id`,
-              [queueId, 'received'],
+              `UPDATE message_queue
+                  SET status = 'in_progress',
+                      claimed_at = COALESCE(claimed_at, now()),
+                      claim_expires_at = now() + ($2 || ' seconds')::interval,
+                      claimed_runtime_instance_id = $3
+                WHERE id = $1
+                  AND agent_id = $4
+                  AND claimed_by = $4
+                  AND status IN ('received', 'in_progress')
+                  AND claim_expires_at > now()
+                  AND (claimed_runtime_instance_id IS NULL OR claimed_runtime_instance_id = $3)
+                RETURNING id, claim_expires_at::text AS claim_expires_at`,
+              [queueId, String(claimTtlSec), QUEUE_CLAIM_RUNTIME_INSTANCE_ID, agentId],
             )
           : stampedPayload
             ? await client.query(
-                `UPDATE message_queue SET status = 'done', done_at = now(), payload = $3 WHERE id = $1 AND status = $2 RETURNING id`,
+                `UPDATE message_queue
+                    SET status = 'done', done_at = now(), payload = $3
+                  WHERE id = $1 AND status = $2 RETURNING id`,
                 [queueId, status, stampedPayload],
               )
             : await client.query(
-                `UPDATE message_queue SET status = 'done', done_at = now() WHERE id = $1 AND status = $2 RETURNING id`,
+                `UPDATE message_queue
+                    SET status = 'done', done_at = now()
+                  WHERE id = $1 AND status = $2 RETURNING id`,
                 [queueId, status],
               )
         if (upd.rows.length === 0) {
@@ -4111,6 +4335,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           }
         }
+        await client.query(
+          `UPDATE agents SET
+             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'busy' ELSE 'idle' END,
+             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status IN ('received', 'in_progress')) THEN 'メッセージ処理中' ELSE NULL END,
+             status_updated_at = now()
+           WHERE agent_id = $1`,
+          [agentId],
+        )
         await client.query('COMMIT')
         return {
           content: [{
@@ -4119,6 +4351,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               ok: true,
               queue_id: queueId,
               status: toStatus,
+              already_transitioned: name === 'processing' && status === 'in_progress' ? true : undefined,
+              lease_renewed: name === 'processing' ? true : undefined,
+              claimed_runtime_instance_id: name === 'processing' ? QUEUE_CLAIM_RUNTIME_INSTANCE_ID : undefined,
+              claim_expires_at: name === 'processing' ? upd.rows[0]?.claim_expires_at ?? null : undefined,
               no_reply_required: name === 'done' && decision.no_reply_required ? true : undefined,
               terminal_baton: name === 'done' ? terminalBaton ?? undefined : undefined,
             }),
