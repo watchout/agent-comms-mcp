@@ -13,6 +13,8 @@ export interface D1ExecutionState {
   authorization_digest: string
   claim_key: string
   invocation_key: string | null
+  effect: D1Effect | null
+  status: 'claimed' | 'reserved' | 'completed'
   internal_reply_receipt: string | null
   github_writeback_receipt: string | null
   external_send_receipt: string | null
@@ -25,13 +27,41 @@ interface D1PersistencePort {
   persist_once(state: D1ExecutionState): Promise<D1ExecutionState>
 }
 
+interface D1InvocationPersistencePort {
+  load(key: string): Promise<D1ExecutionState | null>
+  /** Atomically create one reserved record by invocation_key, or return the existing record. */
+  reserve_once(state: D1ExecutionState): Promise<{
+    acquired: boolean
+    state: D1ExecutionState
+  }>
+  /**
+   * Atomically complete the existing reservation. Replays must return the same
+   * completed record, and a conflicting channel or receipt must fail closed.
+   */
+  complete_once(state: D1ExecutionState): Promise<D1ExecutionState>
+}
+
+interface D1EffectResult {
+  invocation_key: string
+  effect: D1Effect
+  receipt: string
+}
+
 interface D1EffectPort {
-  perform(state: Readonly<D1ExecutionState>): Promise<string>
+  /**
+   * Perform the actual effect at most once for state.invocation_key.
+   *
+   * Implementations must durably bind the returned receipt to the invocation
+   * key before acknowledging success. Repeating this call after concurrency,
+   * process interruption, or acknowledgement loss must return the same result
+   * without repeating the actual effect.
+   */
+  perform_once(state: Readonly<D1ExecutionState>): Promise<D1EffectResult>
 }
 
 export interface D1ExecutionPorts {
   claim_persistence: D1PersistencePort
-  invocation_persistence: D1PersistencePort
+  invocation_persistence: D1InvocationPersistencePort
   internal_reply: D1EffectPort
   github_writeback: D1EffectPort
   external_send: D1EffectPort
@@ -151,7 +181,18 @@ function receiptCount(state: D1ExecutionState): number {
   ].filter(receipt => receipt !== null).length
 }
 
-function assertInvocationReplay(
+function assertClaimState(state: D1ExecutionState): void {
+  if (
+    state.status !== 'claimed'
+    || state.invocation_key !== null
+    || state.effect !== null
+    || receiptCount(state) !== 0
+  ) {
+    throw new Error('CLAIM_STATE_MISMATCH: persisted claim has invocation data')
+  }
+}
+
+function assertInvocationState(
   state: D1ExecutionState,
   envelope: D1AuthorizationEnvelope,
   claimedState: D1ExecutionState,
@@ -162,8 +203,39 @@ function assertInvocationReplay(
   if (state.invocation_key !== invocationKey) {
     throw new Error('INVOCATION_KEY_MISMATCH: persisted invocation uses another key')
   }
-  if (receiptCount(state) !== 1 || receiptFor(state, effect) === null) {
+  if (state.effect !== effect) {
     throw new Error('INVOCATION_EFFECT_MISMATCH: an invocation receipt cannot satisfy another effect channel')
+  }
+  if (state.status === 'reserved' && receiptCount(state) === 0) return
+  if (
+    state.status !== 'completed'
+    || receiptCount(state) !== 1
+    || receiptFor(state, effect) === null
+  ) {
+    throw new Error('INVOCATION_STATE_MISMATCH: invocation must be reserved or completed exactly once')
+  }
+}
+
+function assertEffectResult(
+  result: D1EffectResult,
+  invocationKey: string,
+  effect: D1Effect,
+): void {
+  if (!result || result.invocation_key !== invocationKey || result.effect !== effect) {
+    throw new Error('EFFECT_IDEMPOTENCY_KEY_MISMATCH: effect result is not bound to the invocation')
+  }
+  if (
+    typeof result.receipt !== 'string'
+    || result.receipt.length === 0
+    || result.receipt !== result.receipt.trim()
+  ) {
+    throw new Error('EFFECT_IDEMPOTENCY_RECEIPT_INVALID: effect receipt must be a trimmed nonempty string')
+  }
+}
+
+function assertEffect(effect: D1Effect): void {
+  if (effect !== 'internal_reply' && effect !== 'github_writeback' && effect !== 'external_send') {
+    throw new Error(`UNKNOWN_D1_EFFECT: ${String(effect)}`)
   }
 }
 
@@ -178,6 +250,7 @@ export async function claimD1Execution(
   const existing = await ports.claim_persistence.load(exactClaimKey)
   if (existing) {
     assertStateAuthorization(existing, envelope, exactClaimKey)
+    assertClaimState(existing)
     return existing
   }
 
@@ -186,12 +259,15 @@ export async function claimD1Execution(
     authorization_digest: envelope.authorization_digest,
     claim_key: exactClaimKey,
     invocation_key: null,
+    effect: null,
+    status: 'claimed',
     internal_reply_receipt: null,
     github_writeback_receipt: null,
     external_send_receipt: null,
   }
   const persisted = await ports.claim_persistence.persist_once(claimed)
   assertStateAuthorization(persisted, envelope, exactClaimKey)
+  assertClaimState(persisted)
   return persisted
 }
 
@@ -204,36 +280,53 @@ export async function invokeD1Execution(
 ): Promise<D1ExecutionState> {
   assertAuthorization(envelope)
   const exactInvocationKey = exactKey(invocationKey, 'invocation_key')
+  assertEffect(effect)
   assertStateAuthorization(claimedState, envelope, claimedState.claim_key)
+  assertClaimState(claimedState)
 
   const existing = await ports.invocation_persistence.load(exactInvocationKey)
   if (existing) {
-    assertInvocationReplay(existing, envelope, claimedState, exactInvocationKey, effect)
-    return existing
+    assertInvocationState(existing, envelope, claimedState, exactInvocationKey, effect)
+    if (existing.status === 'completed') return existing
   }
 
-  const invocation: D1ExecutionState = {
+  const requestedReservation: D1ExecutionState = {
     ...claimedState,
     invocation_key: exactInvocationKey,
+    effect,
+    status: 'reserved',
     internal_reply_receipt: null,
     github_writeback_receipt: null,
     external_send_receipt: null,
   }
-  const receipt = effect === 'internal_reply'
-    ? await ports.internal_reply.perform(invocation)
+  const reservation = await ports.invocation_persistence.reserve_once(requestedReservation)
+  assertInvocationState(
+    reservation.state,
+    envelope,
+    claimedState,
+    exactInvocationKey,
+    effect,
+  )
+  if (reservation.state.status === 'completed') return reservation.state
+
+  const result = effect === 'internal_reply'
+    ? await ports.internal_reply.perform_once(reservation.state)
     : effect === 'github_writeback'
-      ? await ports.github_writeback.perform(invocation)
-      : effect === 'external_send'
-        ? await ports.external_send.perform(invocation)
-        : (() => { throw new Error(`UNKNOWN_D1_EFFECT: ${String(effect)}`) })()
+      ? await ports.github_writeback.perform_once(reservation.state)
+      : await ports.external_send.perform_once(reservation.state)
+  assertEffectResult(result, exactInvocationKey, effect)
 
   const completed: D1ExecutionState = {
-    ...invocation,
-    internal_reply_receipt: effect === 'internal_reply' ? receipt : null,
-    github_writeback_receipt: effect === 'github_writeback' ? receipt : null,
-    external_send_receipt: effect === 'external_send' ? receipt : null,
+    ...reservation.state,
+    status: 'completed',
+    internal_reply_receipt: effect === 'internal_reply' ? result.receipt : null,
+    github_writeback_receipt: effect === 'github_writeback' ? result.receipt : null,
+    external_send_receipt: effect === 'external_send' ? result.receipt : null,
   }
-  const persisted = await ports.invocation_persistence.persist_once(completed)
-  assertInvocationReplay(persisted, envelope, claimedState, exactInvocationKey, effect)
+  const persisted = await ports.invocation_persistence.complete_once(completed)
+  assertInvocationState(persisted, envelope, claimedState, exactInvocationKey, effect)
+  if (receiptFor(persisted, effect) !== result.receipt) {
+    throw new Error('EFFECT_IDEMPOTENCY_VIOLATION: one invocation key produced different receipts')
+  }
   return persisted
 }
