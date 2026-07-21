@@ -5,6 +5,7 @@ export type QueueRepairSample = {
   message_id: string | null
   created_at: string | Date | null
   content: string | null
+  claim_expires_at?: string | null
 }
 
 export type QueueRepairResult = {
@@ -31,6 +32,9 @@ function samplesFromRows(rows: any[]): QueueRepairSample[] {
     message_id: row.message_id ?? null,
     created_at: row.created_at ?? null,
     content: row.content ?? null,
+    ...(Object.prototype.hasOwnProperty.call(row, 'claim_expires_at')
+      ? { claim_expires_at: row.claim_expires_at ?? null }
+      : {}),
   }))
 }
 
@@ -338,7 +342,8 @@ export async function reclaimExpiredQueueClaims(
 
   const selectSql = `
     SELECT id, agent_id, status, message_id, created_at, claimed_by,
-           claimed_at, claim_expires_at, claimed_runtime_instance_id,
+           claimed_at, claim_expires_at::text AS claim_expires_at,
+           claimed_runtime_instance_id,
            count(*) OVER ()::int AS total_count,
            substr(payload, 1, 180) AS content
       FROM message_queue

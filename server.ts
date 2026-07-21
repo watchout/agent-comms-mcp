@@ -2292,7 +2292,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // structural via the sweeper. TTL default 30s, env-overridable
       // per Issue #278 §5 Open decisions.
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-      const claimed = await client.query<{ claim_expires_at: Date | string }>(
+      const claimed = await client.query<{ claim_expires_at: string }>(
         `UPDATE message_queue
             SET status = 'received',
                 read_at = now(),
@@ -2301,7 +2301,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 claim_expires_at = now() + ($2 || ' seconds')::interval,
                 claimed_runtime_instance_id = $3
           WHERE id = $4
-          RETURNING claim_expires_at`,
+          RETURNING claim_expires_at::text AS claim_expires_at`,
         [agentId, String(claimTtlSec), QUEUE_CLAIM_RUNTIME_INSTANCE_ID, row.id],
       )
       // spec §4.1 step 4 — mark agent busy while processing this message.
@@ -2507,7 +2507,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const queueSuffix = decision.queueId !== undefined ? ` queue_id=${decision.queueId}` : ''
           const statusSuffix = decision.status ? ` status=${decision.status}` : ''
           const leaseSuffix = decision.claimExpiresAt
-            ? ` claim_expires_at=${new Date(decision.claimExpiresAt).toISOString()}`
+            ? ` claim_expires_at=${decision.claimExpiresAt}`
             : ''
           return {
             content: [{
@@ -4009,10 +4009,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             status: string
             claimed_by: string | null
             claimed_at: Date | string | null
-            claim_expires_at: Date | string | null
+            claim_expires_at: string | null
+            claim_is_expired: boolean | null
             claimed_runtime_instance_id: string | null
           }>(
-            `SELECT id, agent_id, status, claimed_by, claimed_at, claim_expires_at,
+            `SELECT id, agent_id, status, claimed_by, claimed_at,
+                    claim_expires_at::text AS claim_expires_at,
+                    claim_expires_at < now() AS claim_is_expired,
                     claimed_runtime_instance_id::text AS claimed_runtime_instance_id
                FROM message_queue
               WHERE id = $1
@@ -4028,21 +4031,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             await client.query('ROLLBACK')
             return { content: [{ type: 'text', text: `Error [INVALID_STATE]: exact crashed-claim recovery requires status='in_progress', got '${row.status}' (queue_id=${queueId}).` }], isError: true }
           }
-          const observedExpiryMs = row.claim_expires_at ? new Date(row.claim_expires_at).getTime() : Number.NaN
-          const expectedExpiryMs = new Date(expectedClaimExpiresAt).getTime()
-          if (!Number.isFinite(observedExpiryMs) || observedExpiryMs > Date.now()) {
+          if (!row.claim_is_expired) {
             await client.query('ROLLBACK')
             return { content: [{ type: 'text', text: `Error [CLAIM_STILL_ACTIVE]: queue_id=${queueId} lease is not expired; live work must heartbeat, not be reclaimed.` }], isError: true }
-          }
-          if (observedExpiryMs !== expectedExpiryMs) {
-            await client.query('ROLLBACK')
-            return {
-              content: [{
-                type: 'text',
-                text: `Error [CLAIM_FENCE_MISMATCH]: queue_id=${queueId} expected_claim_expires_at does not match the locked row; no state changed.`,
-              }],
-              isError: true,
-            }
           }
           const recovered = await client.query(
             `UPDATE message_queue
@@ -4055,13 +4046,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               WHERE id = $1
                 AND agent_id = $2
                 AND status = 'in_progress'
+                AND claim_expires_at = $3::timestamptz
                 AND claim_expires_at < now()
               RETURNING id`,
-            [queueId, targetAgent],
+            [queueId, targetAgent, expectedClaimExpiresAt],
           )
           if (recovered.rows.length !== 1) {
             await client.query('ROLLBACK')
-            return { content: [{ type: 'text', text: `Error [CLAIM_RECOVERY_RACE]: queue_id=${queueId} changed before recovery.` }], isError: true }
+            return { content: [{ type: 'text', text: `Error [CLAIM_FENCE_MISMATCH]: queue_id=${queueId} expected_claim_expires_at does not match the locked row; no state changed.` }], isError: true }
           }
           await client.query(
             `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
@@ -4197,10 +4189,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           claimed_by: string | null
           claimed_at: Date | string | null
           claim_expires_at: Date | string | null
+          claim_expires_at_exact: string | null
           claimed_runtime_instance_id: string | null
         }>(
           `SELECT mq.status, mq.payload, mq.message_id, mq.agent_id,
                   mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
+                  mq.claim_expires_at::text AS claim_expires_at_exact,
                   mq.claimed_runtime_instance_id::text AS claimed_runtime_instance_id,
                   am.content AS stored_content
              FROM message_queue mq
@@ -4275,7 +4269,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           const expiresAtMs = row.claim_expires_at ? new Date(row.claim_expires_at).getTime() : Number.NaN
           if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
-            const lease = row.claim_expires_at ? new Date(row.claim_expires_at).toISOString() : 'null'
+            const lease = row.claim_expires_at_exact ?? 'null'
             await client.query('ROLLBACK')
             return {
               content: [{ type: 'text', text: `Error [CLAIM_EXPIRED]: queue_id=${queueId} claim_expires_at=${lease}; use exact fenced reclaim before next.` }],
@@ -4317,7 +4311,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   AND status IN ('received', 'in_progress')
                   AND claim_expires_at > now()
                   AND (claimed_runtime_instance_id IS NULL OR claimed_runtime_instance_id = $3)
-                RETURNING id, claim_expires_at`,
+                RETURNING id, claim_expires_at::text AS claim_expires_at`,
               [queueId, String(claimTtlSec), QUEUE_CLAIM_RUNTIME_INSTANCE_ID, agentId],
             )
           : stampedPayload

@@ -287,6 +287,7 @@ type ExplicitReplyQueueRow = {
   claimed_by: string | null
   claimed_at: string | Date | null
   claim_expires_at: string | Date | null
+  claim_expires_at_exact: string | null
   claimed_runtime_instance_id: string | null
   replied_with: string | null
 }
@@ -2859,7 +2860,9 @@ async function sendMessage(args: string[]) {
           }
           qres = await db.query(
             `SELECT id, agent_id, message_id, payload, status, claimed_by, claimed_at,
-                    claim_expires_at, claimed_runtime_instance_id, replied_with
+                    claim_expires_at,
+                    claim_expires_at::text AS claim_expires_at_exact,
+                    claimed_runtime_instance_id, replied_with
                FROM message_queue
               WHERE id = $1
               FOR UPDATE`,
@@ -2868,7 +2871,9 @@ async function sendMessage(args: string[]) {
         } else {
           qres = await db.query(
             `SELECT id, agent_id, message_id, payload, status, claimed_by, claimed_at,
-                    claim_expires_at, claimed_runtime_instance_id, replied_with
+                    claim_expires_at,
+                    claim_expires_at::text AS claim_expires_at_exact,
+                    claimed_runtime_instance_id, replied_with
                FROM message_queue
               WHERE agent_id = $1 AND message_id = $2
               ORDER BY created_at DESC
@@ -2945,8 +2950,8 @@ async function sendMessage(args: string[]) {
             status: qrow.status,
             claimed_by: qrow.claimed_by,
             claimed_runtime_instance_id: qrow.claimed_runtime_instance_id,
-            expected_claim_expires_at: normalizeDateString(qrow.claim_expires_at),
-            recovery: 'agent-com queue reclaim-expired --queue-id <id> --expected-claim-expires-at <iso> --execute',
+            expected_claim_expires_at: qrow.claim_expires_at_exact,
+            recovery: 'agent-com queue reclaim-expired --queue-id <id> --expected-claim-expires-at <exact-timestamptz> --execute',
             outbound_queued: false,
           })
         }
@@ -4637,7 +4642,7 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
       process.exit(2)
     }
     if (expectedClaimExpiresAt && !Number.isFinite(Date.parse(expectedClaimExpiresAt))) {
-      console.error('Error [CLAIM_FENCE_INVALID]: --expected-claim-expires-at must be the exact ISO timestamp returned by CLAIM_EXPIRED')
+      console.error('Error [CLAIM_FENCE_INVALID]: --expected-claim-expires-at must be the exact lossless timestamp returned by CLAIM_EXPIRED')
       process.exit(2)
     }
     if (!dryRun && queueId && !expectedClaimExpiresAt) {
@@ -6032,7 +6037,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run by default; close pending rows already represented on the target identity
   queue close-outbound-obsolete [--agent-id <agent>] [--consumer-agent-id <agent>] --reason <text> [--max-age 12h] [--execute|--dry-run]
                                                        — dry-run by default; close stale outbound projection rows
-  queue reclaim-expired --queue-id <id> --expected-claim-expires-at <iso> --execute
+  queue reclaim-expired --queue-id <id> --expected-claim-expires-at <exact-timestamptz> --execute
                                                        — exact fenced recovery for one expired received/in_progress row; both values are required and must match
   queue reclaim-expired [--agent-id <agent>] [--execute|--dry-run]
                                                        — legacy bulk recovery is received-only and never reclaims in_progress work

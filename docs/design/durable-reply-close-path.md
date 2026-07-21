@@ -68,7 +68,9 @@ fenced recovery before another runtime receives the row.
    - Renewal fails after expiry; reply-close cannot renew implicitly.
    - A stale runtime fails `CLAIM_FENCED` before message or outbound writes.
    - An expired row returns its exact lease timestamp as
-     `expected_claim_expires_at` for recovery.
+     `expected_claim_expires_at` for recovery. This is lossless PostgreSQL
+     timestamp text including all stored microseconds; it is never normalized
+     through JavaScript `Date` or `toISOString()`.
 
 4. Close is idempotent and observable.
    - Already closed rows return `ALREADY_CLOSED` with the closing message id
@@ -99,7 +101,9 @@ fenced recovery before another runtime receives the row.
 4. `reply` or `done` rejects expired work with `CLAIM_EXPIRED` and rejects a
    displaced runtime with `CLAIM_FENCED` before any terminal effect.
 5. Exact recovery moves one expired row back to `pending` only when both
-   `queue_id` and `expected_claim_expires_at` still match under lock.
+   `queue_id` and `expected_claim_expires_at` still match under lock. Preview,
+   execute, and MCP recovery carry the same lossless timestamp string, and the
+   final `UPDATE` binds it as a database equality predicate.
 6. A targeted `receive --queue-id <id>` establishes the next live claim. Only
    then may processing and reply-close continue.
 
@@ -237,6 +241,7 @@ The durable reply close path should compose with drain:
 ```text
 CLAIM_EXPIRED(queue_id, expected_claim_expires_at)
   -> exact reclaim dry-run
+  -> verify samples[].claim_expires_at is the unchanged lossless fence
   -> exact reclaim execute with the same two values
   -> row is pending and old runtime fence is cleared
   -> targeted receive of the same queue_id
@@ -247,3 +252,8 @@ CLAIM_EXPIRED(queue_id, expected_claim_expires_at)
 Every arrow is fail-closed. A failure before targeted receive produces no
 reply, no close, and no outbound projection. A notification is not part of the
 sequence.
+
+Two lease values such as `.123456+00` and `.123789+00` are different fences
+even though both collapse to `.123Z` in a JavaScript `Date`. The database-bound
+compare-and-swap rejects the older value with zero queue, message, outbound, or
+lifecycle effects; the copied current value succeeds once.

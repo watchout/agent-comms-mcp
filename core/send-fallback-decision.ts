@@ -49,7 +49,7 @@ export type SendFallbackDecision =
       queueId?: number | string
       status?: string
       claimedAt?: string | Date | null
-      claimExpiresAt?: string | Date | null
+      claimExpiresAt?: string | null
       claimedRuntimeInstanceId?: string | null
     }
   | { kind: 'invalid_reply_to' }
@@ -122,10 +122,11 @@ export async function decideSendFallback(
     status: string
     claimed_by: string | null
     claimed_at: string | Date | null
-    claim_expires_at: string | Date | null
+    claim_expires_at: string | null
     claimed_runtime_instance_id: string | null
   }>(
-    `SELECT id, status, claimed_by, claimed_at, claim_expires_at,
+    `SELECT id, status, claimed_by, claimed_at,
+            claim_expires_at::text AS claim_expires_at,
             claimed_runtime_instance_id::text AS claimed_runtime_instance_id
        FROM message_queue
       WHERE message_id = $1 AND agent_id = $2

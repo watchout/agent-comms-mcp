@@ -75,6 +75,10 @@ describe('T1 — server.ts tool registration (processing / done)', () => {
     expect(SERVER_SRC).toContain('CLAIM_FENCE_REQUIRED')
     expect(SERVER_SRC).toContain('CLAIM_FENCE_MISMATCH')
     expect(SERVER_SRC).toContain("status = 'in_progress'")
+    expect(SERVER_SRC).toContain('claim_expires_at::text AS claim_expires_at')
+    expect(SERVER_SRC).toMatch(/AND claim_expires_at = \$3::timestamptz/)
+    expect(SERVER_SRC).not.toContain('new Date(decision.claimExpiresAt).toISOString()')
+    expect(SERVER_SRC).not.toContain('observedExpiryMs')
     expect(SERVER_SRC).toContain('expired_in_progress=')
     expect(SERVER_SRC).toContain('expired_in_progress_oldest=')
   })
@@ -238,11 +242,112 @@ dbDescribe('T2 — processing / done DB-level contract (spec §1.2)', () => {
     return r.rows[0]?.status ?? null
   }
 
+  async function exactReclaim(id: number, expectedClaimExpiresAt: string) {
+    return client.query(
+      `UPDATE message_queue
+          SET status = 'pending',
+              read_at = NULL,
+              claimed_by = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL,
+              claimed_runtime_instance_id = NULL
+        WHERE id = $1
+          AND agent_id = $2
+          AND status = 'in_progress'
+          AND claim_expires_at = $3::timestamptz
+          AND claim_expires_at < now()
+        RETURNING id`,
+      [id, FIXTURE_AGENT, expectedClaimExpiresAt],
+    )
+  }
+
+  async function recoveryEffects(id: number) {
+    const messages = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM agent_messages WHERE author_id = $1`,
+      [FIXTURE_AGENT],
+    )
+    const outbound = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM outbound_queue WHERE agent_id = $1`,
+      [FIXTURE_AGENT],
+    )
+    const audit = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM audit_log
+        WHERE target = $1 AND event_type IN ('queue.claim_recovered', 'queue.reclaim_expired')`,
+      [String(id)],
+    )
+    return {
+      messages: Number(messages.rows[0]?.count ?? '0'),
+      outbound: Number(outbound.rows[0]?.count ?? '0'),
+      audit: Number(audit.rows[0]?.count ?? '0'),
+    }
+  }
+
   test('processing: received → in_progress (happy path)', async () => {
     const id = await insertReceived()
     const r = await doTransition(id, 'processing')
     expect(r).toMatchObject({ ok: true, status: 'in_progress' })
     expect(await statusOf(id)).toBe('in_progress')
+  })
+
+  test('exact reclaim preserves sub-ms fence and rejects a stale same-ms lease with zero effects', async () => {
+    const inserted = await client.query<{ id: number }>(
+      `INSERT INTO message_queue
+         (agent_id, payload, status, claimed_by, claimed_at, claim_expires_at)
+       VALUES ($1, '{}', 'in_progress', $1, now(), '2000-01-01 00:00:00.123456+00'::timestamptz)
+       RETURNING id`,
+      [FIXTURE_AGENT],
+    )
+    const id = inserted.rows[0]!.id
+    const firstFence = await client.query<{ claim_expires_at: string }>(
+      `SELECT claim_expires_at::text AS claim_expires_at FROM message_queue WHERE id = $1`,
+      [id],
+    )
+    expect(firstFence.rows[0]!.claim_expires_at).toMatch(/\.123456(?:\+|-)/)
+
+    // A renewal in the same JavaScript millisecond creates a distinct DB
+    // generation. The first copied fence must now be stale even though both
+    // values collapse to .123Z when converted through Date.
+    await client.query(
+      `UPDATE message_queue
+          SET claim_expires_at = '2000-01-01 00:00:00.123789+00'::timestamptz
+        WHERE id = $1`,
+      [id],
+    )
+    const current = await client.query<{ claim_expires_at: string }>(
+      `SELECT claim_expires_at::text AS claim_expires_at FROM message_queue WHERE id = $1`,
+      [id],
+    )
+    const currentFence = current.rows[0]!.claim_expires_at
+    expect(currentFence).toMatch(/\.123789(?:\+|-)/)
+    expect(new Date(currentFence).getTime()).toBe(new Date(firstFence.rows[0]!.claim_expires_at).getTime())
+
+    const beforeEffects = await recoveryEffects(id)
+    const beforeRow = await client.query(
+      `SELECT status, claimed_by, claim_expires_at::text AS claim_expires_at
+         FROM message_queue WHERE id = $1`,
+      [id],
+    )
+    const stale = await exactReclaim(id, firstFence.rows[0]!.claim_expires_at)
+    expect(stale.rows).toHaveLength(0)
+    expect(await recoveryEffects(id)).toEqual(beforeEffects)
+    const afterStaleRow = await client.query(
+      `SELECT status, claimed_by, claim_expires_at::text AS claim_expires_at
+         FROM message_queue WHERE id = $1`,
+      [id],
+    )
+    expect(afterStaleRow.rows[0]).toEqual(beforeRow.rows[0])
+
+    const copiedCurrent = await exactReclaim(id, currentFence)
+    expect(copiedCurrent.rows).toHaveLength(1)
+    const replay = await exactReclaim(id, currentFence)
+    expect(replay.rows).toHaveLength(0)
+    const final = await client.query(
+      `SELECT status, claimed_by, claim_expires_at::text AS claim_expires_at
+         FROM message_queue WHERE id = $1`,
+      [id],
+    )
+    expect(final.rows[0]).toEqual({ status: 'pending', claimed_by: null, claim_expires_at: null })
   })
 
   test('done: in_progress → done + done_at stamped (happy path)', async () => {

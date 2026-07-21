@@ -118,7 +118,10 @@ must fail without reply, close, or outbound projection.
 
 An expired `in_progress` row must not be renewed or closed directly. Copy both
 `queue_id` and `expected_claim_expires_at` from the `CLAIM_EXPIRED` result and
-preview the exact row:
+preview the exact row. The fence is PostgreSQL's lossless timestamp text (for
+example, `2026-07-21 00:00:00.123456+00`); keep it quoted and byte-for-byte as
+returned. Do not pass it through JavaScript `Date`, `toISOString()`, or another
+formatter because those can discard the sub-millisecond lease generation:
 
 ```bash
 AGENT_ID=codex-aun \
@@ -126,12 +129,13 @@ DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
 bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/cli/index.ts queue reclaim-expired \
   --agent-id codex-aun \
   --queue-id 71552 \
-  --expected-claim-expires-at 2026-07-21T00:00:00.000Z \
+  --expected-claim-expires-at "2026-07-21 00:00:00.123456+00" \
   --dry-run
 ```
 
-After confirming that the preview names exactly one intended expired row, use
-the same immutable fence values with `--execute`:
+The preview's `samples[].claim_expires_at` must reproduce the same lossless
+fence. After confirming that it names exactly one intended expired row, use the
+same immutable fence values with `--execute`:
 
 ```bash
 AGENT_ID=codex-aun \
@@ -139,12 +143,14 @@ DATABASE_URL="postgresql:///agent_comms?host=/tmp" \
 bun /Users/yuji/Developer/codex-aun/agent-comms-mcp-main/cli/index.ts queue reclaim-expired \
   --agent-id codex-aun \
   --queue-id 71552 \
-  --expected-claim-expires-at 2026-07-21T00:00:00.000Z \
+  --expected-claim-expires-at "2026-07-21 00:00:00.123456+00" \
   --execute
 ```
 
-Success moves only that row to `pending`, clears the old claim and runtime
-fence, and writes `queue.reclaim_expired` audit evidence. It does not create a
+The database compares this value as `timestamptz` inside the same exact-row
+update; JavaScript millisecond equality is never the authority. Success moves
+only that row to `pending`, clears the old claim and runtime fence, and writes
+`queue.reclaim_expired` audit evidence. It does not create a
 message, enqueue outbound delivery, reply, or close work. Reclaim the same row
 through the normal targeted receive path before processing or replying:
 

@@ -156,6 +156,7 @@ describe('queue repair primitives', () => {
   })
 
   test('reclaim-expired can be scoped to one queue row', async () => {
+    const exactFence = '2000-01-01 00:00:00.123456+00'
     const db = new FakeDb([
       {
         id: 71026,
@@ -163,6 +164,7 @@ describe('queue repair primitives', () => {
         status: 'in_progress',
         message_id: 'm3',
         payload: '{}',
+        claim_expires_at: exactFence,
         created_at: '2026-05-15 00:00:00+00',
       },
     ])
@@ -176,6 +178,8 @@ describe('queue repair primitives', () => {
     expect(db.called(/id = \$2/)).toBe(true)
     expect(db.calls[0].params).toContain('71026')
     expect(db.calls[0].sql).toContain("status IN ('received', 'in_progress')")
+    expect(db.calls[0].sql).toContain('claim_expires_at::text AS claim_expires_at')
+    expect(result.samples[0]?.claim_expires_at).toBe(exactFence)
   })
 
   test('bulk reclaim excludes in-progress work and exact execute requires a lease fence', async () => {
