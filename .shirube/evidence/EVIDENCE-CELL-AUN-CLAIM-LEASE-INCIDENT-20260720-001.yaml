@@ -1,0 +1,62 @@
+schema_version: "shirube-machine-evidence/v1"
+evidence_id: "EVIDENCE-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001"
+target_repo: "watchout/agent-comms-mcp"
+target_pr: 882
+cell_id: "CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001"
+implementation_actor: "codex-aun"
+evidence_scope: "control_projection_for_claim_lease_incident"
+not_structured_audit: true
+owner_decision_required_before_merge: true
+handoff_ref: ".shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml"
+audit_checklist_ref: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml"
+claims:
+  implementation_summary:
+    - "Adds one report-only Rapid/Lite route for CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001."
+    - "Projects PR 882's existing ten runtime/test paths plus the two approved docs paths into one exact twelve-path handoff; cli/index.ts is shared by the existing implementation and the three-path docs/CLI completion."
+    - "Adds an independent audit checklist covering lease renewal, fenced reclaim, stale claimant rejection, exactly-once durable reply-close, notify-absent behavior, and the operator docs/CLI contract."
+    - "Does not modify PR 882, runtime code, queue/DB state, deployment, activation, canary, or rollout."
+  protected_surface_boundary:
+    active_workflow_changed: true
+    active_workflow_change_scope: "one report-only route-table mapping for this Cell"
+    runtime_code_changed: false
+    queue_or_db_mutation: false
+    db_schema_or_migration_changed: false
+    provider_delivery_changed: false
+    state_daemon_or_launchagent_changed: false
+    secrets_or_deployment_changed: false
+    required_check_changed: false
+    branch_protection_or_ruleset_changed: false
+    production_activation: false
+    canary_or_rollout_executed: false
+    pr_882_head_changed: false
+    audit_qa_owner_substitution: false
+  fail_closed_guards:
+    - "The incident Cell resolves to dedicated local handoff/checklist/evidence refs instead of CH-001."
+    - "PR 882 allowed paths are exact and exclude DB schema, migrations, state-daemon, workflow, control, deploy, and activation paths."
+    - "Independent audit, QA, and owner exact-head decision remain required before merge."
+changed_files:
+  - ".github/workflows/shirube-rapid-lite-gates-report.yml"
+  - ".shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml"
+  - ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml"
+  - ".shirube/evidence/EVIDENCE-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml"
+commands:
+  - command: "git diff --check"
+    result: "PASS: tracked workflow diff and all three untracked YAML files"
+  - command: "YAML parse for the three new .shirube YAML files"
+    result: "PASS: 3 of 3 new files; repository-wide syntax parse also passed for 83 YAML files including the workflow"
+  - command: "node scripts/shirube-current-overlay-check.mjs"
+    result: "PASS: Shirube current-overlay gate passed"
+  - command: "deterministic incident Cell route-selection fixture"
+    result: "PASS: one exact route selected among 16 routes, all three local refs exist, no CH-001 fallback, exact 12 unique allowed paths"
+validation_results:
+  - "PASS"
+evidence_refs:
+  - "changed_files"
+  - "validation_commands"
+  - "validation_results"
+  - "audit_checklist_report"
+notes:
+  - "This is machine evidence for the small Control projection PR, with PR 882 recorded as the implementation subject that the route will govern."
+  - "It is not implementation evidence for PR 882 and does not claim any runtime code change."
+  - "It is not a structured audit and does not approve Ready, merge, owner decision, runtime execution, queue/DB mutation, deployment, activation, canary, or rollout."
+next_action: none

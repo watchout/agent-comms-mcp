@@ -1,0 +1,96 @@
+schema_version: "shirube-audit-checklist/v1"
+audit_checklist_id: "AUDIT-CHECKLIST-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001"
+source:
+  handoff_ref: ".shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml"
+  cell_id: "CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001"
+  work_order: "https://github.com/watchout/agent-comms-mcp/issues/881"
+  implementation_actor: "dev-001"
+  audit_model: "comment_backed_structured_audit"
+items:
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-001"
+    source: "allowed_paths"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm the final PR 882 diff contains only the handoff's twelve allowed paths: the existing ten runtime/test paths plus cli/index.ts and the two approved docs, with cli/index.ts counted once."
+    expected_evidence:
+      - "exact changed_files from PR 882"
+      - ".shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-002"
+    source: "control_projection"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001 resolves to this handoff, checklist, and machine-evidence file and never falls back to CH-001."
+    expected_evidence:
+      - ".github/workflows/shirube-rapid-lite-gates-report.yml"
+      - "deterministic route-selection fixture PASS"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-003"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm active claim renewal requires exact queue_id and expected_claim_expires_at and fails closed on a stale or mismatched fence."
+    expected_evidence:
+      - "bin/aun/lifecycle.ts"
+      - "cli/index.ts"
+      - "tests/queue-operations.test.ts"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-004"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm a stale claimant cannot renew, reclaim, reply, close, or produce a terminal side effect after the lease fence changes."
+    expected_evidence:
+      - "core/queue-repair.ts"
+      - "core/send-fallback-decision.ts"
+      - "tests/spec-enforcement/behavioral-spec-alignment.test.ts"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-005"
+    source: "handoff_acceptance"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm durable reply-close preserves exactly-once terminal behavior when notify delivery is absent or fails; notification is not terminal evidence."
+    expected_evidence:
+      - "bin/aun/reply.ts"
+      - "server.ts"
+      - "tests/contract/test_aun_durable_reply_close_wrapper.test.ts"
+      - "tests/contract/test_processing_done_tools.test.ts"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-006"
+    source: "operator_surface"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm CLI and both operator/design docs describe exact queue_id plus expected_claim_expires_at, stale-fence failure, exactly-once reply-close, and notify-absent behavior without an unsafe bypass."
+    expected_evidence:
+      - "cli/index.ts"
+      - "docs/operations/codex-runtime-adapter-bootstrap.md"
+      - "docs/design/durable-reply-close-path.md"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-007"
+    source: "protected_surface_boundary"
+    verification_method: "semantic"
+    required: true
+    prompt: "Confirm neither the control projection nor PR 882 performs production queue/DB mutation, schema migration, provider delivery, deploy, activation, canary, rollout, required-check, branch-protection, ruleset, Ready, or merge mutation."
+    expected_evidence:
+      - "exact changed_files"
+      - "protected_surface_boundary"
+      - "non_scope_confirmed"
+  - item_id: "AUDIT-AUN-CLAIM-LEASE-008"
+    source: "validation"
+    verification_method: "executable"
+    required: true
+    prompt: "Confirm focused claim-lease/reply-close tests and the full tests/ suite pass on the immutable PR 882 head supplied to audit."
+    expected_evidence:
+      - "git diff --check"
+      - "focused bun test command"
+      - "bun test tests/"
+notes:
+  - "This checklist is for an independent auditor and QA reviewer of PR 882 after the route metadata lands."
+  - "The auditor must review an immutable exact head and must not implement, approve, merge, remove Draft state, mutate runtime, or perform rollout."
+  - "Owner exact-head decision and merge authorization remain separate."
+next_action:
+  owner_function: independent_audit
+  action: Audit the immutable PR 882 head against all eight checklist items and publish a machine-readable PASS or blocking verdict with exact evidence.
+  handoff_method: Structured PR 882 comment and configured Shirube audit references.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/pull/882
+    - .shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml
+    - .shirube/evidence/EVIDENCE-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml
+  scope: Read-only audit of the immutable PR 882 head; no code, PR state, runtime, DB, deploy, activation, or rollout mutation.
+  deliverable: Structured audit verdict covering every required checklist item plus an explicit QA handoff or exact remediation list.
+  completion_evidence: Exact head SHA, per-item verdicts, command results, scope diff, and terminal gate result.
+  blocking: false
