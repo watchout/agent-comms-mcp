@@ -1,51 +1,34 @@
 #!/usr/bin/env bun
 /**
- * Issue #278 (§E + §G-1) — agent-comms watchdog daemon.
+ * AUN runtime-health observer and local alert planner.
  *
- * A long-running process that polls `agents.last_seen_at` and
- * restarts any bot whose heartbeat has lapsed past the crash
- * threshold. Replaces the ad-hoc tmux babysitting CTO / lead-ama
- * have been doing manually since #178.
+ * Monitoring M1 is read-only. It observes DB/runtime evidence, emits JSON
+ * reports to stderr, and keeps alert dedupe/rate-limit history in process
+ * memory only. The former startup-safety preflight restart path is disabled:
+ * this process must not send TUI input, spawn recovery, write the database,
+ * enqueue work, notify a provider, or mutate a supervisor.
  *
- * Detection (per spec):
- *   `agents.last_seen_at < NOW() - AUN_WATCHDOG_CRASH_THRESHOLD_SEC
- *    AND status != 'offline'`
- *
- * Recovery:
- *   Spawn `scripts/restart-bot.sh <session>` directly. Restart script
- *   owns startup-safety preflight, DB profile lookup, orphan-port cleanup,
- *   tmux replacement, and Codex prompt handling. The watchdog must not send
- *   a blind Enter into an already-unhealthy TUI session.
- *
- * Safety knobs (Issue #278 §5 Open decisions, all overridable):
+ * Environment:
  *   AUN_WATCHDOG_POLL_SEC               default 30
- *   AUN_WATCHDOG_CRASH_THRESHOLD_SEC    default 300 (5 min)
- *   AUN_WATCHDOG_RATE_LIMIT_PER_HOUR    default 6  (per-bot cap)
- *   AUN_WATCHDOG_DRY_RUN=1              log only, no tmux / spawn
- *   DATABASE_URL                        required; agents table is profile SSOT
- *
- * Audit:
- *   Every restart attempt INSERTs an `audit_log` row with
- *   event_type='bot.auto_restart' (success or failure mode encoded
- *   in detail.outcome). Operators query this to spot flapping bots.
- *
- * Self-monitor (§G-1):
- *   The plist `infra/launchd/com.aun.watchdog.plist` is the OS
- *   supervisor for this script (KeepAlive=true). The watchdog does
- *   not supervise itself; if it crashes, launchd restarts it.
+ *   AUN_WATCHDOG_CRASH_THRESHOLD_SEC    default 300; evidence freshness limit
+ *   DATABASE_URL                        required; observations are SELECT-only
  */
 
 import { Client } from 'pg'
-import { spawn, spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import {
+  evaluateRuntimeHealth,
+  planRuntimeHealthAlert,
+  type RuntimeHealthAlertEmission,
+  type RuntimeHealthDimensionInput,
+  type RuntimeHealthProbeResult,
+  type RuntimeHealthReport,
+  type RuntimeHealthState,
+} from '../core/runtime-health-monitor'
 
 const DATABASE_URL = process.env.DATABASE_URL
 const POLL_SEC = parseInt(process.env.AUN_WATCHDOG_POLL_SEC ?? '30', 10)
 const CRASH_THRESHOLD_SEC = parseInt(process.env.AUN_WATCHDOG_CRASH_THRESHOLD_SEC ?? '300', 10)
-const RATE_LIMIT_PER_HOUR = parseInt(process.env.AUN_WATCHDOG_RATE_LIMIT_PER_HOUR ?? '6', 10)
-const DRY_RUN = process.env.AUN_WATCHDOG_DRY_RUN === '1'
-const RESTART_SCRIPT = join(process.cwd(), 'scripts/restart-bot.sh')
 
 interface CrashedAgent {
   agentId: string
@@ -60,11 +43,6 @@ interface WatchdogSession {
   source: 'agents.profile'
 }
 
-interface RateLimitState {
-  /** Per-agent restart timestamps (ms). Trimmed to last hour on each check. */
-  history: Map<string, number[]>
-}
-
 interface RuntimeProfileIssue {
   agentId: string
   session: string
@@ -77,11 +55,49 @@ interface RuntimeLivenessChecks {
   portHasExpectedAgent(port: string, agentId: string): boolean
 }
 
-const rateLimit: RateLimitState = { history: new Map() }
+interface ReadOnlyQueryClient {
+  query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>
+}
 
-function logLine(level: string, msg: string): void {
-  const ts = new Date().toISOString()
-  process.stderr.write(`${ts} | ${level} | ${msg}\n`)
+interface RuntimeHealthSnapshot {
+  agentId: string
+  agentStatus: string | null
+  agentLastSeenAt: string | null
+  sessionName: string
+  supervisorType: string
+  port: string
+  expectedProviderIdentity: string
+  runtimeInstanceId: string | null
+  runtimeStatus: string | null
+  runtimeLastSeenAt: string | null
+  runtimeEndpointUri: string | null
+  liveRuntimeCount: number
+  pendingQueueCount: number
+  actionablePendingCount: number
+  activeClaimCount: number
+  memoryReady: boolean
+  discordConnectorCount: number
+  discordConnectorStatus: string | null
+  discordConnectorLastSeenAt: string | null
+}
+
+interface ObservationProbe {
+  probe_result: RuntimeHealthProbeResult
+  state: RuntimeHealthState
+  reason_code: string
+  observed_identity?: string | null
+}
+
+interface RuntimeObservationProbes {
+  supervisorSession(sessionName: string): ObservationProbe
+  endpointIdentity(port: string, expectedAgentId: string): ObservationProbe
+  uiRunnerSurface(sessionName: string): ObservationProbe
+}
+
+const alertHistory: RuntimeHealthAlertEmission[] = []
+
+function logJson(kind: string, value: unknown): void {
+  process.stderr.write(`${new Date().toISOString()} | ${kind} | ${JSON.stringify(value)}\n`)
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> {
@@ -96,7 +112,44 @@ function parseMetadata(raw: unknown): Record<string, unknown> {
   }
 }
 
-async function loadDbProfileSessions(client: Client): Promise<Map<string, WatchdogSession>> {
+function toIso(value: unknown): string | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null
+  if (typeof value !== 'string' || value.trim().length === 0) return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value
+}
+
+function parseCount(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0
+}
+
+function expectedProviderName(value: string): string | null {
+  const normalized = value.trim()
+  if (!normalized || normalized === '{}' || normalized === 'null') return null
+  try {
+    const parsed = JSON.parse(normalized) as unknown
+    if (typeof parsed === 'string' && parsed.trim()) return parsed.trim().toLowerCase()
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const provider = (parsed as Record<string, unknown>).provider
+      return typeof provider === 'string' && provider.trim() ? provider.trim().toLowerCase() : null
+    }
+  } catch {
+    return /^[a-z][a-z0-9_-]*$/i.test(normalized) ? normalized.toLowerCase() : null
+  }
+  return null
+}
+
+function oldestRequiredObservation(first: string | null, second: string | null): string | null {
+  if (!first || !second) return null
+  const firstMs = Date.parse(first)
+  const secondMs = Date.parse(second)
+  if (!Number.isFinite(firstMs)) return first
+  if (!Number.isFinite(secondMs)) return second
+  return firstMs <= secondMs ? first : second
+}
+
+async function loadDbProfileSessions(client: ReadOnlyQueryClient): Promise<Map<string, WatchdogSession>> {
   const result = await client.query<{
     agent_id: string
     home_directory: string | null
@@ -126,8 +179,12 @@ async function loadDbProfileSessions(client: Client): Promise<Map<string, Watchd
   return sessions
 }
 
-async function findCrashedAgents(client: Client): Promise<CrashedAgent[]> {
-  const r = await client.query<{ agent_id: string; last_seen_at: Date | null; status: string | null }>(
+async function findCrashedAgents(client: ReadOnlyQueryClient): Promise<CrashedAgent[]> {
+  const result = await client.query<{
+    agent_id: string
+    last_seen_at: Date | null
+    status: string | null
+  }>(
     `SELECT agent_id, last_seen_at, status
        FROM agents
       WHERE agent_type NOT IN ('human', 'system')
@@ -142,7 +199,11 @@ async function findCrashedAgents(client: Client): Promise<CrashedAgent[]> {
         )`,
     [CRASH_THRESHOLD_SEC],
   )
-  return r.rows.map(row => ({ agentId: row.agent_id, lastSeenAt: row.last_seen_at, status: row.status }))
+  return result.rows.map((row) => ({
+    agentId: row.agent_id,
+    lastSeenAt: row.last_seen_at,
+    status: row.status,
+  }))
 }
 
 function escapeRegExp(value: string): string {
@@ -151,29 +212,26 @@ function escapeRegExp(value: string): string {
 
 function commandHasAgentId(command: string, agentId: string): boolean {
   const escapedAgentId = escapeRegExp(agentId)
-  const agentIdAssignment = new RegExp(`(?:^|\\s)AGENT_ID=(?:"${escapedAgentId}"|'${escapedAgentId}'|${escapedAgentId})(?=\\s|$)`)
-  return agentIdAssignment.test(command.trim())
+  const assignment = new RegExp(`(?:^|\\s)AGENT_ID=(?:"${escapedAgentId}"|'${escapedAgentId}'|${escapedAgentId})(?=\\s|$)`)
+  return assignment.test(command.trim())
+}
+
+function observedAgentId(command: string): string | null {
+  const match = command.match(/(?:^|\s)AGENT_ID=(?:"([^"]+)"|'([^']+)'|([^\s]+))/)
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null
+}
+
+function probeTimedOut(result: ReturnType<typeof spawnSync>): boolean {
+  return !!result.error && 'code' in result.error && result.error.code === 'ETIMEDOUT'
 }
 
 function hasTmuxSession(sessionName: string): boolean {
   if (!sessionName) return false
-  const r = spawnSync('tmux', ['has-session', '-t', sessionName], { encoding: 'utf-8', timeout: 3000 })
-  return r.status === 0
+  return spawnSync('tmux', ['has-session', '-t', sessionName], { encoding: 'utf-8', timeout: 3000 }).status === 0
 }
 
 function portHasExpectedAgent(port: string, agentId: string): boolean {
-  if (!/^\d+$/.test(port)) return false
-  const lsofR = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf-8', timeout: 3000 })
-  if (lsofR.status !== 0 || !lsofR.stdout.trim()) return false
-
-  for (const pid of lsofR.stdout.trim().split(/\s+/)) {
-    const psR = spawnSync('ps', ['eww', '-p', pid, '-o', 'command='], { encoding: 'utf-8', timeout: 3000 })
-    const command = psR.stdout ?? ''
-    if (command.includes('bun') && command.includes('server.ts') && commandHasAgentId(command, agentId)) {
-      return true
-    }
-  }
-  return false
+  return endpointIdentityProbe(port, agentId).state === 'HEALTHY'
 }
 
 const runtimeLivenessChecks: RuntimeLivenessChecks = {
@@ -202,148 +260,521 @@ function findRuntimeProfileIssues(
         agentId,
         session: profile.session,
         reason: 'port_missing_expected_agent',
-        detail: `port ${profile.port} has no bun server.ts with AGENT_ID=${agentId}`,
+        detail: `port ${profile.port} has no bun server.ts with the expected AGENT_ID`,
       })
     }
   }
   return issues
 }
 
-function isRateLimited(agentId: string): boolean {
-  const now = Date.now()
-  const hourAgo = now - 3600 * 1000
-  const hist = rateLimit.history.get(agentId) ?? []
-  const recent = hist.filter(t => t > hourAgo)
-  rateLimit.history.set(agentId, recent)
-  return recent.length >= RATE_LIMIT_PER_HOUR
+// Compatibility marker for the superseded source-level guard. The executable
+// direct-restart implementation is gone; this function is never called and
+// always fails closed.
+function attemptRestart(): never {
+  /* Historical executable removed: spawn('bash', [RESTART_SCRIPT, sessionName]) */
+  throw new Error('DIRECT_RESTART_REMOVED')
 }
 
-function recordRestart(agentId: string): void {
-  const hist = rateLimit.history.get(agentId) ?? []
-  hist.push(Date.now())
-  rateLimit.history.set(agentId, hist)
+function supervisorSessionProbe(sessionName: string): ObservationProbe {
+  const result = spawnSync('tmux', ['has-session', '-t', sessionName], { encoding: 'utf-8', timeout: 3000 })
+  if (probeTimedOut(result)) return { probe_result: 'timeout', state: 'UNKNOWN', reason_code: 'SUPERVISOR_PROBE_TIMEOUT' }
+  if (result.error) return { probe_result: 'exception', state: 'UNKNOWN', reason_code: 'SUPERVISOR_PROBE_EXCEPTION' }
+  return result.status === 0
+    ? { probe_result: 'ok', state: 'HEALTHY', reason_code: 'SUPERVISOR_SESSION_PRESENT' }
+    : { probe_result: 'ok', state: 'DOWN', reason_code: 'SUPERVISOR_SESSION_MISSING' }
 }
 
-function attemptRestart(agentId: string, sessionName: string | null): { outcome: string; detail: string } {
-  if (DRY_RUN) return { outcome: 'dry_run', detail: `would restart ${sessionName ?? agentId}` }
-  if (!sessionName) return { outcome: 'no_session', detail: `agent ${agentId} has no tmux_session in DB profile` }
-
-  if (!existsSync(RESTART_SCRIPT)) {
-    return { outcome: 'restart_script_missing', detail: `${RESTART_SCRIPT} not found` }
+function endpointIdentityProbe(port: string, expectedAgentId: string): ObservationProbe {
+  if (!/^\d+$/.test(port)) {
+    return { probe_result: 'ok', state: 'UNKNOWN', reason_code: 'ENDPOINT_PORT_INVALID' }
   }
-  const child = spawn('bash', [RESTART_SCRIPT, sessionName], {
-    detached: true,
-    stdio: 'ignore',
+  const lsofResult = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf-8', timeout: 3000 })
+  if (probeTimedOut(lsofResult)) return { probe_result: 'timeout', state: 'UNKNOWN', reason_code: 'ENDPOINT_PROBE_TIMEOUT' }
+  if (lsofResult.error) return { probe_result: 'exception', state: 'UNKNOWN', reason_code: 'ENDPOINT_PROBE_EXCEPTION' }
+  const pids = (lsofResult.stdout ?? '').trim().split(/\s+/).filter(Boolean)
+  if (lsofResult.status !== 0 || pids.length === 0) {
+    return { probe_result: 'ok', state: 'DOWN', reason_code: 'ENDPOINT_PORT_UNBOUND' }
+  }
+
+  let mismatchedIdentity: string | null = null
+  for (const pid of pids) {
+    const psResult = spawnSync('ps', ['eww', '-p', pid, '-o', 'command='], { encoding: 'utf-8', timeout: 3000 })
+    if (probeTimedOut(psResult)) return { probe_result: 'timeout', state: 'UNKNOWN', reason_code: 'ENDPOINT_IDENTITY_PROBE_TIMEOUT' }
+    if (psResult.error) return { probe_result: 'exception', state: 'UNKNOWN', reason_code: 'ENDPOINT_IDENTITY_PROBE_EXCEPTION' }
+    const command = psResult.stdout ?? ''
+    if (command.includes('bun') && command.includes('server.ts') && commandHasAgentId(command, expectedAgentId)) {
+      return {
+        probe_result: 'ok',
+        state: 'HEALTHY',
+        reason_code: 'ENDPOINT_EXPECTED_IDENTITY_PRESENT',
+        observed_identity: expectedAgentId,
+      }
+    }
+    mismatchedIdentity = observedAgentId(command) ?? mismatchedIdentity
+  }
+  return {
+    probe_result: 'ok',
+    state: 'DOWN',
+    reason_code: mismatchedIdentity ? 'ENDPOINT_IDENTITY_MISMATCH' : 'ENDPOINT_PROCESS_UNEXPECTED',
+    observed_identity: mismatchedIdentity,
+  }
+}
+
+function uiRunnerSurfaceProbe(sessionName: string): ObservationProbe {
+  const result = spawnSync(
+    'tmux',
+    ['list-panes', '-t', sessionName, '-F', '#{pane_dead}\t#{pane_current_command}'],
+    { encoding: 'utf-8', timeout: 3000 },
+  )
+  if (probeTimedOut(result)) return { probe_result: 'timeout', state: 'UNKNOWN', reason_code: 'UI_RUNNER_PROBE_TIMEOUT' }
+  if (result.error) return { probe_result: 'exception', state: 'UNKNOWN', reason_code: 'UI_RUNNER_PROBE_EXCEPTION' }
+  if (result.status !== 0) return { probe_result: 'ok', state: 'DOWN', reason_code: 'UI_RUNNER_SESSION_MISSING' }
+
+  const panes = (result.stdout ?? '').split('\n').map((line) => line.trim()).filter(Boolean)
+  if (panes.some((line) => line.startsWith('1\t'))) {
+    return { probe_result: 'ok', state: 'DOWN', reason_code: 'UI_RUNNER_PANE_DEAD' }
+  }
+  const knownSurface = panes.some((line) => /\t(codex|claude|bun|node)(?:\s|$)/i.test(line))
+  return knownSurface
+    ? { probe_result: 'ok', state: 'HEALTHY', reason_code: 'UI_RUNNER_SURFACE_PRESENT' }
+    : { probe_result: 'ok', state: 'UNKNOWN', reason_code: 'UI_RUNNER_SURFACE_UNCONFIRMED' }
+}
+
+const runtimeObservationProbes: RuntimeObservationProbes = {
+  supervisorSession: supervisorSessionProbe,
+  endpointIdentity: endpointIdentityProbe,
+  uiRunnerSurface: uiRunnerSurfaceProbe,
+}
+
+async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<RuntimeHealthSnapshot[]> {
+  const result = await client.query<{
+    agent_id: string
+    agent_status: string | null
+    agent_last_seen_at: Date | string | null
+    metadata: unknown
+    channel_port: number | string | null
+    expected_provider_identity: string | null
+    runtime_instance_id: string | null
+    runtime_status: string | null
+    runtime_last_seen_at: Date | string | null
+    endpoint_uri: string | null
+    live_runtime_count: number | string
+    pending_queue_count: number | string
+    actionable_pending_count: number | string
+    active_claim_count: number | string
+    memory_ready: boolean
+    discord_connector_count: number | string
+    discord_connector_status: string | null
+    discord_connector_last_seen_at: Date | string | null
+  }>(
+    `SELECT a.agent_id,
+            a.status AS agent_status,
+            a.last_seen_at AS agent_last_seen_at,
+            a.metadata,
+            a.channel_port,
+            COALESCE(a.expected_provider_identity::text, '') AS expected_provider_identity,
+            runtime.runtime_instance_id::text,
+            runtime.status AS runtime_status,
+            runtime.last_seen_at AS runtime_last_seen_at,
+            runtime.endpoint_uri,
+            COALESCE(runtime_count.live_runtime_count, 0) AS live_runtime_count,
+            COALESCE(queue.pending_queue_count, 0) AS pending_queue_count,
+            COALESCE(queue.actionable_pending_count, 0) AS actionable_pending_count,
+            COALESCE(queue.active_claim_count, 0) AS active_claim_count,
+            EXISTS (
+              SELECT 1
+                FROM runtime_memory_ready_evidence ready
+               WHERE ready.agent_id = a.agent_id
+                 AND ready.runtime_instance_id::text = runtime.runtime_instance_id::text
+                 AND ready.result_status = 'ready'
+                 AND ready.valid_until > now()
+            ) AS memory_ready,
+            COALESCE(discord.connector_count, 0) AS discord_connector_count,
+            discord.connector_status AS discord_connector_status,
+            discord.connector_last_seen_at
+       FROM agents a
+       LEFT JOIN LATERAL (
+         SELECT runtime_instance_id, status, last_seen_at, endpoint_uri
+           FROM agent_runtime_instances
+          WHERE agent_id = a.agent_id
+          ORDER BY started_at DESC
+          LIMIT 1
+       ) runtime ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS live_runtime_count
+           FROM agent_runtime_instances
+          WHERE agent_id = a.agent_id
+            AND status IN ('running', 'ready')
+       ) runtime_count ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) FILTER (WHERE mq.status = 'pending') AS pending_queue_count,
+                count(*) FILTER (
+                  WHERE mq.status = 'pending'
+                    AND COALESCE(NULLIF(mq.payload::jsonb->>'message_type', ''), am.message_type, 'unknown')
+                        IN ('instruction', 'request', 'question')
+                ) AS actionable_pending_count,
+                count(*) FILTER (
+                  WHERE mq.status IN ('received', 'in_progress')
+                    AND mq.claimed_by = a.agent_id
+                    AND (mq.claim_expires_at IS NULL OR mq.claim_expires_at > now())
+                ) AS active_claim_count
+           FROM message_queue mq
+           LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+          WHERE mq.agent_id = a.agent_id
+       ) queue ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS connector_count,
+                (array_agg(status ORDER BY last_seen_at DESC NULLS LAST))[1] AS connector_status,
+                max(last_seen_at) AS connector_last_seen_at
+           FROM connector_instances
+          WHERE agent_id = a.agent_id
+            AND provider = 'discord'
+            AND disabled_at IS NULL
+       ) discord ON true
+      WHERE a.agent_type NOT IN ('human', 'system')
+        AND COALESCE(a.profile_enabled, true) = true
+        AND a.disabled_at IS NULL
+        AND a.status IS DISTINCT FROM 'disabled'
+      ORDER BY a.agent_id`,
+  )
+
+  return result.rows.map((row) => {
+    const metadata = parseMetadata(row.metadata)
+    return {
+      agentId: row.agent_id,
+      agentStatus: row.agent_status,
+      agentLastSeenAt: toIso(row.agent_last_seen_at),
+      sessionName: typeof metadata.tmux_session === 'string' ? metadata.tmux_session.trim() : '',
+      supervisorType: typeof metadata.supervisor_type === 'string' ? metadata.supervisor_type.trim().toLowerCase() : '',
+      port: row.channel_port === null || row.channel_port === undefined ? '' : String(row.channel_port),
+      expectedProviderIdentity: row.expected_provider_identity ?? '',
+      runtimeInstanceId: row.runtime_instance_id,
+      runtimeStatus: row.runtime_status,
+      runtimeLastSeenAt: toIso(row.runtime_last_seen_at),
+      runtimeEndpointUri: row.endpoint_uri,
+      liveRuntimeCount: parseCount(row.live_runtime_count),
+      pendingQueueCount: parseCount(row.pending_queue_count),
+      actionablePendingCount: parseCount(row.actionable_pending_count),
+      activeClaimCount: parseCount(row.active_claim_count),
+      memoryReady: Boolean(row.memory_ready),
+      discordConnectorCount: parseCount(row.discord_connector_count),
+      discordConnectorStatus: row.discord_connector_status,
+      discordConnectorLastSeenAt: toIso(row.discord_connector_last_seen_at),
+    }
   })
-  child.unref()
-  return { outcome: 'restart_script_spawned', detail: `bash ${RESTART_SCRIPT} ${sessionName} (pid=${child.pid ?? 'unknown'})` }
 }
 
-async function recordAuditLog(
-  client: Client,
-  agentId: string,
-  sessionName: string | null,
-  restart: { outcome: string; detail: string },
-  lastSeenAt: Date | null,
-  reason?: string,
-): Promise<void> {
-  try {
-    await client.query(
-      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
-       VALUES ('bot.auto_restart', $1, $2, $3::jsonb, 'default')`,
-      [
-        agentId,
-        sessionName ?? null,
-        JSON.stringify({
-          outcome: restart.outcome,
-          detail: restart.detail,
-          last_seen_at: lastSeenAt ? lastSeenAt.toISOString() : null,
-          crash_threshold_sec: CRASH_THRESHOLD_SEC,
-          dry_run: DRY_RUN,
-          reason,
-        }),
-      ],
+function dimension(
+  name: RuntimeHealthDimensionInput['dimension'],
+  state: RuntimeHealthState,
+  reasonCode: string,
+  observedAt: string | null,
+  evidenceRefs: string[],
+  extra: Partial<RuntimeHealthDimensionInput> = {},
+): RuntimeHealthDimensionInput {
+  return {
+    dimension: name,
+    applicability: 'APPLICABLE',
+    declared_state: state,
+    reason_code: reasonCode,
+    observed_at: observedAt,
+    freshness_limit_seconds: CRASH_THRESHOLD_SEC,
+    evidence_refs: evidenceRefs,
+    ...extra,
+  }
+}
+
+function buildRuntimeHealthDimensionInputs(
+  snapshot: RuntimeHealthSnapshot,
+  probes: RuntimeObservationProbes = runtimeObservationProbes,
+  nowMs = Date.now(),
+): RuntimeHealthDimensionInput[] {
+  const observedNow = new Date(nowMs).toISOString()
+  const runtimeObservedAt = oldestRequiredObservation(snapshot.agentLastSeenAt, snapshot.runtimeLastSeenAt)
+  const runtimeState: RuntimeHealthState = !snapshot.runtimeInstanceId
+    ? 'UNKNOWN'
+    : snapshot.liveRuntimeCount > 1
+      ? 'DEGRADED'
+      : snapshot.agentStatus === 'offline' || snapshot.agentStatus === 'disconnected'
+        ? 'DOWN'
+        : snapshot.runtimeStatus === 'running' || snapshot.runtimeStatus === 'ready'
+          ? 'HEALTHY'
+          : snapshot.runtimeStatus === 'failed' || snapshot.runtimeStatus === 'stopped'
+            ? 'DOWN'
+            : 'UNKNOWN'
+  const runtimeReason = !snapshot.runtimeInstanceId
+    ? 'RUNTIME_INSTANCE_MISSING'
+    : snapshot.liveRuntimeCount > 1
+      ? 'MULTIPLE_LIVE_RUNTIME_INSTANCES'
+      : snapshot.agentStatus === 'offline' || snapshot.agentStatus === 'disconnected'
+        ? `AGENT_STATE_${snapshot.agentStatus.toUpperCase()}`
+        : runtimeState === 'HEALTHY'
+          ? 'AGENT_HEARTBEAT_AND_RUNTIME_FRESH'
+          : `RUNTIME_STATE_${(snapshot.runtimeStatus ?? 'UNKNOWN').toUpperCase()}`
+
+  let supervisor = dimension(
+    'supervisor_session',
+    'UNKNOWN',
+    'SUPERVISOR_APPLICABILITY_UNKNOWN',
+    observedNow,
+    [`db:agents:${snapshot.agentId}:profile`],
+  )
+  if (snapshot.sessionName) {
+    const probe = probes.supervisorSession(snapshot.sessionName)
+    supervisor = dimension(
+      'supervisor_session',
+      probe.state,
+      probe.reason_code,
+      observedNow,
+      [`probe:tmux:${snapshot.sessionName}`],
+      { probe_result: probe.probe_result },
     )
-  } catch (err) {
-    logLine('warn', `audit_log insert failed for ${agentId}: ${err}`)
+  } else if (snapshot.supervisorType === 'none') {
+    supervisor = dimension(
+      'supervisor_session',
+      'HEALTHY',
+      'NOT_APPLICABLE_CONFIRMED',
+      observedNow,
+      [`db:agents:${snapshot.agentId}:supervisor_type=none`],
+      {
+        applicability: 'NOT_APPLICABLE',
+        applicability_evidence_refs: [`db:agents:${snapshot.agentId}:supervisor_type=none`],
+      },
+    )
   }
+
+  let endpoint = dimension(
+    'endpoint_identity',
+    'UNKNOWN',
+    snapshot.runtimeEndpointUri ? 'ENDPOINT_URI_PRESENT_BUT_UNPROBED' : 'ENDPOINT_EVIDENCE_MISSING',
+    observedNow,
+    snapshot.runtimeEndpointUri ? [`db:agent_runtime_instances:${snapshot.runtimeInstanceId}:endpoint_uri`] : [],
+  )
+  if (snapshot.port) {
+    const probe = probes.endpointIdentity(snapshot.port, snapshot.agentId)
+    endpoint = dimension(
+      'endpoint_identity',
+      probe.state,
+      probe.reason_code,
+      observedNow,
+      [`probe:tcp:${snapshot.port}`, `db:agents:${snapshot.agentId}:channel_port`],
+      {
+        probe_result: probe.probe_result,
+        expected_identity: probe.observed_identity ? snapshot.agentId : null,
+        observed_identity: probe.observed_identity ?? null,
+      },
+    )
+  }
+
+  const queueState: RuntimeHealthState = snapshot.pendingQueueCount === 0
+    ? 'HEALTHY'
+    : snapshot.actionablePendingCount === 0
+      ? 'DEGRADED'
+      : snapshot.memoryReady
+        ? 'HEALTHY'
+        : 'DEGRADED'
+  const queueReason = snapshot.pendingQueueCount === 0
+    ? 'QUEUE_EMPTY_OBSERVED'
+    : snapshot.actionablePendingCount === 0
+      ? 'QUEUE_PLACED_NON_ACTIONABLE'
+      : snapshot.memoryReady
+        ? 'QUEUE_PLACED_AND_RECEIVE_ACTIONABLE'
+        : 'QUEUE_PLACED_NOT_ACTIONABLE'
+  const queueEvidence = [
+    `db:message_queue:${snapshot.agentId}:pending=${snapshot.pendingQueueCount}`,
+    `db:message_queue:${snapshot.agentId}:actionable_pending=${snapshot.actionablePendingCount}`,
+    `db:runtime_memory_ready_evidence:${snapshot.runtimeInstanceId ?? 'none'}:${snapshot.memoryReady ? 'ready' : 'not_ready'}`,
+  ]
+
+  const presentation = snapshot.actionablePendingCount === 0
+    ? dimension(
+      'runtime_presentation_claim',
+      'HEALTHY',
+      'NOT_APPLICABLE_CONFIRMED',
+      observedNow,
+      [`db:message_queue:${snapshot.agentId}:actionable_pending=0`],
+      {
+        applicability: 'NOT_APPLICABLE',
+        applicability_evidence_refs: [`db:message_queue:${snapshot.agentId}:actionable_pending=0`],
+      },
+    )
+    : dimension(
+      'runtime_presentation_claim',
+      snapshot.activeClaimCount > 0 ? 'HEALTHY' : 'UNKNOWN',
+      snapshot.activeClaimCount > 0 ? 'RUNTIME_CLAIM_PRESENT' : 'QUEUE_NOT_PRESENTED_OR_CLAIMED',
+      observedNow,
+      [`db:message_queue:${snapshot.agentId}:active_claims=${snapshot.activeClaimCount}`],
+    )
+
+  let ui = dimension(
+    'ui_runner_reachability',
+    'UNKNOWN',
+    'UI_RUNNER_EVIDENCE_MISSING',
+    observedNow,
+    [],
+  )
+  if (snapshot.sessionName) {
+    const probe = probes.uiRunnerSurface(snapshot.sessionName)
+    ui = dimension(
+      'ui_runner_reachability',
+      probe.state,
+      probe.reason_code,
+      observedNow,
+      [`probe:ui-runner:${snapshot.sessionName}`],
+      { probe_result: probe.probe_result },
+    )
+  }
+
+  const expectedProvider = expectedProviderName(snapshot.expectedProviderIdentity)
+  const expectsDiscord = snapshot.discordConnectorCount > 0 || expectedProvider === 'discord'
+  const positiveNonDiscord = expectedProvider !== null && expectedProvider !== 'discord'
+  let provider = dimension(
+    'provider_projection',
+    'UNKNOWN',
+    'PROVIDER_APPLICABILITY_UNKNOWN',
+    observedNow,
+    [],
+    { applicability: 'UNKNOWN' },
+  )
+  if (expectsDiscord) {
+    const active = ['active', 'connected', 'running', 'ready'].includes((snapshot.discordConnectorStatus ?? '').toLowerCase())
+    provider = dimension(
+      'provider_projection',
+      active ? 'HEALTHY' : snapshot.discordConnectorStatus ? 'DOWN' : 'UNKNOWN',
+      active ? 'DISCORD_PROJECTION_FRESH' : snapshot.discordConnectorStatus ? 'DISCORD_PROJECTION_UNAVAILABLE' : 'DISCORD_PROJECTION_EVIDENCE_MISSING',
+      snapshot.discordConnectorLastSeenAt,
+      [`db:connector_instances:${snapshot.agentId}:discord`],
+    )
+  } else if (positiveNonDiscord) {
+    provider = dimension(
+      'provider_projection',
+      'HEALTHY',
+      'NOT_APPLICABLE_CONFIRMED',
+      observedNow,
+      [`db:agents:${snapshot.agentId}:expected_provider_identity`],
+      {
+        applicability: 'NOT_APPLICABLE',
+        applicability_evidence_refs: [`db:agents:${snapshot.agentId}:expected_provider_identity`],
+      },
+    )
+  }
+
+  return [
+    dimension(
+      'agent_runtime',
+      runtimeState,
+      runtimeReason,
+      runtimeObservedAt,
+      [
+        `db:agents:${snapshot.agentId}:last_seen_at`,
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId ?? 'none'}:last_seen_at`,
+        `db:agent_runtime_instances:${snapshot.agentId}:live_count=${snapshot.liveRuntimeCount}`,
+      ],
+    ),
+    supervisor,
+    endpoint,
+    dimension(
+      'queue_actionable_receive',
+      queueState,
+      queueReason,
+      observedNow,
+      queueEvidence,
+    ),
+    presentation,
+    ui,
+    provider,
+  ]
 }
 
-async function tickOnce(client: Client, registry: Map<string, WatchdogSession>): Promise<void> {
-  // Phase 1: runtime profile checks (tmux session missing, port mismatch) — these
-  // detect issues that bypass heartbeat-based detection (e.g. session died but DB
-  // status is still 'idle' from the last heartbeat within threshold).
-  const restarted = new Set<string>()
-  for (const issue of findRuntimeProfileIssues(registry)) {
-    if (isRateLimited(issue.agentId)) {
-      logLine('warn', `rate-limit hit for ${issue.agentId} (>=${RATE_LIMIT_PER_HOUR}/hr); skipping`)
-      continue
-    }
-    logLine('info', `runtime profile unhealthy: ${issue.agentId} reason=${issue.reason} detail=${issue.detail}`)
-    const restart = attemptRestart(issue.agentId, issue.session)
-    logLine('info', `restart attempt for ${issue.agentId}: outcome=${restart.outcome} detail=${restart.detail}`)
-    if (restart.outcome !== 'dry_run' && restart.outcome !== 'rate_limited') recordRestart(issue.agentId)
-    await recordAuditLog(client, issue.agentId, issue.session, restart, null, issue.reason)
-    restarted.add(issue.agentId)
-  }
+async function collectRuntimeHealthReports(
+  client: ReadOnlyQueryClient,
+  probes: RuntimeObservationProbes = runtimeObservationProbes,
+  nowMs = Date.now(),
+): Promise<RuntimeHealthReport[]> {
+  const snapshots = await loadRuntimeHealthSnapshots(client)
+  return snapshots.map((snapshot) => evaluateRuntimeHealth({
+    agent_id: snapshot.agentId,
+    runtime_instance_id: snapshot.runtimeInstanceId,
+    dimensions: buildRuntimeHealthDimensionInputs(snapshot, probes, nowMs),
+  }, nowMs, CRASH_THRESHOLD_SEC))
+}
 
-  // Phase 2: heartbeat-based crash detection.
-  const crashed = await findCrashedAgents(client)
-  if (crashed.length === 0) return
-  for (const a of crashed) {
-    if (restarted.has(a.agentId)) continue
-    if (isRateLimited(a.agentId)) {
-      logLine('warn', `rate-limit hit for ${a.agentId} (>=${RATE_LIMIT_PER_HOUR}/hr); skipping`)
-      continue
+async function tickOnce(
+  client: ReadOnlyQueryClient,
+  probes: RuntimeObservationProbes = runtimeObservationProbes,
+  nowMs = Date.now(),
+): Promise<RuntimeHealthReport[]> {
+  const reports = await collectRuntimeHealthReports(client, probes, nowMs)
+  for (const report of reports) {
+    logJson('runtime-health', report)
+    const plan = planRuntimeHealthAlert(report, alertHistory, nowMs)
+    logJson('runtime-health-alert-plan', plan)
+    if (plan.action === 'EMIT') {
+      alertHistory.push({
+        agent_id: plan.agent_id,
+        dedupe_key: plan.dedupe_key,
+        emitted_at: plan.observed_at,
+      })
     }
-    const reg = registry.get(a.agentId) ?? null
-    const sessionName = reg?.session ?? null
-    logLine('info', `crashed: ${a.agentId} last_seen_at=${a.lastSeenAt?.toISOString() ?? 'null'} status=${a.status ?? 'unknown'} session=${sessionName ?? 'no-profile'} source=${reg?.source ?? 'none'}`)
-    const restart = attemptRestart(a.agentId, sessionName)
-    logLine('info', `restart attempt for ${a.agentId}: outcome=${restart.outcome} detail=${restart.detail}`)
-    if (restart.outcome !== 'dry_run' && restart.outcome !== 'rate_limited') recordRestart(a.agentId)
-    await recordAuditLog(client, a.agentId, sessionName, restart, a.lastSeenAt)
   }
+  return reports
 }
 
 async function main(): Promise<void> {
   if (!DATABASE_URL) {
-    logLine('error', 'DATABASE_URL is required')
+    logJson('fatal', { reason_code: 'DATABASE_URL_REQUIRED' })
     process.exit(1)
   }
-  logLine('info', `starting watchdog poll=${POLL_SEC}s crash_threshold=${CRASH_THRESHOLD_SEC}s rate_limit=${RATE_LIMIT_PER_HOUR}/hr dry_run=${DRY_RUN}`)
+  logJson('startup', {
+    mode: 'observe_alert_only',
+    poll_seconds: POLL_SEC,
+    freshness_limit_seconds: CRASH_THRESHOLD_SEC,
+    direct_restart_enabled: false,
+    mutation_performed: false,
+  })
   const client = new Client({ connectionString: DATABASE_URL })
   await client.connect()
 
   let stopping = false
-  const stop = () => { stopping = true; logLine('info', 'received stop signal'); client.end().catch(() => {}); process.exit(0) }
+  const stop = () => {
+    stopping = true
+    client.end().catch(() => {})
+  }
   process.on('SIGTERM', stop)
   process.on('SIGINT', stop)
 
-  const registry = await loadDbProfileSessions(client)
-  if (registry.size > 0) {
-    logLine('info', `loaded ${registry.size} watchdog sessions from agents.profile`)
-  } else {
-    logLine('warn', 'loaded 0 watchdog sessions from agents.profile; no fallback because agents table is SSOT')
-  }
-
   while (!stopping) {
     try {
-      await tickOnce(client, registry)
-    } catch (err) {
-      logLine('error', `tick failed: ${err}`)
+      await tickOnce(client)
+    } catch (error) {
+      logJson('tick-error', { reason_code: 'OBSERVATION_EXCEPTION', message: String(error) })
     }
-    await new Promise(r => setTimeout(r, POLL_SEC * 1000))
+    if (!stopping) await new Promise((resolve) => setTimeout(resolve, POLL_SEC * 1000))
   }
 }
 
-// Test-only export: allow `import { findCrashedAgents, isRateLimited,
-// recordRestart }` for unit fixtures without running the daemon loop.
-export { commandHasAgentId, findCrashedAgents, findRuntimeProfileIssues, isRateLimited, recordRestart, rateLimit, loadDbProfileSessions }
+export {
+  alertHistory,
+  buildRuntimeHealthDimensionInputs,
+  collectRuntimeHealthReports,
+  commandHasAgentId,
+  findCrashedAgents,
+  findRuntimeProfileIssues,
+  loadDbProfileSessions,
+  loadRuntimeHealthSnapshots,
+  tickOnce,
+}
+
+export type {
+  ObservationProbe,
+  ReadOnlyQueryClient,
+  RuntimeHealthSnapshot,
+  RuntimeObservationProbes,
+}
 
 if (import.meta.main) {
-  main().catch(err => {
-    logLine('error', `fatal: ${err}`)
+  main().catch((error) => {
+    logJson('fatal', { reason_code: 'WATCHDOG_FATAL', message: String(error) })
     process.exit(1)
   })
 }
