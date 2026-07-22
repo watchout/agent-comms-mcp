@@ -67,6 +67,22 @@ function queueWorkResidueEnv(agentId: string, withPolicy: boolean): Record<strin
   }
 }
 
+function shirubeD1FleetRestoreEnv(): Record<string, string> {
+  return {
+    SHIRUBE_D1_ENABLED: '1',
+    SHIRUBE_D1_KILL_SWITCH: '0',
+    SHIRUBE_D1_ACTIVATION_MODE: 'fleet',
+    SHIRUBE_D1_TARGET_ALLOWLIST: JSON.stringify(SHIRUBE_D1_FLEET_TARGETS),
+    SHIRUBE_D1_AUTHORIZATION_DIGEST: 'a'.repeat(64),
+    SHIRUBE_D1_ADAPTER_HEAD_SHA: 'b'.repeat(40),
+    SHIRUBE_D1_AUDIT_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-audit',
+    SHIRUBE_D1_QA_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-qa',
+    SHIRUBE_D1_CHECK_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-check',
+    SHIRUBE_D1_CTO_GO_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-cto',
+    SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  }
+}
+
 describe('#603 state-daemon LaunchAgent durable restore contract', () => {
   test('restore plan defaults to a durable operator-owned checkout, not /private/tmp', () => {
     const plan = buildStateDaemonRestorePlan({
@@ -920,19 +936,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
   })
 
   test('restore helper dry-run renders only bounded Shirube D1 fleet and rollback env', () => {
-    const fleetEnv = {
-      SHIRUBE_D1_ENABLED: '1',
-      SHIRUBE_D1_KILL_SWITCH: '0',
-      SHIRUBE_D1_ACTIVATION_MODE: 'fleet',
-      SHIRUBE_D1_TARGET_ALLOWLIST: JSON.stringify(SHIRUBE_D1_FLEET_TARGETS),
-      SHIRUBE_D1_AUTHORIZATION_DIGEST: 'a'.repeat(64),
-      SHIRUBE_D1_ADAPTER_HEAD_SHA: 'b'.repeat(40),
-      SHIRUBE_D1_AUDIT_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-audit',
-      SHIRUBE_D1_QA_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-qa',
-      SHIRUBE_D1_CHECK_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-check',
-      SHIRUBE_D1_CTO_GO_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-cto',
-      SHIRUBE_D1_FLEET_ACTIVATION_REF,
-    }
+    const fleetEnv = shirubeD1FleetRestoreEnv()
     const run = (env: Record<string, string>) => Bun.spawnSync([
       'bun',
       'scripts/state-daemon-launchagent.ts',
@@ -961,6 +965,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     for (const input of [
       { PATH: '/tmp/untrusted' },
       { SHIRUBE_D1_ENABLED: 1 },
+      { ...shirubeD1FleetRestoreEnv(), SHIRUBE_D1_FLEET_ACTIVATION_REF: 'https://github.com/unrelated/repo/issues/1' },
     ]) {
       const proc = Bun.spawnSync([
         'bun',

@@ -11,6 +11,7 @@ import {
   planStateDaemonRestorePrune,
   queueWorkSchedulerLaunchAgentEnabled,
   renderStateDaemonLaunchAgentPlist,
+  validateShirubeD1LaunchAgentEnv,
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
   loadQueueWorkResiduePolicyFromEnv,
@@ -71,6 +72,10 @@ function parseShirubeD1RestoreEnv(raw: string): Record<string, string> {
       throw new Error(`--shirube-d1-env-json requires a string value for ${key}`)
     }
     result[key] = value
+  }
+  const issues = validateShirubeD1LaunchAgentEnv(result)
+  if (issues.length > 0) {
+    throw new Error(`--shirube-d1-env-json failed D1 preflight: ${issues.map((issue) => issue.code).join(',')}`)
   }
   return result
 }
