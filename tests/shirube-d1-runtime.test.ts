@@ -22,7 +22,10 @@ import {
   createShirubeD1DatabasePorts,
   type ShirubeD1RuntimeBinding,
 } from '../core/shirube-d1-runtime'
-import { SHIRUBE_D1_FLEET_TARGETS } from '../core/shirube-d1-activation-policy'
+import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  SHIRUBE_D1_FLEET_TARGETS,
+} from '../core/shirube-d1-activation-policy'
 import {
   claimPendingQueueForAunRuntimeV2,
   runAunRuntimeV2,
@@ -118,7 +121,7 @@ function fleetEnv(): NodeJS.ProcessEnv {
     SHIRUBE_D1_ACTIVATION_MODE: 'fleet',
     SHIRUBE_D1_TARGET_ALLOWLIST: JSON.stringify(SHIRUBE_D1_FLEET_TARGETS),
     SHIRUBE_D1_AUTHORIZATION_DIGEST: fleetEnvelope().authorization_digest,
-    SHIRUBE_D1_FLEET_ACTIVATION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-fleet',
+    SHIRUBE_D1_FLEET_ACTIVATION_REF,
   }
 }
 
@@ -129,7 +132,7 @@ function fleetBinding(targetIndex = 0): ShirubeD1RuntimeBinding {
     authorization: fleetEnvelope(),
     activation_evidence: {
       ...binding().activation_evidence,
-      fleet_activation_ref: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-fleet',
+      fleet_activation_ref: SHIRUBE_D1_FLEET_ACTIVATION_REF,
     },
   }
 }
@@ -214,7 +217,7 @@ describe('Shirube V4 D1 production runtime', () => {
       enabled: true,
       activation_mode: 'fleet',
       allowlist: SHIRUBE_D1_FLEET_TARGETS,
-      fleet_activation_ref: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-fleet',
+      fleet_activation_ref: SHIRUBE_D1_FLEET_ACTIVATION_REF,
     })
   })
 
@@ -236,6 +239,9 @@ describe('Shirube V4 D1 production runtime', () => {
     const env = fleetEnv()
     delete env.SHIRUBE_D1_FLEET_ACTIVATION_REF
     expect(() => buildShirubeD1RuntimePolicy(env)).toThrow('SHIRUBE_D1_FLEET_ACTIVATION_REF')
+
+    env.SHIRUBE_D1_FLEET_ACTIVATION_REF = 'https://github.com/unrelated/repo/issues/1'
+    expect(() => buildShirubeD1RuntimePolicy(env)).toThrow(`must equal ${SHIRUBE_D1_FLEET_ACTIVATION_REF}`)
   })
 
   test('fleet queue binding must carry the activated fleet evidence ref', async () => {

@@ -28,6 +28,7 @@ import {
 } from './shirube-d1-effect-ports'
 import { createD1PersistencePorts } from './shirube-d1-persistence'
 import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
   isExactShirubeD1Fleet,
   type ShirubeD1ActivationMode,
 } from './shirube-d1-activation-policy'
@@ -196,6 +197,9 @@ export function buildShirubeD1RuntimePolicy(env: NodeJS.ProcessEnv = process.env
     }
     if (activationMode === 'fleet' && !isExactShirubeD1Fleet(allowlist)) {
       throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'enabled fleet requires the exact owner-authorized five target tuples')
+    }
+    if (activationMode === 'fleet' && fleetActivationRef !== SHIRUBE_D1_FLEET_ACTIVATION_REF) {
+      throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', `SHIRUBE_D1_FLEET_ACTIVATION_REF must equal ${SHIRUBE_D1_FLEET_ACTIVATION_REF}`)
     }
     if (!authorizationDigest || !/^[0-9a-f]{64}$/.test(authorizationDigest)) {
       throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'SHIRUBE_D1_AUTHORIZATION_DIGEST must be 64 lowercase hex')

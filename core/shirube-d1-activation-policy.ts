@@ -7,6 +7,7 @@ export interface ShirubeD1RuntimeTarget {
 }
 
 export const SHIRUBE_D1_FLEET_CONTROL_SOURCE = 'https://github.com/watchout/ai-dev-framework/issues/556' as const
+export const SHIRUBE_D1_FLEET_ACTIVATION_REF = 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5040830741' as const
 
 export const SHIRUBE_D1_FLEET_TARGETS: readonly ShirubeD1RuntimeTarget[] = Object.freeze([
   Object.freeze({ repository: 'watchout/agent-comms-mcp', agent_id: 'dev-001', control_source: SHIRUBE_D1_FLEET_CONTROL_SOURCE }),

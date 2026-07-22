@@ -53,7 +53,7 @@ substitutions, duplicates, missing targets, and sixth targets fail closed.
 
 ```sh
 export SHIRUBE_D1_ACTIVATION_MODE=fleet
-export SHIRUBE_D1_FLEET_ACTIVATION_REF=https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5040731671
+export SHIRUBE_D1_FLEET_ACTIVATION_REF=https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5040830741
 export SHIRUBE_D1_TARGET_ALLOWLIST='[{"repository":"watchout/agent-comms-mcp","agent_id":"dev-001","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/agent-memory","agent_id":"kusabi","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/aun-platform","agent_id":"aun","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/kodama","agent_id":"kodama","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/misell","agent_id":"misell","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"}]'
 ```
 

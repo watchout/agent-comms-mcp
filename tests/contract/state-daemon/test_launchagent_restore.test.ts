@@ -13,7 +13,10 @@ import {
   validateQueueWorkCanaryResiduePreflight,
 } from '../../../core/state-daemon/launchagent'
 import { loadQueueWorkResiduePolicyFile } from '../../../core/state-daemon/queue-work-residue-policy'
-import { SHIRUBE_D1_FLEET_TARGETS } from '../../../core/shirube-d1-activation-policy'
+import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  SHIRUBE_D1_FLEET_TARGETS,
+} from '../../../core/shirube-d1-activation-policy'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
 
@@ -928,7 +931,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       SHIRUBE_D1_QA_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-qa',
       SHIRUBE_D1_CHECK_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-check',
       SHIRUBE_D1_CTO_GO_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-cto',
-      SHIRUBE_D1_FLEET_ACTIVATION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-fleet',
+      SHIRUBE_D1_FLEET_ACTIVATION_REF,
     }
     const run = (env: Record<string, string>) => Bun.spawnSync([
       'bun',

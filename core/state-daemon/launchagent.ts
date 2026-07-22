@@ -1,7 +1,11 @@
 import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
-import { isExactShirubeD1Fleet, type ShirubeD1RuntimeTarget } from '../shirube-d1-activation-policy'
+import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  isExactShirubeD1Fleet,
+  type ShirubeD1RuntimeTarget,
+} from '../shirube-d1-activation-policy'
 import {
   classifyQueueWorkResidueRows,
   loadQueueWorkResiduePolicyFile,
@@ -100,8 +104,8 @@ export function validateShirubeD1LaunchAgentEnv(env: Record<string, string>): St
   if (activationMode === 'fleet' && !isExactShirubeD1Fleet(targets)) {
     issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 fleet activation requires the exact owner-authorized five target tuples.' })
   }
-  if (activationMode === 'fleet' && !/^https:\/\/github\.com\/[^\s]+$/.test(env.SHIRUBE_D1_FLEET_ACTIVATION_REF ?? '')) {
-    issues.push({ code: 'shirube_d1_fleet_activation_ref_invalid', message: 'SHIRUBE_D1_FLEET_ACTIVATION_REF must be a GitHub evidence URL.' })
+  if (activationMode === 'fleet' && env.SHIRUBE_D1_FLEET_ACTIVATION_REF !== SHIRUBE_D1_FLEET_ACTIVATION_REF) {
+    issues.push({ code: 'shirube_d1_fleet_activation_ref_invalid', message: `SHIRUBE_D1_FLEET_ACTIVATION_REF must equal ${SHIRUBE_D1_FLEET_ACTIVATION_REF}.` })
   }
   if (!/^[0-9a-f]{64}$/.test(env.SHIRUBE_D1_AUTHORIZATION_DIGEST ?? '')) {
     issues.push({ code: 'shirube_d1_authorization_digest_invalid', message: 'SHIRUBE_D1_AUTHORIZATION_DIGEST must be 64 lowercase hex.' })
