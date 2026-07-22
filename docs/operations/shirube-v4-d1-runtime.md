@@ -63,6 +63,22 @@ Fleet queue bindings must include the same `fleet_activation_ref` in
 `control_source`; repo-local adoption/control refs remain the durable target
 read-back locations.
 
+Persist the reviewed policy through the bounded restore input; the helper
+rejects unknown environment keys and non-string values before restore
+planning. Use the same input for kill-switch-first rollback.
+
+```sh
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit <deployed-40-hex-sha> \
+  --shirube-d1-env-json "$SHIRUBE_D1_ENV_JSON" \
+  --execute
+
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit <deployed-40-hex-sha> \
+  --shirube-d1-env-json '{"SHIRUBE_D1_ENABLED":"0","SHIRUBE_D1_KILL_SWITCH":"1","SHIRUBE_D1_TARGET_ALLOWLIST":""}' \
+  --execute
+```
+
 Every enrolled queue payload must contain a `shirube_v4_d1` object with schema
 `shirube-v4/d1-runtime-binding/v1`, the exact allowlisted target, an audited
 authorization envelope, exact activation evidence matching the environment,

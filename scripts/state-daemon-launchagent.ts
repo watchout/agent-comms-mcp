@@ -38,6 +38,43 @@ type ParsedArgs = {
   githubTokenFile?: string
 }
 
+const SHIRUBE_D1_RESTORE_ENV_KEYS = new Set([
+  'SHIRUBE_D1_ENABLED',
+  'SHIRUBE_D1_KILL_SWITCH',
+  'SHIRUBE_D1_ACTIVATION_MODE',
+  'SHIRUBE_D1_TARGET_ALLOWLIST',
+  'SHIRUBE_D1_AUTHORIZATION_DIGEST',
+  'SHIRUBE_D1_ADAPTER_HEAD_SHA',
+  'SHIRUBE_D1_AUDIT_REF',
+  'SHIRUBE_D1_QA_REF',
+  'SHIRUBE_D1_CHECK_REF',
+  'SHIRUBE_D1_CTO_GO_REF',
+  'SHIRUBE_D1_FLEET_ACTIVATION_REF',
+])
+
+function parseShirubeD1RestoreEnv(raw: string): Record<string, string> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('--shirube-d1-env-json requires a valid JSON object')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--shirube-d1-env-json requires a JSON object')
+  }
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!SHIRUBE_D1_RESTORE_ENV_KEYS.has(key)) {
+      throw new Error(`--shirube-d1-env-json does not allow key: ${key}`)
+    }
+    if (typeof value !== 'string') {
+      throw new Error(`--shirube-d1-env-json requires a string value for ${key}`)
+    }
+    result[key] = value
+  }
+  return result
+}
+
 function usage(): string {
   return `state-daemon LaunchAgent restore helper
 
@@ -57,6 +94,8 @@ Usage:
     [--queue-work-residue-policy-file <path>] [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --agent-allowlist <agent> --disable-codex-runner [--execute]
+  bun scripts/state-daemon-launchagent.ts restore --commit <sha>
+    --shirube-d1-env-json <bounded-json> [--execute]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
   bun scripts/state-daemon-launchagent.ts prune [--restore-root <path>] [--keep N] [--execute]
 
@@ -96,6 +135,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--plist') args.plist = next()
     else if (arg === '--bun') args.bunPath = next()
     else if (arg === '--database-url') args.databaseUrl = next()
+    else if (arg === '--shirube-d1-env-json') Object.assign(args.extraEnv, parseShirubeD1RestoreEnv(next()))
     else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
     else if (arg === '--github-work-repos') args.githubWorkRepos = next()
     else if (arg === '--github-work-labels') args.githubWorkLabels = next()

@@ -13,6 +13,7 @@ import {
   validateQueueWorkCanaryResiduePreflight,
 } from '../../../core/state-daemon/launchagent'
 import { loadQueueWorkResiduePolicyFile } from '../../../core/state-daemon/queue-work-residue-policy'
+import { SHIRUBE_D1_FLEET_TARGETS } from '../../../core/shirube-d1-activation-policy'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
 
@@ -913,6 +914,63 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     })
     expect(out.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED).toBeUndefined()
     expect(out.plan.extraEnv).toMatchObject(out.extraEnv)
+  })
+
+  test('restore helper dry-run renders only bounded Shirube D1 fleet and rollback env', () => {
+    const fleetEnv = {
+      SHIRUBE_D1_ENABLED: '1',
+      SHIRUBE_D1_KILL_SWITCH: '0',
+      SHIRUBE_D1_ACTIVATION_MODE: 'fleet',
+      SHIRUBE_D1_TARGET_ALLOWLIST: JSON.stringify(SHIRUBE_D1_FLEET_TARGETS),
+      SHIRUBE_D1_AUTHORIZATION_DIGEST: 'a'.repeat(64),
+      SHIRUBE_D1_ADAPTER_HEAD_SHA: 'b'.repeat(40),
+      SHIRUBE_D1_AUDIT_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-audit',
+      SHIRUBE_D1_QA_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-qa',
+      SHIRUBE_D1_CHECK_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-check',
+      SHIRUBE_D1_CTO_GO_REF: 'https://github.com/watchout/agent-comms-mcp/pull/890#issuecomment-cto',
+      SHIRUBE_D1_FLEET_ACTIVATION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-fleet',
+    }
+    const run = (env: Record<string, string>) => Bun.spawnSync([
+      'bun',
+      'scripts/state-daemon-launchagent.ts',
+      'restore',
+      '--commit',
+      '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      '--shirube-d1-env-json',
+      JSON.stringify(env),
+    ], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
+
+    const fleet = run(fleetEnv)
+    expect(fleet.exitCode, fleet.stderr.toString()).toBe(0)
+    const fleetOut = JSON.parse(fleet.stdout.toString())
+    expect(fleetOut.extraEnv).toEqual(fleetEnv)
+    expect(fleetOut.plan.extraEnv).toEqual(fleetEnv)
+
+    const rollbackEnv = { SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1', SHIRUBE_D1_TARGET_ALLOWLIST: '' }
+    const rollback = run(rollbackEnv)
+    expect(rollback.exitCode, rollback.stderr.toString()).toBe(0)
+    const rollbackOut = JSON.parse(rollback.stdout.toString())
+    expect(rollbackOut.extraEnv).toEqual(rollbackEnv)
+    expect(rollbackOut.plan.extraEnv).toEqual(rollbackEnv)
+  })
+
+  test('restore helper rejects arbitrary or non-string Shirube D1 env entries', () => {
+    for (const input of [
+      { PATH: '/tmp/untrusted' },
+      { SHIRUBE_D1_ENABLED: 1 },
+    ]) {
+      const proc = Bun.spawnSync([
+        'bun',
+        'scripts/state-daemon-launchagent.ts',
+        'restore',
+        '--commit',
+        '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+        '--shirube-d1-env-json',
+        JSON.stringify(input),
+      ], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
+      expect(proc.exitCode).not.toBe(0)
+      expect(proc.stderr.toString()).toContain('--shirube-d1-env-json')
+    }
   })
 
   test('restore verification build artifact does not dirty an existing checkout for repeat restore', () => {
