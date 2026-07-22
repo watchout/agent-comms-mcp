@@ -87,14 +87,15 @@ export function validateShirubeD1LaunchAgentEnv(env: Record<string, string>): St
   } catch {
     issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'SHIRUBE_D1_TARGET_ALLOWLIST must be a JSON array.' })
   }
-  for (const target of targets as unknown as Record<string, unknown>[]) {
-    if (!target || typeof target !== 'object' || ['repository', 'agent_id', 'control_source'].some((key) => typeof target[key] !== 'string' || !(target[key] as string).trim())) {
-      issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'The Shirube D1 target tuple requires repository, agent_id, and control_source.' })
-      break
-    }
-  }
   if (activationMode === 'canary' && targets.length !== 1) {
     issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 canary activation requires exactly one target tuple.' })
+  } else {
+    for (const target of targets as unknown as Record<string, unknown>[]) {
+      if (!target || typeof target !== 'object' || ['repository', 'agent_id', 'control_source'].some((key) => typeof target[key] !== 'string' || !(target[key] as string).trim())) {
+        issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'The Shirube D1 target tuple requires repository, agent_id, and control_source.' })
+        break
+      }
+    }
   }
   if (activationMode === 'fleet' && !isExactShirubeD1Fleet(targets)) {
     issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 fleet activation requires the exact owner-authorized five target tuples.' })

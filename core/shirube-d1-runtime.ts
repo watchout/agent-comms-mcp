@@ -30,12 +30,15 @@ import { createD1PersistencePorts } from './shirube-d1-persistence'
 import {
   isExactShirubeD1Fleet,
   type ShirubeD1ActivationMode,
-  type ShirubeD1RuntimeTarget,
 } from './shirube-d1-activation-policy'
 
-export type { ShirubeD1RuntimeTarget } from './shirube-d1-activation-policy'
-
 export const SHIRUBE_D1_RUNTIME_BINDING_VERSION = 'shirube-v4/d1-runtime-binding/v1' as const
+
+export interface ShirubeD1RuntimeTarget {
+  repository: string
+  agent_id: string
+  control_source: string
+}
 
 export interface ShirubeD1ActivationEvidence {
   adapter_head_sha: string
