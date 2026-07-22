@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
+import { isExactShirubeD1Fleet, type ShirubeD1RuntimeTarget } from '../shirube-d1-activation-policy'
 import {
   classifyQueueWorkResidueRows,
   loadQueueWorkResiduePolicyFile,
@@ -64,31 +65,42 @@ export function validateShirubeD1LaunchAgentEnv(env: Record<string, string>): St
   const issues: StateDaemonPreflightIssue[] = []
   const enabled = env.SHIRUBE_D1_ENABLED
   const killSwitch = env.SHIRUBE_D1_KILL_SWITCH
+  const activationMode = env.SHIRUBE_D1_ACTIVATION_MODE ?? 'canary'
   if (enabled !== undefined && enabled !== '0' && enabled !== '1') {
     issues.push({ code: 'shirube_d1_enabled_invalid', message: 'SHIRUBE_D1_ENABLED must be 0 or 1.' })
   }
   if (killSwitch !== undefined && killSwitch !== '0' && killSwitch !== '1') {
     issues.push({ code: 'shirube_d1_kill_switch_invalid', message: 'SHIRUBE_D1_KILL_SWITCH must be 0 or 1.' })
   }
+  if (activationMode !== 'canary' && activationMode !== 'fleet') {
+    issues.push({ code: 'shirube_d1_activation_mode_invalid', message: 'SHIRUBE_D1_ACTIVATION_MODE must be canary or fleet.' })
+  }
   if (enabled !== '1') return issues
   if (killSwitch !== '0') {
     issues.push({ code: 'shirube_d1_kill_switch_active', message: 'Enabled Shirube D1 requires SHIRUBE_D1_KILL_SWITCH=0.' })
   }
-  let targets: unknown[] = []
+  let targets: ShirubeD1RuntimeTarget[] = []
   try {
     const parsed = JSON.parse(env.SHIRUBE_D1_TARGET_ALLOWLIST ?? '')
     if (!Array.isArray(parsed)) throw new Error('not an array')
-    targets = parsed
+    targets = parsed as ShirubeD1RuntimeTarget[]
   } catch {
     issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'SHIRUBE_D1_TARGET_ALLOWLIST must be a JSON array.' })
   }
-  if (targets.length !== 1) {
-    issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 activation requires exactly one target tuple.' })
-  } else {
-    const target = targets[0] as Record<string, unknown>
+  for (const target of targets as unknown as Record<string, unknown>[]) {
     if (!target || typeof target !== 'object' || ['repository', 'agent_id', 'control_source'].some((key) => typeof target[key] !== 'string' || !(target[key] as string).trim())) {
       issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'The Shirube D1 target tuple requires repository, agent_id, and control_source.' })
+      break
     }
+  }
+  if (activationMode === 'canary' && targets.length !== 1) {
+    issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 canary activation requires exactly one target tuple.' })
+  }
+  if (activationMode === 'fleet' && !isExactShirubeD1Fleet(targets)) {
+    issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 fleet activation requires the exact owner-authorized five target tuples.' })
+  }
+  if (activationMode === 'fleet' && !/^https:\/\/github\.com\/[^\s]+$/.test(env.SHIRUBE_D1_FLEET_ACTIVATION_REF ?? '')) {
+    issues.push({ code: 'shirube_d1_fleet_activation_ref_invalid', message: 'SHIRUBE_D1_FLEET_ACTIVATION_REF must be a GitHub evidence URL.' })
   }
   if (!/^[0-9a-f]{64}$/.test(env.SHIRUBE_D1_AUTHORIZATION_DIGEST ?? '')) {
     issues.push({ code: 'shirube_d1_authorization_digest_invalid', message: 'SHIRUBE_D1_AUTHORIZATION_DIGEST must be 64 lowercase hex.' })
