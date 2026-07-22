@@ -34,10 +34,12 @@ import {
 } from '../../core/aun-runtime-v2-live-claim'
 import {
   buildCodexExecQueueWorkCommand,
+  createWritebackSender,
   describeCodexExecFailure,
   repoRoot,
   type RunQueueWorkPlan,
 } from './run-queue-work'
+import { ShirubeD1RuntimeController } from '../../core/shirube-d1-runtime'
 import {
   QUEUE_WORK_RESULT_VERSION,
   type LlmRuntimeAdapter,
@@ -323,6 +325,7 @@ class AgentComCliReplySender implements QueueReplySender {
     message_id: string | null
     content: string
     mention: string | null
+    idempotency_key?: string | null
   }): Promise<{ message_id?: string | null }> {
     if (!input.mention) throw new Error('reply mention is required for agent-com send')
     const child = await execFileAsync('bun', [
@@ -335,6 +338,7 @@ class AgentComCliReplySender implements QueueReplySender {
       '--queue-id',
       input.queue_id,
       ...(input.message_id ? ['--message-id', input.message_id] : []),
+      ...(input.idempotency_key ? ['--d1-invocation-key', input.idempotency_key, '--no-close'] : []),
     ], {
       cwd: this.cwd,
       env: {
@@ -600,45 +604,47 @@ export async function runtimeV2ClaimLiveCanary(
 export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<RuntimeV2CliResult> {
   const env = opts.env ?? process.env
   const cwd = opts.cwd ?? repoRoot()
-  const plan = buildAunRuntimeV2Plan({
-    ...opts,
-    env,
-    cwd,
-    claimSource: opts.claimSource ?? AUN_RUNTIME_V2_CLAIM_SOURCE,
-  })
-  const validPlan = validateAunRuntimeV2Plan(plan)
-  if (!validPlan.ok) {
-    return {
-      ok: false,
-      dry_run: !!opts.dryRun,
-      plan,
-      error: validPlan.detail ?? validPlan.code,
-    }
-  }
-  if (!opts.dryRun) {
-    const validFence = validateAunRuntimeV2ExecutionFence(plan)
-    if (!validFence.ok) {
-      return {
-        ok: false,
-        dry_run: false,
-        plan,
-        error: validFence.detail,
-      }
-    }
-    const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
-    if (!validLiveAgent.ok) {
-      return {
-        ok: false,
-        dry_run: false,
-        plan,
-        error: validLiveAgent.detail,
-      }
-    }
-  }
-
   const db = createDbAdapter(env.DATABASE_URL)
   const legacyDb = toLegacyDb(db)
+  let plan: AunRuntimeV2Plan | undefined
   try {
+    const d1Runtime = new ShirubeD1RuntimeController(db, { env, now: opts.now })
+    plan = buildAunRuntimeV2Plan({
+      ...opts,
+      env,
+      cwd,
+      d1Runtime,
+      claimSource: opts.claimSource ?? AUN_RUNTIME_V2_CLAIM_SOURCE,
+    })
+    const validPlan = validateAunRuntimeV2Plan(plan)
+    if (!validPlan.ok) {
+      return {
+        ok: false,
+        dry_run: !!opts.dryRun,
+        plan,
+        error: validPlan.detail ?? validPlan.code,
+      }
+    }
+    if (!opts.dryRun) {
+      const validFence = validateAunRuntimeV2ExecutionFence(plan)
+      if (!validFence.ok) {
+        return {
+          ok: false,
+          dry_run: false,
+          plan,
+          error: validFence.detail,
+        }
+      }
+      const validLiveAgent = validateAunRuntimeV2LiveCapability(plan)
+      if (!validLiveAgent.ok) {
+        return {
+          ok: false,
+          dry_run: false,
+          plan,
+          error: validLiveAgent.detail,
+        }
+      }
+    }
     const queueWorkPlan = queueWorkPlanFromRuntimeV2(plan, env)
     const outcome = await runAunRuntimeV2(legacyDb, {
       ...opts,
@@ -649,6 +655,8 @@ export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<Runtime
       expectedClaimSource: plan.expected_claim_source,
       adapter: opts.dryRun ? undefined : createRuntimeAdapter(queueWorkPlan, env),
       replySender: plan.finalize ? new AgentComCliReplySender(queueWorkPlan.repoRoot, env) : undefined,
+      writebackSender: plan.finalize ? createWritebackSender(queueWorkPlan, env) : undefined,
+      d1Runtime,
     })
     return {
       ok: outcome.ok,
@@ -657,10 +665,16 @@ export async function runtimeV2(opts: RuntimeV2CliOptions = {}): Promise<Runtime
       outcome,
     }
   } catch (err) {
+    const fallbackPlan = buildAunRuntimeV2Plan({
+      ...opts,
+      env: { ...env, SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1' },
+      cwd,
+      claimSource: opts.claimSource ?? AUN_RUNTIME_V2_CLAIM_SOURCE,
+    })
     return {
       ok: false,
       dry_run: !!opts.dryRun,
-      plan,
+      plan: plan ?? fallbackPlan,
       error: (err as Error).message ?? String(err),
     }
   } finally {

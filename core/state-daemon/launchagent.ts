@@ -60,6 +60,50 @@ export type StateDaemonPreflightResult = {
   warnings: StateDaemonPreflightIssue[]
 }
 
+export function validateShirubeD1LaunchAgentEnv(env: Record<string, string>): StateDaemonPreflightIssue[] {
+  const issues: StateDaemonPreflightIssue[] = []
+  const enabled = env.SHIRUBE_D1_ENABLED
+  const killSwitch = env.SHIRUBE_D1_KILL_SWITCH
+  if (enabled !== undefined && enabled !== '0' && enabled !== '1') {
+    issues.push({ code: 'shirube_d1_enabled_invalid', message: 'SHIRUBE_D1_ENABLED must be 0 or 1.' })
+  }
+  if (killSwitch !== undefined && killSwitch !== '0' && killSwitch !== '1') {
+    issues.push({ code: 'shirube_d1_kill_switch_invalid', message: 'SHIRUBE_D1_KILL_SWITCH must be 0 or 1.' })
+  }
+  if (enabled !== '1') return issues
+  if (killSwitch !== '0') {
+    issues.push({ code: 'shirube_d1_kill_switch_active', message: 'Enabled Shirube D1 requires SHIRUBE_D1_KILL_SWITCH=0.' })
+  }
+  let targets: unknown[] = []
+  try {
+    const parsed = JSON.parse(env.SHIRUBE_D1_TARGET_ALLOWLIST ?? '')
+    if (!Array.isArray(parsed)) throw new Error('not an array')
+    targets = parsed
+  } catch {
+    issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'SHIRUBE_D1_TARGET_ALLOWLIST must be a JSON array.' })
+  }
+  if (targets.length !== 1) {
+    issues.push({ code: 'shirube_d1_target_allowlist_not_exact', message: 'Protected Shirube D1 activation requires exactly one target tuple.' })
+  } else {
+    const target = targets[0] as Record<string, unknown>
+    if (!target || typeof target !== 'object' || ['repository', 'agent_id', 'control_source'].some((key) => typeof target[key] !== 'string' || !(target[key] as string).trim())) {
+      issues.push({ code: 'shirube_d1_target_allowlist_invalid', message: 'The Shirube D1 target tuple requires repository, agent_id, and control_source.' })
+    }
+  }
+  if (!/^[0-9a-f]{64}$/.test(env.SHIRUBE_D1_AUTHORIZATION_DIGEST ?? '')) {
+    issues.push({ code: 'shirube_d1_authorization_digest_invalid', message: 'SHIRUBE_D1_AUTHORIZATION_DIGEST must be 64 lowercase hex.' })
+  }
+  if (!/^[0-9a-f]{40}$/.test(env.SHIRUBE_D1_ADAPTER_HEAD_SHA ?? '')) {
+    issues.push({ code: 'shirube_d1_adapter_head_invalid', message: 'SHIRUBE_D1_ADAPTER_HEAD_SHA must be 40 lowercase hex.' })
+  }
+  for (const name of ['SHIRUBE_D1_AUDIT_REF', 'SHIRUBE_D1_QA_REF', 'SHIRUBE_D1_CHECK_REF', 'SHIRUBE_D1_CTO_GO_REF']) {
+    if (!/^https:\/\/github\.com\/[^\s]+$/.test(env[name] ?? '')) {
+      issues.push({ code: `shirube_d1_${name.slice('SHIRUBE_D1_'.length).toLowerCase()}_invalid`, message: `${name} must be a GitHub evidence URL.` })
+    }
+  }
+  return issues
+}
+
 export type QueueWorkCanaryResidueRow = {
   id: number | string
   agent_id: string
@@ -450,6 +494,8 @@ export function validateStateDaemonLaunchAgentConfig(
       message: 'LaunchAgent must not embed raw GitHub token values; use STATE_DAEMON_GITHUB_TOKEN_FILE',
     })
   }
+
+  errors.push(...validateShirubeD1LaunchAgentEnv(env))
 
   if (env.STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED === '1') {
     const repos = parseCsvValue(env.STATE_DAEMON_GITHUB_WORK_REPOS)

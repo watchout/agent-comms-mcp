@@ -417,6 +417,7 @@ class AgentComCliReplySender implements QueueReplySender {
     message_id: string | null
     content: string
     mention: string | null
+    idempotency_key?: string | null
   }): Promise<{ message_id?: string | null }> {
     if (!input.mention) {
       throw new Error('reply mention is required for agent-com send')
@@ -431,6 +432,7 @@ class AgentComCliReplySender implements QueueReplySender {
       '--queue-id',
       input.queue_id,
       ...(input.message_id ? ['--message-id', input.message_id] : []),
+      ...(input.idempotency_key ? ['--d1-invocation-key', input.idempotency_key, '--no-close'] : []),
     ], {
       cwd: this.repoRoot,
       env: {
@@ -451,6 +453,7 @@ class AgentComCliReplySender implements QueueReplySender {
 
 interface MediatedPostingRequest {
   schema_version: 'queue_work_mediated_posting_request_v1'
+  operation?: 'perform' | 'readback'
   queue_id: string
   agent_id: string
   message_id: string | null
@@ -467,16 +470,17 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
     private readonly env: NodeJS.ProcessEnv,
   ) {}
 
-  async sendWriteback(input: {
+  private async invoke(input: {
     queue_id: string
     agent_id: string
     message_id: string | null
     handoff_contract: QueueWorkHandoffContract
     writeback: QueueWorkGithubIssueCommentWriteback
     runtime_result_summary: QueueWorkRuntimeResultSummary
-  }): Promise<{ posted_with?: string | null; body_sha256?: string | null }> {
+  }, operation: 'perform' | 'readback'): Promise<{ posted_with?: string | null; body_sha256?: string | null }> {
     const request: MediatedPostingRequest = {
       schema_version: 'queue_work_mediated_posting_request_v1',
+      operation,
       queue_id: input.queue_id,
       agent_id: input.agent_id,
       message_id: input.message_id,
@@ -512,9 +516,17 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
       body_sha256: typeof parsed.body_sha256 === 'string' ? parsed.body_sha256 : null,
     }
   }
+
+  async sendWriteback(input: Parameters<QueueWorkWritebackSender['sendWriteback']>[0]) {
+    return this.invoke(input, 'perform')
+  }
+
+  async readWriteback(input: Parameters<QueueWorkWritebackSender['sendWriteback']>[0]) {
+    return this.invoke(input, 'readback')
+  }
 }
 
-function createWritebackSender(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): QueueWorkWritebackSender | undefined {
+export function createWritebackSender(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): QueueWorkWritebackSender | undefined {
   if (plan.github_writeback_mode !== 'mediated') return undefined
   const command = env.AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND
     ?? env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND
