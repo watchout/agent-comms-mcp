@@ -1,0 +1,118 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-V2-EXACT-CANARY-MECHANISM-20260715-001
+canonical_handoff_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4975131104
+canonical_handoff_schema: shirube-v3/control_handoff/v1
+parent_ssot: watchout/agent-comms-mcp#794
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4975131104
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4966548581
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4975131104
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/794
+source_mirror_ref: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4975131104
+owner: { role: repo_owner, actor: watchout }
+implementation_actor: aun
+next_role: independent_audit
+protected_surfaces:
+  - runtime code
+  - database
+  - external provider send
+rps_scope:
+  shirube_owns:
+    - Report-only gate routing for this exact-canary mechanism Cell.
+    - Exact-head evidence and independent audit binding before merge.
+  shirube_does_not_own:
+    - Live canary execution, production activation, deployment, or merge authority.
+    - Schema, migration, secret, provider, outbox, daemon, ruleset, required-check, or branch-protection mutation.
+cell:
+  CELL-ID: CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001
+  cell_type: implementation
+  risk_class: R3
+  goal: Process one exact AUN V1 queue tuple through the V2 event log with deterministic crash recovery and zero external effects.
+  governance_route: Independent exact-head codex-audit evidence, then separate owner exact-head decision; no canary or activation in this Cell.
+  non_scope:
+    - live canary queue creation or execution
+    - production daemon, listener, scheduler, fleet, or provider activation
+    - schema, migration, secret, deploy, workflow, ruleset, required-check, or branch-protection changes
+    - historic import, external send, real model call, or unrelated V1/V2 row mutation
+    - self-audit, approval, merge, activation, or rollout
+  allowed_paths:
+    - bin/aun/v2-exact-canary.ts
+    - core/eventlog/v1-import.ts
+    - core/eventlog/turns.ts
+    - core/eventlog/worker.ts
+    - tests/eventlog/eventlog-v2-exact-canary.test.ts
+  forbidden_paths:
+    - core/eventlog/outbox.ts
+    - core/eventlog/runtimes.ts
+    - bin/aun/v2-worker-daemon.ts
+    - db/**
+    - migrations/**
+    - .github/**
+    - .shirube/**
+    - config/**
+    - hooks/**
+    - package.json
+  protected_surfaces:
+    declared:
+      - runtime code
+      - database
+      - external provider send
+    touched: true
+    details:
+      - Exact-target import, claim, recovery, and typed V1 close primitives are implementation scope.
+      - External provider dispatch, outbox, daemon activation, and live data execution remain unreachable and forbidden.
+  stop_conditions:
+    - a required changed path is outside the five-path allowlist
+    - exact base ancestry cannot be proven
+    - tuple identity is not bound at import, claim, recovery, and V1-close boundaries
+    - seat-wide or next-turn selection can touch an unrelated turn
+    - deterministic-no-reply, provider-dispatch-disabled, or max-turns-1 is advisory
+    - exact-head independent audit is unavailable or not PASS
+implementation_boundary:
+  summary: One exact-canary executable, minimum exact-target primitives, and one focused twelve-fixture test within exactly five paths.
+  expected_pr_count: 1
+  forbidden_operations:
+    - create or execute a live canary queue row
+    - runtime, provider, outbox, daemon, fleet, or deployment activation
+    - schema, migration, secret, workflow, ruleset, required-check, or branch-protection mutation
+    - self-audit, approve, merge, or rollout
+acceptance_criteria:
+  - The negative phase rejects a mismatched tuple before any V1/V2, runtime, outbox, model, or provider effect.
+  - The crash-after-claim phase durably claims only the exact target and exits before presentation or any later effect.
+  - The resume phase recovers only the same exact tuple, invokes one deterministic no-reply fake, emits one effective terminal, and closes only the exact V1 row.
+  - ECAN-001 through ECAN-012 and every canonical regression command pass on one frozen exact head.
+  - Changed files equal a subset of the five canonical allowed paths.
+validation:
+  required_commands:
+    - bun test tests/eventlog/eventlog-v2-exact-canary.test.ts
+    - bun test tests/eventlog/eventlog-v1-import-m4.test.ts
+    - bun test tests/eventlog/eventlog-worker-m3.test.ts
+    - bun test tests/eventlog/eventlog-core.test.ts
+    - bun test tests/eventlog/eventlog-turns.test.ts
+    - git diff --check
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - validation_commands
+    - validation_results
+audit:
+  required: true
+  actor: codex-audit
+  evidence_mode: comment_backed_structured_audit
+  exact_head_required: true
+  checklist_authored_by_arc: false
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts: [APPROVED_EXACT_HEAD, CHANGES_REQUIRED, BLOCKED]
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence: [merge_commit, merged_at, exact_tree_readback, focused_test_on_merge_sha, next_step]

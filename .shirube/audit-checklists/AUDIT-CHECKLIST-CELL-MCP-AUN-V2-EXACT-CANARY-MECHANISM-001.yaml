@@ -1,0 +1,97 @@
+schema_version: shirube-audit-checklist/v1
+audit_checklist_id: AUDIT-CHECKLIST-CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001
+source:
+  handoff_ref: .shirube/control-handoffs/CH-AUN-V2-EXACT-CANARY-MECHANISM-20260715-001.yaml
+  cell_id: CELL-MCP-AUN-V2-EXACT-CANARY-MECHANISM-001
+  pr: 868
+  pr_head_sha: e325d1e6607360a67d337a9b2a77d5df8dd11477
+  work_order: https://github.com/watchout/agent-comms-mcp/issues/794
+  control_source: https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4975131104
+  implementation_actor: aun
+  audit_model: comment_backed_structured_audit
+  implementation_evidence_ref: https://github.com/watchout/agent-comms-mcp/pull/868#issuecomment-4976491218
+items:
+  - item_id: AUDIT-ECAN-SCOPE-001
+    source: allowed_paths
+    verification_method: executable
+    required: true
+    prompt: Verify exact-base..exact-head changed paths are exactly within the canonical ordered five-path boundary and contain no extra path.
+    expected_evidence: [canonical_changed_paths_5_of_5]
+  - item_id: AUDIT-ECAN-001
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify wrong queue_id with the correct message_id exits nonzero before every V1/V2/runtime/provider mutation.
+    expected_evidence: [ECAN-001]
+  - item_id: AUDIT-ECAN-002
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify correct queue_id with the wrong message_id exits nonzero with a byte-identical queue/event snapshot.
+    expected_evidence: [ECAN-002]
+  - item_id: AUDIT-ECAN-003
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify a stale created_after relation fails before any mutation.
+    expected_evidence: [ECAN-003]
+  - item_id: AUDIT-ECAN-004
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify that with two candidates only the exact tuple is imported, claimed, completed, and V1-closed; the unrelated row stays pending and unimported.
+    expected_evidence: [ECAN-004]
+  - item_id: AUDIT-ECAN-005
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify max_turns is mechanically the literal 1, forged values fail before mutation, and no second turn can be claimed.
+    expected_evidence: [ECAN-005]
+  - item_id: AUDIT-ECAN-006
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify provider_dispatch is mechanically disabled and reply_enqueued, external_send_attempts, and provider_effects remain zero.
+    expected_evidence: [ECAN-006]
+  - item_id: AUDIT-ECAN-007
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify only the injected deterministic-no-reply runtime is accepted and it is called exactly once.
+    expected_evidence: [ECAN-007]
+  - item_id: AUDIT-ECAN-008
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify the planned crash occurs after one durable exact claim and before presentation, completion, reply enqueue, provider effect, or V1 close.
+    expected_evidence: [ECAN-008]
+  - item_id: AUDIT-ECAN-009
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify resume recovers only the same exact tuple and emits one effective terminal without duplicate completion or V1 close.
+    expected_evidence: [ECAN-009]
+  - item_id: AUDIT-ECAN-010
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify a same-target foreign worker claim is not released, recovered, completed, or closed and the full snapshot remains unchanged.
+    expected_evidence: [ECAN-010]
+  - item_id: AUDIT-ECAN-011
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify missing, duplicate, malformed, and unknown arguments fail before database open; help exposes the one-shot disabled-provider contract.
+    expected_evidence: [ECAN-011]
+  - item_id: AUDIT-ECAN-012
+    source: acceptance_fixture
+    verification_method: executable
+    required: true
+    prompt: Verify PostgreSQL execution accepts only an explicitly isolated test URL, rolls back all fixture writes, and leaves no live residue.
+    expected_evidence: [ECAN-012]
+  - item_id: AUDIT-ECAN-ROLE-001
+    source: role_boundary
+    verification_method: semantic
+    required: true
+    prompt: Verify maker-checker separation and that no merge, live canary, daemon activation, production DB mutation, provider send, or rollout authority is inferred.
+    expected_evidence: [maker_checker_and_protected_surface_review]
