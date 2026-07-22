@@ -182,9 +182,11 @@ describe('watchdog seven-dimension edge projection', () => {
       agentId: 'arc',
       agentStatus: 'idle',
       agentLastSeenAt: NOW,
-      sessionName: 'discord-arc',
+      profileSessionName: 'discord-arc',
+      runtimeSessionName: 'discord-arc',
       supervisorType: 'tmux',
-      port: '8810',
+      profilePort: '8810',
+      runtimePort: '8810',
       expectedProviderIdentity: '{"provider":"discord"}',
       runtimeInstanceId: 'runtime-arc-1',
       runtimeStatus: 'running',
@@ -194,6 +196,7 @@ describe('watchdog seven-dimension edge projection', () => {
       pendingQueueCount: 0,
       actionablePendingCount: 0,
       activeClaimCount: 0,
+      unboundActiveClaimCount: 0,
       memoryReady: true,
       discordConnectorCount: 1,
       discordConnectorStatus: 'active',
@@ -230,6 +233,69 @@ describe('watchdog seven-dimension edge projection', () => {
       expected_identity: 'arc',
       observed_identity: 'cto',
     })
+  })
+
+  test('same-agent profile/runtime session-port drift fails closed without probing profile values', () => {
+    const probeCalls = { supervisor: [] as string[], endpoint: [] as string[], ui: [] as string[] }
+    const probes: RuntimeObservationProbes = {
+      supervisorSession: (session) => {
+        probeCalls.supervisor.push(session)
+        return { probe_result: 'ok', state: 'HEALTHY', reason_code: 'SUPERVISOR_SESSION_PRESENT' }
+      },
+      endpointIdentity: (port, expectedAgentId) => {
+        probeCalls.endpoint.push(port)
+        return {
+          probe_result: 'ok',
+          state: 'HEALTHY',
+          reason_code: 'ENDPOINT_EXPECTED_IDENTITY_PRESENT',
+          observed_identity: expectedAgentId,
+        }
+      },
+      uiRunnerSurface: (session) => {
+        probeCalls.ui.push(session)
+        return { probe_result: 'ok', state: 'HEALTHY', reason_code: 'UI_RUNNER_SURFACE_PRESENT' }
+      },
+    }
+    const snapshot = {
+      ...healthySnapshot(),
+      profileSessionName: 'profile-old-session',
+      runtimeSessionName: 'runtime-new-session',
+      profilePort: '8810',
+      runtimePort: '9999',
+      runtimeEndpointUri: 'http://127.0.0.1:9999',
+    }
+
+    const dimensions = buildRuntimeHealthDimensionInputs(snapshot, probes, NOW_MS)
+    expect(dimensions.find((candidate) => candidate.dimension === 'supervisor_session')).toMatchObject({
+      declared_state: 'UNKNOWN',
+      reason_code: 'RUNTIME_PROFILE_SESSION_MISMATCH',
+    })
+    expect(dimensions.find((candidate) => candidate.dimension === 'endpoint_identity')).toMatchObject({
+      declared_state: 'UNKNOWN',
+      reason_code: 'RUNTIME_PROFILE_PORT_MISMATCH',
+    })
+    expect(dimensions.find((candidate) => candidate.dimension === 'ui_runner_reachability')).toMatchObject({
+      declared_state: 'UNKNOWN',
+      reason_code: 'RUNTIME_PROFILE_SESSION_MISMATCH',
+    })
+    expect(probeCalls).toEqual({ supervisor: [], endpoint: [], ui: [] })
+  })
+
+  test('agent-wide claim without selected runtime ownership stays UNKNOWN', () => {
+    const snapshot = {
+      ...healthySnapshot(),
+      pendingQueueCount: 1,
+      actionablePendingCount: 1,
+      activeClaimCount: 0,
+      unboundActiveClaimCount: 1,
+    }
+    const presentation = buildRuntimeHealthDimensionInputs(snapshot, healthyProbes(), NOW_MS)
+      .find((candidate) => candidate.dimension === 'runtime_presentation_claim')
+    expect(presentation).toMatchObject({
+      declared_state: 'UNKNOWN',
+      reason_code: 'CLAIM_RUNTIME_OWNERSHIP_UNPROVEN',
+    })
+    expect(presentation?.evidence_refs).toContain('db:message_queue:arc:runtime=runtime-arc-1:active_claims=0')
   })
 
   test('fresh runtime heartbeat cannot mask a stale agent heartbeat', () => {
@@ -303,11 +369,14 @@ describe('watchdog seven-dimension edge projection', () => {
       runtime_instance_id: 'runtime-arc-1',
       runtime_status: 'running',
       runtime_last_seen_at: NOW,
+      runtime_session_name: 'discord-arc',
+      runtime_port: 8810,
       endpoint_uri: 'http://127.0.0.1:8810',
       live_runtime_count: 1,
       pending_queue_count: 0,
       actionable_pending_count: 0,
       active_claim_count: 0,
+      unbound_active_claim_count: 0,
       memory_ready: true,
       discord_connector_count: 1,
       discord_connector_status: 'active',
@@ -347,6 +416,8 @@ describe('watchdog seven-dimension edge projection', () => {
     expect(sqlCalls).toHaveLength(1)
     expect(sqlCalls[0]).not.toMatch(/\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|ALTER|CREATE|DROP)\b/i)
     expect(sqlCalls[0]).toContain('mq.claimed_by = a.agent_id')
+    expect(sqlCalls[0]).toContain('mq.claimed_runtime_instance_id::text = runtime.runtime_instance_id::text')
+    expect(sqlCalls[0]).toContain('mq.claimed_runtime_instance_id::text IS DISTINCT FROM runtime.runtime_instance_id::text')
     expect(probeCalls).toEqual({ supervisor: 1, endpoint: 1, ui: 1 })
   })
 })

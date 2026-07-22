@@ -63,9 +63,11 @@ interface RuntimeHealthSnapshot {
   agentId: string
   agentStatus: string | null
   agentLastSeenAt: string | null
-  sessionName: string
+  profileSessionName: string
+  runtimeSessionName: string
   supervisorType: string
-  port: string
+  profilePort: string
+  runtimePort: string
   expectedProviderIdentity: string
   runtimeInstanceId: string | null
   runtimeStatus: string | null
@@ -75,6 +77,7 @@ interface RuntimeHealthSnapshot {
   pendingQueueCount: number
   actionablePendingCount: number
   activeClaimCount: number
+  unboundActiveClaimCount: number
   memoryReady: boolean
   discordConnectorCount: number
   discordConnectorStatus: string | null
@@ -117,6 +120,19 @@ function toIso(value: unknown): string | null {
   if (typeof value !== 'string' || value.trim().length === 0) return null
   const parsed = Date.parse(value)
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value
+}
+
+function endpointUriPort(endpointUri: string | null): string {
+  if (!endpointUri) return ''
+  try {
+    const parsed = new URL(endpointUri)
+    if (parsed.port) return parsed.port
+    if (parsed.protocol === 'http:') return '80'
+    if (parsed.protocol === 'https:') return '443'
+  } catch {
+    return ''
+  }
+  return ''
 }
 
 function parseCount(value: unknown): number {
@@ -357,11 +373,14 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
     runtime_instance_id: string | null
     runtime_status: string | null
     runtime_last_seen_at: Date | string | null
+    runtime_session_name: string | null
+    runtime_port: number | string | null
     endpoint_uri: string | null
     live_runtime_count: number | string
     pending_queue_count: number | string
     actionable_pending_count: number | string
     active_claim_count: number | string
+    unbound_active_claim_count: number | string
     memory_ready: boolean
     discord_connector_count: number | string
     discord_connector_status: string | null
@@ -376,11 +395,14 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
             runtime.runtime_instance_id::text,
             runtime.status AS runtime_status,
             runtime.last_seen_at AS runtime_last_seen_at,
+            runtime.session_name AS runtime_session_name,
+            runtime.port AS runtime_port,
             runtime.endpoint_uri,
             COALESCE(runtime_count.live_runtime_count, 0) AS live_runtime_count,
             COALESCE(queue.pending_queue_count, 0) AS pending_queue_count,
             COALESCE(queue.actionable_pending_count, 0) AS actionable_pending_count,
             COALESCE(queue.active_claim_count, 0) AS active_claim_count,
+            COALESCE(queue.unbound_active_claim_count, 0) AS unbound_active_claim_count,
             EXISTS (
               SELECT 1
                 FROM runtime_memory_ready_evidence ready
@@ -394,7 +416,7 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
             discord.connector_last_seen_at
        FROM agents a
        LEFT JOIN LATERAL (
-         SELECT runtime_instance_id, status, last_seen_at, endpoint_uri
+         SELECT runtime_instance_id, status, last_seen_at, session_name, port, endpoint_uri
            FROM agent_runtime_instances
           WHERE agent_id = a.agent_id
           ORDER BY started_at DESC
@@ -416,8 +438,15 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
                 count(*) FILTER (
                   WHERE mq.status IN ('received', 'in_progress')
                     AND mq.claimed_by = a.agent_id
+                    AND mq.claimed_runtime_instance_id::text = runtime.runtime_instance_id::text
                     AND (mq.claim_expires_at IS NULL OR mq.claim_expires_at > now())
-                ) AS active_claim_count
+                ) AS active_claim_count,
+                count(*) FILTER (
+                  WHERE mq.status IN ('received', 'in_progress')
+                    AND mq.claimed_by = a.agent_id
+                    AND mq.claimed_runtime_instance_id::text IS DISTINCT FROM runtime.runtime_instance_id::text
+                    AND (mq.claim_expires_at IS NULL OR mq.claim_expires_at > now())
+                ) AS unbound_active_claim_count
            FROM message_queue mq
            LEFT JOIN agent_messages am ON am.id::text = mq.message_id
           WHERE mq.agent_id = a.agent_id
@@ -444,9 +473,11 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
       agentId: row.agent_id,
       agentStatus: row.agent_status,
       agentLastSeenAt: toIso(row.agent_last_seen_at),
-      sessionName: typeof metadata.tmux_session === 'string' ? metadata.tmux_session.trim() : '',
+      profileSessionName: typeof metadata.tmux_session === 'string' ? metadata.tmux_session.trim() : '',
+      runtimeSessionName: row.runtime_session_name?.trim() ?? '',
       supervisorType: typeof metadata.supervisor_type === 'string' ? metadata.supervisor_type.trim().toLowerCase() : '',
-      port: row.channel_port === null || row.channel_port === undefined ? '' : String(row.channel_port),
+      profilePort: row.channel_port === null || row.channel_port === undefined ? '' : String(row.channel_port),
+      runtimePort: row.runtime_port === null || row.runtime_port === undefined ? '' : String(row.runtime_port),
       expectedProviderIdentity: row.expected_provider_identity ?? '',
       runtimeInstanceId: row.runtime_instance_id,
       runtimeStatus: row.runtime_status,
@@ -456,6 +487,7 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
       pendingQueueCount: parseCount(row.pending_queue_count),
       actionablePendingCount: parseCount(row.actionable_pending_count),
       activeClaimCount: parseCount(row.active_claim_count),
+      unboundActiveClaimCount: parseCount(row.unbound_active_claim_count),
       memoryReady: Boolean(row.memory_ready),
       discordConnectorCount: parseCount(row.discord_connector_count),
       discordConnectorStatus: row.discord_connector_status,
@@ -512,55 +544,113 @@ function buildRuntimeHealthDimensionInputs(
           ? 'AGENT_HEARTBEAT_AND_RUNTIME_FRESH'
           : `RUNTIME_STATE_${(snapshot.runtimeStatus ?? 'UNKNOWN').toUpperCase()}`
 
+  const sessionProfileMismatch = Boolean(
+    snapshot.runtimeInstanceId
+    && snapshot.profileSessionName
+    && snapshot.runtimeSessionName
+    && snapshot.profileSessionName !== snapshot.runtimeSessionName,
+  )
+
   let supervisor = dimension(
     'supervisor_session',
     'UNKNOWN',
-    'SUPERVISOR_APPLICABILITY_UNKNOWN',
+    snapshot.runtimeInstanceId ? 'RUNTIME_SESSION_BINDING_MISSING' : 'RUNTIME_INSTANCE_MISSING',
     observedNow,
-    [`db:agents:${snapshot.agentId}:profile`],
+    [`db:agent_runtime_instances:${snapshot.runtimeInstanceId ?? 'none'}:session_name`],
   )
-  if (snapshot.sessionName) {
-    const probe = probes.supervisorSession(snapshot.sessionName)
+  if (sessionProfileMismatch) {
+    supervisor = dimension(
+      'supervisor_session',
+      'UNKNOWN',
+      'RUNTIME_PROFILE_SESSION_MISMATCH',
+      observedNow,
+      [
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name=${snapshot.runtimeSessionName}`,
+        `db:agents:${snapshot.agentId}:tmux_session=${snapshot.profileSessionName}`,
+      ],
+    )
+  } else if (snapshot.runtimeInstanceId && snapshot.runtimeSessionName) {
+    const probe = probes.supervisorSession(snapshot.runtimeSessionName)
     supervisor = dimension(
       'supervisor_session',
       probe.state,
       probe.reason_code,
       observedNow,
-      [`probe:tmux:${snapshot.sessionName}`],
+      [`probe:tmux:${snapshot.runtimeSessionName}`, `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name`],
       { probe_result: probe.probe_result },
     )
-  } else if (snapshot.supervisorType === 'none') {
+  } else if (snapshot.runtimeInstanceId && snapshot.supervisorType === 'none' && !snapshot.profileSessionName) {
     supervisor = dimension(
       'supervisor_session',
       'HEALTHY',
       'NOT_APPLICABLE_CONFIRMED',
       observedNow,
-      [`db:agents:${snapshot.agentId}:supervisor_type=none`],
+      [
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name=none`,
+        `db:agents:${snapshot.agentId}:supervisor_type=none`,
+      ],
       {
         applicability: 'NOT_APPLICABLE',
-        applicability_evidence_refs: [`db:agents:${snapshot.agentId}:supervisor_type=none`],
+        applicability_evidence_refs: [
+          `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name=none`,
+          `db:agents:${snapshot.agentId}:supervisor_type=none`,
+        ],
       },
     )
   }
 
+  const uriPort = endpointUriPort(snapshot.runtimeEndpointUri)
+  const selectedRuntimePort = snapshot.runtimePort || uriPort
+  const runtimeEndpointMismatch = Boolean(snapshot.runtimePort && uriPort && snapshot.runtimePort !== uriPort)
+  const profileRuntimePortMismatch = Boolean(
+    snapshot.profilePort
+    && selectedRuntimePort
+    && snapshot.profilePort !== selectedRuntimePort,
+  )
+
   let endpoint = dimension(
     'endpoint_identity',
     'UNKNOWN',
-    snapshot.runtimeEndpointUri ? 'ENDPOINT_URI_PRESENT_BUT_UNPROBED' : 'ENDPOINT_EVIDENCE_MISSING',
+    snapshot.runtimeInstanceId ? 'RUNTIME_ENDPOINT_BINDING_MISSING' : 'RUNTIME_INSTANCE_MISSING',
     observedNow,
-    snapshot.runtimeEndpointUri ? [`db:agent_runtime_instances:${snapshot.runtimeInstanceId}:endpoint_uri`] : [],
+    [`db:agent_runtime_instances:${snapshot.runtimeInstanceId ?? 'none'}:endpoint`],
   )
-  if (snapshot.port) {
-    const probe = probes.endpointIdentity(snapshot.port, snapshot.agentId)
+  if (snapshot.runtimeInstanceId && runtimeEndpointMismatch) {
+    endpoint = dimension(
+      'endpoint_identity',
+      'UNKNOWN',
+      'RUNTIME_PORT_ENDPOINT_URI_MISMATCH',
+      observedNow,
+      [
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:port=${snapshot.runtimePort}`,
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:endpoint_uri=${snapshot.runtimeEndpointUri}`,
+      ],
+    )
+  } else if (snapshot.runtimeInstanceId && profileRuntimePortMismatch) {
+    endpoint = dimension(
+      'endpoint_identity',
+      'UNKNOWN',
+      'RUNTIME_PROFILE_PORT_MISMATCH',
+      observedNow,
+      [
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:port=${selectedRuntimePort}`,
+        `db:agents:${snapshot.agentId}:channel_port=${snapshot.profilePort}`,
+      ],
+    )
+  } else if (snapshot.runtimeInstanceId && selectedRuntimePort) {
+    const probe = probes.endpointIdentity(selectedRuntimePort, snapshot.agentId)
     endpoint = dimension(
       'endpoint_identity',
       probe.state,
       probe.reason_code,
       observedNow,
-      [`probe:tcp:${snapshot.port}`, `db:agents:${snapshot.agentId}:channel_port`],
+      [
+        `probe:tcp:${selectedRuntimePort}`,
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:port=${selectedRuntimePort}`,
+      ],
       {
         probe_result: probe.probe_result,
-        expected_identity: probe.observed_identity ? snapshot.agentId : null,
+        expected_identity: snapshot.agentId,
         observed_identity: probe.observed_identity ?? null,
       },
     )
@@ -598,13 +688,26 @@ function buildRuntimeHealthDimensionInputs(
         applicability_evidence_refs: [`db:message_queue:${snapshot.agentId}:actionable_pending=0`],
       },
     )
-    : dimension(
-      'runtime_presentation_claim',
-      snapshot.activeClaimCount > 0 ? 'HEALTHY' : 'UNKNOWN',
-      snapshot.activeClaimCount > 0 ? 'RUNTIME_CLAIM_PRESENT' : 'QUEUE_NOT_PRESENTED_OR_CLAIMED',
-      observedNow,
-      [`db:message_queue:${snapshot.agentId}:active_claims=${snapshot.activeClaimCount}`],
-    )
+    : snapshot.runtimeInstanceId && snapshot.activeClaimCount > 0
+      ? dimension(
+        'runtime_presentation_claim',
+        'HEALTHY',
+        'RUNTIME_CLAIM_PRESENT',
+        observedNow,
+        [`db:message_queue:${snapshot.agentId}:runtime=${snapshot.runtimeInstanceId}:active_claims=${snapshot.activeClaimCount}`],
+      )
+      : dimension(
+        'runtime_presentation_claim',
+        'UNKNOWN',
+        snapshot.unboundActiveClaimCount > 0
+          ? 'CLAIM_RUNTIME_OWNERSHIP_UNPROVEN'
+          : 'QUEUE_NOT_PRESENTED_OR_CLAIMED',
+        observedNow,
+        [
+          `db:message_queue:${snapshot.agentId}:runtime=${snapshot.runtimeInstanceId ?? 'none'}:active_claims=0`,
+          `db:message_queue:${snapshot.agentId}:unbound_active_claims=${snapshot.unboundActiveClaimCount}`,
+        ],
+      )
 
   let ui = dimension(
     'ui_runner_reachability',
@@ -613,14 +716,25 @@ function buildRuntimeHealthDimensionInputs(
     observedNow,
     [],
   )
-  if (snapshot.sessionName) {
-    const probe = probes.uiRunnerSurface(snapshot.sessionName)
+  if (sessionProfileMismatch) {
+    ui = dimension(
+      'ui_runner_reachability',
+      'UNKNOWN',
+      'RUNTIME_PROFILE_SESSION_MISMATCH',
+      observedNow,
+      [
+        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name=${snapshot.runtimeSessionName}`,
+        `db:agents:${snapshot.agentId}:tmux_session=${snapshot.profileSessionName}`,
+      ],
+    )
+  } else if (snapshot.runtimeInstanceId && snapshot.runtimeSessionName) {
+    const probe = probes.uiRunnerSurface(snapshot.runtimeSessionName)
     ui = dimension(
       'ui_runner_reachability',
       probe.state,
       probe.reason_code,
       observedNow,
-      [`probe:ui-runner:${snapshot.sessionName}`],
+      [`probe:ui-runner:${snapshot.runtimeSessionName}`, `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name`],
       { probe_result: probe.probe_result },
     )
   }

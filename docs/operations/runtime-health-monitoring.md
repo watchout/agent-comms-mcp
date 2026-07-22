@@ -37,6 +37,15 @@ A fresh heartbeat never overrides another dimension. A dimension is excluded
 only when fresh positive profile/binding evidence proves it is not applicable.
 Missing applicability evidence remains `UNKNOWN`.
 
+Runtime-labelled observations are bound to the selected
+`agent_runtime_instances.runtime_instance_id`. Supervisor and UI probes use
+that row's `session_name`; endpoint probes use that row's `port`, or the port
+from its `endpoint_uri` when `port` is absent. An agent profile is comparison
+evidence only: a different profile session or port fails closed and the profile
+target is never probed as though it belonged to the selected runtime. A claim
+is healthy presentation evidence only when
+`message_queue.claimed_runtime_instance_id` equals the selected runtime ID.
+
 ## Fail-closed reason table
 
 | Condition | State | Canonical reason |
@@ -50,6 +59,10 @@ Missing applicability evidence remains `UNKNOWN`.
 | Probe completed and the target is absent | `DOWN` | domain reason such as `ENDPOINT_PORT_UNBOUND` |
 | Expected and observed agent identities differ | `DOWN` | `IDENTITY_MISMATCH` |
 | Non-applicability lacks positive evidence | `UNKNOWN` | `APPLICABILITY_EVIDENCE_MISSING` |
+| Runtime and profile session differ | `UNKNOWN` | `RUNTIME_PROFILE_SESSION_MISMATCH` |
+| Runtime and profile port differ | `UNKNOWN` | `RUNTIME_PROFILE_PORT_MISMATCH` |
+| Runtime port and endpoint URI port differ | `UNKNOWN` | `RUNTIME_PORT_ENDPOINT_URI_MISMATCH` |
+| Agent claim is not bound to the selected runtime | `UNKNOWN` | `CLAIM_RUNTIME_OWNERSHIP_UNPROVEN` |
 
 The default freshness limit is 300 seconds and is configurable with
 `AUN_WATCHDOG_CRASH_THRESHOLD_SEC`. Invalid or non-positive limits fail closed.
