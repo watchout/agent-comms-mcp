@@ -23,6 +23,10 @@ import {
   type ShirubeD1RuntimeBinding,
 } from '../core/shirube-d1-runtime'
 import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  SHIRUBE_D1_FLEET_TARGETS,
+} from '../core/shirube-d1-activation-policy'
+import {
   claimPendingQueueForAunRuntimeV2,
   runAunRuntimeV2,
 } from '../core/aun-runtime-v2'
@@ -63,6 +67,20 @@ function envelope(): D1AuthorizationEnvelope {
   return { ...unsigned, authorization_digest: computeD1AuthorizationDigest(unsigned) }
 }
 
+function fleetEnvelope(): D1AuthorizationEnvelope {
+  const unsigned = {
+    control_source: 'https://github.com/watchout/ai-dev-framework/issues/556',
+    handoff_id: 'CH-ACM-887-SHIRUBE-V4-D1-FLEET-001',
+    exact_base_sha: 'e3723373bd6340b877aeaeef191755a5b9b1f0fa',
+    allowed_paths: [
+      'core/shirube-d1-activation-policy.ts',
+      'core/shirube-d1-runtime.ts',
+      'core/state-daemon/launchagent.ts',
+    ],
+  }
+  return { ...unsigned, authorization_digest: computeD1AuthorizationDigest(unsigned) }
+}
+
 function binding(allowedEffects: D1Effect[] = ['github_writeback']): ShirubeD1RuntimeBinding {
   return {
     schema_version: SHIRUBE_D1_RUNTIME_BINDING_VERSION,
@@ -97,6 +115,28 @@ function enabledEnv(killSwitch = false): NodeJS.ProcessEnv {
   } as NodeJS.ProcessEnv
 }
 
+function fleetEnv(): NodeJS.ProcessEnv {
+  return {
+    ...enabledEnv(),
+    SHIRUBE_D1_ACTIVATION_MODE: 'fleet',
+    SHIRUBE_D1_TARGET_ALLOWLIST: JSON.stringify(SHIRUBE_D1_FLEET_TARGETS),
+    SHIRUBE_D1_AUTHORIZATION_DIGEST: fleetEnvelope().authorization_digest,
+    SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  }
+}
+
+function fleetBinding(targetIndex = 0): ShirubeD1RuntimeBinding {
+  return {
+    ...binding(),
+    target: { ...SHIRUBE_D1_FLEET_TARGETS[targetIndex]! },
+    authorization: fleetEnvelope(),
+    activation_evidence: {
+      ...binding().activation_evidence,
+      fleet_activation_ref: SHIRUBE_D1_FLEET_ACTIVATION_REF,
+    },
+  }
+}
+
 function noOpPerformers() {
   const result = async (effect: D1Effect, key: string) => `${effect}:${key}`
   return {
@@ -111,9 +151,11 @@ describe('Shirube V4 D1 production runtime', () => {
     expect(buildShirubeD1RuntimePolicy({} as NodeJS.ProcessEnv)).toEqual({
       enabled: false,
       kill_switch: true,
+      activation_mode: 'canary',
       allowlist: [],
       authorization_digest: null,
       adapter_head_sha: null,
+      fleet_activation_ref: null,
       gate_refs: {
         independent_audit_ref: '',
         qa_ref: '',
@@ -168,6 +210,57 @@ describe('Shirube V4 D1 production runtime', () => {
       { ...binding().target, repository: 'watchout/agent-memory' },
     ])
     expect(() => buildShirubeD1RuntimePolicy(env)).toThrow('exactly one target')
+  })
+
+  test('fleet activation accepts only the exact owner-authorized five targets', () => {
+    expect(buildShirubeD1RuntimePolicy(fleetEnv())).toMatchObject({
+      enabled: true,
+      activation_mode: 'fleet',
+      allowlist: SHIRUBE_D1_FLEET_TARGETS,
+      fleet_activation_ref: SHIRUBE_D1_FLEET_ACTIVATION_REF,
+    })
+  })
+
+  test('fleet activation rejects missing, substituted, duplicated, or sixth targets', () => {
+    const variants = [
+      SHIRUBE_D1_FLEET_TARGETS.slice(0, 4),
+      SHIRUBE_D1_FLEET_TARGETS.map((target, index) => index === 4 ? { ...target, repository: 'watchout/substituted' } : target),
+      [...SHIRUBE_D1_FLEET_TARGETS.slice(0, 4), SHIRUBE_D1_FLEET_TARGETS[0]!],
+      [...SHIRUBE_D1_FLEET_TARGETS, { repository: 'watchout/sixth', agent_id: 'sixth', control_source: SHIRUBE_D1_FLEET_TARGETS[0]!.control_source }],
+    ]
+    for (const targets of variants) {
+      const env = fleetEnv()
+      env.SHIRUBE_D1_TARGET_ALLOWLIST = JSON.stringify(targets)
+      expect(() => buildShirubeD1RuntimePolicy(env)).toThrow()
+    }
+  })
+
+  test('fleet activation requires a durable GitHub activation ref', () => {
+    const env = fleetEnv()
+    delete env.SHIRUBE_D1_FLEET_ACTIVATION_REF
+    expect(() => buildShirubeD1RuntimePolicy(env)).toThrow('SHIRUBE_D1_FLEET_ACTIVATION_REF')
+
+    env.SHIRUBE_D1_FLEET_ACTIVATION_REF = 'https://github.com/unrelated/repo/issues/1'
+    expect(() => buildShirubeD1RuntimePolicy(env)).toThrow(`must equal ${SHIRUBE_D1_FLEET_ACTIVATION_REF}`)
+  })
+
+  test('fleet queue binding must carry the activated fleet evidence ref', async () => {
+    const { adapter } = sqliteFixture()
+    try {
+      const controller = new ShirubeD1RuntimeController(adapter, { env: fleetEnv() })
+      const current = fleetBinding()
+      delete current.activation_evidence.fleet_activation_ref
+      await expect(controller.beforeClaim({
+        id: 30,
+        agent_id: current.target.agent_id,
+        message_id: 'message-fleet-ref',
+        payload: JSON.stringify({ shirube_v4_d1: current }),
+        status: 'pending',
+      })).rejects.toMatchObject({ code: 'D1_ACTIVATION_EVIDENCE_MISMATCH' })
+      expect(await adapter.query<{ count: number }>('SELECT COUNT(*) AS count FROM shirube_d1_claims')).toEqual([{ count: 0 }])
+    } finally {
+      await adapter.close()
+    }
   })
 
   test('activated digest mismatch causes zero D1 persistence', async () => {

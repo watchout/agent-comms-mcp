@@ -45,6 +45,40 @@ export SHIRUBE_D1_CHECK_REF=<technical-check-comment-url>
 export SHIRUBE_D1_CTO_GO_REF=<cto-go-comment-url>
 ```
 
+The default activation mode is `canary`, which still requires exactly one
+target. Operational fleet activation is a separate, closed-world mode. It
+accepts only the five owner-authorized repository/agent tuples below, all
+bound to `watchout/ai-dev-framework#556`; arbitrary multi-target lists,
+substitutions, duplicates, missing targets, and sixth targets fail closed.
+
+```sh
+export SHIRUBE_D1_ACTIVATION_MODE=fleet
+export SHIRUBE_D1_FLEET_ACTIVATION_REF=https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5040830741
+export SHIRUBE_D1_TARGET_ALLOWLIST='[{"repository":"watchout/agent-comms-mcp","agent_id":"dev-001","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/agent-memory","agent_id":"kusabi","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/aun-platform","agent_id":"aun","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/kodama","agent_id":"kodama","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"},{"repository":"watchout/misell","agent_id":"misell","control_source":"https://github.com/watchout/ai-dev-framework/issues/556"}]'
+```
+
+Fleet queue bindings must include the same `fleet_activation_ref` in
+`activation_evidence`. The shared authorization envelope uses
+`https://github.com/watchout/ai-dev-framework/issues/556` as its
+`control_source`; repo-local adoption/control refs remain the durable target
+read-back locations.
+
+Persist the reviewed policy through the bounded restore input; the helper
+rejects unknown environment keys and non-string values before restore
+planning. Use the same input for kill-switch-first rollback.
+
+```sh
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit <deployed-40-hex-sha> \
+  --shirube-d1-env-json "$SHIRUBE_D1_ENV_JSON" \
+  --execute
+
+bun scripts/state-daemon-launchagent.ts restore \
+  --commit <deployed-40-hex-sha> \
+  --shirube-d1-env-json '{"SHIRUBE_D1_ENABLED":"0","SHIRUBE_D1_KILL_SWITCH":"1","SHIRUBE_D1_TARGET_ALLOWLIST":""}' \
+  --execute
+```
+
 Every enrolled queue payload must contain a `shirube_v4_d1` object with schema
 `shirube-v4/d1-runtime-binding/v1`, the exact allowlisted target, an audited
 authorization envelope, exact activation evidence matching the environment,

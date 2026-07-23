@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { validateShirubeD1LaunchAgentEnv } from '../core/state-daemon/launchagent'
+import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  SHIRUBE_D1_FLEET_TARGETS,
+} from '../core/shirube-d1-activation-policy'
 
 const target = {
   repository: 'watchout/agent-comms-mcp',
@@ -38,5 +42,33 @@ describe('Shirube D1 state-daemon activation projection', () => {
       'shirube_d1_adapter_head_invalid',
       'shirube_d1_cto_go_ref_invalid',
     ]))
+  })
+
+  test('accepts only the exact five-target fleet with a durable activation ref', () => {
+    const env: Record<string, string> = {
+      ...enabledEnv(),
+      SHIRUBE_D1_ACTIVATION_MODE: 'fleet',
+      SHIRUBE_D1_TARGET_ALLOWLIST: JSON.stringify(SHIRUBE_D1_FLEET_TARGETS),
+      SHIRUBE_D1_FLEET_ACTIVATION_REF,
+    }
+    expect(validateShirubeD1LaunchAgentEnv(env)).toEqual([])
+
+    env.SHIRUBE_D1_TARGET_ALLOWLIST = JSON.stringify(SHIRUBE_D1_FLEET_TARGETS.slice(0, 4))
+    delete env.SHIRUBE_D1_FLEET_ACTIVATION_REF
+    expect(validateShirubeD1LaunchAgentEnv(env).map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      'shirube_d1_target_allowlist_not_exact',
+      'shirube_d1_fleet_activation_ref_invalid',
+    ]))
+
+    env.SHIRUBE_D1_FLEET_ACTIVATION_REF = SHIRUBE_D1_FLEET_ACTIVATION_REF
+    env.SHIRUBE_D1_TARGET_ALLOWLIST = JSON.stringify([...SHIRUBE_D1_FLEET_TARGETS.slice(0, 4), null])
+    expect(validateShirubeD1LaunchAgentEnv(env).map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      'shirube_d1_target_allowlist_invalid',
+      'shirube_d1_target_allowlist_not_exact',
+    ]))
+
+    env.SHIRUBE_D1_TARGET_ALLOWLIST = JSON.stringify(SHIRUBE_D1_FLEET_TARGETS)
+    env.SHIRUBE_D1_FLEET_ACTIVATION_REF = 'https://github.com/unrelated/repo/issues/1'
+    expect(validateShirubeD1LaunchAgentEnv(env).map((issue) => issue.code)).toContain('shirube_d1_fleet_activation_ref_invalid')
   })
 })

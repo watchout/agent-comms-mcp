@@ -27,6 +27,11 @@ import {
   type D1ExternalEvent,
 } from './shirube-d1-effect-ports'
 import { createD1PersistencePorts } from './shirube-d1-persistence'
+import {
+  SHIRUBE_D1_FLEET_ACTIVATION_REF,
+  isExactShirubeD1Fleet,
+  type ShirubeD1ActivationMode,
+} from './shirube-d1-activation-policy'
 
 export const SHIRUBE_D1_RUNTIME_BINDING_VERSION = 'shirube-v4/d1-runtime-binding/v1' as const
 
@@ -42,6 +47,7 @@ export interface ShirubeD1ActivationEvidence {
   qa_ref: string
   check_ref: string
   cto_go_ref: string
+  fleet_activation_ref?: string
 }
 
 export interface ShirubeD1RuntimeBinding {
@@ -56,10 +62,12 @@ export interface ShirubeD1RuntimeBinding {
 export interface ShirubeD1RuntimePolicy {
   enabled: boolean
   kill_switch: boolean
+  activation_mode: ShirubeD1ActivationMode
   allowlist: ShirubeD1RuntimeTarget[]
   authorization_digest: string | null
   adapter_head_sha: string | null
-  gate_refs: Omit<ShirubeD1ActivationEvidence, 'adapter_head_sha'>
+  fleet_activation_ref: string | null
+  gate_refs: Omit<ShirubeD1ActivationEvidence, 'adapter_head_sha' | 'fleet_activation_ref'>
 }
 
 export interface ShirubeD1RuntimeReceipt {
@@ -125,6 +133,14 @@ function exactFlag(value: string | undefined, name: string, fallback: '0' | '1')
   return resolved
 }
 
+function exactActivationMode(value: string | undefined): ShirubeD1ActivationMode {
+  const resolved = value ?? 'canary'
+  if (resolved !== 'canary' && resolved !== 'fleet') {
+    throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'SHIRUBE_D1_ACTIVATION_MODE must be canary or fleet')
+  }
+  return resolved
+}
+
 function githubRef(value: string | undefined, name: string, required: boolean): string {
   const ref = value?.trim() ?? ''
   if (required && !/^https:\/\/github\.com\/[^\s]+$/.test(ref)) {
@@ -160,9 +176,15 @@ function parseAllowlist(raw: string | undefined): ShirubeD1RuntimeTarget[] {
 export function buildShirubeD1RuntimePolicy(env: NodeJS.ProcessEnv = process.env): ShirubeD1RuntimePolicy {
   const enabled = exactFlag(env.SHIRUBE_D1_ENABLED, 'SHIRUBE_D1_ENABLED', '0') === '1'
   const killSwitch = exactFlag(env.SHIRUBE_D1_KILL_SWITCH, 'SHIRUBE_D1_KILL_SWITCH', '1') === '1'
+  const activationMode = exactActivationMode(env.SHIRUBE_D1_ACTIVATION_MODE)
   const allowlist = parseAllowlist(env.SHIRUBE_D1_TARGET_ALLOWLIST)
   const authorizationDigest = cleanString(env.SHIRUBE_D1_AUTHORIZATION_DIGEST)
   const adapterHeadSha = cleanString(env.SHIRUBE_D1_ADAPTER_HEAD_SHA)
+  const fleetActivationRef = githubRef(
+    env.SHIRUBE_D1_FLEET_ACTIVATION_REF,
+    'SHIRUBE_D1_FLEET_ACTIVATION_REF',
+    enabled && activationMode === 'fleet',
+  ) || null
   const gateRefs = {
     independent_audit_ref: githubRef(env.SHIRUBE_D1_AUDIT_REF, 'SHIRUBE_D1_AUDIT_REF', enabled),
     qa_ref: githubRef(env.SHIRUBE_D1_QA_REF, 'SHIRUBE_D1_QA_REF', enabled),
@@ -170,7 +192,15 @@ export function buildShirubeD1RuntimePolicy(env: NodeJS.ProcessEnv = process.env
     cto_go_ref: githubRef(env.SHIRUBE_D1_CTO_GO_REF, 'SHIRUBE_D1_CTO_GO_REF', enabled),
   }
   if (enabled) {
-    if (allowlist.length !== 1) throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'enabled canary requires exactly one target allowlist entry')
+    if (activationMode === 'canary' && allowlist.length !== 1) {
+      throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'enabled canary requires exactly one target allowlist entry')
+    }
+    if (activationMode === 'fleet' && !isExactShirubeD1Fleet(allowlist)) {
+      throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'enabled fleet requires the exact owner-authorized five target tuples')
+    }
+    if (activationMode === 'fleet' && fleetActivationRef !== SHIRUBE_D1_FLEET_ACTIVATION_REF) {
+      throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', `SHIRUBE_D1_FLEET_ACTIVATION_REF must equal ${SHIRUBE_D1_FLEET_ACTIVATION_REF}`)
+    }
     if (!authorizationDigest || !/^[0-9a-f]{64}$/.test(authorizationDigest)) {
       throw new ShirubeD1RuntimeError('D1_POLICY_INVALID', 'SHIRUBE_D1_AUTHORIZATION_DIGEST must be 64 lowercase hex')
     }
@@ -181,9 +211,11 @@ export function buildShirubeD1RuntimePolicy(env: NodeJS.ProcessEnv = process.env
   return {
     enabled,
     kill_switch: killSwitch,
+    activation_mode: activationMode,
     allowlist,
     authorization_digest: authorizationDigest,
     adapter_head_sha: adapterHeadSha,
+    fleet_activation_ref: fleetActivationRef,
     gate_refs: gateRefs,
   }
 }
@@ -301,6 +333,7 @@ export class ShirubeD1RuntimeController {
     const expectedEvidence: ShirubeD1ActivationEvidence = {
       adapter_head_sha: this.policy.adapter_head_sha!,
       ...this.policy.gate_refs,
+      ...(this.policy.fleet_activation_ref ? { fleet_activation_ref: this.policy.fleet_activation_ref } : {}),
     }
     if (!binding.activation_evidence || JSON.stringify(binding.activation_evidence) !== JSON.stringify(expectedEvidence)) {
       throw new ShirubeD1RuntimeError('D1_ACTIVATION_EVIDENCE_MISMATCH', 'audit/QA/check/CTO/head evidence differs from activated evidence')
