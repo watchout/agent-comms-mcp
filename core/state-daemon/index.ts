@@ -49,6 +49,9 @@ import {
   type PgListenClient,
   type QueueEvent,
   type RefreshResult,
+  type ShirubeD1AutoReceiveDecision,
+  type ShirubeD1AutoReceiveDispatcher,
+  type ShirubeD1AutoReceiveInput,
   type StateDaemonConfig,
   type StateDaemonDeps,
   type SweepResult,
@@ -138,6 +141,7 @@ export class StateDaemon {
   private readonly codexRunner: CodexRunnerInvoker | null
   private readonly hostRuntimeInvoker: HostRuntimeInvoker | null
   private readonly queueWorkScheduler: QueueWorkScheduler | null
+  private readonly shirubeD1AutoReceive: ShirubeD1AutoReceiveDispatcher | null
   private readonly githubWorkPuller: GithubWorkPuller | null
   private readonly clock: Clock
   private readonly metrics: Metrics
@@ -163,6 +167,7 @@ export class StateDaemon {
     this.codexRunner = deps.codexRunner ?? null
     this.hostRuntimeInvoker = deps.hostRuntimeInvoker ?? null
     this.queueWorkScheduler = deps.queueWorkScheduler ?? null
+    this.shirubeD1AutoReceive = deps.shirubeD1AutoReceive ?? null
     this.githubWorkPuller = deps.githubWorkPuller ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
@@ -316,7 +321,7 @@ export class StateDaemon {
 
     // For received events, the pg_notify payload already contains the data we
     // need unless a bounded canary fence requires exact row inspection first.
-    if ((row?.status ?? event.status) === 'received' && this.queueWorkScheduler) {
+    if ((row?.status ?? event.status) === 'received' && this.queueWorkScheduler && !this.shirubeD1AutoReceive) {
       this.scheduleQueueWorkRunner(
         'received',
         row ?? { id: event.id, agent_id: event.agent_id } as QueueRow,
@@ -328,7 +333,7 @@ export class StateDaemon {
     row = row ?? await this.fetchQueueRowById(event.id)
     if (!row) return // row may have been deleted
 
-    if (row.status === 'pending' || row.status === 'received') {
+    if (row.status === 'pending' || row.status === 'received' || (row.status === 'done' && this.shirubeD1AutoReceive)) {
       await this.runWakeIfNotSuppressed(row)
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
@@ -345,6 +350,15 @@ export class StateDaemon {
       scanned: 0, rewoken: 0, reclaimed: 0, abandonReset: 0, permanentlyFailed: 0, durationMs: 0, budgetWarn: false,
     }
 
+    if (this.shirubeD1AutoReceive) {
+      const recoverableD1 = await this.fetchShirubeD1RecoveryRows()
+      for (const row of recoverableD1) {
+        result.scanned++
+        const acted = await this.runWakeIfNotSuppressed(row)
+        if (acted) result.rewoken++
+      }
+    }
+
     const runnerErrorRows = this.queueWorkScheduler ? await this.fetchQueueWorkRunnerErrorRows() : []
     const runnerErrorIds = new Set(runnerErrorRows.map((row) => row.id))
     for (const row of runnerErrorRows) {
@@ -359,6 +373,17 @@ export class StateDaemon {
     for (const row of expired) {
       if (runnerErrorIds.has(row.id)) continue
       result.scanned++
+      const d1Decision = await this.classifyShirubeD1AutoReceive(row)
+      if (d1Decision.outcome !== 'not_d1') {
+        if (d1Decision.outcome === 'reject') {
+          this.recordShirubeD1Rejection(row, d1Decision)
+          continue
+        }
+        this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', { result: 'restart_reclaim' })
+        await this.reclaimRow(row)
+        result.reclaimed++
+        continue
+      }
       if (!this.queueWorkScheduler && this.isQueueWorkSchedulerClaim(row)) {
         this.metrics.inc('state_daemon_queue_work_actions_total', {
           result: 'scheduler_claim_without_scheduler_skipped',
@@ -559,6 +584,8 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'wake' })
       return false
     }
+    const d1Handled = await this.tryShirubeD1AutoReceive(row)
+    if (d1Handled !== null) return d1Handled
     const now = this.clock.now()
     // v0.9 sub-PR 2 §1.3a stall gate: evaluated before typed action
     // execution. If any of the three layers reports a stall the wake is
@@ -970,6 +997,92 @@ export class StateDaemon {
     this.inflightQueueWork.set(key, promise)
   }
 
+  private shirubeD1Input(row: QueueRow): ShirubeD1AutoReceiveInput {
+    return {
+      queueId: Number(row.id),
+      agentId: row.agent_id,
+      messageId: row.message_id ?? null,
+      createdAt: new Date(row.created_at).toISOString(),
+      status: row.status,
+      payload: row.payload,
+    }
+  }
+
+  private async classifyShirubeD1AutoReceive(row: QueueRow): Promise<ShirubeD1AutoReceiveDecision> {
+    if (!this.shirubeD1AutoReceive) return { outcome: 'not_d1' }
+    try {
+      return await this.shirubeD1AutoReceive.classify(this.shirubeD1Input(row))
+    } catch (error) {
+      return {
+        outcome: 'reject',
+        reason: 'D1_CLASSIFICATION_ERROR',
+        detail: (error as Error).message ?? String(error),
+      }
+    }
+  }
+
+  private recordShirubeD1Rejection(
+    row: QueueRow,
+    decision: Extract<ShirubeD1AutoReceiveDecision, { outcome: 'reject' }>,
+  ): void {
+    this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', {
+      result: 'rejected',
+      reason: decision.reason,
+    })
+    void this.alert.alert(
+      `Shirube D1 auto-receive rejected ${row.agent_id} queue_id=${row.id}: ${decision.reason}${decision.detail ? ` (${decision.detail})` : ''}`,
+    )
+  }
+
+  /**
+   * Returns null for ordinary traffic, true when a D1 dispatch was scheduled,
+   * and false when D1 owned the row but intentionally stopped it fail-closed.
+   */
+  private async tryShirubeD1AutoReceive(row: QueueRow): Promise<boolean | null> {
+    const decision = await this.classifyShirubeD1AutoReceive(row)
+    if (decision.outcome === 'not_d1') return null
+    if (decision.outcome === 'reject') {
+      this.recordShirubeD1Rejection(row, decision)
+      return false
+    }
+
+    this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', { result: 'admitted' })
+    if (row.status !== 'pending' && row.status !== 'done') {
+      this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', {
+        result: 'resume_wait',
+        status: row.status,
+      })
+      return false
+    }
+
+    const key = String(row.id)
+    if (this.inflightQueueWork.has(key)) {
+      this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', { result: 'duplicate_notify' })
+      return true
+    }
+    const input = this.shirubeD1Input(row)
+    this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', {
+      result: row.status === 'done' ? 'resume_started' : 'started',
+    })
+    const promise = this.shirubeD1AutoReceive!.dispatch(input)
+      .then((result) => {
+        this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', {
+          result: result.replayed ? 'replayed' : 'terminal',
+          code: result.code,
+        })
+      })
+      .catch((error) => {
+        const message = (error as Error).message ?? String(error)
+        this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', { result: 'error' })
+        void this.alert.alert(`Shirube D1 auto-receive failed for ${row.agent_id} queue_id=${row.id}: ${message}`)
+      })
+      .finally(() => {
+        this.inflightQueueWork.delete(key)
+      })
+    this.inflightQueueWork.set(key, promise)
+    return true
+  }
+
   private scheduleGithubWorkPuller(trigger: 'startup' | 'interval'): void {
     if (!this.githubWorkPuller) return
     if (this.githubWorkPullerInFlight) {
@@ -1107,6 +1220,24 @@ export class StateDaemon {
       [id],
     )
     return rows[0] ?? null
+  }
+
+  private async fetchShirubeD1RecoveryRows(): Promise<QueueRow[]> {
+    const params: unknown[] = [this.config.batchLimit]
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status,
+              mq.claim_expires_at, mq.claimed_at, mq.created_at,
+              mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status = 'done'
+          AND mq.payload LIKE '%"shirube_v4_d1"%'`
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
+    sql += ' ORDER BY mq.done_at ASC NULLS FIRST, mq.id ASC LIMIT $1'
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
+    return rows
   }
 
   private async tryCompleteScopedOutNoReply(event: QueueEvent): Promise<boolean> {

@@ -91,6 +91,47 @@ Missing authorization, a digest mismatch, a target mismatch, an unlisted
 effect, or an active kill switch fails before the corresponding mutation or
 effect.
 
+## Queue-arrival auto-receive
+
+The running state-daemon classifies each fetched queue row before stall,
+memory-ready, tmux, codex-runner, or generic queue-work routing. Classification
+has exactly three outcomes:
+
+- `not_d1`: no `shirube_v4_d1` marker; preserve the existing routing behavior;
+- `admit`: the enabled policy, exact enrolled tuple, binding schema,
+  authorization digest, activation evidence, and allowed effects all match;
+- `reject`: the row is D1-shaped but any check fails; emit a reason-coded alert
+  and do not fall through to a generic runner.
+
+An admitted pending row is sent through `runtime-v2` with its exact queue ID,
+message ID, creation timestamp, and agent ID. Claim, invocation, and expected
+claim sources are all `state-daemon-d1-auto-receive`, and mediated finalization
+is always enabled. This path does not require
+`STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED`; enabling the generic scheduler is
+not a D1 activation mechanism.
+
+The automatic runtime defaults to `codex-exec`. An operator may explicitly set
+`STATE_DAEMON_SHIRUBE_D1_RUNTIME` to another runtime supported by runtime-v2;
+deterministic `echo` or `command-json` values are intended only for bounded
+validation fixtures unless separately approved for a live target.
+
+Duplicate notifications for the same queue ID share one in-flight dispatch.
+After a process interruption, an expired `received` D1 claim is reclaimed to
+pending and dispatched again. A `done` D1 row is the recovery surface for
+finalization or acknowledgement loss: the daemon re-enters runtime-v2, which
+uses the stored runner result and durable invocation-key readback rather than
+rerunning the model or repeating the external effect. Successfully finalized
+`replied` rows are not swept for replay.
+
+The `state_daemon_shirube_d1_auto_receive_total` metric reports `admitted`,
+`rejected`, `started`, `duplicate_notify`, `resume_wait`, `restart_reclaim`,
+`resume_started`, `terminal`, `replayed`, and `error` results. Rejections also
+carry a stable reason such as `D1_DISABLED`, `D1_KILL_SWITCH_ACTIVE`,
+`D1_AGENT_UNENROLLED`, `D1_BINDING_SCHEMA_INVALID`, `D1_TARGET_MISMATCH`,
+`D1_AUTHORIZATION_DIGEST_MISMATCH`,
+`D1_ACTIVATION_EVIDENCE_MISMATCH`, `D1_ALLOWED_EFFECTS_INVALID`, or
+`D1_POLICY_INVALID`.
+
 `internal_reply` uses the canonical queue reply path with a deterministic
 message ID derived from the D1 invocation key. `github_writeback` uses the
 mediated GitHub sender and exact body/key readback. `external_send` accepts

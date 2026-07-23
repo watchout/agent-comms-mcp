@@ -18,6 +18,7 @@ import {
   ShirubeD1RuntimeController,
   ShirubeD1RuntimeError,
   buildShirubeD1RuntimePolicy,
+  classifyShirubeD1AutoReceive,
   computeShirubeD1InvocationKey,
   createShirubeD1DatabasePorts,
   type ShirubeD1RuntimeBinding,
@@ -147,6 +148,61 @@ function noOpPerformers() {
 }
 
 describe('Shirube V4 D1 production runtime', () => {
+  test('auto-receive classifier admits only an exact valid D1 binding and leaves ordinary traffic alone', () => {
+    expect(classifyShirubeD1AutoReceive({
+      agent_id: 'dev-001',
+      payload: JSON.stringify({ message_type: 'phase_handoff', content: 'ordinary' }),
+    }, { SHIRUBE_D1_ENABLED: 'invalid' } as NodeJS.ProcessEnv)).toEqual({ outcome: 'not_d1' })
+
+    expect(classifyShirubeD1AutoReceive({
+      agent_id: 'dev-001',
+      payload: JSON.stringify({ shirube_v4_d1: binding() }),
+    }, enabledEnv())).toEqual({ outcome: 'admit' })
+  })
+
+  test('auto-receive classifier rejects every invalid D1 surface before persistence', () => {
+    const invalidSchema = structuredClone(binding()) as Record<string, any>
+    invalidSchema.schema_version = 'wrong'
+    const wrongTarget = structuredClone(binding())
+    wrongTarget.target.repository = 'watchout/wrong'
+    const wrongDigest = structuredClone(binding())
+    wrongDigest.authorization.authorization_digest = 'f'.repeat(64)
+    const wrongEvidence = structuredClone(binding())
+    wrongEvidence.activation_evidence.qa_ref = 'https://github.com/watchout/wrong/issues/1'
+    const wrongEffects = structuredClone(binding())
+    wrongEffects.allowed_effects = ['github_writeback', 'github_writeback']
+
+    const cases: Array<{
+      name: string
+      agentId?: string
+      payload?: unknown
+      env: NodeJS.ProcessEnv
+      reason: string
+    }> = [
+      { name: 'disabled', env: {}, reason: 'D1_DISABLED' },
+      { name: 'kill switch', env: enabledEnv(true), reason: 'D1_KILL_SWITCH_ACTIVE' },
+      { name: 'unenrolled agent', agentId: 'not-enrolled', env: enabledEnv(), reason: 'D1_AGENT_UNENROLLED' },
+      { name: 'missing binding object', payload: null, env: enabledEnv(), reason: 'D1_BINDING_SCHEMA_INVALID' },
+      { name: 'binding schema', payload: invalidSchema, env: enabledEnv(), reason: 'D1_BINDING_SCHEMA_INVALID' },
+      { name: 'target tuple', payload: wrongTarget, env: enabledEnv(), reason: 'D1_TARGET_MISMATCH' },
+      { name: 'authorization digest', payload: wrongDigest, env: enabledEnv(), reason: 'D1_AUTHORIZATION_DIGEST_MISMATCH' },
+      { name: 'activation evidence', payload: wrongEvidence, env: enabledEnv(), reason: 'D1_ACTIVATION_EVIDENCE_MISMATCH' },
+      { name: 'allowed effects', payload: wrongEffects, env: enabledEnv(), reason: 'D1_ALLOWED_EFFECTS_INVALID' },
+      { name: 'invalid policy', env: { SHIRUBE_D1_ENABLED: 'invalid' }, reason: 'D1_POLICY_INVALID' },
+    ]
+
+    for (const fixture of cases) {
+      const decision = classifyShirubeD1AutoReceive({
+        agent_id: fixture.agentId ?? 'dev-001',
+        payload: JSON.stringify({
+          shirube_v4_d1: fixture.payload === undefined ? binding() : fixture.payload,
+        }),
+      }, fixture.env)
+      expect(decision.outcome, fixture.name).toBe('reject')
+      expect(decision).toMatchObject({ outcome: 'reject', reason: fixture.reason })
+    }
+  })
+
   test('defaults disabled with the kill switch active', () => {
     expect(buildShirubeD1RuntimePolicy({} as NodeJS.ProcessEnv)).toEqual({
       enabled: false,
