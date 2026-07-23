@@ -1040,7 +1040,22 @@ export class StateDaemon {
    */
   private async tryShirubeD1AutoReceive(row: QueueRow): Promise<boolean | null> {
     const decision = await this.classifyShirubeD1AutoReceive(row)
-    if (decision.outcome === 'not_d1') return null
+    if (decision.outcome === 'not_d1') {
+      // Production composes both dispatchers. A received ordinary row still
+      // belongs to the opt-in generic scheduler; the D1 dispatcher being
+      // present must not suppress that pre-existing path. Classification has
+      // already established that this is not D1 traffic, so it is safe to
+      // restore the exact-row runReceived dispatch here without allowing a
+      // D1-shaped rejection to fall through.
+      if (row.status === 'received' && this.queueWorkScheduler) {
+        this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
+          queueId: row.id,
+          agentId: row.agent_id,
+        }))
+        return true
+      }
+      return null
+    }
     if (decision.outcome === 'reject') {
       this.recordShirubeD1Rejection(row, decision)
       return false

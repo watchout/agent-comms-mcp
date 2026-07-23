@@ -255,9 +255,14 @@ class D1ExpiredClaimRecoveryDb implements DBClient {
 }
 
 describe('state_daemon queue work scheduler boundary', () => {
-  test('valid D1 phase_handoff dispatches before routing hold with generic scheduler unset', async () => {
+  test('valid D1 phase_handoff uses only D1 dispatch under production-composed schedulers', async () => {
     const agentId = 'dev-001'
     const calls: Array<{ queueId: number; agentId: string }> = []
+    const genericCalls: string[] = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending() { genericCalls.push('pending') },
+      async runReceived() { genericCalls.push('received') },
+    }
     const d1: ShirubeD1AutoReceiveDispatcher = {
       classify: () => ({ outcome: 'admit' }),
       async dispatch(input) {
@@ -279,7 +284,7 @@ describe('state_daemon queue work scheduler boundary', () => {
         last_heartbeat_at: null,
       }),
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
-      metrics, alert: new FakeAlertSink(), shirubeD1AutoReceive: d1,
+      metrics, alert: new FakeAlertSink(), queueWorkScheduler: scheduler, shirubeD1AutoReceive: d1,
     })
     await daemon.start()
     try {
@@ -289,6 +294,7 @@ describe('state_daemon queue work scheduler boundary', () => {
       await daemon.stop()
     }
     expect(calls).toEqual([{ queueId: 88701, agentId }])
+    expect(genericCalls).toEqual([])
     expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'started' })).toBe(1)
     expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'terminal', code: 'E2E_DONE' })).toBe(1)
     expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'routing_non_actionable_held' })).toBe(0)
@@ -297,6 +303,11 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('D1-shaped rejection fails closed without generic routing or dispatch', async () => {
     const agentId = 'dev-001'
     let dispatches = 0
+    const genericCalls: string[] = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending() { genericCalls.push('pending') },
+      async runReceived() { genericCalls.push('received') },
+    }
     const d1: ShirubeD1AutoReceiveDispatcher = {
       classify: () => ({ outcome: 'reject', reason: 'D1_AUTHORIZATION_DIGEST_MISMATCH' }),
       async dispatch() { dispatches += 1; return { code: 'unexpected', replayed: false } },
@@ -305,21 +316,22 @@ describe('state_daemon queue work scheduler boundary', () => {
     const alerts = new FakeAlertSink()
     const daemon = new StateDaemon({
       db: new PendingLlmDb(agentId, {
-        id: 88702, agent_id: agentId, status: 'pending', message_id: 'msg-d1-invalid',
+        id: 88702, agent_id: agentId, status: 'received', message_id: 'msg-d1-invalid',
         payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
         claim_expires_at: null, created_at: new Date('2026-07-23T00:00:00.000Z'),
         last_wake_attempt_at: null, last_heartbeat_at: null,
       }),
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
-      metrics, alert: alerts, shirubeD1AutoReceive: d1,
+      metrics, alert: alerts, queueWorkScheduler: scheduler, shirubeD1AutoReceive: d1,
     })
     await daemon.start()
     try {
-      await daemon.__testHandleEvent({ op: 'INSERT', id: 88702, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await daemon.__testHandleEvent({ op: 'UPDATE', id: 88702, agent_id: agentId, status: 'received', claim_expires_at: null })
     } finally {
       await daemon.stop()
     }
     expect(dispatches).toBe(0)
+    expect(genericCalls).toEqual([])
     expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', {
       result: 'rejected', reason: 'D1_AUTHORIZATION_DIGEST_MISMATCH',
     })).toBe(1)
@@ -330,6 +342,7 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('duplicate pending notifications share one in-flight D1 dispatch', async () => {
     const agentId = 'dev-001'
     let dispatches = 0
+    const genericCalls: string[] = []
     let release!: () => void
     const blocked = new Promise<void>((resolve) => { release = resolve })
     const d1: ShirubeD1AutoReceiveDispatcher = {
@@ -341,21 +354,29 @@ describe('state_daemon queue work scheduler boundary', () => {
       },
     }
     const metrics = new FakeMetrics()
+    const row = {
+      id: 88703, agent_id: agentId, status: 'pending', message_id: 'msg-d1-duplicate',
+      payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
+      claim_expires_at: null, created_at: new Date('2026-07-23T00:00:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    }
     const daemon = new StateDaemon({
-      db: new PendingLlmDb(agentId, {
-        id: 88703, agent_id: agentId, status: 'pending', message_id: 'msg-d1-duplicate',
-        payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
-        claim_expires_at: null, created_at: new Date('2026-07-23T00:00:00.000Z'),
-        last_wake_attempt_at: null, last_heartbeat_at: null,
-      }),
+      db: new PendingLlmDb(agentId, row),
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
       metrics, alert: new FakeAlertSink(), shirubeD1AutoReceive: d1,
+      queueWorkScheduler: {
+        async runPending() { genericCalls.push('pending') },
+        async runReceived() { genericCalls.push('received') },
+      },
     })
     await daemon.start()
     try {
       const event = { op: 'INSERT', id: 88703, agent_id: agentId, status: 'pending', claim_expires_at: null } as const
       await Promise.all([daemon.__testHandleEvent(event), daemon.__testHandleEvent(event)])
+      row.status = 'received'
+      await daemon.__testHandleEvent({ ...event, op: 'UPDATE', status: 'received' })
       expect(dispatches).toBe(1)
+      expect(genericCalls).toEqual([])
       expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'duplicate_notify' })).toBe(1)
       release()
     } finally {
@@ -487,7 +508,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'restart_reclaim' })).toBe(1)
   })
 
-  test('received queue events schedule the runner without using tmux wake', async () => {
+  test('production-composed received not_d1 rows use the generic runner without tmux wake', async () => {
     const calls: Array<{ queueId: number; agentId: string }> = []
     const scheduler: QueueWorkScheduler = {
       async runReceived(input) {
@@ -496,6 +517,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const tmux = new FakeTmux()
+    let d1Dispatches = 0
     const daemon = new StateDaemon({
       db: new SingleRowDb({
         id: 489,
@@ -512,6 +534,10 @@ describe('state_daemon queue work scheduler boundary', () => {
       metrics,
       alert: new FakeAlertSink(),
       queueWorkScheduler: scheduler,
+      shirubeD1AutoReceive: {
+        classify: () => ({ outcome: 'not_d1' }),
+        async dispatch() { d1Dispatches += 1; return { code: 'unexpected', replayed: false } },
+      },
     })
 
     await daemon.start()
@@ -529,10 +555,13 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
 
     expect(calls).toEqual([{ queueId: 489, agentId: 'codex-audit' }])
+    expect(d1Dispatches).toBe(0)
     expect(tmux.sentKeys).toEqual([])
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'received_runner_invoked',
     })).toBe(1)
+    expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+    expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
   })
 
   test('pending LLM queue events use the scheduler when runPending is configured', async () => {

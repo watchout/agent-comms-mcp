@@ -28,7 +28,7 @@ afterEach(() => {
 
 function authorization() {
   const unsigned = {
-    control_source: 'https://github.com/watchout/agent-comms-mcp/issues/887',
+    control_source: 'https://github.com/watchout/ai-dev-framework/issues/556',
     handoff_id: 'CH-ACM-887-D1-AUTO-RECEIVE-CORRECTIVE-001',
     exact_base_sha: 'b8da4fe8e938016f4a5329f2851e7b34b393c4e1',
     allowed_paths: [
