@@ -24,6 +24,7 @@ const capabilities = {
 } as const
 
 class FakeAunRuntimeDb implements QueueWorkDb {
+  readonly dialect = 'postgres' as const
   calls: Array<{ sql: string; params?: unknown[] }> = []
   renewalMode: 'ok' | 'zero' | 'error' = 'ok'
   renewalCount = 0
@@ -35,6 +36,34 @@ class FakeAunRuntimeDb implements QueueWorkDb {
     const compact = sql.replace(/\s+/g, ' ').trim()
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(compact)) {
       return { rows: [], rowCount: 0 }
+    }
+
+    if (
+      compact.startsWith('SELECT id FROM message_queue')
+      && compact.includes('agent_id = $2')
+      && compact.includes('FOR UPDATE')
+    ) {
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.agent_id === params?.[1]
+        && item.claimed_by === params?.[2]
+        && String(item.claimed_at) === String(params?.[3])
+        && (item.status === 'received' || item.status === 'in_progress')
+      ))
+      return row ? { rows: [{ id: row.id }] as T[], rowCount: 1 } : { rows: [], rowCount: 0 }
+    }
+
+    if (
+      compact.startsWith('SELECT id FROM message_queue')
+      && compact.includes('claimed_by = $2')
+      && compact.includes('FOR UPDATE')
+    ) {
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.claimed_by === params?.[1]
+        && String(item.claimed_at) === String(params?.[2])
+      ))
+      return row ? { rows: [{ id: row.id }] as T[], rowCount: 1 } : { rows: [], rowCount: 0 }
     }
 
     if (compact.includes('SELECT id, agent_id, message_id, payload, status')) {
@@ -77,21 +106,22 @@ class FakeAunRuntimeDb implements QueueWorkDb {
       return { rows: [{ ...row }] as T[], rowCount: 1 }
     }
 
-    if (compact.includes('SET claim_expires_at = $5')) {
+    if (compact.includes('SET claim_expires_at = clock_timestamp()')) {
       this.renewalCount += 1
       if (this.renewalMode === 'error') throw new Error('heartbeat db unavailable')
       if (this.renewalMode === 'zero') return { rows: [], rowCount: 0 }
+      const databaseNow = new Date()
       const row = this.rows.find((item) => (
         String(item.id) === String(params?.[0])
         && item.agent_id === params?.[1]
         && item.claimed_by === params?.[2]
-        && String(item.claimed_at) === String(params?.[5])
+        && String(item.claimed_at) === String(params?.[4])
         && (item.status === 'received' || item.status === 'in_progress')
-        && Date.parse(String(item.claim_expires_at)) > Date.parse(String(params?.[3]))
+        && Date.parse(String(item.claim_expires_at)) > databaseNow.getTime()
       ))
       if (!row) return { rows: [], rowCount: 0 }
-      row.claim_expires_at = params?.[4]
-      row.last_heartbeat_at = params?.[3]
+      row.claim_expires_at = new Date(databaseNow.getTime() + Number(params?.[3]) * 1000).toISOString()
+      row.last_heartbeat_at = databaseNow.toISOString()
       return { rows: [{ id: row.id }] as T[], rowCount: 1 }
     }
 
@@ -648,6 +678,14 @@ describe('runAunRuntimeV2', () => {
     expect(db.renewalCount).toBeGreaterThanOrEqual(4)
     expect(db.rows[0].status).toBe('done')
     expect(JSON.parse(db.rows[0].payload).runner_result).toBeDefined()
+    const leaseLock = db.calls.findIndex((call) => (
+      call.sql.includes('SELECT id') && call.sql.includes('agent_id = $2')
+    ))
+    const leaseWrite = db.calls.findIndex((call) => call.sql.includes('SET claim_expires_at = clock_timestamp()'))
+    expect(leaseLock).toBeGreaterThan(-1)
+    expect(leaseWrite).toBeGreaterThan(leaseLock)
+    expect(db.calls[leaseWrite].sql).toContain('claim_expires_at > clock_timestamp()')
+    expect(db.calls[leaseWrite].params).toHaveLength(5)
   })
 
   test('live D1 zero-row heartbeat aborts before invocation and writes no terminal evidence', async () => {

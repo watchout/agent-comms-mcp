@@ -3,6 +3,7 @@ import {
   type AunRuntimeV2FinalizationResult,
 } from './aun-runtime-v2-finalization'
 import {
+  databaseClockSql,
   runReceivedQueueWork,
   type LlmRuntimeAdapter,
   type QueueReplySender,
@@ -222,7 +223,6 @@ async function startAunRuntimeV2ExecutionLease(
     claimedAt: string
     claimTtlSeconds: number
     executionTimeoutMs: number
-    now?: () => Date
   },
 ): Promise<AunRuntimeV2ExecutionLease> {
   const controller = new AbortController()
@@ -246,33 +246,67 @@ async function startAunRuntimeV2ExecutionLease(
   }
   const renew = async () => {
     if (!active) return
-    const heartbeatAt = input.now?.() ?? new Date()
-    const expiresAt = new Date(heartbeatAt.getTime() + input.claimTtlSeconds * 1000)
+    let transactionOpen = false
     try {
-      const renewed = await db.query<{ id: string | number }>(
-        `UPDATE message_queue
-            SET claim_expires_at = $5,
-                last_heartbeat_at = $4
+      await db.query('BEGIN')
+      transactionOpen = true
+      const locked = await db.query<{ id: string | number }>(
+        `SELECT id
+           FROM message_queue
           WHERE id = $1
             AND agent_id = $2
             AND claimed_by = $3
-            AND claimed_at = $6
+            AND claimed_at = $4
             AND status IN ('received', 'in_progress')
-            AND claim_expires_at > $4
+          FOR UPDATE`,
+        [input.queueId, input.agentId, input.claimedBy, input.claimedAt],
+      )
+      if (rowCount(locked) !== 1) {
+        await db.query('ROLLBACK')
+        transactionOpen = false
+        abort('D1_EXECUTION_CLAIM_OWNERSHIP_LOST')
+        return
+      }
+      if (!active) {
+        await db.query('ROLLBACK')
+        transactionOpen = false
+        return
+      }
+      // This must remain a separate statement after SELECT ... FOR UPDATE.
+      // PostgreSQL may otherwise evaluate clock_timestamp() before a row-lock
+      // wait and renew a lease that expired while waiting.
+      const expirySql = db.dialect === 'sqlite'
+        ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || $4 || ' seconds')"
+        : "clock_timestamp() + ($4::double precision * INTERVAL '1 second')"
+      const renewed = await db.query<{ id: string | number }>(
+        `UPDATE message_queue
+            SET claim_expires_at = ${expirySql},
+                last_heartbeat_at = ${databaseClockSql(db)}
+          WHERE id = $1
+            AND agent_id = $2
+            AND claimed_by = $3
+            AND claimed_at = $5
+            AND status IN ('received', 'in_progress')
+            AND claim_expires_at > ${databaseClockSql(db)}
           RETURNING id`,
         [
           input.queueId,
           input.agentId,
           input.claimedBy,
-          heartbeatAt.toISOString(),
-          expiresAt.toISOString(),
+          input.claimTtlSeconds,
           input.claimedAt,
         ],
       )
       if (rowCount(renewed) !== 1) {
+        await db.query('ROLLBACK')
+        transactionOpen = false
         abort('D1_EXECUTION_CLAIM_OWNERSHIP_LOST')
+        return
       }
+      await db.query('COMMIT')
+      transactionOpen = false
     } catch (err) {
+      if (transactionOpen) await db.query('ROLLBACK').catch(() => {})
       abort(`D1_EXECUTION_HEARTBEAT_FAILED: ${(err as Error).message ?? String(err)}`)
     }
   }
@@ -968,7 +1002,6 @@ export async function runAunRuntimeV2(
           claimedAt: claimFence!.claimedAt,
           claimTtlSeconds: plan.claim_ttl_seconds,
           executionTimeoutMs,
-          now: opts.now,
         })
       : undefined
     try {

@@ -136,7 +136,7 @@ export interface QueueWorkDb {
   ): Promise<{ rows: T[]; rowCount?: number | null }>
 }
 
-function databaseClockSql(db: QueueWorkDb): string {
+export function databaseClockSql(db: QueueWorkDb): string {
   return db.dialect === 'sqlite'
     ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
     : 'clock_timestamp()'
@@ -447,6 +447,26 @@ async function selectReceivedRow(
   return selected.rows[0] ?? null
 }
 
+async function lockExactClaimRow(
+  db: QueueWorkDb,
+  queueId: string | number,
+  claimFence: NonNullable<RunReceivedQueueWorkOptions['claimFence']>,
+): Promise<boolean> {
+  // PostgreSQL can evaluate a clock_timestamp() fence before waiting on the
+  // UPDATE row lock. Acquire ownership first so the following statement's
+  // lease check is necessarily evaluated after the wait.
+  const locked = await db.query<{ id: string | number }>(
+    `SELECT id
+       FROM message_queue
+      WHERE id = $1
+        AND claimed_by = $2
+        AND claimed_at = $3
+      FOR UPDATE`,
+    [queueId, claimFence.claimedBy, claimFence.claimedAt],
+  )
+  return rowCount(locked) === 1
+}
+
 async function persistRunnerError(
   db: QueueWorkDb,
   row: QueueWorkRow,
@@ -477,8 +497,33 @@ async function persistRunnerError(
         AND claimed_at = $5
         AND claim_expires_at > ${databaseClockSql(db)}`
   }
-  const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
-  return rowCount(persisted) === 1
+  if (!claimFence) {
+    const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
+    return rowCount(persisted) === 1
+  }
+
+  let transactionOpen = false
+  try {
+    await db.query('BEGIN')
+    transactionOpen = true
+    if (!await lockExactClaimRow(db, row.id, claimFence)) {
+      await db.query('ROLLBACK')
+      transactionOpen = false
+      return false
+    }
+    const persisted = await db.query(sql, params)
+    if (rowCount(persisted) !== 1) {
+      await db.query('ROLLBACK')
+      transactionOpen = false
+      return false
+    }
+    await db.query('COMMIT')
+    transactionOpen = false
+    return true
+  } catch {
+    if (transactionOpen) await db.query('ROLLBACK').catch(() => {})
+    return false
+  }
 }
 
 function executionAbortDetail(signal: AbortSignal): string {
@@ -704,6 +749,14 @@ export async function runReceivedQueueWork(
   })
   await db.query('BEGIN')
   try {
+    if (opts.claimFence && !await lockExactClaimRow(db, row.id, opts.claimFence)) {
+      await db.query('ROLLBACK')
+      return {
+        ok: false,
+        code: 'CLAIM_OWNERSHIP_LOST',
+        queue_id: queueIdOf(row),
+      }
+    }
     const doneParams: unknown[] = [row.id, completedAt.toISOString(), payload]
     let doneSql = `UPDATE message_queue
           SET status = 'done',

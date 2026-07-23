@@ -5,6 +5,14 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Client } from 'pg'
+import { runAunRuntimeV2 } from '../../../core/aun-runtime-v2'
+import {
+  QUEUE_WORK_RESULT_VERSION,
+  runReceivedQueueWork,
+  type LlmRuntimeAdapter,
+  type QueueWorkDb,
+  type QueueWorkResult,
+} from '../../../core/queue-work'
 import { computeD1AuthorizationDigest } from '../../../core/shirube-d1-execution-adapter'
 import {
   SHIRUBE_D1_RUNTIME_BINDING_VERSION,
@@ -64,6 +72,65 @@ async function fixture(label: string): Promise<{ client: Client; url: string }> 
   const client = new Client({ connectionString: url })
   await client.connect()
   return { client, url }
+}
+
+function pgQueueDb(client: Client): QueueWorkDb {
+  return {
+    dialect: 'postgres',
+    async query<T = any>(sql: string, params?: unknown[]) {
+      const result = await client.query(sql, params)
+      return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 }
+    },
+  }
+}
+
+async function insertReceivedLeaseRow(client: Client, suffix: string) {
+  const inserted = await client.query<{
+    id: string
+    claimed_at: Date
+    claim_expires_at: Date
+  }>(
+    `INSERT INTO message_queue (
+       agent_id, message_id, payload, status, priority, created_at,
+       claimed_by, claimed_at, claim_expires_at, last_heartbeat_at
+     ) VALUES (
+       'dev-001', $1, $2, 'received', 1, clock_timestamp(),
+       'dev-001', date_trunc('milliseconds', clock_timestamp()),
+       clock_timestamp() + INTERVAL '700 milliseconds', clock_timestamp()
+     )
+     RETURNING id::text, claimed_at, claim_expires_at`,
+    [
+      `lockwait-${suffix}-${randomUUID()}`,
+      JSON.stringify({
+        content: `lock wait ${suffix}`,
+        author_id: 'lockwait-fixture',
+        message_type: 'phase_handoff',
+        receive_claim: { source: 'aun-runtime-v2' },
+      }),
+    ],
+  )
+  return inserted.rows[0]
+}
+
+const directCapabilities = {
+  input: 'stdin_prompt',
+  output: 'schema_json',
+  supportsBareMode: true,
+  supportsResume: false,
+  supportsToolAllowlist: false,
+  supportsSandbox: false,
+  supportsUsageMetadata: false,
+} as const
+
+function directResult(): QueueWorkResult {
+  return {
+    schema_version: QUEUE_WORK_RESULT_VERSION,
+    ok: true,
+    summary: 'lock-wait regression result',
+    reply: null,
+    evidence: [],
+    next_action: 'close',
+  }
 }
 
 function authorization() {
@@ -442,4 +509,212 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
       await client.end()
     }
   }, 25_000)
+
+  test('row-lock waits past expiry write neither runner_result nor runner_error nor terminal state', async () => {
+    if (!BASE_DATABASE_URL) {
+      expect(process.env.AGENT_COM_TEST_DATABASE_URL).toBeUndefined()
+      expect(process.env.DATABASE_URL).toBeUndefined()
+      return
+    }
+    const { client, url } = await fixture('lockwait_terminal')
+    const locker = new Client({ connectionString: url })
+    await locker.connect()
+    let lockerTransactionOpen = false
+    try {
+      for (const mode of ['result', 'error'] as const) {
+        const row = await insertReceivedLeaseRow(client, mode)
+        let enteredAdapter!: () => void
+        const adapterEntered = new Promise<void>((resolvePromise) => { enteredAdapter = resolvePromise })
+        let releaseAdapter!: () => void
+        const adapterGate = new Promise<void>((resolvePromise) => { releaseAdapter = resolvePromise })
+        const adapter: LlmRuntimeAdapter = {
+          runtime_id: `lockwait-${mode}`,
+          capabilities: directCapabilities,
+          async invoke() {
+            enteredAdapter()
+            await adapterGate
+            if (mode === 'error') throw new Error('lockwait fixture failure')
+            return directResult()
+          },
+        }
+
+        const outcomePromise = runReceivedQueueWork(pgQueueDb(client), {
+          queueId: row.id,
+          adapter,
+          claimFence: {
+            claimedBy: 'dev-001',
+            claimedAt: row.claimed_at.toISOString(),
+          },
+        })
+        const entered = await Promise.race([
+          adapterEntered.then(() => ({ entered: true as const })),
+          outcomePromise.then((outcome) => ({ entered: false as const, outcome })),
+        ])
+        if (!entered.entered) throw new Error(`worker exited before adapter: ${JSON.stringify(entered.outcome)}`)
+
+        await locker.query('BEGIN')
+        lockerTransactionOpen = true
+        await locker.query('SELECT id FROM message_queue WHERE id = $1 FOR UPDATE', [row.id])
+        releaseAdapter()
+        await waitFor(async () => {
+          const expired = await locker.query<{ expired: boolean }>(
+            'SELECT claim_expires_at < clock_timestamp() AS expired FROM message_queue WHERE id = $1',
+            [row.id],
+          )
+          return expired.rows[0]?.expired === true
+        })
+        await locker.query('COMMIT')
+        lockerTransactionOpen = false
+
+        const outcome = await outcomePromise
+        expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+        const persisted = await client.query<{
+          status: string
+          done_at: Date | null
+          replied_at: Date | null
+          payload: string
+        }>(
+          'SELECT status, done_at, replied_at, payload FROM message_queue WHERE id = $1',
+          [row.id],
+        )
+        const payload = JSON.parse(persisted.rows[0].payload)
+        expect(persisted.rows[0].status).toBe('in_progress')
+        expect(persisted.rows[0].done_at).toBeNull()
+        expect(persisted.rows[0].replied_at).toBeNull()
+        expect(payload.runner_result).toBeUndefined()
+        expect(payload.runner_error).toBeUndefined()
+      }
+    } finally {
+      if (lockerTransactionOpen) await locker.query('ROLLBACK').catch(() => {})
+      await locker.end()
+      await client.end()
+    }
+  }, 15_000)
+
+  test('lease renewal waiting past expiry cannot resurrect the exact claim', async () => {
+    if (!BASE_DATABASE_URL) {
+      expect(process.env.AGENT_COM_TEST_DATABASE_URL).toBeUndefined()
+      expect(process.env.DATABASE_URL).toBeUndefined()
+      return
+    }
+    const { client, url } = await fixture('lockwait_renewal')
+    const locker = new Client({ connectionString: url })
+    await locker.connect()
+    let lockerTransactionOpen = false
+    let releasePromise: Promise<void> | null = null
+    let lockedExpiry: Date | null = null
+    let leaseLockArmed = true
+    try {
+      const inserted = await client.query<{ id: string; message_id: string; created_at: Date }>(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
+         VALUES ('dev-001', $1, $2, 'pending', 1, clock_timestamp())
+         RETURNING id::text, message_id, created_at`,
+        [
+          `lockwait-renewal-${randomUUID()}`,
+          JSON.stringify({
+            content: 'renewal lock wait',
+            author_id: 'lockwait-fixture',
+            message_type: 'phase_handoff',
+          }),
+        ],
+      )
+      const queueId = inserted.rows[0].id
+      const db: QueueWorkDb = {
+        dialect: 'postgres',
+        async query<T = any>(sql: string, params?: unknown[]) {
+          const compact = sql.replace(/\s+/g, ' ').trim()
+          if (
+            leaseLockArmed
+            && compact.startsWith('SELECT id FROM message_queue')
+            && compact.includes('agent_id = $2')
+            && compact.includes('FOR UPDATE')
+          ) {
+            leaseLockArmed = false
+            await locker.query('BEGIN')
+            lockerTransactionOpen = true
+            const locked = await locker.query<{ claim_expires_at: Date }>(
+              'SELECT claim_expires_at FROM message_queue WHERE id = $1 FOR UPDATE',
+              [params?.[0]],
+            )
+            lockedExpiry = locked.rows[0].claim_expires_at
+            releasePromise = (async () => {
+              await waitFor(async () => {
+                const expired = await locker.query<{ expired: boolean }>(
+                  'SELECT claim_expires_at < clock_timestamp() AS expired FROM message_queue WHERE id = $1',
+                  [params?.[0]],
+                )
+                return expired.rows[0]?.expired === true
+              })
+              await locker.query('COMMIT')
+              lockerTransactionOpen = false
+            })()
+          }
+          const result = await client.query(sql, params)
+          return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 }
+        },
+      }
+      let invoked = 0
+      const outcome = await runAunRuntimeV2(db, {
+        agentId: 'dev-001',
+        queueId,
+        messageId: inserted.rows[0].message_id,
+        createdAfter: inserted.rows[0].created_at.toISOString(),
+        claimTtlSeconds: 1,
+        finalize: true,
+        adapter: {
+          runtime_id: 'must-not-run-after-expired-renewal',
+          capabilities: directCapabilities,
+          execution_timeout_ms: 5_000,
+          supportsAbort: true,
+          async invoke() {
+            invoked += 1
+            return directResult()
+          },
+        },
+        d1Runtime: {
+          policy: { enabled: true, kill_switch: false },
+          allowsAgent(agentId: string | null) { return agentId === 'dev-001' },
+          isEnrolledAgent(agentId: string | null) { return agentId === 'dev-001' },
+          async prepareFinalizationSenders() { throw new Error('must not finalize') },
+        } as any,
+        env: {} as NodeJS.ProcessEnv,
+      })
+      if (releasePromise) await releasePromise
+
+      expect(outcome).toMatchObject({
+        ok: false,
+        code: 'RUNNER_FAILED',
+        runner: {
+          ok: false,
+          code: 'EXECUTION_ABORTED',
+          detail: 'D1_EXECUTION_CLAIM_OWNERSHIP_LOST',
+        },
+      })
+      expect(invoked).toBe(0)
+      const persisted = await client.query<{
+        status: string
+        claim_expires_at: Date
+        expired: boolean
+        payload: string
+      }>(
+        `SELECT status, claim_expires_at,
+                claim_expires_at < clock_timestamp() AS expired,
+                payload
+           FROM message_queue
+          WHERE id = $1`,
+        [queueId],
+      )
+      expect(persisted.rows[0].status).toBe('received')
+      expect(persisted.rows[0].expired).toBe(true)
+      expect(persisted.rows[0].claim_expires_at.toISOString()).toBe(lockedExpiry?.toISOString())
+      const payload = JSON.parse(persisted.rows[0].payload)
+      expect(payload.runner_result).toBeUndefined()
+      expect(payload.runner_error).toBeUndefined()
+    } finally {
+      if (releasePromise) await releasePromise.catch(() => {})
+      if (lockerTransactionOpen) await locker.query('ROLLBACK').catch(() => {})
+      await locker.end()
+      await client.end()
+    }
+  }, 15_000)
 })

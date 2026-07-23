@@ -49,6 +49,22 @@ class FakeQueueDb implements QueueWorkDb {
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
       return { rows: [], rowCount: 0 }
     }
+    if (/^\s*SELECT id\s+FROM message_queue/.test(sql) && sql.includes('FOR UPDATE')) {
+      if (
+        this.row
+        && String(this.row.id) === String(params?.[0])
+        && (
+          !sql.includes('claimed_by = $2')
+          || (
+            this.row.claimed_by === params?.[1]
+            && String(this.row.claimed_at) === String(params?.[2])
+          )
+        )
+      ) {
+        return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
     if (sql.includes('SELECT id, agent_id, message_id, payload, status')) {
       if (!this.row) return { rows: [], rowCount: 0 }
       if (sql.includes('WHERE id = $1') && String(this.row.id) !== String(params?.[0])) {
@@ -371,6 +387,12 @@ describe('runReceivedQueueWork', () => {
     expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
     expect(db.row.status).toBe('in_progress')
     expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+    const terminalLock = db.calls.findIndex((call) => (
+      call.sql.includes('SELECT id') && call.sql.includes('claimed_by = $2')
+    ))
+    const terminalWrite = db.calls.findIndex((call) => call.sql.includes("SET status = 'done'"))
+    expect(terminalLock).toBeGreaterThan(-1)
+    expect(terminalWrite).toBe(-1)
     expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
   })
 
@@ -433,6 +455,12 @@ describe('runReceivedQueueWork', () => {
     expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
     expect(db.row.status).toBe('in_progress')
     expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+    const terminalLock = db.calls.findIndex((call) => (
+      call.sql.includes('SELECT id') && call.sql.includes('claimed_by = $2')
+    ))
+    const terminalWrite = db.calls.findIndex((call) => call.sql.includes("SET status = 'done'"))
+    expect(terminalLock).toBeGreaterThan(-1)
+    expect(terminalWrite).toBeGreaterThan(terminalLock)
   })
 
   test('claim expiry during error persistence prevents a stale runner_error write', async () => {
@@ -467,6 +495,12 @@ describe('runReceivedQueueWork', () => {
     expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
     expect(db.row.status).toBe('in_progress')
     expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
+    const errorLock = db.calls.findIndex((call) => (
+      call.sql.includes('SELECT id') && call.sql.includes('claimed_by = $2')
+    ))
+    const errorWrite = db.calls.findIndex((call) => call.sql.includes('last_heartbeat_at = $3'))
+    expect(errorLock).toBeGreaterThan(-1)
+    expect(errorWrite).toBeGreaterThan(errorLock)
   })
 
   test('abort is a typed non-terminal outcome with no done or runner_error write', async () => {
