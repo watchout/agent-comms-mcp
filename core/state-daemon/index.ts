@@ -497,6 +497,7 @@ export class StateDaemon {
         WHERE mq.status IN ('received', 'in_progress')
           AND mq.claim_expires_at > $1::timestamptz
           AND mq.payload NOT LIKE '%"runner_error"%'
+          AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
           AND mq.claimed_by = mq.agent_id
           AND mq.claimed_at IS NOT NULL
           AND mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
@@ -518,6 +519,7 @@ export class StateDaemon {
         FROM message_queue mq
        WHERE mq.status IN ('received', 'in_progress')
          AND mq.claim_expires_at > $1::timestamptz
+         AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
          AND (
            mq.claimed_by IS DISTINCT FROM mq.agent_id
            OR mq.claimed_at IS NULL

@@ -27,6 +27,16 @@ class FakeQueueDb implements QueueWorkDb {
 
   constructor(public row: any | null) {}
 
+  private ownsFence(sql: string, params: unknown[] | undefined, ownerIndex: number, atIndex: number, nowIndex: number): boolean {
+    if (!sql.includes(`claimed_by = $${ownerIndex + 1}`)) return true
+    if (!this.row) return false
+    return (
+      this.row.claimed_by === params?.[ownerIndex]
+      && String(this.row.claimed_at) === String(params?.[atIndex])
+      && Date.parse(String(this.row.claim_expires_at)) > Date.parse(String(params?.[nowIndex]))
+    )
+  }
+
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
     this.calls.push({ sql, params })
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
@@ -43,7 +53,12 @@ class FakeQueueDb implements QueueWorkDb {
       return { rows: [{ ...this.row }] as T[], rowCount: 1 }
     }
     if (sql.includes("SET status = 'in_progress'")) {
-      if (this.row && String(this.row.id) === String(params?.[0]) && this.row.status === 'received') {
+      if (
+        this.row
+        && String(this.row.id) === String(params?.[0])
+        && this.row.status === 'received'
+        && this.ownsFence(sql, params, 2, 3, 1)
+      ) {
         this.row.status = 'in_progress'
         this.row.last_heartbeat_at = params?.[1]
         return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
@@ -51,7 +66,12 @@ class FakeQueueDb implements QueueWorkDb {
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('runner_error') || sql.includes('last_heartbeat_at = $3')) {
-      if (this.row && String(this.row.id) === String(params?.[0]) && (this.row.status === 'in_progress' || this.row.status === 'done')) {
+      if (
+        this.row
+        && String(this.row.id) === String(params?.[0])
+        && (this.row.status === 'in_progress' || this.row.status === 'done')
+        && this.ownsFence(sql, params, 3, 4, 2)
+      ) {
         this.row.payload = params?.[1]
         this.row.last_heartbeat_at = params?.[2]
         return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
@@ -59,7 +79,12 @@ class FakeQueueDb implements QueueWorkDb {
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes("SET status = 'done'")) {
-      if (this.row && String(this.row.id) === String(params?.[0]) && this.row.status === 'in_progress') {
+      if (
+        this.row
+        && String(this.row.id) === String(params?.[0])
+        && this.row.status === 'in_progress'
+        && this.ownsFence(sql, params, 3, 4, 1)
+      ) {
         this.row.status = 'done'
         this.row.done_at = params?.[1]
         this.row.payload = params?.[2]
@@ -311,6 +336,96 @@ describe('runReceivedQueueWork', () => {
       runtime_id: 'fake-runtime',
       invocation_source: 'state-daemon-queue-work-scheduler',
     })
+  })
+
+  test('exact claim fence prevents a stale runner from persisting done after ownership changes', async () => {
+    const row = receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
+    const db = new FakeQueueDb(row)
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() {
+        db.row.claimed_by = 'replacement-owner'
+        db.row.claimed_at = '2026-05-21T01:00:30.000Z'
+        return okResult()
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+    expect(db.row.status).toBe('in_progress')
+    expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+    expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
+  })
+
+  test('exact claim fence prevents stale runner_error persistence after ownership changes', async () => {
+    const row = receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
+    const db = new FakeQueueDb(row)
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() {
+        db.row.claimed_by = 'replacement-owner'
+        db.row.claimed_at = '2026-05-21T01:00:30.000Z'
+        throw new Error('stale failure')
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+    expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
+  })
+
+  test('abort is a typed non-terminal outcome with no done or runner_error write', async () => {
+    const db = new FakeQueueDb(receivedRow())
+    const controller = new AbortController()
+    let settled = 0
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'abortable-runtime',
+      capabilities,
+      supportsAbort: true,
+      execution_timeout_ms: 100,
+      async invoke() {
+        return await new Promise<QueueWorkResult>(() => {})
+      },
+    }
+    setTimeout(() => controller.abort(new Error('lease lost')), 1)
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      signal: controller.signal,
+      async onInvocationSettled() { settled += 1 },
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'EXECUTION_ABORTED',
+      detail: 'lease lost',
+    })
+    expect(settled).toBe(1)
+    expect(db.row.status).toBe('in_progress')
+    expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+    expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
   })
 })
 

@@ -109,6 +109,7 @@ export type AunRuntimeV2FailureCode =
   | 'INVALID_CREATED_AFTER'
   | 'INVALID_CLAIM_TTL'
   | 'ADAPTER_REQUIRED'
+  | 'INVALID_ADAPTER_EXECUTION_TIMEOUT'
   | 'EXACT_FENCE_REQUIRED'
   | 'NO_PENDING_ROW'
   | 'TARGET_QUEUE_NOT_FOUND'
@@ -171,6 +172,120 @@ function positiveInteger(value: unknown, fallback: number): number {
   if (value === undefined || value === null || value === '') return fallback
   const n = typeof value === 'number' ? value : Number(value)
   return Number.isInteger(n) && n > 0 ? n : Number.NaN
+}
+
+const DEFAULT_ADAPTER_EXECUTION_TIMEOUT_MS = 600_000
+
+export function computeAunRuntimeV2ExecutionHeartbeatMs(claimTtlSeconds: number): number {
+  const ttlMs = claimTtlSeconds * 1000
+  const cadence = Math.min(10_000, Math.floor(ttlMs / 3))
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0 || cadence <= 0 || cadence >= ttlMs / 2) {
+    throw new Error('claim TTL cannot produce a positive execution heartbeat below half TTL')
+  }
+  return cadence
+}
+
+function adapterExecutionTimeoutMs(adapter: LlmRuntimeAdapter): number {
+  const value = adapter.execution_timeout_ms ?? DEFAULT_ADAPTER_EXECUTION_TIMEOUT_MS
+  return Number.isInteger(value) && value > 0 ? value : Number.NaN
+}
+
+interface AunRuntimeV2ExecutionLease {
+  signal: AbortSignal
+  settleInvocation(): Promise<void>
+}
+
+async function startAunRuntimeV2ExecutionLease(
+  db: QueueWorkDb,
+  input: {
+    queueId: string
+    agentId: string
+    claimedBy: string
+    claimedAt: string
+    claimTtlSeconds: number
+    executionTimeoutMs: number
+    now?: () => Date
+  },
+): Promise<AunRuntimeV2ExecutionLease> {
+  const controller = new AbortController()
+  const cadenceMs = computeAunRuntimeV2ExecutionHeartbeatMs(input.claimTtlSeconds)
+  let active = true
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  let renewal: Promise<void> | null = null
+
+  const clearTimers = () => {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer)
+    if (deadlineTimer) clearTimeout(deadlineTimer)
+    heartbeatTimer = undefined
+    deadlineTimer = undefined
+  }
+  const abort = (detail: string) => {
+    if (!active) return
+    active = false
+    clearTimers()
+    controller.abort(new Error(detail))
+  }
+  const renew = async () => {
+    if (!active) return
+    const heartbeatAt = input.now?.() ?? new Date()
+    const expiresAt = new Date(heartbeatAt.getTime() + input.claimTtlSeconds * 1000)
+    try {
+      const renewed = await db.query<{ id: string | number }>(
+        `UPDATE message_queue
+            SET claim_expires_at = $5,
+                last_heartbeat_at = $4
+          WHERE id = $1
+            AND agent_id = $2
+            AND claimed_by = $3
+            AND claimed_at = $6
+            AND status IN ('received', 'in_progress')
+            AND claim_expires_at > $4
+          RETURNING id`,
+        [
+          input.queueId,
+          input.agentId,
+          input.claimedBy,
+          heartbeatAt.toISOString(),
+          expiresAt.toISOString(),
+          input.claimedAt,
+        ],
+      )
+      if (rowCount(renewed) !== 1) {
+        abort('D1_EXECUTION_CLAIM_OWNERSHIP_LOST')
+      }
+    } catch (err) {
+      abort(`D1_EXECUTION_HEARTBEAT_FAILED: ${(err as Error).message ?? String(err)}`)
+    }
+  }
+  const schedule = () => {
+    if (!active) return
+    heartbeatTimer = setTimeout(() => {
+      renewal = renew().finally(() => {
+        renewal = null
+        schedule()
+      })
+    }, cadenceMs)
+  }
+
+  deadlineTimer = setTimeout(() => {
+    abort(`D1_EXECUTION_DEADLINE_EXCEEDED: ${input.executionTimeoutMs}ms`)
+  }, input.executionTimeoutMs)
+  renewal = renew()
+  await renewal
+  renewal = null
+  schedule()
+
+  return {
+    signal: controller.signal,
+    async settleInvocation() {
+      if (active) {
+        active = false
+        clearTimers()
+      }
+      if (renewal) await renewal
+    },
+  }
 }
 
 function cleanString(value: unknown): string | null {
@@ -796,18 +911,60 @@ export async function runAunRuntimeV2(
       })
     }
 
+    const ownsD1ExecutionLease = opts.d1Runtime?.allowsAgent(plan.agent_id) ?? false
+    const executionTimeoutMs = adapterExecutionTimeoutMs(opts.adapter)
+    if (ownsD1ExecutionLease && !Number.isFinite(executionTimeoutMs)) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'INVALID_ADAPTER_EXECUTION_TIMEOUT',
+        detail: 'live Shirube D1 adapter execution_timeout_ms must be a finite positive integer',
+      })
+    }
+
     const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
     if (!claimedOutcome.ok) return claimedOutcome
     claimed = claimedOutcome.claimed
 
-    runner = await runReceivedQueueWork(db, {
-      queueId: claimed.queue_id,
-      agentId: plan.agent_id ?? undefined,
-      adapter: opts.adapter,
-      invocationSource: plan.invocation_source,
-      expectedClaimSource: plan.expected_claim_source,
-      now: opts.now,
-    })
+    const claimFence = ownsD1ExecutionLease && claimed.claimed_by && claimed.claimed_at
+      ? { claimedBy: claimed.claimed_by, claimedAt: claimed.claimed_at }
+      : undefined
+    if (ownsD1ExecutionLease && (!plan.agent_id || !claimFence)) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'RUNNER_FAILED',
+        claimed,
+        detail: 'live Shirube D1 claim is missing its exact execution fence',
+      })
+    }
+
+    const executionLease = ownsD1ExecutionLease
+      ? await startAunRuntimeV2ExecutionLease(db, {
+          queueId: claimed.queue_id,
+          agentId: plan.agent_id!,
+          claimedBy: claimFence!.claimedBy,
+          claimedAt: claimFence!.claimedAt,
+          claimTtlSeconds: plan.claim_ttl_seconds,
+          executionTimeoutMs,
+          now: opts.now,
+        })
+      : undefined
+    try {
+      runner = await runReceivedQueueWork(db, {
+        queueId: claimed.queue_id,
+        agentId: plan.agent_id ?? undefined,
+        adapter: opts.adapter,
+        invocationSource: plan.invocation_source,
+        expectedClaimSource: plan.expected_claim_source,
+        claimFence,
+        signal: executionLease?.signal,
+        onInvocationSettled: executionLease?.settleInvocation,
+        now: opts.now,
+      })
+    } finally {
+      await executionLease?.settleInvocation()
+    }
     if (!runner.ok) {
       return failure({
         dryRun: false,
