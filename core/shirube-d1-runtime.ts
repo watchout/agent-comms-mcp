@@ -14,6 +14,7 @@ import type {
 } from './queue-work'
 import {
   claimD1Execution,
+  computeD1AuthorizationDigest,
   invokeD1Execution,
   type D1AuthorizationEnvelope,
   type D1Effect,
@@ -85,6 +86,27 @@ export interface ShirubeD1RuntimeEffectReadback {
   effect_delivery_performed: boolean
   durable_receipts: Array<{ invocation_key: string; effect: D1Effect; receipt: string }>
   duplicate_effects: 0
+}
+
+export type ShirubeD1AutoReceiveRejectReason =
+  | 'D1_DISABLED'
+  | 'D1_KILL_SWITCH_ACTIVE'
+  | 'D1_AGENT_UNENROLLED'
+  | 'D1_BINDING_SCHEMA_INVALID'
+  | 'D1_TARGET_MISMATCH'
+  | 'D1_AUTHORIZATION_DIGEST_MISMATCH'
+  | 'D1_ACTIVATION_EVIDENCE_MISMATCH'
+  | 'D1_ALLOWED_EFFECTS_INVALID'
+  | 'D1_POLICY_INVALID'
+
+export type ShirubeD1AutoReceiveClassification =
+  | { outcome: 'not_d1' }
+  | { outcome: 'admit' }
+  | { outcome: 'reject'; reason: ShirubeD1AutoReceiveRejectReason; detail?: string }
+
+export interface ShirubeD1AutoReceiveCandidate {
+  agent_id: string
+  payload: unknown
 }
 
 export class ShirubeD1RuntimeError extends Error {
@@ -229,6 +251,102 @@ function parsePayload(raw: string): Record<string, unknown> {
     const parsed = JSON.parse(raw)
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
   } catch { return {} }
+}
+
+function parseAutoReceivePayload(raw: unknown): { parsed: Record<string, unknown> | null; d1Shaped: boolean } {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const parsed = raw as Record<string, unknown>
+    return { parsed, d1Shaped: Object.prototype.hasOwnProperty.call(parsed, 'shirube_v4_d1') }
+  }
+  if (typeof raw !== 'string') return { parsed: null, d1Shaped: false }
+  try {
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { parsed: null, d1Shaped: false }
+    }
+    const record = parsed as Record<string, unknown>
+    return { parsed: record, d1Shaped: Object.prototype.hasOwnProperty.call(record, 'shirube_v4_d1') }
+  } catch {
+    return { parsed: null, d1Shaped: /["']shirube_v4_d1["']\s*:/.test(raw) }
+  }
+}
+
+function validAllowedEffects(value: unknown): value is D1Effect[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((effect) => effect === 'internal_reply' || effect === 'github_writeback' || effect === 'external_send')
+    && new Set(value).size === value.length
+}
+
+/**
+ * Classifies an arriving row before state-daemon generic routing. Merely
+ * enrolling an agent does not turn its ordinary traffic into D1 traffic: only
+ * a row carrying the D1 marker enters this fail-closed validation path.
+ */
+export function classifyShirubeD1AutoReceive(
+  row: ShirubeD1AutoReceiveCandidate,
+  env: NodeJS.ProcessEnv = process.env,
+): ShirubeD1AutoReceiveClassification {
+  const payload = parseAutoReceivePayload(row.payload)
+  if (!payload.d1Shaped) return { outcome: 'not_d1' }
+  if (!payload.parsed) {
+    return { outcome: 'reject', reason: 'D1_BINDING_SCHEMA_INVALID', detail: 'D1 payload is not valid JSON object data' }
+  }
+
+  let policy: ShirubeD1RuntimePolicy
+  try {
+    policy = buildShirubeD1RuntimePolicy(env)
+  } catch (error) {
+    return { outcome: 'reject', reason: 'D1_POLICY_INVALID', detail: (error as Error).message }
+  }
+  if (!policy.enabled) return { outcome: 'reject', reason: 'D1_DISABLED' }
+  if (policy.kill_switch) return { outcome: 'reject', reason: 'D1_KILL_SWITCH_ACTIVE' }
+
+  const enrolled = policy.allowlist.find((entry) => entry.agent_id === row.agent_id) ?? null
+  if (!enrolled) return { outcome: 'reject', reason: 'D1_AGENT_UNENROLLED' }
+
+  const candidate = payload.parsed.shirube_v4_d1
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return { outcome: 'reject', reason: 'D1_BINDING_SCHEMA_INVALID' }
+  }
+  const binding = candidate as Partial<ShirubeD1RuntimeBinding>
+  if (binding.schema_version !== SHIRUBE_D1_RUNTIME_BINDING_VERSION) {
+    return { outcome: 'reject', reason: 'D1_BINDING_SCHEMA_INVALID' }
+  }
+  if (
+    !binding.target
+    || !sameTarget(binding.target, enrolled)
+    || binding.target.agent_id !== row.agent_id
+    || binding.authorization?.control_source !== enrolled.control_source
+  ) {
+    return { outcome: 'reject', reason: 'D1_TARGET_MISMATCH' }
+  }
+  if (!binding.authorization || typeof binding.authorization !== 'object') {
+    return { outcome: 'reject', reason: 'D1_BINDING_SCHEMA_INVALID' }
+  }
+  try {
+    const digest = computeD1AuthorizationDigest(binding.authorization)
+    if (
+      binding.authorization.authorization_digest !== digest
+      || binding.authorization.authorization_digest !== policy.authorization_digest
+    ) {
+      return { outcome: 'reject', reason: 'D1_AUTHORIZATION_DIGEST_MISMATCH' }
+    }
+  } catch (error) {
+    return { outcome: 'reject', reason: 'D1_BINDING_SCHEMA_INVALID', detail: (error as Error).message }
+  }
+  const expectedEvidence: ShirubeD1ActivationEvidence = {
+    adapter_head_sha: policy.adapter_head_sha!,
+    ...policy.gate_refs,
+    ...(policy.fleet_activation_ref ? { fleet_activation_ref: policy.fleet_activation_ref } : {}),
+  }
+  if (!binding.activation_evidence || JSON.stringify(binding.activation_evidence) !== JSON.stringify(expectedEvidence)) {
+    return { outcome: 'reject', reason: 'D1_ACTIVATION_EVIDENCE_MISMATCH' }
+  }
+  if (!validAllowedEffects(binding.allowed_effects)) {
+    return { outcome: 'reject', reason: 'D1_ALLOWED_EFFECTS_INVALID' }
+  }
+  return { outcome: 'admit' }
 }
 
 function bindingFromRow(row: QueueWorkRow): ShirubeD1RuntimeBinding | null {

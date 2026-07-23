@@ -83,7 +83,11 @@ export interface QueueWorkResult {
 export interface LlmRuntimeAdapter {
   runtime_id: string
   capabilities: LlmRuntimeCapability
-  invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult>
+  /** Finite wall-clock bound used by both the D1 owner and the adapter. */
+  execution_timeout_ms?: number
+  /** Production process adapters set this when AbortSignal terminates the child. */
+  supportsAbort?: boolean
+  invoke(envelope: QueueWorkEnvelope, opts?: { signal?: AbortSignal }): Promise<QueueWorkResult>
 }
 
 export interface QueueReplySender {
@@ -124,10 +128,18 @@ export interface QueueWorkRuntimeResultSummary {
 }
 
 export interface QueueWorkDb {
+  /** SQL dialect hint for lease-fence comparisons against the database clock. */
+  dialect?: 'sqlite' | 'postgres'
   query<T = any>(
     sql: string,
     params?: unknown[],
   ): Promise<{ rows: T[]; rowCount?: number | null }>
+}
+
+export function databaseClockSql(db: QueueWorkDb): string {
+  return db.dialect === 'sqlite'
+    ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+    : 'clock_timestamp()'
 }
 
 export interface QueueWorkRow {
@@ -157,7 +169,9 @@ export type QueueWorkRunOutcome =
         | 'NO_RECEIVED_ROW'
         | 'INVALID_STATE'
         | 'CLAIM_NOT_OWNED'
+        | 'CLAIM_OWNERSHIP_LOST'
         | 'TRANSITION_RACE'
+        | 'EXECUTION_ABORTED'
         | 'ADAPTER_ERROR'
         | 'ADAPTER_RESULT_NOT_OK'
         | 'DONE_RACE'
@@ -177,6 +191,14 @@ export interface RunReceivedQueueWorkOptions {
    * `next`) are left untouched with CLAIM_NOT_OWNED instead of being advanced.
    */
   expectedClaimSource?: string
+  /** Exact receive-claim incarnation. When present every durable runner write is fenced by it. */
+  claimFence?: {
+    claimedBy: string
+    claimedAt: string
+  }
+  signal?: AbortSignal
+  /** Lets the execution owner stop renewal before terminal/error persistence. */
+  onInvocationSettled?: () => Promise<void> | void
   now?: () => Date
 }
 
@@ -425,6 +447,26 @@ async function selectReceivedRow(
   return selected.rows[0] ?? null
 }
 
+async function lockExactClaimRow(
+  db: QueueWorkDb,
+  queueId: string | number,
+  claimFence: NonNullable<RunReceivedQueueWorkOptions['claimFence']>,
+): Promise<boolean> {
+  // PostgreSQL can evaluate a clock_timestamp() fence before waiting on the
+  // UPDATE row lock. Acquire ownership first so the following statement's
+  // lease check is necessarily evaluated after the wait.
+  const locked = await db.query<{ id: string | number }>(
+    `SELECT id
+       FROM message_queue
+      WHERE id = $1
+        AND claimed_by = $2
+        AND claimed_at = $3
+      FOR UPDATE`,
+    [queueId, claimFence.claimedBy, claimFence.claimedAt],
+  )
+  return rowCount(locked) === 1
+}
+
 async function persistRunnerError(
   db: QueueWorkDb,
   row: QueueWorkRow,
@@ -433,7 +475,8 @@ async function persistRunnerError(
   code: string,
   detail: string,
   invocationSource?: string,
-): Promise<void> {
+  claimFence?: RunReceivedQueueWorkOptions['claimFence'],
+): Promise<boolean> {
   const payload = mergePayload(row, 'runner_error', {
     code,
     detail,
@@ -441,20 +484,87 @@ async function persistRunnerError(
     invocation_source: invocationSource ?? null,
     failed_at: now.toISOString(),
   })
-  await db.query(
-    `UPDATE message_queue
+  const params: unknown[] = [row.id, payload, now.toISOString()]
+  let sql = `UPDATE message_queue
         SET payload = $2,
             last_heartbeat_at = $3
       WHERE id = $1
-        AND status = 'in_progress'`,
-    [row.id, payload, now.toISOString()],
-  ).catch(() => {})
+        AND status = 'in_progress'`
+  if (claimFence) {
+    params.push(claimFence.claimedBy, claimFence.claimedAt)
+    sql += `
+        AND claimed_by = $4
+        AND claimed_at = $5
+        AND claim_expires_at > ${databaseClockSql(db)}`
+  }
+  if (!claimFence) {
+    const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
+    return rowCount(persisted) === 1
+  }
+
+  let transactionOpen = false
+  try {
+    await db.query('BEGIN')
+    transactionOpen = true
+    if (!await lockExactClaimRow(db, row.id, claimFence)) {
+      await db.query('ROLLBACK')
+      transactionOpen = false
+      return false
+    }
+    const persisted = await db.query(sql, params)
+    if (rowCount(persisted) !== 1) {
+      await db.query('ROLLBACK')
+      transactionOpen = false
+      return false
+    }
+    await db.query('COMMIT')
+    transactionOpen = false
+    return true
+  } catch {
+    if (transactionOpen) await db.query('ROLLBACK').catch(() => {})
+    return false
+  }
+}
+
+function executionAbortDetail(signal: AbortSignal): string {
+  const reason = signal.reason
+  if (reason instanceof Error) return reason.message
+  return reason === undefined ? 'runtime execution aborted' : String(reason)
+}
+
+async function invokeRuntimeAdapter(
+  adapter: LlmRuntimeAdapter,
+  envelope: QueueWorkEnvelope,
+  signal?: AbortSignal,
+): Promise<QueueWorkResult> {
+  if (!signal) return adapter.invoke(envelope)
+  if (signal.aborted) throw new DOMException(executionAbortDetail(signal), 'AbortError')
+
+  let removeAbortListener = () => {}
+  const aborted = new Promise<never>((_, reject) => {
+    const onAbort = () => reject(new DOMException(executionAbortDetail(signal), 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+  })
+  try {
+    return await Promise.race([adapter.invoke(envelope, { signal }), aborted])
+  } finally {
+    removeAbortListener()
+  }
 }
 
 export async function runReceivedQueueWork(
   db: QueueWorkDb,
   opts: RunReceivedQueueWorkOptions,
 ): Promise<QueueWorkRunOutcome> {
+  if (opts.signal?.aborted) {
+    return {
+      ok: false,
+      code: 'EXECUTION_ABORTED',
+      queue_id: opts.queueId === undefined ? undefined : String(opts.queueId),
+      detail: executionAbortDetail(opts.signal),
+    }
+  }
   const now = opts.now?.() ?? new Date()
   await db.query('BEGIN')
   let row: QueueWorkRow | null = null
@@ -488,18 +598,38 @@ export async function runReceivedQueueWork(
       }
     }
 
-    const advanced = await db.query<{ id: string | number }>(
-      `UPDATE message_queue
+    if (opts.signal?.aborted) {
+      await db.query('ROLLBACK')
+      return {
+        ok: false,
+        code: 'EXECUTION_ABORTED',
+        queue_id: queueIdOf(row),
+        detail: executionAbortDetail(opts.signal),
+      }
+    }
+
+    const advanceParams: unknown[] = [row.id, now.toISOString()]
+    let advanceSql = `UPDATE message_queue
           SET status = 'in_progress',
               last_heartbeat_at = $2
         WHERE id = $1
-          AND status = 'received'
-        RETURNING id`,
-      [row.id, now.toISOString()],
-    )
+          AND status = 'received'`
+    if (opts.claimFence) {
+      advanceParams.push(opts.claimFence.claimedBy, opts.claimFence.claimedAt)
+      advanceSql += `
+          AND claimed_by = $3
+          AND claimed_at = $4
+          AND claim_expires_at > ${databaseClockSql(db)}`
+    }
+    advanceSql += '\n        RETURNING id'
+    const advanced = await db.query<{ id: string | number }>(advanceSql, advanceParams)
     if (rowCount(advanced) === 0) {
       await db.query('ROLLBACK')
-      return { ok: false, code: 'TRANSITION_RACE', queue_id: queueIdOf(row) }
+      return {
+        ok: false,
+        code: opts.claimFence ? 'CLAIM_OWNERSHIP_LOST' : 'TRANSITION_RACE',
+        queue_id: queueIdOf(row),
+      }
     }
     await db.query('COMMIT')
   } catch (err) {
@@ -510,9 +640,18 @@ export async function runReceivedQueueWork(
   const envelope = buildQueueWorkEnvelope(row)
   let result: QueueWorkResult
   try {
-    result = await opts.adapter.invoke(envelope)
+    result = await invokeRuntimeAdapter(opts.adapter, envelope, opts.signal)
   } catch (err) {
-    await persistRunnerError(
+    await opts.onInvocationSettled?.()
+    if (opts.signal?.aborted) {
+      return {
+        ok: false,
+        code: 'EXECUTION_ABORTED',
+        queue_id: queueIdOf(row),
+        detail: executionAbortDetail(opts.signal),
+      }
+    }
+    const persisted = await persistRunnerError(
       db,
       row,
       opts.adapter,
@@ -520,7 +659,16 @@ export async function runReceivedQueueWork(
       'ADAPTER_ERROR',
       (err as Error).message ?? String(err),
       opts.invocationSource,
+      opts.claimFence,
     )
+    if (!persisted && opts.claimFence) {
+      return {
+        ok: false,
+        code: 'CLAIM_OWNERSHIP_LOST',
+        queue_id: queueIdOf(row),
+        detail: 'claim ownership was lost before runner error persistence',
+      }
+    }
     return {
       ok: false,
       code: 'ADAPTER_ERROR',
@@ -528,9 +676,18 @@ export async function runReceivedQueueWork(
       detail: (err as Error).message ?? String(err),
     }
   }
+  await opts.onInvocationSettled?.()
+  if (opts.signal?.aborted) {
+    return {
+      ok: false,
+      code: 'EXECUTION_ABORTED',
+      queue_id: queueIdOf(row),
+      detail: executionAbortDetail(opts.signal),
+    }
+  }
 
   if (!resultLooksValid(result)) {
-    await persistRunnerError(
+    const persisted = await persistRunnerError(
       db,
       row,
       opts.adapter,
@@ -538,7 +695,16 @@ export async function runReceivedQueueWork(
       'ADAPTER_RESULT_INVALID',
       'adapter returned a malformed queue_work_result_v1 object',
       opts.invocationSource,
+      opts.claimFence,
     )
+    if (!persisted && opts.claimFence) {
+      return {
+        ok: false,
+        code: 'CLAIM_OWNERSHIP_LOST',
+        queue_id: queueIdOf(row),
+        detail: 'claim ownership was lost before invalid-result persistence',
+      }
+    }
     return {
       ok: false,
       code: 'ADAPTER_ERROR',
@@ -548,7 +714,7 @@ export async function runReceivedQueueWork(
   }
 
   if (!result.ok) {
-    await persistRunnerError(
+    const persisted = await persistRunnerError(
       db,
       row,
       opts.adapter,
@@ -556,7 +722,16 @@ export async function runReceivedQueueWork(
       'ADAPTER_RESULT_NOT_OK',
       result.summary,
       opts.invocationSource,
+      opts.claimFence,
     )
+    if (!persisted && opts.claimFence) {
+      return {
+        ok: false,
+        code: 'CLAIM_OWNERSHIP_LOST',
+        queue_id: queueIdOf(row),
+        detail: 'claim ownership was lost before non-ok result persistence',
+      }
+    }
     return {
       ok: false,
       code: 'ADAPTER_RESULT_NOT_OK',
@@ -574,19 +749,37 @@ export async function runReceivedQueueWork(
   })
   await db.query('BEGIN')
   try {
-    const done = await db.query<{ id: string | number }>(
-      `UPDATE message_queue
+    if (opts.claimFence && !await lockExactClaimRow(db, row.id, opts.claimFence)) {
+      await db.query('ROLLBACK')
+      return {
+        ok: false,
+        code: 'CLAIM_OWNERSHIP_LOST',
+        queue_id: queueIdOf(row),
+      }
+    }
+    const doneParams: unknown[] = [row.id, completedAt.toISOString(), payload]
+    let doneSql = `UPDATE message_queue
           SET status = 'done',
               done_at = $2,
               payload = $3
         WHERE id = $1
-          AND status = 'in_progress'
-        RETURNING id`,
-      [row.id, completedAt.toISOString(), payload],
-    )
+          AND status = 'in_progress'`
+    if (opts.claimFence) {
+      doneParams.push(opts.claimFence.claimedBy, opts.claimFence.claimedAt)
+      doneSql += `
+          AND claimed_by = $4
+          AND claimed_at = $5
+          AND claim_expires_at > ${databaseClockSql(db)}`
+    }
+    doneSql += '\n        RETURNING id'
+    const done = await db.query<{ id: string | number }>(doneSql, doneParams)
     if (rowCount(done) === 0) {
       await db.query('ROLLBACK')
-      return { ok: false, code: 'DONE_RACE', queue_id: queueIdOf(row) }
+      return {
+        ok: false,
+        code: opts.claimFence ? 'CLAIM_OWNERSHIP_LOST' : 'DONE_RACE',
+        queue_id: queueIdOf(row),
+      }
     }
     await db.query('COMMIT')
   } catch (err) {

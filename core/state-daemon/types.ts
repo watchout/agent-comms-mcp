@@ -343,6 +343,35 @@ export interface QueueWorkScheduler {
   runReceived(input: { queueId: number; agentId: string }): Promise<void>
 }
 
+/**
+ * Dedicated queue-arrival bridge for an authorized Shirube D1 row.
+ * Classification is deliberately separate from dispatch so D1-shaped invalid
+ * rows can fail closed before any generic routing or runner path is considered.
+ */
+export interface ShirubeD1AutoReceiveInput {
+  queueId: number
+  agentId: string
+  messageId: string | null
+  createdAt: string
+  status: string
+  payload: unknown
+}
+
+export type ShirubeD1AutoReceiveDecision =
+  | { outcome: 'not_d1' }
+  | { outcome: 'admit' }
+  | { outcome: 'reject'; reason: string; detail?: string }
+
+export interface ShirubeD1AutoReceiveResult {
+  code: string
+  replayed: boolean
+}
+
+export interface ShirubeD1AutoReceiveDispatcher {
+  classify(input: ShirubeD1AutoReceiveInput): ShirubeD1AutoReceiveDecision | Promise<ShirubeD1AutoReceiveDecision>
+  dispatch(input: ShirubeD1AutoReceiveInput): Promise<ShirubeD1AutoReceiveResult>
+}
+
 /** #744 supervised GitHub work puller; implementation lives outside StateDaemon. */
 export interface GithubWorkPuller {
   pollOnce(): Promise<{
@@ -362,6 +391,7 @@ export interface StateDaemonDeps {
   codexRunner?: CodexRunnerInvoker
   hostRuntimeInvoker?: HostRuntimeInvoker
   queueWorkScheduler?: QueueWorkScheduler
+  shirubeD1AutoReceive?: ShirubeD1AutoReceiveDispatcher
   githubWorkPuller?: GithubWorkPuller
   clock: Clock
   metrics: Metrics

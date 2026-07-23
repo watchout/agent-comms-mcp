@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { loadQueueWorkResidueExcludedQueueIds } from '../bin/state-daemon'
+import {
+  RuntimeV2ShirubeD1AutoReceiveDispatcher,
+  SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+  loadQueueWorkResidueExcludedQueueIds,
+} from '../bin/state-daemon'
 import { StateDaemon } from '../core/state-daemon'
-import type { DBClient, QueueWorkScheduler } from '../core/state-daemon/types'
+import type {
+  DBClient,
+  QueueWorkScheduler,
+  ShirubeD1AutoReceiveDispatcher,
+} from '../core/state-daemon/types'
 import {
   FakeAlertSink,
   FakeClock,
@@ -211,8 +219,296 @@ class RunnerErrorSweepDb implements DBClient {
   }
 }
 
+class D1DoneRecoveryDb implements DBClient {
+  constructor(private readonly row: any) {}
+
+  async query<T = any>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes("mq.status = 'done'") && sql.includes('shirube_v4_d1')) {
+      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+    }
+    if (sql.includes('count(*)::int AS n')) return { rows: [{ n: 0 }] as T[], rowCount: 1 }
+    return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
+class D1ExpiredClaimRecoveryDb implements DBClient {
+  updates = 0
+  constructor(private readonly row: any) {}
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes("mq.status IN ('received', 'in_progress')") && sql.includes('mq.claim_expires_at <')) {
+      return this.row.status === 'received'
+        ? { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        : { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.trim().startsWith('UPDATE message_queue') && String(params?.[0]) === String(this.row.id)) {
+      this.updates += 1
+      this.row.status = 'pending'
+      this.row.claimed_by = null
+      this.row.claimed_at = null
+      this.row.claim_expires_at = null
+      return { rows: [] as T[], rowCount: 1 }
+    }
+    if (sql.includes('count(*)::int AS n')) return { rows: [{ n: 0 }] as T[], rowCount: 1 }
+    return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
 describe('state_daemon queue work scheduler boundary', () => {
-  test('received queue events schedule the runner without using tmux wake', async () => {
+  test('valid D1 phase_handoff uses only D1 dispatch under production-composed schedulers', async () => {
+    const agentId = 'dev-001'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const genericCalls: string[] = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending() { genericCalls.push('pending') },
+      async runReceived() { genericCalls.push('received') },
+    }
+    const d1: ShirubeD1AutoReceiveDispatcher = {
+      classify: () => ({ outcome: 'admit' }),
+      async dispatch(input) {
+        calls.push({ queueId: input.queueId, agentId: input.agentId })
+        return { code: 'E2E_DONE', replayed: false }
+      },
+    }
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, {
+        id: 88701,
+        agent_id: agentId,
+        status: 'pending',
+        message_id: 'msg-d1-valid',
+        payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
+        claim_expires_at: null,
+        created_at: new Date('2026-07-23T00:00:00.000Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: new FakeAlertSink(), queueWorkScheduler: scheduler, shirubeD1AutoReceive: d1,
+    })
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 88701, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+    expect(calls).toEqual([{ queueId: 88701, agentId }])
+    expect(genericCalls).toEqual([])
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'started' })).toBe(1)
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'terminal', code: 'E2E_DONE' })).toBe(1)
+    expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'routing_non_actionable_held' })).toBe(0)
+  })
+
+  test('D1-shaped rejection fails closed without generic routing or dispatch', async () => {
+    const agentId = 'dev-001'
+    let dispatches = 0
+    const genericCalls: string[] = []
+    const scheduler: QueueWorkScheduler = {
+      async runPending() { genericCalls.push('pending') },
+      async runReceived() { genericCalls.push('received') },
+    }
+    const d1: ShirubeD1AutoReceiveDispatcher = {
+      classify: () => ({ outcome: 'reject', reason: 'D1_AUTHORIZATION_DIGEST_MISMATCH' }),
+      async dispatch() { dispatches += 1; return { code: 'unexpected', replayed: false } },
+    }
+    const metrics = new FakeMetrics()
+    const alerts = new FakeAlertSink()
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, {
+        id: 88702, agent_id: agentId, status: 'received', message_id: 'msg-d1-invalid',
+        payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
+        claim_expires_at: null, created_at: new Date('2026-07-23T00:00:00.000Z'),
+        last_wake_attempt_at: null, last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: alerts, queueWorkScheduler: scheduler, shirubeD1AutoReceive: d1,
+    })
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'UPDATE', id: 88702, agent_id: agentId, status: 'received', claim_expires_at: null })
+    } finally {
+      await daemon.stop()
+    }
+    expect(dispatches).toBe(0)
+    expect(genericCalls).toEqual([])
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', {
+      result: 'rejected', reason: 'D1_AUTHORIZATION_DIGEST_MISMATCH',
+    })).toBe(1)
+    expect(alerts.alerts.join('\n')).toContain('D1_AUTHORIZATION_DIGEST_MISMATCH')
+    expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'routing_non_actionable_held' })).toBe(0)
+  })
+
+  test('duplicate pending notifications share one in-flight D1 dispatch', async () => {
+    const agentId = 'dev-001'
+    let dispatches = 0
+    const genericCalls: string[] = []
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const d1: ShirubeD1AutoReceiveDispatcher = {
+      classify: () => ({ outcome: 'admit' }),
+      async dispatch() {
+        dispatches += 1
+        await blocked
+        return { code: 'E2E_DONE', replayed: false }
+      },
+    }
+    const metrics = new FakeMetrics()
+    const row = {
+      id: 88703, agent_id: agentId, status: 'pending', message_id: 'msg-d1-duplicate',
+      payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
+      claim_expires_at: null, created_at: new Date('2026-07-23T00:00:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, row),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: new FakeAlertSink(), shirubeD1AutoReceive: d1,
+      queueWorkScheduler: {
+        async runPending() { genericCalls.push('pending') },
+        async runReceived() { genericCalls.push('received') },
+      },
+    })
+    await daemon.start()
+    try {
+      const event = { op: 'INSERT', id: 88703, agent_id: agentId, status: 'pending', claim_expires_at: null } as const
+      await Promise.all([daemon.__testHandleEvent(event), daemon.__testHandleEvent(event)])
+      row.status = 'received'
+      await daemon.__testHandleEvent({ ...event, op: 'UPDATE', status: 'received' })
+      expect(dispatches).toBe(1)
+      expect(genericCalls).toEqual([])
+      expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'duplicate_notify' })).toBe(1)
+      release()
+    } finally {
+      release()
+      await daemon.stop()
+    }
+  })
+
+  test('production D1 dispatcher uses exact fences, canonical source, finalize, and codex-exec by default', async () => {
+    let options: any
+    const dispatcher = new RuntimeV2ShirubeD1AutoReceiveDispatcher({} as NodeJS.ProcessEnv, REPO, async (input) => {
+      options = input
+      return {
+        ok: true,
+        dry_run: false,
+        plan: {} as any,
+        outcome: { ok: true, dry_run: false, code: 'E2E_DONE', plan: {} as any, claimed: {} as any, runner: {} as any },
+      }
+    })
+    await expect(dispatcher.dispatch({
+      queueId: 88704, agentId: 'dev-001', messageId: 'msg-d1-exact',
+      createdAt: '2026-07-23T00:00:00.000Z', status: 'pending', payload: {},
+    })).resolves.toEqual({ code: 'E2E_DONE', replayed: false })
+    expect(options).toMatchObject({
+      agentId: 'dev-001', queueId: '88704', messageId: 'msg-d1-exact',
+      createdAfter: '2026-07-23T00:00:00.000Z', runtime: 'codex-exec', finalize: true,
+      claimSource: SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+      invocationSource: SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+      expectedClaimSource: SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+    })
+  })
+
+  test('done D1 notification resumes finalization and is reported as replay', async () => {
+    const agentId = 'dev-001'
+    const calls: string[] = []
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new SingleRowDb({
+        id: 88705, agent_id: agentId, status: 'done', message_id: 'msg-d1-done',
+        payload: JSON.stringify({ shirube_v4_d1: {} }),
+        claim_expires_at: null, created_at: new Date('2026-07-23T00:00:00.000Z'),
+        last_wake_attempt_at: null, last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: new FakeAlertSink(),
+      shirubeD1AutoReceive: {
+        classify: () => ({ outcome: 'admit' }),
+        async dispatch(input) { calls.push(input.status); return { code: 'E2E_DONE', replayed: true } },
+      },
+    })
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'UPDATE', id: 88705, agent_id: agentId, status: 'done', claim_expires_at: null })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+    expect(calls).toEqual(['done'])
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'resume_started' })).toBe(1)
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'replayed', code: 'E2E_DONE' })).toBe(1)
+  })
+
+  test('post-restart sweep recovers a done D1 row without generic scheduler', async () => {
+    const agentId = 'dev-001'
+    let dispatches = 0
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new D1DoneRecoveryDb({
+        id: 88706, agent_id: agentId, status: 'done', message_id: 'msg-d1-restart',
+        payload: JSON.stringify({ shirube_v4_d1: {} }),
+        claim_expires_at: null, claimed_at: new Date('2026-07-23T00:00:00.000Z'),
+        created_at: new Date('2026-07-23T00:00:00.000Z'),
+        last_wake_attempt_at: null, last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: new FakeAlertSink(),
+      shirubeD1AutoReceive: {
+        classify: () => ({ outcome: 'admit' }),
+        async dispatch() { dispatches += 1; return { code: 'E2E_DONE', replayed: true } },
+      },
+    })
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(result.rewoken).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+    expect(dispatches).toBe(1)
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'resume_started' })).toBe(1)
+  })
+
+  test('post-restart sweep reclaims an expired D1 claim and dispatches it once', async () => {
+    const agentId = 'dev-001'
+    const db = new D1ExpiredClaimRecoveryDb({
+      id: 88707, agent_id: agentId, status: 'received', message_id: 'msg-d1-expired',
+      payload: JSON.stringify({ shirube_v4_d1: {}, receive_claim: { source: SHIRUBE_D1_AUTO_RECEIVE_SOURCE } }),
+      claimed_by: agentId,
+      claim_expires_at: new Date('2026-07-22T23:59:00.000Z'),
+      claimed_at: new Date('2026-07-22T23:58:00.000Z'),
+      created_at: new Date('2026-07-22T23:57:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    })
+    let dispatches = 0
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db, pgListen: new FakePgListen(), tmux: new FakeTmux(),
+      clock: new FakeClock('2026-07-23T00:00:00.000Z'), metrics, alert: new FakeAlertSink(),
+      shirubeD1AutoReceive: {
+        classify: () => ({ outcome: 'admit' }),
+        async dispatch(input) {
+          expect(input.status).toBe('pending')
+          dispatches += 1
+          return { code: 'E2E_DONE', replayed: false }
+        },
+      },
+    })
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(result.reclaimed).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+    expect(db.updates).toBe(1)
+    expect(dispatches).toBe(1)
+    expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'restart_reclaim' })).toBe(1)
+  })
+
+  test('production-composed received not_d1 rows use the generic runner without tmux wake', async () => {
     const calls: Array<{ queueId: number; agentId: string }> = []
     const scheduler: QueueWorkScheduler = {
       async runReceived(input) {
@@ -221,6 +517,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const tmux = new FakeTmux()
+    let d1Dispatches = 0
     const daemon = new StateDaemon({
       db: new SingleRowDb({
         id: 489,
@@ -237,6 +534,10 @@ describe('state_daemon queue work scheduler boundary', () => {
       metrics,
       alert: new FakeAlertSink(),
       queueWorkScheduler: scheduler,
+      shirubeD1AutoReceive: {
+        classify: () => ({ outcome: 'not_d1' }),
+        async dispatch() { d1Dispatches += 1; return { code: 'unexpected', replayed: false } },
+      },
     })
 
     await daemon.start()
@@ -254,10 +555,13 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
 
     expect(calls).toEqual([{ queueId: 489, agentId: 'codex-audit' }])
+    expect(d1Dispatches).toBe(0)
     expect(tmux.sentKeys).toEqual([])
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'received_runner_invoked',
     })).toBe(1)
+    expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+    expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
   })
 
   test('pending LLM queue events use the scheduler when runPending is configured', async () => {
@@ -662,8 +966,11 @@ describe('state_daemon queue work scheduler boundary', () => {
     const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
     const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
     expect(update?.sql).toContain('mq.payload NOT LIKE')
+    expect(update?.sql).toContain('mq.payload NOT LIKE \'%"source":"state-daemon-d1-auto-receive"%\'')
+    expect(update?.sql).toContain("a.status IN ('online', 'busy')")
     expect(update?.sql).toContain('mq.message_id = ANY')
     expect(update?.sql).toContain('mq.created_at >=')
+    expect(skipped?.sql).toContain('mq.payload NOT LIKE \'%"source":"state-daemon-d1-auto-receive"%\'')
     expect(skipped?.sql).toContain('mq.message_id = ANY')
     expect(skipped?.sql).toContain('mq.created_at >=')
   })

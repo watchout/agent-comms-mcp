@@ -3,6 +3,7 @@ import {
   type AunRuntimeV2FinalizationResult,
 } from './aun-runtime-v2-finalization'
 import {
+  databaseClockSql,
   runReceivedQueueWork,
   type LlmRuntimeAdapter,
   type QueueReplySender,
@@ -90,6 +91,24 @@ export interface AunRuntimeV2Plan {
   }
 }
 
+async function recoverQueueWorkDbDialect(db: QueueWorkDb): Promise<void> {
+  if (db.dialect) return
+  try {
+    const probed = await db.query<{ database_now: unknown }>(
+      'SELECT CURRENT_TIMESTAMP AS database_now',
+    )
+    const databaseNow = probed.rows[0]?.database_now
+    if (databaseNow instanceof Date) {
+      db.dialect = 'postgres'
+    } else if (typeof databaseNow === 'string') {
+      db.dialect = 'sqlite'
+    }
+  } catch {
+    // Minimal test doubles may not implement the read-only probe. The queue
+    // worker retains its fail-closed PostgreSQL default in that case.
+  }
+}
+
 export interface AunRuntimeV2Candidate {
   queue_id: string
   agent_id: string
@@ -109,6 +128,7 @@ export type AunRuntimeV2FailureCode =
   | 'INVALID_CREATED_AFTER'
   | 'INVALID_CLAIM_TTL'
   | 'ADAPTER_REQUIRED'
+  | 'INVALID_ADAPTER_EXECUTION_TIMEOUT'
   | 'EXACT_FENCE_REQUIRED'
   | 'NO_PENDING_ROW'
   | 'TARGET_QUEUE_NOT_FOUND'
@@ -171,6 +191,153 @@ function positiveInteger(value: unknown, fallback: number): number {
   if (value === undefined || value === null || value === '') return fallback
   const n = typeof value === 'number' ? value : Number(value)
   return Number.isInteger(n) && n > 0 ? n : Number.NaN
+}
+
+const DEFAULT_ADAPTER_EXECUTION_TIMEOUT_MS = 600_000
+
+export function computeAunRuntimeV2ExecutionHeartbeatMs(claimTtlSeconds: number): number {
+  const ttlMs = claimTtlSeconds * 1000
+  const cadence = Math.min(10_000, Math.floor(ttlMs / 3))
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0 || cadence <= 0 || cadence >= ttlMs / 2) {
+    throw new Error('claim TTL cannot produce a positive execution heartbeat below half TTL')
+  }
+  return cadence
+}
+
+function adapterExecutionTimeoutMs(adapter: LlmRuntimeAdapter): number {
+  const value = adapter.execution_timeout_ms ?? DEFAULT_ADAPTER_EXECUTION_TIMEOUT_MS
+  return Number.isInteger(value) && value > 0 ? value : Number.NaN
+}
+
+interface AunRuntimeV2ExecutionLease {
+  signal: AbortSignal
+  settleInvocation(): Promise<void>
+}
+
+async function startAunRuntimeV2ExecutionLease(
+  db: QueueWorkDb,
+  input: {
+    queueId: string
+    agentId: string
+    claimedBy: string
+    claimedAt: string
+    claimTtlSeconds: number
+    executionTimeoutMs: number
+  },
+): Promise<AunRuntimeV2ExecutionLease> {
+  const controller = new AbortController()
+  const cadenceMs = computeAunRuntimeV2ExecutionHeartbeatMs(input.claimTtlSeconds)
+  let active = true
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  let renewal: Promise<void> | null = null
+
+  const clearTimers = () => {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer)
+    if (deadlineTimer) clearTimeout(deadlineTimer)
+    heartbeatTimer = undefined
+    deadlineTimer = undefined
+  }
+  const abort = (detail: string) => {
+    if (!active) return
+    active = false
+    clearTimers()
+    controller.abort(new Error(detail))
+  }
+  const renew = async () => {
+    if (!active) return
+    let transactionOpen = false
+    try {
+      await db.query('BEGIN')
+      transactionOpen = true
+      const locked = await db.query<{ id: string | number }>(
+        `SELECT id
+           FROM message_queue
+          WHERE id = $1
+            AND agent_id = $2
+            AND claimed_by = $3
+            AND claimed_at = $4
+            AND status IN ('received', 'in_progress')
+          FOR UPDATE`,
+        [input.queueId, input.agentId, input.claimedBy, input.claimedAt],
+      )
+      if (rowCount(locked) !== 1) {
+        await db.query('ROLLBACK')
+        transactionOpen = false
+        abort('D1_EXECUTION_CLAIM_OWNERSHIP_LOST')
+        return
+      }
+      if (!active) {
+        await db.query('ROLLBACK')
+        transactionOpen = false
+        return
+      }
+      // This must remain a separate statement after SELECT ... FOR UPDATE.
+      // PostgreSQL may otherwise evaluate clock_timestamp() before a row-lock
+      // wait and renew a lease that expired while waiting.
+      const expirySql = db.dialect === 'sqlite'
+        ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || $4 || ' seconds')"
+        : "clock_timestamp() + ($4::double precision * INTERVAL '1 second')"
+      const renewed = await db.query<{ id: string | number }>(
+        `UPDATE message_queue
+            SET claim_expires_at = ${expirySql},
+                last_heartbeat_at = ${databaseClockSql(db)}
+          WHERE id = $1
+            AND agent_id = $2
+            AND claimed_by = $3
+            AND claimed_at = $5
+            AND status IN ('received', 'in_progress')
+            AND claim_expires_at > ${databaseClockSql(db)}
+          RETURNING id`,
+        [
+          input.queueId,
+          input.agentId,
+          input.claimedBy,
+          input.claimTtlSeconds,
+          input.claimedAt,
+        ],
+      )
+      if (rowCount(renewed) !== 1) {
+        await db.query('ROLLBACK')
+        transactionOpen = false
+        abort('D1_EXECUTION_CLAIM_OWNERSHIP_LOST')
+        return
+      }
+      await db.query('COMMIT')
+      transactionOpen = false
+    } catch (err) {
+      if (transactionOpen) await db.query('ROLLBACK').catch(() => {})
+      abort(`D1_EXECUTION_HEARTBEAT_FAILED: ${(err as Error).message ?? String(err)}`)
+    }
+  }
+  const schedule = () => {
+    if (!active) return
+    heartbeatTimer = setTimeout(() => {
+      renewal = renew().finally(() => {
+        renewal = null
+        schedule()
+      })
+    }, cadenceMs)
+  }
+
+  deadlineTimer = setTimeout(() => {
+    abort(`D1_EXECUTION_DEADLINE_EXCEEDED: ${input.executionTimeoutMs}ms`)
+  }, input.executionTimeoutMs)
+  renewal = renew()
+  await renewal
+  renewal = null
+  schedule()
+
+  return {
+    signal: controller.signal,
+    async settleInvocation() {
+      if (active) {
+        active = false
+        clearTimers()
+      }
+      if (renewal) await renewal
+    },
+  }
 }
 
 function cleanString(value: unknown): string | null {
@@ -796,18 +963,62 @@ export async function runAunRuntimeV2(
       })
     }
 
+    const ownsD1ExecutionLease = opts.d1Runtime?.allowsAgent(plan.agent_id) ?? false
+    const executionTimeoutMs = adapterExecutionTimeoutMs(opts.adapter)
+    if (ownsD1ExecutionLease && !Number.isFinite(executionTimeoutMs)) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'INVALID_ADAPTER_EXECUTION_TIMEOUT',
+        detail: 'live Shirube D1 adapter execution_timeout_ms must be a finite positive integer',
+      })
+    }
+    if (ownsD1ExecutionLease) {
+      await recoverQueueWorkDbDialect(db)
+    }
+
     const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
     if (!claimedOutcome.ok) return claimedOutcome
     claimed = claimedOutcome.claimed
 
-    runner = await runReceivedQueueWork(db, {
-      queueId: claimed.queue_id,
-      agentId: plan.agent_id ?? undefined,
-      adapter: opts.adapter,
-      invocationSource: plan.invocation_source,
-      expectedClaimSource: plan.expected_claim_source,
-      now: opts.now,
-    })
+    const claimFence = ownsD1ExecutionLease && claimed.claimed_by && claimed.claimed_at
+      ? { claimedBy: claimed.claimed_by, claimedAt: claimed.claimed_at }
+      : undefined
+    if (ownsD1ExecutionLease && (!plan.agent_id || !claimFence)) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'RUNNER_FAILED',
+        claimed,
+        detail: 'live Shirube D1 claim is missing its exact execution fence',
+      })
+    }
+
+    const executionLease = ownsD1ExecutionLease
+      ? await startAunRuntimeV2ExecutionLease(db, {
+          queueId: claimed.queue_id,
+          agentId: plan.agent_id!,
+          claimedBy: claimFence!.claimedBy,
+          claimedAt: claimFence!.claimedAt,
+          claimTtlSeconds: plan.claim_ttl_seconds,
+          executionTimeoutMs,
+        })
+      : undefined
+    try {
+      runner = await runReceivedQueueWork(db, {
+        queueId: claimed.queue_id,
+        agentId: plan.agent_id ?? undefined,
+        adapter: opts.adapter,
+        invocationSource: plan.invocation_source,
+        expectedClaimSource: plan.expected_claim_source,
+        claimFence,
+        signal: executionLease?.signal,
+        onInvocationSettled: executionLease?.settleInvocation,
+        now: opts.now,
+      })
+    } finally {
+      await executionLease?.settleInvocation()
+    }
     if (!runner.ok) {
       return failure({
         dryRun: false,

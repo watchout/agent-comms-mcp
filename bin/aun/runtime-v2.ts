@@ -130,7 +130,7 @@ interface ExecResult {
 function execFileAsync(
   command: string,
   args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number; maxBuffer: number; input?: string },
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number; maxBuffer: number; input?: string; signal?: AbortSignal },
 ): Promise<ExecResult> {
   return new Promise((resolvePromise) => {
     const child = execFile(command, args, {
@@ -139,6 +139,7 @@ function execFileAsync(
       timeout: opts.timeout,
       maxBuffer: opts.maxBuffer,
       encoding: 'utf-8',
+      signal: opts.signal,
     }, (err, stdout, stderr) => {
       const execErr = err as (NodeJS.ErrnoException & {
         code?: unknown
@@ -159,6 +160,14 @@ function execFileAsync(
       child.stdin.end()
     }
   })
+}
+
+function positiveExecutionTimeoutMs(raw: string | undefined): number {
+  const value = Number(raw ?? '600000')
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error('AUN queue-work execution timeout must be a finite positive integer')
+  }
+  return value
 }
 
 class EchoRuntimeAdapter implements LlmRuntimeAdapter {
@@ -208,6 +217,8 @@ function parseQueueWorkResultJson(raw: string): QueueWorkResult {
 
 class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'codex-exec'
+  readonly execution_timeout_ms: number
+  readonly supportsAbort = true
   capabilities = {
     input: 'stdin_context',
     output: 'schema_json',
@@ -221,9 +232,13 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
   constructor(
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
-  ) {}
+  ) {
+    this.execution_timeout_ms = positiveExecutionTimeoutMs(
+      env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? env.AUN_QUEUE_WORK_TIMEOUT_MS,
+    )
+  }
 
-  async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
+  async invoke(envelope: QueueWorkEnvelope, opts?: { signal?: AbortSignal }): Promise<QueueWorkResult> {
     const dir = mkdtempSync(join(tmpdir(), 'aun-runtime-v2-codex-'))
     const outputLastMessagePath = join(dir, 'final-message.json')
     try {
@@ -240,8 +255,9 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         cwd: this.cwd,
         env: this.env,
         input: command.stdin,
-        timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
+        timeout: this.execution_timeout_ms,
         maxBuffer: 1024 * 1024 * 20,
+        signal: opts?.signal,
       })
       if (child.status !== 0) {
         throw new Error(describeCodexExecFailure({
@@ -261,6 +277,8 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
 
 class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'command-json'
+  readonly execution_timeout_ms: number
+  readonly supportsAbort = true
   capabilities = {
     input: 'stdin_prompt',
     output: 'schema_json',
@@ -276,15 +294,18 @@ class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
     private readonly args: string[],
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
-  ) {}
+  ) {
+    this.execution_timeout_ms = positiveExecutionTimeoutMs(env.AUN_QUEUE_WORK_TIMEOUT_MS)
+  }
 
-  async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
+  async invoke(envelope: QueueWorkEnvelope, opts?: { signal?: AbortSignal }): Promise<QueueWorkResult> {
     const child = await execFileAsync(this.command, this.args, {
       cwd: this.cwd,
       env: this.env,
       input: JSON.stringify(envelope) + '\n',
-      timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
+      timeout: this.execution_timeout_ms,
       maxBuffer: 1024 * 1024 * 20,
+      signal: opts?.signal,
     })
     if (child.status !== 0) {
       throw new Error(`runtime command failed status=${child.status} stderr=${child.stderr.slice(0, 1000)}`)
@@ -359,6 +380,7 @@ class AgentComCliReplySender implements QueueReplySender {
 
 function toLegacyDb(db: ReturnType<typeof createDbAdapter>) {
   return {
+    dialect: db.dialect,
     async query<T = any>(sql: string, params?: unknown[]) {
       const rows = await db.query<T>(sql, params as any[])
       return { rows, rowCount: rows.length }

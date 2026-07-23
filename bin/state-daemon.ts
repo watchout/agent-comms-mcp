@@ -40,17 +40,64 @@ import {
 } from '../core/state-daemon/queue-work-residue-policy'
 import { receiveTargeted } from './aun/receive'
 import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
+import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
+import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import type {
   AlertSink,
   DBClient,
   Metrics,
   PgListenClient,
   QueueWorkScheduler,
+  ShirubeD1AutoReceiveDispatcher,
+  ShirubeD1AutoReceiveInput,
+  ShirubeD1AutoReceiveResult,
   StateDaemonConfig,
   TmuxClient,
 } from '../core/state-daemon/types'
 
 const execFileAsync = promisify(execFile)
+export const SHIRUBE_D1_AUTO_RECEIVE_SOURCE = 'state-daemon-d1-auto-receive' as const
+
+type RuntimeV2Invoker = (options: RuntimeV2CliOptions) => Promise<RuntimeV2CliResult>
+
+/** Production bridge from queue arrival to the canonical runtime-v2 D1 path. */
+export class RuntimeV2ShirubeD1AutoReceiveDispatcher implements ShirubeD1AutoReceiveDispatcher {
+  constructor(
+    private readonly env: NodeJS.ProcessEnv,
+    private readonly cwd: string,
+    private readonly invokeRuntimeV2: RuntimeV2Invoker = runtimeV2,
+  ) {}
+
+  classify(input: ShirubeD1AutoReceiveInput) {
+    return classifyShirubeD1AutoReceive({ agent_id: input.agentId, payload: input.payload }, this.env)
+  }
+
+  async dispatch(input: ShirubeD1AutoReceiveInput): Promise<ShirubeD1AutoReceiveResult> {
+    const result = await this.invokeRuntimeV2({
+      agentId: input.agentId,
+      queueId: String(input.queueId),
+      messageId: input.messageId,
+      createdAfter: input.createdAt,
+      runtime: this.env.STATE_DAEMON_SHIRUBE_D1_RUNTIME?.trim() || 'codex-exec',
+      claimSource: SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+      invocationSource: SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+      expectedClaimSource: SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+      finalize: true,
+      env: this.env,
+      cwd: this.cwd,
+    })
+    if (!result.ok || !result.outcome?.ok) {
+      const outcome = result.outcome
+      const detail = outcome && !outcome.ok ? outcome.detail ?? outcome.code : result.error ?? 'runtime-v2 returned no outcome'
+      throw new Error(`runtime-v2 D1 dispatch failed: ${detail}`)
+    }
+    const finalizer = 'finalizer' in result.outcome ? result.outcome.finalizer : undefined
+    return {
+      code: result.outcome.code,
+      replayed: input.status === 'done' || finalizer?.code === 'ALREADY_REPLIED',
+    }
+  }
+}
 
 // ── DBClient (single connection for queries; LISTEN uses its own client) ─────
 class PgClientAdapter implements DBClient {
@@ -380,6 +427,7 @@ export async function main(): Promise<void> {
     queueWorkScheduler: queueWorkSchedulerEnabled()
       ? new QueueWorkRunnerScheduler(process.env, process.cwd())
       : undefined,
+    shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),
     githubWorkPuller: githubWorkPullerEnabled(process.env)
       ? new StateDaemonGithubWorkPuller({
         db,

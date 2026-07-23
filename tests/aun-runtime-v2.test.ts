@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   AUN_RUNTIME_V2_CLAIM_SOURCE,
   buildAunRuntimeV2Plan,
+  computeAunRuntimeV2ExecutionHeartbeatMs,
   runAunRuntimeV2,
 } from '../core/aun-runtime-v2'
 import {
@@ -23,7 +24,10 @@ const capabilities = {
 } as const
 
 class FakeAunRuntimeDb implements QueueWorkDb {
+  readonly dialect = 'postgres' as const
   calls: Array<{ sql: string; params?: unknown[] }> = []
+  renewalMode: 'ok' | 'zero' | 'error' = 'ok'
+  renewalCount = 0
 
   constructor(public rows: any[]) {}
 
@@ -32,6 +36,34 @@ class FakeAunRuntimeDb implements QueueWorkDb {
     const compact = sql.replace(/\s+/g, ' ').trim()
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(compact)) {
       return { rows: [], rowCount: 0 }
+    }
+
+    if (
+      compact.startsWith('SELECT id FROM message_queue')
+      && compact.includes('agent_id = $2')
+      && compact.includes('FOR UPDATE')
+    ) {
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.agent_id === params?.[1]
+        && item.claimed_by === params?.[2]
+        && String(item.claimed_at) === String(params?.[3])
+        && (item.status === 'received' || item.status === 'in_progress')
+      ))
+      return row ? { rows: [{ id: row.id }] as T[], rowCount: 1 } : { rows: [], rowCount: 0 }
+    }
+
+    if (
+      compact.startsWith('SELECT id FROM message_queue')
+      && compact.includes('claimed_by = $2')
+      && compact.includes('FOR UPDATE')
+    ) {
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.claimed_by === params?.[1]
+        && String(item.claimed_at) === String(params?.[2])
+      ))
+      return row ? { rows: [{ id: row.id }] as T[], rowCount: 1 } : { rows: [], rowCount: 0 }
     }
 
     if (compact.includes('SELECT id, agent_id, message_id, payload, status')) {
@@ -74,8 +106,38 @@ class FakeAunRuntimeDb implements QueueWorkDb {
       return { rows: [{ ...row }] as T[], rowCount: 1 }
     }
 
+    if (compact.includes('SET claim_expires_at = clock_timestamp()')) {
+      this.renewalCount += 1
+      if (this.renewalMode === 'error') throw new Error('heartbeat db unavailable')
+      if (this.renewalMode === 'zero') return { rows: [], rowCount: 0 }
+      const databaseNow = new Date()
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.agent_id === params?.[1]
+        && item.claimed_by === params?.[2]
+        && String(item.claimed_at) === String(params?.[4])
+        && (item.status === 'received' || item.status === 'in_progress')
+        && Date.parse(String(item.claim_expires_at)) > databaseNow.getTime()
+      ))
+      if (!row) return { rows: [], rowCount: 0 }
+      row.claim_expires_at = new Date(databaseNow.getTime() + Number(params?.[3]) * 1000).toISOString()
+      row.last_heartbeat_at = databaseNow.toISOString()
+      return { rows: [{ id: row.id }] as T[], rowCount: 1 }
+    }
+
     if (compact.includes("SET status = 'in_progress'")) {
-      const row = this.rows.find((item) => String(item.id) === String(params?.[0]) && item.status === 'received')
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.status === 'received'
+        && (
+          !compact.includes('claimed_by = $3')
+          || (
+            item.claimed_by === params?.[2]
+            && String(item.claimed_at) === String(params?.[3])
+            && Date.parse(String(item.claim_expires_at)) > Date.parse(String(params?.[1]))
+          )
+        )
+      ))
       if (!row) return { rows: [], rowCount: 0 }
       row.status = 'in_progress'
       row.last_heartbeat_at = params?.[1]
@@ -86,6 +148,14 @@ class FakeAunRuntimeDb implements QueueWorkDb {
       const row = this.rows.find((item) => (
         String(item.id) === String(params?.[0]) &&
         (item.status === 'in_progress' || item.status === 'done')
+        && (
+          !compact.includes('claimed_by = $4')
+          || (
+            item.claimed_by === params?.[3]
+            && String(item.claimed_at) === String(params?.[4])
+            && Date.parse(String(item.claim_expires_at)) > Date.parse(String(params?.[2]))
+          )
+        )
       ))
       if (!row) return { rows: [], rowCount: 0 }
       row.payload = params?.[1]
@@ -94,7 +164,18 @@ class FakeAunRuntimeDb implements QueueWorkDb {
     }
 
     if (compact.includes("SET status = 'done'")) {
-      const row = this.rows.find((item) => String(item.id) === String(params?.[0]) && item.status === 'in_progress')
+      const row = this.rows.find((item) => (
+        String(item.id) === String(params?.[0])
+        && item.status === 'in_progress'
+        && (
+          !compact.includes('claimed_by = $4')
+          || (
+            item.claimed_by === params?.[3]
+            && String(item.claimed_at) === String(params?.[4])
+            && Date.parse(String(item.claim_expires_at)) > Date.parse(String(params?.[1]))
+          )
+        )
+      ))
       if (!row) return { rows: [], rowCount: 0 }
       row.status = 'done'
       row.done_at = params?.[1]
@@ -164,7 +245,24 @@ function closeResult(overrides: Partial<QueueWorkResult> = {}): QueueWorkResult 
   }
 }
 
+function fakeD1Runtime() {
+  return {
+    policy: { enabled: true, kill_switch: false },
+    allowsAgent(agentId: string | null) { return agentId === 'dev-001' },
+    isEnrolledAgent(agentId: string | null) { return agentId === 'dev-001' },
+    async prepareFinalizationSenders() {
+      throw new Error('finalization intentionally stopped after runner proof')
+    },
+  } as any
+}
+
 describe('AUN runtime v2 planner', () => {
+  test('execution heartbeat cadence stays positive and below half the claim TTL', () => {
+    expect(computeAunRuntimeV2ExecutionHeartbeatMs(1)).toBe(333)
+    expect(computeAunRuntimeV2ExecutionHeartbeatMs(30)).toBe(10_000)
+    expect(computeAunRuntimeV2ExecutionHeartbeatMs(120)).toBe(10_000)
+  })
+
   test('defaults to kodama-only echo runtime with live activation disabled', () => {
     const plan = buildAunRuntimeV2Plan({
       agentId: 'kodama',
@@ -544,5 +642,141 @@ describe('runAunRuntimeV2', () => {
       runtime_id: 'fake-runtime',
       invocation_source: AUN_RUNTIME_V2_CLAIM_SOURCE,
     })
+  })
+
+  test('live D1 execution renews its exact claim beyond TTL independently of agent status', async () => {
+    const db = new FakeAunRuntimeDb([pendingRuntimeRow('dev-001')])
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'delayed-runtime',
+      capabilities,
+      execution_timeout_ms: 2_000,
+      supportsAbort: true,
+      async invoke(_envelope, opts) {
+        expect(opts?.signal).toBeDefined()
+        await new Promise((resolve) => setTimeout(resolve, 1_100))
+        return closeResult()
+      },
+    }
+
+    const outcome = await runAunRuntimeV2(db, {
+      agentId: 'dev-001',
+      queueId: '1001',
+      messageId: 'msg-dev-001-1',
+      createdAfter: '2026-06-18T00:00:00.000Z',
+      claimTtlSeconds: 1,
+      finalize: true,
+      adapter,
+      d1Runtime: fakeD1Runtime(),
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'D1_FINALIZATION_FENCE_FAILED',
+      runner: { ok: true, code: 'DONE' },
+    })
+    expect(db.renewalCount).toBeGreaterThanOrEqual(4)
+    expect(db.rows[0].status).toBe('done')
+    expect(JSON.parse(db.rows[0].payload).runner_result).toBeDefined()
+    const leaseLock = db.calls.findIndex((call) => (
+      call.sql.includes('SELECT id') && call.sql.includes('agent_id = $2')
+    ))
+    const leaseWrite = db.calls.findIndex((call) => call.sql.includes('SET claim_expires_at = clock_timestamp()'))
+    expect(leaseLock).toBeGreaterThan(-1)
+    expect(leaseWrite).toBeGreaterThan(leaseLock)
+    expect(db.calls[leaseWrite].sql).toContain('claim_expires_at > clock_timestamp()')
+    expect(db.calls[leaseWrite].params).toHaveLength(5)
+  })
+
+  test('live D1 zero-row heartbeat aborts before invocation and writes no terminal evidence', async () => {
+    const db = new FakeAunRuntimeDb([pendingRuntimeRow('dev-001')])
+    db.renewalMode = 'zero'
+    let invoked = 0
+    const outcome = await runAunRuntimeV2(db, {
+      agentId: 'dev-001',
+      queueId: '1001',
+      messageId: 'msg-dev-001-1',
+      createdAfter: '2026-06-18T00:00:00.000Z',
+      claimTtlSeconds: 1,
+      finalize: true,
+      adapter: {
+        runtime_id: 'must-not-run', capabilities,
+        execution_timeout_ms: 1_000, supportsAbort: true,
+        async invoke() { invoked += 1; return closeResult() },
+      },
+      d1Runtime: fakeD1Runtime(),
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'RUNNER_FAILED',
+      runner: { ok: false, code: 'EXECUTION_ABORTED', detail: 'D1_EXECUTION_CLAIM_OWNERSHIP_LOST' },
+    })
+    expect(invoked).toBe(0)
+    expect(db.rows[0].status).toBe('received')
+    expect(JSON.parse(db.rows[0].payload).runner_result).toBeUndefined()
+    expect(JSON.parse(db.rows[0].payload).runner_error).toBeUndefined()
+  })
+
+  test('live D1 heartbeat query failure aborts fail-closed before invocation', async () => {
+    const db = new FakeAunRuntimeDb([pendingRuntimeRow('dev-001')])
+    db.renewalMode = 'error'
+    let invoked = 0
+    const outcome = await runAunRuntimeV2(db, {
+      agentId: 'dev-001',
+      queueId: '1001',
+      messageId: 'msg-dev-001-1',
+      createdAfter: '2026-06-18T00:00:00.000Z',
+      claimTtlSeconds: 1,
+      finalize: true,
+      adapter: {
+        runtime_id: 'must-not-run', capabilities,
+        execution_timeout_ms: 1_000, supportsAbort: true,
+        async invoke() { invoked += 1; return closeResult() },
+      },
+      d1Runtime: fakeD1Runtime(),
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'RUNNER_FAILED',
+      runner: { ok: false, code: 'EXECUTION_ABORTED' },
+    })
+    expect(outcome.ok ? '' : outcome.runner?.detail).toContain('D1_EXECUTION_HEARTBEAT_FAILED')
+    expect(invoked).toBe(0)
+    expect(JSON.parse(db.rows[0].payload).runner_error).toBeUndefined()
+  })
+
+  test('live D1 finite deadline aborts a hung runner without stale persistence', async () => {
+    const db = new FakeAunRuntimeDb([pendingRuntimeRow('dev-001')])
+    const outcome = await runAunRuntimeV2(db, {
+      agentId: 'dev-001',
+      queueId: '1001',
+      messageId: 'msg-dev-001-1',
+      createdAfter: '2026-06-18T00:00:00.000Z',
+      claimTtlSeconds: 1,
+      finalize: true,
+      adapter: {
+        runtime_id: 'hung-runtime', capabilities,
+        execution_timeout_ms: 25, supportsAbort: true,
+        async invoke(_envelope, opts) {
+          expect(opts?.signal).toBeDefined()
+          return await new Promise<QueueWorkResult>(() => {})
+        },
+      },
+      d1Runtime: fakeD1Runtime(),
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'RUNNER_FAILED',
+      runner: { ok: false, code: 'EXECUTION_ABORTED', detail: 'D1_EXECUTION_DEADLINE_EXCEEDED: 25ms' },
+    })
+    expect(db.rows[0].status).toBe('in_progress')
+    expect(JSON.parse(db.rows[0].payload).runner_result).toBeUndefined()
+    expect(JSON.parse(db.rows[0].payload).runner_error).toBeUndefined()
   })
 })
