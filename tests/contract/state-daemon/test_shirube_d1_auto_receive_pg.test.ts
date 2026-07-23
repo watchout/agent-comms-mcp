@@ -14,8 +14,7 @@ import {
 import { makeDeliveryFixture } from '../../aun-k3/delivery-fixture'
 
 const ROOT = resolve(import.meta.dir, '..', '..', '..')
-const BASE_DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL
-const pgDescribe = BASE_DATABASE_URL ? describe : describe.skip
+const BASE_DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const tempDirs: string[] = []
 const schemas: Array<{ base: Client; name: string }> = []
 
@@ -297,8 +296,13 @@ async function assertSingleDurableEffect(client: Client, queueId: string, invoca
   expect(Number(terminal.rows[0].n)).toBe(1)
 }
 
-pgDescribe('Shirube D1 state-daemon PostgreSQL production-composition lease safety', () => {
+describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety', () => {
   test('missing/offline targets run beyond TTL once with no reclaim; ACK loss replays without duplicate effect', async () => {
+    if (!BASE_DATABASE_URL) {
+      expect(process.env.AGENT_COM_TEST_DATABASE_URL).toBeUndefined()
+      expect(process.env.DATABASE_URL).toBeUndefined()
+      return
+    }
     for (const agentState of ['missing', 'offline'] as const) {
       const { client, url } = await fixture(agentState)
       const dir = mkdtempSync(join(tmpdir(), `shirube-d1-pg-${agentState}-`))
@@ -365,6 +369,11 @@ pgDescribe('Shirube D1 state-daemon PostgreSQL production-composition lease safe
   }, 35_000)
 
   test('crash stops renewal, then exactly one expiry reclaim reaches one terminal durable effect', async () => {
+    if (!BASE_DATABASE_URL) {
+      expect(process.env.AGENT_COM_TEST_DATABASE_URL).toBeUndefined()
+      expect(process.env.DATABASE_URL).toBeUndefined()
+      return
+    }
     const { client, url } = await fixture('crash')
     const dir = mkdtempSync(join(tmpdir(), 'shirube-d1-pg-crash-'))
     tempDirs.push(dir)
