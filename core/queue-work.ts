@@ -128,10 +128,18 @@ export interface QueueWorkRuntimeResultSummary {
 }
 
 export interface QueueWorkDb {
+  /** SQL dialect hint for lease-fence comparisons against the database clock. */
+  dialect?: 'sqlite' | 'postgres'
   query<T = any>(
     sql: string,
     params?: unknown[],
   ): Promise<{ rows: T[]; rowCount?: number | null }>
+}
+
+function databaseClockSql(db: QueueWorkDb): string {
+  return db.dialect === 'sqlite'
+    ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+    : 'clock_timestamp()'
 }
 
 export interface QueueWorkRow {
@@ -467,7 +475,7 @@ async function persistRunnerError(
     sql += `
         AND claimed_by = $4
         AND claimed_at = $5
-        AND claim_expires_at > $3`
+        AND claim_expires_at > ${databaseClockSql(db)}`
   }
   const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
   return rowCount(persisted) === 1
@@ -566,7 +574,7 @@ export async function runReceivedQueueWork(
       advanceSql += `
           AND claimed_by = $3
           AND claimed_at = $4
-          AND claim_expires_at > $2`
+          AND claim_expires_at > ${databaseClockSql(db)}`
     }
     advanceSql += '\n        RETURNING id'
     const advanced = await db.query<{ id: string | number }>(advanceSql, advanceParams)
@@ -708,7 +716,7 @@ export async function runReceivedQueueWork(
       doneSql += `
           AND claimed_by = $4
           AND claimed_at = $5
-          AND claim_expires_at > $2`
+          AND claim_expires_at > ${databaseClockSql(db)}`
     }
     doneSql += '\n        RETURNING id'
     const done = await db.query<{ id: string | number }>(doneSql, doneParams)

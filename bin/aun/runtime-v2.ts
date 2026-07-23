@@ -380,6 +380,7 @@ class AgentComCliReplySender implements QueueReplySender {
 
 function toLegacyDb(db: ReturnType<typeof createDbAdapter>) {
   return {
+    dialect: db.dialect,
     async query<T = any>(sql: string, params?: unknown[]) {
       const rows = await db.query<T>(sql, params as any[])
       return { rows, rowCount: rows.length }

@@ -23,17 +23,24 @@ const capabilities = {
 } as const
 
 class FakeQueueDb implements QueueWorkDb {
+  readonly dialect = 'postgres' as const
   calls: Array<{ sql: string; params?: unknown[] }> = []
 
-  constructor(public row: any | null) {}
+  constructor(
+    public row: any | null,
+    private readonly databaseNow?: () => Date,
+  ) {}
 
   private ownsFence(sql: string, params: unknown[] | undefined, ownerIndex: number, atIndex: number, nowIndex: number): boolean {
     if (!sql.includes(`claimed_by = $${ownerIndex + 1}`)) return true
     if (!this.row) return false
+    const comparisonTime = sql.includes('claim_expires_at > clock_timestamp()') && this.databaseNow
+      ? this.databaseNow().getTime()
+      : Date.parse(String(params?.[nowIndex]))
     return (
       this.row.claimed_by === params?.[ownerIndex]
       && String(this.row.claimed_at) === String(params?.[atIndex])
-      && Date.parse(String(this.row.claim_expires_at)) > Date.parse(String(params?.[nowIndex]))
+      && Date.parse(String(this.row.claim_expires_at)) > comparisonTime
     )
   }
 
@@ -391,6 +398,74 @@ describe('runReceivedQueueWork', () => {
     })
 
     expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+    expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
+  })
+
+  test('claim expiry during terminal persistence prevents a stale done write', async () => {
+    const startedAt = new Date('2026-05-21T01:00:00.000Z')
+    let databaseNow = startedAt
+    const row = receivedRow({ claim_expires_at: '2026-05-21T01:00:00.100Z' })
+    class ExpiringDoneDb extends FakeQueueDb {
+      override async query<T = any>(sql: string, params?: unknown[]) {
+        if (sql.includes("SET status = 'done'")) {
+          databaseNow = new Date('2026-05-21T01:00:00.200Z')
+        }
+        return super.query<T>(sql, params)
+      }
+    }
+    const db = new ExpiringDoneDb(row, () => databaseNow)
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() { return okResult() },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      now: () => startedAt,
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+    expect(db.row.status).toBe('in_progress')
+    expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+  })
+
+  test('claim expiry during error persistence prevents a stale runner_error write', async () => {
+    const startedAt = new Date('2026-05-21T01:00:00.000Z')
+    let databaseNow = startedAt
+    const row = receivedRow({ claim_expires_at: '2026-05-21T01:00:00.100Z' })
+    class ExpiringErrorDb extends FakeQueueDb {
+      override async query<T = any>(sql: string, params?: unknown[]) {
+        if (sql.includes('last_heartbeat_at = $3')) {
+          databaseNow = new Date('2026-05-21T01:00:00.200Z')
+        }
+        return super.query<T>(sql, params)
+      }
+    }
+    const db = new ExpiringErrorDb(row, () => databaseNow)
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() { throw new Error('late failure') },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      now: () => startedAt,
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+    expect(db.row.status).toBe('in_progress')
     expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
   })
 

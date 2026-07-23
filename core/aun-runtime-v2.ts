@@ -90,6 +90,24 @@ export interface AunRuntimeV2Plan {
   }
 }
 
+async function recoverQueueWorkDbDialect(db: QueueWorkDb): Promise<void> {
+  if (db.dialect) return
+  try {
+    const probed = await db.query<{ database_now: unknown }>(
+      'SELECT CURRENT_TIMESTAMP AS database_now',
+    )
+    const databaseNow = probed.rows[0]?.database_now
+    if (databaseNow instanceof Date) {
+      db.dialect = 'postgres'
+    } else if (typeof databaseNow === 'string') {
+      db.dialect = 'sqlite'
+    }
+  } catch {
+    // Minimal test doubles may not implement the read-only probe. The queue
+    // worker retains its fail-closed PostgreSQL default in that case.
+  }
+}
+
 export interface AunRuntimeV2Candidate {
   queue_id: string
   agent_id: string
@@ -920,6 +938,9 @@ export async function runAunRuntimeV2(
         code: 'INVALID_ADAPTER_EXECUTION_TIMEOUT',
         detail: 'live Shirube D1 adapter execution_timeout_ms must be a finite positive integer',
       })
+    }
+    if (ownsD1ExecutionLease) {
+      await recoverQueueWorkDbDialect(db)
     }
 
     const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
