@@ -1096,6 +1096,69 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
 })
 
 describe('F3 — agent-com send (SQLite)', () => {
+  test('D1 reserved internal reply writes once from done and replays the same durable message id', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const { messageId, queueId } = seedPendingMessage('D1 internal reply')
+    runCli(['next'])
+    const authorizationDigest = 'a'.repeat(64)
+    const claimKey = `d1:claim:${authorizationDigest}:${queueId}`
+    const invocationKey = `d1:invoke:${'b'.repeat(64)}`
+    const db = new Database(dbPath)
+    try {
+      const payload = JSON.parse((db.prepare('SELECT payload FROM message_queue WHERE id = ?').get(queueId) as { payload: string }).payload)
+      payload.shirube_v4_d1 = { authorization: { authorization_digest: authorizationDigest } }
+      db.prepare(`UPDATE message_queue SET status = 'done', payload = ? WHERE id = ?`).run(JSON.stringify(payload), queueId)
+      db.prepare(`
+        INSERT INTO shirube_d1_claims
+          (claim_key, handoff_id, authorization_digest, control_source, exact_base_sha, allowed_paths_digest, status)
+        VALUES (?, 'handoff-d1', ?, 'https://github.com/watchout/agent-comms-mcp/issues/887', ?, ?, 'claimed')
+      `).run(claimKey, authorizationDigest, 'c'.repeat(40), 'd'.repeat(64))
+      db.prepare(`
+        INSERT INTO shirube_d1_invocations
+          (invocation_key, claim_key, handoff_id, authorization_digest, effect, status)
+        VALUES (?, ?, 'handoff-d1', ?, 'internal_reply', 'reserved')
+      `).run(invocationKey, claimKey, authorizationDigest)
+      db.prepare(`
+        INSERT INTO shirube_d1_effect_deliveries
+          (invocation_key, effect, status, lease_owner, lease_expires_at)
+        VALUES (?, 'internal_reply', 'reserved', 'lease-d1', '2099-01-01T00:00:00.000Z')
+      `).run(invocationKey)
+    } finally {
+      db.close()
+    }
+
+    const args = [
+      'send', '--content', 'D1 reply', '--mentions', 'cto', '--queue-id', String(queueId),
+      '--message-id', messageId, '--d1-invocation-key', invocationKey, '--no-close',
+    ]
+    const first = runCli(args)
+    expect(first.status).toBe(0)
+    const firstPayload = JSON.parse(first.stdout.trim()) as any
+    expect(firstPayload).toMatchObject({
+      ok: true,
+      queue_id: queueId,
+      work_closed: false,
+      d1_invocation_key: invocationKey,
+      idempotent_replay: false,
+    })
+    expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
+      .toEqual([{ status: 'done', replied_with: null }])
+
+    const replay = runCli(args)
+    expect(replay.status).toBe(0)
+    const replayPayload = JSON.parse(replay.stdout.trim()) as any
+    expect(replayPayload).toMatchObject({
+      ok: true,
+      message_id: firstPayload.message_id,
+      d1_invocation_key: invocationKey,
+      idempotent_replay: true,
+    })
+    expect(dbRead(`SELECT id FROM agent_messages WHERE id = ?`, [firstPayload.message_id])).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto' AND message_id = ?`, [firstPayload.message_id])).toHaveLength(1)
+    expect(JSON.parse(dbRead(`SELECT metadata FROM agent_messages WHERE id = ?`, [firstPayload.message_id])[0].metadata).shirube_v4_d1)
+      .toEqual({ invocation_key: invocationKey, queue_id: String(queueId), effect: 'internal_reply' })
+  })
+
   test('replies to the in-flight row, sets replied, idles the agent', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { queueId } = seedPendingMessage('send test')

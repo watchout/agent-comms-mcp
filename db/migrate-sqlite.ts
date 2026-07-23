@@ -108,6 +108,64 @@ export function migrateSqlite(dbPath?: string): void {
   if (!mqColNames.has('claim_expires_at')) {
     gatedExec(`ALTER TABLE message_queue ADD COLUMN claim_expires_at TEXT`)
   }
+  if (!mqColNames.has('last_heartbeat_at')) {
+    gatedExec(`ALTER TABLE message_queue ADD COLUMN last_heartbeat_at TEXT`)
+  }
+
+  // Shirube V4 D1 production admission/effect ledger. Creation is additive
+  // and does not activate the runtime; activation remains behind the
+  // default-off environment gate, kill switch, and exact tuple allowlist.
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS shirube_d1_claims (
+      claim_key TEXT PRIMARY KEY NOT NULL,
+      handoff_id TEXT NOT NULL,
+      authorization_digest TEXT NOT NULL,
+      control_source TEXT NOT NULL,
+      exact_base_sha TEXT NOT NULL,
+      allowed_paths_digest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status = 'claimed'),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS shirube_d1_invocations (
+      invocation_key TEXT PRIMARY KEY NOT NULL,
+      claim_key TEXT NOT NULL REFERENCES shirube_d1_claims(claim_key) ON DELETE RESTRICT,
+      handoff_id TEXT NOT NULL,
+      authorization_digest TEXT NOT NULL,
+      effect TEXT NOT NULL CHECK (effect IN ('internal_reply', 'github_writeback', 'external_send')),
+      status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
+      internal_reply_receipt TEXT,
+      github_writeback_receipt TEXT,
+      external_send_receipt TEXT,
+      reserved_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (
+        (status = 'reserved' AND completed_at IS NULL AND internal_reply_receipt IS NULL AND github_writeback_receipt IS NULL AND external_send_receipt IS NULL)
+        OR
+        (status = 'completed' AND completed_at IS NOT NULL AND
+          ((effect = 'internal_reply' AND internal_reply_receipt IS NOT NULL AND github_writeback_receipt IS NULL AND external_send_receipt IS NULL)
+          OR (effect = 'github_writeback' AND internal_reply_receipt IS NULL AND github_writeback_receipt IS NOT NULL AND external_send_receipt IS NULL)
+          OR (effect = 'external_send' AND internal_reply_receipt IS NULL AND github_writeback_receipt IS NULL AND external_send_receipt IS NOT NULL)))
+      )
+    )
+  `)
+  gatedExec(`
+    CREATE TABLE IF NOT EXISTS shirube_d1_effect_deliveries (
+      invocation_key TEXT PRIMARY KEY NOT NULL REFERENCES shirube_d1_invocations(invocation_key) ON DELETE RESTRICT,
+      effect TEXT NOT NULL CHECK (effect IN ('internal_reply', 'github_writeback', 'external_send')),
+      status TEXT NOT NULL CHECK (status IN ('reserved', 'completed')),
+      receipt TEXT,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK ((status = 'reserved' AND receipt IS NULL) OR (status = 'completed' AND receipt IS NOT NULL))
+    )
+  `)
+  gatedExec(`CREATE INDEX IF NOT EXISTS idx_shirube_d1_effect_reserved ON shirube_d1_effect_deliveries(status, lease_expires_at) WHERE status = 'reserved'`)
   // Issue #278 (A) segment 3d — drop legacy current_message_id from
   // pre-Stage-B SQLite DBs. SQLite supports DROP COLUMN as of 3.35; for
   // older DBs we accept the dead column (PG schema is the source of truth).

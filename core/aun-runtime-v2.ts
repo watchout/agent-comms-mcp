@@ -8,10 +8,16 @@ import {
   type QueueReplySender,
   type QueueWorkDb,
   type QueueWorkFinalizeOutcome,
+  type QueueWorkD1CompletionFence,
   type QueueWorkRow,
+  type QueueWorkResult,
   type QueueWorkRunOutcome,
   type QueueWorkWritebackSender,
 } from './queue-work'
+import {
+  ShirubeD1RuntimeController,
+  type ShirubeD1RuntimeEffectReadback,
+} from './shirube-d1-runtime'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,6 +60,7 @@ export interface AunRuntimeV2Options {
   adapter?: LlmRuntimeAdapter
   replySender?: QueueReplySender
   writebackSender?: QueueWorkWritebackSender
+  d1Runtime?: ShirubeD1RuntimeController
 }
 
 export interface AunRuntimeV2Plan {
@@ -75,7 +82,12 @@ export interface AunRuntimeV2Plan {
   expected_claim_source: string
   finalize: boolean
   claim_ttl_seconds: number
-  live_activation: false
+  live_activation: boolean
+  shirube_v4_d1: {
+    enabled: boolean
+    kill_switch: boolean
+    enrolled_agent: boolean
+  }
 }
 
 export interface AunRuntimeV2Candidate {
@@ -108,6 +120,8 @@ export type AunRuntimeV2FailureCode =
   | 'CLAIM_RACE'
   | 'RUNNER_FAILED'
   | 'FINALIZER_FAILED'
+  | 'D1_FINALIZATION_REQUIRED'
+  | 'D1_FINALIZATION_FENCE_FAILED'
 
 export type AunRuntimeV2Outcome =
   | {
@@ -133,6 +147,7 @@ export type AunRuntimeV2Outcome =
       runner: QueueWorkRunOutcome
       finalizer?: QueueWorkFinalizeOutcome
       mediated_finalization?: AunRuntimeV2FinalizationResult
+      shirube_v4_d1?: ShirubeD1RuntimeEffectReadback
     }
   | {
       ok: false
@@ -337,7 +352,12 @@ export function buildAunRuntimeV2Plan(opts: AunRuntimeV2Options = {}): AunRuntim
     expected_claim_source: cleanString(opts.expectedClaimSource) ?? claimSource,
     finalize,
     claim_ttl_seconds: ttl,
-    live_activation: false,
+    live_activation: opts.d1Runtime?.allowsAgent(agentId) ?? false,
+    shirube_v4_d1: {
+      enabled: opts.d1Runtime?.policy.enabled ?? false,
+      kill_switch: opts.d1Runtime?.policy.kill_switch ?? true,
+      enrolled_agent: opts.d1Runtime?.isEnrolledAgent(agentId) ?? false,
+    },
   }
 }
 
@@ -347,7 +367,7 @@ export function validateAunRuntimeV2Plan(plan: AunRuntimeV2Plan): { ok: true } |
   detail?: string
 } {
   if (!plan.agent_id) return { ok: false, code: 'AGENT_ID_REQUIRED' }
-  if (!plan.allowed_agent_ids.includes(plan.agent_id)) {
+  if (!plan.allowed_agent_ids.includes(plan.agent_id) && !plan.shirube_v4_d1.enrolled_agent) {
     return {
       ok: false,
       code: 'TARGET_AGENT_NOT_ALLOWED',
@@ -376,7 +396,9 @@ export function validateAunRuntimeV2LiveCapability(plan: AunRuntimeV2Plan): { ok
   code: AunRuntimeV2FailureCode
   detail: string
 } {
-  if (plan.agent_id && plan.live_agent_ids.includes(plan.agent_id)) return { ok: true }
+  if (plan.agent_id && (plan.live_agent_ids.includes(plan.agent_id) || plan.live_activation)) {
+    return { ok: true }
+  }
   return {
     ok: false,
     code: 'TARGET_AGENT_NOT_LIVE_CAPABLE',
@@ -397,7 +419,10 @@ export function validateAunRuntimeV2ExecutionFence(plan: AunRuntimeV2Plan): { ok
   }
 }
 
-function nonDryRunPreDbFailure(plan: AunRuntimeV2Plan): AunRuntimeV2Outcome | null {
+function nonDryRunPreDbFailure(
+  plan: AunRuntimeV2Plan,
+  d1Runtime?: ShirubeD1RuntimeController,
+): AunRuntimeV2Outcome | null {
   const validFence = validateAunRuntimeV2ExecutionFence(plan)
   if (!validFence.ok) {
     return failure({
@@ -415,6 +440,15 @@ function nonDryRunPreDbFailure(plan: AunRuntimeV2Plan): AunRuntimeV2Outcome | nu
       plan,
       code: validLiveAgent.code,
       detail: validLiveAgent.detail,
+    })
+  }
+
+  if (d1Runtime?.allowsAgent(plan.agent_id) && !plan.finalize) {
+    return failure({
+      dryRun: false,
+      plan,
+      code: 'D1_FINALIZATION_REQUIRED',
+      detail: 'live Shirube D1 execution requires mediated finalization',
     })
   }
 
@@ -477,6 +511,7 @@ export async function selectAunRuntimeV2CandidateRow(
 function validateCandidate(
   plan: AunRuntimeV2Plan,
   row: QueueWorkRow | null,
+  allowedStatuses: readonly string[] = ['pending'],
 ): { ok: true; candidate: AunRuntimeV2Candidate } | {
   ok: false
   code: AunRuntimeV2FailureCode
@@ -502,7 +537,7 @@ function validateCandidate(
       status: candidate.status,
     }
   }
-  if (candidate.status !== 'pending') {
+  if (!allowedStatuses.includes(candidate.status)) {
     return {
       ok: false,
       code: 'TARGET_QUEUE_NOT_PENDING',
@@ -621,7 +656,7 @@ export async function claimPendingQueueForAunRuntimeV2(
       detail: validPlan.detail,
     })
   }
-  const preDbFailure = nonDryRunPreDbFailure(plan)
+  const preDbFailure = nonDryRunPreDbFailure(plan, opts.d1Runtime)
   if (preDbFailure) return preDbFailure
 
   const claimedAt = opts.now?.() ?? new Date()
@@ -656,7 +691,7 @@ export async function claimPendingQueueForAunRuntimeV2(
           AND status = 'pending'
         RETURNING id, agent_id, message_id, payload, status, priority, created_at,
                   claimed_by, claimed_at, claim_expires_at`,
-      [row.id, claimedAt, plan.agent_id, claimExpiresAt, nextPayload],
+      [row.id, claimedAt.toISOString(), plan.agent_id, claimExpiresAt.toISOString(), nextPayload],
     )
     if (rowCount(updated) !== 1) {
       await db.query('ROLLBACK')
@@ -706,50 +741,118 @@ export async function runAunRuntimeV2(
 
   if (opts.dryRun) return inspectAunRuntimeV2Candidate(db, opts)
 
-  const preDbFailure = nonDryRunPreDbFailure(plan)
+  const preDbFailure = nonDryRunPreDbFailure(plan, opts.d1Runtime)
   if (preDbFailure) return preDbFailure
 
-  if (!opts.adapter) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: 'ADAPTER_REQUIRED',
-      detail: 'adapter is required when dry_run=false',
-    })
-  }
+  let claimed: AunRuntimeV2Candidate
+  let runner: QueueWorkRunOutcome
+  const resumeRow = plan.queue_id && opts.d1Runtime?.allowsAgent(plan.agent_id) && plan.finalize
+    ? await selectPendingCandidate(db, plan, false)
+    : null
+  if (resumeRow && (resumeRow.status === 'done' || resumeRow.status === 'replied')) {
+    const resumeCandidate = validateCandidate(plan, resumeRow, ['done', 'replied'])
+    if (!resumeCandidate.ok) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: resumeCandidate.code,
+        candidate: resumeCandidate.candidate,
+        detail: resumeCandidate.detail,
+        status: resumeCandidate.status,
+      })
+    }
+    const storedResult = parsePayload(resumeRow.payload).runner_result as QueueWorkResult | undefined
+    if (
+      !storedResult
+      || storedResult.schema_version !== 'queue_work_result_v1'
+      || typeof storedResult.ok !== 'boolean'
+      || typeof storedResult.summary !== 'string'
+      || !['reply', 'close', 'none', 'retry'].includes(storedResult.next_action)
+    ) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'RUNNER_FAILED',
+        candidate: resumeCandidate.candidate,
+        detail: 'D1 finalization resume requires the exact stored queue_work_result_v1',
+        status: resumeRow.status,
+      })
+    }
+    claimed = resumeCandidate.candidate
+    runner = {
+      ok: true,
+      code: 'DONE',
+      queue_id: String(resumeRow.id),
+      final_status: 'done',
+      result: storedResult,
+    }
+  } else {
+    if (!opts.adapter) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'ADAPTER_REQUIRED',
+        detail: 'adapter is required when dry_run=false',
+      })
+    }
 
-  const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
-  if (!claimedOutcome.ok) return claimedOutcome
-  const claimed = claimedOutcome.claimed
+    const claimedOutcome = await claimPendingQueueForAunRuntimeV2(db, opts)
+    if (!claimedOutcome.ok) return claimedOutcome
+    claimed = claimedOutcome.claimed
 
-  const runner = await runReceivedQueueWork(db, {
-    queueId: claimed.queue_id,
-    agentId: plan.agent_id ?? undefined,
-    adapter: opts.adapter,
-    invocationSource: plan.invocation_source,
-    expectedClaimSource: plan.expected_claim_source,
-    now: opts.now,
-  })
-  if (!runner.ok) {
-    return failure({
-      dryRun: false,
-      plan,
-      code: 'RUNNER_FAILED',
-      claimed,
-      runner,
-      detail: runner.detail,
-      status: runner.status,
+    runner = await runReceivedQueueWork(db, {
+      queueId: claimed.queue_id,
+      agentId: plan.agent_id ?? undefined,
+      adapter: opts.adapter,
+      invocationSource: plan.invocation_source,
+      expectedClaimSource: plan.expected_claim_source,
+      now: opts.now,
     })
+    if (!runner.ok) {
+      return failure({
+        dryRun: false,
+        plan,
+        code: 'RUNNER_FAILED',
+        claimed,
+        runner,
+        detail: runner.detail,
+        status: runner.status,
+      })
+    }
   }
 
   let finalizer: QueueWorkFinalizeOutcome | undefined
   let mediatedFinalization: AunRuntimeV2FinalizationResult | undefined
   if (plan.finalize) {
+    let replySender = opts.replySender
+    let writebackSender = opts.writebackSender
+    let d1CompletionFence: QueueWorkD1CompletionFence | undefined
+    if (opts.d1Runtime) {
+      try {
+        const guarded = await opts.d1Runtime.prepareFinalizationSenders(runner.queue_id, {
+          replySender,
+          writebackSender,
+        })
+        replySender = guarded.replySender
+        writebackSender = guarded.writebackSender
+        d1CompletionFence = guarded.d1CompletionFence
+      } catch (err) {
+        return failure({
+          dryRun: false,
+          plan,
+          code: 'D1_FINALIZATION_FENCE_FAILED',
+          claimed,
+          runner,
+          detail: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
     const mediated = await finalizeAunRuntimeV2MediatedQueueWork(db, {
       queueId: runner.queue_id,
       messageId: plan.message_id,
-      replySender: opts.replySender,
-      writebackSender: opts.writebackSender,
+      replySender,
+      writebackSender,
+      d1CompletionFence,
       now: opts.now,
     })
     if ('error' in mediated) {
@@ -779,6 +882,10 @@ export async function runAunRuntimeV2(
     }
   }
 
+  const d1Readback = opts.d1Runtime
+    ? await opts.d1Runtime.effectReadback(runner.queue_id)
+    : undefined
+
   return {
     ok: true,
     dry_run: false,
@@ -788,5 +895,6 @@ export async function runAunRuntimeV2(
     runner,
     finalizer,
     mediated_finalization: mediatedFinalization,
+    shirube_v4_d1: d1Readback,
   }
 }
