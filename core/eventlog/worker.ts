@@ -377,6 +377,8 @@ export async function runV2NativeMeshTick(
     instanceId: string
     maxTurnsPerSeat?: number
     dbFactory?: V2NativeMeshDbFactory
+    /** Required for S1/S2/S3: complete durable/offline/DB revalidation. */
+    mutationFence?: (boundary: string) => void | Promise<void>
     supervision?: Partial<Omit<SeatSupervisionConfigV1, 'units'>>
     /** K3 provider dispatcher; production-only and independently supervised. */
     v2DeliveryDispatcher?: (db: DbAdapter, signal: AbortSignal) => Promise<unknown>
@@ -384,6 +386,9 @@ export async function runV2NativeMeshTick(
   },
 ) {
   const scope = assertV2NativeMeshExecutionFence(opts.scope, opts.fence)
+  if (scope.stage_id !== 'S0_IMPLEMENTATION' && !opts.mutationFence) {
+    throw new V2NativeMeshFenceError('native activation stage requires an asynchronous mutation revalidation callback')
+  }
   const frozen = new Map(scope.frozen_enabled_set.map(agent => [agent.agent_id, agent]))
   const seatIds = new Set(opts.seats.map(seat => seat.seatId))
   if (opts.seats.length !== frozen.size || seatIds.size !== frozen.size || opts.seats.some(seat => !frozen.has(seat.seatId))) {
@@ -448,7 +453,10 @@ export async function runV2NativeMeshTick(
           seatInstanceId: seat.runtimeInstanceId,
           runtime: runtimes.get(seat.seatId)!,
           maxTurns: opts.maxTurnsPerSeat,
-          mutationFence: async () => { assertSeatBinding(seat) },
+          mutationFence: async boundary => {
+            await opts.mutationFence?.(`seat:${seat.seatId}:${boundary}`)
+            assertSeatBinding(seat)
+          },
           runtimeBinding: resolvedBindings.get(seat.seatId),
           currentRuntimeBinding: seat.currentRuntimeBinding,
           claimExecutionMode: unitDb.dialect === 'postgres' ? 'production_multi_worker' : 'unit_conformance',
@@ -462,7 +470,10 @@ export async function runV2NativeMeshTick(
       adapterFactory: () => opts.dbFactory!({ unitId: 'outbox:v2-native-internal-handoff', kind: 'outbox' }),
       run: async unitDb => {
         const { dispatchV2NativeInternalHandoffs } = await import('./internal-handoff')
-        return dispatchV2NativeInternalHandoffs(unitDb, scope, opts.fence, { dispatcherInstanceId: opts.instanceId })
+        return dispatchV2NativeInternalHandoffs(unitDb, scope, opts.fence, {
+          dispatcherInstanceId: opts.instanceId,
+          mutationFence: async boundary => { await opts.mutationFence?.(`internal-handoff:${boundary}`) },
+        })
       },
       retryable: () => true,
     })
@@ -506,7 +517,10 @@ export async function runV2NativeMeshTick(
 
   const seatResults: Record<string, SeatWorkerPassResult> = {}
   for (const seat of [...opts.seats].sort((a, b) => a.seatId.localeCompare(b.seatId))) {
-    const mutationFence: TurnMutationFence = async () => { assertSeatBinding(seat) }
+    const mutationFence: TurnMutationFence = async boundary => {
+      await opts.mutationFence?.(`seat:${seat.seatId}:${boundary}`)
+      assertSeatBinding(seat)
+    }
     seatResults[seat.seatId] = await runSeatWorkerOnce(db, {
       seatId: seat.seatId,
       seatInstanceId: seat.runtimeInstanceId,
@@ -518,6 +532,7 @@ export async function runV2NativeMeshTick(
   const { dispatchV2NativeInternalHandoffs } = await import('./internal-handoff')
   const handoff = await dispatchV2NativeInternalHandoffs(db, scope, opts.fence, {
     dispatcherInstanceId: opts.instanceId,
+    mutationFence: async boundary => { await opts.mutationFence?.(`internal-handoff:${boundary}`) },
   })
   return { seatResults, handoff }
 }

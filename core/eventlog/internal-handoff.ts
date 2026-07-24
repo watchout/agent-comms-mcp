@@ -16,6 +16,7 @@ import {
   assertV2NativeMeshExecutionFence,
   decodeV2NativeInboundPayload,
   v2NativeMeshScopeSha256,
+  V2NativeMeshFenceError,
   type V2NativeInboundPayloadV1,
   type V2NativeMeshExecutionFence,
   type V2NativeMeshScopeV1,
@@ -25,6 +26,17 @@ export type InternalHandoffCommitPoint =
   | 'after_delivery_claimed'
   | 'before_atomic_placement'
   | 'after_atomic_placement_before_return'
+
+export type InternalHandoffMutationBoundary =
+  | 'before_delivery_claimed_append'
+  | 'after_delivery_claimed_append'
+  | 'after_injected_delivery_claimed_commit_point'
+  | 'after_injected_before_atomic_placement_commit_point'
+  | 'before_reply_placement_append'
+  | 'after_reply_placement_append'
+  | 'before_handoff_accepted_append'
+  | 'after_handoff_accepted_append'
+  | 'after_injected_atomic_placement_commit_point'
 
 export interface InternalHandoffDispatchResult {
   accepted: string[]
@@ -174,9 +186,13 @@ export async function dispatchV2NativeInternalHandoffs(
     dispatcherInstanceId: string
     maxReplies?: number
     onCommitPoint?: (point: InternalHandoffCommitPoint, replyId: string) => void | Promise<void>
+    mutationFence?: (boundary: InternalHandoffMutationBoundary, replyId: string) => void | Promise<void>
   },
 ): Promise<InternalHandoffDispatchResult> {
   const scope = assertV2NativeMeshExecutionFence(scopeValue, fence)
+  if (scope.stage_id !== 'S0_IMPLEMENTATION' && !options.mutationFence) {
+    throw new V2NativeMeshFenceError('native activation internal handoff requires a mutation revalidation callback')
+  }
   const result: InternalHandoffDispatchResult = {
     accepted: [],
     lostClaims: [],
@@ -200,6 +216,7 @@ export async function dispatchV2NativeInternalHandoffs(
       const claimed = await db.transaction(async tx => {
         assertV2NativeMeshExecutionFence(scopeValue, fence)
         const nextEpoch = await nextInternalEpoch(tx, row.reply_id)
+        await options.mutationFence?.('before_delivery_claimed_append', row.reply_id)
         const event = (await new EventLog(db).append({
           eventId: randomUUID(),
           eventType: 'reply.delivery_claimed',
@@ -212,6 +229,7 @@ export async function dispatchV2NativeInternalHandoffs(
           claimEpoch: nextEpoch,
           payload: { kind: 'v2_native_internal_handoff', run_id: scope.run_id },
         }, tx)).event
+        await options.mutationFence?.('after_delivery_claimed_append', row.reply_id)
         assertV2NativeMeshExecutionFence(scopeValue, fence)
         return { event, epoch: nextEpoch }
       })
@@ -225,7 +243,9 @@ export async function dispatchV2NativeInternalHandoffs(
       throw error
     }
     await options.onCommitPoint?.('after_delivery_claimed', row.reply_id)
+    await options.mutationFence?.('after_injected_delivery_claimed_commit_point', row.reply_id)
     await options.onCommitPoint?.('before_atomic_placement', row.reply_id)
+    await options.mutationFence?.('after_injected_before_atomic_placement_commit_point', row.reply_id)
     await db.transaction(async tx => {
       assertV2NativeMeshExecutionFence(scopeValue, fence)
       const activeClaim = {
@@ -236,6 +256,7 @@ export async function dispatchV2NativeInternalHandoffs(
       }
       await assertActiveInternalHandoffClaim(tx, activeClaim)
       assertV2NativeMeshExecutionFence(scopeValue, fence)
+      await options.mutationFence?.('before_reply_placement_append', row.reply_id)
       const placed = await appendV2NativeInbound(db, scope, fence, {
         message_id: `mesh-reply-message:${row.reply_id}`,
         delivery_id: deliveryId(row.reply_id),
@@ -248,9 +269,11 @@ export async function dispatchV2NativeInternalHandoffs(
         correlation_id: authority.received.correlation_id ?? `mesh-correlation:${scope.run_id}:${row.reply_id}`,
         causation_id: row.enqueued_event_id,
       }, tx)
+      await options.mutationFence?.('after_reply_placement_append', row.reply_id)
       assertV2NativeMeshExecutionFence(scopeValue, fence)
       await assertActiveInternalHandoffClaim(tx, activeClaim)
       const terminal = acceptedPayload(row.reply_id, authority.inbound.source_agent_id, placed.event.event_id)
+      await options.mutationFence?.('before_handoff_accepted_append', row.reply_id)
       await new EventLog(db).append({
         eventId: `mesh-handoff-accepted:${row.reply_id}`,
         eventType: 'reply.handoff_accepted',
@@ -263,12 +286,14 @@ export async function dispatchV2NativeInternalHandoffs(
         claimEpoch: epoch,
         payload: terminal as unknown as Record<string, unknown>,
       }, tx)
+      await options.mutationFence?.('after_handoff_accepted_append', row.reply_id)
       // If the deadline crosses after the terminal append, roll back both the
       // recipient placement and terminal instead of committing stale work.
       assertV2NativeMeshExecutionFence(scopeValue, fence)
     })
     result.accepted.push(row.reply_id)
     await options.onCommitPoint?.('after_atomic_placement_before_return', row.reply_id)
+    await options.mutationFence?.('after_injected_atomic_placement_commit_point', row.reply_id)
   }
   return result
 }

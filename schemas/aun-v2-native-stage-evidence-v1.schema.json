@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-v2-native-stage-evidence-v1.schema.json",
+  "title": "AUN V2 native stage evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "stage_binding_url", "stage_binding_sha256", "exact_implementation_main_sha",
+    "exact_implementation_main_tree", "database_identity_sha256", "migration_version_and_receipt",
+    "enabled_snapshot_url_sha256_cardinality", "stage_membership_sha256", "supervisor_process_identities",
+    "command_receipts", "direct_fanout_correlated_matrix_counts", "crash_boundary_receipts",
+    "replay_before_after_sha256", "V1_provider_external_baseline_and_delta",
+    "wrong_target_wrong_queue_foreign_owner_zero_mutation", "open_turn_and_pending_delivery_residual_queries",
+    "checkout_and_runtime_drift_report", "implementation_audit_ref", "scenario_verification_ref",
+    "stage_result_url_and_body_sha256", "event_identities", "terminal_result"
+  ],
+  "properties": {
+    "schema_version": { "const": "aun-v2-native-stage-evidence/v1" },
+    "stage_binding_url": { "type": "string", "minLength": 1 },
+    "stage_binding_sha256": { "$ref": "#/$defs/sha256" },
+    "exact_implementation_main_sha": { "$ref": "#/$defs/sha1" },
+    "exact_implementation_main_tree": { "$ref": "#/$defs/sha1" },
+    "database_identity_sha256": { "$ref": "#/$defs/sha256" },
+    "migration_version_and_receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["required", "version", "receipt_ref"],
+      "properties": { "required": { "type": "boolean" }, "version": { "type": ["string", "null"] }, "receipt_ref": { "type": ["string", "null"] } }
+    },
+    "enabled_snapshot_url_sha256_cardinality": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_url", "canonical_json_sha256", "cardinality"],
+      "properties": { "artifact_url": { "type": "string", "format": "uri" }, "canonical_json_sha256": { "$ref": "#/$defs/sha256" }, "cardinality": { "type": "integer", "minimum": 2 } }
+    },
+    "stage_membership_sha256": { "$ref": "#/$defs/sha256" },
+    "supervisor_process_identities": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/supervisorProcess" } },
+    "command_receipts": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["command_id", "executable_sha256", "status"],
+        "properties": { "command_id": { "type": "string", "minLength": 1 }, "executable_sha256": { "$ref": "#/$defs/sha256" }, "status": { "enum": ["BOUND_NOT_STARTED_BY_EXECUTOR", "EXECUTED_BY_BOUND_SEAT"] } }
+      }
+    },
+    "direct_fanout_correlated_matrix_counts": { "$ref": "#/$defs/matrix" },
+    "crash_boundary_receipts": { "type": "array", "items": { "$ref": "#/$defs/crashBoundaryReceipt" } },
+    "replay_before_after_sha256": {
+      "type": "object", "additionalProperties": false,
+      "required": ["before", "after", "byte_equal"],
+      "properties": { "before": { "$ref": "#/$defs/sha256" }, "after": { "$ref": "#/$defs/sha256" }, "byte_equal": { "type": "boolean" } }
+    },
+    "V1_provider_external_baseline_and_delta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["before", "delta"],
+      "properties": { "before": { "$ref": "#/$defs/forbiddenCounters" }, "delta": { "$ref": "#/$defs/forbiddenCounters" } }
+    },
+    "wrong_target_wrong_queue_foreign_owner_zero_mutation": {
+      "type": "object", "additionalProperties": false, "required": ["wrong_target", "wrong_queue", "foreign_owner"],
+      "properties": { "wrong_target": { "$ref": "#/$defs/nonnegative" }, "wrong_queue": { "$ref": "#/$defs/nonnegative" }, "foreign_owner": { "$ref": "#/$defs/nonnegative" } }
+    },
+    "open_turn_and_pending_delivery_residual_queries": {
+      "type": "object", "additionalProperties": false, "required": ["open_turns", "pending_internal_deliveries"],
+      "properties": { "open_turns": { "$ref": "#/$defs/nonnegative" }, "pending_internal_deliveries": { "$ref": "#/$defs/nonnegative" } }
+    },
+    "checkout_and_runtime_drift_report": {
+      "type": "object", "additionalProperties": false, "required": ["drift_count", "checked_agent_ids"],
+      "properties": { "drift_count": { "$ref": "#/$defs/nonnegative" }, "checked_agent_ids": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } } }
+    },
+    "implementation_audit_ref": { "type": ["string", "null"] },
+    "scenario_verification_ref": { "type": ["string", "null"] },
+    "stage_result_url_and_body_sha256": {
+      "type": "object", "additionalProperties": false, "required": ["durable_url", "body_sha256"],
+      "properties": { "durable_url": { "type": ["string", "null"] }, "body_sha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] } }
+    },
+    "event_identities": { "type": "array", "items": { "$ref": "#/$defs/eventIdentity" } },
+    "terminal_result": { "$ref": "#/$defs/terminalResult" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "terminal_result": { "properties": { "kind": { "const": "ACCEPT_STAGE" } } } } },
+      "then": {
+        "properties": {
+          "implementation_audit_ref": { "type": "string", "minLength": 1 },
+          "scenario_verification_ref": { "type": "string", "minLength": 1 },
+          "stage_result_url_and_body_sha256": { "properties": { "durable_url": { "type": "string", "minLength": 1 }, "body_sha256": { "$ref": "#/$defs/sha256" } } },
+          "replay_before_after_sha256": { "properties": { "byte_equal": { "const": true } } },
+          "direct_fanout_correlated_matrix_counts": { "properties": { "missing": { "const": 0 }, "duplicates": { "const": 0 }, "unexpected_recipients": { "const": 0 }, "wrong_queue_mutations": { "const": 0 }, "foreign_owner_mutations": { "const": 0 }, "open_turns_after_drain": { "const": 0 }, "pending_internal_deliveries_after_drain": { "const": 0 }, "V1_invocations": { "const": 0 }, "provider_attempts": { "const": 0 }, "provider_effects": { "const": 0 }, "external_send_attempts": { "const": 0 } } },
+          "wrong_target_wrong_queue_foreign_owner_zero_mutation": { "properties": { "wrong_target": { "const": 0 }, "wrong_queue": { "const": 0 }, "foreign_owner": { "const": 0 } } },
+          "open_turn_and_pending_delivery_residual_queries": { "properties": { "open_turns": { "const": 0 }, "pending_internal_deliveries": { "const": 0 } } },
+          "checkout_and_runtime_drift_report": { "properties": { "drift_count": { "const": 0 } } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nonnegative": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "crashBoundaryReceipt": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/crashReceiptCommon" },
+        {
+          "oneOf": [
+            {
+              "required": ["boundary", "eventual_claims"],
+              "properties": {
+                "boundary": { "const": "before_claim" },
+                "eventual_claims": { "const": 1 }
+              }
+            },
+            {
+              "required": ["boundary", "claim_epoch_before", "claim_epoch_after", "stale_holder_terminal"],
+              "properties": {
+                "boundary": { "const": "after_claim" },
+                "claim_epoch_before": { "$ref": "#/$defs/nonnegative" },
+                "claim_epoch_after": { "$ref": "#/$defs/nonnegative" },
+                "stale_holder_terminal": { "const": 0 }
+              }
+            },
+            {
+              "required": ["boundary", "completion_cardinality", "enqueue_cardinality", "reply_delivery_cardinality"],
+              "properties": {
+                "boundary": { "const": "after_completion_enqueue" },
+                "completion_cardinality": { "const": 1 },
+                "enqueue_cardinality": { "const": 1 },
+                "reply_delivery_cardinality": { "const": 1 }
+              }
+            },
+            {
+              "required": ["boundary", "delivery_unknown", "reconciliation_cas_winners"],
+              "properties": {
+                "boundary": { "const": "after_delivery_claim" },
+                "delivery_unknown": { "const": 1 },
+                "reconciliation_cas_winners": { "const": 1 }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "crashReceiptCommon": {
+      "type": "object",
+      "required": [
+        "schema_version", "run_id", "stage_id", "boundary", "subject_agent_id",
+        "crashed_runtime_instance_id", "supervisor_evidence_ref", "occurred_at",
+        "rto_ms", "rpo_events", "loss", "duplicate_terminal", "automatic_retry"
+      ],
+      "properties": {
+        "schema_version": { "const": "aun-v2-native-crash-boundary-receipt/v1" },
+        "run_id": { "type": "string", "format": "uuid" },
+        "stage_id": { "enum": ["S2_SELECTED_ENABLED", "S3_ALL_ENABLED"] },
+        "boundary": { "enum": ["before_claim", "after_claim", "after_completion_enqueue", "after_delivery_claim"] },
+        "subject_agent_id": { "type": "string", "minLength": 1 },
+        "crashed_runtime_instance_id": { "type": "string", "minLength": 1 },
+        "supervisor_evidence_ref": { "type": "string", "minLength": 1 },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "rto_ms": { "type": "integer", "minimum": 0, "maximum": 30000 },
+        "rpo_events": { "const": 0 },
+        "loss": { "const": 0 },
+        "duplicate_terminal": { "const": 0 },
+        "automatic_retry": { "const": 0 }
+      }
+    },
+    "realpath": { "type": "string", "pattern": "^/", "minLength": 2 },
+    "supervisorProcess": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit_kind", "agent_id_or_dispatcher_id", "runtime_instance_id", "pid", "process_start_time", "executable_realpath", "executable_sha256", "checkout_sha", "database_identity_sha256"],
+      "properties": {
+        "unit_kind": { "enum": ["seat", "outbox", "reconciler"] },
+        "agent_id_or_dispatcher_id": { "type": "string", "minLength": 1 },
+        "runtime_instance_id": { "type": "string", "minLength": 1 },
+        "pid": { "type": "integer", "minimum": 1 },
+        "process_start_time": { "$ref": "#/$defs/timestamp" },
+        "executable_realpath": { "$ref": "#/$defs/realpath" },
+        "executable_sha256": { "$ref": "#/$defs/sha256" },
+        "checkout_sha": { "$ref": "#/$defs/sha1" },
+        "database_identity_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "forbiddenCounters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["V1_message_queue_row_count", "V1_agent_messages_row_count", "V1_outbound_queue_row_count", "provider_attempt_count", "provider_effect_count", "external_send_attempt_count"],
+      "properties": {
+        "V1_message_queue_row_count": { "type": "integer" }, "V1_agent_messages_row_count": { "type": "integer" }, "V1_outbound_queue_row_count": { "type": "integer" },
+        "provider_attempt_count": { "type": "integer" }, "provider_effect_count": { "type": "integer" }, "external_send_attempt_count": { "type": "integer" }
+      }
+    },
+    "matrix": {
+      "type": "object", "additionalProperties": false,
+      "required": ["member_count", "directed_requests", "terminal_replies", "fanout_parents", "fanout_children", "correlated_reply_edges", "missing", "duplicates", "unexpected_recipients", "wrong_queue_mutations", "foreign_owner_mutations", "open_turns_after_drain", "pending_internal_deliveries_after_drain", "V1_invocations", "provider_attempts", "provider_effects", "external_send_attempts"],
+      "properties": {
+        "member_count": { "type": "integer", "minimum": 2 }, "directed_requests": { "$ref": "#/$defs/nonnegative" }, "terminal_replies": { "$ref": "#/$defs/nonnegative" },
+        "fanout_parents": { "$ref": "#/$defs/nonnegative" }, "fanout_children": { "$ref": "#/$defs/nonnegative" }, "correlated_reply_edges": { "$ref": "#/$defs/nonnegative" },
+        "missing": { "$ref": "#/$defs/nonnegative" }, "duplicates": { "$ref": "#/$defs/nonnegative" }, "unexpected_recipients": { "$ref": "#/$defs/nonnegative" },
+        "wrong_queue_mutations": { "$ref": "#/$defs/nonnegative" }, "foreign_owner_mutations": { "$ref": "#/$defs/nonnegative" }, "open_turns_after_drain": { "$ref": "#/$defs/nonnegative" },
+        "pending_internal_deliveries_after_drain": { "$ref": "#/$defs/nonnegative" }, "V1_invocations": { "type": "integer" }, "provider_attempts": { "type": "integer" },
+        "provider_effects": { "type": "integer" }, "external_send_attempts": { "type": "integer" }
+      }
+    },
+    "eventIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "stage_id", "turn_id", "message_id", "reply_id", "delivery_id", "claim_epoch", "runtime_instance_id", "event_id", "seq", "payload_sha256", "occurred_at"],
+      "properties": {
+        "run_id": { "type": "string", "format": "uuid" }, "stage_id": { "enum": ["S1_TWO_AGENT", "S2_SELECTED_ENABLED", "S3_ALL_ENABLED"] },
+        "turn_id": { "type": ["string", "null"] }, "message_id": { "type": ["string", "null"] }, "reply_id": { "type": ["string", "null"] }, "delivery_id": { "type": ["string", "null"] },
+        "claim_epoch": { "type": ["integer", "null"] }, "runtime_instance_id": { "type": ["string", "null"] }, "event_id": { "type": "string", "minLength": 1 },
+        "seq": { "type": "integer", "minimum": 1 }, "payload_sha256": { "$ref": "#/$defs/sha256" }, "occurred_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "terminalResult": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "stop_reason", "auto_advance"],
+          "properties": { "kind": { "const": "MEASURED_PENDING_INDEPENDENT_GATES" }, "stop_reason": { "const": "EVIDENCE_INCOMPLETE_OR_STALE" }, "auto_advance": { "const": false } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "stop_reason", "auto_advance", "error"],
+          "properties": { "kind": { "const": "ROLLBACK_REQUEST" }, "stop_reason": { "type": "string", "minLength": 1 }, "auto_advance": { "const": false }, "error": { "type": "string", "minLength": 1 } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "stop_reason", "auto_advance"],
+          "properties": { "kind": { "const": "ACCEPT_STAGE" }, "stop_reason": { "type": "null" }, "auto_advance": { "const": false } }
+        }
+      ]
+    }
+  }
+}

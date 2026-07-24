@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/watchout/agent-comms-mcp/schemas/aun-v2-native-stage-binding-v1.schema.json",
+  "title": "AUN V2 native activation stage binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "stage_id", "exact_implementation_main_sha",
+    "exact_implementation_main_tree", "database", "migration", "frozen_enabled_snapshot",
+    "stage_members", "started_at", "deadline", "provider_dispatch", "V1_mode",
+    "pre_run_baselines", "supervisor_processes", "command_catalog", "approval_ref", "prior_gate_ref"
+  ],
+  "properties": {
+    "schema_version": { "const": "aun-v2-native-stage-binding/v1" },
+    "run_id": { "type": "string", "format": "uuid" },
+    "stage_id": { "$ref": "#/$defs/stageId" },
+    "exact_implementation_main_sha": { "$ref": "#/$defs/sha1" },
+    "exact_implementation_main_tree": { "$ref": "#/$defs/sha1" },
+    "database": { "$ref": "#/$defs/database" },
+    "migration": { "$ref": "#/$defs/migration" },
+    "frozen_enabled_snapshot": { "$ref": "#/$defs/enabledSnapshot" },
+    "stage_members": { "$ref": "#/$defs/stageMembers" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "deadline": { "$ref": "#/$defs/timestamp" },
+    "provider_dispatch": { "const": "disabled" },
+    "V1_mode": { "const": "observe_only_no_traversal" },
+    "pre_run_baselines": { "$ref": "#/$defs/baselines" },
+    "supervisor_processes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/supervisorProcess" }
+    },
+    "command_catalog": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/command" }
+    },
+    "approval_ref": { "$ref": "#/$defs/approvalRef" },
+    "prior_gate_ref": {
+      "enum": ["K3_POST_MERGE_AND_INDEPENDENT_GATES", "S1_TERMINAL_PASS", "S2_TERMINAL_PASS"]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "stage_id": { "const": "S1_TWO_AGENT" } } },
+      "then": {
+        "properties": {
+          "stage_members": { "properties": { "cardinality": { "const": 2 }, "agent_ids": { "minItems": 2, "maxItems": 2 } } },
+          "prior_gate_ref": { "const": "K3_POST_MERGE_AND_INDEPENDENT_GATES" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "stage_id": { "const": "S2_SELECTED_ENABLED" } } },
+      "then": {
+        "properties": {
+          "stage_members": { "properties": { "cardinality": { "minimum": 3 }, "agent_ids": { "minItems": 3 } } },
+          "prior_gate_ref": { "const": "S1_TERMINAL_PASS" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "stage_id": { "const": "S3_ALL_ENABLED" } } },
+      "then": { "properties": { "prior_gate_ref": { "const": "S2_TERMINAL_PASS" } } }
+    }
+  ],
+  "$defs": {
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "stageId": { "enum": ["S1_TWO_AGENT", "S2_SELECTED_ENABLED", "S3_ALL_ENABLED"] },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "realpath": { "type": "string", "pattern": "^/", "minLength": 2 },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "server_version", "cluster_fingerprint_sha256", "database_name", "database_oid", "schema_name", "identity_sha256"],
+      "properties": {
+        "engine": { "const": "PostgreSQL" },
+        "server_version": { "type": "string", "minLength": 1 },
+        "cluster_fingerprint_sha256": { "$ref": "#/$defs/sha256" },
+        "database_name": { "type": "string", "minLength": 1 },
+        "database_oid": { "type": "integer", "minimum": 1 },
+        "schema_name": { "type": "string", "minLength": 1 },
+        "identity_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "version", "up_blob_sha256", "down_blob_sha256", "applied_at", "decision_ref", "receipt_ref"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "version": { "type": ["string", "null"] },
+        "up_blob_sha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "down_blob_sha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "applied_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "decision_ref": { "type": ["string", "null"] },
+        "receipt_ref": { "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "required": { "const": false } } },
+          "then": { "properties": { "version": { "type": "null" }, "up_blob_sha256": { "type": "null" }, "down_blob_sha256": { "type": "null" }, "applied_at": { "type": "null" }, "decision_ref": { "type": "null" }, "receipt_ref": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "required": { "const": true } } },
+          "then": { "properties": { "version": { "type": "string", "minLength": 1 }, "up_blob_sha256": { "$ref": "#/$defs/sha256" }, "down_blob_sha256": { "$ref": "#/$defs/sha256" }, "applied_at": { "$ref": "#/$defs/timestamp" }, "decision_ref": { "type": "string", "minLength": 1 }, "receipt_ref": { "type": "string", "minLength": 1 } } }
+        }
+      ]
+    },
+    "enabledRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "enabled", "active_function", "runtime_instance_id", "workspace_realpath", "checkout_root_realpath", "checkout_sha", "checkout_tree", "engine", "status", "last_seen_at", "runtime_policy_sha256", "runtime_build_sha256", "config_sha256"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1 },
+        "enabled": { "const": true },
+        "active_function": { "type": "string", "minLength": 1 },
+        "runtime_instance_id": { "type": "string", "minLength": 1 },
+        "workspace_realpath": { "$ref": "#/$defs/realpath" },
+        "checkout_root_realpath": { "$ref": "#/$defs/realpath" },
+        "checkout_sha": { "$ref": "#/$defs/sha1" },
+        "checkout_tree": { "$ref": "#/$defs/sha1" },
+        "engine": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "last_seen_at": { "$ref": "#/$defs/timestamp" },
+        "runtime_policy_sha256": { "$ref": "#/$defs/sha256" },
+        "runtime_build_sha256": { "$ref": "#/$defs/sha256" },
+        "config_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "enabledSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_url", "canonical_json_sha256", "cardinality", "generated_at", "query_digest", "rows"],
+      "properties": {
+        "artifact_url": { "type": "string", "format": "uri", "pattern": "^https://.*#" },
+        "canonical_json_sha256": { "$ref": "#/$defs/sha256" },
+        "cardinality": { "type": "integer", "minimum": 2 },
+        "generated_at": { "$ref": "#/$defs/timestamp" },
+        "query_digest": { "$ref": "#/$defs/sha256" },
+        "rows": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/enabledRow" } }
+      }
+    },
+    "stageMembers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_ids", "cardinality", "membership_sha256"],
+      "properties": {
+        "agent_ids": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "cardinality": { "type": "integer", "minimum": 2 },
+        "membership_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "baselines": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_log_max_seq", "active_turn_count", "open_delivery_count", "V1_message_queue_row_count", "V1_agent_messages_row_count", "V1_outbound_queue_row_count", "provider_attempt_count", "provider_effect_count", "external_send_attempt_count"],
+      "properties": {
+        "event_log_max_seq": { "type": "integer", "minimum": 0 },
+        "active_turn_count": { "type": "integer", "minimum": 0 },
+        "open_delivery_count": { "type": "integer", "minimum": 0 },
+        "V1_message_queue_row_count": { "type": "integer", "minimum": 0 },
+        "V1_agent_messages_row_count": { "type": "integer", "minimum": 0 },
+        "V1_outbound_queue_row_count": { "type": "integer", "minimum": 0 },
+        "provider_attempt_count": { "type": "integer", "minimum": 0 },
+        "provider_effect_count": { "type": "integer", "minimum": 0 },
+        "external_send_attempt_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "supervisorProcess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit_kind", "agent_id_or_dispatcher_id", "runtime_instance_id", "pid", "process_start_time", "executable_realpath", "executable_sha256", "checkout_sha", "database_identity_sha256"],
+      "properties": {
+        "unit_kind": { "enum": ["seat", "outbox", "reconciler"] },
+        "agent_id_or_dispatcher_id": { "type": "string", "minLength": 1 },
+        "runtime_instance_id": { "type": "string", "minLength": 1 },
+        "pid": { "type": "integer", "minimum": 1 },
+        "process_start_time": { "$ref": "#/$defs/timestamp" },
+        "executable_realpath": { "$ref": "#/$defs/realpath" },
+        "executable_sha256": { "$ref": "#/$defs/sha256" },
+        "checkout_sha": { "$ref": "#/$defs/sha1" },
+        "database_identity_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "exact_argv", "cwd_realpath", "allowed_env_keys", "env_value_hashes", "timeout_seconds", "executable_sha256"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "exact_argv": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "cwd_realpath": { "$ref": "#/$defs/realpath" },
+        "allowed_env_keys": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "env_value_hashes": { "type": "object", "propertyNames": { "type": "string", "minLength": 1 }, "additionalProperties": { "$ref": "#/$defs/sha256" } },
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "executable_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "approvalRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "durable_url", "body_sha256", "exact_stage_id", "exact_binding_sha256"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "durable_url": { "type": "string", "format": "uri", "pattern": "^https://.*#" },
+        "body_sha256": { "$ref": "#/$defs/sha256" },
+        "exact_stage_id": { "$ref": "#/$defs/stageId" },
+        "exact_binding_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

@@ -70,5 +70,7 @@ export {
 export * from './delivery'
 export * from './v2-native-ingress'
 export * from './v2-native-routing'
+export * from './v2-native-stage-binding'
+export * from './v2-native-stage-executor'
 export * from './internal-handoff'
 export * from './v1-import'
