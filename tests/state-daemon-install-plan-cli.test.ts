@@ -20,6 +20,24 @@ function runCli(args: string[]) {
 }
 
 describe('state-daemon install-plan CLI dry-run', () => {
+  test('bootstrap restore plan writes all four explicit safe defaults', () => {
+    const result = Bun.spawnSync([
+      'bun', 'scripts/state-daemon-launchagent.ts', 'restore', '--commit', COMMIT,
+      '--agent-allowlist', 'bootstrap-probe', '--disable-codex-runner', '--bootstrap-safe-defaults',
+    ], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
+    expect(result.exitCode).toBe(0)
+    const json = JSON.parse(result.stdout.toString())
+    expect(json.dry_run).toBe(true)
+    expect(json.extraEnv).toMatchObject({
+      SHIRUBE_D1_ENABLED: '0',
+      SHIRUBE_D1_KILL_SWITCH: '1',
+      SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
+      STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
+      STATE_DAEMON_AGENT_ALLOWLIST: 'bootstrap-probe',
+      STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
+    })
+  })
+
   test('emits a durable install plan without writing, loading, or restarting', () => {
     const restoreRoot = '/Users/yuji/.agent-comms/state-daemon/checkouts'
     const result = runCli([

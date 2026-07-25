@@ -5,6 +5,56 @@ import {
   normalizeApprovedCheckoutRoots,
   type FleetCheckoutDriftResult,
 } from './fleet-checkout-drift'
+
+export type BootstrapRuntimeKind = 'codex' | 'claude'
+
+export type BootstrapRuntimeSignal = {
+  source: 'agent_profile' | 'process_identity'
+  runtime: BootstrapRuntimeKind
+  verified: boolean
+  evidence: string
+}
+
+export type BootstrapRuntimeSelection = {
+  ok: boolean
+  runtime: BootstrapRuntimeKind | null
+  reason: 'selected' | 'NO_GO_RUNTIME_UNDETECTED' | 'NO_GO_RUNTIME_AMBIGUOUS'
+  signals: BootstrapRuntimeSignal[]
+}
+
+/**
+ * Selects a bootstrap provider from identity evidence, never from a mere
+ * `--version` result. An existing profile is accepted only when a matching
+ * live process identity is also present. With no profile, one verified live
+ * process identity is sufficient. Conflicts are always fail-closed.
+ */
+export function selectBootstrapRuntime(
+  requested: 'auto' | BootstrapRuntimeKind,
+  signals: BootstrapRuntimeSignal[],
+): BootstrapRuntimeSelection {
+  const verified = signals.filter((signal) => signal.verified)
+  if (requested !== 'auto') {
+    const conflicting = verified.filter((signal) => signal.runtime !== requested)
+    if (conflicting.length > 0) {
+      return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
+    }
+    return { ok: true, runtime: requested, reason: 'selected', signals }
+  }
+
+  const profiles = verified.filter((signal) => signal.source === 'agent_profile')
+  const processes = verified.filter((signal) => signal.source === 'process_identity')
+  const runtimes = new Set(verified.map((signal) => signal.runtime))
+  if (runtimes.size > 1 || profiles.length > 1 || processes.length > 1) {
+    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
+  }
+  if (processes.length === 0) {
+    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_UNDETECTED', signals }
+  }
+  if (profiles.length === 1 && profiles[0].runtime !== processes[0].runtime) {
+    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
+  }
+  return { ok: true, runtime: processes[0].runtime, reason: 'selected', signals }
+}
 import type { V2NativeMeshFrozenAgentV1 } from './eventlog/v2-native-ingress'
 
 type RuntimeFreshness = 'fresh' | 'stale' | 'missing_heartbeat' | 'stopped' | 'unknown'

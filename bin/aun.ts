@@ -5,6 +5,7 @@
  * Subcommands:
  *   - aun                    → init if missing, else start
  *   - aun init [--dry-run] [--force]
+ *   - aun bootstrap --agent-id <id> --runtime auto|codex|claude [--dry-run] [--json] [--resume <run_id>|--rollback <run_id>]
  *   - aun start [-- <extra args passed to claude>]
  *   - aun receive --agent-id <id> [--queue-id <id>] [--dry-run]
  *   - aun next --agent-id <id> [--queue-id <id>] [--dry-run]
@@ -44,6 +45,7 @@ import { memoryReadyBootstrap } from './aun/memory-ready'
 import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Plan } from './aun/runtime-v2'
 import { connectorChannelAccessDiscovery, connectorCredentialDiagnostic, connectorProviderIdentityVerify } from './aun/connector'
 import { validateV2NativeMeshScopeFile } from './aun/v2-native-mesh'
+import { bootstrap } from './aun/bootstrap'
 
 function printHelp(): void {
   const lines = [
@@ -52,6 +54,7 @@ function printHelp(): void {
     'Usage:',
     '  aun                       run init if missing, else start',
     '  aun init [--dry-run] [--force]',
+    '  aun bootstrap --agent-id <id> --runtime auto|codex|claude [--dry-run] [--json] [--resume <run_id>|--rollback <run_id>]',
     '  aun start [-- <args...>]',
     '  aun receive --agent-id <id> [--queue-id <id>] [--dry-run]',
     '  aun next --agent-id <id> [--queue-id <id>] [--dry-run]',
@@ -330,8 +333,49 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
     subcommand !== 'renew-claim' &&
     subcommand !== 'memory-ready-bootstrap' &&
     subcommand !== 'runtime-v2' &&
-    subcommand !== 'connector'
+    subcommand !== 'connector' &&
+    subcommand !== 'bootstrap'
   ) return run(argv)
+
+  if (subcommand === 'bootstrap') {
+    const agentId = typeof flags['agent-id'] === 'string' ? flags['agent-id'] : ''
+    const runtime = typeof flags.runtime === 'string' ? flags.runtime : ''
+    if (!agentId || !['auto', 'codex', 'claude'].includes(runtime)) {
+      process.stderr.write('Error [AUN_BOOTSTRAP_INVALID]: --agent-id <id> and --runtime auto|codex|claude are required\n')
+      return 2
+    }
+    if (flags.resume !== undefined && typeof flags.resume !== 'string') {
+      process.stderr.write('Error [AUN_BOOTSTRAP_INVALID]: --resume requires a run_id\n')
+      return 2
+    }
+    if (flags.rollback !== undefined && typeof flags.rollback !== 'string') {
+      process.stderr.write('Error [AUN_BOOTSTRAP_INVALID]: --rollback requires a run_id\n')
+      return 2
+    }
+    try {
+      const result = await bootstrap({
+        agentId,
+        runtime: runtime as 'auto' | 'codex' | 'claude',
+        dryRun: !!flags['dry-run'],
+        json: !!flags.json,
+        resumeRunId: typeof flags.resume === 'string' ? flags.resume : undefined,
+        rollbackRunId: typeof flags.rollback === 'string' ? flags.rollback : undefined,
+      })
+      if (flags.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      else printSummary('aun bootstrap', [
+        `run: ${result.run_id}`,
+        `runtime: ${result.resolved_runtime ?? 'unresolved'}`,
+        `stage: ${result.stage}`,
+        `status: ${result.status}`,
+        `reason_codes: ${result.reason_codes.join(', ') || 'none'}`,
+        `next: ${result.next_action.action}`,
+      ], [])
+      return ['PLANNED', 'READY', 'IDEMPOTENT_READY', 'ROLLED_BACK'].includes(result.status) ? 0 : 1
+    } catch (err) {
+      process.stderr.write(`Error [AUN_BOOTSTRAP_FAILED]: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 2
+    }
+  }
 
   if ((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') {
     const res = await receiveTargeted({

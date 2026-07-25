@@ -12,6 +12,7 @@ import {
 import {
   buildQueueDaemonStatusReport,
   buildQueueSmokeReadiness,
+  runBootstrapQueueSmoke,
 } from '../core/queue-runtime'
 
 const REPO_ROOT = join(import.meta.dir, '..')
@@ -259,6 +260,30 @@ describe('queue repair primitives', () => {
 })
 
 describe('queue runtime diagnostics', () => {
+  test('bootstrap smoke enqueues, claims, and terminalizes exactly once without effects', async () => {
+    const row = { id: 901, status: 'pending' }
+    const db = {
+      async transaction<T>(fn: (tx: any) => Promise<T>) { return fn(this) },
+      async query(sql: string) {
+        if (sql.includes('INSERT INTO message_queue')) return [{ id: row.id }]
+        if (sql.includes('SELECT status')) return [{ status: row.status }]
+        return []
+      },
+      async execute(sql: string) {
+        if (sql.includes("status = 'received'") && row.status === 'pending') { row.status = 'received'; return { rowCount: 1 } }
+        if (sql.includes("status = 'done'") && row.status === 'received') { row.status = 'done'; return { rowCount: 1 } }
+        return { rowCount: 0 }
+      },
+    }
+    const report = await runBootstrapQueueSmoke(db, {
+      agentId: 'bootstrap-smoke', runId: 'run-1', messageId: '00000000-0000-4000-8000-000000000001',
+    })
+    expect(report).toMatchObject({
+      ok: true, enqueue_count: 1, claim_count: 1, terminal_outcome_count: 1,
+      duplicate_effect_count: 0, external_effect_count: 0, final_status: 'done',
+    })
+  })
+
   test('daemon-status reports DB-observed wake and claim heartbeat evidence', async () => {
     const db = {
       async query(sql: string) {

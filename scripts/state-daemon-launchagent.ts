@@ -36,6 +36,7 @@ type ParsedArgs = {
   githubWorkOwnerAllowlist?: string
   githubWorkIntervalMs?: number
   githubWorkWritebackEnabled: boolean
+  bootstrapSafeDefaults: boolean
   githubTokenFile?: string
 }
 
@@ -85,6 +86,7 @@ function usage(): string {
 
 Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha> [--execute] [--no-bootstrap]
+    [--bootstrap-safe-defaults]
     [--github-work-puller-enabled --github-work-repos <owner/repo>
      --github-work-labels <canary:label>
      --github-work-owner-allowlist <agent>
@@ -123,6 +125,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     extraEnv: {},
     githubWorkPullerEnabled: false,
     githubWorkWritebackEnabled: false,
+    bootstrapSafeDefaults: false,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -156,6 +159,13 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--github-token-file') args.githubTokenFile = next()
     else if (arg === '--agent-allowlist') args.extraEnv.STATE_DAEMON_AGENT_ALLOWLIST = next()
     else if (arg === '--disable-codex-runner') args.extraEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED = '0'
+    else if (arg === '--bootstrap-safe-defaults') {
+      args.bootstrapSafeDefaults = true
+      args.extraEnv.SHIRUBE_D1_ENABLED = '0'
+      args.extraEnv.SHIRUBE_D1_KILL_SWITCH = '1'
+      args.extraEnv.SHIRUBE_D1_TARGET_ALLOWLIST = '[]'
+      args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '0'
+    }
     else if (arg === '--enable-queue-work-scheduler') args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '1'
     else if (arg === '--queue-work-runtime') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RUNTIME = next()
     else if (arg === '--queue-work-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_COMMAND = next()
@@ -298,6 +308,17 @@ function commandRestore(args: ParsedArgs): void {
     ...args.extraEnv,
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
+  }
+  if (args.bootstrapSafeDefaults) {
+    const expected = {
+      SHIRUBE_D1_ENABLED: '0',
+      SHIRUBE_D1_KILL_SWITCH: '1',
+      SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
+      STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
+    }
+    for (const [key, value] of Object.entries(expected)) {
+      if (extraEnv[key] !== value) throw new Error(`bootstrap safe default mismatch: ${key}`)
+    }
   }
   const plan = buildStateDaemonRestorePlan({
     commit: args.commit,

@@ -37,6 +37,26 @@ export interface QueueSmokeReadiness {
   execute_command: string
 }
 
+export interface BootstrapQueueSmokeReport {
+  ok: boolean
+  run_id: string
+  queue_id: string | null
+  message_id: string
+  enqueue_count: number
+  claim_count: number
+  terminal_outcome_count: number
+  duplicate_effect_count: number
+  external_effect_count: number
+  final_status: string | null
+  reason_codes: string[]
+}
+
+type BootstrapSmokeDb = {
+  query<T = any>(sql: string, params?: any[]): Promise<T[]>
+  execute(sql: string, params?: any[]): Promise<{ rowCount: number }>
+  transaction<T>(fn: (tx: BootstrapSmokeDb) => Promise<T>): Promise<T>
+}
+
 type Queryable = {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[] }>
 }
@@ -177,5 +197,96 @@ export async function buildQueueSmokeReadiness(
       expired_claim_count: expired,
     },
     execute_command: `agent-com queue smoke --agent-id ${agentId} --execute`,
+  }
+}
+
+/**
+ * Deterministic no-effect queue smoke for `aun bootstrap`.
+ *
+ * It proves enqueue/claim/terminal semantics without asking an LLM to process
+ * the row and without creating an outbound or protected effect. All three
+ * writes run in one transaction, so an intermediate failure leaves no orphan
+ * smoke row. A second claimant cannot win because the claim update is fenced
+ * on `status = 'pending'`.
+ */
+export async function runBootstrapQueueSmoke(
+  db: BootstrapSmokeDb,
+  input: { agentId: string; runId: string; messageId: string; now?: Date },
+): Promise<BootstrapQueueSmokeReport> {
+  const createdAt = (input.now ?? new Date()).toISOString()
+  const base: BootstrapQueueSmokeReport = {
+    ok: false,
+    run_id: input.runId,
+    queue_id: null,
+    message_id: input.messageId,
+    enqueue_count: 0,
+    claim_count: 0,
+    terminal_outcome_count: 0,
+    duplicate_effect_count: 0,
+    external_effect_count: 0,
+    final_status: null,
+    reason_codes: [],
+  }
+
+  try {
+    return await db.transaction(async (tx) => {
+      const inserted = await tx.query<{ id: string | number }>(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
+         VALUES ($1, $2, $3, 'pending', 0, $4)
+         RETURNING id`,
+        [
+          input.agentId,
+          input.messageId,
+          JSON.stringify({
+            schema_version: 'shirube-v3/aun-bootstrap-queue-smoke/v1',
+            bootstrap_run_id: input.runId,
+            author_id: 'aun-bootstrap',
+            message_type: 'report',
+            content: 'Deterministic AUN bootstrap queue smoke. No external action is required.',
+            next_action: 'none',
+            protected_effect_allowed: false,
+          }),
+          createdAt,
+        ],
+      )
+      const queueId = String(inserted[0]?.id ?? '')
+      if (!queueId) throw new Error('queue insert returned no id')
+      const claimed = await tx.execute(
+        `UPDATE message_queue
+            SET status = 'received', claimed_by = $1, claimed_at = $2,
+                claim_expires_at = $3, read_at = $2
+          WHERE id = $4 AND agent_id = $1 AND status = 'pending'`,
+        [input.agentId, createdAt, new Date(new Date(createdAt).getTime() + 30_000).toISOString(), queueId],
+      )
+      const terminal = await tx.execute(
+        `UPDATE message_queue
+            SET status = 'done', done_at = $1, claim_expires_at = NULL
+          WHERE id = $2 AND agent_id = $3 AND status = 'received' AND claimed_by = $3`,
+        [createdAt, queueId, input.agentId],
+      )
+      const rows = await tx.query<{ status: string }>(
+        `SELECT status FROM message_queue WHERE id = $1 AND agent_id = $2`,
+        [queueId, input.agentId],
+      )
+      const finalStatus = rows[0]?.status ?? null
+      const report: BootstrapQueueSmokeReport = {
+        ...base,
+        queue_id: queueId,
+        enqueue_count: 1,
+        claim_count: claimed.rowCount,
+        terminal_outcome_count: terminal.rowCount,
+        final_status: finalStatus,
+        ok: claimed.rowCount === 1 && terminal.rowCount === 1 && finalStatus === 'done',
+      }
+      if (claimed.rowCount > 1) report.reason_codes.push('NO_GO_DUPLICATE_CLAIM')
+      else if (claimed.rowCount !== 1) report.reason_codes.push('NO_GO_QUEUE_NO_PROGRESS')
+      if (terminal.rowCount !== 1 || finalStatus !== 'done') report.reason_codes.push('NO_GO_SMOKE_NOT_TERMINAL')
+      return report
+    })
+  } catch (err) {
+    return {
+      ...base,
+      reason_codes: [`NO_GO_QUEUE_ENQUEUE:${err instanceof Error ? err.message : String(err)}`],
+    }
   }
 }

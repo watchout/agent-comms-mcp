@@ -391,15 +391,7 @@ export function registerAunViaClaude(opts: InitOptions): {
   // example: `claude mcp add --scope user --transport stdio aun -- <bun> <server.ts>`.
   // The `--` terminates flag parsing so the server.ts path can't be
   // mistaken for a CLI option.
-  const addArgs = [
-    'mcp', 'add',
-    '--scope', 'user',
-    '--transport', 'stdio',
-    'aun',
-    '--',
-    bunPath,
-    aunEntry,
-  ]
+  const addArgs = buildClaudeMcpAddArgs({ bunPath, serverArgs: [aunEntry] })
   const addResult = spawnSync(claudeBin, addArgs, {
     encoding: 'utf-8',
     timeout: 10_000,
@@ -419,6 +411,21 @@ export function registerAunViaClaude(opts: InitOptions): {
     serverPath: aunEntry,
     preRemoveStderr,
   }
+}
+
+/** Shared provider-owned registration shape used by both `aun init` and
+ * `aun bootstrap`. Values are passed as argv entries and are never rendered
+ * into the bootstrap journal. */
+export function buildClaudeMcpAddArgs(input: {
+  bunPath: string
+  serverArgs: string[]
+  environment?: Record<string, string>
+}): string[] {
+  return [
+    'mcp', 'add', '--scope', 'user', '--transport', 'stdio',
+    ...Object.entries(input.environment ?? {}).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
+    'aun', '--', input.bunPath, ...input.serverArgs,
+  ]
 }
 
 export function init(opts: InitOptions = {}): InitResult {
