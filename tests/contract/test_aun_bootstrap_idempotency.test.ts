@@ -10,7 +10,9 @@ describe('aun bootstrap idempotency', () => {
     const pass = (name: string, result: BootstrapStageOutcome = { ok: true }) => async () => { calls.push(name); return result }
     const ports: BootstrapExecutionPorts = {
       lockAndSnapshot: pass('B0'), dependencyPreflight: pass('B1', { ok: true, resolvedRuntime: 'codex' }),
-      migrateDatabase: pass('B2'), ensureAgentProfile: pass('B3'), ensureMcpRegistration: pass('B4'),
+      migrateDatabase: pass('B2', { ok: true, mutation: {
+        kind: 'db', owner_key: 'db:first-run', before_digest: null, intended_after_digest: 'after', actual_after_digest: 'after', rollback_action: 'fixture',
+      } }), ensureAgentProfile: pass('B3'), ensureMcpRegistration: pass('B4'),
       ensureMemoryReadiness: pass('B5'), installAndStartDaemon: pass('B6'), runQueueSmoke: pass('B7'),
       readbackReady: pass('B8'), rollbackMutation: pass('rollback'),
     }
@@ -22,6 +24,12 @@ describe('aun bootstrap idempotency', () => {
     const second = await bootstrap(input, { stateStore: store, ports, run })
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(calls).toEqual(['B1', 'B8'])
-    expect(second.mutation_manifest_sha256).toBe(first.mutation_manifest_sha256)
+    expect(second.mutation_manifest_sha256).not.toBe(first.mutation_manifest_sha256)
+    expect(second.mutation_manifest_sha256).toBeDefined()
+    calls.length = 0
+    const third = await bootstrap(input, { stateStore: store, ports, run })
+    expect(third.status).toBe('IDEMPOTENT_READY')
+    expect(calls).toEqual(['B1', 'B8'])
+    expect(third.mutation_manifest_sha256).toBe(second.mutation_manifest_sha256)
   })
 })

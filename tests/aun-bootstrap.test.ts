@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { bootstrap } from '../bin/aun/bootstrap'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { bootstrap, bootstrapInternal } from '../bin/aun/bootstrap'
 import type {
   BootstrapExecutionPorts,
   BootstrapStageContext,
@@ -33,11 +36,57 @@ function passingPorts(calls: string[] = []): BootstrapExecutionPorts {
     installAndStartDaemon: pass('B6', { ok: true, readinessPredicates: { daemon_started: true } }),
     runQueueSmoke: pass('B7', { ok: true, readinessPredicates: { enqueue_once: true, claim_at_most_once: true, terminal_once: true, external_effect_zero: true } }),
     readbackReady: pass('B8', { ok: true, readinessPredicates: { safe_d1_readback: true } }),
+    revalidateStage: async (_context, stage) => { calls.push(`R:${stage}`); return { ok: true } },
     rollbackMutation: pass('rollback', { ok: true }),
   }
 }
 
 describe('aun bootstrap B0-B8 state machine', () => {
+  test('genuine Wasurezu MCP protocol rejects missing/error/wrong-project/fabricated/timeout receipts', async () => {
+    const fixture = (mode: string) => `
+      const readline = require('node:readline');
+      const rl = readline.createInterface({ input: process.stdin });
+      if (${JSON.stringify(mode)} === 'fabricated') console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project expected recovered'}],isError:false}}));
+      rl.on('line', (line) => {
+        const m = JSON.parse(line); const mode = ${JSON.stringify(mode)};
+        if (mode === 'timeout') return;
+        if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fixture',version:'1'}}}));
+        if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:mode === 'missing' ? [] : [{name:'recover_context',inputSchema:{type:'object'}}]}}));
+        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:mode === 'wrong-project' ? 'Project other recovered' : 'Project expected recovered'}],isError:mode === 'error'}}));
+      });
+    `
+    for (const mode of ['missing', 'error', 'wrong-project', 'fabricated', 'timeout']) {
+      const context = {
+        runId: 'mcp-test', agentId: 'mcp-test', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+        repoRoot: process.cwd(), workspaceRoot: process.cwd(), repoHead: HEAD, dryRun: false,
+        env: { AUN_BOOTSTRAP_MCP_RECOVERY_TIMEOUT_MS: '50' }, priorState: {} as any,
+      } as const
+      await expect(bootstrapInternal.runStdioMcpRecovery({
+        command: process.execPath, args: ['-e', fixture(mode)], env: {}, tupleDigest: 'fixture',
+      }, 'expected', context as any)).rejects.toThrow()
+    }
+  }, 10_000)
+
+  test('timed-out child is SIGKILLed and cannot perform a later write before runner resolves', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'aun-bootstrap-timeout-'))
+    const latePath = join(root, 'late-write')
+    try {
+      const runner = bootstrapInternal.defaultCommandRunner()
+      const started = Date.now()
+      const result = await runner(process.execPath, ['-e', `
+        const fs = require('node:fs');
+        process.on('SIGTERM', () => {});
+        setTimeout(() => fs.writeFileSync(${JSON.stringify(latePath)}, 'late'), 6000);
+        setInterval(() => {}, 1000);
+      `], { cwd: root, env: { ...process.env } as Record<string, string>, timeoutMs: 50 })
+      expect(result.exitCode).toBe(124)
+      expect(Date.now() - started).toBeGreaterThanOrEqual(4_900)
+      expect(existsSync(latePath)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 10_000)
+
   test('auto runtime requires live identity and rejects provider conflict', () => {
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },
@@ -117,7 +166,36 @@ describe('aun bootstrap B0-B8 state machine', () => {
     ports.ensureMemoryReadiness = async () => { calls.push('B5'); return { ok: true } }
     const resumed = await bootstrap({ ...input, runtime: 'codex', resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
     expect(resumed.status).toBe('READY')
-    expect(calls).toEqual(['B0', 'B1', 'B5', 'B6', 'B7', 'B8'])
+    expect(calls).toEqual([
+      'B0', 'B1',
+      'R:B2_DB_MIGRATION', 'R:B3_AGENT_PROFILE', 'R:B4_MCP_REGISTRATION',
+      'B5', 'B6', 'B7', 'B8',
+    ])
+  })
+
+  test('resume digest fences database endpoint, AUN state root, workspace, and selected provider inputs', async () => {
+    const store = new MemoryBootstrapStateStore()
+    const ports = passingPorts()
+    ports.ensureMemoryReadiness = async () => ({ ok: false, reasonCodes: ['NO_GO_MEMORY_RECOVERY'] })
+    const base = {
+      agentId: 'resume-fence', runtime: 'codex' as const, home: '/tmp/resume-fence', repoRoot: process.cwd(),
+      workspaceRoot: '/tmp/workspace-a', env: { HOME: '/tmp/resume-fence', AUN_HOME: '/tmp/aun-a', DATABASE_URL: 'postgresql:///a' },
+    }
+    const first = await bootstrap(base, { stateStore: store, ports, run: fakeRun() })
+    expect(first.status).toBe('NO_GO')
+    for (const changed of [
+      { env: { ...base.env, DATABASE_URL: 'postgresql:///b' } },
+      { env: { ...base.env, AUN_HOME: '/tmp/aun-b' } },
+      { workspaceRoot: '/tmp/workspace-b' },
+    ]) {
+      const resumed = await bootstrap({ ...base, ...changed, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
+      expect(resumed.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
+    }
+    const stored = store.states.get(`resume-fence/${first.run_id}`)!
+    stored.mutations[0].actual_after_digest = 'tampered'
+    store.states.set(`resume-fence/${first.run_id}`, stored)
+    const mutationDrift = await bootstrap({ ...base, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
+    expect(mutationDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
   })
 
   test('rollback executes only recorded mutations in reverse order', async () => {

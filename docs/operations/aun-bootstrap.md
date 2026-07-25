@@ -48,19 +48,21 @@ aun status
 | Stage | Required proof |
 | --- | --- |
 | B0 lock and snapshot | One per-agent lock, exact repository head, redacted pre-state journal |
-| B1 dependency preflight | Bun, Node, Git, tmux, launchd, selected provider CLI, unambiguous live provider identity |
-| B2 database migration | Successful migration and successful identical rerun |
+| B1 dependency preflight | Read-only Bun, Node, Git, tmux, launchd, selected provider CLI, and unambiguous live provider identity checks; an absent SQLite database is not created |
+| B2 database migration | Successful migration, successful identical rerun, and a digest of the resulting SQLite artifact family or PostgreSQL schema |
 | B3 agent profile | Exact agent/runtime/workspace/tmux/port tuple and provider-native readback |
-| B4 MCP registration | `codex mcp add` or `claude mcp add`, followed by provider-native list readback |
-| B5 memory readiness | Current runtime receipt and current Wasurezu recovery-readiness evidence |
-| B6 ordinary daemon | Durable checkout, valid plist, one launchd daemon, matching runtime identity, safe D1 values |
-| B7 queue smoke | One no-effect row, one claim, one terminal result, no duplicate or external effect |
+| B4 MCP registration | `codex mcp add` or `claude mcp add`, followed by exact provider-native get/list tuple readback |
+| B5 memory readiness | Exact live runtime receipt plus a real MCP `initialize` → `tools/list` → Wasurezu `recover_context` call |
+| B6 ordinary daemon | Durable checkout, valid plist, one launchd daemon, ordinary receiver enabled, matching runtime identity, safe D1 values |
+| B7 queue smoke | Bootstrap enqueues/observes only; a separate OS process runs canonical `receive` → `processing` → `record-no-reply`, with one terminal result, one winner under same-row contention, and zero external effect |
 | B8 READY readback | Identity, MCP, memory, process, endpoint, queue progression, and safe-D1 evidence agree |
 
 The command emits `READY` only after B8. `IDEMPOTENT_READY` means an identical
 prior run was found and a fresh B8 readback passed without a new profile, MCP
 registration, daemon, migration, port lease, or smoke row. Any missing or
-stale proof returns an exact `NO_GO_*` code and a bounded resume command.
+stale proof returns an exact `NO_GO_*` code and a bounded resume command. A
+failed idempotent readback never falls through to B2–B7 and therefore cannot
+repeat setup mutations.
 
 ## Safe defaults
 
@@ -90,10 +92,32 @@ Conflicting Codex/Claude evidence returns `NO_GO_RUNTIME_AMBIGUOUS`; missing
 live identity returns `NO_GO_RUNTIME_UNDETECTED`.
 
 Codex configuration is changed only through `codex mcp add aun` and read back
-with `codex mcp list`. Claude configuration uses the existing `aun init`
+with both `codex mcp get aun --json` and `codex mcp list --json`. Claude configuration uses the existing `aun init`
 registration shape through `claude mcp add --scope user --transport stdio`
-and is read back with `claude mcp list`. The bootstrap journal stores hashes
+and is read back with strict `claude mcp get aun` and `claude mcp list`
+parsing. Name-only, malformed, disabled, disconnected, duplicate, wrong-scope,
+wrong-command, wrong-argument, wrong-agent, wrong-database, wrong-port, and
+wrong-repository entries are rejected without being overwritten. The bootstrap journal stores hashes
 and redacted identities, not provider configuration bodies or credentials.
+
+The selected provider's configured `wasurezu` stdio transport is also invoked
+directly. READY requires successful MCP initialization, discovery of the
+`recover_context` tool, and a non-error recovery response for the exact
+project. A prewritten or CLI-flag-only memory receipt is not sufficient.
+
+For PostgreSQL, the provider and daemon use the normalized `DATABASE_URL`.
+For SQLite, bootstrap records and passes the exact `AGENT_COM_DB=sqlite` and
+`AGENT_COM_SQLITE_PATH` tuple to both the provider and LaunchAgent. The queue
+smoke always uses that same database tuple.
+
+PostgreSQL rollback never drops a shared database or reverses shared schema
+migrations. It retains the captured endpoint/migration/schema ledger, expires
+or stops only exact run-owned rows, and reports the remaining schema boundary
+as `PARTIAL_ROLLBACK_NO_GO`. For SQLite, a pre-existing database is backed up
+with its realpath, device/inode, mode, byte digest, and post-state DB/WAL/SHM
+artifact digest. Restore is atomic and allowed only under those fences. A
+run-created SQLite database removes the exact DB, WAL, and SHM artifacts and
+verifies all three are absent.
 
 ## Journal, resume, and rollback
 
@@ -104,11 +128,25 @@ ${AUN_HOME:-~/.aun}/bootstrap/<agent_id>/<run_id>.json
 ```
 
 Directories are private and run files are mode `0600`. The journal records
-stage results and an append-only mutation manifest. Resume is accepted only
-when the agent, repository head, original requested runtime, safe defaults,
-and stage-input digest match. Rollback runs in reverse order and refuses
+stage results and a digest-fenced mutation manifest. Resume is accepted only
+when the agent, repository/workspace realpaths and head, provider, home/AUN
+state root, database endpoint, memory project, safe defaults, and mutation
+manifest match. Every passed stage is independently read back before it is
+skipped, including the database schema/artifact digest, exact provider tuple,
+runtime/memory receipt, daemon state, and queue terminal identity. Rollback
+runs in reverse order and refuses
 cross-run or unowned deletion. If any recorded rollback cannot be verified,
 the terminal status is `PARTIAL_ROLLBACK_NO_GO`, never success.
+
+Run-owned memory evidence is expired with a rollback reason rather than
+deleted, so its audit history remains available. Provider registration and
+LaunchAgent rollback both require native absence/unloaded readback before the
+mutation is marked verified.
+
+Timeouts are cancellation-aware. Bootstrap sends `SIGTERM`, waits at most five
+seconds, then sends `SIGKILL` if necessary and waits for confirmed process
+close before releasing the per-agent lock. A timed-out child therefore cannot
+continue mutating state after the command has reported completion.
 
 ## Operational boundary
 

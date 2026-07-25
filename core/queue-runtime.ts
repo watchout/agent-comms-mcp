@@ -48,7 +48,33 @@ export interface BootstrapQueueSmokeReport {
   duplicate_effect_count: number
   external_effect_count: number
   final_status: string | null
+  observer_pid: number
+  consumer_pids: number[]
+  claim_source: string
+  runtime_instance_id: string
   reason_codes: string[]
+}
+
+export interface BootstrapQueueSmokeConsumerEvidence {
+  pids: number[]
+  exit_codes: number[]
+  stdout_digests: string[]
+}
+
+export interface BootstrapQueueSmokeEnvelope {
+  run_id: string
+  queue_id: string
+  message_id: string
+  agent_id: string
+  runtime_instance_id: string
+  claim_source: string
+  observer_pid: number
+  created_at: string
+  effect_baseline: {
+    outbound: number
+    d1_invocations: number
+    d1_deliveries: number
+  }
 }
 
 type BootstrapSmokeDb = {
@@ -200,37 +226,20 @@ export async function buildQueueSmokeReadiness(
   }
 }
 
-/**
- * Deterministic no-effect queue smoke for `aun bootstrap`.
- *
- * It proves enqueue/claim/terminal semantics without asking an LLM to process
- * the row and without creating an outbound or protected effect. All three
- * writes run in one transaction, so an intermediate failure leaves no orphan
- * smoke row. A second claimant cannot win because the claim update is fenced
- * on `status = 'pending'`.
- */
-export async function runBootstrapQueueSmoke(
+/** Producer boundary for the bootstrap smoke. It may only enqueue. */
+export async function enqueueBootstrapQueueSmoke(
   db: BootstrapSmokeDb,
-  input: { agentId: string; runId: string; messageId: string; now?: Date },
-): Promise<BootstrapQueueSmokeReport> {
+  input: { agentId: string; runId: string; messageId: string; runtimeInstanceId: string; observerPid: number; now?: Date },
+): Promise<BootstrapQueueSmokeEnvelope> {
   const createdAt = (input.now ?? new Date()).toISOString()
-  const base: BootstrapQueueSmokeReport = {
-    ok: false,
-    run_id: input.runId,
-    queue_id: null,
-    message_id: input.messageId,
-    enqueue_count: 0,
-    claim_count: 0,
-    terminal_outcome_count: 0,
-    duplicate_effect_count: 0,
-    external_effect_count: 0,
-    final_status: null,
-    reason_codes: [],
+  const claimSource = `aun-bootstrap:${input.runId}:${input.runtimeInstanceId}`
+  const count = async (table: string) => Number((await db.query<{ n: string | number }>(`SELECT count(*) AS n FROM ${table}`))[0]?.n ?? 0)
+  const effectBaseline = {
+    outbound: await count('outbound_queue').catch(() => 0),
+    d1_invocations: await count('shirube_d1_invocations').catch(() => 0),
+    d1_deliveries: await count('shirube_d1_effect_deliveries').catch(() => 0),
   }
-
-  try {
-    return await db.transaction(async (tx) => {
-      const inserted = await tx.query<{ id: string | number }>(
+  const inserted = await db.transaction(async (tx) => tx.query<{ id: string | number }>(
         `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
          VALUES ($1, $2, $3, 'pending', 0, $4)
          RETURNING id`,
@@ -240,53 +249,149 @@ export async function runBootstrapQueueSmoke(
           JSON.stringify({
             schema_version: 'shirube-v3/aun-bootstrap-queue-smoke/v1',
             bootstrap_run_id: input.runId,
+            agent_id: input.agentId,
+            runtime_instance_id: input.runtimeInstanceId,
+            observer_pid: input.observerPid,
+            required_claim_source: claimSource,
             author_id: 'aun-bootstrap',
             message_type: 'report',
             content: 'Deterministic AUN bootstrap queue smoke. No external action is required.',
             next_action: 'none',
             protected_effect_allowed: false,
+            no_reply_required: true,
           }),
           createdAt,
         ],
-      )
-      const queueId = String(inserted[0]?.id ?? '')
-      if (!queueId) throw new Error('queue insert returned no id')
-      const claimed = await tx.execute(
-        `UPDATE message_queue
-            SET status = 'received', claimed_by = $1, claimed_at = $2,
-                claim_expires_at = $3, read_at = $2
-          WHERE id = $4 AND agent_id = $1 AND status = 'pending'`,
-        [input.agentId, createdAt, new Date(new Date(createdAt).getTime() + 30_000).toISOString(), queueId],
-      )
-      const terminal = await tx.execute(
-        `UPDATE message_queue
-            SET status = 'done', done_at = $1, claim_expires_at = NULL
-          WHERE id = $2 AND agent_id = $3 AND status = 'received' AND claimed_by = $3`,
-        [createdAt, queueId, input.agentId],
-      )
-      const rows = await tx.query<{ status: string }>(
-        `SELECT status FROM message_queue WHERE id = $1 AND agent_id = $2`,
-        [queueId, input.agentId],
-      )
-      const finalStatus = rows[0]?.status ?? null
-      const report: BootstrapQueueSmokeReport = {
-        ...base,
-        queue_id: queueId,
-        enqueue_count: 1,
-        claim_count: claimed.rowCount,
-        terminal_outcome_count: terminal.rowCount,
-        final_status: finalStatus,
-        ok: claimed.rowCount === 1 && terminal.rowCount === 1 && finalStatus === 'done',
-      }
-      if (claimed.rowCount > 1) report.reason_codes.push('NO_GO_DUPLICATE_CLAIM')
-      else if (claimed.rowCount !== 1) report.reason_codes.push('NO_GO_QUEUE_NO_PROGRESS')
-      if (terminal.rowCount !== 1 || finalStatus !== 'done') report.reason_codes.push('NO_GO_SMOKE_NOT_TERMINAL')
-      return report
-    })
-  } catch (err) {
-    return {
-      ...base,
-      reason_codes: [`NO_GO_QUEUE_ENQUEUE:${err instanceof Error ? err.message : String(err)}`],
-    }
+      ))
+  const queueId = String(inserted[0]?.id ?? '')
+  if (!queueId) throw new Error('queue insert returned no id')
+  return {
+    run_id: input.runId,
+    queue_id: queueId,
+    message_id: input.messageId,
+    agent_id: input.agentId,
+    runtime_instance_id: input.runtimeInstanceId,
+    claim_source: claimSource,
+    observer_pid: input.observerPid,
+    created_at: createdAt,
+    effect_baseline: effectBaseline,
   }
+}
+
+function parsePayload(value: unknown): Record<string, any> {
+  if (value && typeof value === 'object') return value as Record<string, any>
+  try { return JSON.parse(String(value ?? '{}')) } catch { return {} }
+}
+
+function timestampMs(value: unknown): number {
+  if (value instanceof Date) return value.getTime()
+  const text = String(value ?? '')
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text
+  return new Date(normalized).getTime()
+}
+
+/** Observer boundary. It performs no queue lifecycle transition. */
+export async function observeBootstrapQueueSmoke(
+  db: BootstrapSmokeDb,
+  envelope: BootstrapQueueSmokeEnvelope,
+  consumer: BootstrapQueueSmokeConsumerEvidence,
+): Promise<BootstrapQueueSmokeReport> {
+  const rows = await db.query<any>(
+    `SELECT id, message_id, payload, status, created_at, claimed_by, claimed_at,
+            claim_expires_at, done_at
+       FROM message_queue
+      WHERE id = $1 AND agent_id = $2 AND message_id = $3`,
+    [envelope.queue_id, envelope.agent_id, envelope.message_id],
+  )
+  const row = rows[0]
+  const payload = parsePayload(row?.payload)
+  const claimSource = String(payload?.receive_claim?.source ?? '')
+  const terminalBaton = payload?.terminal_baton
+  const duplicateRows = await db.query<{ n: string | number }>(
+    'SELECT count(*) AS n FROM message_queue WHERE agent_id = $1 AND message_id = $2',
+    [envelope.agent_id, envelope.message_id],
+  ).catch(() => [{ n: rows.length }])
+  const outboundRows = await db.query<{ n: string | number }>(
+    'SELECT count(*) AS n FROM outbound_queue WHERE message_id = $1',
+    [envelope.message_id],
+  ).catch(() => [{ n: 0 }])
+  const count = async (table: string) => Number((await db.query<{ n: string | number }>(`SELECT count(*) AS n FROM ${table}`))[0]?.n ?? 0)
+  const effectAfter = {
+    outbound: await count('outbound_queue').catch(() => envelope.effect_baseline.outbound),
+    d1_invocations: await count('shirube_d1_invocations').catch(() => envelope.effect_baseline.d1_invocations),
+    d1_deliveries: await count('shirube_d1_effect_deliveries').catch(() => envelope.effect_baseline.d1_deliveries),
+  }
+  const enqueueCount = Number(duplicateRows[0]?.n ?? 0)
+  const claimCount = row?.claimed_by === envelope.agent_id && row?.claimed_at ? 1 : 0
+  const terminalCount = row?.status === 'done' && row?.done_at && terminalBaton?.no_reply_required === true ? 1 : 0
+  const createdMs = timestampMs(row?.created_at ?? envelope.created_at)
+  const doneMs = timestampMs(terminalBaton?.set_at ?? row?.done_at)
+  const terminalWithinDeadline = Number.isFinite(createdMs) && Number.isFinite(doneMs)
+    && doneMs >= createdMs && doneMs - createdMs <= 30_000
+  const externalEffectCount = Number(outboundRows[0]?.n ?? 0)
+    + Math.max(0, effectAfter.outbound - envelope.effect_baseline.outbound)
+    + Math.max(0, effectAfter.d1_invocations - envelope.effect_baseline.d1_invocations)
+    + Math.max(0, effectAfter.d1_deliveries - envelope.effect_baseline.d1_deliveries)
+  const distinctConsumers = [...new Set(consumer.pids.filter((pid) => Number.isInteger(pid) && pid > 0))]
+  const consumerOk = consumer.exit_codes.length === 3
+    && consumer.exit_codes.every((code) => code === 0)
+    && distinctConsumers.length > 0
+    && !distinctConsumers.includes(envelope.observer_pid)
+  const identityOk = claimSource === envelope.claim_source
+    && payload?.bootstrap_run_id === envelope.run_id
+    && payload?.runtime_instance_id === envelope.runtime_instance_id
+    && payload?.agent_id === envelope.agent_id
+  const ok = enqueueCount === 1
+    && claimCount === 1
+    && terminalCount === 1
+    && terminalWithinDeadline
+    && externalEffectCount === 0
+    && consumerOk
+    && identityOk
+  const reasonCodes: string[] = []
+  if (enqueueCount !== 1) reasonCodes.push('NO_GO_QUEUE_ENQUEUE')
+  if (claimCount !== 1 || !consumerOk || !identityOk) reasonCodes.push('NO_GO_QUEUE_ORDINARY_RECEIVE_UNPROVEN')
+  if (terminalCount !== 1 || !terminalWithinDeadline) reasonCodes.push('NO_GO_SMOKE_NOT_TERMINAL')
+  if (externalEffectCount !== 0) reasonCodes.push('NO_GO_DUPLICATE_EFFECT')
+  return {
+    ok,
+    run_id: envelope.run_id,
+    queue_id: envelope.queue_id,
+    message_id: envelope.message_id,
+    enqueue_count: enqueueCount,
+    claim_count: claimCount,
+    terminal_outcome_count: terminalCount,
+    duplicate_effect_count: Math.max(0, enqueueCount - 1),
+    external_effect_count: externalEffectCount,
+    final_status: row?.status ?? null,
+    observer_pid: envelope.observer_pid,
+    consumer_pids: distinctConsumers,
+    claim_source: claimSource,
+    runtime_instance_id: envelope.runtime_instance_id,
+    reason_codes: reasonCodes,
+  }
+}
+
+/**
+ * Test/fixture composition of the separated producer, ordinary consumer, and
+ * observer boundaries. Production bootstrap opens a fresh DB connection for
+ * each boundary rather than calling this convenience wrapper.
+ */
+export async function runBootstrapQueueSmoke(
+  db: BootstrapSmokeDb,
+  input: {
+    agentId: string
+    runId: string
+    messageId: string
+    runtimeInstanceId: string
+    observerPid: number
+    consume: (envelope: BootstrapQueueSmokeEnvelope) => Promise<BootstrapQueueSmokeConsumerEvidence>
+    now?: Date
+  },
+): Promise<BootstrapQueueSmokeReport> {
+  const envelope = await enqueueBootstrapQueueSmoke(db, input)
+  const consumer = await input.consume(envelope)
+  return observeBootstrapQueueSmoke(db, envelope, consumer)
 }

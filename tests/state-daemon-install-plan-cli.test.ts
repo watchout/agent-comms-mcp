@@ -23,7 +23,7 @@ describe('state-daemon install-plan CLI dry-run', () => {
   test('bootstrap restore plan writes all four explicit safe defaults', () => {
     const result = Bun.spawnSync([
       'bun', 'scripts/state-daemon-launchagent.ts', 'restore', '--commit', COMMIT,
-      '--agent-allowlist', 'bootstrap-probe', '--disable-codex-runner', '--bootstrap-safe-defaults',
+      '--agent-allowlist', 'bootstrap-probe', '--bootstrap-safe-defaults', '--sqlite-path', '/tmp/bootstrap-probe.db',
     ], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
     expect(result.exitCode).toBe(0)
     const json = JSON.parse(result.stdout.toString())
@@ -34,8 +34,10 @@ describe('state-daemon install-plan CLI dry-run', () => {
       SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
       STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
       STATE_DAEMON_AGENT_ALLOWLIST: 'bootstrap-probe',
-      STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
+      AGENT_COM_DB: 'sqlite',
+      AGENT_COM_SQLITE_PATH: '/tmp/bootstrap-probe.db',
     })
+    expect(json.extraEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED).toBeUndefined()
   })
 
   test('emits a durable install plan without writing, loading, or restarting', () => {

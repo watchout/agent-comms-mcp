@@ -4,7 +4,7 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { readSettings, listBackups } from './lib/settings-patch'
 import { loadBaseline } from './lib/cli-signature-verify'
 
@@ -76,7 +76,10 @@ function homeFor(opts: StatusOptions): string {
 }
 
 export function status(opts: StatusOptions = {}): StatusReport {
-  const aunHome = join(homeFor(opts), '.aun')
+  const configuredAunHome = opts.env?.AUN_HOME?.trim()
+  const aunHome = configuredAunHome
+    ? resolve(configuredAunHome.replace(/^~(?=\/|$)/, homeFor(opts)))
+    : join(homeFor(opts), '.aun')
   const claudeSettingsPath = join(opts.claudeHome ?? join(homeFor(opts), '.claude'), 'settings.json')
   const summary: string[] = []
   const aunHomeExists = existsSync(aunHome)

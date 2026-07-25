@@ -129,6 +129,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
   }
 
   save(state: BootstrapRunState): void {
+    state.mutation_manifest_digest = bootstrapDigest(state.mutations)
     const path = this.runPath(state.agent_id, state.run_id)
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     const temp = `${path}.${process.pid}.tmp`
@@ -175,6 +176,7 @@ export class MemoryBootstrapStateStore implements BootstrapStateStore {
   }
 
   save(state: BootstrapRunState): void {
+    state.mutation_manifest_digest = bootstrapDigest(state.mutations)
     this.states.set(`${state.agent_id}/${state.run_id}`, structuredClone(redactBootstrapValue(state) as BootstrapRunState))
   }
 

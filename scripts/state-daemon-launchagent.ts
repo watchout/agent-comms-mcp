@@ -29,6 +29,7 @@ type ParsedArgs = {
   plist?: string
   bunPath?: string
   databaseUrl?: string
+  sqlitePath?: string
   keep?: number
   githubWorkPullerEnabled: boolean
   githubWorkRepos?: string
@@ -87,6 +88,7 @@ function usage(): string {
 Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha> [--execute] [--no-bootstrap]
     [--bootstrap-safe-defaults]
+    [--database-url <postgres-url> | --sqlite-path <sqlite-file>]
     [--github-work-puller-enabled --github-work-repos <owner/repo>
      --github-work-labels <canary:label>
      --github-work-owner-allowlist <agent>
@@ -143,6 +145,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--plist') args.plist = next()
     else if (arg === '--bun') args.bunPath = next()
     else if (arg === '--database-url') args.databaseUrl = next()
+    else if (arg === '--sqlite-path') args.sqlitePath = resolve(next())
     else if (arg === '--shirube-d1-env-json') Object.assign(args.extraEnv, parseShirubeD1RestoreEnv(next()))
     else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
     else if (arg === '--github-work-repos') args.githubWorkRepos = next()
@@ -306,6 +309,7 @@ function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
   const extraEnv = {
     ...args.extraEnv,
+    ...(args.sqlitePath ? { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: args.sqlitePath } : {}),
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
   }

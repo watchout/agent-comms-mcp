@@ -45,12 +45,14 @@ export type BootstrapReasonCode =
   | 'NO_GO_TUI_WEDGED'
   | 'NO_GO_QUEUE_ENQUEUE'
   | 'NO_GO_QUEUE_NO_PROGRESS'
+  | 'NO_GO_QUEUE_ORDINARY_RECEIVE_UNPROVEN'
   | 'NO_GO_DUPLICATE_CLAIM'
   | 'NO_GO_DUPLICATE_RUNNER'
   | 'NO_GO_SMOKE_NOT_TERMINAL'
   | 'NO_GO_READBACK_STALE'
   | 'NO_GO_READY_PREDICATE_FALSE'
   | 'NO_GO_STAGE_TIMEOUT'
+  | 'NO_GO_CHILD_EXIT_UNCONFIRMED'
   | 'NO_GO_RESUME_INPUT_MISMATCH'
   | 'NO_GO_RUN_NOT_FOUND'
   | 'NO_GO_ROLLBACK_UNVERIFIED'
@@ -59,6 +61,7 @@ export type BootstrapCommandResult = {
   exitCode: number
   stdout: string
   stderr: string
+  pid?: number
 }
 
 export type BootstrapMutation = {
@@ -71,6 +74,7 @@ export type BootstrapMutation = {
   actual_after_digest: string | null
   rollback_action: string
   rollback_status: 'not_run' | 'verified' | 'failed'
+  rollback_payload?: Record<string, unknown>
 }
 
 export type BootstrapStageRecord = {
@@ -98,6 +102,12 @@ export type BootstrapRunState = {
   terminal_status: BootstrapTerminalStatus | null
   stages: BootstrapStageRecord[]
   mutations: BootstrapMutation[]
+  mutation_manifest_digest: string
+  readback_bindings: {
+    source_run_id: string
+    runtime_instance_id: string | null
+    queue_id: string | null
+  } | null
   evidence_refs: string[]
   safe_D1_readback: BootstrapSafeD1Readback
 }
@@ -129,6 +139,7 @@ export type BootstrapStageContext = {
   dryRun: boolean
   env: Record<string, string>
   priorState: BootstrapRunState
+  abortSignal?: AbortSignal
 }
 
 export interface BootstrapExecutionPorts {
@@ -141,6 +152,7 @@ export interface BootstrapExecutionPorts {
   installAndStartDaemon(context: BootstrapStageContext): Promise<BootstrapStageOutcome>
   runQueueSmoke(context: BootstrapStageContext): Promise<BootstrapStageOutcome>
   readbackReady(context: BootstrapStageContext): Promise<BootstrapStageOutcome>
+  revalidateStage?(context: BootstrapStageContext, stage: BootstrapStage): Promise<BootstrapStageOutcome>
   rollbackMutation(context: BootstrapStageContext, mutation: BootstrapMutation): Promise<BootstrapStageOutcome>
 }
 

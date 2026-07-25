@@ -9,22 +9,42 @@ const context = {
   priorState: {} as any,
 } satisfies BootstrapStageContext
 
+const environment = {
+  AGENT_ID: 'codex-probe',
+  AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe',
+  DATABASE_URL: 'postgresql:///probe',
+  AGENT_COM_PG_NOTIFY: 'false',
+  AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
+  AUN_WEBHOOK_PORT: '8891',
+}
+
+function exactGet(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    name: 'aun', enabled: true,
+    transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
+    ...overrides,
+  })
+}
+
 describe('aun bootstrap Codex adapter', () => {
-  test('uses provider CLI registration and exact list readback', async () => {
+  test('uses provider CLI registration and exact get/list readback', async () => {
     const calls: Array<{ command: string; args: string[] }> = []
-    let listed = false
+    let added = false
     const adapter = createCodexBootstrapAdapter({
       bunPath: '/bin/bun', serverEntry: 'server.ts',
       run: async (command, args) => {
         calls.push({ command, args })
-        if (args.join(' ') === 'mcp list') return { exitCode: 0, stdout: listed ? 'aun enabled\n' : '', stderr: '' }
-        if (args.slice(0, 3).join(' ') === 'mcp add aun') { listed = true; return { exitCode: 0, stdout: 'added', stderr: '' } }
+        if (args.join(' ') === 'mcp get aun --json') return added
+          ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+          : { exitCode: 1, stdout: '', stderr: 'not found' }
+        if (args.join(' ') === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(added ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') { added = true; return { exitCode: 0, stdout: 'added', stderr: '' } }
         return { exitCode: 0, stdout: 'codex 1.0.0', stderr: '' }
       },
     })
     const result = await adapter.applyMcpRegistration(context)
     expect(result.ok).toBe(true)
-    expect(result.mutation?.owner_key).toBe('codex:aun:codex-probe')
+    expect(result.mutation?.owner_key).toBe('codex:aun:run-1')
     const add = calls.find((call) => call.args.slice(0, 3).join(' ') === 'mcp add aun')!
     expect(add.command).toBe('codex')
     expect(add.args).toContain('AGENT_ID=codex-probe')
@@ -32,13 +52,55 @@ describe('aun bootstrap Codex adapter', () => {
     expect(add.args.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/repo', 'server.ts'])
   })
 
-  test('existing registration is idempotent and creates no mutation', async () => {
+  test('exact existing registration is idempotent and creates no mutation', async () => {
     const adapter = createCodexBootstrapAdapter({
       bunPath: '/bin/bun', serverEntry: 'server.ts',
-      run: async () => ({ exitCode: 0, stdout: 'aun enabled\n', stderr: '' }),
+      run: async (_command, args) => args.includes('get')
+        ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+        : { exitCode: 0, stdout: JSON.stringify([{ name: 'aun', enabled: true }]), stderr: '' },
     })
     const result = await adapter.applyMcpRegistration(context)
     expect(result.ok).toBe(true)
     expect(result.mutation).toBeUndefined()
+  })
+
+  for (const [name, mutate] of [
+    ['disabled', (value: any) => ({ ...value, enabled: false })],
+    ['wrong-command', (value: any) => ({ ...value, transport: { ...value.transport, command: '/wrong/bun' } })],
+    ['wrong-argv', (value: any) => ({ ...value, transport: { ...value.transport, args: ['server.ts'] } })],
+    ['wrong-agent', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_ID: 'wrong' } } })],
+    ['wrong-database', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, DATABASE_URL: 'postgresql:///wrong' } } })],
+    ['wrong-port', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AUN_WEBHOOK_PORT: '1' } } })],
+    ['wrong-repo', (value: any) => ({ ...value, transport: { ...value.transport, args: ['run', '--cwd', '/wrong', 'server.ts'] } })],
+  ] as const) {
+    test(`rejects stale existing ${name} tuple without mutation`, async () => {
+      const base = JSON.parse(exactGet())
+      let addCalled = false
+      const adapter = createCodexBootstrapAdapter({
+        bunPath: '/bin/bun', serverEntry: 'server.ts',
+        run: async (_command, args) => {
+          if (args.slice(0, 3).join(' ') === 'mcp add aun') addCalled = true
+          if (args.includes('get')) return { exitCode: 0, stdout: JSON.stringify(mutate(base)), stderr: '' }
+          return { exitCode: 0, stdout: JSON.stringify([{ name: 'aun', enabled: true }]), stderr: '' }
+        },
+      })
+      const result = await adapter.applyMcpRegistration(context)
+      expect(result.ok).toBe(false)
+      expect(result.reasonCodes).toEqual(['NO_GO_PROVIDER_ADAPTER_MISMATCH'])
+      expect(addCalled).toBe(false)
+    })
+  }
+
+  test('failed or duplicate native list readback is never absence verification', async () => {
+    for (const list of [
+      { exitCode: 1, stdout: '', stderr: 'failed' },
+      { exitCode: 0, stdout: JSON.stringify([{ name: 'aun', enabled: true }, { name: 'aun', enabled: true }]), stderr: '' },
+    ]) {
+      const adapter = createCodexBootstrapAdapter({
+        bunPath: '/bin/bun', serverEntry: 'server.ts',
+        run: async (_command, args) => args.includes('get') ? { exitCode: 1, stdout: '', stderr: 'missing' } : list,
+      })
+      expect((await adapter.applyMcpRegistration(context)).ok).toBe(false)
+    }
   })
 })
