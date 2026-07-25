@@ -1,0 +1,536 @@
+schema_version: shirube-gate-contract-matrix/v1
+matrix_id: GCM-SHIRUBE-V3-RAPID-LITE-001
+status: draft_design_baseline
+mode: rapid-lite
+canonical_mode_name: rapid-lite
+deprecated_aliases:
+  - lapid
+parent_ssot: https://github.com/watchout/ai-dev-framework/issues/458
+source_standard_refs:
+  - docs/standards/shirube-ai-development-governance-standard-v1.md
+  - .shirube/repo-spec.yaml
+
+purpose: >
+  Define the first Rapid/Lite Gate Contract Matrix for Shirube V3. Rapid/Lite
+  is the lightweight goal-mode lane for fast implementation. It may collapse
+  Goal, minimal Spec, Cell, and Impl into one control handoff, but it must not
+  remove structural evidence, exact-head checks, diff-scope checks, owner
+  decision evidence, or audit admissibility when audit is used.
+
+principles:
+  - id: RL-PRINCIPLE-001
+    statement: Rapid/Lite collapses artifacts; it does not waive evidence.
+  - id: RL-PRINCIPLE-002
+    statement: Hard BLOCK is reserved for structural or durable-evidence failures that can be detected without semantic interpretation.
+  - id: RL-PRINCIPLE-003
+    statement: WARN is used for semantic quality, AC/TEST granularity, coverage depth, edge-case maturity, and recommended fields.
+  - id: RL-PRINCIPLE-004
+    statement: Protected, production, secret, branch-protection, ruleset, live-dispatch, and irreversible changes do not proceed in Rapid/Lite.
+  - id: RL-PRINCIPLE-005
+    statement: Legacy docs, comments, chat, and local overlays can be inputs but are never truth unless linked by a repo-local control handoff.
+
+artifact_policy:
+  control_handoff_may_collapse:
+    - goal_issue
+    - minimal_spec
+    - cell
+    - impl
+  collapsed_artifact_name: control_handoff
+  canonical_template: templates/shirube-control-handoff.rapid-lite.yaml
+  non_optional_invariants:
+    - mode
+    - profile
+    - framework_ref or framework_lock_ref
+    - repo_spec_ref or premise_ref
+    - owner_confirmation_ref or premise_confirmation_ref when RPS readiness confirmation is required
+    - rps_scope
+    - spec_review_state
+    - repo_local_issue
+    - control_handoff
+    - CELL-ID
+    - risk_class
+    - allowed_paths
+    - forbidden_paths
+    - stop_conditions
+    - PR_head_SHA
+    - changed_files
+    - validation_evidence
+    - owner_decision
+    - next_role
+    - exact_head_match
+
+severity_policy:
+  hard_block_definition: >
+    A finding is Hard BLOCK when it proves the runner cannot safely continue or
+    the owner cannot verify scope, head, evidence, or authority from durable
+    repo/GitHub facts.
+  warn_definition: >
+    A finding is WARN when the work may continue under owner review but quality,
+    granularity, or maturity should be improved before Standard or Enterprise
+    promotion.
+  hard_block_exit_policy:
+    report_only_pilot: exit_0_with_would_block_true
+    future_required_check: nonzero_only_after_owner_approved_graduation
+
+profiles:
+  hotel-lite:
+    inherits_mode: rapid-lite
+    purpose: Lightweight first-use profile for hotel repository pilots.
+    allowed_cell_types:
+      - docs_only
+      - scaffold
+      - code_lite
+    warning_cell_types:
+      - integration_lite
+    forbidden_cell_types:
+      - protected_stop
+    hard_forbidden_surfaces:
+      - auth_or_permission_change
+      - DB_migration_or_destructive_data_change
+      - production_or_deploy_change
+      - branch_protection_or_ruleset_change
+      - required_check_activation
+      - secret_read_or_write
+      - external_repository_mutation
+      - live_AUN_Discord_queue_DB_LaunchAgent_dispatch
+      - irreversible_customer_impacting_operation
+    default_owner_role: repo_owner
+    default_next_role: implementation
+    required_owner_decision_for_merge: true
+
+cell_types:
+  docs_only:
+    description: Documentation, design, issue text, or non-behavioral markdown updates.
+    required_evidence:
+      - repo_local_issue
+      - control_handoff
+      - CELL-ID
+      - allowed_paths
+      - forbidden_paths
+      - changed_files
+      - PR_head_SHA
+      - validation_evidence
+      - owner_decision
+    default_warnings:
+      - docs_expression_quality
+      - recommended_fields_missing
+  scaffold:
+    description: Templates, schemas, fixtures, or repo-local governance scaffold without runtime activation.
+    required_evidence:
+      - repo_local_issue
+      - control_handoff
+      - CELL-ID
+      - allowed_paths
+      - forbidden_paths
+      - changed_files
+      - PR_head_SHA
+      - validation_evidence
+      - owner_decision
+      - parse_or_schema_review
+    default_warnings:
+      - schema_validator_not_yet_executable
+      - coverage_quality_low
+  code_lite:
+    description: Small non-protected code or config change with no external write and no public contract break.
+    required_evidence:
+      - repo_local_issue
+      - control_handoff
+      - CELL-ID
+      - allowed_paths
+      - forbidden_paths
+      - changed_files
+      - PR_head_SHA
+      - validation_commands
+      - validation_results
+      - owner_decision
+      - no_forbidden_surface_confirmation
+    default_warnings:
+      - AC_TEST_granularity_low
+      - semantic_edge_case_review_needed
+  integration_lite:
+    description: Narrow integration touch with no protected surface and no external mutation during the Cell.
+    required_evidence:
+      - repo_local_issue
+      - control_handoff
+      - CELL-ID
+      - allowed_paths
+      - forbidden_paths
+      - changed_files
+      - PR_head_SHA
+      - validation_commands
+      - validation_results
+      - owner_decision
+      - integration_NA_or_smoke_evidence
+    default_warnings:
+      - integration_coverage_quality_low
+      - semantic_edge_case_review_needed
+    escalation_conditions:
+      - external_write_required
+      - user_data_boundary_changed
+      - public_contract_changed
+      - auth_permission_or_secret_touched
+  protected_stop:
+    description: Any protected, production, irreversible, secret, enforcement, branch-protection, or live-operation surface.
+    rapid_lite_allowed: false
+    hard_block_code: protected_surface_requires_standard_or_enterprise
+
+stage_contracts:
+  bootstrap:
+    purpose: Establish framework source/ref and Rapid/Lite profile before any implementation.
+    hard_blocks:
+      - item_id: RL-BOOT-001
+        code: missing_framework_lock
+        reason: Framework lock or handoff framework/matrix reference is missing.
+      - item_id: RL-BOOT-002
+        code: missing_mode_or_profile
+        reason: mode/profile must be rapid-lite / hotel-lite in the first implementation.
+    warnings:
+      - item_id: RL-BOOT-003
+        code: framework_ref_unpinned
+        reason: framework_ref is symbolic and should be pinned before enforcement.
+
+  rps:
+    purpose: Ensure Repository Premise Spec exists and is confirmed before Rapid/Lite execution.
+    hard_blocks:
+      - item_id: RL-RPS-001
+        code: missing_premise_ssot
+        reason: RPS / Repository Premise Spec or handoff premise reference is missing.
+      - item_id: RL-RPS-002
+        code: missing_premise_owner_confirmation
+        reason: RPS owner confirmation is missing when required.
+      - item_id: RL-RPS-003
+        code: rps_scope_missing
+        reason: RPS or handoff does not state what Shirube owns and does not own for the repo.
+      - item_id: RL-RPS-004
+        code: legacy_source_as_truth
+        reason: Legacy/external docs are treated as authority without current repo-local RPS/control reference.
+
+  minimal_spec_handoff:
+    purpose: Ensure collapsed Rapid/Lite handoff still contains the minimal spec boundary.
+    hard_blocks:
+      - item_id: RL-SPEC-004
+        code: missing_minimal_spec_boundary
+        reason: goal, non_scope, risk_class, cell_type, paths, or validation plan is missing.
+      - item_id: RL-SPEC-005
+        code: missing_spec_review_state
+        reason: handoff does not state whether it is ready for implementation and who owns the next role.
+
+  goal_issue:
+    purpose: Establish the durable control entry point before goal-mode work.
+    required_evidence:
+      - repo_local_issue
+      - control_handoff
+      - owner
+      - next_role
+    hard_blocks:
+      - item_id: RL-GOAL-001
+        code: missing_control_handoff
+        reason: No durable control handoff exists for the requested goal.
+      - item_id: RL-GOAL-002
+        code: missing_repo_local_issue
+        reason: Work is not anchored to a repo-local GitHub issue or PR.
+      - item_id: RL-GOAL-003
+        code: legacy_as_truth
+        reason: Legacy docs, chat, or external overlay is treated as truth without repo-local handoff.
+      - item_id: RL-GOAL-004
+        code: missing_owner_or_next_role
+        reason: Owner or next responsible role is missing.
+    warnings:
+      - item_id: RL-GOAL-W001
+        code: ambiguous_goal
+        reason: Goal can proceed only with owner review because wording is not fully precise.
+      - item_id: RL-GOAL-W002
+        code: risk_class_defaulted
+        reason: Risk class was inferred or defaulted instead of explicitly declared.
+
+  spec:
+    purpose: Keep a minimal, testable design boundary even when Spec is collapsed into the handoff.
+    hard_blocks:
+      - item_id: RL-SPEC-001
+        code: missing_goal_statement
+        reason: Control handoff lacks a goal statement.
+      - item_id: RL-SPEC-002
+        code: missing_non_scope
+        reason: Control handoff lacks non-scope or forbidden behavior.
+      - item_id: RL-SPEC-003
+        code: protected_surface_in_rapid_lite
+        reason: Spec scope includes protected work that cannot proceed in Rapid/Lite.
+    warnings:
+      - item_id: RL-SPEC-W001
+        code: AC_TEST_granularity_low
+        reason: Acceptance or test expectations exist but are not granular.
+      - item_id: RL-SPEC-W002
+        code: semantic_edge_case_review_needed
+        reason: Edge cases require semantic review but do not prove structural drift.
+      - item_id: RL-SPEC-W003
+        code: recommended_fields_missing
+        reason: Recommended spec fields are missing but hard invariants are present.
+
+  cell:
+    purpose: Freeze the goal-mode execution boundary.
+    required_evidence:
+      - CELL-ID
+      - risk_class
+      - allowed_paths
+      - forbidden_paths
+      - stop_conditions
+    hard_blocks:
+      - item_id: RL-CELL-001
+        code: missing_cell_id
+        reason: CELL-ID is absent.
+      - item_id: RL-CELL-002
+        code: missing_allowed_paths
+        reason: allowed_paths is absent or empty.
+      - item_id: RL-CELL-003
+        code: missing_forbidden_paths
+        reason: forbidden_paths is absent or empty.
+      - item_id: RL-CELL-004
+        code: missing_stop_conditions
+        reason: stop_conditions is absent or empty.
+      - item_id: RL-CELL-005
+        code: unauthorized_next_cell
+        reason: Requested continuation is not authorized by the current control handoff.
+      - item_id: RL-CELL-006
+        code: protected_surface_requires_standard_or_enterprise
+        reason: Cell touches a protected surface that Rapid/Lite must not execute.
+    warnings:
+      - item_id: RL-CELL-W001
+        code: cell_size_large
+        reason: Cell may be too large for fast review but remains structurally bounded.
+      - item_id: RL-CELL-W002
+        code: cell_type_inferred
+        reason: Cell type was inferred instead of explicitly declared.
+
+  impl:
+    purpose: State how the bounded Cell will be changed and validated.
+    hard_blocks:
+      - item_id: RL-IMPL-001
+        code: missing_impl_boundary
+        reason: Implementation approach or changed-area boundary is absent.
+      - item_id: RL-IMPL-002
+        code: missing_validation_plan
+        reason: Required validation commands or evidence plan is absent.
+      - item_id: RL-IMPL-003
+        code: forbidden_operation_requested
+        reason: Impl asks the runner to merge, approve, mutate protected settings, or perform live operations.
+    warnings:
+      - item_id: RL-IMPL-W001
+        code: implementation_detail_low
+        reason: Implementation detail is thin but still bounded by paths and evidence.
+      - item_id: RL-IMPL-W002
+        code: rollback_or_revert_light
+        reason: Revert path exists only as normal PR revert or manual owner decision.
+
+  pr_diff:
+    purpose: Compare actual PR files with the Cell boundary and exact head.
+    required_evidence:
+      - PR_head_SHA
+      - changed_files
+      - cell_allowed_paths
+      - cell_forbidden_paths
+    hard_blocks:
+      - item_id: RL-PR-001
+        code: missing_pr_head_sha
+        reason: PR head SHA is missing.
+      - item_id: RL-PR-002
+        code: changed_files_outside_allowed_paths
+        reason: Changed file is outside the declared allowed_paths.
+      - item_id: RL-PR-003
+        code: forbidden_paths_touched
+        reason: Changed file matches forbidden_paths.
+      - item_id: RL-PR-004
+        code: head_mismatch
+        reason: Gate, audit, or owner decision was recorded for a different head.
+      - item_id: RL-PR-005
+        code: scope_drift
+        reason: PR diff includes a hidden behavior or artifact class outside the Cell.
+    warnings:
+      - item_id: RL-PR-W001
+        code: PR_size_large
+        reason: PR size may slow review but is not yet out of scope.
+      - item_id: RL-PR-W002
+        code: generated_or_bulk_diff_needs_sampling
+        reason: Generated or bulk diff needs review sampling.
+
+  evidence:
+    purpose: Ensure validation evidence is durable and not placeholder prose.
+    required_evidence:
+      - validation_commands
+      - validation_results
+      - exact_head
+    hard_blocks:
+      - item_id: RL-EVID-001
+        code: missing_validation_evidence
+        reason: No validation command result or durable check evidence is recorded.
+      - item_id: RL-EVID-002
+        code: placeholder_evidence
+        reason: Evidence contains placeholder, pending, TBD, or non-durable text.
+      - item_id: RL-EVID-003
+        code: stale_evidence
+        reason: Evidence does not match the current PR head.
+      - item_id: RL-EVID-004
+        code: failed_required_validation_without_owner_decision
+        reason: A required validation failed without owner decision, waiver, or explicit follow-up.
+    warnings:
+      - item_id: RL-EVID-W001
+        code: weak_test_coverage
+        reason: Tests exist but coverage depth is weak for Standard promotion.
+      - item_id: RL-EVID-W002
+        code: manual_evidence_only
+        reason: Evidence is durable but manual; executable gate can be added later.
+
+  trace:
+    purpose: Prevent unauthorized continuation and SSOT drift.
+    hard_blocks:
+      - item_id: RL-TRACE-001
+        code: cell_not_linked_to_handoff
+        reason: CELL-ID is not linked to the control handoff.
+      - item_id: RL-TRACE-002
+        code: unauthorized_next_cell
+        reason: Next Cell is not authorized by the handoff or owner decision.
+      - item_id: RL-TRACE-003
+        code: legacy_as_truth
+        reason: Legacy source is treated as canonical without current repo-local confirmation.
+    warnings:
+      - item_id: RL-TRACE-W001
+        code: trace_matrix_granularity_low
+        reason: Trace exists but does not yet provide Standard-level REQ/AC/TEST granularity.
+
+  semantic_audit:
+    purpose: Bound LLM review to fixed item IDs while keeping Rapid/Lite lightweight.
+    required_when:
+      - owner_requests_audit
+      - cell_type_is_code_lite
+      - cell_type_is_integration_lite
+      - warning_requires_semantic_review
+    hard_blocks:
+      - item_id: RL-AUDIT-001
+        code: audit_claim_without_record
+        reason: PR claims audit was performed but no durable audit record exists.
+      - item_id: RL-AUDIT-002
+        code: audit_fail_without_owner_decision
+        reason: Audit FAIL exists and no owner decision, waiver, or rework is recorded.
+    warnings:
+      - item_id: RL-AUDIT-W001
+        code: semantic_edge_case_review_needed
+        reason: Semantic edge cases are not fully addressed.
+      - item_id: RL-AUDIT-W002
+        code: coverage_quality_low
+        reason: Coverage quality is below Standard baseline but not structurally unsafe.
+
+  audit_bridge:
+    purpose: If an audit record is used as gate material, B3 must judge it admissible.
+    applies_when: audit_record_present_or_required
+    hard_blocks:
+      - item_id: RL-B3-001
+        code: missing_required_item
+        reason: Required audit item was not answered.
+      - item_id: RL-B3-002
+        code: duplicate_item
+        reason: Audit item was answered more than once.
+      - item_id: RL-B3-003
+        code: extra_item
+        reason: Audit item is not declared by the item set.
+      - item_id: RL-B3-004
+        code: fail_without_durable_evidence
+        reason: FAIL item lacks durable evidence_ref.
+      - item_id: RL-B3-005
+        code: unverified_item
+        reason: UNVERIFIED item is not admissible for Rapid/Lite gate material.
+      - item_id: RL-B3-006
+        code: maker_checker_violation
+        reason: Reviewer actor/model matches implementation actor/model where separation is required.
+      - item_id: RL-B3-007
+        code: audit_head_mismatch
+        reason: Audit target_head does not match PR head.
+    warnings: []
+
+  owner_merge:
+    purpose: Keep final merge decision tied to exact head and owner authority.
+    hard_blocks:
+      - item_id: RL-MERGE-001
+        code: owner_decision_missing
+        reason: Owner decision for merge or continue is missing.
+      - item_id: RL-MERGE-002
+        code: merge_head_mismatch
+        reason: Merge target is not the exact head that passed checks.
+      - item_id: RL-MERGE-003
+        code: hard_block_unresolved
+        reason: A Rapid/Lite Hard BLOCK remains unresolved.
+    warnings:
+      - item_id: RL-MERGE-W001
+        code: warnings_unacknowledged
+        reason: WARN findings exist and should be acknowledged by owner.
+
+  post_merge:
+    purpose: Prevent done claims without durable post-merge evidence.
+    hard_blocks:
+      - item_id: RL-POST-001
+        code: missing_merge_commit
+        reason: Merge commit was not recorded.
+      - item_id: RL-POST-002
+        code: missing_merged_at
+        reason: merged_at timestamp was not recorded.
+      - item_id: RL-POST-003
+        code: missing_post_merge_smoke_or_NA
+        reason: Post-merge smoke or explicit N/A evidence is missing.
+      - item_id: RL-POST-004
+        code: unresolved_follow_up_blocker
+        reason: Follow-up blocker remains while work claims done.
+    warnings:
+      - item_id: RL-POST-W001
+        code: next_step_weak
+        reason: Next step exists but is not specific enough for Standard/Enterprise continuation.
+
+rapid_lite_audit_item_namespace:
+  schema_note: >
+    These item IDs are contract items for Rapid/Lite. A later Cell may emit
+    `shirube-audit/v1` audit_item_set artifacts from this namespace. This file
+    does not replace `shirube-audit/v1` and does not introduce a competing B3
+    schema.
+  required_hard_item_prefixes:
+    - RL-BOOT-
+    - RL-RPS-
+    - RL-GOAL-
+    - RL-SPEC-
+    - RL-CELL-
+    - RL-IMPL-
+    - RL-PR-
+    - RL-EVID-
+    - RL-TRACE-
+    - RL-AUDIT-
+    - RL-B3-
+    - RL-MERGE-
+    - RL-POST-
+  warning_item_prefixes:
+    - RL-GOAL-W
+    - RL-SPEC-W
+    - RL-CELL-W
+    - RL-IMPL-W
+    - RL-PR-W
+    - RL-EVID-W
+    - RL-TRACE-W
+    - RL-AUDIT-W
+    - RL-MERGE-W
+    - RL-POST-W
+
+mode_escalation:
+  rapid_lite_to_standard_when:
+    - public_contract_changed
+    - integration_lite_warning_not_owner_accepted
+    - repeated_weak_test_coverage
+    - semantic_audit_FAIL_without_small_rework
+    - REQ_AC_TEST_trace_required_by_owner
+  rapid_lite_to_enterprise_when:
+    - protected_surface_touched
+    - production_or_deploy_touched
+    - branch_protection_ruleset_or_required_check_touched
+    - secret_or_customer_data_boundary_touched
+    - cross_repo_authority_or_external_mutation_required
+    - live_AUN_or_agent_dispatch_required
+
+non_scope:
+  - This matrix does not enforce checks by itself.
+  - This matrix does not change GitHub workflow behavior.
+  - This matrix does not authorize Rapid/Lite use for protected surfaces.
+  - This matrix does not finalize Standard or Enterprise baselines.
