@@ -16,189 +16,145 @@ permissions:
   pull-requests: write
   issues: write
 
+env:
+  NODE_VERSION: "20"
+  RESULT_DIR: .shirube-rapid-lite
+
 jobs:
-  collect-shirube-pr-inputs:
-    name: Collect Shirube PR inputs
+  shirube-rapid-lite-gates-report:
+    name: Shirube Rapid/Lite Gates Report
     runs-on: ubuntu-latest
-    outputs:
-      structured_audit_comment_ref: ${{ steps.refs.outputs.structured_audit_comment_ref }}
-      additional_review_ref: ${{ steps.refs.outputs.additional_review_ref }}
-      additional_review_comment_ref: ${{ steps.refs.outputs.additional_review_comment_ref }}
-      handoff_ref: ${{ steps.refs.outputs.handoff_ref }}
-      audit_checklist_ref: ${{ steps.refs.outputs.audit_checklist_ref }}
-      audit_machine_evidence_ref: ${{ steps.refs.outputs.audit_machine_evidence_ref }}
-      route_cell_id: ${{ steps.refs.outputs.route_cell_id }}
     steps:
-      - name: Extract comment-backed audit ref
-        id: refs
+      - name: Checkout target head
+        uses: actions/checkout@v4
+        with:
+          path: target
+          fetch-depth: 0
+
+      - name: Checkout trusted base runtime
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 1
+          sparse-checkout: .shirube/runtime/rapid-lite
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Verify trusted runtime bundle
+        run: |
+          node <<'NODE'
+          const crypto = require("crypto");
+          const fs = require("fs");
+          const path = require("path");
+          const root = "trusted/.shirube/runtime/rapid-lite";
+          try {
+            const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+            const entries = Object.entries(manifest.files || {});
+            if (manifest.schema_version !== "shirube-runtime-manifest/v1" || entries.length === 0) {
+              throw new Error("runtime manifest schema or inventory is invalid");
+            }
+            for (const [file, expected] of entries) {
+              if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) {
+                throw new Error(`invalid digest: ${file}`);
+              }
+              if (!file || file === "manifest.json" || file.includes("\\") || path.posix.isAbsolute(file) || path.posix.normalize(file) !== file || file.split("/").some((part) => !part || part === "." || part === "..")) {
+                throw new Error(`unsafe runtime path: ${file}`);
+              }
+            }
+            const actualFiles = [];
+            const walk = (directory, prefix = "") => {
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+                const absolute = path.join(directory, entry.name);
+                if (entry.isSymbolicLink()) throw new Error(`runtime symlink is forbidden: ${relative}`);
+                if (entry.isDirectory()) walk(absolute, relative);
+                else if (entry.isFile()) actualFiles.push(relative);
+                else throw new Error(`unsupported runtime entry: ${relative}`);
+              }
+            };
+            walk(root);
+            const expectedFiles = entries.map(([file]) => file).sort();
+            const observedFiles = actualFiles.filter((file) => file !== "manifest.json").sort();
+            if (JSON.stringify(observedFiles) !== JSON.stringify(expectedFiles)) {
+              throw new Error("runtime manifest inventory mismatch");
+            }
+            for (const [file, expected] of entries) {
+              const actual = crypto.createHash("sha256").update(fs.readFileSync(path.join(root, file))).digest("hex");
+              if (actual !== expected) throw new Error(`digest mismatch: ${file}`);
+            }
+            console.log(JSON.stringify({ result: "EVALUATOR_READY", version: manifest.version, files: entries.length }));
+          } catch (error) {
+            console.error(JSON.stringify({ result: "EVALUATOR_UNAVAILABLE", error: error.message }));
+            process.exit(2);
+          }
+          NODE
+
+      - name: Run trusted Rapid/Lite report
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node trusted/.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs \
+            --target-dir target \
+            --result-dir "$RESULT_DIR"
+          cat "target/$RESULT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "target/$RESULT_DIR/aggregate.json"
+
+      - name: Upsert PR comment
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- shirube-rapid-lite-gates-report/v1 -->";
+            const summary = "target/.shirube-rapid-lite/summary.md";
+            const body = fs.existsSync(summary)
+              ? fs.readFileSync(summary, "utf8")
+              : `${marker}\n\n## Shirube Rapid/Lite Gates Report\n\nRuntime was unavailable before summary creation.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const previous = comments.find((comment) => comment.user?.type === "Bot" && comment.body?.includes(marker));
+            if (previous) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Upload Rapid/Lite gate JSON artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shirube-rapid-lite-gates-${{ github.event.pull_request.number }}
+          path: target/${{ env.RESULT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Enforce flow-safety activation
+        if: always()
         run: |
           node <<'NODE'
           const fs = require("fs");
-          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-          const body = event.pull_request?.body || "";
-          function refFromBody(keys) {
-            for (const key of keys) {
-              const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-              const pattern = new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?(?:${escaped})\\s*:\\s*([^\\n]+?)\\s*(?=\\n|$)`, "i");
-              const value = body.match(pattern)?.[1]?.trim().replace(/^["'`]|["'`]$/g, "");
-              if (value && value !== "null") return value.split(/\s+/)[0];
-            }
-            return "";
+          const reportPath = `target/${process.env.RESULT_DIR}/aggregate.json`;
+          if (!fs.existsSync(reportPath)) throw new Error("EVALUATOR_UNAVAILABLE: missing Rapid/Lite aggregate");
+          const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+          const gate = report.gates?.find((entry) => entry.gate === "flow-safety");
+          if (!gate) throw new Error("Missing flow-safety gate record.");
+          if (gate.status === "ran" && gate.verdict !== "PASS") {
+            throw new Error(`Flow-safety must PASS before audit handoff: ${gate.verdict}.`);
           }
-          function supportedCommentRef(value) {
-            return (
-            /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:pull|issues)\/\d+#issuecomment-\d+$/.test(value) ||
-            /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value) ||
-            /^github-comment:\/\/[^/]+\/[^/]+\/(?:pull|issues)\/\d+#issuecomment-\d+$/.test(value) ||
-            /^github-comment:\/\/[^/]+\/[^/]+\/issues\/comments\/\d+$/.test(value)
-            );
-          }
-          function supportedCommentRefList(value) {
-            if (!value) return false;
-            return value.split(",").map((entry) => entry.trim()).every(supportedCommentRef);
-          }
-          function localRef(value) {
-            if (!value || /^https?:\/\//i.test(value) || /^github-comment:\/\//i.test(value)) return "";
-            return value;
-          }
-          const structuredAuditCommentRef = refFromBody(["structured_audit_comment_ref", "structured_audit_comment", "structured-audit-comment"]);
-          const additionalReviewRef = refFromBody(["additional_review_ref", "additional_review", "additional-review", "protected_review_ref", "protected_review"]);
-          const additionalReviewCommentRef = refFromBody(["additional_review_comment_ref", "additional_review_comment", "additional-review-comment", "protected_review_comment_ref", "protected_review_comment"]);
-          const defaultRoute = {
-            cellId: "CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001",
-            handoffRef: ".shirube/control-handoffs/CH-001.yaml",
-            auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
-            auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001.yaml",
-          };
-          const primaryCellId = body.match(/(?:^|\n)\s*CELL-ID\s*:\s*([^\s`'"]+)/i)?.[1]?.trim() || "";
-          const implementationRoutes = [
-            {
-              cellId: "CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-SYNTHETIC-CLAIM-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-LIVE-KODAMA-CANARY-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-MEDIATED-FINALIZATION-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-RUNTIME-V2-POLICY-ALLOWLIST-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-CP80-PROJECTION-CREDENTIAL-CONTRACT-DIAGNOSTIC-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-CP80-PROJECTION-CREDENTIAL-CONTRACT-DIAGNOSTIC-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-PROJECTION-CREDENTIAL-CONTRACT-DIAGNOSTIC-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-PROJECTION-CREDENTIAL-CONTRACT-DIAGNOSTIC-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-CONNECTOR-CREDENTIAL-DIAGNOSTIC-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-CONNECTOR-CREDENTIAL-DIAGNOSTIC-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-CREDENTIAL-DIAGNOSTIC-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-CREDENTIAL-DIAGNOSTIC-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-PROVIDER-IDENTITY-VERIFY-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-CONNECTOR-CHANNEL-ACCESS-DISCOVERY-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-CONNECTOR-CHANNEL-ACCESS-DISCOVERY-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-CHANNEL-ACCESS-DISCOVERY-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-CHANNEL-ACCESS-DISCOVERY-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CONNECTOR-UI-BINDINGS-MATERIALIZER-001.yaml",
-            },
-            {
-              cellId: "SUITE-LEAD-OPERATING-PROTOCOL-001",
-              handoffRef: ".shirube/control-handoffs/CH-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-SUITE-LEAD-OPERATING-PROTOCOL-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-V2-CUTOVER-M4-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M4-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M4-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-CUTOVER-M4-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-V2-CUTOVER-M3-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-V2-CUTOVER-M3-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-V2-CUTOVER-M3-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-V2-CUTOVER-M3-001.yaml",
-            },
-            {
-              cellId: "CELL-MCP-AUN-CP80-FLEET-MODE-001",
-              handoffRef: ".shirube/control-handoffs/CH-AUN-CP80-FLEET-MODE-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-MCP-AUN-CP80-FLEET-MODE-001.yaml",
-            },
-            {
-              cellId: "CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001",
-              handoffRef: ".shirube/control-handoffs/CH-DEV001-ISSUE881-AUN-CLAIM-LEASE-20260720-001.yaml",
-              auditChecklistRef: ".shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml",
-              auditMachineEvidenceRef: ".shirube/evidence/EVIDENCE-CELL-AUN-CLAIM-LEASE-INCIDENT-20260720-001.yaml",
-            },
-          ];
-          const route = implementationRoutes.find((candidate) => primaryCellId === candidate.cellId) || defaultRoute;
-
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `structured_audit_comment_ref=${supportedCommentRef(structuredAuditCommentRef) ? structuredAuditCommentRef : ""}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `additional_review_ref=${localRef(additionalReviewRef)}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `additional_review_comment_ref=${supportedCommentRefList(additionalReviewCommentRef) ? additionalReviewCommentRef : ""}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `handoff_ref=${route.handoffRef}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `audit_checklist_ref=${route.auditChecklistRef}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `audit_machine_evidence_ref=${route.auditMachineEvidenceRef}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `route_cell_id=${route.cellId}\n`);
+          console.log(`Flow-safety activation: ${gate.status}/${gate.verdict}`);
           NODE
 
-  shirube-rapid-lite-gates-report:
-    name: Shirube Rapid/Lite Gates Report
-    needs: collect-shirube-pr-inputs
-    uses: "watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b"
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-    with:
-      framework_ref: "watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b"
-      profile: hotel-lite
-      report_only: true
-      pr_body: "${{ github.event.pull_request.body || '' }}"
-      changed_files: ""
-      execution_context_ref: .shirube/execution-context.yaml
-      adoption_plan_ref: .shirube/adoption-intake.yaml
-      lifecycle_state_ref: .shirube/lifecycle-state.yaml
-      handoff_ref: ${{ needs.collect-shirube-pr-inputs.outputs.handoff_ref }}
-      validation_evidence_ref: ""
-      owner_decision_ref: ""
-      enforcement_policy_ref: .shirube/enforcement-policy.yaml
-      audit_checklist_ref: ${{ needs.collect-shirube-pr-inputs.outputs.audit_checklist_ref }}
-      generate_current_run_audit_request: true
-      structured_audit_ref: ""
-      structured_audit_comment_ref: ${{ needs.collect-shirube-pr-inputs.outputs.structured_audit_comment_ref }}
-      additional_review_ref: ${{ needs.collect-shirube-pr-inputs.outputs.additional_review_ref }}
-      additional_review_comment_ref: ${{ needs.collect-shirube-pr-inputs.outputs.additional_review_comment_ref }}
-      audit_machine_evidence_ref: ${{ needs.collect-shirube-pr-inputs.outputs.audit_machine_evidence_ref }}
+      - name: Report-only completion
+        if: always()
+        run: |
+          echo "Rapid/Lite gates other than flow-safety remain report-only."
+          echo "Required-check and branch-protection settings are unchanged."

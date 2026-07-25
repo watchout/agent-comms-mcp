@@ -1,0 +1,181 @@
+schema_version: shirube-design-rule-pack/v1
+rule_pack_id: DESIGN-RULE-PACK-SHIRUBE-DEFAULT-001
+mode: rapid-lite
+profile: hotel-lite
+status: draft_report_only
+rules:
+  - rule_id: DR-LLM-001
+    code: llm_must_not_be_final_decider
+    severity: BLOCK
+    category: decision_authority
+    description: LLM output cannot be the final gate, owner, merge, security, or architecture decision.
+    applies_to:
+      changed_paths:
+        - "**/*"
+    check:
+      type: text_pattern_absent
+      inputs:
+        - pr_body
+        - handoff
+        - evidence
+        - changed_files
+      forbidden_patterns:
+        - "LLM approved"
+        - "AI approved"
+        - "ChatGPT approved"
+        - "Claude approved"
+        - "approved by model"
+        - "ChatGPT says merge-ready"
+        - "Claude approved architecture"
+        - "AI decided this is safe"
+
+  - rule_id: DR-DATA-001
+    code: hard_delete_without_soft_delete_policy
+    severity: BLOCK
+    category: data_safety
+    description: Hard delete operations require an adjacent soft-delete policy or explicit approved exception.
+    applies_to:
+      changed_paths:
+        - "**/*"
+    check:
+      type: hard_delete_requires_soft_delete_policy
+      hard_delete_patterns:
+        - "DELETE FROM"
+        - "TRUNCATE TABLE"
+        - "drop table"
+        - "drop column"
+        - ".destroy("
+        - ".delete("
+        - ".deleteMany("
+        - ".remove("
+        - "unlinkSync("
+        - "rm -rf"
+      soft_delete_markers:
+        - "soft-delete"
+        - "soft delete"
+        - "deleted_at"
+        - "archived_at"
+        - "logical delete"
+
+  - rule_id: DR-ARCH-001
+    code: low_generality_new_domain_shape
+    severity: WARN
+    category: architecture_generality
+    description: New variable domain concepts should be represented by DB/config rather than narrow source shapes.
+    applies_to:
+      changed_paths:
+        - "src/**"
+        - "app/**"
+        - "lib/**"
+    check:
+      type: source_generality_heuristic
+      markers:
+        - "TODO configurable"
+        - "hardcoded"
+
+  - rule_id: DR-CODE-001
+    code: duplicated_code_block
+    severity: WARN
+    block_severity: BLOCK
+    category: code_quality
+    description: Exact duplicate code blocks should be extracted or otherwise justified.
+    applies_to:
+      changed_paths:
+        - "src/**"
+        - "app/**"
+        - "lib/**"
+        - "scripts/**"
+    check:
+      type: exact_duplicate_block
+      warn_threshold_lines: 6
+      block_threshold_lines: 12
+      ignore_paths:
+        - "test/**"
+        - "tests/**"
+        - "**/__snapshots__/**"
+        - "**/*.snap"
+        - "package-lock.json"
+        - "pnpm-lock.yaml"
+
+  - rule_id: DR-CONFIG-001
+    code: source_hardcoded_variable_item
+    severity: WARN
+    category: configuration
+    description: Likely configurable values should live in DB/config/content files rather than executable source.
+    applies_to:
+      changed_paths:
+        - "src/**"
+        - "app/**"
+        - "lib/**"
+    check:
+      type: source_configurable_value_heuristic
+      repeated_literal_min_count: 2
+      allowed_paths:
+        - "config/**"
+        - "*.config.*"
+        - ".shirube/**"
+        - "templates/**"
+        - "test/**"
+        - "tests/**"
+        - "docs/**"
+
+  - rule_id: DR-SAFE-001
+    code: protected_surface_without_explicit_cell
+    severity: BLOCK
+    category: protected_surface
+    description: Protected surfaces require explicit protected_stop or escalation route in the handoff/cell.
+    applies_to:
+      changed_paths:
+        - "**/*"
+    check:
+      type: protected_surface_requires_declaration
+      protected_path_patterns:
+        - ".github/workflows/**"
+        - "**/auth/**"
+        - "**/permission*/**"
+        - "**/permissions/**"
+        - "**/secret*/**"
+        - "**/migration*/**"
+        - "deploy/**"
+        - "**/branch-protection/**"
+        - "**/ruleset/**"
+      protected_content_patterns:
+        - "process.env"
+        - "permission"
+        - "auth"
+        - "LaunchAgent"
+        - "Discord"
+        - "queue"
+
+  - rule_id: DR-CONFIG-002
+    code: hidden_business_constant_in_source
+    severity: WARN
+    category: configuration
+    description: Tenant, product, operator, or business constants should be centralized.
+    applies_to:
+      changed_paths:
+        - "src/**"
+        - "app/**"
+        - "lib/**"
+    check:
+      type: business_constant_heuristic
+      markers:
+        - "room type"
+        - "room_type"
+        - "plan name"
+        - "planName"
+        - "rank label"
+        - "fee table"
+        - "business threshold"
+        - "sales copy"
+
+  - rule_id: DR-RULEPACK-001
+    code: missing_rule_pack_or_version
+    severity: BLOCK
+    category: rule_pack_integrity
+    description: The design rule pack must declare schema_version and rule_pack_id.
+    applies_to:
+      changed_paths:
+        - "**/*"
+    check:
+      type: rule_pack_has_identity

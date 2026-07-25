@@ -1,0 +1,29 @@
+{
+  "schema_version": "shirube-runtime-manifest/v1",
+  "component": "rapid-lite",
+  "version": "1.2.1",
+  "files": {
+    "build-review-plan.mjs": "e6a152a4bf79ad2dfdb6698ee746256205cdff644a81559efb68da45c79dcf85",
+    "check-adoption.mjs": "80c35f811abdb2d5b5c5653a56eea189244b41c70d0195953b13a4bd6b6369b3",
+    "check-audit-checklist.mjs": "6ac7d94098a2b77a28e52e2b99498def9e8753920604ecb89eb6752bea2c300e",
+    "check-control-state-completeness.mjs": "79ebdc25d9fad0aa6c0cf9d39170076cfc8d10f8daa5dee37a3b3af05394c228",
+    "check-design-rules.mjs": "42d7139410bb2e75e6e28e8a12f02700c4fca0e9b9afc8a742124aadf50646e5",
+    "check-enforcement-policy.mjs": "1565310d6c57dd1ba3a02a2174183584fc488bed172279e95d4d2ba08f345743",
+    "check-execution-context.mjs": "6febe7ee73ac68b8f768fad7ed9e9ff8e6c672acaa49125124d379c73eb53f1c",
+    "check-flow-safety.mjs": "b223d2747c1265af5f29c624750811a99cf26033a0140bbbcb760e94b277ed72",
+    "check-gate-contract.mjs": "53ef0c1292a44d867f01f306f096afcc7c31960b36017edb77b5b030c79b610d",
+    "check-lifecycle.mjs": "5a02fc65c1dda4e73990d1ab9c50063602c4bca40379aea814e97dd7c8b2a2a2",
+    "check-review-plan.mjs": "fba44cf2f2a03e03462ac3fe2a08cd865175774e9bfb249dd42f8bf721917578",
+    "generate-audit-checklist.mjs": "fd7a76311345706889bcbb12a48693b0bdc957bd1b325eb215e93a76a9c60a1a",
+    "lib.mjs": "882fd47548aac062ba72d276fb7b69e14b5ed53b98314547881f1f712549c39a",
+    "next-action-sequencing.mjs": "67fe879ace62f96429b91cb23167897a6a2bbdc8d7d789cff09b1312c48ebd33",
+    "normalize-control-handoff.mjs": "47deccdf4bc633cc0b493f0df44f017d801933430cbd16b5ff0548b3656726c4",
+    "resolve-additional-review-ref.mjs": "faba408ce66c6d450184043076044b11899ab8a6306323f1b4dde28faa33ed28",
+    "resolve-control-handoff-ref.mjs": "0395f6881458e22090073d2521398bcde6d777840ee30e51411ee34b1b84c579",
+    "resolve-structured-audit-ref.mjs": "5a09843d10fe6e7ee7e4c39f8a2c810e406bb30fe99b9c626dda4efa060e17d6",
+    "run-rapid-lite-report.mjs": "532783aa792f7d1550787abe126120e03e52bc14332c33f8e922a28858d325a8",
+    "run-rapid-lite-workflow.mjs": "6b097974235d15607112f30fee5e4b5cecb5cc7d399f67b9eba635cfa8a0482e",
+    "shirube-v3-rapid-lite-gate-contract-matrix.yaml": "cc6cc4b39131847a606cd2aeec29f8e0d76ed330aae23dcadedbaf34317db049",
+    "shirube-default-design-rules.yaml": "d6a5e1ababaa6dd8b8ce7b53cde13737f204c09054f0793cb700ff74745301df"
+  }
+}
