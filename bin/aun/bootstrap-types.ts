@@ -54,6 +54,8 @@ export type BootstrapReasonCode =
   | 'NO_GO_STAGE_TIMEOUT'
   | 'NO_GO_CHILD_EXIT_UNCONFIRMED'
   | 'NO_GO_RESUME_INPUT_MISMATCH'
+  | 'NO_GO_RESUME_REVALIDATION'
+  | 'NO_GO_POST_MUTATION_READBACK'
   | 'NO_GO_RUN_NOT_FOUND'
   | 'NO_GO_ROLLBACK_UNVERIFIED'
 
@@ -73,7 +75,7 @@ export type BootstrapMutation = {
   intended_after_digest: string | null
   actual_after_digest: string | null
   rollback_action: string
-  rollback_status: 'not_run' | 'verified' | 'failed'
+  rollback_status: 'not_run' | 'attempting' | 'verified' | 'failed' | 'skipped'
   rollback_payload?: Record<string, unknown>
 }
 
@@ -85,6 +87,8 @@ export type BootstrapStageRecord = {
   reason_codes: BootstrapReasonCode[]
   evidence_refs: string[]
   readiness_predicates: Record<string, boolean>
+  readback_digest: string | null
+  seal_digest: string | null
 }
 
 export type BootstrapRunState = {
@@ -100,6 +104,8 @@ export type BootstrapRunState = {
   created_at: string
   updated_at: string
   terminal_status: BootstrapTerminalStatus | null
+  lock_release_authorized_at: string | null
+  lock_released_at: string | null
   stages: BootstrapStageRecord[]
   mutations: BootstrapMutation[]
   mutation_manifest_digest: string
@@ -124,6 +130,8 @@ export type BootstrapStageOutcome = {
   reasonCodes?: BootstrapReasonCode[]
   evidenceRefs?: string[]
   readinessPredicates?: Record<string, boolean>
+  /** Canonical digest of the live native target readback for stage sealing/resume. */
+  readbackDigest?: string
   mutation?: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>
   resolvedRuntime?: BootstrapResolvedRuntime
 }

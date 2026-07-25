@@ -131,6 +131,7 @@ async function exactReadback(
         ok: true,
         evidenceRefs: [`codex-mcp-exact-tuple:${bootstrapDigest(expected)}`],
         readinessPredicates: { mcp_registered: true, mcp_native_get_exact: true, mcp_native_list_exact: true },
+        readbackDigest: bootstrapDigest(expected),
       }
     : {
         ok: false,
@@ -140,6 +141,22 @@ async function exactReadback(
       }
 }
 
+async function exactAbsenceReadback(
+  context: BootstrapStageContext,
+  deps: BootstrapAdapterDependencies,
+): Promise<BootstrapStageOutcome> {
+  const options = { cwd: context.repoRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal }
+  const [getResult, listResult] = await Promise.all([
+    deps.run('codex', ['mcp', 'get', 'aun', '--json'], options),
+    deps.run('codex', ['mcp', 'list', '--json'], options),
+  ])
+  const list = codexListState(parseJson(listResult))
+  const digest = bootstrapDigest({ absent: true, get_exit: getResult.exitCode, list_exit: listResult.exitCode, list_count: list.count })
+  return nativeAbsence(getResult) && listResult.exitCode === 0 && list.count === 0
+    ? { ok: true, evidenceRefs: [`codex-mcp-native-absence:${digest}`], readbackDigest: digest }
+    : { ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'], evidenceRefs: [`codex-mcp-native-absence-unresolved:${digest}`] }
+}
+
 export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies): BootstrapRuntimeAdapter {
   return {
     runtime: 'codex',
@@ -147,7 +164,12 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
     async dependencyPreflight(context): Promise<BootstrapStageOutcome> {
       const result = await deps.run('codex', ['--version'], { cwd: context.repoRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal })
       return result.exitCode === 0
-        ? { ok: true, evidenceRefs: [`codex-cli:${bootstrapDigest(result.stdout.trim())}`], readinessPredicates: { codex_cli_available: true } }
+        ? {
+            ok: true,
+            evidenceRefs: [`codex-cli:${bootstrapDigest(result.stdout.trim())}`],
+            readinessPredicates: { codex_cli_available: true },
+            readbackDigest: bootstrapDigest({ executable: realpathOrResolve('codex'), version: result.stdout.trim(), config_scope: 'native-default' }),
+          }
         : { ok: false, reasonCodes: ['NO_GO_DEPENDENCY_MISSING'], readinessPredicates: { codex_cli_available: false } }
     },
 
@@ -175,7 +197,6 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
       const tuple = expectedBootstrapMcpTuple(context, deps)
       const args = registrationArgs(tuple)
       const applied = await deps.run('codex', args, { ...options, timeoutMs: 120_000 })
-      if (applied.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_MCP_REGISTRATION'] }
       const mutation = {
         kind: 'mcp_registration' as const,
         owner_key: `codex:aun:${context.runId}`,
@@ -186,9 +207,27 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         rollback_payload: { created_by_run: true, tuple_digest: bootstrapDigest(tuple) },
       }
       const readback = await exactReadback(context, deps)
-      return readback.ok
-        ? { ...readback, mutation: { ...mutation, actual_after_digest: bootstrapDigest(tuple) } }
-        : { ...readback, mutation }
+      if (readback.ok) {
+        const observed = { ...mutation, actual_after_digest: bootstrapDigest(tuple) }
+        return applied.exitCode === 0
+          ? { ...readback, mutation: observed }
+          : {
+              ...readback,
+              ok: false,
+              reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+              evidenceRefs: [...(readback.evidenceRefs ?? []), `codex-mcp-add-nonzero-after-mutation:${applied.exitCode}`],
+              mutation: observed,
+            }
+      }
+      const absence = await exactAbsenceReadback(context, deps)
+      if (absence.ok) {
+        return {
+          ...absence,
+          ok: false,
+          reasonCodes: [applied.exitCode === 0 ? 'NO_GO_MCP_READBACK' : 'NO_GO_MCP_REGISTRATION'],
+        }
+      }
+      return { ...readback, ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'] }
     },
 
     readbackMcpRegistration(context): Promise<BootstrapStageOutcome> {
@@ -219,8 +258,19 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         deps.run('codex', ['mcp', 'list', '--json'], options),
       ])
       const listState = codexListState(parseJson(listResult))
+      const readbackDigest = bootstrapDigest({
+        absent: true,
+        get_exit: getResult.exitCode,
+        list_exit: listResult.exitCode,
+        list_count: listState.count,
+      })
       return nativeAbsence(getResult) && listResult.exitCode === 0 && listState.count === 0
-        ? { ok: true, readinessPredicates: { rollback_verified: true } }
+        ? {
+            ok: true,
+            readinessPredicates: { rollback_verified: true },
+            evidenceRefs: [`codex-mcp-native-absence:${readbackDigest}`],
+            readbackDigest,
+          }
         : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
     },
   }

@@ -110,6 +110,7 @@ async function exactReadback(
         ok: true,
         evidenceRefs: [`claude-mcp-exact-tuple:${bootstrapDigest(expected)}`],
         readinessPredicates: { mcp_registered: true, mcp_native_get_exact: true, mcp_native_list_exact: true },
+        readbackDigest: bootstrapDigest(expected),
       }
     : {
         ok: false,
@@ -119,6 +120,22 @@ async function exactReadback(
       }
 }
 
+async function exactAbsenceReadback(
+  context: BootstrapStageContext,
+  deps: BootstrapAdapterDependencies,
+): Promise<BootstrapStageOutcome> {
+  const options = { cwd: context.repoRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal }
+  const [getResult, listResult] = await Promise.all([
+    deps.run('claude', ['mcp', 'get', 'aun'], options),
+    deps.run('claude', ['mcp', 'list'], options),
+  ])
+  const list = claudeListState(listResult.stdout)
+  const digest = bootstrapDigest({ absent: true, get_exit: getResult.exitCode, list_exit: listResult.exitCode, list_count: list.count })
+  return nativeAbsence(getResult) && listResult.exitCode === 0 && list.count === 0
+    ? { ok: true, evidenceRefs: [`claude-mcp-native-absence:${digest}`], readbackDigest: digest }
+    : { ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'], evidenceRefs: [`claude-mcp-native-absence-unresolved:${digest}`] }
+}
+
 export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies): BootstrapRuntimeAdapter {
   return {
     runtime: 'claude',
@@ -126,7 +143,12 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
     async dependencyPreflight(context): Promise<BootstrapStageOutcome> {
       const result = await deps.run('claude', ['--version'], { cwd: context.repoRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal })
       return result.exitCode === 0
-        ? { ok: true, evidenceRefs: [`claude-cli:${bootstrapDigest(result.stdout.trim())}`], readinessPredicates: { claude_cli_available: true } }
+        ? {
+            ok: true,
+            evidenceRefs: [`claude-cli:${bootstrapDigest(result.stdout.trim())}`],
+            readinessPredicates: { claude_cli_available: true },
+            readbackDigest: bootstrapDigest({ executable: realpathOrResolve('claude'), version: result.stdout.trim(), config_scope: 'user' }),
+          }
         : { ok: false, reasonCodes: ['NO_GO_DEPENDENCY_MISSING'], readinessPredicates: { claude_cli_available: false } }
     },
 
@@ -152,7 +174,6 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
 
       const tuple = expectedBootstrapMcpTuple(context, deps)
       const applied = await deps.run('claude', registrationArgs(tuple), { ...options, timeoutMs: 120_000 })
-      if (applied.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_MCP_REGISTRATION'] }
       const mutation = {
         kind: 'mcp_registration' as const,
         owner_key: `claude:aun:${context.runId}`,
@@ -163,9 +184,27 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
         rollback_payload: { created_by_run: true, tuple_digest: bootstrapDigest(tuple) },
       }
       const readback = await exactReadback(context, deps)
-      return readback.ok
-        ? { ...readback, mutation: { ...mutation, actual_after_digest: bootstrapDigest(tuple) } }
-        : { ...readback, mutation }
+      if (readback.ok) {
+        const observed = { ...mutation, actual_after_digest: bootstrapDigest(tuple) }
+        return applied.exitCode === 0
+          ? { ...readback, mutation: observed }
+          : {
+              ...readback,
+              ok: false,
+              reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+              evidenceRefs: [...(readback.evidenceRefs ?? []), `claude-mcp-add-nonzero-after-mutation:${applied.exitCode}`],
+              mutation: observed,
+            }
+      }
+      const absence = await exactAbsenceReadback(context, deps)
+      if (absence.ok) {
+        return {
+          ...absence,
+          ok: false,
+          reasonCodes: [applied.exitCode === 0 ? 'NO_GO_MCP_READBACK' : 'NO_GO_MCP_REGISTRATION'],
+        }
+      }
+      return { ...readback, ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'] }
     },
 
     readbackMcpRegistration(context): Promise<BootstrapStageOutcome> {
@@ -196,8 +235,19 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
         deps.run('claude', ['mcp', 'list'], options),
       ])
       const list = claudeListState(listResult.stdout)
+      const readbackDigest = bootstrapDigest({
+        absent: true,
+        get_exit: getResult.exitCode,
+        list_exit: listResult.exitCode,
+        list_count: list.count,
+      })
       return nativeAbsence(getResult) && listResult.exitCode === 0 && list.count === 0
-        ? { ok: true, readinessPredicates: { rollback_verified: true } }
+        ? {
+            ok: true,
+            readinessPredicates: { rollback_verified: true },
+            evidenceRefs: [`claude-mcp-native-absence:${readbackDigest}`],
+            readbackDigest,
+          }
         : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
     },
   }

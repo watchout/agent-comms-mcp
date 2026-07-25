@@ -64,6 +64,39 @@ describe('aun bootstrap Codex adapter', () => {
     expect(result.mutation).toBeUndefined()
   })
 
+  test('mcp add that mutates then exits 124 returns an observed mutation and native rollback proof', async () => {
+    let added = false
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args) => {
+        const joined = args.join(' ')
+        if (joined === 'mcp get aun --json') return added
+          ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+          : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+        if (joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(added ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') {
+          added = true
+          return { exitCode: 124, stdout: '', stderr: 'timed out after mutation' }
+        }
+        if (joined === 'mcp remove aun') {
+          added = false
+          return { exitCode: 0, stdout: 'removed', stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+    const failed = await adapter.applyMcpRegistration(context)
+    expect(failed.ok).toBe(false)
+    expect(failed.reasonCodes).toEqual(['NO_GO_POST_MUTATION_READBACK'])
+    expect(failed.mutation?.actual_after_digest).toBeString()
+    expect(added).toBe(true)
+    const rolledBack = await adapter.rollbackRuntimeRegistration(context, {
+      mutation_id: 'm1', stage: 'B4_MCP_REGISTRATION', rollback_status: 'not_run', ...failed.mutation!,
+    })
+    expect(rolledBack.ok).toBe(true)
+    expect(added).toBe(false)
+  })
+
   for (const [name, mutate] of [
     ['disabled', (value: any) => ({ ...value, enabled: false })],
     ['wrong-command', (value: any) => ({ ...value, transport: { ...value.transport, command: '/wrong/bun' } })],

@@ -143,6 +143,8 @@ function initialState(input: {
     created_at: timestamp,
     updated_at: timestamp,
     terminal_status: null,
+    lock_release_authorized_at: null,
+    lock_released_at: null,
     stages: BOOTSTRAP_STAGES.map((stage) => ({
       stage,
       status: 'pending',
@@ -151,6 +153,8 @@ function initialState(input: {
       reason_codes: [],
       evidence_refs: [],
       readiness_predicates: {},
+      readback_digest: null,
+      seal_digest: null,
     })),
     mutations: [],
     mutation_manifest_digest: bootstrapDigest([]),
@@ -158,6 +162,53 @@ function initialState(input: {
     evidence_refs: [],
     safe_D1_readback: { ...BOOTSTRAP_SAFE_D1_DEFAULTS },
   }
+}
+
+function stageSealDigest(state: BootstrapRunState, stage: BootstrapStage): string {
+  const record = state.stages.find((candidate) => candidate.stage === stage)
+  if (!record) return bootstrapDigest({ missing_stage: stage })
+  return bootstrapDigest({
+    stage: record.stage,
+    status: record.status,
+    started_at: record.started_at,
+    completed_at: record.completed_at,
+    reason_codes: record.reason_codes,
+    evidence_refs: record.evidence_refs,
+    readiness_predicates: record.readiness_predicates,
+    readback_digest: record.readback_digest,
+    mutations: state.mutations
+      .filter((mutation) => mutation.stage === stage)
+      .map((mutation) => ({
+        mutation_id: mutation.mutation_id,
+        kind: mutation.kind,
+        owner_key: mutation.owner_key,
+        before_digest: mutation.before_digest,
+        intended_after_digest: mutation.intended_after_digest,
+        actual_after_digest: mutation.actual_after_digest,
+        rollback_action: mutation.rollback_action,
+        rollback_status: mutation.rollback_status,
+        rollback_payload: mutation.rollback_payload ?? null,
+      })),
+  })
+}
+
+function passedStageSealsAreValid(state: BootstrapRunState): boolean {
+  return state.stages.every((record) => record.status !== 'passed'
+    || (typeof record.readback_digest === 'string'
+      && record.readback_digest.length > 0
+      && typeof record.seal_digest === 'string'
+      && record.seal_digest === stageSealDigest(state, record.stage)))
+}
+
+function outcomeReadbackDigest(outcome: BootstrapStageOutcome): string {
+  return outcome.readbackDigest ?? bootstrapDigest({
+    ok: outcome.ok,
+    reason_codes: outcome.reasonCodes ?? [],
+    evidence_refs: outcome.evidenceRefs ?? [],
+    readiness_predicates: outcome.readinessPredicates ?? {},
+    resolved_runtime: outcome.resolvedRuntime ?? null,
+    mutation_actual_after_digest: outcome.mutation?.actual_after_digest ?? null,
+  })
 }
 
 function resultFromState(
@@ -217,7 +268,14 @@ async function withDeadline(
   }, Math.max(1, Math.min(STAGE_DEADLINE_MS[stage], remainingTotalMs)))
   try {
     const outcome = await task(controller.signal)
-    return timedOut ? { ok: false, reasonCodes: ['NO_GO_STAGE_TIMEOUT'] } : outcome
+    return timedOut
+      ? {
+          ...outcome,
+          ok: false,
+          reasonCodes: [outcome.mutation ? 'NO_GO_POST_MUTATION_READBACK' : 'NO_GO_STAGE_TIMEOUT'],
+          evidenceRefs: [...(outcome.evidenceRefs ?? []), `stage-timeout-after-close:${stage}`],
+        }
+      : outcome
   } catch (err) {
     return timedOut
       ? { ok: false, reasonCodes: ['NO_GO_STAGE_TIMEOUT'] }
@@ -275,6 +333,42 @@ function realpathOrResolve(path: string): string {
   try { return realpathSync(path) } catch { return resolve(path) }
 }
 
+async function providerInputSnapshot(input: {
+  requestedRuntime: BootstrapOptions['runtime']
+  repoRoot: string
+  home: string
+  env: Record<string, string>
+  run: BootstrapAdapterCommandRunner
+}): Promise<Record<string, unknown>> {
+  const runtimes: BootstrapResolvedRuntime[] = input.requestedRuntime === 'auto'
+    ? ['codex', 'claude']
+    : [input.requestedRuntime]
+  const entries = await Promise.all(runtimes.map(async (runtime) => {
+    const executable = realpathOrResolve(Bun.which(runtime) ?? runtime)
+    const version = await input.run(runtime, ['--version'], {
+      cwd: input.repoRoot, env: input.env, timeoutMs: 10_000,
+    })
+    const wasurezu = await input.run(runtime, runtime === 'codex'
+      ? ['mcp', 'get', 'wasurezu', '--json']
+      : ['mcp', 'get', 'wasurezu'], {
+      cwd: input.repoRoot, env: input.env, timeoutMs: 30_000,
+    })
+    return {
+      runtime,
+      executable,
+      version_exit: version.exitCode,
+      version_digest: bootstrapDigest({ stdout: version.stdout.trim(), stderr: version.stderr.trim() }),
+      config_scope: runtime === 'claude' ? 'user' : 'native-default',
+      config_root_digest: bootstrapDigest(runtime === 'codex'
+        ? input.env.CODEX_HOME || join(input.home, '.codex')
+        : input.env.CLAUDE_CONFIG_DIR || join(input.home, '.claude')),
+      wasurezu_native_exit: wasurezu.exitCode,
+      wasurezu_native_readback_digest: bootstrapDigest({ stdout: wasurezu.stdout, stderr: wasurezu.stderr }),
+    }
+  }))
+  return Object.fromEntries(entries.map((entry) => [entry.runtime, entry]))
+}
+
 function bootstrapInputDigest(input: {
   agentId: string
   requestedRuntime: BootstrapOptions['runtime']
@@ -283,6 +377,7 @@ function bootstrapInputDigest(input: {
   repoHead: string | null
   home: string
   env: Record<string, string>
+  providerSnapshot: Record<string, unknown>
 }): string {
   const databaseBackend = input.env.AGENT_COM_DB?.trim().toLowerCase()
     || (input.env.DATABASE_URL ? 'postgres' : 'sqlite')
@@ -299,6 +394,16 @@ function bootstrapInputDigest(input: {
     requested_port: input.env.AUN_WEBHOOK_PORT || input.env.AUN_BOOTSTRAP_CHANNEL_PORT || null,
     tmux_session: input.env.TMUX || input.env.TMUX_PANE || null,
     memory_project: input.env.AGENT_MEMORY_PROJECT || input.env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(input.workspaceRoot),
+    provider_snapshot: input.providerSnapshot,
+    intended_aun_tuple_template_digest: bootstrapDigest({
+      command: realpathOrResolve(process.execPath),
+      argv: ['run', '--cwd', realpathOrResolve(input.repoRoot), 'server.ts'],
+      agent_id: input.agentId,
+      database_backend: databaseBackend,
+      database_endpoint_digest: bootstrapDigest(input.env.DATABASE_URL || input.env.AGENT_COM_SQLITE_PATH || join(input.repoRoot, 'agent-com.db')),
+      requested_port: input.env.AUN_WEBHOOK_PORT || input.env.AUN_BOOTSTRAP_CHANNEL_PORT || '<B3-selected>',
+      config_scope: 'user',
+    }),
     safe_d1: BOOTSTRAP_SAFE_D1_DEFAULTS,
   })
 }
@@ -609,6 +714,44 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   const commandOptions = (context: BootstrapStageContext, timeoutMs: number) => ({
     cwd: repoRoot, env, timeoutMs, signal: context.abortSignal,
   })
+  const daemonLabel = STATE_DAEMON_PLIST_NAME.replace(/\.plist$/, '')
+  const daemonDomain = `gui/${process.getuid?.() ?? ''}`
+  type DaemonNativeState = {
+    plist_exists: boolean
+    plist_digest: string | null
+    plist_mode: number | null
+    launch_domain: string
+    launch_label: string
+    launch_loaded: boolean
+    launch_pid: number | null
+    safe_d1_digest: string | null
+    launch_safe_d1_digest: string | null
+  }
+  const readDaemonNativeState = async (context: BootstrapStageContext): Promise<DaemonNativeState> => {
+    const plistPath = join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)
+    const launch = await run('launchctl', ['print', `${daemonDomain}/${daemonLabel}`], commandOptions(context, 30_000))
+    const pidMatch = launch.stdout.match(/(?:^|\n)\s*pid\s*=\s*(\d+)\s*(?:\n|$)/i)
+    const launchSafeEntries = Object.keys(BOOTSTRAP_SAFE_D1_DEFAULTS).map((key) => {
+      const match = launch.stdout.match(new RegExp(`(?:^|\\n)\\s*${key}\\s*(?:=>|=)\\s*"?([^"\\n]+?)"?\\s*(?:\\n|$)`))
+      return [key, match?.[1]?.trim() ?? null] as const
+    })
+    const launchSafe = launchSafeEntries.every(([, value]) => value !== null)
+      ? Object.fromEntries(launchSafeEntries) as Record<string, string>
+      : null
+    return {
+      plist_exists: existsSync(plistPath),
+      plist_digest: existsSync(plistPath) ? bootstrapDigest(readFileSync(plistPath)) : null,
+      plist_mode: existsSync(plistPath) ? statSync(plistPath).mode & 0o777 : null,
+      launch_domain: daemonDomain,
+      launch_label: daemonLabel,
+      launch_loaded: launch.exitCode === 0,
+      launch_pid: launch.exitCode === 0 && pidMatch ? Number(pidMatch[1]) : null,
+      safe_d1_digest: safeD1FromPlist(home) ? bootstrapDigest(BOOTSTRAP_SAFE_D1_DEFAULTS) : null,
+      launch_safe_d1_digest: launch.exitCode === 0 && bootstrapDigest(launchSafe) === bootstrapDigest(BOOTSTRAP_SAFE_D1_DEFAULTS)
+        ? bootstrapDigest(BOOTSTRAP_SAFE_D1_DEFAULTS)
+        : null,
+    }
+  }
 
   const databaseAlreadyExists = (): boolean => {
     const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
@@ -674,6 +817,35 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     return sqliteArtifactDigest(path)
   }
 
+  const queueStageReadbackDigest = async (queueId: string, agentId: string, runId: string, runtimeId: string): Promise<string | null> =>
+    withBootstrapDb(env, async (db) => {
+      const row = await db.queryOne<any>(
+        `SELECT id, message_id, payload, status, claimed_by, claimed_at, claim_expires_at, done_at
+           FROM message_queue WHERE id = $1 AND agent_id = $2`,
+        [queueId, agentId],
+      )
+      if (!row) return null
+      const payload = parseJsonRecord(row.payload)
+      const outbound = row.message_id
+        ? await db.query<any>('SELECT id, status FROM outbound_queue WHERE message_id = $1 ORDER BY id', [row.message_id]).catch(() => [])
+        : []
+      return bootstrapDigest({
+        queue_id: String(row.id),
+        message_id: row.message_id,
+        status: row.status,
+        claimed_by: row.claimed_by,
+        claimed_at: row.claimed_at,
+        claim_expires_at: row.claim_expires_at,
+        done_at: row.done_at,
+        bootstrap_run_id: payload.bootstrap_run_id,
+        runtime_instance_id: payload.runtime_instance_id,
+        receive_claim_source: payload.receive_claim?.source,
+        no_reply_required: payload.terminal_baton?.no_reply_required,
+        outbound_rows: outbound,
+        exact_identity: payload.bootstrap_run_id === runId && payload.runtime_instance_id === runtimeId,
+      })
+    }, { readonly: true }).catch(() => null)
+
   const memoryGate = async (context: BootstrapStageContext): Promise<BootstrapStageOutcome> => {
     if (context.dryRun) {
       return {
@@ -685,6 +857,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
     let runtimeInstanceId: string | null = null
     let runtimeCreated = false
+    let runtimeBeforeDigest: string | null = null
     let evidenceId: string | number | null = null
     let runtimeTupleDigest: string | null = null
     try {
@@ -715,6 +888,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             ORDER BY COALESCE(last_seen_at, started_at) DESC`,
           [context.agentId],
         )
+        runtimeBeforeDigest = bootstrapDigest(active)
         const matches = active.filter((row) => row.agent_id === runtimeTuple.agent_id
           && row.runtime_engine === runtimeTuple.runtime_engine
           && row.session_name === runtimeTuple.session_name
@@ -772,31 +946,39 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           runtime_tuple_digest: runtimeTupleDigest,
         }
         const recorded = await recordRuntimeMemoryReadyEvidence(db as any, evidence)
+        const storedEvidence = await db.queryOne<any>(
+          'SELECT valid_until FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
+          [recorded.evidence_id, runtime.id],
+        )
         const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
           agent_id: context.agentId,
           expected_agent_id: context.agentId,
           project,
         })
-        return { recorded, gate, recovery }
+        return { recorded, gate, recovery, validUntil: storedEvidence?.valid_until ?? null }
       })
       evidenceId = result.recorded.evidence_id
       const stableMemoryReadback = {
         evidence_id: evidenceId,
         runtime_instance_id: runtime.id,
         project,
+        valid_until: result.validUntil,
+        provider_tuple_digest: transport.tupleDigest,
         recovery_response_digest: recovery.responseDigest,
         runtime_tuple_digest: runtimeTupleDigest,
       }
       const mutation = {
         kind: 'memory_readiness' as const,
         owner_key: `memory:${context.runId}:${runtime.id}:${String(evidenceId)}`,
-        before_digest: bootstrapDigest({ runtime_created: runtimeCreated, evidence_absent: true }),
+        before_digest: bootstrapDigest({ runtime_before_digest: runtimeBeforeDigest, evidence_absent: true }),
         intended_after_digest: bootstrapDigest({ runtime_tuple_digest: runtimeTupleDigest, recovery: recovery.responseDigest }),
         actual_after_digest: bootstrapDigest(stableMemoryReadback),
         rollback_action: 'expire run-owned memory evidence and stop only a run-owned runtime receipt',
         rollback_payload: {
           runtime_instance_id: runtime.id, runtime_created: runtimeCreated, evidence_id: evidenceId,
           bootstrap_run_id: context.runId, project, recovery_response_digest: recovery.responseDigest, runtime_tuple_digest: runtimeTupleDigest,
+          provider_tuple_digest: transport.tupleDigest,
+          valid_until: result.validUntil,
         },
       }
       return result.gate.ok
@@ -804,22 +986,41 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             ok: true,
             evidenceRefs: [`memory-ready:${bootstrapDigest(result.gate)}`, `wasurezu-recovery:${recovery.responseDigest}`, `runtime-tuple:${runtimeTupleDigest}`],
             readinessPredicates: { memory_recovery_ready: true, runtime_receipt_present: true, genuine_mcp_recovery: true },
+            readbackDigest: bootstrapDigest(stableMemoryReadback),
             mutation,
           }
         : { ok: false, reasonCodes: ['NO_GO_MEMORY_RECOVERY'], evidenceRefs: [`memory-no-go:${bootstrapDigest(result.gate)}`], mutation }
     } catch (err) {
-      const mutation = runtimeInstanceId ? {
+      const observed = runtimeInstanceId ? await withBootstrapDb(env, async (db) => ({
+        runtime: await db.queryOne<any>(
+          `SELECT runtime_instance_id, agent_id, runtime_engine, session_name, process_id,
+                  port, checkout_path, commit_sha, status, metadata
+             FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2`,
+          [runtimeInstanceId, context.agentId],
+        ),
+        evidence: evidenceId === null || evidenceId === undefined ? null : await db.queryOne<any>(
+          `SELECT id, project, runtime_instance_id, result_status, valid_until, metadata
+             FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2`,
+          [evidenceId, runtimeInstanceId],
+        ),
+      })).catch(() => null) : null
+      const mutation = runtimeInstanceId && (runtimeCreated || evidenceId !== null) ? {
         kind: 'memory_readiness' as const,
         owner_key: `memory:${context.runId}:${runtimeInstanceId}:${String(evidenceId ?? 'none')}`,
-        before_digest: bootstrapDigest({ runtime_created: runtimeCreated, evidence_absent: true }),
+        before_digest: bootstrapDigest({ runtime_before_digest: runtimeBeforeDigest, evidence_absent: true }),
         intended_after_digest: runtimeTupleDigest,
-        actual_after_digest: null,
+        actual_after_digest: observed ? bootstrapDigest(observed) : null,
         rollback_action: 'expire run-owned memory evidence and stop only a run-owned runtime receipt',
-        rollback_payload: { runtime_instance_id: runtimeInstanceId, runtime_created: runtimeCreated, evidence_id: evidenceId, bootstrap_run_id: context.runId },
+        rollback_payload: {
+          runtime_instance_id: runtimeInstanceId, runtime_created: runtimeCreated, evidence_id: evidenceId,
+          bootstrap_run_id: context.runId, post_error_readback_digest: observed ? bootstrapDigest(observed) : null,
+        },
       } : undefined
       return {
         ok: false,
-        reasonCodes: [runtimeInstanceId ? 'NO_GO_MEMORY_RECOVERY' : 'NO_GO_RUNTIME_RECEIPT'],
+        reasonCodes: [mutation
+          ? 'NO_GO_POST_MUTATION_READBACK'
+          : runtimeInstanceId ? 'NO_GO_MEMORY_RECOVERY' : 'NO_GO_RUNTIME_RECEIPT'],
         evidenceRefs: [`memory-error:${bootstrapDigest(String(err))}`],
         mutation,
       }
@@ -850,19 +1051,30 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           [payload.evidence_id, payload.runtime_instance_id],
         ))
         const metadata = parseJsonRecord(evidence?.metadata)
+        const nativeTransport = await readConfiguredWasurezuTransport(context, run)
         const readbackDigest = bootstrapDigest({
           evidence_id: evidence?.id ?? null,
           runtime_instance_id: evidence?.runtime_instance_id ?? null,
           project: evidence?.project ?? null,
+          valid_until: evidence?.valid_until ?? null,
+          provider_tuple_digest: metadata.provider_tuple_digest ?? null,
           recovery_response_digest: metadata.recovery_response_digest ?? null,
           runtime_tuple_digest: metadata.runtime_tuple_digest ?? null,
         })
         mutationMatches = evidence?.result_status === 'ready'
           && metadata.bootstrap_run_id === payload.bootstrap_run_id
+          && Boolean(evidence?.valid_until) && Date.parse(String(evidence.valid_until)) > Date.now()
+          && nativeTransport?.tupleDigest === payload.provider_tuple_digest
+          && metadata.provider_tuple_digest === payload.provider_tuple_digest
           && readbackDigest === mutation.actual_after_digest
       }
       return gate.ok && runtimeMatches && mutationMatches
-        ? { ok: true, evidenceRefs: [`memory-readback:${bootstrapDigest(gate)}`], readinessPredicates: { memory_recovery_ready: true, runtime_receipt_present: true } }
+        ? {
+            ok: true,
+            evidenceRefs: [`memory-readback:${bootstrapDigest(gate)}`],
+            readinessPredicates: { memory_recovery_ready: true, runtime_receipt_present: true },
+            readbackDigest: mutation?.actual_after_digest ?? bootstrapDigest(gate),
+          }
         : { ok: false, reasonCodes: [gate.runtime_instance_id ? 'NO_GO_MEMORY_RECOVERY' : 'NO_GO_RUNTIME_RECEIPT'], evidenceRefs: [`memory-readback-no-go:${bootstrapDigest(gate)}`] }
     } catch (err) {
       return { ok: false, reasonCodes: ['NO_GO_MEMORY_RECOVERY'], evidenceRefs: [`memory-readback-error:${bootstrapDigest(String(err))}`] }
@@ -877,6 +1089,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         ok: true,
         evidenceRefs: [`prestate:${bootstrapDigest({ repo_head: context.repoHead, dirty: dirty.stdout })}`],
         readinessPredicates: { state_journal_mode_0600: true, safe_d1_defaults_planned: true },
+        readbackDigest: bootstrapDigest({ repo_head: context.repoHead, dirty: dirty.stdout }),
       }
     },
 
@@ -915,6 +1128,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         resolvedRuntime: selection.runtime,
         evidenceRefs: [`runtime-selection:${bootstrapDigest(selection)}`, ...(provider.evidenceRefs ?? [])],
         readinessPredicates: { dependencies_present: true, supervisor_capable: true, runtime_unambiguous: true },
+        readbackDigest: bootstrapDigest({
+          runtime: selection.runtime,
+          tmux_identity: tmuxIdentity,
+          provider_readback_digest: provider.readbackDigest ?? null,
+          provider_executable: realpathOrResolve(selection.runtime),
+          config_scope: selection.runtime === 'claude' ? 'user' : 'native-default',
+        }),
       }
     },
 
@@ -938,42 +1158,69 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         writeFileSync(backupPath, beforeBytes, { mode: 0o600 })
         chmodSync(backupPath, 0o600)
       }
+      const databaseMutation = (afterDigest: string | null) => ({
+        kind: 'db' as const,
+        owner_key: `db:${context.runId}`,
+        before_digest: before,
+        intended_after_digest: afterDigest,
+        actual_after_digest: afterDigest,
+        rollback_action: postgres
+          ? 'preserve shared PostgreSQL schema; delete or expire exact bootstrap-run-owned rows and prove inactive absence'
+          : sqliteExisted
+            ? 'restore exact owner-protected SQLite backup only under post-state digest fence'
+            : 'remove exact run-created SQLite file only under realpath and post-state digest fence',
+        rollback_payload: postgres
+          ? {
+              backend: 'postgres', shared: true, bootstrap_run_id: context.runId,
+              endpoint_digest: bootstrapDigest(env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp'),
+              migration_ledger_digest: bootstrapDigest(readFileSync(join(repoRoot, 'db', 'migrate.ts'))),
+              schema_before_digest: before,
+              schema_after_digest: afterDigest,
+              bootstrap_owned_row_keys: [{ key: 'bootstrap_run_id', value: context.runId }],
+            }
+          : {
+              backend: 'sqlite', path: sqlitePath, before_exists: sqliteExisted, created_by_run: !sqliteExisted,
+              before_digest: before, before_byte_digest: beforeByteDigest, before_mode: beforeMode, before_identity: beforeIdentity,
+              backup_path: sqliteExisted ? backupPath : null, after_digest: afterDigest,
+              after_identity: existsSync(sqlitePath) ? sqliteFileIdentity(sqlitePath) : null,
+            },
+      })
       const result = await run(bunPath, ['db/migrate.ts'], commandOptions(context, 120_000))
-      if (result.exitCode !== 0) return { ok: false, reasonCodes: [/destructive/i.test(result.stderr) ? 'NO_GO_DESTRUCTIVE_MIGRATION_GATE' : 'NO_GO_DB_MIGRATION'] }
+      if (result.exitCode !== 0) {
+        const observedAfter = await currentDatabaseStageDigest()
+        const observedMutation = observedAfter !== before ? databaseMutation(observedAfter) : undefined
+        return {
+          ok: false,
+          reasonCodes: observedMutation
+            ? ['NO_GO_POST_MUTATION_READBACK']
+            : [/destructive/i.test(result.stderr) ? 'NO_GO_DESTRUCTIVE_MIGRATION_GATE' : 'NO_GO_DB_MIGRATION'],
+          evidenceRefs: [`db-post-command-readback:${bootstrapDigest({ exit: result.exitCode, before, after: observedAfter })}`],
+          readbackDigest: bootstrapDigest(observedAfter ?? { absent: true }),
+          mutation: observedMutation,
+        }
+      }
       const idempotency = await run(bunPath, ['db/migrate.ts'], commandOptions(context, 120_000))
-      if (idempotency.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_DB_MIGRATION'] }
+      if (idempotency.exitCode !== 0) {
+        const observedAfter = await currentDatabaseStageDigest()
+        const observedMutation = observedAfter !== before ? databaseMutation(observedAfter) : undefined
+        return {
+          ok: false,
+          reasonCodes: observedMutation ? ['NO_GO_POST_MUTATION_READBACK'] : ['NO_GO_DB_MIGRATION'],
+          evidenceRefs: [`db-idempotency-post-command-readback:${bootstrapDigest({ exit: idempotency.exitCode, before, after: observedAfter })}`],
+          readbackDigest: bootstrapDigest(observedAfter ?? { absent: true }),
+          mutation: observedMutation,
+        }
+      }
       const after = postgres
         ? await postgresSchemaDigest().catch(() => null)
         : sqliteArtifactDigest(sqlitePath)
       if (!after) return { ok: false, reasonCodes: ['NO_GO_DB_MIGRATION'] }
-      const afterIdentity = !postgres && existsSync(sqlitePath) ? sqliteFileIdentity(sqlitePath) : null
       return {
         ok: true,
         evidenceRefs: [`db-migration:${after}`, `db-migration-idempotency:${bootstrapDigest(idempotency.stdout)}`],
         readinessPredicates: { migration_complete: true, migration_idempotent: true },
-        mutation: before === after ? undefined : {
-          kind: 'db', owner_key: `db:${context.runId}`, before_digest: before,
-          intended_after_digest: after, actual_after_digest: after,
-          rollback_action: postgres
-            ? 'shared PostgreSQL schema is never dropped or down-migrated; clean only run-owned rows and report resume-required'
-            : sqliteExisted
-              ? 'restore exact owner-protected SQLite backup only under post-state digest fence'
-              : 'remove exact run-created SQLite file only under realpath and post-state digest fence',
-          rollback_payload: postgres
-            ? {
-                backend: 'postgres', shared: true,
-                endpoint_digest: bootstrapDigest(env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp'),
-                migration_ledger_digest: bootstrapDigest(readFileSync(join(repoRoot, 'db', 'migrate.ts'))),
-                schema_before_digest: before,
-                schema_after_digest: after,
-                bootstrap_owned_row_keys: [],
-              }
-            : {
-                backend: 'sqlite', path: sqlitePath, before_exists: sqliteExisted, created_by_run: !sqliteExisted,
-                before_digest: before, before_byte_digest: beforeByteDigest, before_mode: beforeMode, before_identity: beforeIdentity,
-                backup_path: sqliteExisted ? backupPath : null, after_digest: after, after_identity: afterIdentity,
-              },
-        },
+        readbackDigest: after,
+        mutation: postgres || before !== after ? databaseMutation(after) : undefined,
       }
     },
 
@@ -999,7 +1246,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         && existing.tmux_session === session
         && existing.profile_enabled === true
       if (context.dryRun) return { ok: true, evidenceRefs: [`profile-plan:${bootstrapDigest(desired)}`], readinessPredicates: { profile_plan_unambiguous: true } }
-      if (matches) return { ok: true, evidenceRefs: [`profile-existing:${bootstrapDigest(existing)}`], readinessPredicates: { profile_readback_matches: true } }
+      if (matches) return {
+        ok: true,
+        evidenceRefs: [`profile-existing:${bootstrapDigest(existing)}`],
+        readinessPredicates: { profile_readback_matches: true },
+        readbackDigest: bootstrapDigest(managedProfile(existing)),
+      }
       if (existing) {
         return { ok: false, reasonCodes: ['NO_GO_PROFILE_CONFLICT'], evidenceRefs: [`profile-mismatch:${bootstrapDigest(existing)}`] }
       }
@@ -1009,22 +1261,38 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         '--home-directory', context.workspaceRoot, '--channel-port', String(port),
         '--tmux-session', session, '--enabled', 'true', '--execute',
       ], commandOptions(context, 120_000))
-      if (applied.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_PROFILE_CONFLICT'] }
       const readback = await profileGet(context.agentId)
+      const actualProfile = managedProfile(readback)
+      const actualDigest = actualProfile ? bootstrapDigest(actualProfile) : null
+      const observedMutation = actualProfile ? {
+        kind: 'profile' as const,
+        owner_key: `profile:${context.runId}:${context.agentId}`,
+        before_digest: bootstrapDigest({ absent: true }),
+        intended_after_digest: bootstrapDigest(desired), actual_after_digest: actualDigest,
+        rollback_action: 'disable only the exact profile created by this run and verify native readback',
+        rollback_payload: { created_by_run: true, profile_digest: actualDigest },
+      } : undefined
+      if (applied.exitCode !== 0) return {
+        ok: false,
+        reasonCodes: observedMutation ? ['NO_GO_POST_MUTATION_READBACK'] : ['NO_GO_PROFILE_CONFLICT'],
+        evidenceRefs: [`profile-post-command-readback:${bootstrapDigest({ exit: applied.exitCode, actual: actualProfile })}`],
+        readbackDigest: bootstrapDigest(actualProfile ?? { absent: true }),
+        mutation: observedMutation,
+      }
       if (!readback || readback.runtime_engine_preference !== context.resolvedRuntime || Number(readback.channel_port) !== port) {
-        return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'] }
+        return {
+          ok: false,
+          reasonCodes: observedMutation ? ['NO_GO_POST_MUTATION_READBACK'] : ['NO_GO_IDENTITY_MISMATCH'],
+          readbackDigest: bootstrapDigest(actualProfile ?? { absent: true }),
+          mutation: observedMutation,
+        }
       }
       return {
         ok: true,
         evidenceRefs: [`profile-readback:${bootstrapDigest(readback)}`],
         readinessPredicates: { profile_readback_matches: true, endpoint_allocated: true },
-        mutation: {
-          kind: 'profile', owner_key: `profile:${context.runId}:${context.agentId}`,
-          before_digest: bootstrapDigest({ absent: true }),
-          intended_after_digest: bootstrapDigest(desired), actual_after_digest: bootstrapDigest(managedProfile(readback)),
-          rollback_action: 'disable only the exact profile created by this run and verify native readback',
-          rollback_payload: { created_by_run: true, profile_digest: bootstrapDigest(managedProfile(readback)) },
-        },
+        readbackDigest: bootstrapDigest(managedProfile(readback)),
+        mutation: observedMutation,
       }
     },
 
@@ -1043,20 +1311,57 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const runtimePlan = await adapter.planRuntimeStart(context)
       if (!runtimePlan.ok) return runtimePlan
       const plistPath = join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)
-      if (!context.dryRun && existsSync(plistPath)) {
-        const existingSafe = safeD1FromPlist(home)
+      const before = await readDaemonNativeState(context)
+      const beforeDigest = bootstrapDigest(before)
+      if (!context.dryRun && before.launch_loaded && !before.plist_exists) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_PRESTATE_UNREADABLE'],
+          evidenceRefs: [`daemon-loaded-without-plist:${beforeDigest}`],
+          readbackDigest: beforeDigest,
+        }
+      }
+      if (!context.dryRun && before.plist_exists && !safeD1FromPlist(home)) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_INSTALL_PLAN'],
+          evidenceRefs: [`daemon-preexisting-unsafe:${beforeDigest}`],
+          readbackDigest: beforeDigest,
+        }
+      }
+      if (!context.dryRun && before.plist_exists && before.launch_loaded) {
+        if (before.launch_safe_d1_digest !== bootstrapDigest(BOOTSTRAP_SAFE_D1_DEFAULTS)) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_INSTALL_PLAN'],
+            evidenceRefs: [`daemon-live-environment-unsafe:${beforeDigest}`],
+            readbackDigest: beforeDigest,
+          }
+        }
         const existing = await run(bunPath, [
           'cli/index.ts', 'state-daemon', 'readiness', '--require-running',
           '--expected-agent-id', context.agentId, '--format', 'json',
         ], commandOptions(context, 30_000))
         const existingJson = parseJsonOutput(existing)
-        return existingSafe && existing.exitCode === 0 && existingJson?.ok
+        return existing.exitCode === 0 && existingJson?.ok
           ? {
               ok: true,
-              evidenceRefs: [`daemon-existing:${bootstrapDigest({ plist: readFileSync(plistPath), readiness: existingJson })}`],
+              evidenceRefs: [`daemon-existing:${bootstrapDigest({ native: before, readiness: existingJson })}`],
               readinessPredicates: { daemon_started: true, process_identity_matches: true, daemon_preexisting_unchanged: true },
+              readbackDigest: beforeDigest,
             }
-          : { ok: false, reasonCodes: ['NO_GO_INSTALL_PLAN'], evidenceRefs: [`daemon-preexisting-mismatch:${bootstrapDigest({ safe: Boolean(existingSafe), readiness_exit: existing.exitCode })}`] }
+          : {
+              ok: false,
+              reasonCodes: ['NO_GO_INSTALL_PLAN'],
+              evidenceRefs: [`daemon-preexisting-mismatch:${bootstrapDigest({ native: before, readiness_exit: existing.exitCode })}`],
+              readbackDigest: beforeDigest,
+            }
+      }
+      const backupPath = join(bootstrapStateRoot(home, env), context.agentId, `${context.runId}.daemon.before.plist`)
+      if (!context.dryRun && before.plist_exists) {
+        mkdirSync(join(bootstrapStateRoot(home, env), context.agentId), { recursive: true, mode: 0o700 })
+        writeFileSync(backupPath, readFileSync(plistPath), { mode: 0o600 })
+        chmodSync(backupPath, 0o600)
       }
       const args = [
         'scripts/state-daemon-launchagent.ts', 'restore', '--commit', context.repoHead ?? '',
@@ -1067,23 +1372,55 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         ...(context.dryRun ? [] : ['--execute']),
       ]
       const result = await run(bunPath, args, commandOptions(context, 120_000))
-      if (result.exitCode !== 0) return { ok: false, reasonCodes: [context.dryRun ? 'NO_GO_INSTALL_PLAN' : 'NO_GO_DAEMON_START'] }
       if (context.dryRun) return { ok: true, evidenceRefs: [`daemon-plan:${bootstrapDigest(result.stdout)}`], readinessPredicates: { install_plan_go: true, d1_safe_defaults_planned: true } }
+      const after = await readDaemonNativeState(context)
+      const afterDigest = bootstrapDigest(after)
+      const changed = afterDigest !== beforeDigest
+      const mutation = changed ? {
+        kind: 'daemon' as const,
+        owner_key: `launchd:${context.runId}:${context.agentId}:${STATE_DAEMON_PLIST_NAME}`,
+        before_digest: beforeDigest,
+        intended_after_digest: bootstrapDigest(args),
+        actual_after_digest: afterDigest,
+        rollback_action: 'restore exact captured plist/load pre-state or prove exact run-created absence',
+        rollback_payload: {
+          created_by_run: !before.plist_exists && !before.launch_loaded,
+          bootstrap_run_id: context.runId,
+          agent_id: context.agentId,
+          plist_path: plistPath,
+          backup_path: before.plist_exists ? backupPath : null,
+          before_state: before,
+          before_state_digest: beforeDigest,
+          after_state: after,
+          after_state_digest: afterDigest,
+          launch_domain: daemonDomain,
+          launch_label: daemonLabel,
+        },
+      } : undefined
+      if (result.exitCode !== 0) return {
+        ok: false,
+        reasonCodes: mutation ? ['NO_GO_POST_MUTATION_READBACK'] : ['NO_GO_DAEMON_START'],
+        evidenceRefs: [`daemon-post-command-readback:${bootstrapDigest({ exit: result.exitCode, before, after })}`],
+        readbackDigest: afterDigest,
+        mutation,
+      }
       const identity = await adapter.verifyRuntimeIdentity(context)
-      if (!identity.ok) return identity
-      if (!existsSync(plistPath)) return { ok: false, reasonCodes: ['NO_GO_DAEMON_START'] }
-      const plistDigest = bootstrapDigest(readFileSync(plistPath))
+      const exactAfter = after.plist_exists && after.launch_loaded
+        && after.safe_d1_digest === bootstrapDigest(BOOTSTRAP_SAFE_D1_DEFAULTS)
+        && after.launch_safe_d1_digest === bootstrapDigest(BOOTSTRAP_SAFE_D1_DEFAULTS)
+      if (!identity.ok || !exactAfter) return {
+        ok: false,
+        reasonCodes: mutation ? ['NO_GO_POST_MUTATION_READBACK'] : (identity.reasonCodes ?? ['NO_GO_DAEMON_START']),
+        evidenceRefs: [`daemon-post-command-invalid:${afterDigest}`, ...(identity.evidenceRefs ?? [])],
+        readbackDigest: afterDigest,
+        mutation,
+      }
       return {
         ok: true,
-        evidenceRefs: [`daemon-start:${bootstrapDigest(result.stdout)}`, ...(identity.evidenceRefs ?? [])],
+        evidenceRefs: [`daemon-start:${bootstrapDigest(result.stdout)}`, `daemon-native:${afterDigest}`, ...(identity.evidenceRefs ?? [])],
         readinessPredicates: { daemon_started: true, process_identity_matches: true },
-        mutation: {
-          kind: 'daemon', owner_key: `launchd:${context.runId}:${STATE_DAEMON_PLIST_NAME}`,
-          before_digest: null, intended_after_digest: bootstrapDigest(args),
-          actual_after_digest: plistDigest,
-          rollback_action: `launchctl bootout gui/<uid> ${join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)}`,
-          rollback_payload: { created_by_run: true, plist_path: plistPath, plist_digest: plistDigest },
-        },
+        readbackDigest: afterDigest,
+        mutation,
       }
     },
 
@@ -1133,6 +1470,10 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
                   : 'NO_GO_QUEUE_NO_PROGRESS')
         return { ok: false, reasonCodes: mapped }
       }
+      const queueReadbackDigest = await queueStageReadbackDigest(
+        queueSmokeEvidence.queue_id, context.agentId, context.runId, runtimeInstanceId,
+      )
+      if (!queueReadbackDigest) return { ok: false, reasonCodes: ['NO_GO_QUEUE_ORDINARY_RECEIVE_UNPROVEN'] }
       return {
         ok: true,
         evidenceRefs: [`queue-smoke:${bootstrapDigest(queueSmokeEvidence)}`],
@@ -1143,6 +1484,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           duplicate_effect_zero: queueSmokeEvidence.duplicate_effect_count === 0,
           external_effect_zero: queueSmokeEvidence.external_effect_count === 0,
         },
+        readbackDigest: queueReadbackDigest,
         mutation: {
           kind: 'queue_smoke', owner_key: `queue:${queueSmokeEvidence.queue_id}`,
           before_digest: null, intended_after_digest: bootstrapDigest({ status: 'done' }),
@@ -1160,15 +1502,27 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         env.AUN_BOOTSTRAP_CHANNEL_PORT = String(profile.channel_port ?? '')
         env.AUN_BOOTSTRAP_TMUX_SESSION = String(profile.tmux_session ?? '')
       }
-      const [mcp, runtimeIdentity, memory, daemon] = await Promise.all([
+      const [mcp, runtimeIdentity, memory, daemon, daemonNative] = await Promise.all([
         adapter.readbackMcpRegistration(context),
         adapter.verifyRuntimeIdentity(context),
         memoryReadback(context),
         run(bunPath, ['cli/index.ts', 'state-daemon', 'readiness', '--require-running', '--expected-agent-id', context.agentId, '--format', 'json'], commandOptions(context, 30_000)),
+        readDaemonNativeState(context),
       ])
       const safeD1 = safeD1FromPlist(home)
       const daemonJson = parseJsonOutput(daemon)
       let queueReady = Boolean(queueSmokeEvidence?.ok)
+      let queueReadbackDigest: string | null = null
+      if (queueSmokeEvidence?.ok) {
+        const runtimeId = context.priorState.readback_bindings?.runtime_instance_id
+          ?? env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? ''
+        queueReadbackDigest = await queueStageReadbackDigest(
+          queueSmokeEvidence.queue_id, context.agentId,
+          context.priorState.readback_bindings?.source_run_id ?? context.priorState.run_id,
+          runtimeId,
+        )
+        queueReady = Boolean(queueReadbackDigest)
+      }
       if (!queueReady) {
         const queueMutation = context.priorState.mutations.find((mutation) => mutation.kind === 'queue_smoke')
         const queueId = queueMutation?.owner_key.startsWith('queue:')
@@ -1195,9 +1549,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
               && payload.terminal_baton?.no_reply_required === true
               && outbound.length === 0
           }).catch(() => false)
+          if (queueReady) {
+            queueReadbackDigest = await queueStageReadbackDigest(
+              String(queueId), context.agentId,
+              context.priorState.readback_bindings?.source_run_id ?? context.priorState.run_id,
+              context.priorState.readback_bindings?.runtime_instance_id ?? '',
+            )
+            queueReady = Boolean(queueReadbackDigest)
+          }
         }
       }
-      const ok = mcp.ok && runtimeIdentity.ok && memory.ok && Boolean(profile) && daemon.exitCode === 0 && Boolean(daemonJson?.ok) && queueReady && Boolean(safeD1)
+      const ok = mcp.ok && runtimeIdentity.ok && memory.ok && Boolean(profile) && daemon.exitCode === 0
+        && Boolean(daemonJson?.ok) && daemonNative.launch_loaded && queueReady && Boolean(safeD1)
       if (!ok) {
         const codes: BootstrapReasonCode[] = []
         if (!mcp.ok) codes.push('NO_GO_MCP_READBACK')
@@ -1220,20 +1583,28 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           identity_ready: true, mcp_ready: true, memory_ready: true,
           process_endpoint_ready: true, queue_progress_ready: true, safe_d1_readback: true,
         },
+        readbackDigest: bootstrapDigest({
+          mcp: mcp.readbackDigest ?? null,
+          runtime_identity: runtimeIdentity.readbackDigest ?? bootstrapDigest(runtimeIdentity.readinessPredicates ?? {}),
+          memory: memory.readbackDigest ?? null,
+          profile: bootstrapDigest(managedProfile(profile)),
+          daemon: bootstrapDigest(daemonNative),
+          queue: queueReadbackDigest,
+          safe_d1: bootstrapDigest(safeD1),
+        }),
       }
     },
 
     async revalidateStage(context, stage) {
       if (stage === 'B0_LOCK_AND_SNAPSHOT' || stage === 'B1_DEPENDENCY_PREFLIGHT') return { ok: true }
       if (stage === 'B2_DB_MIGRATION') {
-        const result = await run(bunPath, ['db/migrate.ts'], commandOptions(context, 120_000))
         const mutation = context.priorState.mutations.find((item) => item.stage === stage && item.kind === 'db')
         const recordedEvidence = context.priorState.stages.find((item) => item.stage === stage)
           ?.evidence_refs.find((ref) => ref.startsWith('db-migration:'))
         const expectedDigest = mutation?.actual_after_digest ?? recordedEvidence?.slice('db-migration:'.length)
-        const currentDigest = result.exitCode === 0 ? await currentDatabaseStageDigest() : null
-        return result.exitCode === 0 && Boolean(expectedDigest) && currentDigest === expectedDigest
-          ? { ok: true, evidenceRefs: [`resume-db-readback:${currentDigest}`] }
+        const currentDigest = await currentDatabaseStageDigest()
+        return Boolean(expectedDigest) && currentDigest === expectedDigest
+          ? { ok: true, evidenceRefs: [`resume-db-readback:${currentDigest}`], readbackDigest: currentDigest! }
           : { ok: false, reasonCodes: ['NO_GO_RESUME_INPUT_MISMATCH'] }
       }
       if (stage === 'B3_AGENT_PROFILE') {
@@ -1247,7 +1618,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           && profile.profile_enabled === true
           && digestMatches
         if (ok) env.AUN_BOOTSTRAP_CHANNEL_PORT = String(profile.channel_port)
-        return ok ? { ok: true, evidenceRefs: [`resume-profile-readback:${bootstrapDigest(profile)}`] } : { ok: false, reasonCodes: ['NO_GO_RESUME_INPUT_MISMATCH'] }
+        return ok ? {
+          ok: true,
+          evidenceRefs: [`resume-profile-readback:${bootstrapDigest(profile)}`],
+          readbackDigest: bootstrapDigest(managedProfile(profile)),
+        } : { ok: false, reasonCodes: ['NO_GO_RESUME_REVALIDATION'] }
       }
       if (stage === 'B4_MCP_REGISTRATION') {
         const adapter = adapterFor(context)
@@ -1255,10 +1630,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       }
       if (stage === 'B5_MEMORY_READINESS') return memoryReadback(context)
       if (stage === 'B6_ORDINARY_DAEMON_INSTALL_START') {
+        const native = await readDaemonNativeState(context)
+        const nativeDigest = bootstrapDigest(native)
         const daemon = await run(bunPath, ['cli/index.ts', 'state-daemon', 'readiness', '--require-running', '--expected-agent-id', context.agentId, '--format', 'json'], commandOptions(context, 30_000))
-        return daemon.exitCode === 0 && parseJsonOutput(daemon)?.ok && Boolean(safeD1FromPlist(home))
-          ? { ok: true, evidenceRefs: [`resume-daemon-readback:${bootstrapDigest(parseJsonOutput(daemon))}`] }
-          : { ok: false, reasonCodes: ['NO_GO_RESUME_INPUT_MISMATCH'] }
+        return daemon.exitCode === 0 && parseJsonOutput(daemon)?.ok && Boolean(safeD1FromPlist(home)) && native.launch_loaded
+          ? { ok: true, evidenceRefs: [`resume-daemon-readback:${nativeDigest}`], readbackDigest: nativeDigest }
+          : { ok: false, reasonCodes: ['NO_GO_RESUME_REVALIDATION'] }
       }
       if (stage === 'B7_QUEUE_SMOKE') {
         const mutation = context.priorState.mutations.find((item) => item.stage === stage && item.kind === 'queue_smoke')
@@ -1272,7 +1649,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             && payload?.runtime_instance_id === env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID
             && payload?.terminal_baton?.no_reply_required === true
         }).catch(() => false)
-        return ok ? { ok: true, evidenceRefs: [`resume-queue-readback:${queueId}`] } : { ok: false, reasonCodes: ['NO_GO_RESUME_INPUT_MISMATCH'] }
+        const runtimeId = env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? ''
+        const digest = ok ? await queueStageReadbackDigest(String(queueId), context.agentId, context.runId, runtimeId) : null
+        return ok && digest
+          ? { ok: true, evidenceRefs: [`resume-queue-readback:${queueId}`], readbackDigest: digest }
+          : { ok: false, reasonCodes: ['NO_GO_RESUME_REVALIDATION'] }
       }
       return { ok: false, reasonCodes: ['NO_GO_RESUME_INPUT_MISMATCH'] }
     },
@@ -1280,23 +1661,82 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     async rollbackMutation(context, mutation) {
       const adapter = adapterFor(context)
       if (mutation.kind === 'mcp_registration' && adapter) return adapter.rollbackRuntimeRegistration(context, mutation)
-      if (mutation.kind === 'daemon' && mutation.owner_key === `launchd:${context.runId}:${STATE_DAEMON_PLIST_NAME}`) {
+      if (mutation.kind === 'daemon'
+        && mutation.owner_key === `launchd:${context.runId}:${context.agentId}:${STATE_DAEMON_PLIST_NAME}`) {
         const plist = String(mutation.rollback_payload?.plist_path ?? '')
-        const expectedDigest = mutation.rollback_payload?.plist_digest
-        if (mutation.rollback_payload?.created_by_run !== true || !plist || !existsSync(plist)
-          || bootstrapDigest(readFileSync(plist)) !== expectedDigest) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
-        const result = await run('launchctl', ['bootout', `gui/${process.getuid?.() ?? ''}`, plist], commandOptions(context, 30_000))
-        if (result.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
-        rmSync(plist)
-        const unloaded = await run(
-          'launchctl', ['print', `gui/${process.getuid?.() ?? ''}/${STATE_DAEMON_PLIST_NAME.replace(/\.plist$/, '')}`],
-          commandOptions(context, 30_000),
-        )
-        return !existsSync(plist) && unloaded.exitCode !== 0
-          ? { ok: true, readinessPredicates: { rollback_verified: true } }
-          : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        const payload = mutation.rollback_payload ?? {}
+        const beforeState = payload.before_state as DaemonNativeState | undefined
+        const expectedAfterDigest = String(payload.after_state_digest ?? '')
+        if (!plist || !beforeState || payload.bootstrap_run_id !== context.runId || payload.agent_id !== context.agentId
+          || payload.launch_domain !== daemonDomain || payload.launch_label !== daemonLabel) {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        const live = await readDaemonNativeState(context)
+        if (bootstrapDigest(live) !== expectedAfterDigest || mutation.actual_after_digest !== expectedAfterDigest) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+            evidenceRefs: [`daemon-rollback-poststate-fence-mismatch:${bootstrapDigest(live)}`],
+          }
+        }
+        if (live.launch_loaded) {
+          const bootout = await run('launchctl', ['bootout', daemonDomain, plist], commandOptions(context, 30_000))
+          if (bootout.exitCode !== 0) return {
+            ok: false,
+            reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+            evidenceRefs: [`daemon-rollback-bootout-failed:${bootout.exitCode}`],
+          }
+        }
+        if (payload.created_by_run === true) {
+          rmSync(plist, { force: true })
+        } else {
+          const backup = String(payload.backup_path ?? '')
+          if (!beforeState.plist_exists || !backup || !existsSync(backup)
+            || bootstrapDigest(readFileSync(backup)) !== beforeState.plist_digest) {
+            return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+          }
+          const restoreTemp = `${plist}.${context.runId}.restore.tmp`
+          rmSync(restoreTemp, { force: true })
+          try {
+            writeFileSync(restoreTemp, readFileSync(backup), { mode: Number(beforeState.plist_mode) })
+            chmodSync(restoreTemp, Number(beforeState.plist_mode))
+            renameSync(restoreTemp, plist)
+          } finally {
+            rmSync(restoreTemp, { force: true })
+          }
+          if (beforeState.launch_loaded) {
+            const restored = await run('launchctl', ['bootstrap', daemonDomain, plist], commandOptions(context, 30_000))
+            if (restored.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+          }
+        }
+        const finalState = await readDaemonNativeState(context)
+        const expectedFinal = payload.created_by_run === true
+          ? {
+              ...beforeState,
+              plist_exists: false, plist_digest: null, plist_mode: null,
+              launch_loaded: false, launch_pid: null,
+              safe_d1_digest: null, launch_safe_d1_digest: null,
+            }
+          : beforeState
+        const ok = bootstrapDigest(finalState) === bootstrapDigest(expectedFinal)
+        return ok
+          ? {
+              ok: true,
+              readinessPredicates: { rollback_verified: true },
+              evidenceRefs: [`daemon-rollback-native-readback:${bootstrapDigest(finalState)}`],
+              readbackDigest: bootstrapDigest(finalState),
+            }
+          : {
+              ok: false,
+              reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+              evidenceRefs: [`daemon-rollback-final-mismatch:${bootstrapDigest({ expected: expectedFinal, actual: finalState })}`],
+            }
       }
-      if (mutation.kind === 'queue_smoke') return { ok: true, readinessPredicates: { terminal_smoke_retained: true } }
+      if (mutation.kind === 'queue_smoke') return {
+        ok: true,
+        readinessPredicates: { terminal_smoke_retained: true },
+        readbackDigest: mutation.actual_after_digest ?? bootstrapDigest({ terminal_smoke_retained: true }),
+      }
       if (mutation.kind === 'memory_readiness') {
         const payload = mutation.rollback_payload ?? {}
         const runtimeId = String(payload.runtime_instance_id ?? '')
@@ -1344,7 +1784,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             : null
           return (!evidence || (evidence.result_status === 'failed' && evidence.failure_reason === 'BOOTSTRAP_ROLLBACK')) && !active
         })).catch(() => false)
-        return ok ? { ok: true, readinessPredicates: { rollback_verified: true } } : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        return ok
+          ? { ok: true, readinessPredicates: { rollback_verified: true }, readbackDigest: bootstrapDigest({ runtime_id: runtimeId, evidence_id: evidenceId, active: false }) }
+          : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
       if (mutation.kind === 'profile') {
         if (mutation.owner_key !== `profile:${context.runId}:${context.agentId}` || mutation.rollback_payload?.created_by_run !== true) {
@@ -1355,12 +1797,100 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const disabled = await run(bunPath, ['cli/index.ts', 'agent', 'profile', 'set', context.agentId, '--enabled', 'false', '--execute'], commandOptions(context, 30_000))
         const readback = await profileGet(context.agentId)
         return disabled.exitCode === 0 && readback?.profile_enabled === false
-          ? { ok: true, readinessPredicates: { rollback_verified: true } }
+          ? { ok: true, readinessPredicates: { rollback_verified: true }, readbackDigest: bootstrapDigest(managedProfile(readback)) }
           : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
       if (mutation.kind === 'db') {
         const payload = mutation.rollback_payload ?? {}
-        if (payload.backend === 'postgres') return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        if (payload.backend === 'postgres') {
+          if (payload.bootstrap_run_id !== context.runId
+            || payload.endpoint_digest !== bootstrapDigest(env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp')) {
+            return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+          }
+          const schemaBeforeCleanup = await postgresSchemaDigest().catch(() => null)
+          if (!schemaBeforeCleanup || schemaBeforeCleanup !== payload.schema_after_digest) {
+            return {
+              ok: false,
+              reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+              evidenceRefs: [`postgres-rollback-schema-fence-mismatch:${bootstrapDigest(schemaBeforeCleanup)}`],
+            }
+          }
+          const ledger = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+            const sharedBefore = [
+              await tx.query<any>(`SELECT runtime_instance_id, status, metadata FROM agent_runtime_instances
+                WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY runtime_instance_id`, [context.runId]),
+              await tx.query<any>(`SELECT id, result_status, metadata FROM runtime_memory_ready_evidence
+                WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
+              await tx.query<any>(`SELECT id, status, payload FROM message_queue
+                WHERE COALESCE((payload::jsonb)->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
+            ]
+            const ownedBefore = [
+              await tx.query<any>(`SELECT runtime_instance_id, status FROM agent_runtime_instances
+                WHERE metadata->>'bootstrap_run_id' = $1 ORDER BY runtime_instance_id`, [context.runId]),
+              await tx.query<any>(`SELECT id, result_status FROM runtime_memory_ready_evidence
+                WHERE metadata->>'bootstrap_run_id' = $1 ORDER BY id`, [context.runId]),
+              await tx.query<any>(`SELECT id, status FROM message_queue
+                WHERE (payload::jsonb)->>'bootstrap_run_id' = $1 ORDER BY id`, [context.runId]),
+            ]
+            await tx.execute(`UPDATE runtime_memory_ready_evidence
+              SET result_status = 'failed', failure_reason = 'BOOTSTRAP_ROLLBACK', valid_until = now()
+              WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [context.runId])
+            await tx.execute(`UPDATE agent_runtime_instances
+              SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), last_seen_at = now()
+              WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [context.runId])
+            await tx.execute(`UPDATE message_queue
+              SET status = CASE
+                    WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN 'skipped'
+                    ELSE status
+                  END,
+                  failed_reason = CASE
+                    WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN 'BOOTSTRAP_ROLLBACK'
+                    ELSE failed_reason
+                  END,
+                  done_at = CASE
+                    WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN COALESCE(done_at, now())
+                    ELSE done_at
+                  END,
+                  claim_expires_at = now(),
+                  payload = jsonb_set(payload::jsonb, '{bootstrap_rollback_expired}', 'true'::jsonb, true)::text
+              WHERE (payload::jsonb)->>'bootstrap_run_id' = $1`, [context.runId])
+            const activeAfter = [
+              await tx.query<any>(`SELECT runtime_instance_id FROM agent_runtime_instances
+                WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [context.runId]),
+              await tx.query<any>(`SELECT id FROM runtime_memory_ready_evidence
+                WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [context.runId]),
+              await tx.query<any>(`SELECT id FROM message_queue
+                WHERE (payload::jsonb)->>'bootstrap_run_id' = $1
+                  AND status IN ('pending', 'read', 'received', 'in_progress')`, [context.runId]),
+            ]
+            const sharedAfter = [
+              await tx.query<any>(`SELECT runtime_instance_id, status, metadata FROM agent_runtime_instances
+                WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY runtime_instance_id`, [context.runId]),
+              await tx.query<any>(`SELECT id, result_status, metadata FROM runtime_memory_ready_evidence
+                WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
+              await tx.query<any>(`SELECT id, status, payload FROM message_queue
+                WHERE COALESCE((payload::jsonb)->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
+            ]
+            return {
+              owned_before_digest: bootstrapDigest(ownedBefore),
+              owned_before_counts: ownedBefore.map((rows) => rows.length),
+              active_after_counts: activeAfter.map((rows) => rows.length),
+              shared_before_digest: bootstrapDigest(sharedBefore),
+              shared_after_digest: bootstrapDigest(sharedAfter),
+              shared_unchanged: bootstrapDigest(sharedBefore) === bootstrapDigest(sharedAfter),
+            }
+          })).catch(() => null)
+          const schemaAfterCleanup = await postgresSchemaDigest().catch(() => null)
+          const ownedAbsent = Boolean(ledger)
+            && ledger!.active_after_counts.every((count) => count === 0)
+            && ledger!.shared_unchanged
+            && schemaAfterCleanup === schemaBeforeCleanup
+          const sharedSchemaRestored = payload.schema_before_digest === payload.schema_after_digest
+          const evidence = `postgres-run-owned-rollback:${bootstrapDigest({ ledger, schemaBeforeCleanup, schemaAfterCleanup, sharedSchemaRestored })}`
+          return ownedAbsent && sharedSchemaRestored
+            ? { ok: true, readinessPredicates: { rollback_verified: true }, evidenceRefs: [evidence], readbackDigest: bootstrapDigest({ ledger, schemaAfterCleanup }) }
+            : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: [evidence] }
+        }
         if (payload.backend !== 'sqlite') return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         const path = String(payload.path ?? '')
         if (!path || !existsSync(path)
@@ -1384,16 +1914,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           } finally {
             rmSync(restoreTemp, { force: true })
           }
-          return sqliteFileDigest(path) === payload.before_byte_digest
+          const restoredDigest = sqliteFileDigest(path)
+          return restoredDigest === payload.before_byte_digest
             && !sqliteHasSidecars(path)
             && (statSync(path).mode & 0o777) === Number(payload.before_mode)
-            ? { ok: true, readinessPredicates: { rollback_verified: true } }
+            ? { ok: true, readinessPredicates: { rollback_verified: true }, readbackDigest: bootstrapDigest({ restored_digest: restoredDigest, sidecars_absent: true, mode: Number(payload.before_mode) }) }
             : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         }
         if (payload.created_by_run !== true) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         removeSqliteArtifacts(path)
-        return [path, `${path}-wal`, `${path}-shm`].every((candidate) => !existsSync(candidate))
-          ? { ok: true, readinessPredicates: { rollback_verified: true } }
+        const absent = [path, `${path}-wal`, `${path}-shm`].every((candidate) => !existsSync(candidate))
+        return absent
+          ? { ok: true, readinessPredicates: { rollback_verified: true }, readbackDigest: bootstrapDigest({ path, absent: true }) }
           : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
       return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
@@ -1425,8 +1957,11 @@ export async function bootstrap(
   const runId = options.resumeRunId ?? options.rollbackRunId ?? `bootstrap-${(dependencies.uuid ?? randomUUID)()}`
   let state = options.resumeRunId || options.rollbackRunId ? stateStore.load(agentId, runId) : null
   const requestedRuntimeForDigest = state?.requested_runtime ?? options.runtime
+  const providerSnapshot = await providerInputSnapshot({
+    requestedRuntime: requestedRuntimeForDigest, repoRoot, home, env, run: runCommand,
+  })
   const inputDigest = bootstrapInputDigest({
-    agentId, requestedRuntime: requestedRuntimeForDigest, repoRoot, workspaceRoot, repoHead, home, env,
+    agentId, requestedRuntime: requestedRuntimeForDigest, repoRoot, workspaceRoot, repoHead, home, env, providerSnapshot,
   })
   if ((options.resumeRunId || options.rollbackRunId) && !state) {
     const missing = initialState({ runId, agentId, runtime: options.runtime, inputDigest, repoRoot, workspaceRoot, repoHead })
@@ -1437,6 +1972,9 @@ export async function bootstrap(
   }
   if (state && state.mutation_manifest_digest !== bootstrapDigest(state.mutations)) {
     return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
+  }
+  if (state && (options.resumeRunId || options.rollbackRunId) && !passedStageSealsAreValid(state)) {
+    return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
   }
   if (state && state.input_digest !== inputDigest) {
     return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
@@ -1498,10 +2036,30 @@ export async function bootstrap(
       let allVerified = true
       for (const mutation of [...state.mutations].reverse()) {
         if (mutation.rollback_status === 'verified') continue
+        const rollbackStartedAt = nowIso()
+        mutation.rollback_status = 'attempting'
+        mutation.rollback_payload = {
+          ...(mutation.rollback_payload ?? {}),
+          rollback_disposition: 'attempting',
+          rollback_started_at: rollbackStartedAt,
+        }
+        state.updated_at = rollbackStartedAt
+        stateStore.save(state)
         const outcome = await boundedDeadline(mutation.stage, (signal) => ports.rollbackMutation(context(signal), mutation))
-        mutation.rollback_status = outcome.ok ? 'verified' : 'failed'
-        allVerified &&= outcome.ok
-        if (outcome.ok && mutation.kind !== 'db') refreshOwnedRollbackFences(state)
+        const rollbackVerified = outcome.ok && Boolean(outcome.readbackDigest)
+        mutation.rollback_status = rollbackVerified ? 'verified' : 'failed'
+        mutation.rollback_payload = {
+          ...(mutation.rollback_payload ?? {}),
+          rollback_disposition: rollbackVerified ? 'verified' : 'failed',
+          rollback_evidence_refs: outcome.evidenceRefs ?? [],
+          rollback_readback_digest: outcome.readbackDigest ?? null,
+          rollback_completed_at: nowIso(),
+        }
+        state.evidence_refs = [...new Set([...state.evidence_refs, ...(outcome.evidenceRefs ?? [])])]
+        allVerified &&= rollbackVerified
+        if (rollbackVerified && mutation.kind !== 'db') refreshOwnedRollbackFences(state)
+        const stageRecord = state.stages.find((record) => record.stage === mutation.stage)
+        if (stageRecord?.status === 'passed') stageRecord.seal_digest = stageSealDigest(state, mutation.stage)
         state.updated_at = nowIso()
         stateStore.save(state)
       }
@@ -1513,6 +2071,9 @@ export async function bootstrap(
 
     const priorReady = !options.resumeRunId && !options.dryRun ? stateStore.findLatestReady(agentId, inputDigest) : null
     if (priorReady) {
+      if (!passedStageSealsAreValid(priorReady)) {
+        return resultFromState(state, 'B1_DEPENDENCY_PREFLIGHT', 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
+      }
       state.resolved_runtime = priorReady.resolved_runtime
       hydrateRunEnvironment(priorReady)
       const preflight = await boundedDeadline('B1_DEPENDENCY_PREFLIGHT', (signal) => ports.dependencyPreflight(context(signal, priorReady)))
@@ -1535,6 +2096,21 @@ export async function bootstrap(
           queue_id: null,
         }
         state.evidence_refs = [...new Set([...state.evidence_refs, `idempotent-readback-of:${priorReady.run_id}`])]
+        const b1 = state.stages.find((record) => record.stage === 'B1_DEPENDENCY_PREFLIGHT')!
+        b1.started_at = state.created_at
+        b1.completed_at = state.updated_at
+        b1.evidence_refs = preflight.evidenceRefs ?? []
+        b1.readiness_predicates = preflight.readinessPredicates ?? {}
+        b1.readback_digest = outcomeReadbackDigest(preflight)
+        const b8 = state.stages.find((record) => record.stage === 'B8_READY_READBACK')!
+        b8.started_at = state.created_at
+        b8.completed_at = state.updated_at
+        b8.evidence_refs = readback.evidenceRefs ?? []
+        b8.readiness_predicates = readback.readinessPredicates ?? {}
+        b8.readback_digest = outcomeReadbackDigest(readback)
+        for (const record of state.stages) {
+          if (record.status === 'passed') record.seal_digest = stageSealDigest(state, record.stage)
+        }
         stateStore.save(state)
         return resultFromState(state, 'B8_READY_READBACK', 'IDEMPOTENT_READY', [])
       }
@@ -1543,16 +2119,19 @@ export async function bootstrap(
 
     for (const stage of BOOTSTRAP_STAGES) {
       const record = state.stages.find((candidate) => candidate.stage === stage)!
+      const sealedRecord = structuredClone(record)
       if (options.resumeRunId && record.status === 'passed' && stage !== 'B0_LOCK_AND_SNAPSHOT' && stage !== 'B1_DEPENDENCY_PREFLIGHT') {
         if (!ports.revalidateStage) return resultFromState(state, stage, 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
         const revalidated = await boundedDeadline(stage, (signal) => ports.revalidateStage!(context(signal), stage))
-        if (!revalidated.ok) {
+        const liveReadbackDigest = outcomeReadbackDigest(revalidated)
+        if (!revalidated.ok || !record.readback_digest || liveReadbackDigest !== record.readback_digest) {
           state.terminal_status = 'NO_GO'
           state.updated_at = nowIso()
           stateStore.save(state)
-          return resultFromState(state, stage, 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
+          return resultFromState(state, stage, 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
         }
         record.evidence_refs = [...new Set([...record.evidence_refs, ...(revalidated.evidenceRefs ?? [])])]
+        record.seal_digest = stageSealDigest(state, stage)
         state.updated_at = nowIso()
         stateStore.save(state)
         continue
@@ -1566,14 +2145,27 @@ export async function bootstrap(
       record.reason_codes = outcome.reasonCodes ?? []
       record.evidence_refs = outcome.evidenceRefs ?? []
       record.readiness_predicates = outcome.readinessPredicates ?? {}
+      record.readback_digest = outcomeReadbackDigest(outcome)
       if (outcome.resolvedRuntime) state.resolved_runtime = outcome.resolvedRuntime
+      if (options.resumeRunId && sealedRecord.status === 'passed'
+        && (stage === 'B0_LOCK_AND_SNAPSHOT' || stage === 'B1_DEPENDENCY_PREFLIGHT')
+        && sealedRecord.readback_digest !== record.readback_digest) {
+        record.status = 'failed'
+        record.reason_codes = ['NO_GO_RESUME_REVALIDATION']
+        state.terminal_status = 'NO_GO'
+        state.updated_at = nowIso()
+        stateStore.save(state)
+        return resultFromState(state, stage, 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
+      }
+      let observedMutation: BootstrapMutation | null = null
       if (outcome.mutation && !options.dryRun) {
-        state.mutations.push({
+        observedMutation = {
           mutation_id: `${runId}:${stage}:${state.mutations.length + 1}`,
           stage,
           rollback_status: 'not_run',
           ...outcome.mutation,
-        })
+        }
+        state.mutations.push(observedMutation)
       }
       state.updated_at = nowIso()
       if (!outcome.ok) {
@@ -1581,12 +2173,48 @@ export async function bootstrap(
         state.terminal_status = 'NO_GO'
         if (!options.dryRun) {
           refreshOwnedRollbackFences(state)
+          state.updated_at = nowIso()
+          stateStore.save(state)
+          if (observedMutation) {
+            const rollbackStartedAt = nowIso()
+            observedMutation.rollback_status = 'attempting'
+            observedMutation.rollback_payload = {
+              ...(observedMutation.rollback_payload ?? {}),
+              rollback_disposition: 'attempting_after_failed_command',
+              rollback_started_at: rollbackStartedAt,
+            }
+            state.updated_at = rollbackStartedAt
+            stateStore.save(state)
+            const rollback = await boundedDeadline(stage, (signal) => ports.rollbackMutation(context(signal), observedMutation!))
+            const rollbackVerified = rollback.ok && Boolean(rollback.readbackDigest)
+            const durableMutation = state.mutations.find((candidate) => candidate.mutation_id === observedMutation!.mutation_id)
+            if (!durableMutation) throw new Error('observed mutation disappeared before rollback disposition')
+            durableMutation.rollback_status = rollbackVerified ? 'verified' : 'failed'
+            durableMutation.rollback_payload = {
+              ...(durableMutation.rollback_payload ?? {}),
+              rollback_disposition: rollbackVerified ? 'verified_after_failed_command' : 'recovery_required_after_failed_command',
+              rollback_completed_at: nowIso(),
+              rollback_evidence_refs: rollback.evidenceRefs ?? [],
+              rollback_readback_digest: rollback.readbackDigest ?? null,
+            }
+            state.evidence_refs = [...new Set([...state.evidence_refs, ...(rollback.evidenceRefs ?? [])])]
+            record.reason_codes = [...new Set([
+              ...(record.reason_codes.length > 0 ? record.reason_codes : ['NO_GO_POST_MUTATION_READBACK']),
+              ...(!rollbackVerified ? ['NO_GO_POST_MUTATION_READBACK' as const] : []),
+            ])]
+          }
+          for (const sealed of state.stages) {
+            if (sealed.status === 'passed') sealed.seal_digest = stageSealDigest(state, sealed.stage)
+          }
           stateStore.save(state)
         }
         return resultFromState(state, stage, 'NO_GO', record.reason_codes.length > 0 ? record.reason_codes : ['NO_GO_READY_PREDICATE_FALSE'])
       }
       record.status = options.dryRun ? 'planned' : 'passed'
-      if (!options.dryRun) stateStore.save(state)
+      if (!options.dryRun) {
+        record.seal_digest = stageSealDigest(state, stage)
+        stateStore.save(state)
+      }
     }
 
     state.terminal_status = options.dryRun ? 'PLANNED' : 'READY'
@@ -1597,15 +2225,28 @@ export async function bootstrap(
         stateStore.save(state)
         return resultFromState(state, 'B8_READY_READBACK', 'NO_GO', ['NO_GO_ROLLBACK_UNVERIFIED'])
       }
+      for (const record of state.stages) {
+        if (record.status === 'passed') record.seal_digest = stageSealDigest(state, record.stage)
+      }
       stateStore.save(state)
     }
     return resultFromState(state, 'B8_READY_READBACK', state.terminal_status, [])
   } finally {
-    if (lockHeld) stateStore.releaseLock(agentId, runId)
+    if (lockHeld) {
+      state.lock_release_authorized_at = nowIso()
+      state.updated_at = state.lock_release_authorized_at
+      stateStore.save(state)
+      stateStore.releaseLock(agentId, runId)
+      lockHeld = false
+      state.lock_released_at = nowIso()
+      state.updated_at = state.lock_released_at
+      stateStore.save(state)
+    }
   }
 }
 
 export const bootstrapInternal = {
   defaultCommandRunner,
   runStdioMcpRecovery,
+  createDefaultPorts,
 }

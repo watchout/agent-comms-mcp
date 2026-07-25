@@ -36,8 +36,14 @@ function passingPorts(calls: string[] = []): BootstrapExecutionPorts {
     installAndStartDaemon: pass('B6', { ok: true, readinessPredicates: { daemon_started: true } }),
     runQueueSmoke: pass('B7', { ok: true, readinessPredicates: { enqueue_once: true, claim_at_most_once: true, terminal_once: true, external_effect_zero: true } }),
     readbackReady: pass('B8', { ok: true, readinessPredicates: { safe_d1_readback: true } }),
-    revalidateStage: async (_context, stage) => { calls.push(`R:${stage}`); return { ok: true } },
-    rollbackMutation: pass('rollback', { ok: true }),
+    revalidateStage: async (context, stage) => {
+      calls.push(`R:${stage}`)
+      return {
+        ok: true,
+        readbackDigest: context.priorState.stages.find((record) => record.stage === stage)?.readback_digest ?? undefined,
+      }
+    },
+    rollbackMutation: pass('rollback', { ok: true, readbackDigest: 'exact-prestate' }),
   }
 }
 
@@ -198,6 +204,131 @@ describe('aun bootstrap B0-B8 state machine', () => {
     expect(mutationDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
   })
 
+  test('resume revalidates provider, Wasurezu, and daemon stage seals before any later mutation', async () => {
+    for (const driftStage of ['B4_MCP_REGISTRATION', 'B5_MEMORY_READINESS', 'B6_ORDINARY_DAEMON_INSTALL_START'] as const) {
+      const store = new MemoryBootstrapStateStore()
+      const calls: string[] = []
+      const ports = passingPorts(calls)
+      ports.runQueueSmoke = async () => { calls.push('B7'); return { ok: false, reasonCodes: ['NO_GO_QUEUE_NO_PROGRESS'] } }
+      const input = { agentId: `resume-${driftStage.toLowerCase()}`, runtime: 'codex' as const, home: `/tmp/resume-${driftStage}`, repoRoot: process.cwd(), env: { HOME: `/tmp/resume-${driftStage}` } }
+      const first = await bootstrap(input, { stateStore: store, ports, run: fakeRun() })
+      expect(first.status).toBe('NO_GO')
+      calls.length = 0
+      ports.revalidateStage = async (context, stage) => {
+        calls.push(`R:${stage}`)
+        return {
+          ok: true,
+          readbackDigest: stage === driftStage
+            ? `drift:${stage}`
+            : context.priorState.stages.find((record) => record.stage === stage)?.readback_digest ?? undefined,
+        }
+      }
+      const resumed = await bootstrap({ ...input, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
+      expect(resumed.status).toBe('NO_GO')
+      expect(resumed.reason_codes).toEqual(['NO_GO_RESUME_REVALIDATION'])
+      expect(calls).not.toContain('B7')
+    }
+  })
+
+  test('exact unchanged resume performs every skipped-stage native readback before continuing', async () => {
+    const store = new MemoryBootstrapStateStore()
+    const calls: string[] = []
+    const ports = passingPorts(calls)
+    ports.runQueueSmoke = async () => { calls.push('B7'); return { ok: false, reasonCodes: ['NO_GO_QUEUE_NO_PROGRESS'] } }
+    const input = { agentId: 'resume-all-native', runtime: 'codex' as const, home: '/tmp/resume-all-native', repoRoot: process.cwd(), env: { HOME: '/tmp/resume-all-native' } }
+    const first = await bootstrap(input, { stateStore: store, ports, run: fakeRun() })
+    expect(first.status).toBe('NO_GO')
+    calls.length = 0
+    ports.runQueueSmoke = async () => { calls.push('B7'); return { ok: true, readbackDigest: 'queue-live' } }
+    const resumed = await bootstrap({ ...input, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
+    expect(resumed.status).toBe('READY')
+    expect(calls).toEqual([
+      'B0', 'B1',
+      'R:B2_DB_MIGRATION', 'R:B3_AGENT_PROFILE', 'R:B4_MCP_REGISTRATION',
+      'R:B5_MEMORY_READINESS', 'R:B6_ORDINARY_DAEMON_INSTALL_START',
+      'B7', 'B8',
+    ])
+  })
+
+  test('resume rejects altered passed-stage evidence seal and provider input version drift', async () => {
+    const store = new MemoryBootstrapStateStore()
+    const ports = passingPorts()
+    ports.runQueueSmoke = async () => ({ ok: false, reasonCodes: ['NO_GO_QUEUE_NO_PROGRESS'] })
+    let providerVersion = 'codex 1.0.0'
+    let wasurezuTuple = '{"tuple":"stable"}'
+    const run = async (command: string, args: string[]) => {
+      if (command === 'git' && args.join(' ') === 'rev-parse HEAD') return { exitCode: 0, stdout: `${HEAD}\n`, stderr: '' }
+      if (command === 'codex' && args.join(' ') === '--version') return { exitCode: 0, stdout: providerVersion, stderr: '' }
+      if (command === 'codex' && args.join(' ') === 'mcp get wasurezu --json') return { exitCode: 0, stdout: wasurezuTuple, stderr: '' }
+      return { exitCode: 1, stdout: '', stderr: '' }
+    }
+    const input = { agentId: 'resume-seal-drift', runtime: 'codex' as const, home: '/tmp/resume-seal-drift', repoRoot: process.cwd(), env: { HOME: '/tmp/resume-seal-drift' } }
+    const first = await bootstrap(input, { stateStore: store, ports, run })
+    const stored = store.states.get(`resume-seal-drift/${first.run_id}`)!
+    stored.stages.find((record) => record.stage === 'B5_MEMORY_READINESS')!.evidence_refs.push('tampered')
+    store.save(stored)
+    const tampered = await bootstrap({ ...input, resumeRunId: first.run_id }, { stateStore: store, ports, run })
+    expect(tampered.reason_codes).toEqual(['NO_GO_RESUME_REVALIDATION'])
+
+    const secondStore = new MemoryBootstrapStateStore()
+    const second = await bootstrap({ ...input, agentId: 'resume-version-drift' }, { stateStore: secondStore, ports, run })
+    providerVersion = 'codex 2.0.0'
+    const versionDrift = await bootstrap({ ...input, agentId: 'resume-version-drift', resumeRunId: second.run_id }, { stateStore: secondStore, ports, run })
+    expect(versionDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
+
+    providerVersion = 'codex 1.0.0'
+    const thirdStore = new MemoryBootstrapStateStore()
+    const third = await bootstrap({ ...input, agentId: 'resume-wasurezu-drift' }, { stateStore: thirdStore, ports, run })
+    wasurezuTuple = '{"tuple":"changed"}'
+    const wasurezuDrift = await bootstrap({ ...input, agentId: 'resume-wasurezu-drift', resumeRunId: third.run_id }, { stateStore: thirdStore, ports, run })
+    expect(wasurezuDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
+
+    wasurezuTuple = '{"tuple":"stable"}'
+    const fourthStore = new MemoryBootstrapStateStore()
+    const fourthInput = { ...input, agentId: 'resume-config-drift', env: { ...input.env, CODEX_HOME: '/tmp/codex-a' } }
+    const fourth = await bootstrap(fourthInput, { stateStore: fourthStore, ports, run })
+    const configDrift = await bootstrap({ ...fourthInput, env: { ...fourthInput.env, CODEX_HOME: '/tmp/codex-b' }, resumeRunId: fourth.run_id }, { stateStore: fourthStore, ports, run })
+    expect(configDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
+  })
+
+  test('failed mutating stage is journaled and rolled back before the per-agent lock is released', async () => {
+    const store = new MemoryBootstrapStateStore()
+    const ports = passingPorts()
+    let failWithMutation = true
+    let rollbackFinished = false
+    ports.ensureMcpRegistration = async (context) => failWithMutation
+      ? {
+          ok: false,
+          reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+          readbackDigest: 'observed-provider-tuple',
+          mutation: {
+            kind: 'mcp_registration', owner_key: `codex:aun:${context.runId}`,
+            before_digest: 'absent', intended_after_digest: 'tuple', actual_after_digest: 'tuple',
+            rollback_action: 'remove and native-readback', rollback_payload: { created_by_run: true },
+          },
+        }
+      : { ok: true, readbackDigest: 'observed-provider-tuple' }
+    ports.rollbackMutation = async () => {
+      await Promise.resolve()
+      rollbackFinished = true
+      return { ok: true, evidenceRefs: ['native-target-equals-prestate'], readbackDigest: 'native-prestate' }
+    }
+    const input = { agentId: 'post-mutation-lock', runtime: 'codex' as const, home: '/tmp/post-mutation-lock', repoRoot: process.cwd(), env: { HOME: '/tmp/post-mutation-lock' } }
+    const failed = await bootstrap(input, { stateStore: store, ports, run: fakeRun(), uuid: () => 'failed-run' })
+    expect(failed.reason_codes).toContain('NO_GO_POST_MUTATION_READBACK')
+    expect(rollbackFinished).toBe(true)
+    const failedState = store.states.get('post-mutation-lock/bootstrap-failed-run')!
+    const providerMutation = failedState.mutations.find((mutation) => mutation.kind === 'mcp_registration')!
+    expect(providerMutation.rollback_status).toBe('verified')
+    expect(providerMutation.rollback_payload?.rollback_disposition).toBe('verified_after_failed_command')
+    expect(providerMutation.rollback_payload?.rollback_readback_digest).toBe('native-prestate')
+    expect(Date.parse(failedState.lock_release_authorized_at!)).toBeGreaterThanOrEqual(Date.parse(String(providerMutation.rollback_payload?.rollback_completed_at)))
+    expect(Date.parse(failedState.lock_released_at!)).toBeGreaterThanOrEqual(Date.parse(failedState.lock_release_authorized_at!))
+    failWithMutation = false
+    const retry = await bootstrap(input, { stateStore: store, ports, run: fakeRun(), uuid: () => 'retry-run' })
+    expect(retry.status).toBe('READY')
+  })
+
   test('rollback executes only recorded mutations in reverse order', async () => {
     const store = new MemoryBootstrapStateStore()
     const rollbackOrder: string[] = []
@@ -209,7 +340,10 @@ describe('aun bootstrap B0-B8 state machine', () => {
       kind: 'profile', owner_key: 'profile:owned', before_digest: 'before-profile', intended_after_digest: 'after-profile', actual_after_digest: 'after-profile', rollback_action: 'restore-profile',
     } })
     ports.ensureMcpRegistration = async () => ({ ok: false, reasonCodes: ['NO_GO_MCP_REGISTRATION'] })
-    ports.rollbackMutation = async (_context, mutation) => { rollbackOrder.push(mutation.kind); return { ok: true } }
+    ports.rollbackMutation = async (_context, mutation) => {
+      rollbackOrder.push(mutation.kind)
+      return { ok: true, readbackDigest: `restored:${mutation.kind}` }
+    }
     const input = { agentId: 'rollback-agent', runtime: 'codex' as const, home: '/tmp/rollback-agent', repoRoot: process.cwd(), env: { HOME: '/tmp/rollback-agent' } }
     const failed = await bootstrap(input, { stateStore: store, ports, run: fakeRun() })
     const rolledBack = await bootstrap({ ...input, rollbackRunId: failed.run_id }, { stateStore: store, ports, run: fakeRun() })

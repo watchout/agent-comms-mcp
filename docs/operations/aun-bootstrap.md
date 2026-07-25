@@ -48,12 +48,12 @@ aun status
 | Stage | Required proof |
 | --- | --- |
 | B0 lock and snapshot | One per-agent lock, exact repository head, redacted pre-state journal |
-| B1 dependency preflight | Read-only Bun, Node, Git, tmux, launchd, selected provider CLI, and unambiguous live provider identity checks; an absent SQLite database is not created |
+| B1 dependency preflight | Read-only Bun, Node, Git, tmux, launchd, selected provider executable/version/config scope, provider-native Wasurezu tuple, and unambiguous live provider identity checks; an absent SQLite database is not created |
 | B2 database migration | Successful migration, successful identical rerun, and a digest of the resulting SQLite artifact family or PostgreSQL schema |
 | B3 agent profile | Exact agent/runtime/workspace/tmux/port tuple and provider-native readback |
 | B4 MCP registration | `codex mcp add` or `claude mcp add`, followed by exact provider-native get/list tuple readback |
 | B5 memory readiness | Exact live runtime receipt plus a real MCP `initialize` → `tools/list` → Wasurezu `recover_context` call |
-| B6 ordinary daemon | Durable checkout, valid plist, one launchd daemon, ordinary receiver enabled, matching runtime identity, safe D1 values |
+| B6 ordinary daemon | Durable checkout, exact plist bytes/mode plus independent launchctl domain/label/load/PID state, one ordinary receiver, matching runtime identity, safe D1 values |
 | B7 queue smoke | Bootstrap enqueues/observes only; a separate OS process runs canonical `receive` → `processing` → `record-no-reply`, with one terminal result, one winner under same-row contention, and zero external effect |
 | B8 READY readback | Identity, MCP, memory, process, endpoint, queue progression, and safe-D1 evidence agree |
 
@@ -111,9 +111,11 @@ For SQLite, bootstrap records and passes the exact `AGENT_COM_DB=sqlite` and
 smoke always uses that same database tuple.
 
 PostgreSQL rollback never drops a shared database or reverses shared schema
-migrations. It retains the captured endpoint/migration/schema ledger, expires
-or stops only exact run-owned rows, and reports the remaining schema boundary
-as `PARTIAL_ROLLBACK_NO_GO`. For SQLite, a pre-existing database is backed up
+migrations. It retains the captured endpoint/migration/schema ledger; expires
+exact-run memory evidence, stops exact-run runtime rows, expires exact-run
+queue rows, proves no run-owned row remains active, and proves non-run rows did
+not change. A retained shared-schema delta reports `PARTIAL_ROLLBACK_NO_GO`.
+For SQLite, a pre-existing database is backed up
 with its realpath, device/inode, mode, byte digest, and post-state DB/WAL/SHM
 artifact digest. Restore is atomic and allowed only under those fences. A
 run-created SQLite database removes the exact DB, WAL, and SHM artifacts and
@@ -128,25 +130,46 @@ ${AUN_HOME:-~/.aun}/bootstrap/<agent_id>/<run_id>.json
 ```
 
 Directories are private and run files are mode `0600`. The journal records
-stage results and a digest-fenced mutation manifest. Resume is accepted only
-when the agent, repository/workspace realpaths and head, provider, home/AUN
-state root, database endpoint, memory project, safe defaults, and mutation
-manifest match. Every passed stage is independently read back before it is
-skipped, including the database schema/artifact digest, exact provider tuple,
-runtime/memory receipt, daemon state, and queue terminal identity. Rollback
-runs in reverse order and refuses
+stage results, each stage's canonical native-readback digest and seal digest,
+and a digest-fenced mutation manifest. Resume is accepted only when the agent,
+repository/workspace realpaths and head, provider executable/version/config
+scope, intended AUN tuple template, provider-native Wasurezu tuple, home/AUN
+state root, database endpoint, memory project, safe defaults, passed-stage
+evidence, and mutation manifest match. B0 and B1 are rerun. Every other passed
+stage is independently read back before it is skipped, including the database
+schema/artifact digest, exact provider tuple, Wasurezu tuple and durable
+recovery receipt, runtime identity, plist plus launchctl load identity, and
+queue terminal identity. A missing or changed stage seal returns
+`NO_GO_RESUME_REVALIDATION` before the next mutation. Rollback runs in reverse
+order and refuses
 cross-run or unowned deletion. If any recorded rollback cannot be verified,
 the terminal status is `PARTIAL_ROLLBACK_NO_GO`, never success.
+Each surface is durably marked `attempting` before rollback starts, then
+`verified`, `failed`, or `skipped`, with start/completion timestamps, evidence,
+and the final native-readback digest. The run also records lock-release
+authorization before unlocking and the observed release timestamp afterward.
 
 Run-owned memory evidence is expired with a rollback reason rather than
 deleted, so its audit history remains available. Provider registration and
 LaunchAgent rollback both require native absence/unloaded readback before the
 mutation is marked verified.
 
+Before B6, plist existence/bytes/mode and launchctl domain/label/load/PID are
+captured independently. A loaded same-label job with no plist is treated as
+pre-existing ambiguous state and stops without writing. A pre-existing
+unloaded plist is restored to its exact original bytes/mode and remains
+unloaded on rollback. A run-created job is booted out and both its plist and
+launchctl entry must be absent. PID, label, agent, ownership-token, or plist
+digest drift blocks rollback without mutation.
+
 Timeouts are cancellation-aware. Bootstrap sends `SIGTERM`, waits at most five
 seconds, then sends `SIGKILL` if necessary and waits for confirmed process
-close before releasing the per-agent lock. A timed-out child therefore cannot
-continue mutating state after the command has reported completion.
+close. Success, nonzero, timeout, SIGTERM, and SIGKILL paths all receive an
+exact target readback. If a provider, profile, database, or daemon target
+changed despite failure, the observed mutation is durably journaled and its
+rollback/native final readback is completed (or marked recovery-required)
+before the per-agent lock is released. An unresolved target returns
+`NO_GO_POST_MUTATION_READBACK`; process exit alone is never proof of no change.
 
 ## Operational boundary
 

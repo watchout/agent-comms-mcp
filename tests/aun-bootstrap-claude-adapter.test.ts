@@ -49,6 +49,39 @@ describe('aun bootstrap Claude adapter', () => {
     expect(add.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/repo', 'server.ts'])
   })
 
+  test('mcp add that mutates then exits nonzero returns an observed mutation and native rollback proof', async () => {
+    let added = false
+    const adapter = createClaudeBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args) => {
+        const joined = args.join(' ')
+        if (joined === 'mcp get aun') return added
+          ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+          : { exitCode: 1, stdout: '', stderr: 'No MCP server named "aun"' }
+        if (joined === 'mcp list') return { exitCode: 0, stdout: added ? 'aun: /bin/bun - ✔ Connected\n' : '', stderr: '' }
+        if (args[0] === 'mcp' && args[1] === 'add') {
+          added = true
+          return { exitCode: 1, stdout: '', stderr: 'failed after mutation' }
+        }
+        if (joined === 'mcp remove --scope user aun') {
+          added = false
+          return { exitCode: 0, stdout: 'removed', stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+    const failed = await adapter.applyMcpRegistration(context)
+    expect(failed.ok).toBe(false)
+    expect(failed.reasonCodes).toEqual(['NO_GO_POST_MUTATION_READBACK'])
+    expect(failed.mutation?.actual_after_digest).toBeString()
+    expect(added).toBe(true)
+    const rolledBack = await adapter.rollbackRuntimeRegistration(context, {
+      mutation_id: 'm1', stage: 'B4_MCP_REGISTRATION', rollback_status: 'not_run', ...failed.mutation!,
+    })
+    expect(rolledBack.ok).toBe(true)
+    expect(added).toBe(false)
+  })
+
   for (const [name, changes] of [
     ['disconnected', { status: '✘ Disconnected' }],
     ['wrong-scope', { scope: 'Project' }],
