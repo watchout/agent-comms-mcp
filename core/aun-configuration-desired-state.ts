@@ -122,8 +122,13 @@ export interface AunConfigurationRestartExecutionRecord extends AunConfiguration
   ownerDecisionRef: string
   ownerDecisionExpiresAt: string | Date
   ctoExecutionReceiptRef: string
+  ctoExecutionReceiptMessageId: string
+  executorActiveFunction: 'runtime_recovery_executor'
   executionAttempt: 1
 }
+
+export const CONFIGURATION_RESTART_EXECUTOR_AGENT_ID = 'codex-cto' as const
+export const CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION = 'runtime_recovery_executor' as const
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize)
@@ -422,6 +427,7 @@ export async function claimApprovedConfigurationRestartExecution(
   db: DbAdapter,
   input: AunConfigurationRestartExecutionClaimInput,
 ): Promise<AunConfigurationRestartExecutionRecord | null> {
+  if (input.executorAgentId !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID) return null
   const refs = normalizeControlRefs(input.exactControlRefs)
   const row = await db.queryOne<any>(
     `UPDATE aun_configuration_restart_requests r
@@ -431,7 +437,7 @@ export async function claimApprovedConfigurationRestartExecution(
             execution_attempts = 1,
             execution_started_at = now(),
             updated_at = now()
-       FROM control_plane_leases l, agents a
+       FROM control_plane_leases l, agents a, agent_messages receipt
       WHERE r.request_id = $1::uuid
         AND r.host_id = $2::text AND r.agent_id = $3::text
         AND r.to_revision = $4::bigint AND r.to_digest = $5::text
@@ -442,21 +448,42 @@ export async function claimApprovedConfigurationRestartExecution(
         AND r.execution_attempts = 0
         AND NULLIF(btrim(r.owner_decision_ref), '') IS NOT NULL
         AND r.owner_decision_expires_at > now()
-        AND NULLIF(btrim(r.cto_execution_receipt_ref), '') IS NOT NULL
+        AND r.cto_execution_receipt_ref = 'aun:agent-message:' || receipt.id::text
+        AND receipt.author_id = 'codex-cto'
+        AND receipt.metadata #>> '{schema_version}' = 'shirube-v3/runtime_recovery_execution_receipt/v1'
+        AND receipt.metadata #>> '{active_function}' = 'runtime_recovery_executor'
+        AND receipt.metadata #>> '{authorization_status}' = 'AUTHORIZED'
+        AND receipt.metadata #>> '{executor_agent_id}' = 'codex-cto'
+        AND receipt.metadata #>> '{restart_request_id}' = r.request_id::text
+        AND receipt.metadata #>> '{host_id}' = r.host_id
+        AND receipt.metadata #>> '{agent_id}' = r.agent_id
+        AND receipt.metadata #>> '{to_revision}' = r.to_revision::text
+        AND receipt.metadata #>> '{to_digest}' = r.to_digest
+        AND receipt.metadata #>> '{candidate_digest}' = r.candidate_digest
+        AND receipt.metadata #>> '{rollback_artifact_digest}' = r.rollback_artifact_digest
+        AND receipt.metadata #>> '{exact_release_commit}' = r.exact_release_commit
+        AND receipt.metadata #>> '{exact_release_tree}' = r.exact_release_tree
+        AND receipt.metadata -> 'exact_control_refs' = r.exact_control_refs
+        AND receipt.metadata #>> '{owner_decision_ref}' = r.owner_decision_ref
+        AND receipt.metadata #>> '{execution_lease_id}' = l.lease_id::text
+        AND receipt.metadata #>> '{execution_fencing_token}' = l.fencing_token::text
+        AND receipt.metadata #>> '{auth,signature}' ~ '^[0-9a-f]{64}$'
+        AND NULLIF(receipt.metadata #>> '{auth,timestamp}', '') IS NOT NULL
         AND a.agent_id = r.agent_id
         AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
         AND l.lease_id = $11::uuid AND l.fencing_token = $12::bigint
         AND l.lease_scope_type = 'runtime_instance'
         AND l.lease_scope_id = 'configuration-restart:' || r.host_id || ':' || r.agent_id
         AND l.lease_purpose = 'maintenance'
-        AND l.holder_agent_id = $13::text
+        AND l.holder_agent_id = 'codex-cto'
+        AND $13::text = 'codex-cto'
         AND l.status = 'active' AND l.expires_at > now()
       RETURNING r.request_id, r.host_id, r.agent_id, r.to_revision, r.to_digest,
                 r.candidate_digest, r.rollback_artifact_digest, r.exact_release_commit,
                 r.exact_release_tree, r.exact_control_refs, r.restart_budget, r.status,
                 r.owner_decision_ref, r.owner_decision_expires_at,
-                r.cto_execution_receipt_ref, r.execution_lease_id,
-                r.execution_fencing_token, r.execution_attempts`,
+                r.cto_execution_receipt_ref, receipt.id AS cto_execution_receipt_message_id,
+                r.execution_lease_id, r.execution_fencing_token, r.execution_attempts`,
     [
       input.requestId, input.hostId, input.agentId, input.toRevision, input.toDigest,
       input.candidateDigest, input.rollbackArtifactDigest, input.exactReleaseCommit,
@@ -476,7 +503,10 @@ export async function claimApprovedConfigurationRestartExecution(
     executionFencingToken: Number(row.execution_fencing_token), executorAgentId: input.executorAgentId,
     restartBudget: 1, status: 'EXECUTING', ownerDecisionRef: String(row.owner_decision_ref),
     ownerDecisionExpiresAt: row.owner_decision_expires_at,
-    ctoExecutionReceiptRef: String(row.cto_execution_receipt_ref), executionAttempt: 1,
+    ctoExecutionReceiptRef: String(row.cto_execution_receipt_ref),
+    ctoExecutionReceiptMessageId: String(row.cto_execution_receipt_message_id),
+    executorActiveFunction: CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION,
+    executionAttempt: 1,
   }
 }
 
@@ -484,11 +514,18 @@ export async function verifyConfigurationRestartExecutionClaim(
   db: DbAdapter,
   claim: AunConfigurationRestartExecutionRecord,
 ): Promise<boolean> {
+  if (claim.executorAgentId !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID
+    || claim.executorActiveFunction !== CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION
+    || claim.ctoExecutionReceiptRef !== `aun:agent-message:${claim.ctoExecutionReceiptMessageId}`) {
+    return false
+  }
   const row = await db.queryOne<{ current: boolean }>(
     `SELECT true AS current
        FROM aun_configuration_restart_requests r
        JOIN agents a ON a.agent_id = r.agent_id
        JOIN control_plane_leases l ON l.lease_id = r.execution_lease_id
+       JOIN agent_messages receipt
+         ON r.cto_execution_receipt_ref = 'aun:agent-message:' || receipt.id::text
       WHERE r.request_id = $1::uuid AND r.status = 'EXECUTING'
         AND r.execution_attempts = 1 AND r.execution_lease_id = $2::uuid
         AND r.execution_fencing_token = $3::bigint
@@ -498,10 +535,30 @@ export async function verifyConfigurationRestartExecutionClaim(
         AND r.exact_release_commit = $11::text AND r.exact_release_tree = $12::text
         AND r.exact_control_refs = $13::jsonb
         AND r.owner_decision_ref = $14::text AND r.cto_execution_receipt_ref = $15::text
+        AND receipt.id = $16::uuid AND receipt.author_id = 'codex-cto'
+        AND receipt.metadata #>> '{schema_version}' = 'shirube-v3/runtime_recovery_execution_receipt/v1'
+        AND receipt.metadata #>> '{active_function}' = 'runtime_recovery_executor'
+        AND receipt.metadata #>> '{authorization_status}' = 'AUTHORIZED'
+        AND receipt.metadata #>> '{executor_agent_id}' = 'codex-cto'
+        AND receipt.metadata #>> '{restart_request_id}' = r.request_id::text
+        AND receipt.metadata #>> '{host_id}' = r.host_id
+        AND receipt.metadata #>> '{agent_id}' = r.agent_id
+        AND receipt.metadata #>> '{to_revision}' = r.to_revision::text
+        AND receipt.metadata #>> '{to_digest}' = r.to_digest
+        AND receipt.metadata #>> '{candidate_digest}' = r.candidate_digest
+        AND receipt.metadata #>> '{rollback_artifact_digest}' = r.rollback_artifact_digest
+        AND receipt.metadata #>> '{exact_release_commit}' = r.exact_release_commit
+        AND receipt.metadata #>> '{exact_release_tree}' = r.exact_release_tree
+        AND receipt.metadata -> 'exact_control_refs' = r.exact_control_refs
+        AND receipt.metadata #>> '{owner_decision_ref}' = r.owner_decision_ref
+        AND receipt.metadata #>> '{execution_lease_id}' = l.lease_id::text
+        AND receipt.metadata #>> '{execution_fencing_token}' = l.fencing_token::text
+        AND receipt.metadata #>> '{auth,signature}' ~ '^[0-9a-f]{64}$'
+        AND NULLIF(receipt.metadata #>> '{auth,timestamp}', '') IS NOT NULL
         AND r.owner_decision_expires_at > now()
         AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
         AND l.fencing_token = r.execution_fencing_token
-        AND l.holder_agent_id = $4::text
+        AND l.holder_agent_id = 'codex-cto' AND $4::text = 'codex-cto'
         AND l.lease_scope_type = 'runtime_instance'
         AND l.lease_scope_id = 'configuration-restart:' || r.host_id || ':' || r.agent_id
         AND l.lease_purpose = 'maintenance'
@@ -511,7 +568,7 @@ export async function verifyConfigurationRestartExecutionClaim(
       claim.hostId, claim.agentId, claim.toRevision, claim.toDigest, claim.candidateDigest,
       claim.rollbackArtifactDigest, claim.exactReleaseCommit, claim.exactReleaseTree,
       JSON.stringify(normalizeControlRefs(claim.exactControlRefs)), claim.ownerDecisionRef,
-      claim.ctoExecutionReceiptRef,
+      claim.ctoExecutionReceiptRef, claim.ctoExecutionReceiptMessageId,
     ],
   )
   return row?.current === true

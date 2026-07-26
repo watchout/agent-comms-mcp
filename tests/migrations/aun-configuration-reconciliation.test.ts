@@ -228,13 +228,36 @@ describe('AUN configuration reconciliation migration', () => {
       })
       expect(ctoLease.ok).toBe(true)
       if (!ctoLease.ok) throw new Error('CTO fixture lease unavailable')
+      const ownerDecisionRef = 'github:owner-decision:fixture'
+      const ctoReceiptMessageId = randomUUID()
+      const ctoReceiptRef = `aun:agent-message:${ctoReceiptMessageId}`
+      await db.execute(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
+         VALUES ($1, 'aun-configuration-fixture', 'codex-cto', 'authorized fixture restart', 'approval', $2::jsonb)`,
+        [ctoReceiptMessageId, JSON.stringify({
+          schema_version: 'shirube-v3/runtime_recovery_execution_receipt/v1',
+          active_function: 'runtime_recovery_executor', authorization_status: 'AUTHORIZED',
+          executor_agent_id: 'codex-cto', restart_request_id: restartRequestId,
+          host_id: restartInput.hostId, agent_id: restartInput.agentId,
+          to_revision: String(restartInput.toRevision), to_digest: restartInput.toDigest,
+          candidate_digest: restartInput.candidateDigest,
+          rollback_artifact_digest: restartInput.rollbackArtifactDigest,
+          exact_release_commit: restartInput.exactReleaseCommit,
+          exact_release_tree: restartInput.exactReleaseTree,
+          exact_control_refs: restartInput.exactControlRefs,
+          owner_decision_ref: ownerDecisionRef,
+          execution_lease_id: ctoLease.lease.lease_id,
+          execution_fencing_token: String(ctoLease.lease.fencing_token),
+          auth: { signature: 'a'.repeat(64), timestamp: 1_785_103_922 },
+        })],
+      )
       await db.execute(
         `UPDATE aun_configuration_restart_requests
             SET status = 'APPROVED', owner_decision_ref = $2,
                 owner_decision_expires_at = now() + interval '5 minutes',
                 cto_execution_receipt_ref = $3
           WHERE request_id = $1`,
-        [restartRequestId, 'github:owner-decision:fixture', 'aun:cto-execution-receipt:fixture'],
+        [restartRequestId, ownerDecisionRef, ctoReceiptRef],
       )
       const executionInput = {
         requestId: restartRequestId, hostId: restartInput.hostId, agentId: restartInput.agentId,
@@ -291,6 +314,78 @@ describe('AUN configuration reconciliation migration', () => {
         ...executionInput, requestId: rejectedRequestId, candidateDigest: 'd'.repeat(64),
       })).toBeNull()
 
+      await releaseControlPlaneLease(db, {
+        leaseId: ctoLease.lease.lease_id, fencingToken: ctoLease.lease.fencing_token,
+        holderAgentId: 'codex-cto', holderRuntimeInstanceId: null,
+      })
+      await db.execute(
+        `INSERT INTO agents (
+           agent_id, display_name, agent_type, runtime, profile_enabled,
+           runtime_engine_preference, home_directory, channel_port
+         ) VALUES ('other-agent', 'Ineligible fixture', 'bot', 'TUI', true, 'codex', '/tmp/other-agent', 8897)`,
+      )
+      const otherLease = await acquireControlPlaneLease(db, {
+        scopeType: 'runtime_instance', scopeId: 'configuration-restart:fixture-host:acm887-fixture',
+        purpose: 'maintenance', ttlMs: 45_000, holderAgentId: 'other-agent',
+        holderRuntimeInstanceId: null,
+      })
+      expect(otherLease.ok).toBe(true)
+      if (!otherLease.ok) throw new Error('ineligible fixture lease unavailable')
+      const ineligibleCandidateDigest = 'b'.repeat(64)
+      const ineligibleRequestId = await createConfigurationRestartRequest(db, {
+        ...restartInput, candidateDigest: ineligibleCandidateDigest,
+      })
+      const ineligibleReceiptMessageId = randomUUID()
+      const ineligibleOwnerDecisionRef = 'github:owner-decision:ineligible-fixture'
+      await db.execute(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
+         VALUES ($1, 'aun-configuration-fixture', 'codex-cto', 'receipt cannot delegate CTO authority', 'approval', $2::jsonb)`,
+        [ineligibleReceiptMessageId, JSON.stringify({
+          schema_version: 'shirube-v3/runtime_recovery_execution_receipt/v1',
+          active_function: 'runtime_recovery_executor', authorization_status: 'AUTHORIZED',
+          executor_agent_id: 'codex-cto', restart_request_id: ineligibleRequestId,
+          host_id: restartInput.hostId, agent_id: restartInput.agentId,
+          to_revision: String(restartInput.toRevision), to_digest: restartInput.toDigest,
+          candidate_digest: ineligibleCandidateDigest,
+          rollback_artifact_digest: restartInput.rollbackArtifactDigest,
+          exact_release_commit: restartInput.exactReleaseCommit,
+          exact_release_tree: restartInput.exactReleaseTree,
+          exact_control_refs: restartInput.exactControlRefs,
+          owner_decision_ref: ineligibleOwnerDecisionRef,
+          execution_lease_id: otherLease.lease.lease_id,
+          execution_fencing_token: String(otherLease.lease.fencing_token),
+          auth: { signature: 'b'.repeat(64), timestamp: 1_785_103_923 },
+        })],
+      )
+      await db.execute(
+        `UPDATE aun_configuration_restart_requests
+            SET status = 'APPROVED', owner_decision_ref = $2,
+                owner_decision_expires_at = now() + interval '5 minutes',
+                cto_execution_receipt_ref = $3
+          WHERE request_id = $1`,
+        [ineligibleRequestId, ineligibleOwnerDecisionRef, `aun:agent-message:${ineligibleReceiptMessageId}`],
+      )
+      const ineligibleExecutionInput = {
+        ...executionInput, requestId: ineligibleRequestId,
+        candidateDigest: ineligibleCandidateDigest,
+        executionLeaseId: otherLease.lease.lease_id,
+        executionFencingToken: otherLease.lease.fencing_token,
+      }
+      expect(await claimApprovedConfigurationRestartExecution(db, {
+        ...ineligibleExecutionInput, executorAgentId: 'other-agent',
+      })).toBeNull()
+      expect(await claimApprovedConfigurationRestartExecution(db, {
+        ...ineligibleExecutionInput, executorAgentId: 'codex-cto',
+      })).toBeNull()
+      expect(await db.queryOne<{ status: string; execution_attempts: number }>(
+        `SELECT status, execution_attempts FROM aun_configuration_restart_requests WHERE request_id = $1`,
+        [ineligibleRequestId],
+      )).toEqual({ status: 'APPROVED', execution_attempts: 0 })
+      await releaseControlPlaneLease(db, {
+        leaseId: otherLease.lease.lease_id, fencingToken: otherLease.lease.fencing_token,
+        holderAgentId: 'other-agent', holderRuntimeInstanceId: null,
+      })
+
       await expect(db.execute(down)).rejects.toThrow('refusing to drop nonempty AUN configuration reconciliation evidence')
       await db.execute(`DELETE FROM aun_configuration_restart_requests WHERE agent_id = $1`, ['acm887-fixture'])
       await db.execute(`DELETE FROM aun_configuration_observed_state WHERE host_id = $1 AND agent_id = $2`, ['fixture-host', 'acm887-fixture'])
@@ -299,11 +394,7 @@ describe('AUN configuration reconciliation migration', () => {
         leaseId: lease.lease.lease_id, fencingToken: lease.lease.fencing_token,
         holderAgentId: 'acm887-fixture', holderRuntimeInstanceId: null,
       })
-      await releaseControlPlaneLease(db, {
-        leaseId: ctoLease.lease.lease_id, fencingToken: ctoLease.lease.fencing_token,
-        holderAgentId: 'codex-cto', holderRuntimeInstanceId: null,
-      })
-      await db.execute(`DELETE FROM agents WHERE agent_id IN ($1, $2, $3)`, ['acm887-fixture', 'acm887-incomplete', 'codex-cto'])
+      await db.execute(`DELETE FROM agents WHERE agent_id IN ($1, $2, $3, $4)`, ['acm887-fixture', 'acm887-incomplete', 'codex-cto', 'other-agent'])
       await db.execute(down)
       await db.execute(up)
       expect(await configurationSchemaSnapshot(db)).toEqual(firstSchemaDigest)

@@ -60,7 +60,9 @@ class FakeRestartExecutionStore implements ConfigurationRestartExecutionStore {
       ...input, restartBudget: 1, status: 'EXECUTING',
       ownerDecisionRef: 'https://github.com/watchout/example/issues/1#issuecomment-1',
       ownerDecisionExpiresAt: new Date(Date.now() + 60_000),
-      ctoExecutionReceiptRef: 'aun:cto-execution-receipt:fixture', executionAttempt: 1,
+      ctoExecutionReceiptRef: 'aun:agent-message:22222222-2222-4222-8222-222222222222',
+      ctoExecutionReceiptMessageId: '22222222-2222-4222-8222-222222222222',
+      executorActiveFunction: 'runtime_recovery_executor', executionAttempt: 1,
     }
   }
   async verify(): Promise<boolean> { return this.current }
@@ -121,6 +123,22 @@ test('rejected, expired, superseded, or drifted durable restart claims perform z
     })).rejects.toThrow('RESTART_EXECUTION_NOT_AUTHORIZED')
     expect(restartCount).toBe(0)
   }
+})
+
+test('an ineligible exact maintenance-lease holder cannot claim or restart', async () => {
+  const candidate = candidateFixture(undefined, true)
+  const store = new FakeRestartExecutionStore()
+  const lease = { ...ctoExecutionLease(), holder_agent_id: 'other-agent' }
+  let restartCount = 0
+  await expect(executeApprovedConfigurationRestart('request-ineligible', candidate, {
+    lease, executorAgentId: 'other-agent',
+  }, store, {
+    async restartOnce() { restartCount++ },
+    async readback() { throw new Error('must not read back') },
+    async rollback() { throw new Error('must not roll back') },
+  })).rejects.toThrow('RESTART_EXECUTION_NOT_AUTHORIZED')
+  expect(store.claimCount).toBe(0)
+  expect(restartCount).toBe(0)
 })
 
 test('lease loss after durable claim records failure and performs zero restart', async () => {

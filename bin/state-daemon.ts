@@ -424,14 +424,17 @@ function loadConfig(): Partial<StateDaemonConfig> {
   return cfg
 }
 
-function referenceMatches(actual: string | undefined, reference: string): boolean {
+export function referenceMatches(actual: string | undefined, reference: string): boolean {
   if (actual === undefined) return false
   if (reference.startsWith('literal:')) return actual === reference.slice('literal:'.length)
   if (reference.startsWith('env:')) return actual === process.env[reference.slice('env:'.length)]
-  return actual.length > 0
+  // Opaque DB-owned references are projected into the native provider
+  // environment verbatim.  Treating any non-empty native value as a match
+  // lets an old identity/token reference satisfy a newer desired revision.
+  return actual === reference
 }
 
-function environmentReferencesMatch(
+export function environmentReferencesMatch(
   actual: Record<string, string>,
   expected: Record<string, string>,
 ): boolean {

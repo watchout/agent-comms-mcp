@@ -6,6 +6,7 @@ import {
 import {
   claudeNativeMcpAbsent,
   codexNativeMcpAbsent,
+  environmentReferencesMatch,
   launchctlEnvironment,
   nativeReleaseIdentityMatches,
   runtimeRegistrationRowsMatch,
@@ -71,6 +72,24 @@ test('disabled provider readback requires exact native get and list absence', ()
   expect(claudeNativeMcpAbsent(absent, claudeList, 'aun')).toBe(true)
   expect(claudeNativeMcpAbsent(absent, { ...claudeList, stdout: 'aun: Connected\n' }, 'aun')).toBe(false)
   expect(claudeNativeMcpAbsent(absent, { ...claudeList, exitCode: 1 }, 'aun')).toBe(false)
+})
+
+test('codex and claude native readback reject a stale opaque provider identity reference', () => {
+  const expected = {
+    AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: 'agent-profile:misell:expected-provider-identity:def',
+    AGENT_COM_PROVIDER_TOKEN_SOURCE_REF: 'agent-profile:misell:provider-token-source:def',
+  }
+  const staleCodexEnvironment = {
+    AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: 'agent-profile:misell:expected-provider-identity:abc',
+    AGENT_COM_PROVIDER_TOKEN_SOURCE_REF: expected.AGENT_COM_PROVIDER_TOKEN_SOURCE_REF,
+  }
+  const staleClaudeEnvironment = {
+    ...expected,
+    AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: 'agent-profile:misell:expected-provider-identity:abc',
+  }
+  expect(environmentReferencesMatch(expected, expected)).toBe(true)
+  expect(environmentReferencesMatch(staleCodexEnvironment, expected)).toBe(false)
+  expect(environmentReferencesMatch(staleClaudeEnvironment, expected)).toBe(false)
 })
 
 test('native release readback requires exact commit, tree, and a clean checkout', () => {

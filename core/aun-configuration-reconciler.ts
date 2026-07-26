@@ -24,6 +24,8 @@ import {
   type AunConfigurationRestartExecutionClaimInput,
   type AunConfigurationRestartExecutionRecord,
   type AunConfigurationStatus,
+  CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION,
+  CONFIGURATION_RESTART_EXECUTOR_AGENT_ID,
 } from './aun-configuration-desired-state'
 import type { AunConfigurationCandidate } from './aun-configuration-candidate'
 
@@ -168,6 +170,10 @@ export async function executeApprovedConfigurationRestart(
   terminalReceiptRecorded: boolean
   reasonCode: string | null
 }> {
+  if (execution.executorAgentId !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID
+    || execution.lease.holder_agent_id !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID) {
+    throw new Error('RESTART_EXECUTION_NOT_AUTHORIZED')
+  }
   const claim = await store.claim({
     requestId, hostId: candidate.hostId, agentId: candidate.agentId,
     toRevision: candidate.desiredRevision, toDigest: candidate.desiredDigest,
@@ -178,7 +184,11 @@ export async function executeApprovedConfigurationRestart(
     executionFencingToken: execution.lease.fencing_token,
     executorAgentId: execution.executorAgentId,
   })
-  if (!claim) throw new Error('RESTART_EXECUTION_NOT_AUTHORIZED')
+  if (!claim
+    || claim.executorAgentId !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID
+    || claim.executorActiveFunction !== CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION) {
+    throw new Error('RESTART_EXECUTION_NOT_AUTHORIZED')
+  }
 
   const finish = async (
     status: 'EXECUTED' | 'FAILED',
