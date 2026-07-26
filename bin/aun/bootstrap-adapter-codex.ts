@@ -109,6 +109,29 @@ function codexListState(value: any): { count: number; enabled: boolean } {
   return { count: entries.length, enabled: entries.length === 1 && entries[0]?.enabled === true }
 }
 
+const POST_EXIT_RECOVERY_DEADLINE_MS = 30_000
+
+export async function withFreshBootstrapRecoverySignal(
+  context: BootstrapStageContext,
+  task: (recoveryContext: BootstrapStageContext) => Promise<BootstrapStageOutcome>,
+): Promise<BootstrapStageOutcome> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(new Error('bootstrap post-exit recovery deadline exceeded'))
+  }, POST_EXIT_RECOVERY_DEADLINE_MS)
+  try {
+    return await task({ ...context, abortSignal: controller.signal })
+  } catch (err) {
+    return {
+      ok: false,
+      reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+      evidenceRefs: [`bootstrap-post-exit-recovery-error:${bootstrapDigest(String(err))}`],
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function exactReadback(
   context: BootstrapStageContext,
   deps: BootstrapAdapterDependencies,
@@ -206,7 +229,8 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         rollback_action: 'codex mcp remove aun; verify native get absence and list absence',
         rollback_payload: { created_by_run: true, tuple_digest: bootstrapDigest(tuple) },
       }
-      const readback = await exactReadback(context, deps)
+      const readback = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+        exactReadback(recoveryContext, deps))
       if (readback.ok) {
         const observed = { ...mutation, actual_after_digest: bootstrapDigest(tuple) }
         return applied.exitCode === 0
@@ -219,7 +243,8 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
               mutation: observed,
             }
       }
-      const absence = await exactAbsenceReadback(context, deps)
+      const absence = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+        exactAbsenceReadback(recoveryContext, deps))
       if (absence.ok) {
         return {
           ...absence,
@@ -227,7 +252,29 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
           reasonCodes: [applied.exitCode === 0 ? 'NO_GO_MCP_READBACK' : 'NO_GO_MCP_REGISTRATION'],
         }
       }
-      return { ...readback, ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'] }
+      return {
+        ...readback,
+        ok: false,
+        reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+        evidenceRefs: [
+          ...(readback.evidenceRefs ?? []),
+          ...(absence.evidenceRefs ?? []),
+          `codex-mcp-post-exit-recovery-required:${bootstrapDigest({
+            run_id: context.runId,
+            intended_after_digest: mutation.intended_after_digest,
+            add_exit: applied.exitCode,
+          })}`,
+        ],
+        mutation: {
+          ...mutation,
+          rollback_payload: {
+            ...mutation.rollback_payload,
+            post_exit_readback_signal: 'fresh_bounded',
+            recovery_required: true,
+            target_readback_unresolved: true,
+          },
+        },
+      }
     },
 
     readbackMcpRegistration(context): Promise<BootstrapStageOutcome> {

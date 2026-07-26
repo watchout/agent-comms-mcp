@@ -8,7 +8,7 @@ import type {
   BootstrapStageOutcome,
 } from './bootstrap-types'
 import type { BootstrapAdapterDependencies, BootstrapMcpTuple } from './bootstrap-adapter-codex'
-import { expectedBootstrapMcpTuple } from './bootstrap-adapter-codex'
+import { expectedBootstrapMcpTuple, withFreshBootstrapRecoverySignal } from './bootstrap-adapter-codex'
 import { buildClaudeMcpAddArgs } from './init'
 
 function realpathOrResolve(path: string): string {
@@ -183,7 +183,8 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
         rollback_action: 'claude mcp remove --scope user aun; verify native get absence and list absence',
         rollback_payload: { created_by_run: true, tuple_digest: bootstrapDigest(tuple) },
       }
-      const readback = await exactReadback(context, deps)
+      const readback = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+        exactReadback(recoveryContext, deps))
       if (readback.ok) {
         const observed = { ...mutation, actual_after_digest: bootstrapDigest(tuple) }
         return applied.exitCode === 0
@@ -196,7 +197,8 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
               mutation: observed,
             }
       }
-      const absence = await exactAbsenceReadback(context, deps)
+      const absence = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+        exactAbsenceReadback(recoveryContext, deps))
       if (absence.ok) {
         return {
           ...absence,
@@ -204,7 +206,29 @@ export function createClaudeBootstrapAdapter(deps: BootstrapAdapterDependencies)
           reasonCodes: [applied.exitCode === 0 ? 'NO_GO_MCP_READBACK' : 'NO_GO_MCP_REGISTRATION'],
         }
       }
-      return { ...readback, ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'] }
+      return {
+        ...readback,
+        ok: false,
+        reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+        evidenceRefs: [
+          ...(readback.evidenceRefs ?? []),
+          ...(absence.evidenceRefs ?? []),
+          `claude-mcp-post-exit-recovery-required:${bootstrapDigest({
+            run_id: context.runId,
+            intended_after_digest: mutation.intended_after_digest,
+            add_exit: applied.exitCode,
+          })}`,
+        ],
+        mutation: {
+          ...mutation,
+          rollback_payload: {
+            ...mutation.rollback_payload,
+            post_exit_readback_signal: 'fresh_bounded',
+            recovery_required: true,
+            target_readback_unresolved: true,
+          },
+        },
+      }
     },
 
     readbackMcpRegistration(context): Promise<BootstrapStageOutcome> {

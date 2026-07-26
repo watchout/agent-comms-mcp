@@ -259,13 +259,14 @@ async function withDeadline(
   stage: BootstrapStage,
   task: (signal: AbortSignal) => Promise<BootstrapStageOutcome>,
   remainingTotalMs = Number.POSITIVE_INFINITY,
+  stageDeadlineMs = STAGE_DEADLINE_MS[stage],
 ): Promise<BootstrapStageOutcome> {
   const controller = new AbortController()
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
     controller.abort(new Error(`bootstrap stage deadline exceeded: ${stage}`))
-  }, Math.max(1, Math.min(STAGE_DEADLINE_MS[stage], remainingTotalMs)))
+  }, Math.max(1, Math.min(stageDeadlineMs, remainingTotalMs)))
   try {
     const outcome = await task(controller.signal)
     return timedOut
@@ -1938,6 +1939,7 @@ export type BootstrapDependencies = {
   ports?: BootstrapExecutionPorts
   run?: BootstrapAdapterCommandRunner
   uuid?: () => string
+  stageDeadlineMs?: Partial<Record<BootstrapStage, number>>
 }
 
 export async function bootstrap(
@@ -1991,7 +1993,12 @@ export async function bootstrap(
   let lockHeld = false
   const bootstrapStartedAt = performance.now()
   const boundedDeadline = (stage: BootstrapStage, task: (signal: AbortSignal) => Promise<BootstrapStageOutcome>) =>
-    withDeadline(stage, task, 600_000 - (performance.now() - bootstrapStartedAt))
+    withDeadline(
+      stage,
+      task,
+      600_000 - (performance.now() - bootstrapStartedAt),
+      dependencies.stageDeadlineMs?.[stage] ?? STAGE_DEADLINE_MS[stage],
+    )
 
   const refreshOwnedRollbackFences = (source: BootstrapRunState): boolean => {
     const sqlite = source.mutations.find((mutation) => mutation.kind === 'db' && mutation.rollback_payload?.backend === 'sqlite')

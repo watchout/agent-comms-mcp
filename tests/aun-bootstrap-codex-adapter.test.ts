@@ -97,6 +97,82 @@ describe('aun bootstrap Codex adapter', () => {
     expect(added).toBe(false)
   })
 
+  test('post-exit readback uses a fresh bounded signal after the stage signal aborts', async () => {
+    const stageController = new AbortController()
+    const postAddSignals: Array<{ signal: AbortSignal | undefined; aborted: boolean }> = []
+    let added = false
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args, options) => {
+        const joined = args.join(' ')
+        if (options.signal?.aborted) return { exitCode: 124, stdout: '', stderr: 'aborted signal' }
+        if (joined === 'mcp get aun --json') {
+          if (added) postAddSignals.push({ signal: options.signal, aborted: Boolean(options.signal?.aborted) })
+          return added
+            ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+        }
+        if (joined === 'mcp list --json') {
+          if (added) postAddSignals.push({ signal: options.signal, aborted: Boolean(options.signal?.aborted) })
+          return { exitCode: 0, stdout: JSON.stringify(added ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+        }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') {
+          added = true
+          stageController.abort(new Error('B4 stage deadline'))
+          return { exitCode: 124, stdout: '', stderr: 'stage deadline after mutation' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+
+    const failed = await adapter.applyMcpRegistration({ ...context, abortSignal: stageController.signal })
+    expect(stageController.signal.aborted).toBe(true)
+    expect(failed.ok).toBe(false)
+    expect(failed.reasonCodes).toEqual(['NO_GO_POST_MUTATION_READBACK'])
+    expect(failed.mutation?.actual_after_digest).toBeString()
+    expect(postAddSignals).toHaveLength(2)
+    expect(postAddSignals.every((entry) => entry.signal !== stageController.signal && !entry.aborted)).toBe(true)
+  })
+
+  test('unresolved post-exit target still returns a recovery-required owned mutation', async () => {
+    const stageController = new AbortController()
+    let added = false
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args, options) => {
+        const joined = args.join(' ')
+        if (joined === 'mcp get aun --json') {
+          if (added) return { exitCode: 124, stdout: '', stderr: 'native readback unavailable' }
+          return { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+        }
+        if (joined === 'mcp list --json') {
+          return added
+            ? { exitCode: 124, stdout: '', stderr: 'native list unavailable' }
+            : { exitCode: 0, stdout: '[]', stderr: '' }
+        }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') {
+          added = true
+          stageController.abort(new Error('B4 stage deadline'))
+          return { exitCode: 124, stdout: '', stderr: 'stage deadline after mutation' }
+        }
+        return options.signal?.aborted
+          ? { exitCode: 124, stdout: '', stderr: 'aborted' }
+          : { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+
+    const failed = await adapter.applyMcpRegistration({ ...context, abortSignal: stageController.signal })
+    expect(failed.ok).toBe(false)
+    expect(failed.reasonCodes).toEqual(['NO_GO_POST_MUTATION_READBACK'])
+    expect(failed.mutation?.actual_after_digest).toBeNull()
+    expect(failed.mutation?.rollback_payload).toMatchObject({
+      created_by_run: true,
+      post_exit_readback_signal: 'fresh_bounded',
+      recovery_required: true,
+      target_readback_unresolved: true,
+    })
+  })
+
   for (const [name, mutate] of [
     ['disabled', (value: any) => ({ ...value, enabled: false })],
     ['wrong-command', (value: any) => ({ ...value, transport: { ...value.transport, command: '/wrong/bun' } })],

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../bin/aun/bootstrap'
+import { createCodexBootstrapAdapter } from '../bin/aun/bootstrap-adapter-codex'
 import type {
   BootstrapExecutionPorts,
   BootstrapStageContext,
@@ -327,6 +328,142 @@ describe('aun bootstrap B0-B8 state machine', () => {
     failWithMutation = false
     const retry = await bootstrap(input, { stateStore: store, ports, run: fakeRun(), uuid: () => 'retry-run' })
     expect(retry.status).toBe('READY')
+  })
+
+  test('B4 stage deadline after provider mutation uses fresh readback, journals, and rolls back before lock release', async () => {
+    const store = new MemoryBootstrapStateStore()
+    const ports = passingPorts()
+    let added = false
+    let freshReadbackObserved = false
+    const run = async (command: string, args: string[], options: { signal?: AbortSignal } = {}) => {
+      const joined = args.join(' ')
+      if (command === 'git' && joined === 'rev-parse HEAD') {
+        return { exitCode: 0, stdout: `${HEAD}\n`, stderr: '' }
+      }
+      if (command === 'codex' && joined === '--version') {
+        return { exitCode: 0, stdout: 'codex 1.0.0\n', stderr: '' }
+      }
+      if (command === 'codex' && joined === 'mcp get wasurezu --json') {
+        return { exitCode: 0, stdout: '{"name":"wasurezu"}', stderr: '' }
+      }
+      if (options.signal?.aborted) {
+        return { exitCode: 124, stdout: '', stderr: 'command started with aborted signal' }
+      }
+      if (command === 'codex' && joined === 'mcp get aun --json') {
+        if (added) freshReadbackObserved = true
+        return added
+          ? { exitCode: 0, stdout: JSON.stringify({
+              name: 'aun', enabled: true,
+              transport: {
+                type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', process.cwd(), 'server.ts'],
+                env: {
+                  AGENT_ID: 'stage-deadline', AGENT_COM_EXPECTED_AGENT_ID: 'stage-deadline',
+                  AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db', AGENT_COM_DB: 'sqlite',
+                  AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
+                },
+              },
+            }), stderr: '' }
+          : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+      }
+      if (command === 'codex' && joined === 'mcp list --json') {
+        if (added) freshReadbackObserved = true
+        return { exitCode: 0, stdout: JSON.stringify(added ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+      }
+      if (command === 'codex' && args.slice(0, 3).join(' ') === 'mcp add aun') {
+        added = true
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) resolve()
+          else options.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return { exitCode: 124, stdout: '', stderr: 'B4 stage deadline after mutation' }
+      }
+      if (command === 'codex' && joined === 'mcp remove aun') {
+        added = false
+        return { exitCode: 0, stdout: 'removed', stderr: '' }
+      }
+      return { exitCode: 1, stdout: '', stderr: 'unexpected command' }
+    }
+    const adapter = createCodexBootstrapAdapter({ bunPath: '/bin/bun', serverEntry: 'server.ts', run: run as any })
+    ports.ensureMcpRegistration = (stageContext) => adapter.applyMcpRegistration(stageContext)
+    ports.rollbackMutation = (stageContext, mutation) => adapter.rollbackRuntimeRegistration(stageContext, mutation)
+    const result = await bootstrap({
+      agentId: 'stage-deadline', runtime: 'codex', home: '/tmp/stage-deadline', repoRoot: process.cwd(),
+      env: { HOME: '/tmp/stage-deadline', AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db' },
+    }, {
+      stateStore: store,
+      ports,
+      run: run as any,
+      uuid: () => 'stage-deadline-run',
+      stageDeadlineMs: { B4_MCP_REGISTRATION: 20 },
+    })
+
+    expect(result.status).toBe('NO_GO')
+    expect(result.reason_codes).toContain('NO_GO_POST_MUTATION_READBACK')
+    expect(freshReadbackObserved).toBe(true)
+    expect(added).toBe(false)
+    const state = store.states.get('stage-deadline/bootstrap-stage-deadline-run')!
+    const mutation = state.mutations.find((entry) => entry.kind === 'mcp_registration')!
+    expect(mutation.actual_after_digest).toBeString()
+    expect(mutation.rollback_status).toBe('verified')
+    expect(mutation.rollback_payload?.rollback_disposition).toBe('verified_after_failed_command')
+    expect(Date.parse(state.lock_release_authorized_at!)).toBeGreaterThanOrEqual(
+      Date.parse(String(mutation.rollback_payload?.rollback_completed_at)),
+    )
+    expect(Date.parse(state.lock_released_at!)).toBeGreaterThanOrEqual(Date.parse(state.lock_release_authorized_at!))
+  })
+
+  test('unresolved stage-deadline mutation is durably recovery-required before lock release', async () => {
+    const store = new MemoryBootstrapStateStore()
+    const ports = passingPorts()
+    ports.ensureMcpRegistration = async (stageContext) => {
+      await new Promise<void>((resolve) => {
+        if (stageContext.abortSignal?.aborted) resolve()
+        else stageContext.abortSignal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      return {
+        ok: false,
+        reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+        evidenceRefs: ['provider-target-readback-unresolved'],
+        mutation: {
+          kind: 'mcp_registration', owner_key: `codex:aun:${stageContext.runId}`,
+          before_digest: 'absent', intended_after_digest: 'expected-tuple', actual_after_digest: null,
+          rollback_action: 'remove and verify native absence',
+          rollback_payload: { created_by_run: true, recovery_required: true, target_readback_unresolved: true },
+        },
+      }
+    }
+    ports.rollbackMutation = async () => ({
+      ok: false,
+      reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+      evidenceRefs: ['provider-rollback-readback-unresolved'],
+    })
+    const result = await bootstrap({
+      agentId: 'stage-deadline-unresolved', runtime: 'codex', home: '/tmp/stage-deadline-unresolved',
+      repoRoot: process.cwd(), env: { HOME: '/tmp/stage-deadline-unresolved' },
+    }, {
+      stateStore: store,
+      ports,
+      run: fakeRun(),
+      uuid: () => 'stage-deadline-unresolved-run',
+      stageDeadlineMs: { B4_MCP_REGISTRATION: 10 },
+    })
+
+    expect(result.status).toBe('NO_GO')
+    expect(result.reason_codes).toContain('NO_GO_POST_MUTATION_READBACK')
+    const state = store.states.get('stage-deadline-unresolved/bootstrap-stage-deadline-unresolved-run')!
+    const mutation = state.mutations.find((entry) => entry.kind === 'mcp_registration')!
+    expect(mutation.actual_after_digest).toBeNull()
+    expect(mutation.rollback_status).toBe('failed')
+    expect(mutation.rollback_payload).toMatchObject({
+      recovery_required: true,
+      target_readback_unresolved: true,
+      rollback_disposition: 'recovery_required_after_failed_command',
+    })
+    expect(mutation.rollback_payload?.rollback_completed_at).toBeString()
+    expect(Date.parse(state.lock_release_authorized_at!)).toBeGreaterThanOrEqual(
+      Date.parse(String(mutation.rollback_payload?.rollback_completed_at)),
+    )
+    expect(Date.parse(state.lock_released_at!)).toBeGreaterThanOrEqual(Date.parse(state.lock_release_authorized_at!))
   })
 
   test('rollback executes only recorded mutations in reverse order', async () => {
