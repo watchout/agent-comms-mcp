@@ -12,6 +12,7 @@ import {
   queueWorkSchedulerLaunchAgentEnabled,
   renderStateDaemonLaunchAgentPlist,
   validateShirubeD1LaunchAgentEnv,
+  validateAllAgentCommunicationManifestLaunchAgentEnv,
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
   loadQueueWorkResiduePolicyFromEnv,
@@ -54,6 +55,37 @@ const SHIRUBE_D1_RESTORE_ENV_KEYS = new Set([
   'SHIRUBE_D1_CTO_GO_REF',
   'SHIRUBE_D1_FLEET_ACTIVATION_REF',
 ])
+
+const ALL_AGENT_MANIFEST_RESTORE_ENV_KEYS = new Set([
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_ID',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_PATH',
+])
+
+function parseAllAgentManifestRestoreEnv(raw: string): Record<string, string> {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { throw new Error('--all-agent-manifest-env-json requires a valid JSON object') }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--all-agent-manifest-env-json requires a JSON object')
+  }
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!ALL_AGENT_MANIFEST_RESTORE_ENV_KEYS.has(key)) {
+      throw new Error(`--all-agent-manifest-env-json does not allow key: ${key}`)
+    }
+    if (typeof value !== 'string') throw new Error(`--all-agent-manifest-env-json requires a string value for ${key}`)
+    result[key] = value
+  }
+  const issues = validateAllAgentCommunicationManifestLaunchAgentEnv(result)
+  if (issues.length > 0) {
+    throw new Error(`--all-agent-manifest-env-json failed preflight: ${issues.map(issue => issue.code).join(',')}`)
+  }
+  return result
+}
 
 function parseShirubeD1RestoreEnv(raw: string): Record<string, string> {
   let parsed: unknown
@@ -105,6 +137,8 @@ Usage:
     --agent-allowlist <agent> --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --shirube-d1-env-json <bounded-json> [--execute]
+  bun scripts/state-daemon-launchagent.ts restore --commit <sha>
+    --all-agent-manifest-env-json <bounded-json> [--execute]
   bun scripts/state-daemon-launchagent.ts preflight [--plist <path>]
   bun scripts/state-daemon-launchagent.ts prune [--restore-root <path>] [--keep N] [--execute]
 
@@ -147,6 +181,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--database-url') args.databaseUrl = next()
     else if (arg === '--sqlite-path') args.sqlitePath = resolve(next())
     else if (arg === '--shirube-d1-env-json') Object.assign(args.extraEnv, parseShirubeD1RestoreEnv(next()))
+    else if (arg === '--all-agent-manifest-env-json') Object.assign(args.extraEnv, parseAllAgentManifestRestoreEnv(next()))
     else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
     else if (arg === '--github-work-repos') args.githubWorkRepos = next()
     else if (arg === '--github-work-labels') args.githubWorkLabels = next()
@@ -168,6 +203,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       args.extraEnv.SHIRUBE_D1_KILL_SWITCH = '1'
       args.extraEnv.SHIRUBE_D1_TARGET_ALLOWLIST = '[]'
       args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '0'
+      args.extraEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED = '0'
     }
     else if (arg === '--enable-queue-work-scheduler') args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '1'
     else if (arg === '--queue-work-runtime') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RUNTIME = next()
@@ -319,6 +355,7 @@ function commandRestore(args: ParsedArgs): void {
       SHIRUBE_D1_KILL_SWITCH: '1',
       SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
       STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED: '0',
     }
     for (const [key, value] of Object.entries(expected)) {
       if (extraEnv[key] !== value) throw new Error(`bootstrap safe default mismatch: ${key}`)

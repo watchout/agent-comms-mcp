@@ -9,8 +9,13 @@ import {
   fingerprintFatalStderr,
   formatQueueProcessingReadinessText,
   inspectStateDaemonRuntime,
+  evaluateAllAgentCommunicationManifestReadiness,
   type StateDaemonRuntimeReadiness,
 } from '../core/state-daemon-readiness'
+import {
+  buildAllAgentCommunicationManifest,
+  type AllAgentCommunicationManifestTargetV1,
+} from '../core/all-agent-communication-manifest'
 import {
   FakeAlertSink,
   FakeClock,
@@ -213,6 +218,58 @@ function botStatusRow(overrides: Partial<BotStatusDbRow> = {}): BotStatusDbRow {
     ...overrides,
   }
 }
+
+describe('ordinary all-agent manifest readiness', () => {
+  const target: AllAgentCommunicationManifestTargetV1 = {
+    agent_id: 'dev-001',
+    target_repository: 'watchout/agent-comms-mcp',
+    control_source: 'https://github.com/watchout/agent-comms-mcp/issues/887',
+    active_function: 'implementation_executor',
+    workspace_id: 'workspace-dev-001',
+    workspace_path: '/work/dev-001',
+    runtime_engine: 'codex-exec',
+    runtime_profile_ref: 'agent-profile://dev-001/revision/1',
+    provider_identity_ref: 'discord-identity://dev-001/identity-1',
+    communication_auto_receive: true,
+    protected_d1: false,
+    discord_mode: 'native_verified',
+  }
+  const manifest = buildAllAgentCommunicationManifest({
+    manifest_id: 'm1', revision: 1,
+    issued_at: '2026-07-26T00:00:00Z', not_before: '2026-07-26T00:00:00Z', expires_at: '2026-07-27T00:00:00Z',
+    owner_decision_ref: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-owner',
+    targets: [target], release_commit: 'a'.repeat(40), release_tree: 'b'.repeat(40),
+    policy_digest: 'c'.repeat(64), revoked_or_superseded_refs: [],
+  })
+  const context = {
+    now: '2026-07-26T12:00:00Z',
+    trusted_owner_decision_ref: manifest.owner_decision_ref,
+    trusted_owner_pinned_digest: manifest.owner_pinned_digest,
+  }
+
+  test('reads back exact accepted identity and explicit protected_d1 state', () => {
+    expect(evaluateAllAgentCommunicationManifestReadiness(manifest, context, [target])).toEqual({
+      ready: true,
+      state: 'READY',
+      code: 'ADMITTED',
+      manifest_id: 'm1',
+      revision: 1,
+      artifact_digest: manifest.artifact_digest,
+      canonical_bytes_sha256: manifest.artifact_digest,
+      target_count: 1,
+      target_sha256: manifest.target_sha256,
+      owner_decision_ref: manifest.owner_decision_ref,
+      protected_d1_explicit: true,
+      drift: [],
+    })
+  })
+
+  test('reports NOT_DONE and preserves the full manifest denominator on per-target drift', () => {
+    const report = evaluateAllAgentCommunicationManifestReadiness(manifest, context, [])
+    expect(report).toMatchObject({ ready: false, state: 'NOT_DONE', code: 'TARGET_DRIFT', target_count: 1 })
+    expect(report.drift).toEqual(['dev-001:missing_target'])
+  })
+})
 
 describe('state-daemon readiness diagnostics', () => {
   test('fatal stderr fingerprint detects launchd module resolution failures', () => {

@@ -5,7 +5,10 @@ import { join } from 'node:path'
 import {
   buildStateDaemonRestorePlan,
   renderStateDaemonLaunchAgentPlist,
+  validateAllAgentCommunicationManifestArtifact,
+  validateAllAgentCommunicationManifestLaunchAgentEnv,
 } from '../core/state-daemon/launchagent'
+import { buildAllAgentCommunicationManifest } from '../core/all-agent-communication-manifest'
 
 const REPO = join(import.meta.dir, '..')
 const COMMIT = '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9'
@@ -20,7 +23,7 @@ function runCli(args: string[]) {
 }
 
 describe('state-daemon install-plan CLI dry-run', () => {
-  test('bootstrap restore plan writes all four explicit safe defaults', () => {
+  test('bootstrap restore plan writes all five explicit safe defaults', () => {
     const result = Bun.spawnSync([
       'bun', 'scripts/state-daemon-launchagent.ts', 'restore', '--commit', COMMIT,
       '--agent-allowlist', 'bootstrap-probe', '--bootstrap-safe-defaults', '--sqlite-path', '/tmp/bootstrap-probe.db',
@@ -33,11 +36,97 @@ describe('state-daemon install-plan CLI dry-run', () => {
       SHIRUBE_D1_KILL_SWITCH: '1',
       SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
       STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED: '0',
       STATE_DAEMON_AGENT_ALLOWLIST: 'bootstrap-probe',
       AGENT_COM_DB: 'sqlite',
       AGENT_COM_SQLITE_PATH: '/tmp/bootstrap-probe.db',
     })
     expect(json.extraEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED).toBeUndefined()
+  })
+
+  test('ordinary manifest activation input is identity-complete and fail-closed', () => {
+    const complete = {
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED: '1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ID: 'm1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION: '1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST: 'a'.repeat(64),
+      STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256: 'b'.repeat(64),
+      STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-owner',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_PATH: '/durable/manifests/m1.json',
+    }
+    expect(validateAllAgentCommunicationManifestLaunchAgentEnv(complete)).toEqual([])
+    expect(validateAllAgentCommunicationManifestLaunchAgentEnv({
+      ...complete,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256: '',
+    }).map(issue => issue.code)).toContain('all_agent_manifest_identity_incomplete')
+    expect(validateAllAgentCommunicationManifestLaunchAgentEnv({
+      ...complete,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION: '0',
+    }).map(issue => issue.code)).toContain('all_agent_manifest_revision_invalid')
+  })
+
+  test('ordinary manifest artifact must match every pinned LaunchAgent identity field', () => {
+    const manifest = buildAllAgentCommunicationManifest({
+      manifest_id: 'm1',
+      revision: 1,
+      issued_at: '2026-07-26T00:00:00Z',
+      not_before: '2026-07-26T00:00:00Z',
+      expires_at: '2026-07-27T00:00:00Z',
+      owner_decision_ref: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-owner',
+      targets: [{
+        agent_id: 'dev-001',
+        target_repository: 'watchout/agent-comms-mcp',
+        control_source: 'https://github.com/watchout/agent-comms-mcp/issues/887',
+        active_function: 'implementation_executor',
+        workspace_id: 'w1',
+        workspace_path: '/work/dev-001',
+        runtime_engine: 'codex-exec',
+        runtime_profile_ref: 'agent-profile://dev-001/revision/1',
+        provider_identity_ref: 'discord-identity://dev-001/id1',
+        communication_auto_receive: true,
+        protected_d1: false,
+        discord_mode: 'native_verified',
+      }],
+      release_commit: 'a'.repeat(40),
+      release_tree: 'b'.repeat(40),
+      policy_digest: 'c'.repeat(64),
+      revoked_or_superseded_refs: [],
+    })
+    const env = {
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED: '1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ID: manifest.manifest_id,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION: String(manifest.revision),
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST: manifest.artifact_digest,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256: manifest.target_sha256,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF: manifest.owner_decision_ref,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_PATH: '/durable/manifests/m1.json',
+    }
+    expect(validateAllAgentCommunicationManifestArtifact(env, JSON.stringify(manifest))).toEqual([])
+    expect(validateAllAgentCommunicationManifestArtifact({
+      ...env,
+      STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256: 'f'.repeat(64),
+    }, JSON.stringify(manifest)).map(issue => issue.code)).toEqual(['all_agent_manifest_env_artifact_mismatch'])
+  })
+
+  test('restore helper accepts bounded ordinary manifest env only as an explicit dry-run plan', () => {
+    const env = {
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED: '1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ID: 'm1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION: '1',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST: 'a'.repeat(64),
+      STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256: 'b'.repeat(64),
+      STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-owner',
+      STATE_DAEMON_ALL_AGENT_MANIFEST_PATH: '/durable/manifests/m1.json',
+    }
+    const result = Bun.spawnSync([
+      'bun', 'scripts/state-daemon-launchagent.ts', 'restore', '--commit', COMMIT,
+      '--all-agent-manifest-env-json', JSON.stringify(env),
+    ], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
+    expect(result.exitCode).toBe(0)
+    const output = JSON.parse(result.stdout.toString())
+    expect(output.dry_run).toBe(true)
+    expect(output.extraEnv).toMatchObject(env)
+    expect(output.bootstrapped).toBeUndefined()
   })
 
   test('emits a durable install plan without writing, loading, or restarting', () => {

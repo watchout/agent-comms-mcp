@@ -1,5 +1,13 @@
 import type { DbAdapter } from './db'
 import {
+  ALL_AGENT_COMMUNICATION_ACTIVE_FUNCTIONS,
+  allAgentCommunicationTargetSha256,
+  canonicalAllAgentCommunicationTargets,
+  type AllAgentCommunicationActiveFunction,
+  type AllAgentCommunicationDiscordMode,
+  type AllAgentCommunicationManifestTargetV1,
+} from './all-agent-communication-manifest'
+import {
   evaluateFleetCheckoutDrift,
   fullGitShaEquals,
   normalizeApprovedCheckoutRoots,
@@ -163,6 +171,27 @@ export interface V2NativeFrozenSetReadOptions {
   maxHeartbeatAgeMs?: number
 }
 
+export interface AllAgentCommunicationCandidateOptions {
+  nowMs?: number
+  maxHeartbeatAgeMs?: number
+  controlSourceByAgent: Record<string, string>
+  activeFunctionByAgent: Record<string, string>
+  communicationAutoReceiveByAgent: Record<string, boolean>
+  protectedD1ByAgent: Record<string, boolean>
+  discordModeByAgent: Record<string, AllAgentCommunicationDiscordMode>
+}
+
+export interface AllAgentCommunicationCandidateReport {
+  ok: boolean
+  generated_at: string
+  expected_agent_ids: string[]
+  expected_target_count: number
+  resolved_target_count: number
+  target_sha256: string | null
+  targets: AllAgentCommunicationManifestTargetV1[]
+  blockers: string[]
+}
+
 function metadataObject(raw: unknown): Record<string, unknown> {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
   if (typeof raw === 'string') {
@@ -242,6 +271,205 @@ export async function readV2NativeFrozenEnabledSet(
     })
   }
   return result
+}
+
+function hasOwn(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key)
+}
+
+function normalizeRepository(raw: unknown): string | null {
+  const text = normalizeString(raw)
+  if (!text) return null
+  const normalized = text
+    .replace(/^git@github\.com:/, '')
+    .replace(/^https?:\/\/github\.com\//, '')
+    .replace(/\.git$/, '')
+    .replace(/^\/+|\/+$/g, '')
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(normalized) ? normalized : null
+}
+
+function manifestRuntimeEngine(raw: unknown): 'codex-exec' | 'claude-exec' | null {
+  const value = normalizeString(raw)?.toLowerCase()
+  if (!value) return null
+  if (value === 'codex' || value === 'codex-exec') return 'codex-exec'
+  if (value === 'claude' || value === 'claude-exec' || value === 'claude-code') return 'claude-exec'
+  return null
+}
+
+function parseMembers(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((value): value is string => typeof value === 'string')
+  if (typeof raw !== 'string') return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Builds evidence-only candidate rows for the ordinary communication lane.
+ * Membership comes from the canonical production registry and every selected
+ * agent remains in the denominator even when its evidence is incomplete.
+ * `protected_d1` and auto-receive are explicit caller-bound policy inputs;
+ * neither is inferred from an agent id or an existing protected allowlist.
+ */
+export async function generateAllAgentCommunicationManifestCandidates(
+  db: DbAdapter,
+  options: AllAgentCommunicationCandidateOptions,
+): Promise<AllAgentCommunicationCandidateReport> {
+  const nowMs = options.nowMs ?? Date.now()
+  const maxAgeMs = options.maxHeartbeatAgeMs ?? 15 * 60_000
+  const agents = (await db.query<any>(
+    `SELECT agent_id, agent_type, profile_revision, profile_enabled, disabled_at,
+            runtime_engine_preference, metadata
+       FROM agents
+      ORDER BY agent_id`,
+  )).filter(row => {
+    const metadata = metadataObject(row.metadata)
+    return (row.profile_enabled === true || Number(row.profile_enabled) === 1)
+      && row.disabled_at === null
+      && String(row.agent_type) === 'dev'
+      && String(metadata.profile_class ?? '') !== 'test'
+  })
+  const expectedAgentIds = agents.map(row => String(row.agent_id)).sort()
+  const blockers: string[] = []
+  const targets: AllAgentCommunicationManifestTargetV1[] = []
+
+  const gatewayRows = await db.query<any>(
+    `SELECT c.members, p.adapter_owner_agent_id
+       FROM channels c
+       JOIN channel_routing_policy p ON p.channel_id = c.id
+      WHERE p.adapter_owner_agent_id = $1`,
+    ['aun'],
+  )
+  const gatewayMembers = new Set(gatewayRows.flatMap(row => parseMembers(row.members)))
+
+  for (const agent of agents) {
+    const agentId = String(agent.agent_id)
+    const agentBlockers: string[] = []
+    const activeFunction = options.activeFunctionByAgent[agentId]
+    if (!(ALL_AGENT_COMMUNICATION_ACTIVE_FUNCTIONS as readonly string[]).includes(activeFunction)) {
+      agentBlockers.push('active_function_missing_or_unknown')
+    }
+    const controlSource = normalizeString(options.controlSourceByAgent[agentId])
+    if (!controlSource) agentBlockers.push('control_source_missing')
+    if (!hasOwn(options.communicationAutoReceiveByAgent, agentId)
+      || typeof options.communicationAutoReceiveByAgent[agentId] !== 'boolean') {
+      agentBlockers.push('communication_auto_receive_not_explicit')
+    }
+    if (!hasOwn(options.protectedD1ByAgent, agentId)
+      || typeof options.protectedD1ByAgent[agentId] !== 'boolean') {
+      agentBlockers.push('protected_d1_not_explicit')
+    }
+    const discordMode = options.discordModeByAgent[agentId]
+    if (discordMode !== 'native_verified' && discordMode !== 'aun_gateway_projection') {
+      agentBlockers.push('discord_mode_missing_or_unknown')
+    }
+
+    const workspaces = await db.query<any>(
+      `SELECT w.workspace_id, w.local_path, w.repo_url
+         FROM agent_workspace_bindings b
+         JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+        WHERE b.agent_id = $1 AND b.active = true AND b.binding_role = 'primary'
+        ORDER BY w.workspace_id`,
+      [agentId],
+    )
+    if (workspaces.length !== 1) agentBlockers.push(`primary_workspace_count_${workspaces.length}`)
+    const workspace = workspaces[0]
+    const workspacePath = normalizeString(workspace?.local_path)
+    const repository = normalizeRepository(workspace?.repo_url)
+    if (!workspacePath || !workspacePath.startsWith('/')) agentBlockers.push('workspace_path_missing_or_non_absolute')
+    if (!repository) agentBlockers.push('target_repository_missing_or_invalid')
+
+    const runtimes = await db.query<any>(
+      `SELECT runtime_instance_id, workspace_id, runtime_engine, status, stopped_at, last_seen_at
+         FROM agent_runtime_instances
+        WHERE agent_id = $1
+        ORDER BY started_at DESC`,
+      [agentId],
+    )
+    const live = runtimes.filter(runtime => {
+      const seen = parseTimestampMs(runtime.last_seen_at)
+      return runtime.stopped_at === null
+        && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
+        && seen !== null
+        && nowMs - seen <= maxAgeMs
+        && String(runtime.workspace_id ?? '') === String(workspace?.workspace_id ?? '')
+    })
+    if (live.length !== 1) agentBlockers.push(`selected_runtime_count_${live.length}`)
+    if (live.length === 1 && !normalizeString(live[0]?.runtime_instance_id)) {
+      agentBlockers.push('runtime_instance_id_missing')
+    }
+    const profileEngine = manifestRuntimeEngine(agent.runtime_engine_preference)
+    const liveEngine = manifestRuntimeEngine(live[0]?.runtime_engine)
+    if (!profileEngine) agentBlockers.push('profile_runtime_engine_missing_or_unsupported')
+    if (!liveEngine) agentBlockers.push('live_runtime_engine_missing_or_unsupported')
+    if (profileEngine && liveEngine && profileEngine !== liveEngine) {
+      agentBlockers.push('runtime_engine_profile_mismatch')
+    }
+    const engine = profileEngine ?? liveEngine
+    const profileRevision = Number(agent.profile_revision)
+    if (!Number.isSafeInteger(profileRevision) || profileRevision <= 0) agentBlockers.push('profile_revision_missing_or_invalid')
+
+    const identityAgentId = discordMode === 'aun_gateway_projection' ? 'aun' : agentId
+    const identities = await db.query<any>(
+      `SELECT provider_identity_id
+         FROM agent_provider_identities
+        WHERE agent_id = $1 AND provider = 'discord'
+          AND status = 'verified' AND trust_status = 'verified'
+          AND disabled_at IS NULL AND revoked_at IS NULL
+        ORDER BY provider_identity_id`,
+      [identityAgentId],
+    )
+    if (identities.length !== 1) agentBlockers.push(`verified_provider_identity_count_${identities.length}`)
+    if (discordMode === 'native_verified') {
+      const bindings = await db.query<any>(
+        `SELECT binding_id
+           FROM agent_ui_bindings
+          WHERE agent_id = $1 AND ui_type = 'discord'
+            AND status = 'active' AND trust_status = 'verified'
+            AND disabled_at IS NULL
+            AND provider_identity_id = $2
+          ORDER BY binding_id`,
+        [agentId, identities[0]?.provider_identity_id ?? null],
+      )
+      if (bindings.length !== 1) agentBlockers.push(`verified_native_ui_binding_count_${bindings.length}`)
+    } else if (discordMode === 'aun_gateway_projection' && !gatewayMembers.has(agentId)) {
+      agentBlockers.push('aun_gateway_projection_missing')
+    }
+
+    if (agentBlockers.length > 0) {
+      blockers.push(...agentBlockers.map(blocker => `${agentId}:${blocker}`))
+      continue
+    }
+    targets.push({
+      agent_id: agentId,
+      target_repository: repository!,
+      control_source: controlSource!,
+      active_function: activeFunction as AllAgentCommunicationActiveFunction,
+      workspace_id: String(workspace.workspace_id),
+      workspace_path: workspacePath!,
+      runtime_engine: engine!,
+      runtime_profile_ref: `agent-profile://${agentId}/revision/${profileRevision}`,
+      provider_identity_ref: `discord-identity://${identityAgentId}/${identities[0].provider_identity_id}`,
+      communication_auto_receive: options.communicationAutoReceiveByAgent[agentId],
+      protected_d1: options.protectedD1ByAgent[agentId],
+      discord_mode: discordMode,
+    })
+  }
+  const canonicalTargets = canonicalAllAgentCommunicationTargets(targets)
+  const ok = blockers.length === 0 && canonicalTargets.length === expectedAgentIds.length && expectedAgentIds.length > 0
+  return {
+    ok,
+    generated_at: new Date(nowMs).toISOString(),
+    expected_agent_ids: expectedAgentIds,
+    expected_target_count: expectedAgentIds.length,
+    resolved_target_count: canonicalTargets.length,
+    target_sha256: ok ? allAgentCommunicationTargetSha256(canonicalTargets) : null,
+    targets: canonicalTargets,
+    blockers: blockers.sort(),
+  }
 }
 
 function parseTimestampMs(raw: unknown): number | null {
