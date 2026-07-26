@@ -1,5 +1,10 @@
 # AUN one-command bootstrap
 
+> Mutable operational configuration is DB-owned. Bootstrap is the first fenced
+> reconciliation, not a permanent snapshot authority. After B8, the
+> state-daemon continuous reconciler owns later desired revisions. See
+> [AUN configuration reconciliation](./aun-configuration-reconciliation.md).
+
 `aun bootstrap` turns an already-started Codex or Claude runtime into a
 provider-registered, ordinary-receive-capable AUN seat. It is deterministic,
 idempotent, resumable, and fail-closed. It does not enable Shirube D1, release

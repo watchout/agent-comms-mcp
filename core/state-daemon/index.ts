@@ -41,6 +41,7 @@ import {
   type AlertSink,
   type Clock,
   type CodexRunnerInvoker,
+  type ConfigurationReconcilerService,
   type GithubWorkPuller,
   type HostRuntimeInvoker,
   type QueueWorkScheduler,
@@ -149,6 +150,7 @@ export class StateDaemon {
   private readonly shirubeD1AutoReceive: ShirubeD1AutoReceiveDispatcher | null
   private readonly allAgentCommunicationAdmissionGate: AllAgentCommunicationAdmissionGate | null
   private readonly githubWorkPuller: GithubWorkPuller | null
+  private readonly configurationReconciler: ConfigurationReconcilerService | null
   private readonly clock: Clock
   private readonly metrics: Metrics
   private readonly alert: AlertSink
@@ -176,6 +178,7 @@ export class StateDaemon {
     this.shirubeD1AutoReceive = deps.shirubeD1AutoReceive ?? null
     this.allAgentCommunicationAdmissionGate = deps.allAgentCommunicationAdmissionGate ?? null
     this.githubWorkPuller = deps.githubWorkPuller ?? null
+    this.configurationReconciler = deps.configurationReconciler ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
     this.alert = deps.alert
@@ -210,6 +213,7 @@ export class StateDaemon {
       throw new AlreadyStartedError()
     }
     this.status = 'running'
+    try {
 
     await this.pgListen.listen('queue_event', (raw) => {
       try {
@@ -270,6 +274,20 @@ export class StateDaemon {
         )
       }
     }
+    if (this.config.configurationReconcilerEnabled) {
+      if (!this.configurationReconciler) {
+        this.metrics.inc('state_daemon_configuration_reconciler_actions_total', { result: 'missing_dependency' })
+        await this.alert.alert('configuration reconciler enabled but no dependency is configured')
+        throw new Error('STATE_DAEMON_CONFIGURATION_RECONCILER_DEPENDENCY_REQUIRED')
+      } else {
+        await this.configurationReconciler.start()
+        this.metrics.inc('state_daemon_configuration_reconciler_actions_total', { result: 'started' })
+      }
+    }
+    } catch (error) {
+      await this.stop().catch(() => {})
+      throw error
+    }
   }
 
   async stop(): Promise<void> {
@@ -288,6 +306,9 @@ export class StateDaemon {
         ]),
         new Promise((r) => setTimeout(r, 50)),
       ])
+    }
+    if (this.config.configurationReconcilerEnabled && this.configurationReconciler) {
+      await this.configurationReconciler.stop()
     }
     await this.pgListen.unlisten()
     this.status = 'stopped'

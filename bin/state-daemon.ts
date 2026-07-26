@@ -24,9 +24,26 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir, hostname } from 'node:os'
+import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
+import { PgAdapter } from '../core/db/pg-adapter'
+import {
+  AunConfigurationReconciler,
+  DbConfigurationDesiredStateStore,
+  DbConfigurationLeasePort,
+  type ConfigurationProjectionPort,
+  type ConfigurationProjectionReadback,
+} from '../core/aun-configuration-reconciler'
+import {
+  buildDefaultAunConfigurationCandidate,
+  type AunConfigurationCandidate,
+} from '../core/aun-configuration-candidate'
+import { configurationDigest, type AunConfigurationDesiredState } from '../core/aun-configuration-desired-state'
+import { parseStateDaemonLaunchAgentPlist, STATE_DAEMON_PLIST_NAME } from '../core/state-daemon/launchagent'
+import { parseClaudeMcpGet } from './aun/bootstrap-adapter-claude'
 import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
 import {
   githubWorkPullerEnabled,
@@ -361,6 +378,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
     if (v !== undefined) (cfg as any)[k] = v
   }
   set('pollSweepIntervalMs', num('STATE_DAEMON_POLL_SWEEP_INTERVAL_MS'))
+  set('configurationReconcilerEnabled', bool('STATE_DAEMON_CONFIGURATION_RECONCILER_ENABLED'))
   set('pendingStaleAfter', str('STATE_DAEMON_PENDING_STALE_AFTER'))
   set('readExpiredAfter', str('STATE_DAEMON_READ_EXPIRED_AFTER'))
   set('abandonRecent', str('STATE_DAEMON_ABANDON_RECENT'))
@@ -402,12 +420,342 @@ function loadConfig(): Partial<StateDaemonConfig> {
   return cfg
 }
 
+function referenceMatches(actual: string | undefined, reference: string): boolean {
+  if (actual === undefined) return false
+  if (reference.startsWith('literal:')) return actual === reference.slice('literal:'.length)
+  if (reference.startsWith('env:')) return actual === process.env[reference.slice('env:'.length)]
+  return actual.length > 0
+}
+
+function environmentReferencesMatch(
+  actual: Record<string, string>,
+  expected: Record<string, string>,
+): boolean {
+  return Object.entries(expected).every(([key, reference]) => referenceMatches(actual[key], reference))
+}
+
+export function launchctlEnvironment(output: string, keys: readonly string[]): Record<string, string> {
+  const environment: Record<string, string> = {}
+  for (const key of keys) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const match = output.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*(?:=>|=)\\s*"?([^"\\n]+?)"?\\s*(?:\\n|$)`))
+    if (match?.[1]) environment[key] = match[1].trim()
+  }
+  return environment
+}
+
+export function runtimeRegistrationRowsMatch(
+  rows: readonly Record<string, unknown>[],
+  candidate: AunConfigurationCandidate,
+): boolean {
+  if (!candidate.runtimeRegistration.enabled) return rows.length === 0
+  if (rows.length !== 1) return false
+  const row = rows[0]!
+  const localPath = typeof row.local_path === 'string' ? row.local_path : ''
+  return String(row.runtime_engine) === candidate.runtimeRegistration.runtimeEngine
+    && Number(row.port) === candidate.runtimeRegistration.channelPort
+    && localPath !== ''
+    && resolve(localPath) === resolve(candidate.runtimeRegistration.workspace)
+}
+
+export interface NativeMcpCommandResult {
+  exitCode: number
+  stdout: string
+  stderr: string
+}
+
+function nativeAbsence(result: NativeMcpCommandResult): boolean {
+  return result.exitCode !== 0 && /(?:not found|no mcp server named)/i.test(result.stderr)
+}
+
+export function codexNativeMcpAbsent(
+  getResult: NativeMcpCommandResult,
+  listResult: NativeMcpCommandResult,
+  serverName: string,
+): boolean {
+  if (!nativeAbsence(getResult) || listResult.exitCode !== 0) return false
+  try {
+    const parsed = JSON.parse(listResult.stdout)
+    return Array.isArray(parsed) && parsed.filter((item) => item?.name === serverName).length === 0
+  } catch {
+    return false
+  }
+}
+
+export function claudeNativeMcpAbsent(
+  getResult: NativeMcpCommandResult,
+  listResult: NativeMcpCommandResult,
+  serverName: string,
+): boolean {
+  if (!nativeAbsence(getResult) || listResult.exitCode !== 0) return false
+  const escaped = serverName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const entries = listResult.stdout.split(/\r?\n/).filter((line) => new RegExp(`^\\s*${escaped}:\\s*`, 'i').test(line))
+  return entries.length === 0
+}
+
+async function nativeMcpCommandResult(
+  command: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; timeout: number },
+): Promise<NativeMcpCommandResult> {
+  try {
+    const result = await execFileAsync(command, args, options)
+    return { exitCode: 0, stdout: result.stdout, stderr: result.stderr }
+  } catch (error) {
+    const failure = error as { code?: number; stdout?: string; stderr?: string }
+    return {
+      exitCode: Number.isInteger(failure.code) ? failure.code! : -1,
+      stdout: typeof failure.stdout === 'string' ? failure.stdout : '',
+      stderr: typeof failure.stderr === 'string' ? failure.stderr : '',
+    }
+  }
+}
+
+export interface NativeReleaseIdentity {
+  commit: string
+  tree: string
+  clean: boolean
+}
+
+export function nativeReleaseIdentityMatches(
+  identity: NativeReleaseIdentity | null,
+  candidate: AunConfigurationCandidate,
+): boolean {
+  return identity !== null
+    && identity.commit === candidate.releaseCommit
+    && identity.tree === candidate.releaseTree
+    && identity.clean
+}
+
+async function readNativeReleaseIdentity(checkoutRoot: string): Promise<NativeReleaseIdentity | null> {
+  try {
+    const [commit, tree, status] = await Promise.all([
+      execFileAsync('git', ['-C', checkoutRoot, 'rev-parse', 'HEAD^{commit}'], { timeout: 5_000 }),
+      execFileAsync('git', ['-C', checkoutRoot, 'rev-parse', 'HEAD^{tree}'], { timeout: 5_000 }),
+      execFileAsync('git', ['-C', checkoutRoot, 'status', '--porcelain'], { timeout: 5_000 }),
+    ])
+    const identity = {
+      commit: commit.stdout.trim(),
+      tree: tree.stdout.trim(),
+      clean: status.stdout.trim() === '',
+    }
+    return /^[0-9a-f]{40}$/.test(identity.commit) && /^[0-9a-f]{40}$/.test(identity.tree)
+      ? identity
+      : null
+  } catch {
+    return null
+  }
+}
+
+class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
+  constructor(private readonly db: PgAdapter) {}
+
+  async render(input: { hostId: string; desired: AunConfigurationDesiredState }): Promise<AunConfigurationCandidate> {
+    const projection = input.desired.ordinaryProjection
+    const providerRepoRoot = typeof projection.provider_repo_root === 'string' ? projection.provider_repo_root.trim() : ''
+    const providerConfigRoot = typeof projection.provider_config_root === 'string' ? projection.provider_config_root.trim() : ''
+    const daemonCheckout = typeof projection.daemon_checkout === 'string' ? projection.daemon_checkout.trim() : ''
+    if (!providerRepoRoot || !providerConfigRoot || !daemonCheckout) throw new Error('ORDINARY_PROJECTION_ROOTS_INCOMPLETE')
+    return buildDefaultAunConfigurationCandidate({
+      hostId: input.hostId,
+      desired: input.desired,
+      databaseLocatorRef: process.env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
+      databaseCredentialRef: process.env.AUN_DATABASE_CREDENTIAL_REF?.trim() || 'env:DATABASE_URL',
+      bunPath: Bun.which('bun') ?? process.execPath,
+      serverEntry: 'server.ts',
+      providerRepoRoot: resolve(providerRepoRoot),
+      providerConfigRoot: resolve(providerConfigRoot),
+      daemonCheckout: resolve(daemonCheckout),
+      daemonEntry: join(resolve(daemonCheckout), 'bin', 'state-daemon.ts'),
+      restartRequired: true,
+    })
+  }
+
+  async validate(candidate: AunConfigurationCandidate): Promise<{ ok: boolean; reasonCodes: string[] }> {
+    const reasons: string[] = []
+    if (!/^[0-9a-f]{64}$/.test(candidate.candidateDigest)) reasons.push('CANDIDATE_DIGEST_INVALID')
+    if (candidate.providerMcp.databaseLocatorRef !== candidate.launchAgent.databaseLocatorRef) reasons.push('MIXED_DATABASE_ENDPOINT_CANDIDATE')
+    const [providerRelease, daemonRelease] = await Promise.all([
+      readNativeReleaseIdentity(candidate.providerMcp.checkoutRoot),
+      readNativeReleaseIdentity(candidate.launchAgent.workingDirectory),
+    ])
+    if (!nativeReleaseIdentityMatches(providerRelease, candidate)) reasons.push('PROVIDER_RELEASE_MISMATCH')
+    if (!nativeReleaseIdentityMatches(daemonRelease, candidate)) reasons.push('DAEMON_RELEASE_MISMATCH')
+    return { ok: reasons.length === 0, reasonCodes: reasons }
+  }
+
+  async applyUnprotected(): Promise<{ ok: boolean; mutated: boolean; partial: boolean; reasonCode: string }> {
+    return { ok: false, mutated: false, partial: false, reasonCode: 'PROTECTED_NATIVE_CHANGE_REQUIRES_RESTART_DECISION' }
+  }
+
+  async rollback(): Promise<{ ok: boolean }> {
+    return { ok: true }
+  }
+
+  private async providerMatches(candidate: AunConfigurationCandidate): Promise<boolean> {
+    try {
+      const providerEnv = {
+        ...process.env,
+        HOME: candidate.providerMcp.providerHome,
+        ...(candidate.providerMcp.provider === 'codex'
+          ? { CODEX_HOME: candidate.providerMcp.providerConfigRoot }
+          : { CLAUDE_CONFIG_DIR: candidate.providerMcp.providerConfigRoot }),
+      }
+      if (candidate.providerMcp.provider === 'codex') {
+        const [getResult, listResult] = await Promise.all([
+          nativeMcpCommandResult(
+            'codex', ['mcp', 'get', candidate.providerMcp.serverName, '--json'],
+            { env: providerEnv, timeout: 10_000 },
+          ),
+          nativeMcpCommandResult('codex', ['mcp', 'list', '--json'], { env: providerEnv, timeout: 10_000 }),
+        ])
+        if (!candidate.providerMcp.enabled) {
+          return codexNativeMcpAbsent(getResult, listResult, candidate.providerMcp.serverName)
+        }
+        if (getResult.exitCode !== 0 || listResult.exitCode !== 0) return false
+        const parsed = JSON.parse(getResult.stdout)
+        const listed = JSON.parse(listResult.stdout)
+        const entries = Array.isArray(listed)
+          ? listed.filter((item) => item?.name === candidate.providerMcp.serverName)
+          : []
+        const transport = parsed?.transport
+        const actualEnv = transport?.env && typeof transport.env === 'object' ? transport.env as Record<string, string> : {}
+        return entries.length === 1
+          && entries[0]?.enabled === true
+          && parsed?.enabled === true
+          && transport?.type === 'stdio'
+          && resolve(String(transport?.command ?? '')) === resolve(candidate.providerMcp.command)
+          && JSON.stringify(transport?.args ?? []) === JSON.stringify(candidate.providerMcp.args)
+          && environmentReferencesMatch(actualEnv, candidate.providerMcp.environmentRefs)
+      }
+      const [getResult, listResult] = await Promise.all([
+        nativeMcpCommandResult(
+          'claude', ['mcp', 'get', candidate.providerMcp.serverName],
+          { env: providerEnv, timeout: 10_000 },
+        ),
+        nativeMcpCommandResult('claude', ['mcp', 'list'], { env: providerEnv, timeout: 10_000 }),
+      ])
+      if (!candidate.providerMcp.enabled) {
+        return claudeNativeMcpAbsent(getResult, listResult, candidate.providerMcp.serverName)
+      }
+      if (getResult.exitCode !== 0 || listResult.exitCode !== 0) return false
+      const parsed = parseClaudeMcpGet(getResult.stdout)
+      const escaped = candidate.providerMcp.serverName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const entries = listResult.stdout.split(/\r?\n/)
+        .filter((line) => new RegExp(`^\\s*${escaped}:\\s*`, 'i').test(line))
+      return entries.length === 1
+        && /(?:✔|✓)?\s*Connected\s*$/i.test(entries[0]!)
+        && parsed !== null
+        && parsed.type.toLowerCase() === 'stdio'
+        && resolve(parsed.command) === resolve(candidate.providerMcp.command)
+        && JSON.stringify(parsed.args) === JSON.stringify(candidate.providerMcp.args)
+        && environmentReferencesMatch(parsed.environment, candidate.providerMcp.environmentRefs)
+    } catch {
+      return false
+    }
+  }
+
+  private async launchAgentMatches(candidate: AunConfigurationCandidate): Promise<{ plist: boolean; launchctl: boolean }> {
+    const plistPath = process.env.STATE_DAEMON_LAUNCHAGENT_PLIST
+      ?? join(homedir(), 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)
+    let plist = false
+    if (existsSync(plistPath)) {
+      try {
+        const parsed = parseStateDaemonLaunchAgentPlist(readFileSync(plistPath, 'utf8'))
+        plist = parsed.label === candidate.launchAgent.label
+          && parsed.workingDirectory !== null
+          && resolve(parsed.workingDirectory) === resolve(candidate.launchAgent.workingDirectory)
+          && JSON.stringify(parsed.programArguments.map(resolve)) === JSON.stringify(candidate.launchAgent.programArguments.map(resolve))
+          && environmentReferencesMatch(parsed.environmentVariables, candidate.launchAgent.environmentRefs)
+      } catch { plist = false }
+    }
+    try {
+      const { stdout } = await execFileAsync(
+        'launchctl',
+        ['print', `gui/${process.getuid?.() ?? 0}/${candidate.launchAgent.label}`],
+        { timeout: 5_000 },
+      )
+      const environment = launchctlEnvironment(stdout, Object.keys(candidate.launchAgent.environmentRefs))
+      return {
+        plist,
+        launchctl: environmentReferencesMatch(environment, candidate.launchAgent.environmentRefs),
+      }
+    } catch {
+      return { plist, launchctl: false }
+    }
+  }
+
+  private async runtimeMatches(candidate: AunConfigurationCandidate): Promise<boolean> {
+    const rows = await this.db.query<any>(
+      `SELECT r.runtime_engine, r.port, r.status, w.local_path
+         FROM agent_runtime_instances r
+         JOIN agent_workspaces w ON w.workspace_id = r.workspace_id
+         JOIN agent_workspace_bindings b
+           ON b.agent_id = r.agent_id AND b.workspace_id = r.workspace_id
+          AND b.active = true AND b.binding_role = 'primary'
+        WHERE r.agent_id = $1 AND r.status IN ('running', 'active')
+        ORDER BY COALESCE(r.last_seen_at, r.started_at) DESC`,
+      [candidate.agentId],
+    ).catch(() => [])
+    return runtimeRegistrationRowsMatch(rows, candidate)
+  }
+
+  async readback(candidate: AunConfigurationCandidate): Promise<ConfigurationProjectionReadback> {
+    const [provider, launch, runtime, providerRelease, daemonRelease] = await Promise.all([
+      this.providerMatches(candidate),
+      this.launchAgentMatches(candidate),
+      this.runtimeMatches(candidate),
+      readNativeReleaseIdentity(candidate.providerMcp.checkoutRoot),
+      readNativeReleaseIdentity(candidate.launchAgent.workingDirectory),
+    ])
+    const providerReleaseMatches = nativeReleaseIdentityMatches(providerRelease, candidate)
+    const daemonReleaseMatches = nativeReleaseIdentityMatches(daemonRelease, candidate)
+    const reasons = [
+      ...(provider ? [] : ['PROVIDER_NATIVE_MISMATCH']),
+      ...(launch.plist ? [] : ['LAUNCHAGENT_PLIST_MISMATCH']),
+      ...(launch.launchctl ? [] : ['LAUNCHCTL_ENVIRONMENT_MISMATCH']),
+      ...(runtime ? [] : ['RUNTIME_IDENTITY_MISMATCH']),
+      ...(providerReleaseMatches ? [] : ['PROVIDER_RELEASE_MISMATCH']),
+      ...(daemonReleaseMatches ? [] : ['DAEMON_RELEASE_MISMATCH']),
+    ]
+    return {
+      matchesCandidate: reasons.length === 0,
+      providerNativeDigest: provider
+        ? configurationDigest({ projection: candidate.providerMcp, release: providerRelease })
+        : configurationDigest({ provider: false, expected: candidate.providerMcp, release: providerRelease }),
+      launchagentPlistDigest: launch.plist
+        ? configurationDigest({ projection: candidate.launchAgent, release: daemonRelease })
+        : configurationDigest({ plist: false, expected: candidate.launchAgent, release: daemonRelease }),
+      launchctlEnvironmentDigest: launch.launchctl
+        ? configurationDigest(candidate.launchAgent.environmentRefs)
+        : configurationDigest({ launchctl: false, expected: candidate.launchAgent.environmentRefs }),
+      runtimeIdentityDigest: runtime
+        ? configurationDigest(candidate.runtimeRegistration)
+        : configurationDigest({ runtime: false, expected: candidate.runtimeRegistration }),
+      driftReasonCodes: reasons,
+    }
+  }
+}
+
 export async function main(): Promise<void> {
   const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const queryClient = new Client({ connectionString: connStr })
   await queryClient.connect()
   const db = new PgClientAdapter(queryClient)
   const config = loadConfig()
+  const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
+  const configurationReconciler = configurationDb
+    ? new AunConfigurationReconciler(
+        process.env.AUN_HOST_ID?.trim() || hostname(),
+        new DbConfigurationDesiredStateStore(configurationDb),
+        new DbConfigurationLeasePort(
+          configurationDb,
+          process.env.AGENT_ID?.trim() || 'state-daemon',
+          process.env.STATE_DAEMON_RUNTIME_INSTANCE_ID?.trim() || null,
+        ),
+        new NativeConfigurationProjectionPort(configurationDb),
+      )
+    : undefined
   const githubConfig = loadGithubWorkPullerConfigFromEnv(process.env)
   if (config.githubWorkPullerRepos && config.githubWorkPullerRepos.length > 0) {
     githubConfig.repos = config.githubWorkPullerRepos
@@ -437,6 +785,7 @@ export async function main(): Promise<void> {
         config: githubConfig,
       })
       : undefined,
+    configurationReconciler,
     clock: { now: () => new Date() },
     metrics: new StdoutMetrics(),
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),
@@ -455,6 +804,9 @@ export async function main(): Promise<void> {
     }
     try {
       await queryClient.end()
+    } catch { /* ignore */ }
+    try {
+      await configurationDb?.close()
     } catch { /* ignore */ }
     process.exit(0)
   }

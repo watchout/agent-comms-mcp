@@ -120,6 +120,7 @@ function usage(): string {
 Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha> [--execute] [--no-bootstrap]
     [--bootstrap-safe-defaults]
+    [--configuration-reconciler-enabled]
     [--database-url <postgres-url> | --sqlite-path <sqlite-file>]
     [--github-work-puller-enabled --github-work-repos <owner/repo>
      --github-work-labels <canary:label>
@@ -205,6 +206,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '0'
       args.extraEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED = '0'
     }
+    else if (arg === '--configuration-reconciler-enabled') args.extraEnv.STATE_DAEMON_CONFIGURATION_RECONCILER_ENABLED = '1'
     else if (arg === '--enable-queue-work-scheduler') args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '1'
     else if (arg === '--queue-work-runtime') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RUNTIME = next()
     else if (arg === '--queue-work-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_COMMAND = next()

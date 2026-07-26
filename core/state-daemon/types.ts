@@ -20,6 +20,9 @@ import type {
 
 /** spec §9 — full daemon configuration. Defaults match v0.6 §13.2. */
 export interface StateDaemonConfig {
+  /** DB desired-state reconciler; bootstrap projections enable this explicitly. */
+  configurationReconcilerEnabled: boolean
+
   // wake / sweep (§4.3)
   pollSweepIntervalMs: number       // default 30_000
   pendingStaleAfter: string         // default '10 seconds' (PG interval string)
@@ -134,6 +137,7 @@ export interface StateDaemonConfig {
 
 /** Defaults per spec v0.6 §9 + §13.2 CEO 採択 (O2-O8). */
 export const DEFAULT_CONFIG: StateDaemonConfig = {
+  configurationReconcilerEnabled: false,
   pollSweepIntervalMs: 30_000,
   pendingStaleAfter: '10 seconds',
   readExpiredAfter: '30 seconds',
@@ -414,6 +418,12 @@ export interface GithubWorkPuller {
   }>
 }
 
+export interface ConfigurationReconcilerService {
+  start(): Promise<void>
+  stop(): Promise<void>
+  sweepOnce(): Promise<unknown>
+}
+
 export interface StateDaemonDeps {
   db: DBClient
   pgListen: PgListenClient
@@ -424,6 +434,7 @@ export interface StateDaemonDeps {
   shirubeD1AutoReceive?: ShirubeD1AutoReceiveDispatcher
   allAgentCommunicationAdmissionGate?: AllAgentCommunicationAdmissionGate
   githubWorkPuller?: GithubWorkPuller
+  configurationReconciler?: ConfigurationReconcilerService
   clock: Clock
   metrics: Metrics
   alert: AlertSink
