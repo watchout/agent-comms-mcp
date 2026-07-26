@@ -4,6 +4,11 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { DbAdapter } from './db'
+import {
+  evaluateAllAgentCommunicationManifest,
+  type AllAgentCommunicationManifestEvaluationContext,
+  type AllAgentCommunicationManifestTargetV1,
+} from './all-agent-communication-manifest'
 import type { BotStatusDbRow, QueueWakeState } from './bot-status-db'
 import { defaultConfigPort } from './ports/config-port'
 
@@ -57,6 +62,13 @@ export interface StateDaemonRuntimeReadiness {
     shirube_d1_qa_ref?: string | null
     shirube_d1_check_ref?: string | null
     shirube_d1_cto_go_ref?: string | null
+    all_agent_manifest_enforcement_enabled?: string | null
+    all_agent_manifest_id?: string | null
+    all_agent_manifest_revision?: string | null
+    all_agent_manifest_artifact_digest?: string | null
+    all_agent_manifest_target_sha256?: string | null
+    all_agent_manifest_owner_decision_ref?: string | null
+    all_agent_manifest_path?: string | null
   }
   stderr: {
     path: string | null
@@ -497,12 +509,62 @@ export function inspectStateDaemonRuntime(options: StateDaemonRuntimeOptions = {
       shirube_d1_qa_ref: launchctlEnv.SHIRUBE_D1_QA_REF ?? plistEnv.SHIRUBE_D1_QA_REF ?? null,
       shirube_d1_check_ref: launchctlEnv.SHIRUBE_D1_CHECK_REF ?? plistEnv.SHIRUBE_D1_CHECK_REF ?? null,
       shirube_d1_cto_go_ref: launchctlEnv.SHIRUBE_D1_CTO_GO_REF ?? plistEnv.SHIRUBE_D1_CTO_GO_REF ?? null,
+      all_agent_manifest_enforcement_enabled: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED ?? null,
+      all_agent_manifest_id: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ID ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ID ?? null,
+      all_agent_manifest_revision: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION ?? null,
+      all_agent_manifest_artifact_digest: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST ?? null,
+      all_agent_manifest_target_sha256: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256 ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256 ?? null,
+      all_agent_manifest_owner_decision_ref: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF ?? null,
+      all_agent_manifest_path: launchctlEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH ?? plistEnv.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH ?? null,
     },
     stderr: {
       path: stderrPath,
       exists: stderrExists,
       fatal_fingerprint: fatalFingerprint,
     },
+  }
+}
+
+export interface AllAgentCommunicationManifestReadinessReport {
+  ready: boolean
+  state: 'READY' | 'NOT_DONE'
+  code: string
+  manifest_id: string | null
+  revision: number | null
+  artifact_digest: string | null
+  canonical_bytes_sha256: string | null
+  target_count: number
+  target_sha256: string | null
+  owner_decision_ref: string | null
+  protected_d1_explicit: boolean
+  drift: string[]
+}
+
+/** Pure, read-only readiness projection for a frozen ordinary manifest. */
+export function evaluateAllAgentCommunicationManifestReadiness(
+  manifest: unknown,
+  context: Omit<AllAgentCommunicationManifestEvaluationContext, 'observed_targets'>,
+  observedTargets: AllAgentCommunicationManifestTargetV1[],
+): AllAgentCommunicationManifestReadinessReport {
+  const evaluation = evaluateAllAgentCommunicationManifest(manifest, {
+    ...context,
+    observed_targets: observedTargets,
+  })
+  return {
+    ready: evaluation.ok,
+    state: evaluation.ok ? 'READY' : 'NOT_DONE',
+    code: evaluation.code,
+    manifest_id: evaluation.manifest?.manifest_id ?? null,
+    revision: evaluation.manifest?.revision ?? null,
+    artifact_digest: evaluation.manifest?.artifact_digest ?? null,
+    canonical_bytes_sha256: evaluation.canonical_bytes_sha256,
+    target_count: evaluation.target_count,
+    target_sha256: evaluation.target_sha256,
+    owner_decision_ref: evaluation.manifest?.owner_decision_ref ?? null,
+    protected_d1_explicit: evaluation.manifest?.sorted_exact_target_tuples.every(
+      target => typeof target.protected_d1 === 'boolean',
+    ) ?? false,
+    drift: evaluation.drift,
   }
 }
 

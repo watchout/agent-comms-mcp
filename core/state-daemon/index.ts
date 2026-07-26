@@ -35,6 +35,7 @@
 import {
   AlreadyStartedError,
   DEFAULT_CONFIG,
+  loadAllAgentCommunicationManifestOverridesFromEnv,
   loadGcOverridesFromEnv,
   DBConnectionError,
   type AlertSink,
@@ -57,6 +58,10 @@ import {
   type SweepResult,
   type TmuxClient,
 } from './types'
+import type {
+  AllAgentCommunicationAdmissionDecision,
+  AllAgentCommunicationAdmissionGate,
+} from '../all-agent-communication-manifest'
 import {
   buildHostRuntimeFailureResult,
   selectHostRuntimeAdapter,
@@ -142,6 +147,7 @@ export class StateDaemon {
   private readonly hostRuntimeInvoker: HostRuntimeInvoker | null
   private readonly queueWorkScheduler: QueueWorkScheduler | null
   private readonly shirubeD1AutoReceive: ShirubeD1AutoReceiveDispatcher | null
+  private readonly allAgentCommunicationAdmissionGate: AllAgentCommunicationAdmissionGate | null
   private readonly githubWorkPuller: GithubWorkPuller | null
   private readonly clock: Clock
   private readonly metrics: Metrics
@@ -168,6 +174,7 @@ export class StateDaemon {
     this.hostRuntimeInvoker = deps.hostRuntimeInvoker ?? null
     this.queueWorkScheduler = deps.queueWorkScheduler ?? null
     this.shirubeD1AutoReceive = deps.shirubeD1AutoReceive ?? null
+    this.allAgentCommunicationAdmissionGate = deps.allAgentCommunicationAdmissionGate ?? null
     this.githubWorkPuller = deps.githubWorkPuller ?? null
     this.clock = deps.clock
     this.metrics = deps.metrics
@@ -181,6 +188,7 @@ export class StateDaemon {
     this.config = {
       ...DEFAULT_CONFIG,
       ...loadGcOverridesFromEnv(),
+      ...loadAllAgentCommunicationManifestOverridesFromEnv(),
       ...(deps.config ?? {}),
     }
     this.wakePool = new WakePool({
@@ -321,7 +329,10 @@ export class StateDaemon {
 
     // For received events, the pg_notify payload already contains the data we
     // need unless a bounded canary fence requires exact row inspection first.
-    if ((row?.status ?? event.status) === 'received' && this.queueWorkScheduler && !this.shirubeD1AutoReceive) {
+    if ((row?.status ?? event.status) === 'received'
+      && this.queueWorkScheduler
+      && !this.shirubeD1AutoReceive
+      && !this.config.allAgentCommunicationManifestEnforcementEnabled) {
       this.scheduleQueueWorkRunner(
         'received',
         row ?? { id: event.id, agent_id: event.agent_id } as QueueRow,
@@ -588,6 +599,17 @@ export class StateDaemon {
     }
     const d1Handled = await this.tryShirubeD1AutoReceive(row)
     if (d1Handled !== null) return d1Handled
+    const manifestAdmission = await this.checkAllAgentCommunicationManifestAdmission(row)
+    if (manifestAdmission.outcome !== 'admit') {
+      this.metrics.inc('state_daemon_all_agent_manifest_admission_total', {
+        result: 'denied',
+        code: manifestAdmission.code,
+      })
+      void this.alert.alert(
+        `ordinary communication manifest blocked ${row.agent_id} queue_id=${row.id}: ${manifestAdmission.code}`,
+      )
+      return false
+    }
     const now = this.clock.now()
     // v0.9 sub-PR 2 §1.3a stall gate: evaluated before typed action
     // execution. If any of the three layers reports a stall the wake is
@@ -621,6 +643,33 @@ export class StateDaemon {
       return await runPromise
     } finally {
       this.inflightWakes.delete(runPromise)
+    }
+  }
+
+  private async checkAllAgentCommunicationManifestAdmission(
+    row: QueueRow,
+  ): Promise<AllAgentCommunicationAdmissionDecision | { outcome: 'admit'; manifest_id: 'disabled'; revision: 0; artifact_digest: ''; target_sha256: '' }> {
+    if (!this.config.allAgentCommunicationManifestEnforcementEnabled) {
+      return { outcome: 'admit', manifest_id: 'disabled', revision: 0, artifact_digest: '', target_sha256: '' }
+    }
+    if (!this.allAgentCommunicationAdmissionGate) {
+      return { outcome: 'deny', code: 'MANIFEST_GATE_UNAVAILABLE' }
+    }
+    try {
+      return await this.allAgentCommunicationAdmissionGate.decide({
+        phase: 'preclaim',
+        queue_id: Number(row.id),
+        message_id: row.message_id ?? null,
+        created_at: new Date(row.created_at).toISOString(),
+        agent_id: row.agent_id,
+        payload: row.payload,
+      })
+    } catch (error) {
+      return {
+        outcome: 'deny',
+        code: 'MANIFEST_GATE_UNAVAILABLE',
+        detail: (error as Error).message ?? String(error),
+      }
     }
   }
 
@@ -1049,7 +1098,9 @@ export class StateDaemon {
       // already established that this is not D1 traffic, so it is safe to
       // restore the exact-row runReceived dispatch here without allowing a
       // D1-shaped rejection to fall through.
-      if (row.status === 'received' && this.queueWorkScheduler) {
+      if (row.status === 'received'
+        && this.queueWorkScheduler
+        && !this.config.allAgentCommunicationManifestEnforcementEnabled) {
         this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
           queueId: row.id,
           agentId: row.agent_id,

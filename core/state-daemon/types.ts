@@ -14,6 +14,9 @@ import type {
   HostRuntimeRunnerResult,
   RuntimeInvocationProfile,
 } from './host-runtime-invocation'
+import type {
+  AllAgentCommunicationAdmissionGate,
+} from '../all-agent-communication-manifest'
 
 /** spec §9 — full daemon configuration. Defaults match v0.6 §13.2. */
 export interface StateDaemonConfig {
@@ -84,6 +87,13 @@ export interface StateDaemonConfig {
    * they should never be woken by state_daemon even if a queue row is inserted.
    */
   agentDenylist: string[] | null
+
+  /**
+   * Ordinary all-agent communication manifest admission. This remains false
+   * by default and is independent of the protected Shirube D1 dispatcher.
+   * Enabling without an injected gate fails closed before ordinary claim.
+   */
+  allAgentCommunicationManifestEnforcementEnabled: boolean
 
   /**
    * Optional queue-work fence for bounded canaries. When configured, daemon
@@ -166,6 +176,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   memoryReadyProject: 'agent-comms-mcp',
   agentAllowlist: null,
   agentDenylist: null,
+  allAgentCommunicationManifestEnforcementEnabled: false,
   queueWorkFenceQueueIds: null,
   queueWorkFenceMessageIds: null,
   queueWorkFenceCreatedAfter: null,
@@ -205,6 +216,25 @@ export function loadGcOverridesFromEnv(
   const batchLimit = parsePositive('STATE_DAEMON_GC_BATCH_LIMIT')
   if (batchLimit !== null) out.gcBatchLimit = Math.round(batchLimit)
   return out
+}
+
+export function loadAllAgentCommunicationManifestOverridesFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): Partial<StateDaemonConfig> {
+  const raw = env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED
+  if (raw === undefined) return {}
+  const normalized = raw.trim().toLowerCase()
+  return {
+    // An explicit malformed value must not silently disable enforcement and
+    // reopen ordinary auto-receive. Arming the gate makes missing/invalid
+    // wiring deny before claim, while an absent variable remains default-off.
+    allAgentCommunicationManifestEnforcementEnabled:
+      normalized === '1' || normalized === 'true'
+        ? true
+        : normalized === '0' || normalized === 'false'
+          ? false
+          : true,
+  }
 }
 
 /** pg_notify('queue_event', ...) JSON payload (§7.3).
@@ -392,6 +422,7 @@ export interface StateDaemonDeps {
   hostRuntimeInvoker?: HostRuntimeInvoker
   queueWorkScheduler?: QueueWorkScheduler
   shirubeD1AutoReceive?: ShirubeD1AutoReceiveDispatcher
+  allAgentCommunicationAdmissionGate?: AllAgentCommunicationAdmissionGate
   githubWorkPuller?: GithubWorkPuller
   clock: Clock
   metrics: Metrics

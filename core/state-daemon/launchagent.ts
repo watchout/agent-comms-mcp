@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import {
@@ -12,6 +12,9 @@ import {
   type QueueWorkResiduePolicy,
   type QueueWorkResidueRow,
 } from './queue-work-residue-policy'
+import {
+  parseAllAgentCommunicationManifest,
+} from '../all-agent-communication-manifest'
 
 export const STATE_DAEMON_LAUNCH_AGENT_LABEL = 'com.agent-comms.state-daemon'
 export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist`
@@ -63,6 +66,84 @@ export type StateDaemonPreflightResult = {
   ok: boolean
   errors: StateDaemonPreflightIssue[]
   warnings: StateDaemonPreflightIssue[]
+}
+
+const ALL_AGENT_MANIFEST_ENV_KEYS = [
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_ID',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF',
+  'STATE_DAEMON_ALL_AGENT_MANIFEST_PATH',
+] as const
+
+export function validateAllAgentCommunicationManifestLaunchAgentEnv(
+  env: Record<string, string>,
+): StateDaemonPreflightIssue[] {
+  const issues: StateDaemonPreflightIssue[] = []
+  const enabled = env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED
+  if (enabled !== undefined && enabled !== '0' && enabled !== '1') {
+    issues.push({
+      code: 'all_agent_manifest_enforcement_invalid',
+      message: 'STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED must be 0 or 1.',
+    })
+  }
+  if (enabled !== '1') return issues
+  for (const key of ALL_AGENT_MANIFEST_ENV_KEYS) {
+    if (!env[key]?.trim()) {
+      issues.push({ code: 'all_agent_manifest_identity_incomplete', message: `${key} is required when ordinary manifest enforcement is enabled.` })
+    }
+  }
+  if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION
+    && !/^[1-9]\d*$/.test(env.STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION)) {
+    issues.push({ code: 'all_agent_manifest_revision_invalid', message: 'Manifest revision must be a positive integer.' })
+  }
+  for (const key of ['STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST', 'STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256']) {
+    if (env[key] && !/^[0-9a-f]{64}$/.test(env[key])) {
+      issues.push({ code: 'all_agent_manifest_digest_invalid', message: `${key} must be lowercase sha256.` })
+    }
+  }
+  if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF
+    && !/^https:\/\/github\.com\/[^\s]+$/.test(env.STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF)) {
+    issues.push({ code: 'all_agent_manifest_owner_decision_ref_invalid', message: 'Manifest owner decision ref must be a GitHub URL.' })
+  }
+  if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH
+    && !env.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH.startsWith('/')) {
+    issues.push({ code: 'all_agent_manifest_path_not_absolute', message: 'Manifest path must be absolute.' })
+  }
+  return issues
+}
+
+export function validateAllAgentCommunicationManifestArtifact(
+  env: Record<string, string>,
+  rawArtifact: string,
+): StateDaemonPreflightIssue[] {
+  if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED !== '1') return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(rawArtifact)
+  } catch {
+    return [{ code: 'all_agent_manifest_json_invalid', message: 'Ordinary manifest file must contain valid JSON.' }]
+  }
+  let manifest
+  try {
+    manifest = parseAllAgentCommunicationManifest(parsed)
+  } catch (error) {
+    return [{ code: 'all_agent_manifest_artifact_invalid', message: (error as Error).message }]
+  }
+  const expected: Array<[string, string, string]> = [
+    ['manifest_id', manifest.manifest_id, env.STATE_DAEMON_ALL_AGENT_MANIFEST_ID ?? ''],
+    ['revision', String(manifest.revision), env.STATE_DAEMON_ALL_AGENT_MANIFEST_REVISION ?? ''],
+    ['artifact_digest', manifest.artifact_digest, env.STATE_DAEMON_ALL_AGENT_MANIFEST_ARTIFACT_DIGEST ?? ''],
+    ['target_sha256', manifest.target_sha256, env.STATE_DAEMON_ALL_AGENT_MANIFEST_TARGET_SHA256 ?? ''],
+    ['owner_decision_ref', manifest.owner_decision_ref, env.STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF ?? ''],
+  ]
+  return expected
+    .filter(([, actual, pinned]) => actual !== pinned)
+    .map(([field]) => ({
+      code: 'all_agent_manifest_env_artifact_mismatch',
+      message: `Ordinary manifest ${field} does not match the pinned LaunchAgent environment.`,
+    }))
 }
 
 export function validateShirubeD1LaunchAgentEnv(env: Record<string, string>): StateDaemonPreflightIssue[] {
@@ -154,6 +235,7 @@ export type PathProbe = {
   isDirectory(path: string): boolean
   isFile(path: string): boolean
   isExecutable(path: string): boolean
+  readText?(path: string): string
 }
 
 export type StateDaemonPruneTarget = {
@@ -424,6 +506,7 @@ export function validateStateDaemonLaunchAgentConfig(
         return false
       }
     },
+    readText: (path: string) => readFileSync(path, 'utf8'),
   }
   const errors: StateDaemonPreflightIssue[] = []
   const warnings: StateDaemonPreflightIssue[] = []
@@ -513,6 +596,23 @@ export function validateStateDaemonLaunchAgentConfig(
   }
 
   errors.push(...validateShirubeD1LaunchAgentEnv(env))
+  errors.push(...validateAllAgentCommunicationManifestLaunchAgentEnv(env))
+  const allAgentManifestPath = env.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH?.trim()
+  if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED === '1' && allAgentManifestPath) {
+    if (!probe.exists(allAgentManifestPath)) {
+      errors.push({ code: 'all_agent_manifest_file_missing', message: 'Ordinary manifest file does not exist.', path: allAgentManifestPath })
+    } else if (!probe.isFile(allAgentManifestPath)) {
+      errors.push({ code: 'all_agent_manifest_path_not_file', message: 'Ordinary manifest path must be a regular file.', path: allAgentManifestPath })
+    } else if (!probe.readText) {
+      errors.push({ code: 'all_agent_manifest_content_unavailable', message: 'Ordinary manifest bytes must be readable during preflight.', path: allAgentManifestPath })
+    } else {
+      try {
+        errors.push(...validateAllAgentCommunicationManifestArtifact(env, probe.readText(allAgentManifestPath)))
+      } catch (error) {
+        errors.push({ code: 'all_agent_manifest_read_failed', message: (error as Error).message, path: allAgentManifestPath })
+      }
+    }
+  }
 
   if (env.STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED === '1') {
     const repos = parseCsvValue(env.STATE_DAEMON_GITHUB_WORK_REPOS)

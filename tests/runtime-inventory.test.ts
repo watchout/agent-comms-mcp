@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
-import { buildRuntimeInventoryReport, formatRuntimeInventoryText } from '../core/runtime-inventory'
+import {
+  buildRuntimeInventoryReport,
+  formatRuntimeInventoryText,
+  generateAllAgentCommunicationManifestCandidates,
+} from '../core/runtime-inventory'
 
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
 const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -190,5 +194,109 @@ describe('runtime inventory', () => {
       expect(hotelConnector?.warnings).toContain('connector_runtime_commit_mismatch')
       expect(report.blockers).toContain('hotel-dev:runtime_commit_mismatch')
     })
+  })
+})
+
+describe('ordinary all-agent manifest candidate inventory', () => {
+  function fakeManifestDb(includeUnresolvedNewSeat = false, liveRuntimeEngine = 'codex') {
+    const now = '2026-07-26T00:00:00Z'
+    return {
+      async query(sql: string, params: unknown[] = []) {
+        const agentId = String(params[0] ?? '')
+        if (/FROM agents/.test(sql)) return [
+          {
+            agent_id: 'dev-001', agent_type: 'dev', profile_revision: 7, profile_enabled: true,
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+          },
+          ...(includeUnresolvedNewSeat ? [{
+            agent_id: 'new-dev', agent_type: 'dev', profile_revision: 1, profile_enabled: true,
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+          }] : []),
+          { agent_id: 'test-agent', agent_type: 'dev', profile_revision: 1, profile_enabled: true, disabled_at: null, runtime_engine_preference: 'codex', metadata: {} },
+        ]
+        if (/FROM channels c/.test(sql)) return []
+        if (/FROM agent_workspace_bindings/.test(sql)) {
+          return agentId === 'dev-001'
+            ? [{ workspace_id: 'workspace-dev-001', local_path: '/work/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
+            : []
+        }
+        if (/FROM agent_runtime_instances/.test(sql)) {
+          return agentId === 'dev-001'
+            ? [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', runtime_engine: liveRuntimeEngine, status: 'active', stopped_at: null, last_seen_at: now }]
+            : []
+        }
+        if (/FROM agent_provider_identities/.test(sql)) {
+          return agentId === 'dev-001' ? [{ provider_identity_id: 'identity-1' }] : []
+        }
+        if (/FROM agent_ui_bindings/.test(sql)) {
+          return agentId === 'dev-001' ? [{ binding_id: 'binding-1' }] : []
+        }
+        return []
+      },
+    } as any
+  }
+
+  function candidateOptions() {
+    return {
+      nowMs: Date.parse('2026-07-26T00:01:00Z'),
+      controlSourceByAgent: { 'dev-001': 'https://github.com/watchout/agent-comms-mcp/issues/887' },
+      activeFunctionByAgent: { 'dev-001': 'implementation_executor' },
+      communicationAutoReceiveByAgent: { 'dev-001': true },
+      protectedD1ByAgent: { 'dev-001': false },
+      discordModeByAgent: { 'dev-001': 'native_verified' as const },
+    }
+  }
+
+  test('resolves one exact workspace/runtime/profile/identity row without inferring protected D1', async () => {
+    const report = await generateAllAgentCommunicationManifestCandidates(fakeManifestDb(), candidateOptions())
+    expect(report).toMatchObject({ ok: true, expected_target_count: 1, resolved_target_count: 1, blockers: [] })
+    expect(report.target_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(report.targets[0]).toMatchObject({
+      agent_id: 'dev-001',
+      target_repository: 'watchout/agent-comms-mcp',
+      workspace_id: 'workspace-dev-001',
+      runtime_engine: 'codex-exec',
+      runtime_profile_ref: 'agent-profile://dev-001/revision/7',
+      provider_identity_ref: 'discord-identity://dev-001/identity-1',
+      communication_auto_receive: true,
+      protected_d1: false,
+      discord_mode: 'native_verified',
+    })
+  })
+
+  test('keeps unresolved/new seats in the denominator and fails the complete candidate', async () => {
+    const options = candidateOptions()
+    const report = await generateAllAgentCommunicationManifestCandidates(fakeManifestDb(true), {
+      ...options,
+      controlSourceByAgent: { ...options.controlSourceByAgent, 'new-dev': 'https://github.com/watchout/agent-comms-mcp/issues/887' },
+      activeFunctionByAgent: { ...options.activeFunctionByAgent, 'new-dev': 'implementation_executor' },
+      communicationAutoReceiveByAgent: { ...options.communicationAutoReceiveByAgent, 'new-dev': true },
+      protectedD1ByAgent: { ...options.protectedD1ByAgent, 'new-dev': false },
+      discordModeByAgent: { ...options.discordModeByAgent, 'new-dev': 'native_verified' },
+    })
+    expect(report).toMatchObject({ ok: false, expected_target_count: 2, resolved_target_count: 1, target_sha256: null })
+    expect(report.expected_agent_ids).toEqual(['dev-001', 'new-dev'])
+    expect(report.blockers).toContain('new-dev:primary_workspace_count_0')
+  })
+
+  test('omitted protected_d1 is a blocker, never an inherited default', async () => {
+    const options = candidateOptions()
+    const report = await generateAllAgentCommunicationManifestCandidates(fakeManifestDb(), {
+      ...options,
+      protectedD1ByAgent: {},
+    })
+    expect(report.ok).toBe(false)
+    expect(report.blockers).toContain('dev-001:protected_d1_not_explicit')
+    expect(report.resolved_target_count).toBe(0)
+  })
+
+  test('profile/runtime engine mismatch fails closed instead of choosing either value', async () => {
+    const report = await generateAllAgentCommunicationManifestCandidates(
+      fakeManifestDb(false, 'claude'),
+      candidateOptions(),
+    )
+    expect(report.ok).toBe(false)
+    expect(report.blockers).toContain('dev-001:runtime_engine_profile_mismatch')
+    expect(report.resolved_target_count).toBe(0)
   })
 })
