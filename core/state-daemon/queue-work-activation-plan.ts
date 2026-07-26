@@ -137,6 +137,19 @@ function normalizePriority(value: string | number | null | undefined): number | 
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function declaresShirubeD1Binding(payload: string | null): boolean {
+  if (!payload) return false
+  try {
+    const parsed = JSON.parse(payload)
+    return parsed !== null
+      && typeof parsed === 'object'
+      && !Array.isArray(parsed)
+      && Object.prototype.hasOwnProperty.call(parsed, 'shirube_v4_d1')
+  } catch {
+    return false
+  }
+}
+
 function normalizeQueueRow(row: QueueRow): QueueWorkActivationCandidate {
   return {
     queue_id: String(row.id),
@@ -437,6 +450,14 @@ export async function buildQueueWorkActivationPlan(
     payload: candidatePayload ?? '{}',
     postingMode: githubWritebackMode as QueueWorkWritebackMode,
   })
+
+  if (declaresShirubeD1Binding(candidatePayload) && runtime !== 'command-json') {
+    blockers.push({
+      code: 'NO_GO_RUNTIME_NOT_DETERMINISTIC',
+      message: 'Shirube D1 canary activation requires the deterministic command-json runtime.',
+      evidence: { runtime, required_runtime: 'command-json' },
+    })
+  }
 
   if (handoffContract.github_backed && handoffContract.posting_mode !== 'mediated') {
     blockers.push({

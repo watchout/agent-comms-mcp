@@ -80,6 +80,20 @@ function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
   })
 }
 
+function shirubeD1GithubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
+  const githubRow = githubHandoffRow()
+  return {
+    ...githubRow,
+    payload: JSON.stringify({
+      ...JSON.parse(String(githubRow.payload)),
+      shirube_v4_d1: {
+        schema_version: 'shirube-v4/d1-runtime-binding/v1',
+      },
+    }),
+    ...patch,
+  }
+}
+
 describe('queue-work activation planner', () => {
   test('builds an exact-row read-only restore command without echoing payload', async () => {
     const db = new FakeDb({ 121877: [row()] })
@@ -213,6 +227,58 @@ describe('queue-work activation planner', () => {
         '--queue-work-mediated-posting-command',
         command.path,
       ]))
+    } finally {
+      command.cleanup()
+    }
+  })
+
+  test('blocks a Shirube D1 canary when the runtime is not deterministic', async () => {
+    const command = probeCommand()
+    const db = new FakeDb({ 121926: [shirubeD1GithubHandoffRow()] })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'l2auditor',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        runtime: 'codex-exec',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: command.path,
+      })
+
+      expect(report.ok).toBe(false)
+      expect(report.go_no_go).toBe('NO_GO')
+      expect(report.blockers.map((blocker) => blocker.code)).toContain('NO_GO_RUNTIME_NOT_DETERMINISTIC')
+      expect(report.mediated_posting.command_probe).toBe('not_run')
+      expect(report.dry_run_command).toEqual([])
+      expect(report.execute_command).toEqual([])
+    } finally {
+      command.cleanup()
+    }
+  })
+
+  test('allows a Shirube D1 canary with the deterministic command-json runtime', async () => {
+    const command = probeCommand()
+    const db = new FakeDb({ 121926: [shirubeD1GithubHandoffRow()] })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'l2auditor',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        runtime: 'command-json',
+        queueWorkCommand: 'bun scripts/shirube-d1-github-canary-runtime.ts',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: command.path,
+      })
+
+      expect(report.ok).toBe(true)
+      expect(report.go_no_go).toBe('GO')
+      expect(report.activation_env).toMatchObject({
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'command-json',
+        STATE_DAEMON_QUEUE_WORK_COMMAND: 'bun scripts/shirube-d1-github-canary-runtime.ts',
+      })
+      expect(report.mediated_posting.command_probe).toBe('passed')
+      expect(report.dry_run_command).toContain('--queue-work-command')
+      expect(report.execute_command).toContain('--execute')
     } finally {
       command.cleanup()
     }
