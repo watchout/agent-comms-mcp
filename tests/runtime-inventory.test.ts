@@ -10,6 +10,7 @@ import {
   formatRuntimeInventoryText,
   generateAllAgentCommunicationManifestCandidates,
 } from '../core/runtime-inventory'
+import { allAgentCommunicationTargetSha256 } from '../core/all-agent-communication-manifest'
 
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
 const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -198,7 +199,11 @@ describe('runtime inventory', () => {
 })
 
 describe('ordinary all-agent manifest candidate inventory', () => {
-  function fakeManifestDb(includeUnresolvedNewSeat = false, liveRuntimeEngine = 'codex') {
+  function fakeManifestDb(
+    includeUnresolvedNewSeat = false,
+    liveRuntimeEngine = 'codex',
+    includeProductionNameCollisionSeat = false,
+  ) {
     const now = '2026-07-26T00:00:00Z'
     return {
       async query(sql: string, params: unknown[] = []) {
@@ -212,24 +217,40 @@ describe('ordinary all-agent manifest candidate inventory', () => {
             agent_id: 'new-dev', agent_type: 'dev', profile_revision: 1, profile_enabled: true,
             disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
           }] : []),
-          { agent_id: 'test-agent', agent_type: 'dev', profile_revision: 1, profile_enabled: true, disabled_at: null, runtime_engine_preference: 'codex', metadata: {} },
+          ...(includeProductionNameCollisionSeat ? [{
+            agent_id: 'contest-dev', agent_type: 'dev', profile_revision: 3, profile_enabled: true,
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'production' },
+          }] : []),
+          { agent_id: 'test-agent', agent_type: 'dev', profile_revision: 1, profile_enabled: true, disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'test' } },
         ]
         if (/FROM channels c/.test(sql)) return []
         if (/FROM agent_workspace_bindings/.test(sql)) {
-          return agentId === 'dev-001'
-            ? [{ workspace_id: 'workspace-dev-001', local_path: '/work/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
-            : []
+          if (agentId === 'dev-001') {
+            return [{ workspace_id: 'workspace-dev-001', local_path: '/work/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
+          }
+          if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
+            return [{ workspace_id: 'workspace-contest-dev', local_path: '/work/contest-dev', repo_url: 'https://github.com/watchout/contest.git' }]
+          }
+          return []
         }
         if (/FROM agent_runtime_instances/.test(sql)) {
-          return agentId === 'dev-001'
-            ? [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', runtime_engine: liveRuntimeEngine, status: 'active', stopped_at: null, last_seen_at: now }]
-            : []
+          if (agentId === 'dev-001') {
+            return [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', runtime_engine: liveRuntimeEngine, status: 'active', stopped_at: null, last_seen_at: now }]
+          }
+          if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
+            return [{ runtime_instance_id: 'runtime-contest', workspace_id: 'workspace-contest-dev', runtime_engine: 'codex', status: 'active', stopped_at: null, last_seen_at: now }]
+          }
+          return []
         }
         if (/FROM agent_provider_identities/.test(sql)) {
-          return agentId === 'dev-001' ? [{ provider_identity_id: 'identity-1' }] : []
+          if (agentId === 'dev-001') return [{ provider_identity_id: 'identity-1' }]
+          if (includeProductionNameCollisionSeat && agentId === 'contest-dev') return [{ provider_identity_id: 'identity-contest' }]
+          return []
         }
         if (/FROM agent_ui_bindings/.test(sql)) {
-          return agentId === 'dev-001' ? [{ binding_id: 'binding-1' }] : []
+          if (agentId === 'dev-001') return [{ binding_id: 'binding-1' }]
+          if (includeProductionNameCollisionSeat && agentId === 'contest-dev') return [{ binding_id: 'binding-contest' }]
+          return []
         }
         return []
       },
@@ -277,6 +298,26 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     expect(report).toMatchObject({ ok: false, expected_target_count: 2, resolved_target_count: 1, target_sha256: null })
     expect(report.expected_agent_ids).toEqual(['dev-001', 'new-dev'])
     expect(report.blockers).toContain('new-dev:primary_workspace_count_0')
+  })
+
+  test('keeps explicitly production seats in the denominator when agent ids contain test substrings', async () => {
+    const options = candidateOptions()
+    const report = await generateAllAgentCommunicationManifestCandidates(fakeManifestDb(false, 'codex', true), {
+      ...options,
+      controlSourceByAgent: {
+        ...options.controlSourceByAgent,
+        'contest-dev': 'https://github.com/watchout/agent-comms-mcp/issues/887',
+      },
+      activeFunctionByAgent: { ...options.activeFunctionByAgent, 'contest-dev': 'implementation_executor' },
+      communicationAutoReceiveByAgent: { ...options.communicationAutoReceiveByAgent, 'contest-dev': true },
+      protectedD1ByAgent: { ...options.protectedD1ByAgent, 'contest-dev': false },
+      discordModeByAgent: { ...options.discordModeByAgent, 'contest-dev': 'native_verified' },
+    })
+
+    expect(report).toMatchObject({ ok: true, expected_target_count: 2, resolved_target_count: 2, blockers: [] })
+    expect(report.expected_agent_ids).toEqual(['contest-dev', 'dev-001'])
+    expect(report.targets.map(target => target.agent_id)).toEqual(['contest-dev', 'dev-001'])
+    expect(report.target_sha256).toBe(allAgentCommunicationTargetSha256(report.targets))
   })
 
   test('omitted protected_d1 is a blocker, never an inherited default', async () => {

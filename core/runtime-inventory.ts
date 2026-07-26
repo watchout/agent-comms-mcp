@@ -327,11 +327,9 @@ export async function generateAllAgentCommunicationManifestCandidates(
       ORDER BY agent_id`,
   )).filter(row => {
     const metadata = metadataObject(row.metadata)
-    const agentId = String(row.agent_id)
     return (row.profile_enabled === true || Number(row.profile_enabled) === 1)
       && row.disabled_at === null
       && String(row.agent_type) === 'dev'
-      && !/(^__|test|ephemeral)/i.test(agentId)
       && String(metadata.profile_class ?? '') !== 'test'
   })
   const expectedAgentIds = agents.map(row => String(row.agent_id)).sort()
