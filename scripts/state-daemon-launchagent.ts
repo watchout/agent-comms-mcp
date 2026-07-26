@@ -29,6 +29,7 @@ type ParsedArgs = {
   plist?: string
   bunPath?: string
   databaseUrl?: string
+  sqlitePath?: string
   keep?: number
   githubWorkPullerEnabled: boolean
   githubWorkRepos?: string
@@ -36,6 +37,7 @@ type ParsedArgs = {
   githubWorkOwnerAllowlist?: string
   githubWorkIntervalMs?: number
   githubWorkWritebackEnabled: boolean
+  bootstrapSafeDefaults: boolean
   githubTokenFile?: string
 }
 
@@ -85,6 +87,8 @@ function usage(): string {
 
 Usage:
   bun scripts/state-daemon-launchagent.ts restore --commit <sha> [--execute] [--no-bootstrap]
+    [--bootstrap-safe-defaults]
+    [--database-url <postgres-url> | --sqlite-path <sqlite-file>]
     [--github-work-puller-enabled --github-work-repos <owner/repo>
      --github-work-labels <canary:label>
      --github-work-owner-allowlist <agent>
@@ -123,6 +127,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     extraEnv: {},
     githubWorkPullerEnabled: false,
     githubWorkWritebackEnabled: false,
+    bootstrapSafeDefaults: false,
   }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
@@ -140,6 +145,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--plist') args.plist = next()
     else if (arg === '--bun') args.bunPath = next()
     else if (arg === '--database-url') args.databaseUrl = next()
+    else if (arg === '--sqlite-path') args.sqlitePath = resolve(next())
     else if (arg === '--shirube-d1-env-json') Object.assign(args.extraEnv, parseShirubeD1RestoreEnv(next()))
     else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
     else if (arg === '--github-work-repos') args.githubWorkRepos = next()
@@ -156,6 +162,13 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--github-token-file') args.githubTokenFile = next()
     else if (arg === '--agent-allowlist') args.extraEnv.STATE_DAEMON_AGENT_ALLOWLIST = next()
     else if (arg === '--disable-codex-runner') args.extraEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED = '0'
+    else if (arg === '--bootstrap-safe-defaults') {
+      args.bootstrapSafeDefaults = true
+      args.extraEnv.SHIRUBE_D1_ENABLED = '0'
+      args.extraEnv.SHIRUBE_D1_KILL_SWITCH = '1'
+      args.extraEnv.SHIRUBE_D1_TARGET_ALLOWLIST = '[]'
+      args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '0'
+    }
     else if (arg === '--enable-queue-work-scheduler') args.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED = '1'
     else if (arg === '--queue-work-runtime') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RUNTIME = next()
     else if (arg === '--queue-work-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_COMMAND = next()
@@ -296,8 +309,20 @@ function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
   const extraEnv = {
     ...args.extraEnv,
+    ...(args.sqlitePath ? { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: args.sqlitePath } : {}),
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
+  }
+  if (args.bootstrapSafeDefaults) {
+    const expected = {
+      SHIRUBE_D1_ENABLED: '0',
+      SHIRUBE_D1_KILL_SWITCH: '1',
+      SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
+      STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
+    }
+    for (const [key, value] of Object.entries(expected)) {
+      if (extraEnv[key] !== value) throw new Error(`bootstrap safe default mismatch: ${key}`)
+    }
   }
   const plan = buildStateDaemonRestorePlan({
     commit: args.commit,

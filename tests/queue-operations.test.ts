@@ -12,11 +12,13 @@ import {
 import {
   buildQueueDaemonStatusReport,
   buildQueueSmokeReadiness,
+  runBootstrapQueueSmoke,
 } from '../core/queue-runtime'
 
 const REPO_ROOT = join(import.meta.dir, '..')
 const CLI_SRC = readFileSync(join(REPO_ROOT, 'cli', 'index.ts'), 'utf-8')
 const REPAIR_SRC = readFileSync(join(REPO_ROOT, 'core', 'queue-repair.ts'), 'utf-8')
+const QUEUE_RUNTIME_SRC = readFileSync(join(REPO_ROOT, 'core', 'queue-runtime.ts'), 'utf-8')
 
 class FakeDb {
   calls: Array<{ sql: string; params?: unknown[] }> = []
@@ -259,6 +261,95 @@ describe('queue repair primitives', () => {
 })
 
 describe('queue runtime diagnostics', () => {
+  test('bootstrap smoke producer only enqueues and a separated consumer proves terminal delivery', async () => {
+    const payload: Record<string, any> = {}
+    const row: Record<string, any> = { id: 901, message_id: '00000000-0000-4000-8000-000000000001', status: 'pending', payload: '{}' }
+    const db = {
+      async transaction<T>(fn: (tx: any) => Promise<T>) { return fn(this) },
+      async query(sql: string, params?: unknown[]) {
+        if (sql.includes('INSERT INTO message_queue')) {
+          Object.assign(payload, JSON.parse(String(params?.[2])))
+          row.payload = JSON.stringify(payload)
+          return [{ id: row.id }]
+        }
+        if (sql.includes('count(*) AS n FROM message_queue')) return [{ n: 1 }]
+        if (sql.includes('count(*) AS n FROM outbound_queue')) return [{ n: 0 }]
+        if (sql.includes('FROM message_queue')) return [row]
+        return []
+      },
+      async execute() { throw new Error('bootstrap producer/observer must not transition lifecycle') },
+    }
+    const report = await runBootstrapQueueSmoke(db, {
+      agentId: 'bootstrap-smoke', runId: 'run-1', messageId: '00000000-0000-4000-8000-000000000001',
+      runtimeInstanceId: 'runtime-1', observerPid: 100,
+      consume: async (envelope) => {
+        row.status = 'done'
+        row.claimed_by = 'bootstrap-smoke'
+        row.claimed_at = '2026-07-25T00:00:01.000Z'
+        row.created_at = envelope.created_at
+        row.done_at = new Date(new Date(envelope.created_at).getTime() + 1000).toISOString()
+        row.payload = JSON.stringify({
+          ...payload,
+          receive_claim: { source: envelope.claim_source },
+          terminal_baton: { no_reply_required: true },
+        })
+        return { pids: [101, 102, 103], exit_codes: [0, 0, 0], stdout_digests: ['a', 'b', 'c'] }
+      },
+    })
+    expect(report).toMatchObject({
+      ok: true, enqueue_count: 1, claim_count: 1, terminal_outcome_count: 1,
+      duplicate_effect_count: 0, external_effect_count: 0, final_status: 'done',
+    })
+    expect(report.consumer_pids).not.toContain(report.observer_pid)
+    const bootstrapSection = QUEUE_RUNTIME_SRC.slice(QUEUE_RUNTIME_SRC.indexOf('enqueueBootstrapQueueSmoke'))
+    expect(bootstrapSection).not.toMatch(/SET\s+status\s*=\s*'received'/)
+    expect(bootstrapSection).not.toMatch(/SET\s+status\s*=\s*'done'/)
+  })
+
+  test('bootstrap observer rejects absent, duplicate, wrong-identity, wrong-DB, and late consumers', async () => {
+    for (const kind of ['absent', 'duplicate', 'wrong-identity', 'wrong-db', 'late'] as const) {
+      const payload: Record<string, any> = {}
+      const row: Record<string, any> = { id: 902, message_id: `message-${kind}`, status: 'pending', payload: '{}' }
+      const db = {
+        async transaction<T>(fn: (tx: any) => Promise<T>) { return fn(this) },
+        async query(sql: string, params?: unknown[]) {
+          if (sql.includes('INSERT INTO message_queue')) {
+            Object.assign(payload, JSON.parse(String(params?.[2])))
+            row.payload = JSON.stringify(payload)
+            return [{ id: row.id }]
+          }
+          if (sql.includes('count(*) AS n FROM message_queue')) return [{ n: 1 }]
+          if (sql.includes('count(*) AS n FROM outbound_queue')) return [{ n: 0 }]
+          if (sql.includes('FROM message_queue')) return [row]
+          return []
+        },
+        async execute() { throw new Error('observer must remain read-only') },
+      }
+      const report = await runBootstrapQueueSmoke(db, {
+        agentId: 'bootstrap-smoke', runId: `run-${kind}`, messageId: row.message_id,
+        runtimeInstanceId: 'runtime-1', observerPid: 100,
+        consume: async (envelope) => {
+          if (kind !== 'absent' && kind !== 'wrong-db' && kind !== 'late') {
+            row.status = 'done'; row.claimed_by = 'bootstrap-smoke'; row.claimed_at = 'now'; row.done_at = 'later'
+            row.payload = JSON.stringify({
+              ...payload,
+              receive_claim: { source: envelope.claim_source },
+              runtime_instance_id: kind === 'wrong-identity' ? 'runtime-wrong' : 'runtime-1',
+              terminal_baton: { no_reply_required: true },
+            })
+          }
+          if (kind === 'duplicate') return { pids: [101, 102, 103, 104], exit_codes: [0, 0, 0, 0], stdout_digests: [] }
+          if (kind === 'absent') return { pids: [], exit_codes: [], stdout_digests: [] }
+          if (kind === 'wrong-db') return { pids: [101], exit_codes: [1], stdout_digests: [] }
+          if (kind === 'late') return { pids: [101, 102, 103], exit_codes: [0, 0, 0], stdout_digests: [] }
+          return { pids: [101, 102, 103], exit_codes: [0, 0, 0], stdout_digests: [] }
+        },
+      })
+      expect(report.ok).toBe(false)
+      expect(report.reason_codes.length).toBeGreaterThan(0)
+    }
+  })
+
   test('daemon-status reports DB-observed wake and claim heartbeat evidence', async () => {
     const db = {
       async query(sql: string) {
