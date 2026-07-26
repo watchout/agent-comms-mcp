@@ -34,8 +34,12 @@ import {
   AunConfigurationReconciler,
   DbConfigurationDesiredStateStore,
   DbConfigurationLeasePort,
+  configurationEffectAuthorizationDigest,
+  type ConfigurationApplyResult,
+  type ConfigurationEffectAuthorization,
   type ConfigurationProjectionPort,
   type ConfigurationProjectionReadback,
+  type ConfigurationRollbackResult,
 } from '../core/aun-configuration-reconciler'
 import {
   buildDefaultAunConfigurationCandidate,
@@ -584,12 +588,32 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
     return { ok: reasons.length === 0, reasonCodes: reasons }
   }
 
-  async applyUnprotected(): Promise<{ ok: boolean; mutated: boolean; partial: boolean; reasonCode: string }> {
-    return { ok: false, mutated: false, partial: false, reasonCode: 'PROTECTED_NATIVE_CHANGE_REQUIRES_RESTART_DECISION' }
+  async applyFenced(
+    _candidate: AunConfigurationCandidate,
+    authorization: ConfigurationEffectAuthorization,
+  ): Promise<ConfigurationApplyResult> {
+    const fenceVerifiedAtCommit = await authorization.verifyCurrent()
+    return {
+      ok: false, mutated: false, partial: false,
+      authorizationDigest: configurationEffectAuthorizationDigest(authorization),
+      fenceVerifiedAtCommit,
+      reasonCode: fenceVerifiedAtCommit
+        ? 'PROTECTED_NATIVE_CHANGE_REQUIRES_RESTART_DECISION'
+        : 'ADAPTER_EFFECT_FENCE_REJECTED',
+    }
   }
 
-  async rollback(): Promise<{ ok: boolean }> {
-    return { ok: true }
+  async rollbackFenced(
+    _candidate: AunConfigurationCandidate,
+    authorization: ConfigurationEffectAuthorization,
+  ): Promise<ConfigurationRollbackResult> {
+    const fenceVerifiedAtCommit = await authorization.verifyCurrent()
+    return {
+      ok: fenceVerifiedAtCommit,
+      authorizationDigest: configurationEffectAuthorizationDigest(authorization),
+      fenceVerifiedAtCommit,
+      ...(fenceVerifiedAtCommit ? {} : { reasonCode: 'ROLLBACK_EFFECT_FENCE_REJECTED' }),
+    }
   }
 
   private async providerMatches(candidate: AunConfigurationCandidate): Promise<boolean> {

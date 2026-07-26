@@ -34,10 +34,16 @@ function input(overrides: Partial<BuildAunConfigurationCandidateInput> = {}): Bu
     },
     providerMcp: {
       enabled: true,
+      expectedProviderIdentityRef: desired.expectedProviderIdentityRef,
+      providerTokenSourceRef: desired.providerTokenSourceRef,
       provider: 'codex', providerHome: '/Users/misell', providerConfigRoot: '/Users/misell/.codex',
       checkoutRoot: '/srv/agent-comms',
       serverName: 'aun', command: '/usr/local/bin/bun',
-      args: ['run', '--cwd', '/srv/agent-comms', 'server.ts'], environmentRefs: { DATABASE_URL: 'env:DATABASE_URL' },
+      args: ['run', '--cwd', '/srv/agent-comms', 'server.ts'], environmentRefs: {
+        DATABASE_URL: 'env:DATABASE_URL',
+        AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: desired.expectedProviderIdentityRef,
+        AGENT_COM_PROVIDER_TOKEN_SOURCE_REF: desired.providerTokenSourceRef!,
+      },
       databaseLocatorRef: 'env:DATABASE_URL',
     },
     launchAgent: {
@@ -79,7 +85,10 @@ describe('AUN immutable configuration candidate', () => {
     releaseDrift.externalRoot = { ...releaseDrift.externalRoot, releaseTree: '1'.repeat(40) }
     expect(() => buildAunConfigurationCandidate(releaseDrift)).toThrow('EXTERNAL_RELEASE_REF_MISMATCH')
     const secret = input()
-    secret.providerMcp = { ...secret.providerMcp, environmentRefs: { TOKEN: 'sk-abcdefghijklmnop' } }
+    secret.providerMcp = {
+      ...secret.providerMcp,
+      environmentRefs: { ...secret.providerMcp.environmentRefs, TOKEN: 'sk-abcdefghijklmnop' },
+    }
     expect(() => buildAunConfigurationCandidate(secret)).toThrow('RAW_SECRET_FORBIDDEN')
   })
 
@@ -104,6 +113,40 @@ describe('AUN immutable configuration candidate', () => {
     const mismatch = structuredClone(disabled)
     mismatch.providerMcp.enabled = true
     expect(() => buildAunConfigurationCandidate(mismatch)).toThrow('ENROLLMENT_PROJECTION_MISMATCH')
+  })
+
+  test('projects every governed provider identity field into the immutable provider contract', () => {
+    const firstInput = input()
+    const first = buildAunConfigurationCandidate(firstInput)
+    const secondInput = input()
+    secondInput.desired = {
+      ...secondInput.desired,
+      expectedProviderIdentityRef: 'agent-profile:misell:expected-provider-identity:def',
+      providerTokenSourceRef: 'secret-ref:provider/misell-v2',
+      desiredDigest: '',
+    }
+    secondInput.desired.desiredDigest = computeDesiredDigest(secondInput.desired)
+    secondInput.providerMcp = {
+      ...secondInput.providerMcp,
+      expectedProviderIdentityRef: secondInput.desired.expectedProviderIdentityRef,
+      providerTokenSourceRef: secondInput.desired.providerTokenSourceRef,
+      environmentRefs: {
+        ...secondInput.providerMcp.environmentRefs,
+        AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: secondInput.desired.expectedProviderIdentityRef,
+        AGENT_COM_PROVIDER_TOKEN_SOURCE_REF: secondInput.desired.providerTokenSourceRef!,
+      },
+    }
+    const second = buildAunConfigurationCandidate(secondInput)
+    expect(second.providerMcp).not.toEqual(first.providerMcp)
+    expect(second.candidateDigest).not.toBe(first.candidateDigest)
+
+    const omitted = input()
+    omitted.desired = secondInput.desired
+    expect(() => buildAunConfigurationCandidate(omitted)).toThrow('PROVIDER_IDENTITY_CONTRACT_MISMATCH')
+
+    const nativeOmitted = input()
+    delete nativeOmitted.providerMcp.environmentRefs.AGENT_COM_PROVIDER_TOKEN_SOURCE_REF
+    expect(() => buildAunConfigurationCandidate(nativeOmitted)).toThrow('PROVIDER_IDENTITY_NATIVE_PROJECTION_MISMATCH')
   })
 
   test('ordinary restore command deterministically carries the DB reconciler startup flag', () => {

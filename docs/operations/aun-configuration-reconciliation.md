@@ -38,11 +38,16 @@ an enrolled profile cannot erase its revision or bypass the outbox.
 - missed-notification recovery deadline: at most 60 seconds.
 
 The reconciler verifies its fence before rendering, immediately before apply,
-and before committing observed state. Every candidate binds one desired
+at the adapter commit boundary, before any rollback, and before committing
+observed state. Every adapter effect returns a receipt bound to the exact host,
+agent, desired revision/digest, lease, and fencing token. A lost fence rejects
+the effect before commit, and a stale holder is never allowed to roll back a
+newer projection. Every candidate binds one desired
 revision/digest, release commit/tree, sorted control refs, provider projection,
 LaunchAgent projection, runtime projection, rollback envelope, and candidate
-digest. A revision, digest, lease, or fencing-token change discards the
-candidate before effects.
+digest. The provider projection includes the expected provider-identity and
+token-source references in native environment readback; changing either field
+therefore changes the native projection as well as the desired/candidate digest.
 
 Native reads use provider CLI, `launchctl`, the active primary runtime/workspace
 binding, and clean Git checkout commit/tree readback for both the provider and
@@ -55,7 +60,11 @@ If convergence would require a process restart, the reconciler performs zero
 restart and creates one `AWAITING_OWNER_DECISION` request with
 `restart_budget=1`. A separate exact owner decision and CTO runtime-recovery
 execution context are required. Rejection, expiry, or candidate drift cannot
-retry a restart.
+retry a restart. Execution atomically claims the durable row from `APPROVED` to
+`EXECUTING` only when host/agent, revision/digest, candidate/rollback digests,
+release/tree/control refs, unexpired owner decision, CTO receipt, and a current
+CTO execution lease/fence all match. The one attempt is terminally recorded as
+`EXECUTED` or `FAILED`; an ACK-loss replay cannot claim or restart it again.
 
 ## READY
 

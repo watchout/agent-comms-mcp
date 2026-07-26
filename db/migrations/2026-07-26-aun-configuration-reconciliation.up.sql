@@ -294,12 +294,32 @@ CREATE TABLE IF NOT EXISTS aun_configuration_restart_requests (
   fencing_token BIGINT NOT NULL CHECK (fencing_token > 0),
   restart_budget INTEGER NOT NULL CHECK (restart_budget = 1),
   status TEXT NOT NULL DEFAULT 'AWAITING_OWNER_DECISION' CHECK (status IN (
-    'AWAITING_OWNER_DECISION', 'APPROVED', 'REJECTED', 'EXPIRED', 'EXECUTED', 'FAILED'
+    'AWAITING_OWNER_DECISION', 'APPROVED', 'REJECTED', 'EXPIRED', 'EXECUTING', 'EXECUTED', 'FAILED'
   )),
   owner_decision_ref TEXT,
+  owner_decision_expires_at TIMESTAMPTZ,
   cto_execution_receipt_ref TEXT,
+  execution_lease_id UUID REFERENCES control_plane_leases(lease_id) ON DELETE RESTRICT,
+  execution_fencing_token BIGINT CHECK (execution_fencing_token IS NULL OR execution_fencing_token > 0),
+  execution_attempts INTEGER NOT NULL DEFAULT 0 CHECK (execution_attempts IN (0, 1)),
+  execution_started_at TIMESTAMPTZ,
+  terminal_receipt_digest TEXT CHECK (terminal_receipt_digest IS NULL OR terminal_receipt_digest ~ '^[0-9a-f]{64}$'),
+  terminal_reason_code TEXT,
+  terminal_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (host_id, agent_id, to_revision, to_digest, candidate_digest),
-  CHECK (from_revision IS NULL OR from_revision <= to_revision)
+  CHECK (from_revision IS NULL OR from_revision <= to_revision),
+  CHECK (status NOT IN ('APPROVED', 'EXECUTING', 'EXECUTED', 'FAILED') OR (
+    NULLIF(btrim(owner_decision_ref), '') IS NOT NULL
+    AND owner_decision_expires_at IS NOT NULL
+    AND NULLIF(btrim(cto_execution_receipt_ref), '') IS NOT NULL
+  )),
+  CHECK (status NOT IN ('EXECUTING', 'EXECUTED', 'FAILED') OR (
+    execution_lease_id IS NOT NULL AND execution_fencing_token IS NOT NULL
+    AND execution_attempts = 1 AND execution_started_at IS NOT NULL
+  )),
+  CHECK (status NOT IN ('EXECUTED', 'FAILED') OR (
+    terminal_receipt_digest IS NOT NULL AND terminal_at IS NOT NULL
+  ))
 );

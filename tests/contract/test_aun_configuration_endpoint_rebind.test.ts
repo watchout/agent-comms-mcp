@@ -11,7 +11,11 @@ test('DB endpoint rebind is one exact candidate and uses the protected restart g
       databaseLocatorRef: 'external-locator:db-v2', databaseCredentialRef: 'secret-ref:db-v2',
       releaseCommit: desired.releaseCommit, releaseTree: desired.releaseTree, controlRefs: desired.controlRefs,
     },
-    providerMcp: { ...old.providerMcp, databaseLocatorRef: 'external-locator:db-v2', environmentRefs: { DATABASE_URL: 'external-locator:db-v2' } },
+    providerMcp: {
+      ...old.providerMcp,
+      databaseLocatorRef: 'external-locator:db-v2',
+      environmentRefs: { ...old.providerMcp.environmentRefs, DATABASE_URL: 'external-locator:db-v2' },
+    },
     launchAgent: { ...old.launchAgent, databaseLocatorRef: 'external-locator:db-v2', environmentRefs: { DATABASE_URL: 'external-locator:db-v2' } },
     runtimeRegistration: old.runtimeRegistration,
     rollback: { providerMcp: old.providerMcp, launchAgent: old.launchAgent, runtimeRegistration: old.runtimeRegistration },

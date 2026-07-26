@@ -3,9 +3,12 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  claimApprovedConfigurationRestartExecution,
+  completeConfigurationRestartExecution,
   createConfigurationRestartRequest,
   normalizeDesiredStateRow,
   recordConfigurationObservedState,
+  verifyConfigurationRestartExecutionClaim,
 } from '../../core/aun-configuration-desired-state'
 import { acquireControlPlaneLease, releaseControlPlaneLease } from '../../core/control-plane-leases'
 import { PgAdapter } from '../../core/db/pg-adapter'
@@ -212,15 +215,95 @@ describe('AUN configuration reconciliation migration', () => {
         ['fixture-host', 'acm887-fixture', lease.lease.lease_id, lease.lease.fencing_token],
       ))?.count).toBe('1')
 
+      await db.execute(
+        `INSERT INTO agents (
+           agent_id, display_name, agent_type, runtime, profile_enabled,
+           runtime_engine_preference, home_directory, channel_port
+         ) VALUES ('codex-cto', 'CTO fixture', 'bot', 'TUI', true, 'codex', '/tmp/codex-cto', 8898)`,
+      )
+      const ctoLease = await acquireControlPlaneLease(db, {
+        scopeType: 'runtime_instance', scopeId: 'configuration-restart:fixture-host:acm887-fixture',
+        purpose: 'maintenance', ttlMs: 45_000, holderAgentId: 'codex-cto',
+        holderRuntimeInstanceId: null,
+      })
+      expect(ctoLease.ok).toBe(true)
+      if (!ctoLease.ok) throw new Error('CTO fixture lease unavailable')
+      await db.execute(
+        `UPDATE aun_configuration_restart_requests
+            SET status = 'APPROVED', owner_decision_ref = $2,
+                owner_decision_expires_at = now() + interval '5 minutes',
+                cto_execution_receipt_ref = $3
+          WHERE request_id = $1`,
+        [restartRequestId, 'github:owner-decision:fixture', 'aun:cto-execution-receipt:fixture'],
+      )
+      const executionInput = {
+        requestId: restartRequestId, hostId: restartInput.hostId, agentId: restartInput.agentId,
+        toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
+        candidateDigest: restartInput.candidateDigest,
+        rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+        exactReleaseCommit: restartInput.exactReleaseCommit,
+        exactReleaseTree: restartInput.exactReleaseTree,
+        exactControlRefs: restartInput.exactControlRefs,
+        executionLeaseId: ctoLease.lease.lease_id,
+        executionFencingToken: ctoLease.lease.fencing_token,
+        executorAgentId: 'codex-cto',
+      }
+      expect(await claimApprovedConfigurationRestartExecution(db, {
+        ...executionInput, executorAgentId: 'wrong-executor',
+      })).toBeNull()
+      expect(await claimApprovedConfigurationRestartExecution(db, {
+        ...executionInput, candidateDigest: 'f'.repeat(64),
+      })).toBeNull()
+      const executionClaim = await claimApprovedConfigurationRestartExecution(db, executionInput)
+      expect(executionClaim).not.toBeNull()
+      if (!executionClaim) throw new Error('exact restart execution claim unavailable')
+      expect(await verifyConfigurationRestartExecutionClaim(db, executionClaim)).toBe(true)
+      expect(await completeConfigurationRestartExecution(db, executionClaim, {
+        status: 'EXECUTED', terminalReceiptDigest: '9'.repeat(64), reasonCode: null,
+      })).toBe(true)
+      expect(await completeConfigurationRestartExecution(db, executionClaim, {
+        status: 'EXECUTED', terminalReceiptDigest: '9'.repeat(64), reasonCode: null,
+      })).toBe(false)
+
+      const expiredRequestId = await createConfigurationRestartRequest(db, {
+        ...restartInput, candidateDigest: 'e'.repeat(64),
+      })
+      await db.execute(
+        `UPDATE aun_configuration_restart_requests
+            SET status = 'APPROVED', owner_decision_ref = 'github:owner-decision:expired',
+                owner_decision_expires_at = now() - interval '1 second',
+                cto_execution_receipt_ref = 'aun:cto-execution-receipt:expired'
+          WHERE request_id = $1`,
+        [expiredRequestId],
+      )
+      expect(await claimApprovedConfigurationRestartExecution(db, {
+        ...executionInput, requestId: expiredRequestId, candidateDigest: 'e'.repeat(64),
+      })).toBeNull()
+
+      const rejectedRequestId = await createConfigurationRestartRequest(db, {
+        ...restartInput, candidateDigest: 'd'.repeat(64),
+      })
+      await db.execute(
+        `UPDATE aun_configuration_restart_requests SET status = 'REJECTED' WHERE request_id = $1`,
+        [rejectedRequestId],
+      )
+      expect(await claimApprovedConfigurationRestartExecution(db, {
+        ...executionInput, requestId: rejectedRequestId, candidateDigest: 'd'.repeat(64),
+      })).toBeNull()
+
       await expect(db.execute(down)).rejects.toThrow('refusing to drop nonempty AUN configuration reconciliation evidence')
-      await db.execute(`DELETE FROM aun_configuration_restart_requests WHERE request_id = $1`, [restartRequestId])
+      await db.execute(`DELETE FROM aun_configuration_restart_requests WHERE agent_id = $1`, ['acm887-fixture'])
       await db.execute(`DELETE FROM aun_configuration_observed_state WHERE host_id = $1 AND agent_id = $2`, ['fixture-host', 'acm887-fixture'])
       await db.execute(`DELETE FROM aun_configuration_desired_outbox WHERE agent_id = $1`, ['acm887-fixture'])
       await releaseControlPlaneLease(db, {
         leaseId: lease.lease.lease_id, fencingToken: lease.lease.fencing_token,
         holderAgentId: 'acm887-fixture', holderRuntimeInstanceId: null,
       })
-      await db.execute(`DELETE FROM agents WHERE agent_id IN ($1, $2)`, ['acm887-fixture', 'acm887-incomplete'])
+      await releaseControlPlaneLease(db, {
+        leaseId: ctoLease.lease.lease_id, fencingToken: ctoLease.lease.fencing_token,
+        holderAgentId: 'codex-cto', holderRuntimeInstanceId: null,
+      })
+      await db.execute(`DELETE FROM agents WHERE agent_id IN ($1, $2, $3)`, ['acm887-fixture', 'acm887-incomplete', 'codex-cto'])
       await db.execute(down)
       await db.execute(up)
       expect(await configurationSchemaSnapshot(db)).toEqual(firstSchemaDigest)

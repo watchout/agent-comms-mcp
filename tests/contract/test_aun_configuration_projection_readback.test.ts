@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test'
-import { AunConfigurationReconciler } from '../../core/aun-configuration-reconciler'
+import {
+  AunConfigurationReconciler,
+  configurationEffectAuthorizationDigest,
+} from '../../core/aun-configuration-reconciler'
 import {
   claudeNativeMcpAbsent,
   codexNativeMcpAbsent,
@@ -14,7 +17,14 @@ test('manual projection tamper is detected and never back-propagates to DB desir
   store.dueAgentIds = ['misell']
   const original = structuredClone(store.desired)
   const port = new FakeProjection()
-  port.applyUnprotected = async () => { port.applyCalls++; return { ok: true, mutated: false, partial: false } }
+  port.applyFenced = async (_candidate, authorization) => {
+    port.applyCalls++
+    return {
+      ok: true, mutated: false, partial: false,
+      authorizationDigest: configurationEffectAuthorizationDigest(authorization),
+      fenceVerifiedAtCommit: await authorization.verifyCurrent(),
+    }
+  }
   const [result] = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).sweepOnce()
   expect(result.status).toBe('DRIFTED')
   expect(store.observed?.reconcileStatus).toBe('DRIFTED')

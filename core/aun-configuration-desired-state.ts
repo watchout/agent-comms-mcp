@@ -94,9 +94,35 @@ export interface AunConfigurationRestartRequest {
   leaseId: string
   fencingToken: number
   restartBudget: 1
-  status?: 'AWAITING_OWNER_DECISION'
+  status?: 'AWAITING_OWNER_DECISION' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'EXECUTING' | 'EXECUTED' | 'FAILED'
   ownerDecisionRef?: string | null
+  ownerDecisionExpiresAt?: string | Date | null
   ctoExecutionReceiptRef?: string | null
+}
+
+export interface AunConfigurationRestartExecutionClaimInput {
+  requestId: string
+  hostId: string
+  agentId: string
+  toRevision: number
+  toDigest: string
+  candidateDigest: string
+  rollbackArtifactDigest: string
+  exactReleaseCommit: string
+  exactReleaseTree: string
+  exactControlRefs: string[]
+  executionLeaseId: string
+  executionFencingToken: number
+  executorAgentId: string
+}
+
+export interface AunConfigurationRestartExecutionRecord extends AunConfigurationRestartExecutionClaimInput {
+  restartBudget: 1
+  status: 'EXECUTING'
+  ownerDecisionRef: string
+  ownerDecisionExpiresAt: string | Date
+  ctoExecutionReceiptRef: string
+  executionAttempt: 1
 }
 
 function canonicalize(value: unknown): unknown {
@@ -390,4 +416,124 @@ export async function createConfigurationRestartRequest(
   )
   if (!row) throw new Error('RESTART_REQUEST_FENCE_REJECTED')
   return String(row.request_id)
+}
+
+export async function claimApprovedConfigurationRestartExecution(
+  db: DbAdapter,
+  input: AunConfigurationRestartExecutionClaimInput,
+): Promise<AunConfigurationRestartExecutionRecord | null> {
+  const refs = normalizeControlRefs(input.exactControlRefs)
+  const row = await db.queryOne<any>(
+    `UPDATE aun_configuration_restart_requests r
+        SET status = 'EXECUTING',
+            execution_lease_id = $11::uuid,
+            execution_fencing_token = $12::bigint,
+            execution_attempts = 1,
+            execution_started_at = now(),
+            updated_at = now()
+       FROM control_plane_leases l, agents a
+      WHERE r.request_id = $1::uuid
+        AND r.host_id = $2::text AND r.agent_id = $3::text
+        AND r.to_revision = $4::bigint AND r.to_digest = $5::text
+        AND r.candidate_digest = $6::text AND r.rollback_artifact_digest = $7::text
+        AND r.exact_release_commit = $8::text AND r.exact_release_tree = $9::text
+        AND r.exact_control_refs = $10::jsonb
+        AND r.restart_budget = 1 AND r.status = 'APPROVED'
+        AND r.execution_attempts = 0
+        AND NULLIF(btrim(r.owner_decision_ref), '') IS NOT NULL
+        AND r.owner_decision_expires_at > now()
+        AND NULLIF(btrim(r.cto_execution_receipt_ref), '') IS NOT NULL
+        AND a.agent_id = r.agent_id
+        AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
+        AND l.lease_id = $11::uuid AND l.fencing_token = $12::bigint
+        AND l.lease_scope_type = 'runtime_instance'
+        AND l.lease_scope_id = 'configuration-restart:' || r.host_id || ':' || r.agent_id
+        AND l.lease_purpose = 'maintenance'
+        AND l.holder_agent_id = $13::text
+        AND l.status = 'active' AND l.expires_at > now()
+      RETURNING r.request_id, r.host_id, r.agent_id, r.to_revision, r.to_digest,
+                r.candidate_digest, r.rollback_artifact_digest, r.exact_release_commit,
+                r.exact_release_tree, r.exact_control_refs, r.restart_budget, r.status,
+                r.owner_decision_ref, r.owner_decision_expires_at,
+                r.cto_execution_receipt_ref, r.execution_lease_id,
+                r.execution_fencing_token, r.execution_attempts`,
+    [
+      input.requestId, input.hostId, input.agentId, input.toRevision, input.toDigest,
+      input.candidateDigest, input.rollbackArtifactDigest, input.exactReleaseCommit,
+      input.exactReleaseTree, JSON.stringify(refs), input.executionLeaseId,
+      input.executionFencingToken, input.executorAgentId,
+    ],
+  )
+  if (!row) return null
+  return {
+    requestId: String(row.request_id), hostId: String(row.host_id), agentId: String(row.agent_id),
+    toRevision: Number(row.to_revision), toDigest: String(row.to_digest),
+    candidateDigest: String(row.candidate_digest),
+    rollbackArtifactDigest: String(row.rollback_artifact_digest),
+    exactReleaseCommit: String(row.exact_release_commit), exactReleaseTree: String(row.exact_release_tree),
+    exactControlRefs: stringArray(row.exact_control_refs),
+    executionLeaseId: String(row.execution_lease_id),
+    executionFencingToken: Number(row.execution_fencing_token), executorAgentId: input.executorAgentId,
+    restartBudget: 1, status: 'EXECUTING', ownerDecisionRef: String(row.owner_decision_ref),
+    ownerDecisionExpiresAt: row.owner_decision_expires_at,
+    ctoExecutionReceiptRef: String(row.cto_execution_receipt_ref), executionAttempt: 1,
+  }
+}
+
+export async function verifyConfigurationRestartExecutionClaim(
+  db: DbAdapter,
+  claim: AunConfigurationRestartExecutionRecord,
+): Promise<boolean> {
+  const row = await db.queryOne<{ current: boolean }>(
+    `SELECT true AS current
+       FROM aun_configuration_restart_requests r
+       JOIN agents a ON a.agent_id = r.agent_id
+       JOIN control_plane_leases l ON l.lease_id = r.execution_lease_id
+      WHERE r.request_id = $1::uuid AND r.status = 'EXECUTING'
+        AND r.execution_attempts = 1 AND r.execution_lease_id = $2::uuid
+        AND r.execution_fencing_token = $3::bigint
+        AND r.host_id = $5::text AND r.agent_id = $6::text
+        AND r.to_revision = $7::bigint AND r.to_digest = $8::text
+        AND r.candidate_digest = $9::text AND r.rollback_artifact_digest = $10::text
+        AND r.exact_release_commit = $11::text AND r.exact_release_tree = $12::text
+        AND r.exact_control_refs = $13::jsonb
+        AND r.owner_decision_ref = $14::text AND r.cto_execution_receipt_ref = $15::text
+        AND r.owner_decision_expires_at > now()
+        AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
+        AND l.fencing_token = r.execution_fencing_token
+        AND l.holder_agent_id = $4::text
+        AND l.lease_scope_type = 'runtime_instance'
+        AND l.lease_scope_id = 'configuration-restart:' || r.host_id || ':' || r.agent_id
+        AND l.lease_purpose = 'maintenance'
+        AND l.status = 'active' AND l.expires_at > now()`,
+    [
+      claim.requestId, claim.executionLeaseId, claim.executionFencingToken, claim.executorAgentId,
+      claim.hostId, claim.agentId, claim.toRevision, claim.toDigest, claim.candidateDigest,
+      claim.rollbackArtifactDigest, claim.exactReleaseCommit, claim.exactReleaseTree,
+      JSON.stringify(normalizeControlRefs(claim.exactControlRefs)), claim.ownerDecisionRef,
+      claim.ctoExecutionReceiptRef,
+    ],
+  )
+  return row?.current === true
+}
+
+export async function completeConfigurationRestartExecution(
+  db: DbAdapter,
+  claim: AunConfigurationRestartExecutionRecord,
+  input: { status: 'EXECUTED' | 'FAILED'; terminalReceiptDigest: string; reasonCode: string | null },
+): Promise<boolean> {
+  assertExactDigest(input.terminalReceiptDigest, 'TERMINAL_RECEIPT_DIGEST', 64)
+  const result = await db.execute(
+    `UPDATE aun_configuration_restart_requests
+        SET status = $4::text, terminal_receipt_digest = $5::text,
+            terminal_reason_code = $6::text, terminal_at = now(), updated_at = now()
+      WHERE request_id = $1::uuid AND status = 'EXECUTING' AND execution_attempts = 1
+        AND execution_lease_id = $2::uuid AND execution_fencing_token = $3::bigint
+        AND terminal_receipt_digest IS NULL`,
+    [
+      claim.requestId, claim.executionLeaseId, claim.executionFencingToken,
+      input.status, input.terminalReceiptDigest, input.reasonCode,
+    ],
+  )
+  return result.rowCount === 1
 }

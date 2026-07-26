@@ -17,6 +17,8 @@ export interface AunConfigurationExternalRoot {
 export interface ProviderMcpProjection {
   enabled: boolean
   provider: 'codex' | 'claude'
+  expectedProviderIdentityRef: string
+  providerTokenSourceRef: string | null
   providerHome: string
   providerConfigRoot: string
   checkoutRoot: string
@@ -139,6 +141,18 @@ export function buildAunConfigurationCandidate(
     throw new Error('ENROLLMENT_PROJECTION_MISMATCH')
   }
   if (input.providerMcp.providerHome !== input.desired.canonicalHome) throw new Error('PROVIDER_HOME_MISMATCH')
+  if (input.providerMcp.expectedProviderIdentityRef !== input.desired.expectedProviderIdentityRef
+    || input.providerMcp.providerTokenSourceRef !== input.desired.providerTokenSourceRef) {
+    throw new Error('PROVIDER_IDENTITY_CONTRACT_MISMATCH')
+  }
+  if (input.providerMcp.environmentRefs.AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF
+      !== input.desired.expectedProviderIdentityRef
+    || (input.desired.providerTokenSourceRef === null
+      ? Object.hasOwn(input.providerMcp.environmentRefs, 'AGENT_COM_PROVIDER_TOKEN_SOURCE_REF')
+      : input.providerMcp.environmentRefs.AGENT_COM_PROVIDER_TOKEN_SOURCE_REF
+        !== input.desired.providerTokenSourceRef)) {
+    throw new Error('PROVIDER_IDENTITY_NATIVE_PROJECTION_MISMATCH')
+  }
   if (!input.providerMcp.providerConfigRoot.startsWith('/')) throw new Error('PROVIDER_CONFIG_ROOT_INVALID')
   if (!isAbsolute(input.providerMcp.checkoutRoot)) throw new Error('PROVIDER_CHECKOUT_ROOT_INVALID')
   const cwdIndex = input.providerMcp.args.indexOf('--cwd')
@@ -206,6 +220,8 @@ export function buildDefaultAunConfigurationCandidate(
     providerMcp: {
       enabled: input.desired.profileEnabled && input.desired.ordinaryCommunicationEnrollment,
       provider,
+      expectedProviderIdentityRef: input.desired.expectedProviderIdentityRef,
+      providerTokenSourceRef: input.desired.providerTokenSourceRef,
       providerHome: input.desired.canonicalHome,
       providerConfigRoot: input.providerConfigRoot,
       checkoutRoot: input.providerRepoRoot,
@@ -214,6 +230,10 @@ export function buildDefaultAunConfigurationCandidate(
       args: ['run', '--cwd', input.providerRepoRoot, input.serverEntry],
       environmentRefs: {
         ...commonRefs,
+        AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: input.desired.expectedProviderIdentityRef,
+        ...(input.desired.providerTokenSourceRef
+          ? { AGENT_COM_PROVIDER_TOKEN_SOURCE_REF: input.desired.providerTokenSourceRef }
+          : {}),
         AGENT_COM_PG_NOTIFY: 'literal:false',
         AGENT_COMMS_TTL_SWEEP_DISABLED: 'literal:1',
         AUN_WEBHOOK_PORT: `literal:${input.desired.channelPort}`,

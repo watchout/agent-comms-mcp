@@ -8,16 +8,21 @@ import {
 import type { DbAdapter } from './db'
 import {
   AUN_CONFIGURATION_NOTIFY_CHANNEL,
+  claimApprovedConfigurationRestartExecution,
+  completeConfigurationRestartExecution,
   configurationDigest,
   createConfigurationRestartRequest,
   listPendingConfigurationEvents,
   markConfigurationEventDelivered,
   readConfigurationDesiredState,
   recordConfigurationObservedState,
+  verifyConfigurationRestartExecutionClaim,
   type AunConfigurationDesiredState,
   type AunConfigurationObservedState,
   type AunConfigurationOutboxEvent,
   type AunConfigurationRestartRequest,
+  type AunConfigurationRestartExecutionClaimInput,
+  type AunConfigurationRestartExecutionRecord,
   type AunConfigurationStatus,
 } from './aun-configuration-desired-state'
 import type { AunConfigurationCandidate } from './aun-configuration-candidate'
@@ -41,12 +46,33 @@ export interface ConfigurationApplyResult {
   ok: boolean
   mutated: boolean
   partial: boolean
+  authorizationDigest: string
+  fenceVerifiedAtCommit: boolean
   reasonCode?: string
 }
 
 export interface ConfigurationRollbackResult {
   ok: boolean
+  authorizationDigest: string
+  fenceVerifiedAtCommit: boolean
   reasonCode?: string
+}
+
+export interface ConfigurationEffectAuthorization {
+  hostId: string
+  agentId: string
+  desiredRevision: number
+  desiredDigest: string
+  leaseId: string
+  fencingToken: number
+  verifyCurrent(): Promise<boolean>
+}
+
+export function configurationEffectAuthorizationDigest(
+  authorization: Omit<ConfigurationEffectAuthorization, 'verifyCurrent'> | ConfigurationEffectAuthorization,
+): string {
+  const { verifyCurrent: _verifyCurrent, ...binding } = authorization as ConfigurationEffectAuthorization
+  return configurationDigest(binding)
 }
 
 export interface ConfigurationProjectionPort {
@@ -55,9 +81,15 @@ export interface ConfigurationProjectionPort {
     desired: AunConfigurationDesiredState
   }): Promise<AunConfigurationCandidate>
   validate(candidate: AunConfigurationCandidate): Promise<{ ok: boolean; reasonCodes: string[] }>
-  applyUnprotected(candidate: AunConfigurationCandidate): Promise<ConfigurationApplyResult>
+  applyFenced(
+    candidate: AunConfigurationCandidate,
+    authorization: ConfigurationEffectAuthorization,
+  ): Promise<ConfigurationApplyResult>
   readback(candidate: AunConfigurationCandidate): Promise<ConfigurationProjectionReadback>
-  rollback(candidate: AunConfigurationCandidate): Promise<ConfigurationRollbackResult>
+  rollbackFenced(
+    candidate: AunConfigurationCandidate,
+    authorization: ConfigurationEffectAuthorization,
+  ): Promise<ConfigurationRollbackResult>
 }
 
 export interface ConfigurationDesiredStateStore {
@@ -92,44 +124,114 @@ export interface ConfigurationReconcileResult {
   freshNativeReadback: boolean
 }
 
-export interface ApprovedConfigurationRestartExecution {
-  requestId: string
-  candidateDigest: string
-  rollbackArtifactDigest: string
-  restartBudget: 1
-  status: 'APPROVED'
-  ownerDecisionRef: string
+export interface ConfigurationRestartExecutionStore {
+  claim(input: AunConfigurationRestartExecutionClaimInput): Promise<AunConfigurationRestartExecutionRecord | null>
+  verify(claim: AunConfigurationRestartExecutionRecord): Promise<boolean>
+  complete(
+    claim: AunConfigurationRestartExecutionRecord,
+    input: { status: 'EXECUTED' | 'FAILED'; terminalReceiptDigest: string; reasonCode: string | null },
+  ): Promise<boolean>
 }
 
 export interface ConfigurationRestartExecutionPort {
-  restartOnce(input: ApprovedConfigurationRestartExecution): Promise<void>
+  restartOnce(input: AunConfigurationRestartExecutionRecord): Promise<void>
   readback(candidate: AunConfigurationCandidate): Promise<ConfigurationProjectionReadback>
-  rollback(candidate: AunConfigurationCandidate): Promise<ConfigurationRollbackResult>
+  rollback(candidate: AunConfigurationCandidate, claim: AunConfigurationRestartExecutionRecord): Promise<{ ok: boolean; reasonCode?: string }>
+}
+
+export class DbConfigurationRestartExecutionStore implements ConfigurationRestartExecutionStore {
+  constructor(private readonly db: DbAdapter) {}
+  claim(input: AunConfigurationRestartExecutionClaimInput) {
+    return claimApprovedConfigurationRestartExecution(this.db, input)
+  }
+  verify(claim: AunConfigurationRestartExecutionRecord) {
+    return verifyConfigurationRestartExecutionClaim(this.db, claim)
+  }
+  complete(
+    claim: AunConfigurationRestartExecutionRecord,
+    input: { status: 'EXECUTED' | 'FAILED'; terminalReceiptDigest: string; reasonCode: string | null },
+  ) {
+    return completeConfigurationRestartExecution(this.db, claim, input)
+  }
 }
 
 export async function executeApprovedConfigurationRestart(
-  request: ApprovedConfigurationRestartExecution,
+  requestId: string,
   candidate: AunConfigurationCandidate,
+  execution: { lease: ControlPlaneLease; executorAgentId: string },
+  store: ConfigurationRestartExecutionStore,
   port: ConfigurationRestartExecutionPort,
-): Promise<{ ok: boolean; restartCount: number; rollbackEvidencePresent: boolean; reasonCode: string | null }> {
-  if (request.status !== 'APPROVED' || !request.ownerDecisionRef.trim()) throw new Error('OWNER_DECISION_REQUIRED')
-  if (request.restartBudget !== 1) throw new Error('RESTART_BUDGET_INVALID')
-  if (request.candidateDigest !== candidate.candidateDigest
-    || request.rollbackArtifactDigest !== candidate.rollbackArtifactDigest) {
-    throw new Error('RESTART_REQUEST_CANDIDATE_DRIFT')
+): Promise<{
+  ok: boolean
+  restartCount: number
+  rollbackEvidencePresent: boolean
+  terminalReceiptRecorded: boolean
+  reasonCode: string | null
+}> {
+  const claim = await store.claim({
+    requestId, hostId: candidate.hostId, agentId: candidate.agentId,
+    toRevision: candidate.desiredRevision, toDigest: candidate.desiredDigest,
+    candidateDigest: candidate.candidateDigest,
+    rollbackArtifactDigest: candidate.rollbackArtifactDigest,
+    exactReleaseCommit: candidate.releaseCommit, exactReleaseTree: candidate.releaseTree,
+    exactControlRefs: candidate.controlRefs, executionLeaseId: execution.lease.lease_id,
+    executionFencingToken: execution.lease.fencing_token,
+    executorAgentId: execution.executorAgentId,
+  })
+  if (!claim) throw new Error('RESTART_EXECUTION_NOT_AUTHORIZED')
+
+  const finish = async (
+    status: 'EXECUTED' | 'FAILED',
+    reasonCode: string | null,
+    restartCount: number,
+    rollbackEvidencePresent: boolean,
+  ) => {
+    const terminalReceiptDigest = configurationDigest({
+      requestId: claim.requestId, executionAttempt: claim.executionAttempt,
+      executionLeaseId: claim.executionLeaseId,
+      executionFencingToken: claim.executionFencingToken,
+      candidateDigest: claim.candidateDigest, status, reasonCode,
+    })
+    const terminalReceiptRecorded = await store.complete(
+      claim, { status, terminalReceiptDigest, reasonCode },
+    ).catch(() => false)
+    return {
+      ok: status === 'EXECUTED' && terminalReceiptRecorded,
+      restartCount, rollbackEvidencePresent, terminalReceiptRecorded,
+      reasonCode: terminalReceiptRecorded ? reasonCode : 'RESTART_TERMINAL_RECEIPT_CAS_REJECTED',
+    }
   }
-  await port.restartOnce(request)
-  const readback = await port.readback(candidate)
+
+  if (!await store.verify(claim)) {
+    return finish('FAILED', 'RESTART_EXECUTION_FENCE_REJECTED', 0, false)
+  }
+  try {
+    await port.restartOnce(claim)
+  } catch {
+    return finish('FAILED', 'RESTART_EFFECT_FAILED', 1, false)
+  }
+  let readback: ConfigurationProjectionReadback
+  try {
+    readback = await port.readback(candidate)
+  } catch {
+    return finish('FAILED', 'RESTART_READBACK_FAILED', 1, false)
+  }
   if (readback.matchesCandidate) {
-    return { ok: true, restartCount: 1, rollbackEvidencePresent: true, reasonCode: null }
+    return finish('EXECUTED', null, 1, false)
   }
-  const rollback = await port.rollback(candidate)
-  return {
-    ok: false,
-    restartCount: 1,
-    rollbackEvidencePresent: true,
-    reasonCode: rollback.ok ? 'RESTART_READBACK_MISMATCH' : (rollback.reasonCode ?? 'ROLLBACK_FAILED'),
+  if (!await store.verify(claim)) {
+    return finish('FAILED', 'RESTART_READBACK_MISMATCH_ROLLBACK_NOT_AUTHORIZED', 1, false)
   }
+  let rollback: { ok: boolean; reasonCode?: string }
+  try {
+    rollback = await port.rollback(candidate, claim)
+  } catch {
+    return finish('FAILED', 'ROLLBACK_FAILED', 1, true)
+  }
+  return finish(
+    'FAILED', rollback.ok ? 'RESTART_READBACK_MISMATCH' : (rollback.reasonCode ?? 'ROLLBACK_FAILED'),
+    1, true,
+  )
 }
 
 function observedFrom(
@@ -485,10 +587,48 @@ export class AunConfigurationReconciler {
         return { ...result, status: 'DEGRADED_APPROVAL_REQUIRED', reasonCodes: ['PROTECTED_RESTART_REQUIRED'] }
       }
 
-      const applied = await this.projections.applyUnprotected(candidate)
+      const effectAuthorization: ConfigurationEffectAuthorization = {
+        hostId: this.hostId, agentId, desiredRevision: desired.desiredRevision,
+        desiredDigest: desired.desiredDigest, leaseId: lease.lease_id,
+        fencingToken: lease.fencing_token,
+        verifyCurrent: async () => {
+          const effectCurrent = await this.store.readDesired(agentId).catch(() => null)
+          return Boolean(effectCurrent && await fenceValid()
+            && effectCurrent.desiredRevision === desired.desiredRevision
+            && effectCurrent.desiredDigest === desired.desiredDigest)
+        },
+      }
+      const expectedAuthorizationDigest = configurationEffectAuthorizationDigest(effectAuthorization)
+      const receiptIsCurrent = (receipt: { authorizationDigest: string; fenceVerifiedAtCommit: boolean }) => (
+        receipt.fenceVerifiedAtCommit && receipt.authorizationDigest === expectedAuthorizationDigest
+      )
+      const applied = await this.projections.applyFenced(candidate, effectAuthorization)
+      if (!receiptIsCurrent(applied)) {
+        return {
+          ...result, status: 'NO_GO_STALE_CANDIDATE',
+          reasonCodes: ['ADAPTER_EFFECT_FENCE_REJECTED'],
+        }
+      }
       if (applied.mutated) result.applyCount = 1
       if (!applied.ok) {
-        const rollback = applied.mutated ? await this.projections.rollback(candidate) : { ok: true }
+        let rollback: ConfigurationRollbackResult = {
+          ok: true, authorizationDigest: expectedAuthorizationDigest, fenceVerifiedAtCommit: true,
+        }
+        if (applied.mutated) {
+          if (!await effectAuthorization.verifyCurrent()) {
+            return {
+              ...result, status: 'NO_GO_STALE_CANDIDATE',
+              reasonCodes: ['FENCE_INVALID_BEFORE_ROLLBACK'],
+            }
+          }
+          rollback = await this.projections.rollbackFenced(candidate, effectAuthorization)
+          if (!receiptIsCurrent(rollback)) {
+            return {
+              ...result, status: 'NO_GO_STALE_CANDIDATE',
+              reasonCodes: ['ROLLBACK_EFFECT_FENCE_REJECTED'],
+            }
+          }
+        }
         const afterFailure = await this.projections.readback(candidate)
         result.freshNativeReadback = true
         const status: AunConfigurationStatus = rollback.ok ? 'NO_GO_PARTIAL_APPLY' : 'NO_GO_ROLLBACK'

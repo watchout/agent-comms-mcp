@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import {
   AunConfigurationReconciler,
   CONFIGURATION_RECONCILER_HEARTBEAT_MS,
+  configurationEffectAuthorizationDigest,
+  type ConfigurationEffectAuthorization,
   type ConfigurationDesiredStateStore,
   type ConfigurationLeasePort,
   type ConfigurationProjectionPort,
@@ -50,10 +52,18 @@ export function candidateFixture(desired = desiredFixture(), restartRequired = f
     },
     providerMcp: {
       enabled: desired.profileEnabled && desired.ordinaryCommunicationEnrollment,
+      expectedProviderIdentityRef: desired.expectedProviderIdentityRef,
+      providerTokenSourceRef: desired.providerTokenSourceRef,
       provider: 'codex', providerHome: desired.canonicalHome, providerConfigRoot: '/Users/misell/.codex',
       checkoutRoot: '/srv/agent-comms', serverName: 'aun', command: '/bin/bun',
       args: ['run', '--cwd', '/srv/agent-comms', 'server.ts'],
-      environmentRefs: { DATABASE_URL: 'env:DATABASE_URL' }, databaseLocatorRef: 'env:DATABASE_URL',
+      environmentRefs: {
+        DATABASE_URL: 'env:DATABASE_URL',
+        AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: desired.expectedProviderIdentityRef,
+        ...(desired.providerTokenSourceRef
+          ? { AGENT_COM_PROVIDER_TOKEN_SOURCE_REF: desired.providerTokenSourceRef }
+          : {}),
+      }, databaseLocatorRef: 'env:DATABASE_URL',
     },
     launchAgent: {
       label: 'com.agent-comms.state-daemon', programArguments: ['/bin/bun', 'bin/state-daemon.ts'],
@@ -139,16 +149,37 @@ export class FakeProjection implements ConfigurationProjectionPort {
   applyCalls = 0
   readbackCalls = 0
   rollbackCalls = 0
+  committedMutations = 0
   applyResult = { ok: true, mutated: true, partial: false }
   rollbackResult = { ok: true }
   renderDelay: Promise<void> | null = null
+  beforeApplyCommit: ((authorization: ConfigurationEffectAuthorization) => void | Promise<void>) | null = null
+  beforeRollbackCommit: ((authorization: ConfigurationEffectAuthorization) => void | Promise<void>) | null = null
 
   async render({ desired }: { hostId: string; desired: AunConfigurationDesiredState }) {
     if (this.renderDelay) await this.renderDelay
     return candidateFixture(desired, this.restartRequired)
   }
   async validate() { return { ok: true, reasonCodes: [] } }
-  async applyUnprotected() { this.applyCalls++; this.readbackMatches = this.applyResult.ok; return this.applyResult }
+  async applyFenced(_candidate: AunConfigurationCandidate, authorization: ConfigurationEffectAuthorization) {
+    this.applyCalls++
+    await this.beforeApplyCommit?.(authorization)
+    const fenceVerifiedAtCommit = await authorization.verifyCurrent()
+    if (!fenceVerifiedAtCommit) {
+      return {
+        ok: false, mutated: false, partial: false, reasonCode: 'ADAPTER_EFFECT_FENCE_REJECTED',
+        authorizationDigest: configurationEffectAuthorizationDigest(authorization),
+        fenceVerifiedAtCommit,
+      }
+    }
+    if (this.applyResult.mutated) this.committedMutations++
+    this.readbackMatches = this.applyResult.ok
+    return {
+      ...this.applyResult,
+      authorizationDigest: configurationEffectAuthorizationDigest(authorization),
+      fenceVerifiedAtCommit,
+    }
+  }
   async readback(): Promise<ConfigurationProjectionReadback> {
     this.readbackCalls++
     return {
@@ -158,7 +189,17 @@ export class FakeProjection implements ConfigurationProjectionPort {
       driftReasonCodes: this.readbackMatches ? [] : ['FIXTURE_DRIFT'],
     }
   }
-  async rollback() { this.rollbackCalls++; return this.rollbackResult }
+  async rollbackFenced(_candidate: AunConfigurationCandidate, authorization: ConfigurationEffectAuthorization) {
+    this.rollbackCalls++
+    await this.beforeRollbackCommit?.(authorization)
+    const fenceVerifiedAtCommit = await authorization.verifyCurrent()
+    if (fenceVerifiedAtCommit && this.rollbackResult.ok && this.committedMutations > 0) this.committedMutations--
+    return {
+      ...this.rollbackResult,
+      authorizationDigest: configurationEffectAuthorizationDigest(authorization),
+      fenceVerifiedAtCommit,
+    }
+  }
 }
 
 describe('AUN configuration reconciler', () => {
@@ -171,7 +212,7 @@ describe('AUN configuration reconciler', () => {
     expect(result).toMatchObject({ status: 'READY', applyCount: 1, eventDelivered: true, freshNativeReadback: true })
     expect(port.applyCalls).toBe(1)
     expect(port.readbackCalls).toBe(2)
-    expect(lease.verifyCalls).toBe(3)
+    expect(lease.verifyCalls).toBe(4)
     expect(store.observed?.observedRevision).toBe(1)
   })
 
@@ -194,6 +235,36 @@ describe('AUN configuration reconciler', () => {
     expect(result.status).toBe('NO_GO_STALE_CANDIDATE')
     expect(result.applyCount).toBe(0)
     expect(port.applyCalls).toBe(0)
+  })
+
+  test('lease loss inside a successful adapter call rejects the effect before commit', async () => {
+    const store = new FakeStore()
+    const lease = new FakeLease()
+    const port = new FakeProjection()
+    port.beforeApplyCommit = () => { lease.valid = false }
+    const result = await new AunConfigurationReconciler('host-a', store, lease, port).reconcileAgent('misell')
+    expect(result).toMatchObject({
+      status: 'NO_GO_STALE_CANDIDATE', applyCount: 0,
+      reasonCodes: ['ADAPTER_EFFECT_FENCE_REJECTED'],
+    })
+    expect(port.applyCalls).toBe(1)
+    expect(port.committedMutations).toBe(0)
+    expect(port.rollbackCalls).toBe(0)
+  })
+
+  test('lease loss inside a partial adapter call cannot commit or invoke stale rollback', async () => {
+    const store = new FakeStore()
+    const lease = new FakeLease()
+    const port = new FakeProjection()
+    port.applyResult = { ok: false, mutated: true, partial: true, reasonCode: 'PARTIAL' }
+    port.beforeApplyCommit = () => { lease.valid = false }
+    const result = await new AunConfigurationReconciler('host-a', store, lease, port).reconcileAgent('misell')
+    expect(result).toMatchObject({
+      status: 'NO_GO_STALE_CANDIDATE', applyCount: 0,
+      reasonCodes: ['ADAPTER_EFFECT_FENCE_REJECTED'],
+    })
+    expect(port.committedMutations).toBe(0)
+    expect(port.rollbackCalls).toBe(0)
   })
 
   test('never closes an outbox event when the stale observed receipt is fence-rejected', async () => {
