@@ -1,5 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { isAbsolute } from 'node:path'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 import type { DbAdapter } from './db'
 
 export const AUN_CONFIGURATION_EVENT_TYPE = 'AUN_AGENT_CONFIGURATION_DESIRED_CHANGED' as const
@@ -129,6 +131,29 @@ export interface AunConfigurationRestartExecutionRecord extends AunConfiguration
 
 export const CONFIGURATION_RESTART_EXECUTOR_AGENT_ID = 'codex-cto' as const
 export const CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION = 'runtime_recovery_executor' as const
+export const CONFIGURATION_RESTART_RECEIPT_SCHEMA_VERSION = 'shirube-v3/runtime_recovery_execution_receipt/v1' as const
+export const CONFIGURATION_RESTART_RECEIPT_AUTH_REPLAY_WINDOW_SECONDS = 300
+
+export interface ConfigurationRestartReceiptAuthorizationDocument {
+  schema_version: typeof CONFIGURATION_RESTART_RECEIPT_SCHEMA_VERSION
+  active_function: typeof CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION
+  authorization_status: 'AUTHORIZED'
+  executor_agent_id: typeof CONFIGURATION_RESTART_EXECUTOR_AGENT_ID
+  channel_id: string
+  restart_request_id: string
+  host_id: string
+  agent_id: string
+  to_revision: string
+  to_digest: string
+  candidate_digest: string
+  rollback_artifact_digest: string
+  exact_release_commit: string
+  exact_release_tree: string
+  exact_control_refs: string[]
+  owner_decision_ref: string
+  execution_lease_id: string
+  execution_fencing_token: string
+}
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize)
@@ -152,6 +177,138 @@ export function configurationDigest(value: unknown): string {
 
 function normalizeControlRefs(refs: readonly string[]): string[] {
   return [...new Set(refs.map((ref) => ref.trim()).filter(Boolean))].sort(compareUtf8)
+}
+
+export function configurationRestartReceiptAuthorizationDocument(input: {
+  channelId: string
+  requestId: string
+  hostId: string
+  agentId: string
+  toRevision: number
+  toDigest: string
+  candidateDigest: string
+  rollbackArtifactDigest: string
+  exactReleaseCommit: string
+  exactReleaseTree: string
+  exactControlRefs: readonly string[]
+  ownerDecisionRef: string
+  executionLeaseId: string
+  executionFencingToken: number
+}): ConfigurationRestartReceiptAuthorizationDocument {
+  return {
+    schema_version: CONFIGURATION_RESTART_RECEIPT_SCHEMA_VERSION,
+    active_function: CONFIGURATION_RESTART_EXECUTOR_ACTIVE_FUNCTION,
+    authorization_status: 'AUTHORIZED',
+    executor_agent_id: CONFIGURATION_RESTART_EXECUTOR_AGENT_ID,
+    channel_id: input.channelId,
+    restart_request_id: input.requestId,
+    host_id: input.hostId,
+    agent_id: input.agentId,
+    to_revision: String(input.toRevision),
+    to_digest: input.toDigest,
+    candidate_digest: input.candidateDigest,
+    rollback_artifact_digest: input.rollbackArtifactDigest,
+    exact_release_commit: input.exactReleaseCommit,
+    exact_release_tree: input.exactReleaseTree,
+    exact_control_refs: normalizeControlRefs(input.exactControlRefs),
+    owner_decision_ref: input.ownerDecisionRef,
+    execution_lease_id: input.executionLeaseId,
+    execution_fencing_token: String(input.executionFencingToken),
+  }
+}
+
+type ConfigurationRestartReceiptAuthSnapshot = {
+  receiptId: string
+  channelId: string
+  content: string
+  signature: string
+  timestamp: number
+  createdAt: string | Date
+  ownerDecisionRef: string
+}
+
+function loadConfigurationRestartReceiptAuthSecret(): string | null {
+  const envSecret = process.env.AGENT_COMMS_SECRET
+  if (envSecret) return envSecret
+  const configuredPath = process.env.AGENT_COMMS_SECRET_FILE
+  const secretPath = configuredPath
+    ? configuredPath.replace(/^~/, homedir())
+    : join(homedir(), '.agent-com', 'secret')
+  try {
+    return readFileSync(secretPath, 'utf8').trim() || null
+  } catch {
+    return null
+  }
+}
+
+async function readAuthenticatedConfigurationRestartReceipt(
+  db: DbAdapter,
+  input: AunConfigurationRestartExecutionClaimInput,
+  expectedOwnerDecisionRef?: string,
+): Promise<ConfigurationRestartReceiptAuthSnapshot | null> {
+  const row = await db.queryOne<any>(
+    `SELECT receipt.id, receipt.channel_id, receipt.author_id, receipt.content,
+            receipt.created_at, receipt.metadata, r.owner_decision_ref
+       FROM aun_configuration_restart_requests r
+       JOIN agent_messages receipt
+         ON r.cto_execution_receipt_ref = 'aun:agent-message:' || receipt.id::text
+      WHERE r.request_id = $1::uuid`,
+    [input.requestId],
+  )
+  if (!row || String(row.author_id) !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID) return null
+  const channelId = String(row.channel_id ?? '')
+  const content = String(row.content ?? '')
+  const ownerDecisionRef = String(row.owner_decision_ref ?? '')
+  if (!channelId || !content || !ownerDecisionRef
+    || (expectedOwnerDecisionRef !== undefined && ownerDecisionRef !== expectedOwnerDecisionRef)) return null
+
+  let metadata: any
+  try {
+    metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata
+  } catch {
+    return null
+  }
+  const signature = metadata?.auth?.signature
+  const timestamp = Number(metadata?.auth?.timestamp)
+  if (typeof signature !== 'string' || !/^[0-9a-f]{64}$/.test(signature)
+    || !Number.isSafeInteger(timestamp)) return null
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const replayWindow = CONFIGURATION_RESTART_RECEIPT_AUTH_REPLAY_WINDOW_SECONDS
+  if (Math.abs(nowSeconds - timestamp) > replayWindow) return null
+  const createdAtMs = new Date(row.created_at).getTime()
+  if (!Number.isFinite(createdAtMs) || Math.abs(Math.floor(createdAtMs / 1000) - timestamp) > replayWindow) return null
+
+  const authorizationDocument = configurationRestartReceiptAuthorizationDocument({
+    channelId,
+    requestId: input.requestId,
+    hostId: input.hostId,
+    agentId: input.agentId,
+    toRevision: input.toRevision,
+    toDigest: input.toDigest,
+    candidateDigest: input.candidateDigest,
+    rollbackArtifactDigest: input.rollbackArtifactDigest,
+    exactReleaseCommit: input.exactReleaseCommit,
+    exactReleaseTree: input.exactReleaseTree,
+    exactControlRefs: input.exactControlRefs,
+    ownerDecisionRef,
+    executionLeaseId: input.executionLeaseId,
+    executionFencingToken: input.executionFencingToken,
+  })
+  if (content !== canonicalConfigurationJson(authorizationDocument)) return null
+
+  const secret = loadConfigurationRestartReceiptAuthSecret()
+  if (!secret) return null
+  const contentHash = createHash('sha256').update(content).digest('hex')
+  const expected = createHmac('sha256', secret)
+    .update(`${CONFIGURATION_RESTART_EXECUTOR_AGENT_ID}:${timestamp}:${channelId}:${contentHash}`)
+    .digest('hex')
+  const actualBytes = Buffer.from(signature, 'hex')
+  const expectedBytes = Buffer.from(expected, 'hex')
+  if (actualBytes.length !== expectedBytes.length || !timingSafeEqual(actualBytes, expectedBytes)) return null
+  return {
+    receiptId: String(row.id), channelId, content, signature, timestamp,
+    createdAt: row.created_at, ownerDecisionRef,
+  }
 }
 
 function assertExactDigest(value: string, label: string, length: 40 | 64): void {
@@ -429,6 +586,8 @@ export async function claimApprovedConfigurationRestartExecution(
 ): Promise<AunConfigurationRestartExecutionRecord | null> {
   if (input.executorAgentId !== CONFIGURATION_RESTART_EXECUTOR_AGENT_ID) return null
   const refs = normalizeControlRefs(input.exactControlRefs)
+  const authenticatedReceipt = await readAuthenticatedConfigurationRestartReceipt(db, input)
+  if (!authenticatedReceipt) return null
   const row = await db.queryOne<any>(
     `UPDATE aun_configuration_restart_requests r
         SET status = 'EXECUTING',
@@ -454,6 +613,7 @@ export async function claimApprovedConfigurationRestartExecution(
         AND receipt.metadata #>> '{active_function}' = 'runtime_recovery_executor'
         AND receipt.metadata #>> '{authorization_status}' = 'AUTHORIZED'
         AND receipt.metadata #>> '{executor_agent_id}' = 'codex-cto'
+        AND receipt.metadata #>> '{channel_id}' = receipt.channel_id
         AND receipt.metadata #>> '{restart_request_id}' = r.request_id::text
         AND receipt.metadata #>> '{host_id}' = r.host_id
         AND receipt.metadata #>> '{agent_id}' = r.agent_id
@@ -467,8 +627,12 @@ export async function claimApprovedConfigurationRestartExecution(
         AND receipt.metadata #>> '{owner_decision_ref}' = r.owner_decision_ref
         AND receipt.metadata #>> '{execution_lease_id}' = l.lease_id::text
         AND receipt.metadata #>> '{execution_fencing_token}' = l.fencing_token::text
-        AND receipt.metadata #>> '{auth,signature}' ~ '^[0-9a-f]{64}$'
-        AND NULLIF(receipt.metadata #>> '{auth,timestamp}', '') IS NOT NULL
+        AND receipt.id = $14::uuid
+        AND receipt.channel_id = $15::text
+        AND receipt.content = $16::text
+        AND receipt.metadata #>> '{auth,signature}' = $17::text
+        AND receipt.metadata #>> '{auth,timestamp}' = $18::text
+        AND receipt.created_at = $19::timestamptz
         AND a.agent_id = r.agent_id
         AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
         AND l.lease_id = $11::uuid AND l.fencing_token = $12::bigint
@@ -489,6 +653,8 @@ export async function claimApprovedConfigurationRestartExecution(
       input.candidateDigest, input.rollbackArtifactDigest, input.exactReleaseCommit,
       input.exactReleaseTree, JSON.stringify(refs), input.executionLeaseId,
       input.executionFencingToken, input.executorAgentId,
+      authenticatedReceipt.receiptId, authenticatedReceipt.channelId, authenticatedReceipt.content,
+      authenticatedReceipt.signature, String(authenticatedReceipt.timestamp), authenticatedReceipt.createdAt,
     ],
   )
   if (!row) return null
@@ -519,6 +685,11 @@ export async function verifyConfigurationRestartExecutionClaim(
     || claim.ctoExecutionReceiptRef !== `aun:agent-message:${claim.ctoExecutionReceiptMessageId}`) {
     return false
   }
+  const authenticatedReceipt = await readAuthenticatedConfigurationRestartReceipt(
+    db, claim, claim.ownerDecisionRef,
+  )
+  if (!authenticatedReceipt
+    || authenticatedReceipt.receiptId !== claim.ctoExecutionReceiptMessageId) return false
   const row = await db.queryOne<{ current: boolean }>(
     `SELECT true AS current
        FROM aun_configuration_restart_requests r
@@ -540,6 +711,7 @@ export async function verifyConfigurationRestartExecutionClaim(
         AND receipt.metadata #>> '{active_function}' = 'runtime_recovery_executor'
         AND receipt.metadata #>> '{authorization_status}' = 'AUTHORIZED'
         AND receipt.metadata #>> '{executor_agent_id}' = 'codex-cto'
+        AND receipt.metadata #>> '{channel_id}' = receipt.channel_id
         AND receipt.metadata #>> '{restart_request_id}' = r.request_id::text
         AND receipt.metadata #>> '{host_id}' = r.host_id
         AND receipt.metadata #>> '{agent_id}' = r.agent_id
@@ -553,8 +725,11 @@ export async function verifyConfigurationRestartExecutionClaim(
         AND receipt.metadata #>> '{owner_decision_ref}' = r.owner_decision_ref
         AND receipt.metadata #>> '{execution_lease_id}' = l.lease_id::text
         AND receipt.metadata #>> '{execution_fencing_token}' = l.fencing_token::text
-        AND receipt.metadata #>> '{auth,signature}' ~ '^[0-9a-f]{64}$'
-        AND NULLIF(receipt.metadata #>> '{auth,timestamp}', '') IS NOT NULL
+        AND receipt.channel_id = $17::text
+        AND receipt.content = $18::text
+        AND receipt.metadata #>> '{auth,signature}' = $19::text
+        AND receipt.metadata #>> '{auth,timestamp}' = $20::text
+        AND receipt.created_at = $21::timestamptz
         AND r.owner_decision_expires_at > now()
         AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
         AND l.fencing_token = r.execution_fencing_token
@@ -569,6 +744,8 @@ export async function verifyConfigurationRestartExecutionClaim(
       claim.rollbackArtifactDigest, claim.exactReleaseCommit, claim.exactReleaseTree,
       JSON.stringify(normalizeControlRefs(claim.exactControlRefs)), claim.ownerDecisionRef,
       claim.ctoExecutionReceiptRef, claim.ctoExecutionReceiptMessageId,
+      authenticatedReceipt.channelId, authenticatedReceipt.content, authenticatedReceipt.signature,
+      String(authenticatedReceipt.timestamp), authenticatedReceipt.createdAt,
     ],
   )
   return row?.current === true

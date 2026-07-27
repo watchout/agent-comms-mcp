@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   claimApprovedConfigurationRestartExecution,
+  canonicalConfigurationJson,
   completeConfigurationRestartExecution,
+  configurationRestartReceiptAuthorizationDocument,
   createConfigurationRestartRequest,
   normalizeDesiredStateRow,
   recordConfigurationObservedState,
@@ -18,6 +20,25 @@ const downPath = join(import.meta.dir, '../../db/migrations/2026-07-26-aun-confi
 const up = readFileSync(upPath, 'utf8')
 const down = readFileSync(downPath, 'utf8')
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
+const receiptSecret = 'fixture-restart-receipt-hmac-secret'
+
+function signedRestartReceipt(input: Parameters<typeof configurationRestartReceiptAuthorizationDocument>[0], options: {
+  secret?: string
+  timestamp?: number
+  activeFunction?: string
+} = {}) {
+  const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000)
+  const exactDocument = configurationRestartReceiptAuthorizationDocument(input)
+  const document = options.activeFunction
+    ? { ...exactDocument, active_function: options.activeFunction }
+    : exactDocument
+  const content = canonicalConfigurationJson(document)
+  const contentHash = sha256(content)
+  const signature = createHmac('sha256', options.secret ?? receiptSecret)
+    .update(`codex-cto:${timestamp}:${input.channelId}:${contentHash}`)
+    .digest('hex')
+  return { content, metadata: { ...document, auth: { signature, timestamp } }, timestamp }
+}
 
 async function configurationSchemaSnapshot(db: PgAdapter): Promise<Record<string, string>> {
   const columns = await db.query(`SELECT table_name, column_name, data_type, is_nullable, column_default
@@ -88,6 +109,8 @@ describe('AUN configuration reconciliation migration', () => {
     const repoRoot = join(import.meta.dir, '../..')
     const created = Bun.spawnSync(['createdb', '-h', '/tmp', databaseName], { stdout: 'pipe', stderr: 'pipe' })
     expect(created.exitCode).toBe(0)
+    const priorAuthSecret = process.env.AGENT_COMMS_SECRET
+    process.env.AGENT_COMMS_SECRET = receiptSecret
     let db: PgAdapter | null = null
     try {
       const migrated = Bun.spawnSync([process.execPath, 'db/migrate.ts'], {
@@ -231,25 +254,24 @@ describe('AUN configuration reconciliation migration', () => {
       const ownerDecisionRef = 'github:owner-decision:fixture'
       const ctoReceiptMessageId = randomUUID()
       const ctoReceiptRef = `aun:agent-message:${ctoReceiptMessageId}`
+      const receiptChannelId = 'aun-configuration-fixture'
+      const signedReceipt = signedRestartReceipt({
+        channelId: receiptChannelId, requestId: restartRequestId,
+        hostId: restartInput.hostId, agentId: restartInput.agentId,
+        toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
+        candidateDigest: restartInput.candidateDigest,
+        rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+        exactReleaseCommit: restartInput.exactReleaseCommit,
+        exactReleaseTree: restartInput.exactReleaseTree,
+        exactControlRefs: restartInput.exactControlRefs,
+        ownerDecisionRef, executionLeaseId: ctoLease.lease.lease_id,
+        executionFencingToken: ctoLease.lease.fencing_token,
+      })
       await db.execute(
-        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
-         VALUES ($1, 'aun-configuration-fixture', 'codex-cto', 'authorized fixture restart', 'approval', $2::jsonb)`,
-        [ctoReceiptMessageId, JSON.stringify({
-          schema_version: 'shirube-v3/runtime_recovery_execution_receipt/v1',
-          active_function: 'runtime_recovery_executor', authorization_status: 'AUTHORIZED',
-          executor_agent_id: 'codex-cto', restart_request_id: restartRequestId,
-          host_id: restartInput.hostId, agent_id: restartInput.agentId,
-          to_revision: String(restartInput.toRevision), to_digest: restartInput.toDigest,
-          candidate_digest: restartInput.candidateDigest,
-          rollback_artifact_digest: restartInput.rollbackArtifactDigest,
-          exact_release_commit: restartInput.exactReleaseCommit,
-          exact_release_tree: restartInput.exactReleaseTree,
-          exact_control_refs: restartInput.exactControlRefs,
-          owner_decision_ref: ownerDecisionRef,
-          execution_lease_id: ctoLease.lease.lease_id,
-          execution_fencing_token: String(ctoLease.lease.fencing_token),
-          auth: { signature: 'a'.repeat(64), timestamp: 1_785_103_922 },
-        })],
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, created_at)
+         VALUES ($1, $2, 'codex-cto', $3, 'approval', $4::jsonb, to_timestamp($5))`,
+        [ctoReceiptMessageId, receiptChannelId, signedReceipt.content,
+          JSON.stringify(signedReceipt.metadata), signedReceipt.timestamp],
       )
       await db.execute(
         `UPDATE aun_configuration_restart_requests
@@ -314,6 +336,55 @@ describe('AUN configuration reconciliation migration', () => {
         ...executionInput, requestId: rejectedRequestId, candidateDigest: 'd'.repeat(64),
       })).toBeNull()
 
+      for (const receiptCase of [
+        { label: 'forged-signature', candidateDigest: '7'.repeat(64), forgedSignature: true },
+        { label: 'wrong-active-function', candidateDigest: '8'.repeat(64), activeFunction: 'implementation_executor' },
+        {
+          label: 'expired-valid-signature',
+          candidateDigest: '6'.repeat(64),
+          timestamp: Math.floor(Date.now() / 1000) - 301,
+        },
+      ]) {
+        const requestId = await createConfigurationRestartRequest(db, {
+          ...restartInput, candidateDigest: receiptCase.candidateDigest,
+        })
+        const decisionRef = `github:owner-decision:${receiptCase.label}`
+        const messageId = randomUUID()
+        const receipt = signedRestartReceipt({
+          channelId: receiptChannelId, requestId,
+          hostId: restartInput.hostId, agentId: restartInput.agentId,
+          toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
+          candidateDigest: receiptCase.candidateDigest,
+          rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+          exactReleaseCommit: restartInput.exactReleaseCommit,
+          exactReleaseTree: restartInput.exactReleaseTree,
+          exactControlRefs: restartInput.exactControlRefs,
+          ownerDecisionRef: decisionRef, executionLeaseId: ctoLease.lease.lease_id,
+          executionFencingToken: ctoLease.lease.fencing_token,
+        }, { activeFunction: receiptCase.activeFunction, timestamp: receiptCase.timestamp })
+        if (receiptCase.forgedSignature) receipt.metadata.auth.signature = 'f'.repeat(64)
+        await db.execute(
+          `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, created_at)
+           VALUES ($1, $2, 'codex-cto', $3, 'approval', $4::jsonb, to_timestamp($5))`,
+          [messageId, receiptChannelId, receipt.content, JSON.stringify(receipt.metadata), receipt.timestamp],
+        )
+        await db.execute(
+          `UPDATE aun_configuration_restart_requests
+              SET status = 'APPROVED', owner_decision_ref = $2,
+                  owner_decision_expires_at = now() + interval '5 minutes',
+                  cto_execution_receipt_ref = $3
+            WHERE request_id = $1`,
+          [requestId, decisionRef, `aun:agent-message:${messageId}`],
+        )
+        expect(await claimApprovedConfigurationRestartExecution(db, {
+          ...executionInput, requestId, candidateDigest: receiptCase.candidateDigest,
+        })).toBeNull()
+        expect(await db.queryOne<{ status: string; execution_attempts: number }>(
+          `SELECT status, execution_attempts FROM aun_configuration_restart_requests WHERE request_id = $1`,
+          [requestId],
+        )).toEqual({ status: 'APPROVED', execution_attempts: 0 })
+      }
+
       await releaseControlPlaneLease(db, {
         leaseId: ctoLease.lease.lease_id, fencingToken: ctoLease.lease.fencing_token,
         holderAgentId: 'codex-cto', holderRuntimeInstanceId: null,
@@ -337,25 +408,24 @@ describe('AUN configuration reconciliation migration', () => {
       })
       const ineligibleReceiptMessageId = randomUUID()
       const ineligibleOwnerDecisionRef = 'github:owner-decision:ineligible-fixture'
+      const ineligibleReceipt = signedRestartReceipt({
+        channelId: receiptChannelId, requestId: ineligibleRequestId,
+        hostId: restartInput.hostId, agentId: restartInput.agentId,
+        toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
+        candidateDigest: ineligibleCandidateDigest,
+        rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+        exactReleaseCommit: restartInput.exactReleaseCommit,
+        exactReleaseTree: restartInput.exactReleaseTree,
+        exactControlRefs: restartInput.exactControlRefs,
+        ownerDecisionRef: ineligibleOwnerDecisionRef,
+        executionLeaseId: otherLease.lease.lease_id,
+        executionFencingToken: otherLease.lease.fencing_token,
+      })
       await db.execute(
-        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
-         VALUES ($1, 'aun-configuration-fixture', 'codex-cto', 'receipt cannot delegate CTO authority', 'approval', $2::jsonb)`,
-        [ineligibleReceiptMessageId, JSON.stringify({
-          schema_version: 'shirube-v3/runtime_recovery_execution_receipt/v1',
-          active_function: 'runtime_recovery_executor', authorization_status: 'AUTHORIZED',
-          executor_agent_id: 'codex-cto', restart_request_id: ineligibleRequestId,
-          host_id: restartInput.hostId, agent_id: restartInput.agentId,
-          to_revision: String(restartInput.toRevision), to_digest: restartInput.toDigest,
-          candidate_digest: ineligibleCandidateDigest,
-          rollback_artifact_digest: restartInput.rollbackArtifactDigest,
-          exact_release_commit: restartInput.exactReleaseCommit,
-          exact_release_tree: restartInput.exactReleaseTree,
-          exact_control_refs: restartInput.exactControlRefs,
-          owner_decision_ref: ineligibleOwnerDecisionRef,
-          execution_lease_id: otherLease.lease.lease_id,
-          execution_fencing_token: String(otherLease.lease.fencing_token),
-          auth: { signature: 'b'.repeat(64), timestamp: 1_785_103_923 },
-        })],
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, created_at)
+         VALUES ($1, $2, 'codex-cto', $3, 'approval', $4::jsonb, to_timestamp($5))`,
+        [ineligibleReceiptMessageId, receiptChannelId, ineligibleReceipt.content,
+          JSON.stringify(ineligibleReceipt.metadata), ineligibleReceipt.timestamp],
       )
       await db.execute(
         `UPDATE aun_configuration_restart_requests
@@ -399,6 +469,8 @@ describe('AUN configuration reconciliation migration', () => {
       await db.execute(up)
       expect(await configurationSchemaSnapshot(db)).toEqual(firstSchemaDigest)
     } finally {
+      if (priorAuthSecret === undefined) delete process.env.AGENT_COMMS_SECRET
+      else process.env.AGENT_COMMS_SECRET = priorAuthSecret
       await db?.close().catch(() => {})
       const dropped = Bun.spawnSync(['dropdb', '-h', '/tmp', '--if-exists', databaseName], { stdout: 'pipe', stderr: 'pipe' })
       expect(dropped.exitCode).toBe(0)
