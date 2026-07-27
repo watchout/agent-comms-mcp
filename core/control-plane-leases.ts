@@ -259,9 +259,9 @@ export async function heartbeatControlPlaneLease(
         AND fencing_token = $2
         AND status = 'active'
         AND expires_at > $3
-        AND ($5 IS NULL OR holder_agent_id = $5)
-        AND ($6 IS NULL OR holder_runtime_instance_id = $6)
-        AND ($7 IS NULL OR holder_connector_instance_id = $7)`,
+        AND ($5::text IS NULL OR holder_agent_id = $5::text)
+        AND ($6::uuid IS NULL OR holder_runtime_instance_id = $6::uuid)
+        AND ($7::uuid IS NULL OR holder_connector_instance_id = $7::uuid)`,
     [
       input.leaseId,
       Number(input.fencingToken),
@@ -293,9 +293,9 @@ export async function releaseControlPlaneLease(
         AND fencing_token = $2
         AND status = 'active'
         AND expires_at > $3
-        AND ($4 IS NULL OR holder_agent_id = $4)
-        AND ($5 IS NULL OR holder_runtime_instance_id = $5)
-        AND ($6 IS NULL OR holder_connector_instance_id = $6)`,
+        AND ($4::text IS NULL OR holder_agent_id = $4::text)
+        AND ($5::uuid IS NULL OR holder_runtime_instance_id = $5::uuid)
+        AND ($6::uuid IS NULL OR holder_connector_instance_id = $6::uuid)`,
     [
       input.leaseId,
       Number(input.fencingToken),

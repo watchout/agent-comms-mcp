@@ -1,11 +1,21 @@
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import type { DbAdapter } from '../../core/db/adapter'
+import {
+  acquireControlPlaneLease,
+  releaseControlPlaneLease,
+} from '../../core/control-plane-leases'
+import {
+  markConfigurationEventDelivered,
+  readConfigurationDesiredState,
+  recordConfigurationObservedState,
+} from '../../core/aun-configuration-desired-state'
+import { buildDefaultAunConfigurationCandidate } from '../../core/aun-configuration-candidate'
 import {
   BOOTSTRAP_SAFE_D1_DEFAULTS,
   FileBootstrapStateStore,
@@ -15,6 +25,7 @@ import {
   type BootstrapStateStore,
 } from '../../core/aun-bootstrap-state'
 import {
+  defaultStateDaemonRestoreRoot,
   parseStateDaemonLaunchAgentPlist,
   STATE_DAEMON_PLIST_NAME,
 } from '../../core/state-daemon/launchagent'
@@ -789,6 +800,217 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     }, { readonly: true }).catch(() => null)
   }
 
+  const ensureConfigurationDesiredState = async (
+    context: BootstrapStageContext,
+  ): Promise<{ desired_revision: number; desired_digest: string; release_tree: string } | null> => {
+    const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
+    const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
+    if (!postgres || !context.repoHead) return null
+    const treeResult = await run('git', ['rev-parse', 'HEAD^{tree}'], { ...commandOptions(context, 10_000), cwd: context.repoRoot })
+    // The injected command port is authoritative. A read-only native fallback
+    // keeps older bootstrap adapters compatible while still resolving the
+    // exact tree from the checkout rather than inventing it from the commit.
+    const nativeTreeResult = treeResult.exitCode === 0
+      ? null
+      : Bun.spawnSync(['git', 'rev-parse', 'HEAD^{tree}'], {
+          cwd: context.repoRoot,
+          env: context.env,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+    const releaseTree = treeResult.exitCode === 0
+      ? treeResult.stdout.trim()
+      : nativeTreeResult?.exitCode === 0
+        ? nativeTreeResult.stdout.toString().trim()
+        : ''
+    if (!/^[0-9a-f]{40}$/.test(releaseTree)) throw new Error('configuration desired release tree unavailable')
+    return withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('aun.actor_ref', $1, true)`, [`aun-bootstrap:${context.runId}`])
+      await tx.execute(
+        `UPDATE agents SET
+           canonical_workspace = $2,
+           canonical_home = $3,
+           supervisor_identity = 'launchd:com.agent-comms.state-daemon',
+           ordinary_communication_enrollment = true,
+           ordinary_projection = $4::jsonb,
+           desired_release_commit = $5,
+           desired_release_tree = $6,
+           desired_control_refs = $7::jsonb
+         WHERE agent_id = $1`,
+        [
+          context.agentId, context.workspaceRoot, home,
+          JSON.stringify({
+            owner: 'continuous-reconciler',
+            provider_repo_root: context.repoRoot,
+            provider_config_root: context.resolvedRuntime === 'claude'
+              ? env.CLAUDE_CONFIG_DIR || join(home, '.claude')
+              : env.CODEX_HOME || join(home, '.codex'),
+            daemon_checkout: join(defaultStateDaemonRestoreRoot(home), context.repoHead),
+            schema_version: 'aun-configuration-projection/v1',
+          }),
+          context.repoHead, releaseTree,
+          JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5082585803']),
+        ],
+      )
+      const row = await tx.queryOne<any>(
+        `SELECT desired_revision, desired_digest, desired_release_tree
+           FROM agents WHERE agent_id = $1`,
+        [context.agentId],
+      )
+      if (!row || !Number.isSafeInteger(Number(row.desired_revision)) || !/^[0-9a-f]{64}$/.test(String(row.desired_digest ?? ''))) {
+        throw new Error('configuration desired state readback invalid')
+      }
+      return {
+        desired_revision: Number(row.desired_revision),
+        desired_digest: String(row.desired_digest),
+        release_tree: String(row.desired_release_tree),
+      }
+    }))
+  }
+
+  const configurationDesiredReadOnly = async (
+    agentId: string,
+  ): Promise<{ desired_revision: number; desired_digest: string; release_tree: string } | null> => {
+    const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
+    const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
+    if (!postgres || !databaseAlreadyExists()) return null
+    return withBootstrapDb(env, async (db) => {
+      const row = await db.queryOne<any>(
+        `SELECT desired_revision, desired_digest, desired_release_tree
+           FROM agents WHERE agent_id = $1`,
+        [agentId],
+      )
+      return row && Number.isSafeInteger(Number(row.desired_revision)) && /^[0-9a-f]{64}$/.test(String(row.desired_digest ?? ''))
+        ? {
+            desired_revision: Number(row.desired_revision),
+            desired_digest: String(row.desired_digest),
+            release_tree: String(row.desired_release_tree),
+          }
+        : null
+    }, { readonly: true }).catch(() => null)
+  }
+
+  const recordBootstrapConfigurationReady = async (
+    context: BootstrapStageContext,
+    nativeReadback: {
+      providerNativeDigest: string
+      launchagentPlistDigest: string
+      launchctlEnvironmentDigest: string
+      runtimeIdentityDigest: string
+    },
+  ): Promise<{
+    hostId: string
+    desiredRevision: number
+    desiredDigest: string
+    candidateDigest: string
+    outboxEventId: string | null
+    previousObservedState: Record<string, unknown> | null
+  } | null> => {
+    const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
+    const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
+    if (!postgres) return null
+    if (Object.values(nativeReadback).some((digest) => !/^[0-9a-f]{64}$/.test(digest))) {
+      throw new Error('configuration native readback digest unavailable')
+    }
+    return withBootstrapDb(env, async (db) => {
+      const desired = await readConfigurationDesiredState(db, context.agentId)
+      if (!desired) throw new Error('configuration desired state unavailable')
+      const projection = desired.ordinaryProjection
+      const providerRepoRoot = typeof projection.provider_repo_root === 'string'
+        ? projection.provider_repo_root
+        : context.repoRoot
+      const daemonCheckout = typeof projection.daemon_checkout === 'string'
+        ? projection.daemon_checkout
+        : join(defaultStateDaemonRestoreRoot(home), desired.releaseCommit)
+      const providerConfigRoot = typeof projection.provider_config_root === 'string'
+        ? projection.provider_config_root
+        : desired.runtimeEnginePreference === 'claude'
+          ? env.CLAUDE_CONFIG_DIR || join(home, '.claude')
+          : env.CODEX_HOME || join(home, '.codex')
+      const candidate = buildDefaultAunConfigurationCandidate({
+        hostId: env.AUN_HOST_ID?.trim() || hostname(),
+        desired,
+        databaseLocatorRef: env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
+        databaseCredentialRef: env.AUN_DATABASE_CREDENTIAL_REF?.trim() || 'env:DATABASE_URL',
+        bunPath,
+        serverEntry: 'server.ts',
+        providerRepoRoot,
+        providerConfigRoot,
+        daemonCheckout,
+        daemonEntry: join(daemonCheckout, 'bin', 'state-daemon.ts'),
+        restartRequired: true,
+      })
+      const previousObservedState = await db.queryOne<Record<string, unknown>>(
+        `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
+                release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
+                launchctl_environment_digest, runtime_identity_digest, reconcile_status,
+                drift_reason_codes, lease_id, fencing_token, observed_at
+           FROM aun_configuration_observed_state
+          WHERE host_id = $1 AND agent_id = $2`,
+        [candidate.hostId, candidate.agentId],
+      )
+      const acquired = await acquireControlPlaneLease(db, {
+        scopeType: 'runtime_instance',
+        scopeId: `configuration-reconciler:${candidate.hostId}`,
+        purpose: 'maintenance',
+        ttlMs: 45_000,
+        holderAgentId: context.agentId,
+        holderRuntimeInstanceId: env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? null,
+        metadata: { owner: 'aun-bootstrap-first-reconciliation', run_id: context.runId },
+      })
+      if (!acquired.ok) throw new Error('configuration reconciliation lease unavailable')
+      try {
+        const recorded = await recordConfigurationObservedState(db, {
+          hostId: candidate.hostId,
+          agentId: candidate.agentId,
+          observedRevision: desired.desiredRevision,
+          observedDesiredDigest: desired.desiredDigest,
+          candidateDigest: candidate.candidateDigest,
+          releaseCommit: candidate.releaseCommit,
+          releaseTree: candidate.releaseTree,
+          providerNativeDigest: nativeReadback.providerNativeDigest,
+          launchagentPlistDigest: nativeReadback.launchagentPlistDigest,
+          launchctlEnvironmentDigest: nativeReadback.launchctlEnvironmentDigest,
+          runtimeIdentityDigest: nativeReadback.runtimeIdentityDigest,
+          reconcileStatus: 'READY',
+          driftReasonCodes: [],
+          leaseId: acquired.lease.lease_id,
+          fencingToken: acquired.lease.fencing_token,
+        })
+        if (!recorded) throw new Error('configuration observed state fence rejected')
+        const event = await db.queryOne<any>(
+          `SELECT event_id, desired_revision, desired_digest
+             FROM aun_configuration_desired_outbox
+            WHERE agent_id = $1 AND desired_revision = $2 AND desired_digest = $3
+              AND delivered_at IS NULL
+            ORDER BY created_at DESC LIMIT 1`,
+          [desired.agentId, desired.desiredRevision, desired.desiredDigest],
+        )
+        if (event) {
+          const delivered = await markConfigurationEventDelivered(
+            db, String(event.event_id), Number(event.desired_revision), String(event.desired_digest),
+          )
+          if (!delivered) throw new Error('configuration outbox delivery receipt rejected')
+        }
+        return {
+          hostId: candidate.hostId,
+          desiredRevision: desired.desiredRevision,
+          desiredDigest: desired.desiredDigest,
+          candidateDigest: candidate.candidateDigest,
+          outboxEventId: event ? String(event.event_id) : null,
+          previousObservedState,
+        }
+      } finally {
+        await releaseControlPlaneLease(db, {
+          leaseId: acquired.lease.lease_id,
+          fencingToken: acquired.lease.fencing_token,
+          holderAgentId: context.agentId,
+          holderRuntimeInstanceId: env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? null,
+        })
+      }
+    })
+  }
+
   const postgresSchemaDigest = async (): Promise<string> => withBootstrapDb(env, async (db) => {
     const columns = await db.query<any>(
       `SELECT table_name, column_name, ordinal_position, data_type, is_nullable, column_default
@@ -1175,6 +1397,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
               backend: 'postgres', shared: true, bootstrap_run_id: context.runId,
               endpoint_digest: bootstrapDigest(env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp'),
               migration_ledger_digest: bootstrapDigest(readFileSync(join(repoRoot, 'db', 'migrate.ts'))),
+              configuration_migration_digest: bootstrapDigest(readFileSync(join(
+                repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql',
+              ))),
               schema_before_digest: before,
               schema_after_digest: afterDigest,
               bootstrap_owned_row_keys: [{ key: 'bootstrap_run_id', value: context.runId }],
@@ -1200,7 +1425,36 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           mutation: observedMutation,
         }
       }
-      const idempotency = await run(bunPath, ['db/migrate.ts'], commandOptions(context, 120_000))
+      const configurationMigration = join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql')
+      const configurationMigrationSql = postgres ? readFileSync(configurationMigration, 'utf8') : ''
+      const applyConfigurationMigration = async (): Promise<BootstrapCommandResult> => {
+        try {
+          const applied = await withBootstrapDb(env, async (db) => db.execute(configurationMigrationSql))
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ row_count: applied.rowCount, migration_digest: bootstrapDigest(configurationMigrationSql) }),
+            stderr: '',
+          }
+        } catch (error) {
+          return { exitCode: 1, stdout: '', stderr: `configuration migration failed:${bootstrapDigest(String(error))}` }
+        }
+      }
+      if (postgres) {
+        const paired = await applyConfigurationMigration()
+        if (paired.exitCode !== 0) {
+          const observedAfter = await currentDatabaseStageDigest()
+          return {
+            ok: false,
+            reasonCodes: observedAfter !== before ? ['NO_GO_POST_MUTATION_READBACK'] : ['NO_GO_DB_MIGRATION'],
+            evidenceRefs: [`configuration-migration-post-command-readback:${bootstrapDigest({ exit: paired.exitCode, before, after: observedAfter })}`],
+            readbackDigest: bootstrapDigest(observedAfter ?? { absent: true }),
+            mutation: observedAfter !== before ? databaseMutation(observedAfter) : undefined,
+          }
+        }
+      }
+      const idempotency = postgres
+        ? await applyConfigurationMigration()
+        : await run(bunPath, ['db/migrate.ts'], commandOptions(context, 120_000))
       if (idempotency.exitCode !== 0) {
         const observedAfter = await currentDatabaseStageDigest()
         const observedMutation = observedAfter !== before ? databaseMutation(observedAfter) : undefined
@@ -1247,11 +1501,20 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         && existing.tmux_session === session
         && existing.profile_enabled === true
       if (context.dryRun) return { ok: true, evidenceRefs: [`profile-plan:${bootstrapDigest(desired)}`], readinessPredicates: { profile_plan_unambiguous: true } }
-      if (matches) return {
-        ok: true,
-        evidenceRefs: [`profile-existing:${bootstrapDigest(existing)}`],
-        readinessPredicates: { profile_readback_matches: true },
-        readbackDigest: bootstrapDigest(managedProfile(existing)),
+      if (matches) {
+        const configuration = await ensureConfigurationDesiredState(context)
+        return {
+          ok: true,
+          evidenceRefs: [
+            `profile-existing:${bootstrapDigest(existing)}`,
+            ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
+          ],
+          readinessPredicates: {
+            profile_readback_matches: true,
+            configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
+          },
+          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), configuration }),
+        }
       }
       if (existing) {
         return { ok: false, reasonCodes: ['NO_GO_PROFILE_CONFLICT'], evidenceRefs: [`profile-mismatch:${bootstrapDigest(existing)}`] }
@@ -1288,11 +1551,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           mutation: observedMutation,
         }
       }
+      const configuration = await ensureConfigurationDesiredState(context)
       return {
         ok: true,
-        evidenceRefs: [`profile-readback:${bootstrapDigest(readback)}`],
-        readinessPredicates: { profile_readback_matches: true, endpoint_allocated: true },
-        readbackDigest: bootstrapDigest(managedProfile(readback)),
+        evidenceRefs: [
+          `profile-readback:${bootstrapDigest(readback)}`,
+          ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
+        ],
+        readinessPredicates: {
+          profile_readback_matches: true,
+          endpoint_allocated: true,
+          configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
+        },
+        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), configuration }),
         mutation: observedMutation,
       }
     },
@@ -1367,6 +1638,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const args = [
         'scripts/state-daemon-launchagent.ts', 'restore', '--commit', context.repoHead ?? '',
         '--agent-allowlist', context.agentId, '--bootstrap-safe-defaults',
+        ...(env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite' ? [] : ['--configuration-reconciler-enabled']),
         ...(env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite'
           ? ['--sqlite-path', realpathOrResolve(env.AGENT_COM_SQLITE_PATH || join(repoRoot, 'agent-com.db'))]
           : ['--database-url', env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp']),
@@ -1573,16 +1845,36 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         if (!safeD1) codes.push('NO_GO_READY_PREDICATE_FALSE')
         return { ok: false, reasonCodes: [...new Set(codes)] }
       }
+      let configuration: Awaited<ReturnType<typeof recordBootstrapConfigurationReady>> = null
+      try {
+        const nativeConfigurationEvidence = {
+          providerNativeDigest: mcp.readbackDigest ?? '',
+          launchagentPlistDigest: daemonNative.plist_digest ?? '',
+          launchctlEnvironmentDigest: daemonNative.launch_safe_d1_digest ?? '',
+          runtimeIdentityDigest: runtimeIdentity.readbackDigest
+            ?? bootstrapDigest(runtimeIdentity.readinessPredicates ?? {}),
+        }
+        configuration = await recordBootstrapConfigurationReady(context, nativeConfigurationEvidence)
+      } catch (error) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+          evidenceRefs: [`configuration-first-reconcile-error:${bootstrapDigest(String(error))}`],
+        }
+      }
       return {
         ok: true,
         evidenceRefs: [
           ...(mcp.evidenceRefs ?? []), ...(memory.evidenceRefs ?? []),
           `profile-final:${bootstrapDigest(profile)}`, `daemon-final:${bootstrapDigest(daemonJson)}`,
           `d1-safe-final:${bootstrapDigest(safeD1)}`,
+          ...(configuration ? [`configuration-first-reconcile:${configuration.desiredRevision}:${configuration.candidateDigest}`] : []),
         ],
         readinessPredicates: {
           identity_ready: true, mcp_ready: true, memory_ready: true,
           process_endpoint_ready: true, queue_progress_ready: true, safe_d1_readback: true,
+          configuration_reconciler_handoff_ready:
+            configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
         },
         readbackDigest: bootstrapDigest({
           mcp: mcp.readbackDigest ?? null,
@@ -1592,7 +1884,37 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           daemon: bootstrapDigest(daemonNative),
           queue: queueReadbackDigest,
           safe_d1: bootstrapDigest(safeD1),
+          configuration,
         }),
+        mutation: configuration ? {
+          kind: 'configuration',
+          owner_key: `configuration:${context.runId}:${configuration.hostId}:${context.agentId}`,
+          before_digest: bootstrapDigest(configuration.previousObservedState ?? { absent: true }),
+          intended_after_digest: bootstrapDigest({
+            host_id: configuration.hostId,
+            agent_id: context.agentId,
+            desired_revision: configuration.desiredRevision,
+            desired_digest: configuration.desiredDigest,
+            candidate_digest: configuration.candidateDigest,
+          }),
+          actual_after_digest: bootstrapDigest({
+            host_id: configuration.hostId,
+            agent_id: context.agentId,
+            desired_revision: configuration.desiredRevision,
+            desired_digest: configuration.desiredDigest,
+            candidate_digest: configuration.candidateDigest,
+          }),
+          rollback_action: 'restore the exact prior observed projection and remove only the run-consumed desired event',
+          rollback_payload: {
+            host_id: configuration.hostId,
+            agent_id: context.agentId,
+            desired_revision: configuration.desiredRevision,
+            desired_digest: configuration.desiredDigest,
+            candidate_digest: configuration.candidateDigest,
+            outbox_event_id: configuration.outboxEventId,
+            previous_observed_state: configuration.previousObservedState,
+          },
+        } : undefined,
       }
     },
 
@@ -1610,6 +1932,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       }
       if (stage === 'B3_AGENT_PROFILE') {
         const profile = await profileGet(context.agentId)
+        const configuration = await configurationDesiredReadOnly(context.agentId)
         const mutation = context.priorState.mutations.find((item) => item.stage === stage && item.kind === 'profile')
         const digestMatches = !mutation || mutation.actual_after_digest === bootstrapDigest(managedProfile(profile))
         const ok = Boolean(profile)
@@ -1622,7 +1945,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         return ok ? {
           ok: true,
           evidenceRefs: [`resume-profile-readback:${bootstrapDigest(profile)}`],
-          readbackDigest: bootstrapDigest(managedProfile(profile)),
+          readbackDigest: bootstrapDigest({ profile: managedProfile(profile), configuration }),
         } : { ok: false, reasonCodes: ['NO_GO_RESUME_REVALIDATION'] }
       }
       if (stage === 'B4_MCP_REGISTRATION') {
@@ -1737,6 +2060,90 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         ok: true,
         readinessPredicates: { terminal_smoke_retained: true },
         readbackDigest: mutation.actual_after_digest ?? bootstrapDigest({ terminal_smoke_retained: true }),
+      }
+      if (mutation.kind === 'configuration') {
+        const payload = mutation.rollback_payload ?? {}
+        const hostId = String(payload.host_id ?? '')
+        const agentId = String(payload.agent_id ?? '')
+        const desiredRevision = Number(payload.desired_revision)
+        const desiredDigest = String(payload.desired_digest ?? '')
+        const candidateDigest = String(payload.candidate_digest ?? '')
+        const outboxEventId = payload.outbox_event_id === null || payload.outbox_event_id === undefined
+          ? null
+          : String(payload.outbox_event_id)
+        const previous = payload.previous_observed_state && typeof payload.previous_observed_state === 'object'
+          ? payload.previous_observed_state as Record<string, any>
+          : null
+        if (mutation.owner_key !== `configuration:${context.runId}:${hostId}:${agentId}`
+          || agentId !== context.agentId
+          || !Number.isSafeInteger(desiredRevision) || desiredRevision < 1
+          || !/^[0-9a-f]{64}$/.test(desiredDigest)
+          || !/^[0-9a-f]{64}$/.test(candidateDigest)) {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        const readback = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+          const removed = await tx.execute(
+            `DELETE FROM aun_configuration_observed_state
+              WHERE host_id = $1 AND agent_id = $2
+                AND observed_revision = $3 AND observed_desired_digest = $4
+                AND candidate_digest = $5`,
+            [hostId, agentId, desiredRevision, desiredDigest, candidateDigest],
+          )
+          if (removed.rowCount !== 1) throw new Error('configuration rollback fence rejected')
+          if (previous) {
+            await tx.execute(
+              `INSERT INTO aun_configuration_observed_state (
+                 host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
+                 release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
+                 launchctl_environment_digest, runtime_identity_digest, reconcile_status,
+                 drift_reason_codes, lease_id, fencing_token, observed_at
+               ) VALUES (
+                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16
+               )`,
+              [
+                previous.host_id, previous.agent_id, previous.observed_revision,
+                previous.observed_desired_digest, previous.candidate_digest,
+                previous.release_commit, previous.release_tree, previous.provider_native_digest,
+                previous.launchagent_plist_digest, previous.launchctl_environment_digest,
+                previous.runtime_identity_digest, previous.reconcile_status,
+                JSON.stringify(previous.drift_reason_codes ?? []), previous.lease_id,
+                previous.fencing_token, previous.observed_at,
+              ],
+            )
+          }
+          if (outboxEventId) {
+            const removedEvent = await tx.execute(
+              `DELETE FROM aun_configuration_desired_outbox
+                WHERE event_id = $1 AND agent_id = $2
+                  AND desired_revision = $3 AND desired_digest = $4`,
+              [outboxEventId, agentId, desiredRevision, desiredDigest],
+            )
+            if (removedEvent.rowCount !== 1) throw new Error('configuration outbox rollback fence rejected')
+          }
+          const observed = await tx.queryOne<Record<string, unknown>>(
+            `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
+                    release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
+                    launchctl_environment_digest, runtime_identity_digest, reconcile_status,
+                    drift_reason_codes, lease_id, fencing_token, observed_at
+               FROM aun_configuration_observed_state
+              WHERE host_id = $1 AND agent_id = $2`,
+            [hostId, agentId],
+          )
+          const event = outboxEventId
+            ? await tx.queryOne('SELECT event_id FROM aun_configuration_desired_outbox WHERE event_id = $1', [outboxEventId])
+            : null
+          return { observed, event }
+        })).catch(() => null)
+        const restored = Boolean(readback)
+          && !readback!.event
+          && bootstrapDigest(readback!.observed ?? { absent: true }) === bootstrapDigest(previous ?? { absent: true })
+        return restored
+          ? {
+              ok: true,
+              readinessPredicates: { rollback_verified: true },
+              readbackDigest: bootstrapDigest({ observed: readback!.observed, outbox_event_absent: true }),
+            }
+          : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
       if (mutation.kind === 'memory_readiness') {
         const payload = mutation.rollback_payload ?? {}
@@ -1886,9 +2293,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             && ledger!.active_after_counts.every((count) => count === 0)
             && ledger!.shared_unchanged
             && schemaAfterCleanup === schemaBeforeCleanup
-          const sharedSchemaRestored = payload.schema_before_digest === payload.schema_after_digest
-          const evidence = `postgres-run-owned-rollback:${bootstrapDigest({ ledger, schemaBeforeCleanup, schemaAfterCleanup, sharedSchemaRestored })}`
-          return ownedAbsent && sharedSchemaRestored
+          const approvedConfigurationMigration = payload.configuration_migration_digest === bootstrapDigest(readFileSync(join(
+            repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql',
+          )))
+          const sharedSchemaPreserved = payload.schema_before_digest === payload.schema_after_digest
+            || (approvedConfigurationMigration && schemaAfterCleanup === payload.schema_after_digest)
+          const evidence = `postgres-run-owned-rollback:${bootstrapDigest({ ledger, schemaBeforeCleanup, schemaAfterCleanup, sharedSchemaPreserved })}`
+          return ownedAbsent && sharedSchemaPreserved
             ? { ok: true, readinessPredicates: { rollback_verified: true }, evidenceRefs: [evidence], readbackDigest: bootstrapDigest({ ledger, schemaAfterCleanup }) }
             : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: [evidence] }
         }

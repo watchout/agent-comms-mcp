@@ -69,7 +69,7 @@ export type BootstrapCommandResult = {
 export type BootstrapMutation = {
   mutation_id: string
   stage: BootstrapStage
-  kind: 'db' | 'profile' | 'mcp_registration' | 'memory_readiness' | 'daemon' | 'queue_smoke'
+  kind: 'db' | 'profile' | 'mcp_registration' | 'memory_readiness' | 'daemon' | 'queue_smoke' | 'configuration'
   owner_key: string
   before_digest: string | null
   intended_after_digest: string | null
