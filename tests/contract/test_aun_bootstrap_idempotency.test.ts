@@ -16,7 +16,9 @@ describe('aun bootstrap idempotency', () => {
       ensureMemoryReadiness: pass('B5'), installAndStartDaemon: pass('B6'), runQueueSmoke: pass('B7'),
       readbackReady: pass('B8'), rollbackMutation: pass('rollback'),
     }
-    const run = async () => ({ exitCode: 0, stdout: `${'c'.repeat(40)}\n`, stderr: '' })
+    const run = async (command: string, args: string[]) => command === 'codex' && args.join(' ') === 'mcp get wasurezu --json'
+      ? { exitCode: 1, stdout: '', stderr: 'not configured' }
+      : { exitCode: 0, stdout: `${'c'.repeat(40)}\n`, stderr: '' }
     const input = { agentId: 'idempotent-agent', runtime: 'codex' as const, home: '/tmp/idempotent', repoRoot: process.cwd(), env: { HOME: '/tmp/idempotent' } }
     const first = await bootstrap(input, { stateStore: store, ports, run })
     expect(first.status).toBe('READY')

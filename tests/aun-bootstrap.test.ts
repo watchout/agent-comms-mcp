@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../bin/aun/bootstrap'
@@ -9,7 +9,7 @@ import type {
   BootstrapStageContext,
   BootstrapStageOutcome,
 } from '../bin/aun/bootstrap-types'
-import { MemoryBootstrapStateStore } from '../core/aun-bootstrap-state'
+import { MemoryBootstrapStateStore, bootstrapDigest } from '../core/aun-bootstrap-state'
 import { selectBootstrapRuntime } from '../core/runtime-inventory'
 
 const HEAD = 'c8eb30805a587a65a794499fa597935f2460c703'
@@ -49,6 +49,95 @@ function passingPorts(calls: string[] = []): BootstrapExecutionPorts {
 }
 
 describe('aun bootstrap B0-B8 state machine', () => {
+  test('F1 canonical provider identity collapses 100 object-key permutations without raw config persistence', async () => {
+    const permutations = <T>(items: T[]): T[][] => items.length < 2
+      ? [items]
+      : items.flatMap((item, index) => permutations(items.filter((_, candidate) => candidate !== index))
+          .map((tail) => [item, ...tail]))
+    const transport = {
+      type: 'stdio', command: '/bin/bun', args: ['run', 2, true],
+      env: { A: 'one', B: 'two' },
+    }
+    const fields: Array<[string, unknown]> = [
+      ['name', 'wasurezu'], ['enabled', true], ['scope', 'user'],
+      ['transport', transport], ['startup_timeout_sec', 30],
+    ]
+    const documents = permutations(fields).slice(0, 100)
+      .map((entries) => JSON.stringify(Object.fromEntries(entries)))
+    expect(new Set(documents).size).toBe(100)
+    const digests = new Set<string>()
+    for (const stdout of documents) {
+      const snapshot = await bootstrapInternal.providerInputSnapshot({
+        requestedRuntime: 'codex', repoRoot: process.cwd(), home: '/tmp/provider-json',
+        env: { HOME: '/tmp/provider-json', CODEX_HOME: '/tmp/provider-json/.codex' },
+        run: async (_command, args) => args.join(' ') === '--version'
+          ? { exitCode: 0, stdout: 'codex 1', stderr: '' }
+          : { exitCode: 0, stdout, stderr: '' },
+      }) as any
+      digests.add(snapshot.codex.wasurezu_native_readback_digest)
+      expect(JSON.stringify(snapshot)).not.toContain('"env":{"A":"one"')
+      expect(JSON.stringify(snapshot)).not.toContain('"args":["run",2,true]')
+    }
+    expect(digests.size).toBe(1)
+  })
+
+  test('F2 every semantic provider tuple change produces a distinct canonical identity', async () => {
+    const base = {
+      name: 'wasurezu', enabled: true, scope: 'user',
+      transport: { type: 'stdio', command: '/bin/bun', args: ['run', 'server.ts'], env: { A: 'one' } },
+    }
+    const variants = [
+      base,
+      { ...base, enabled: false },
+      { ...base, scope: 'project' },
+      { ...base, transport: { ...base.transport, command: '/other/bun' } },
+      { ...base, transport: { ...base.transport, args: ['run', 'other.ts'] } },
+      { ...base, transport: { ...base.transport, env: { A: 'two' } } },
+    ]
+    const digests = new Set<string>()
+    for (const document of variants) {
+      const snapshot = await bootstrapInternal.providerInputSnapshot({
+        requestedRuntime: 'codex', repoRoot: process.cwd(), home: '/tmp/provider-json-semantic',
+        env: { HOME: '/tmp/provider-json-semantic', CODEX_HOME: '/tmp/provider-json-semantic/.codex' },
+        run: async (_command, args) => args.join(' ') === '--version'
+          ? { exitCode: 0, stdout: 'codex 1', stderr: '' }
+          : { exitCode: 0, stdout: JSON.stringify(document), stderr: '' },
+      }) as any
+      digests.add(snapshot.codex.wasurezu_native_readback_digest)
+    }
+    expect(digests.size).toBe(variants.length)
+  })
+
+  test('successful malformed provider JSON fails closed before any stage mutation', async () => {
+    await expect(bootstrapInternal.providerInputSnapshot({
+      requestedRuntime: 'codex', repoRoot: process.cwd(), home: '/tmp/provider-json-invalid',
+      env: { HOME: '/tmp/provider-json-invalid' },
+      run: async (_command, args) => args.join(' ') === '--version'
+        ? { exitCode: 0, stdout: 'codex 1', stderr: '' }
+        : { exitCode: 0, stdout: '{invalid', stderr: 'raw-secret=must-not-persist' },
+    })).rejects.toThrow('NO_GO_PROVIDER_NATIVE_JSON_INVALID')
+  })
+
+  test('clean-host Codex root is canonical HOME/.codex and caller CODEX_HOME is evidence-only', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'aun-root-authority-'))
+    try {
+      const resolved = await bootstrapInternal.resolveProviderRootAuthority({
+        agentId: 'clean-root', requestedRuntime: 'codex', home,
+        repoRoot: process.cwd(), env: { HOME: home, CODEX_HOME: '/tmp/untrusted-caller-root' },
+      })
+      expect(resolved.ok).toBe(true)
+      if (!resolved.ok) throw new Error('unexpected root authority rejection')
+      expect(resolved.authority).toMatchObject({
+        existingTarget: false,
+        canonicalSourceField: 'clean_host_default',
+        canonicalRoot: join(realpathSync(home), '.codex'),
+        callerMismatch: true,
+      })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test('genuine Wasurezu MCP protocol rejects missing/error/wrong-project/fabricated/timeout receipts', async () => {
     const fixture = (mode: string) => `
       const readline = require('node:readline');
@@ -146,7 +235,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
     expect(store.locks.size).toBe(0)
   })
 
-  test('a failed memory predicate is exact resumable NO_GO, never READY', async () => {
+  test('a failed memory predicate is terminal NO_GO and instructs a new run, never resume', async () => {
     const store = new MemoryBootstrapStateStore()
     const ports = passingPorts()
     ports.ensureMemoryReadiness = async () => ({ ok: false, reasonCodes: ['NO_GO_MEMORY_RECOVERY'] })
@@ -158,10 +247,11 @@ describe('aun bootstrap B0-B8 state machine', () => {
     expect(result.stage).toBe('B5_MEMORY_READINESS')
     expect(result.reason_codes).toEqual(['NO_GO_MEMORY_RECOVERY'])
     expect(result.next_action.blocking).toBe(true)
-    expect(result.next_action.deliver_via).toContain(`--resume ${result.run_id}`)
+    expect(result.next_action.deliver_via).not.toContain('--resume')
+    expect(result.next_action.action).toContain('failed run is terminal')
   })
 
-  test('resume accepts the resolved provider and reruns only safety preflight plus incomplete stages', async () => {
+  test('a failed run cannot re-enter stages under --resume', async () => {
     const store = new MemoryBootstrapStateStore()
     const calls: string[] = []
     const ports = passingPorts(calls)
@@ -172,26 +262,23 @@ describe('aun bootstrap B0-B8 state machine', () => {
     calls.length = 0
     ports.ensureMemoryReadiness = async () => { calls.push('B5'); return { ok: true } }
     const resumed = await bootstrap({ ...input, runtime: 'codex', resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
-    expect(resumed.status).toBe('READY')
-    expect(calls).toEqual([
-      'B0', 'B1',
-      'R:B2_DB_MIGRATION', 'R:B3_AGENT_PROFILE', 'R:B4_MCP_REGISTRATION',
-      'B5', 'B6', 'B7', 'B8',
-    ])
+    expect(resumed.status).toBe('NO_GO')
+    expect(resumed.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
+    expect(calls).toEqual([])
   })
 
-  test('resume digest fences database endpoint, AUN state root, workspace, and selected provider inputs', async () => {
+  test('terminal failed-run rejection precedes changed external input probes', async () => {
     const store = new MemoryBootstrapStateStore()
     const ports = passingPorts()
     ports.ensureMemoryReadiness = async () => ({ ok: false, reasonCodes: ['NO_GO_MEMORY_RECOVERY'] })
     const base = {
       agentId: 'resume-fence', runtime: 'codex' as const, home: '/tmp/resume-fence', repoRoot: process.cwd(),
-      workspaceRoot: '/tmp/workspace-a', env: { HOME: '/tmp/resume-fence', AUN_HOME: '/tmp/aun-a', DATABASE_URL: 'postgresql:///a' },
+      workspaceRoot: '/tmp/workspace-a', env: { HOME: '/tmp/resume-fence', AUN_HOME: '/tmp/aun-a' },
     }
     const first = await bootstrap(base, { stateStore: store, ports, run: fakeRun() })
     expect(first.status).toBe('NO_GO')
     for (const changed of [
-      { env: { ...base.env, DATABASE_URL: 'postgresql:///b' } },
+      { env: { ...base.env, DATABASE_URL: 'postgresql:///unreachable' } },
       { env: { ...base.env, AUN_HOME: '/tmp/aun-b' } },
       { workspaceRoot: '/tmp/workspace-b' },
     ]) {
@@ -203,93 +290,6 @@ describe('aun bootstrap B0-B8 state machine', () => {
     store.states.set(`resume-fence/${first.run_id}`, stored)
     const mutationDrift = await bootstrap({ ...base, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
     expect(mutationDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
-  })
-
-  test('resume revalidates provider, Wasurezu, and daemon stage seals before any later mutation', async () => {
-    for (const driftStage of ['B4_MCP_REGISTRATION', 'B5_MEMORY_READINESS', 'B6_ORDINARY_DAEMON_INSTALL_START'] as const) {
-      const store = new MemoryBootstrapStateStore()
-      const calls: string[] = []
-      const ports = passingPorts(calls)
-      ports.runQueueSmoke = async () => { calls.push('B7'); return { ok: false, reasonCodes: ['NO_GO_QUEUE_NO_PROGRESS'] } }
-      const input = { agentId: `resume-${driftStage.toLowerCase()}`, runtime: 'codex' as const, home: `/tmp/resume-${driftStage}`, repoRoot: process.cwd(), env: { HOME: `/tmp/resume-${driftStage}` } }
-      const first = await bootstrap(input, { stateStore: store, ports, run: fakeRun() })
-      expect(first.status).toBe('NO_GO')
-      calls.length = 0
-      ports.revalidateStage = async (context, stage) => {
-        calls.push(`R:${stage}`)
-        return {
-          ok: true,
-          readbackDigest: stage === driftStage
-            ? `drift:${stage}`
-            : context.priorState.stages.find((record) => record.stage === stage)?.readback_digest ?? undefined,
-        }
-      }
-      const resumed = await bootstrap({ ...input, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
-      expect(resumed.status).toBe('NO_GO')
-      expect(resumed.reason_codes).toEqual(['NO_GO_RESUME_REVALIDATION'])
-      expect(calls).not.toContain('B7')
-    }
-  })
-
-  test('exact unchanged resume performs every skipped-stage native readback before continuing', async () => {
-    const store = new MemoryBootstrapStateStore()
-    const calls: string[] = []
-    const ports = passingPorts(calls)
-    ports.runQueueSmoke = async () => { calls.push('B7'); return { ok: false, reasonCodes: ['NO_GO_QUEUE_NO_PROGRESS'] } }
-    const input = { agentId: 'resume-all-native', runtime: 'codex' as const, home: '/tmp/resume-all-native', repoRoot: process.cwd(), env: { HOME: '/tmp/resume-all-native' } }
-    const first = await bootstrap(input, { stateStore: store, ports, run: fakeRun() })
-    expect(first.status).toBe('NO_GO')
-    calls.length = 0
-    ports.runQueueSmoke = async () => { calls.push('B7'); return { ok: true, readbackDigest: 'queue-live' } }
-    const resumed = await bootstrap({ ...input, resumeRunId: first.run_id }, { stateStore: store, ports, run: fakeRun() })
-    expect(resumed.status).toBe('READY')
-    expect(calls).toEqual([
-      'B0', 'B1',
-      'R:B2_DB_MIGRATION', 'R:B3_AGENT_PROFILE', 'R:B4_MCP_REGISTRATION',
-      'R:B5_MEMORY_READINESS', 'R:B6_ORDINARY_DAEMON_INSTALL_START',
-      'B7', 'B8',
-    ])
-  })
-
-  test('resume rejects altered passed-stage evidence seal and provider input version drift', async () => {
-    const store = new MemoryBootstrapStateStore()
-    const ports = passingPorts()
-    ports.runQueueSmoke = async () => ({ ok: false, reasonCodes: ['NO_GO_QUEUE_NO_PROGRESS'] })
-    let providerVersion = 'codex 1.0.0'
-    let wasurezuTuple = '{"tuple":"stable"}'
-    const run = async (command: string, args: string[]) => {
-      if (command === 'git' && args.join(' ') === 'rev-parse HEAD') return { exitCode: 0, stdout: `${HEAD}\n`, stderr: '' }
-      if (command === 'codex' && args.join(' ') === '--version') return { exitCode: 0, stdout: providerVersion, stderr: '' }
-      if (command === 'codex' && args.join(' ') === 'mcp get wasurezu --json') return { exitCode: 0, stdout: wasurezuTuple, stderr: '' }
-      return { exitCode: 1, stdout: '', stderr: '' }
-    }
-    const input = { agentId: 'resume-seal-drift', runtime: 'codex' as const, home: '/tmp/resume-seal-drift', repoRoot: process.cwd(), env: { HOME: '/tmp/resume-seal-drift' } }
-    const first = await bootstrap(input, { stateStore: store, ports, run })
-    const stored = store.states.get(`resume-seal-drift/${first.run_id}`)!
-    stored.stages.find((record) => record.stage === 'B5_MEMORY_READINESS')!.evidence_refs.push('tampered')
-    store.save(stored)
-    const tampered = await bootstrap({ ...input, resumeRunId: first.run_id }, { stateStore: store, ports, run })
-    expect(tampered.reason_codes).toEqual(['NO_GO_RESUME_REVALIDATION'])
-
-    const secondStore = new MemoryBootstrapStateStore()
-    const second = await bootstrap({ ...input, agentId: 'resume-version-drift' }, { stateStore: secondStore, ports, run })
-    providerVersion = 'codex 2.0.0'
-    const versionDrift = await bootstrap({ ...input, agentId: 'resume-version-drift', resumeRunId: second.run_id }, { stateStore: secondStore, ports, run })
-    expect(versionDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
-
-    providerVersion = 'codex 1.0.0'
-    const thirdStore = new MemoryBootstrapStateStore()
-    const third = await bootstrap({ ...input, agentId: 'resume-wasurezu-drift' }, { stateStore: thirdStore, ports, run })
-    wasurezuTuple = '{"tuple":"changed"}'
-    const wasurezuDrift = await bootstrap({ ...input, agentId: 'resume-wasurezu-drift', resumeRunId: third.run_id }, { stateStore: thirdStore, ports, run })
-    expect(wasurezuDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
-
-    wasurezuTuple = '{"tuple":"stable"}'
-    const fourthStore = new MemoryBootstrapStateStore()
-    const fourthInput = { ...input, agentId: 'resume-config-drift', env: { ...input.env, CODEX_HOME: '/tmp/codex-a' } }
-    const fourth = await bootstrap(fourthInput, { stateStore: fourthStore, ports, run })
-    const configDrift = await bootstrap({ ...fourthInput, env: { ...fourthInput.env, CODEX_HOME: '/tmp/codex-b' }, resumeRunId: fourth.run_id }, { stateStore: fourthStore, ports, run })
-    expect(configDrift.reason_codes).toEqual(['NO_GO_RESUME_INPUT_MISMATCH'])
   })
 
   test('failed mutating stage is journaled and rolled back before the per-agent lock is released', async () => {
@@ -328,6 +328,54 @@ describe('aun bootstrap B0-B8 state machine', () => {
     failWithMutation = false
     const retry = await bootstrap(input, { stateStore: store, ports, run: fakeRun(), uuid: () => 'retry-run' })
     expect(retry.status).toBe('READY')
+  })
+
+  test('F11 forced B5, B6, B7, and B8 failures restore downstream then B4 and ordered B3 mutations', async () => {
+    for (const failedStage of ['B5', 'B6', 'B7', 'B8'] as const) {
+      const store = new MemoryBootstrapStateStore()
+      const rollbackOrder: string[] = []
+      const ports = passingPorts()
+      ports.ensureAgentProfile = async () => ({
+        ok: true,
+        mutations: [
+          { kind: 'profile', owner_key: 'profile:ordered', before_digest: 'p0', intended_after_digest: 'p1', actual_after_digest: 'p1', rollback_action: 'profile rollback' },
+          { kind: 'configuration_desired', owner_key: 'configuration-desired:ordered', before_digest: 'c0', intended_after_digest: 'c1', actual_after_digest: 'c1', rollback_action: 'desired rollback' },
+        ],
+      })
+      ports.ensureMcpRegistration = async () => ({
+        ok: true,
+        mutation: { kind: 'mcp_registration', owner_key: 'mcp:ordered', before_digest: 'm0', intended_after_digest: 'm1', actual_after_digest: 'm1', rollback_action: 'provider rollback' },
+      })
+      const failure = (kind?: 'memory_readiness' | 'daemon' | 'queue_smoke' | 'configuration'): BootstrapStageOutcome => ({
+        ok: false,
+        reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+        mutation: kind ? {
+          kind, owner_key: `${kind}:ordered`, before_digest: `${kind}:0`,
+          intended_after_digest: `${kind}:1`, actual_after_digest: `${kind}:1`,
+          rollback_action: `${kind} rollback`,
+        } : undefined,
+      })
+      if (failedStage === 'B5') ports.ensureMemoryReadiness = async () => failure()
+      if (failedStage === 'B6') ports.installAndStartDaemon = async () => failure('daemon')
+      if (failedStage === 'B7') ports.runQueueSmoke = async () => failure('queue_smoke')
+      if (failedStage === 'B8') ports.readbackReady = async () => failure('configuration')
+      ports.rollbackMutation = async (_context, mutation) => {
+        rollbackOrder.push(mutation.kind)
+        return { ok: true, readbackDigest: `restored:${mutation.kind}` }
+      }
+      const agentId = `ordered-reverse-rollback-${failedStage.toLowerCase()}`
+      const result = await bootstrap({
+        agentId, runtime: 'codex', home: `/tmp/${agentId}`,
+        repoRoot: process.cwd(), env: { HOME: `/tmp/${agentId}` },
+      }, { stateStore: store, ports, run: fakeRun() })
+      expect(result.status, failedStage).toBe('NO_GO')
+      const b4Index = rollbackOrder.indexOf('mcp_registration')
+      expect(b4Index, failedStage).toBeGreaterThanOrEqual(0)
+      expect(rollbackOrder.slice(b4Index, b4Index + 3), failedStage)
+        .toEqual(['mcp_registration', 'configuration_desired', 'profile'])
+      const state = store.states.get(`${agentId}/${result.run_id}`)!
+      expect(state.mutations.every((mutation) => mutation.rollback_status === 'verified'), failedStage).toBe(true)
+    }
   })
 
   test('B4 stage deadline after provider mutation uses fresh readback, journals, and rolls back before lock release', async () => {

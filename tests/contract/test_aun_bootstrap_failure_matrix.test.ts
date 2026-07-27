@@ -4,7 +4,9 @@ import type { BootstrapExecutionPorts, BootstrapReasonCode, BootstrapStageOutcom
 import { MemoryBootstrapStateStore } from '../../core/aun-bootstrap-state'
 
 const HEAD = 'c8eb30805a587a65a794499fa597935f2460c703'
-const fakeRun = async () => ({ exitCode: 0, stdout: `${HEAD}\n`, stderr: '' })
+const fakeRun = async (command: string, args: string[]) => command === 'codex' && args.join(' ') === 'mcp get wasurezu --json'
+  ? { exitCode: 1, stdout: '', stderr: 'not configured' }
+  : { exitCode: 0, stdout: `${HEAD}\n`, stderr: '' }
 
 function ports(failMethod: keyof BootstrapExecutionPorts, code: BootstrapReasonCode): BootstrapExecutionPorts {
   const ok = async (): Promise<BootstrapStageOutcome> => ({ ok: true })
@@ -35,7 +37,7 @@ describe('aun bootstrap failure injection matrix', () => {
     ['readbackReady', 'NO_GO_READY_PREDICATE_FALSE', 'B8_READY_READBACK'],
   ]
   for (const [method, code, stage] of cases) {
-    test(`${stage} failure is resumable NO_GO with exact code`, async () => {
+    test(`${stage} failure is terminal NO_GO with exact code`, async () => {
       const store = new MemoryBootstrapStateStore()
       const result = await bootstrap({
         agentId: `failure-${stage.toLowerCase()}`, runtime: 'codex', home: '/tmp/failure', repoRoot: process.cwd(), env: { HOME: '/tmp/failure' },
@@ -43,7 +45,7 @@ describe('aun bootstrap failure injection matrix', () => {
       expect(result.status).toBe('NO_GO')
       expect(result.stage).toBe(stage)
       expect(result.reason_codes).toEqual([code])
-      expect(result.next_action.deliver_via).toContain('--resume')
+      expect(result.next_action.deliver_via).not.toContain('--resume')
     })
   }
 })
