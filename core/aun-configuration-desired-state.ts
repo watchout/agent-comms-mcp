@@ -223,7 +223,7 @@ type ConfigurationRestartReceiptAuthSnapshot = {
   content: string
   signature: string
   timestamp: number
-  createdAt: string | Date
+  createdAtEpochMicroseconds: string
   ownerDecisionRef: string
 }
 
@@ -248,7 +248,9 @@ async function readAuthenticatedConfigurationRestartReceipt(
 ): Promise<ConfigurationRestartReceiptAuthSnapshot | null> {
   const row = await db.queryOne<any>(
     `SELECT receipt.id, receipt.channel_id, receipt.author_id, receipt.content,
-            receipt.created_at, receipt.metadata, r.owner_decision_ref
+            (extract(epoch FROM receipt.created_at) * 1000000)::numeric(20, 0)::text
+              AS created_at_epoch_microseconds,
+            receipt.metadata, r.owner_decision_ref
        FROM aun_configuration_restart_requests r
        JOIN agent_messages receipt
          ON r.cto_execution_receipt_ref = 'aun:agent-message:' || receipt.id::text
@@ -275,8 +277,11 @@ async function readAuthenticatedConfigurationRestartReceipt(
   const nowSeconds = Math.floor(Date.now() / 1000)
   const replayWindow = CONFIGURATION_RESTART_RECEIPT_AUTH_REPLAY_WINDOW_SECONDS
   if (Math.abs(nowSeconds - timestamp) > replayWindow) return null
-  const createdAtMs = new Date(row.created_at).getTime()
-  if (!Number.isFinite(createdAtMs) || Math.abs(Math.floor(createdAtMs / 1000) - timestamp) > replayWindow) return null
+  const createdAtEpochMicroseconds = String(row.created_at_epoch_microseconds ?? '')
+  if (!/^[0-9]{1,20}$/.test(createdAtEpochMicroseconds)) return null
+  const createdAtSeconds = Number(BigInt(createdAtEpochMicroseconds) / 1_000_000n)
+  if (!Number.isSafeInteger(createdAtSeconds)
+    || Math.abs(createdAtSeconds - timestamp) > replayWindow) return null
 
   const authorizationDocument = configurationRestartReceiptAuthorizationDocument({
     channelId,
@@ -307,7 +312,7 @@ async function readAuthenticatedConfigurationRestartReceipt(
   if (actualBytes.length !== expectedBytes.length || !timingSafeEqual(actualBytes, expectedBytes)) return null
   return {
     receiptId: String(row.id), channelId, content, signature, timestamp,
-    createdAt: row.created_at, ownerDecisionRef,
+    createdAtEpochMicroseconds, ownerDecisionRef,
   }
 }
 
@@ -632,7 +637,7 @@ export async function claimApprovedConfigurationRestartExecution(
         AND receipt.content = $16::text
         AND receipt.metadata #>> '{auth,signature}' = $17::text
         AND receipt.metadata #>> '{auth,timestamp}' = $18::text
-        AND receipt.created_at = $19::timestamptz
+        AND (extract(epoch FROM receipt.created_at) * 1000000)::numeric(20, 0)::text = $19::text
         AND a.agent_id = r.agent_id
         AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
         AND l.lease_id = $11::uuid AND l.fencing_token = $12::bigint
@@ -654,7 +659,8 @@ export async function claimApprovedConfigurationRestartExecution(
       input.exactReleaseTree, JSON.stringify(refs), input.executionLeaseId,
       input.executionFencingToken, input.executorAgentId,
       authenticatedReceipt.receiptId, authenticatedReceipt.channelId, authenticatedReceipt.content,
-      authenticatedReceipt.signature, String(authenticatedReceipt.timestamp), authenticatedReceipt.createdAt,
+      authenticatedReceipt.signature, String(authenticatedReceipt.timestamp),
+      authenticatedReceipt.createdAtEpochMicroseconds,
     ],
   )
   if (!row) return null
@@ -729,7 +735,7 @@ export async function verifyConfigurationRestartExecutionClaim(
         AND receipt.content = $18::text
         AND receipt.metadata #>> '{auth,signature}' = $19::text
         AND receipt.metadata #>> '{auth,timestamp}' = $20::text
-        AND receipt.created_at = $21::timestamptz
+        AND (extract(epoch FROM receipt.created_at) * 1000000)::numeric(20, 0)::text = $21::text
         AND r.owner_decision_expires_at > now()
         AND a.desired_revision = r.to_revision AND a.desired_digest = r.to_digest
         AND l.fencing_token = r.execution_fencing_token
@@ -745,7 +751,7 @@ export async function verifyConfigurationRestartExecutionClaim(
       JSON.stringify(normalizeControlRefs(claim.exactControlRefs)), claim.ownerDecisionRef,
       claim.ctoExecutionReceiptRef, claim.ctoExecutionReceiptMessageId,
       authenticatedReceipt.channelId, authenticatedReceipt.content, authenticatedReceipt.signature,
-      String(authenticatedReceipt.timestamp), authenticatedReceipt.createdAt,
+      String(authenticatedReceipt.timestamp), authenticatedReceipt.createdAtEpochMicroseconds,
     ],
   )
   return row?.current === true

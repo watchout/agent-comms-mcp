@@ -268,11 +268,24 @@ describe('AUN configuration reconciliation migration', () => {
         executionFencingToken: ctoLease.lease.fencing_token,
       })
       await db.execute(
-        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, created_at)
-         VALUES ($1, $2, 'codex-cto', $3, 'approval', $4::jsonb, to_timestamp($5))`,
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata)
+         VALUES ($1, $2, 'codex-cto', $3, 'approval', $4::jsonb)`,
         [ctoReceiptMessageId, receiptChannelId, signedReceipt.content,
-          JSON.stringify(signedReceipt.metadata), signedReceipt.timestamp],
+          JSON.stringify(signedReceipt.metadata)],
       )
+      let receiptSubmillisecondMicroseconds = 0
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const persisted = await db.queryOne<{ submillisecond_microseconds: number }>(
+          `SELECT ((extract(epoch FROM created_at) * 1000000)::bigint % 1000)::int
+                    AS submillisecond_microseconds
+             FROM agent_messages WHERE id = $1`,
+          [ctoReceiptMessageId],
+        )
+        receiptSubmillisecondMicroseconds = Number(persisted?.submillisecond_microseconds ?? 0)
+        if (receiptSubmillisecondMicroseconds !== 0) break
+        await db.execute(`UPDATE agent_messages SET created_at = DEFAULT WHERE id = $1`, [ctoReceiptMessageId])
+      }
+      expect(receiptSubmillisecondMicroseconds).not.toBe(0)
       await db.execute(
         `UPDATE aun_configuration_restart_requests
             SET status = 'APPROVED', owner_decision_ref = $2,
