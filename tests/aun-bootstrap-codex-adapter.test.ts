@@ -363,6 +363,7 @@ describe('aun bootstrap Codex adapter', () => {
     const original = Buffer.from('[mcp_servers.aun]\nenabled = false\nlegacy = "exact"\n')
     const absentBytes = Buffer.from('[mcp_servers.other]\nenabled = true\n')
     const intendedBytes = Buffer.from('[mcp_servers.aun]\nenabled = true\ncommand = "current"\n')
+    const foreignBytes = Buffer.from('[mcp_servers.foreign]\nenabled = true\nowner = "other-process"\n')
     writeFileSync(configPath, original, { mode: 0o600 })
     const legacy = {
       name: 'aun', enabled: false, scope: 'user',
@@ -388,7 +389,15 @@ describe('aun bootstrap Codex adapter', () => {
       ? 'legacy'
       : readFileSync(configPath).equals(intendedBytes) ? 'intended' : 'absent'
     const seenRoots: string[] = []
+    const admissionTrace: string[] = []
     let addExitCode = 0
+    let injectForeignEditDuringAbsenceReadback = false
+    candidateContext.admitRecoveryMutation = (mutation) => {
+      admissionTrace.push(`admit:${String(mutation.rollback_payload?.recovery_admission_phase)}`)
+    }
+    candidateContext.cancelRecoveryAdmission = () => {
+      admissionTrace.push('cancel')
+    }
     const adapter = createCodexBootstrapAdapter({
       bunPath: '/bin/bun', serverEntry: 'server.ts',
       run: async (_command, args, options) => {
@@ -398,6 +407,10 @@ describe('aun bootstrap Codex adapter', () => {
         if (joined === 'mcp get aun --json') {
           if (state === 'legacy') return { exitCode: 0, stdout: JSON.stringify(legacy), stderr: '' }
           if (state === 'intended') return { exitCode: 0, stdout: exactGet(), stderr: '' }
+          if (injectForeignEditDuringAbsenceReadback) {
+            injectForeignEditDuringAbsenceReadback = false
+            writeFileSync(configPath, foreignBytes, { mode: 0o600 })
+          }
           return { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
         }
         if (joined === 'mcp list --json') return {
@@ -408,10 +421,12 @@ describe('aun bootstrap Codex adapter', () => {
           stderr: '',
         }
         if (joined === 'mcp remove aun') {
+          admissionTrace.push('remove')
           writeFileSync(configPath, absentBytes, { mode: 0o600 })
           return { exitCode: 0, stdout: 'removed', stderr: '' }
         }
         if (args.slice(0, 3).join(' ') === 'mcp add aun') {
+          admissionTrace.push('add')
           writeFileSync(configPath, intendedBytes, { mode: 0o600 })
           return { exitCode: addExitCode, stdout: addExitCode === 0 ? 'added' : '', stderr: addExitCode === 0 ? '' : 'timeout after mutation' }
         }
@@ -421,6 +436,12 @@ describe('aun bootstrap Codex adapter', () => {
     try {
       const upgraded = await adapter.applyMcpRegistration(candidateContext)
       expect(upgraded.ok).toBe(true)
+      expect(admissionTrace.slice(0, 4)).toEqual([
+        'admit:B4_PRE_PROVIDER_REMOVE',
+        'remove',
+        'admit:B4_POST_PROVIDER_REMOVE',
+        'add',
+      ])
       expect(upgraded.mutation?.rollback_payload).toMatchObject({
         replaced_recognized_disabled_legacy: true,
         backup_fsync_verified: true,
@@ -458,6 +479,19 @@ describe('aun bootstrap Codex adapter', () => {
       expect(finalized.ok).toBe(true)
       expect(existsSync(terminalBackupPath)).toBe(false)
       expect(terminalMutation.rollback_payload).toMatchObject({ backup_retained: false, backup_deleted: true })
+
+      writeFileSync(configPath, original, { mode: 0o600 })
+      const foreignUpgrade = await adapter.applyMcpRegistration(candidateContext)
+      expect(foreignUpgrade.ok).toBe(true)
+      const foreignBackupPath = String(foreignUpgrade.mutation?.rollback_payload?.private_backup_path)
+      injectForeignEditDuringAbsenceReadback = true
+      const foreignRollback = await adapter.rollbackRuntimeRegistration(candidateContext, {
+        mutation_id: 'legacy-foreign-edit', stage: 'B4_MCP_REGISTRATION', rollback_status: 'not_run', ...foreignUpgrade.mutation!,
+      })
+      expect(foreignRollback.ok).toBe(false)
+      expect(foreignRollback.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+      expect(readFileSync(configPath).equals(foreignBytes)).toBe(true)
+      expect(existsSync(foreignBackupPath)).toBe(true)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

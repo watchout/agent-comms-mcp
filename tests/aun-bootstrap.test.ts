@@ -330,6 +330,51 @@ describe('aun bootstrap B0-B8 state machine', () => {
     expect(retry.status).toBe('READY')
   })
 
+  test('B3 and B4 recovery admissions are durable before the protected effect boundary and block resume re-entry', async () => {
+    for (const target of ['B3', 'B4'] as const) {
+      const store = new MemoryBootstrapStateStore()
+      const ports = passingPorts()
+      const agentId = `recovery-admission-${target.toLowerCase()}`
+      const input = {
+        agentId, runtime: 'codex' as const, home: `/tmp/${agentId}`,
+        repoRoot: process.cwd(), env: { HOME: `/tmp/${agentId}` },
+      }
+      let crashSnapshot: ReturnType<MemoryBootstrapStateStore['load']> = null
+      let targetCalls = 0
+      const boundary = async (context: BootstrapStageContext): Promise<BootstrapStageOutcome> => {
+        targetCalls++
+        context.admitRecoveryMutation?.({
+          kind: target === 'B3' ? 'configuration_desired' : 'mcp_registration',
+          owner_key: `${target.toLowerCase()}:${context.runId}`,
+          before_digest: 'exact-prestate',
+          intended_after_digest: 'intended-poststate',
+          actual_after_digest: null,
+          rollback_action: 'restore exact admitted prestate',
+          rollback_payload: { created_by_run: true, exact_artifact_identity: 'fixture' },
+        })
+        crashSnapshot = store.load(agentId, context.runId)
+        expect(crashSnapshot?.stages.find((record) => record.stage === (target === 'B3' ? 'B3_AGENT_PROFILE' : 'B4_MCP_REGISTRATION')))
+          .toMatchObject({ status: 'pending' })
+        expect(crashSnapshot?.mutations).toHaveLength(1)
+        expect(crashSnapshot?.mutations[0]?.rollback_payload).toMatchObject({ recovery_admission: true })
+        return { ok: false, reasonCodes: ['NO_GO_POST_MUTATION_READBACK'] }
+      }
+      if (target === 'B3') ports.ensureAgentProfile = boundary
+      else ports.ensureMcpRegistration = boundary
+      ports.rollbackMutation = async () => ({ ok: true, readbackDigest: 'exact-prestate' })
+      const first = await bootstrap(input, { stateStore: store, ports, run: fakeRun(), uuid: () => target.toLowerCase() })
+      expect(first.status).toBe('NO_GO')
+      expect(crashSnapshot).not.toBeNull()
+      store.save(crashSnapshot!)
+      const resumed = await bootstrap(
+        { ...input, resumeRunId: `bootstrap-${target.toLowerCase()}` },
+        { stateStore: store, ports, run: fakeRun() },
+      )
+      expect(resumed.reason_codes).toEqual(['NO_GO_RESUME_REVALIDATION'])
+      expect(targetCalls).toBe(1)
+    }
+  })
+
   test('F11 forced B5, B6, B7, and B8 failures restore downstream then B4 and ordered B3 mutations', async () => {
     for (const failedStage of ['B5', 'B6', 'B7', 'B8'] as const) {
       const store = new MemoryBootstrapStateStore()

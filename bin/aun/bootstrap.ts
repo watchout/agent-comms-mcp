@@ -616,6 +616,38 @@ function jsonRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
+function providerRootAuthorityTupleDigest(agentId: string, row: Record<string, unknown>): string {
+  const metadata = jsonRecord(row.metadata)
+  const projection = jsonRecord(row.ordinary_projection)
+  return bootstrapDigest({
+    agent_id: String(row.agent_id ?? agentId),
+    repo_url: typeof row.repo_url === 'string' ? row.repo_url : null,
+    workspace_path: typeof row.workspace_path === 'string'
+      ? row.workspace_path
+      : typeof row.canonical_workspace === 'string'
+        ? row.canonical_workspace
+        : typeof row.home_directory === 'string'
+          ? row.home_directory
+          : null,
+    config_profile: {
+      runtime_engine_preference: String(row.runtime_engine_preference ?? '').toLowerCase() || null,
+      metadata_codex_home: typeof metadata.codex_home === 'string' ? metadata.codex_home : null,
+    },
+    provider_binding: {
+      expected_provider_identity_ref: typeof row.expected_provider_identity_ref === 'string'
+        ? row.expected_provider_identity_ref
+        : null,
+      provider_token_source_ref: typeof row.provider_token_source_ref === 'string'
+        ? row.provider_token_source_ref
+        : null,
+      projection_provider_config_root: typeof projection.provider_config_root === 'string'
+        ? projection.provider_config_root
+        : null,
+    },
+    projection_digest: bootstrapDigest(projection),
+  })
+}
+
 async function resolveProviderRootAuthority(input: {
   agentId: string
   requestedRuntime: BootstrapOptions['runtime']
@@ -640,6 +672,18 @@ async function resolveProviderRootAuthority(input: {
     canonicalRealpathDigest: bootstrapDigest(existsSync(cleanRoot) ? realpathSync(cleanRoot) : cleanRoot),
     projectionMatches: true,
     callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== cleanRoot),
+    authorityTupleDigest: bootstrapDigest({
+      agent_id: input.agentId,
+      repo_url: null,
+      workspace_path: null,
+      config_profile: { runtime_engine_preference: null, metadata_codex_home: null },
+      provider_binding: {
+        expected_provider_identity_ref: null,
+        provider_token_source_ref: null,
+        projection_provider_config_root: null,
+      },
+      projection_digest: bootstrapDigest({}),
+    }),
   })
   if (input.requestedRuntime === 'claude') return { ok: true, authority: null }
 
@@ -653,8 +697,22 @@ async function resolveProviderRootAuthority(input: {
   let row: Record<string, unknown> | null
   try {
     row = await withBootstrapDb(input.env, (db) => db.queryOne<Record<string, unknown>>(
-      `SELECT metadata, runtime_engine_preference
-         FROM agents WHERE agent_id = $1`,
+      `SELECT a.agent_id, a.metadata, a.runtime_engine_preference, a.home_directory,
+              a.provider_token_source_ref,
+              to_jsonb(a)->'canonical_workspace' AS canonical_workspace,
+              to_jsonb(a)->'expected_provider_identity_ref' AS expected_provider_identity_ref,
+              to_jsonb(a)->'ordinary_projection' AS ordinary_projection,
+              workspace.repo_url, workspace.local_path AS workspace_path
+         FROM agents a
+         LEFT JOIN LATERAL (
+           SELECT w.repo_url, w.local_path
+             FROM agent_workspace_bindings b
+             JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+            WHERE b.agent_id = a.agent_id AND b.active = true
+            ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+            LIMIT 1
+         ) workspace ON true
+        WHERE a.agent_id = $1`,
       [input.agentId],
     ), { readonly: true })
   } catch {
@@ -665,19 +723,6 @@ async function resolveProviderRootAuthority(input: {
     }
   }
   if (!row) return { ok: true, authority: cleanAuthority() }
-  try {
-    const projected = await withBootstrapDb(input.env, (db) => db.queryOne<Record<string, unknown>>(
-      `SELECT ordinary_projection FROM agents WHERE agent_id = $1`,
-      [input.agentId],
-    ), { readonly: true })
-    row = { ...row, ordinary_projection: projected?.ordinary_projection }
-  } catch {
-    return {
-      ok: false,
-      reasonCode: 'NO_GO_DB_CONNECT',
-      evidenceRef: `provider-root-db-readback:${bootstrapDigest({ agent_id: input.agentId, projection: 'unavailable' })}`,
-    }
-  }
   const runtime = String(row.runtime_engine_preference ?? '').toLowerCase()
   if (input.requestedRuntime === 'auto' && runtime !== 'codex') return { ok: true, authority: null }
 
@@ -729,6 +774,7 @@ async function resolveProviderRootAuthority(input: {
       canonicalRealpathDigest: bootstrapDigest(canonicalRealpath),
       projectionMatches: true,
       callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== rawRoot),
+      authorityTupleDigest: providerRootAuthorityTupleDigest(input.agentId, row),
     },
   }
 }
@@ -1127,14 +1173,49 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         : ''
     if (!/^[0-9a-f]{40}$/.test(releaseTree)) throw new Error('configuration desired release tree unavailable')
     let createdArtifact: DurableArtifactIdentity | null = null
+    let recoveryAdmitted = false
     try {
       return await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
-        const preAgentResult = await tx.queryOne<{ row: Record<string, unknown> }>(
-          `SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1 FOR UPDATE`,
+        const preAgentResult = await tx.queryOne<{
+          row: Record<string, unknown>
+          repo_url: string | null
+          workspace_path: string | null
+        }>(
+          `SELECT to_jsonb(a) AS row, workspace.repo_url, workspace.local_path AS workspace_path
+             FROM agents a
+             LEFT JOIN LATERAL (
+               SELECT w.repo_url, w.local_path
+                 FROM agent_workspace_bindings b
+                 JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+                WHERE b.agent_id = a.agent_id AND b.active = true
+                ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+                LIMIT 1
+             ) workspace ON true
+            WHERE a.agent_id = $1
+            FOR UPDATE OF a`,
           [context.agentId],
         )
         if (!preAgentResult?.row) throw new Error('configuration desired agent row unavailable')
         const preAgentRow = preAgentResult.row
+        if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === true) {
+          const liveMetadata = jsonRecord(preAgentRow.metadata)
+          const liveProjection = jsonRecord(preAgentRow.ordinary_projection)
+          const liveRoot = typeof liveMetadata.codex_home === 'string' ? liveMetadata.codex_home : ''
+          const liveProjectedRoot = typeof liveProjection.provider_config_root === 'string'
+            ? liveProjection.provider_config_root
+            : ''
+          const liveTupleDigest = providerRootAuthorityTupleDigest(context.agentId, {
+            ...preAgentRow,
+            repo_url: preAgentResult.repo_url,
+            workspace_path: preAgentResult.workspace_path,
+          })
+          const expectedTupleDigest = context.providerRootAuthority.authorityTupleDigest ?? liveTupleDigest
+          if (liveRoot !== context.providerRootAuthority.canonicalRoot
+            || liveProjectedRoot !== context.providerRootAuthority.canonicalRoot
+            || liveTupleDigest !== expectedTupleDigest) {
+            throw new Error('provider root authority drift under B3 row lock')
+          }
+        }
         const preOutboxRows = (await tx.query<{ row: Record<string, unknown> }>(
           `SELECT to_jsonb(o) AS row
              FROM aun_configuration_desired_outbox o
@@ -1247,32 +1328,43 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
         createdArtifact = writeConfigurationDesiredArtifact(home, env, artifact)
         const artifactDigest = bootstrapDigest(artifact)
+        const mutation = {
+          kind: 'configuration_desired' as const,
+          owner_key: `configuration-desired:${context.runId}:${context.agentId}`,
+          before_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(preAgentRow), outbox: preOutboxRows }),
+          intended_after_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
+          actual_after_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
+          rollback_action: 'restore the exact locked agents/outbox preimage and delete only exact run/compensating events',
+          rollback_payload: {
+            created_by_run: true,
+            rollback_artifact_digest: artifactDigest,
+            rollback_artifact_identity: createdArtifact,
+            new_event_ids: heldEventIds,
+            desired_revision: desiredRevision,
+            desired_digest: desiredDigest,
+            post_union_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
+          },
+        }
+        context.admitRecoveryMutation?.({
+          ...mutation,
+          actual_after_digest: null,
+          rollback_payload: {
+            ...mutation.rollback_payload,
+            recovery_admission: true,
+            recovery_admission_phase: 'B3_PRE_COMMIT',
+          },
+        })
+        recoveryAdmitted = Boolean(context.admitRecoveryMutation)
         return {
           desired_revision: desiredRevision,
           desired_digest: desiredDigest,
           release_tree: String(postAgentRow.desired_release_tree),
           held_event_ids: heldEventIds,
-          mutation: {
-            kind: 'configuration_desired',
-            owner_key: `configuration-desired:${context.runId}:${context.agentId}`,
-            before_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(preAgentRow), outbox: preOutboxRows }),
-            intended_after_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
-            actual_after_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
-            rollback_action: 'restore the exact locked agents/outbox preimage and delete only exact run/compensating events',
-            rollback_payload: {
-              created_by_run: true,
-              rollback_artifact_digest: artifactDigest,
-              rollback_artifact_identity: createdArtifact,
-              new_event_ids: heldEventIds,
-              desired_revision: desiredRevision,
-              desired_digest: desiredDigest,
-              post_union_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
-            },
-          },
+          mutation,
         }
       }))
     } catch (error) {
-      if (createdArtifact && existsSync(createdArtifact.path)) {
+      if (!recoveryAdmitted && createdArtifact && existsSync(createdArtifact.path)) {
         try { removeConfigurationDesiredArtifact(createdArtifact) } catch { /* preserve an unverifiable artifact for manual recovery */ }
       }
       throw error
@@ -2582,9 +2674,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         }
         const { artifact, identity } = artifactReadback
+        const artifactPostDigest = bootstrapDigest({
+          agent: configurationDesiredControlledRow(artifact.post_agent_row),
+          outbox: artifact.post_outbox_rows,
+        })
+        const artifactPreDigest = bootstrapDigest({
+          agent: configurationDesiredControlledRow(artifact.pre_agent_row),
+          outbox: artifact.pre_outbox_rows,
+        })
+        const admissionOpen = payload.recovery_admission === true && mutation.actual_after_digest === null
         if (artifact.run_id !== context.runId || artifact.agent_id !== context.agentId
-          || bootstrapDigest({ agent: configurationDesiredControlledRow(artifact.post_agent_row), outbox: artifact.post_outbox_rows }) !== mutation.actual_after_digest
-          || bootstrapDigest({ agent: configurationDesiredControlledRow(artifact.pre_agent_row), outbox: artifact.pre_outbox_rows }) !== mutation.before_digest) {
+          || artifactPostDigest !== (admissionOpen ? mutation.intended_after_digest : mutation.actual_after_digest)
+          || artifactPreDigest !== mutation.before_digest) {
           return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         }
         const restored = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
@@ -2597,7 +2698,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
               WHERE agent_id = $1 ORDER BY event_id`,
             [context.agentId],
           )).map((item) => item.row)
-          if (!currentAgent || bootstrapDigest({ agent: configurationDesiredControlledRow(currentAgent), outbox: currentOutbox }) !== mutation.actual_after_digest) {
+          const currentDigest = currentAgent
+            ? bootstrapDigest({ agent: configurationDesiredControlledRow(currentAgent), outbox: currentOutbox })
+            : null
+          if (admissionOpen && currentDigest === artifactPreDigest) {
+            return {
+              digest: artifactPreDigest,
+              compensatingEventCount: 0,
+              exactDeleteCount: 0,
+              recoveryAdmissionNoEffect: true,
+            }
+          }
+          if (!currentAgent || currentDigest !== artifactPostDigest) {
             throw new Error('configuration desired rollback poststate fence mismatch')
           }
           const currentEventIds = new Set(currentOutbox.map((row) => String(row.event_id)))
@@ -2654,22 +2766,52 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             throw new Error('configuration desired compensating event cardinality invalid')
           }
           for (const event of compensatingEvents) {
+            const desiredRevision = Number(event.desired_revision)
+            const desiredDigest = String(event.desired_digest ?? '')
+            if (!Number.isSafeInteger(desiredRevision) || !/^[0-9a-f]{64}$/.test(desiredDigest)) {
+              throw new Error('configuration desired compensating event identity invalid')
+            }
             const held = await tx.execute(
               `UPDATE aun_configuration_desired_outbox SET available_at = 'infinity'::timestamptz
                 WHERE event_id = $1 AND agent_id = $2
+                  AND desired_revision = $3 AND desired_digest = $4
                   AND delivered_at IS NULL AND attempt_count = 0`,
-              [String(event.event_id), context.agentId],
+              [String(event.event_id), context.agentId, desiredRevision, desiredDigest],
             )
             if (held.rowCount !== 1) throw new Error('configuration desired compensating event hold rejected')
           }
           let exactDeleteCount = 0
-          for (const eventId of [...artifact.new_event_ids, ...compensatingEvents.map((row) => String(row.event_id))]) {
+          const runEvents = artifact.post_outbox_rows.filter((row) => artifact.new_event_ids.includes(String(row.event_id)))
+          const exactEvents = [...runEvents, ...compensatingEvents]
+          if (exactEvents.length !== artifact.new_event_ids.length + compensatingEvents.length) {
+            throw new Error('configuration desired exact event fence cardinality invalid')
+          }
+          for (const event of exactEvents) {
+            const eventId = String(event.event_id)
+            const desiredRevision = Number(event.desired_revision)
+            const desiredDigest = String(event.desired_digest ?? '')
+            const exactReadback = await tx.queryOne<Record<string, unknown>>(
+              `SELECT event_id, agent_id, desired_revision, desired_digest, delivered_at, attempt_count, available_at
+                 FROM aun_configuration_desired_outbox
+                WHERE event_id = $1 AND agent_id = $2 FOR UPDATE`,
+              [eventId, context.agentId],
+            )
+            if (!exactReadback
+              || Number(exactReadback.desired_revision) !== desiredRevision
+              || String(exactReadback.desired_digest) !== desiredDigest
+              || exactReadback.delivered_at !== null
+              || Number(exactReadback.attempt_count) !== 0
+              || (exactReadback.available_at !== Number.POSITIVE_INFINITY
+                && String(exactReadback.available_at).toLowerCase() !== 'infinity')) {
+              throw new Error('configuration desired exact event readback fence mismatch')
+            }
             const removed = await tx.execute(
               `DELETE FROM aun_configuration_desired_outbox
                 WHERE event_id = $1 AND agent_id = $2
+                  AND desired_revision = $3 AND desired_digest = $4
                   AND delivered_at IS NULL AND attempt_count = 0
                   AND available_at = 'infinity'::timestamptz`,
-              [eventId, context.agentId],
+              [eventId, context.agentId, desiredRevision, desiredDigest],
             )
             if (removed.rowCount !== 1) throw new Error('configuration desired exact event removal rejected')
             exactDeleteCount += removed.rowCount
@@ -2715,6 +2857,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             digest: bootstrapDigest({ agent: finalAgent, outbox: finalOutbox }),
             compensatingEventCount: compensatingEvents.length,
             exactDeleteCount,
+            recoveryAdmissionNoEffect: false,
           }
         })).catch(() => null)
         if (!restored) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
@@ -2740,6 +2883,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             broad_delete_count: 0,
             trigger_disable_count: 0,
             foreign_event_mutation_count: 0,
+            recovery_admission_no_effect: restored.recoveryAdmissionNoEffect,
           },
           evidenceRefs: [`configuration-desired-rollback:${bootstrapDigest({
             final_digest: restored.digest,
@@ -2748,6 +2892,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             broad_delete_count: 0,
             trigger_disable_count: 0,
             foreign_event_mutation_count: 0,
+            recovery_admission_no_effect: restored.recoveryAdmissionNoEffect,
           })}`],
           readbackDigest: restored.digest,
         }
@@ -3186,9 +3331,77 @@ export async function bootstrap(
     }
   }
 
+  let activeStageForAdmission: BootstrapStage | null = null
+  const fsyncRecoveryAdmissionState = () => {
+    if (!(stateStore instanceof FileBootstrapStateStore)) return
+    const path = join(stateStore.root, validateBootstrapAgentId(agentId), `${runId}.json`)
+    const identity = lstatSync(path)
+    if (identity.isSymbolicLink() || !identity.isFile() || identity.nlink !== 1) {
+      throw new Error('recovery admission journal identity invalid')
+    }
+    const fd = openSync(path, 'r')
+    try { fsyncSync(fd) } finally { closeSync(fd) }
+    fsyncDirectory(dirname(path))
+  }
   const context = (abortSignal?: AbortSignal, priorState: BootstrapRunState = state!): BootstrapStageContext => ({
     runId, agentId, requestedRuntime: state!.requested_runtime, resolvedRuntime: state!.resolved_runtime,
     repoRoot, workspaceRoot, repoHead, dryRun: Boolean(options.dryRun), env, priorState, abortSignal,
+    admitRecoveryMutation: options.dryRun ? undefined : (reported) => {
+      const stage = activeStageForAdmission
+      if (!stage) throw new Error('recovery admission attempted outside an active bootstrap stage')
+      const recoveryFields = {
+        recovery_admission: true,
+        recovery_preimage_readback_fence: reported.before_digest,
+        recovery_intended_mutation_fence: reported.intended_after_digest,
+        recovery_ownership_predicate_digest: bootstrapDigest({
+          stage,
+          owner_key: reported.owner_key,
+          kind: reported.kind,
+          before_digest: reported.before_digest,
+          intended_after_digest: reported.intended_after_digest,
+          rollback_artifact_identity: reported.rollback_payload?.rollback_artifact_identity
+            ?? reported.rollback_payload?.private_backup_identity
+            ?? null,
+        }),
+        rollback_disposition: 'admitted_pending_effect',
+      }
+      const existing = state!.mutations.find((mutation) => mutation.stage === stage
+        && mutation.owner_key === reported.owner_key
+        && mutation.rollback_payload?.recovery_admission === true)
+      if (existing) {
+        Object.assign(existing, reported)
+        existing.rollback_payload = {
+          ...(reported.rollback_payload ?? {}),
+          ...recoveryFields,
+        }
+      } else {
+        state!.mutations.push({
+          mutation_id: `${runId}:${stage}:admission:${state!.mutations.length + 1}`,
+          stage,
+          rollback_status: 'not_run',
+          ...reported,
+          rollback_payload: {
+            ...(reported.rollback_payload ?? {}),
+            ...recoveryFields,
+          },
+        })
+      }
+      state!.updated_at = nowIso()
+      stateStore.save(state!)
+      fsyncRecoveryAdmissionState()
+    },
+    cancelRecoveryAdmission: options.dryRun ? undefined : (ownerKey) => {
+      const stage = activeStageForAdmission
+      if (!stage) throw new Error('recovery admission cancellation attempted outside an active bootstrap stage')
+      const before = state!.mutations.length
+      state!.mutations = state!.mutations.filter((mutation) => !(mutation.stage === stage
+        && mutation.owner_key === ownerKey
+        && mutation.rollback_payload?.recovery_admission === true))
+      if (state!.mutations.length === before) throw new Error('recovery admission cancellation target missing')
+      state!.updated_at = nowIso()
+      stateStore.save(state!)
+      fsyncRecoveryAdmissionState()
+    },
     providerRootAuthority: rootResolution.authority ?? undefined,
   })
 
@@ -3228,6 +3441,13 @@ export async function bootstrap(
       state.updated_at = nowIso()
       stateStore.save(state)
       return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', state.terminal_status, allVerified ? [] : ['NO_GO_ROLLBACK_UNVERIFIED'])
+    }
+
+    if (options.resumeRunId && state.mutations.some((mutation) => mutation.rollback_payload?.recovery_admission === true)) {
+      state.terminal_status = 'NO_GO'
+      state.updated_at = nowIso()
+      stateStore.save(state)
+      return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
     }
 
     const priorReady = !options.resumeRunId && !options.dryRun ? stateStore.findLatestReady(agentId, inputDigest) : null
@@ -3301,7 +3521,13 @@ export async function bootstrap(
       record.started_at = nowIso()
       record.reason_codes = []
       const method = STAGE_METHOD[stage]
+      if (!options.dryRun) {
+        state.updated_at = nowIso()
+        stateStore.save(state)
+      }
+      activeStageForAdmission = stage
       const outcome = await boundedDeadline(stage, (signal) => ports[method](context(signal)))
+      activeStageForAdmission = null
       record.completed_at = nowIso()
       record.reason_codes = outcome.reasonCodes ?? []
       record.evidence_refs = outcome.evidenceRefs ?? []
@@ -3323,15 +3549,39 @@ export async function bootstrap(
           ...(outcome.mutations ?? []),
           ...(outcome.mutation ? [outcome.mutation] : []),
         ]
+        const orderedStageMutations: BootstrapMutation[] = []
         for (const reported of reportedMutations) {
+          const admitted = state.mutations.find((mutation) => mutation.stage === stage
+            && mutation.owner_key === reported.owner_key
+            && mutation.rollback_payload?.recovery_admission === true)
+          if (admitted) {
+            const admittedPayload = admitted.rollback_payload ?? {}
+            Object.assign(admitted, reported)
+            admitted.rollback_payload = {
+              ...admittedPayload,
+              ...(reported.rollback_payload ?? {}),
+              recovery_admission: false,
+              recovery_admission_phase: 'COMMITTED_AND_READ_BACK',
+            }
+            orderedStageMutations.push(admitted)
+            continue
+          }
           const observed: BootstrapMutation = {
             mutation_id: `${runId}:${stage}:${state.mutations.length + 1}`,
             stage,
             rollback_status: 'not_run',
             ...reported,
           }
-          state.mutations.push(observed)
+          orderedStageMutations.push(observed)
         }
+        const reportedIds = new Set(orderedStageMutations.map((mutation) => mutation.mutation_id))
+        const unmatchedStageAdmissions = state.mutations.filter((mutation) => mutation.stage === stage
+          && !reportedIds.has(mutation.mutation_id))
+        state.mutations = [
+          ...state.mutations.filter((mutation) => mutation.stage !== stage),
+          ...orderedStageMutations,
+          ...unmatchedStageAdmissions,
+        ]
       }
       state.updated_at = nowIso()
       if (!outcome.ok) {

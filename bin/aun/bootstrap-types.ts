@@ -154,6 +154,16 @@ export type BootstrapStageContext = {
   env: Record<string, string>
   priorState: BootstrapRunState
   abortSignal?: AbortSignal
+  /**
+   * Persist an exact rollback admission before a stage makes its first
+   * protected external mutation. The runner owns the durable journal; stage
+   * adapters only describe the intended fence.
+   */
+  admitRecoveryMutation?: (
+    mutation: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>,
+  ) => void
+  /** Remove an admission only after native readback proves no mutation occurred. */
+  cancelRecoveryAdmission?: (ownerKey: string) => void
   providerRootAuthority?: {
     existingTarget: boolean
     canonicalSourceField: 'metadata.codex_home' | 'clean_host_default'
@@ -162,6 +172,7 @@ export type BootstrapStageContext = {
     canonicalRealpathDigest: string
     projectionMatches: boolean
     callerMismatch: boolean
+    authorityTupleDigest?: string
   }
 }
 

@@ -256,25 +256,38 @@ function cleanupLegacyRollbackArtifact(payload: Record<string, unknown>): boolea
   return !existsSync(path) && !existsSync(directory)
 }
 
-function atomicRestoreProviderArtifact(artifact: LegacyRollbackArtifact, context: BootstrapStageContext): ProviderArtifactIdentity {
+function atomicRestoreProviderArtifact(
+  artifact: LegacyRollbackArtifact,
+  context: BootstrapStageContext,
+  expectedCurrent: ProviderArtifactIdentity,
+): ProviderArtifactIdentity {
   const configPath = artifact.config_path
   const parent = dirname(configPath)
   const temp = join(parent, `.config.toml.aun-restore-${context.runId}`)
   if (existsSync(temp)) throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
   const bytes = Buffer.from(artifact.config_bytes_base64, 'base64')
   if (sha256Bytes(bytes) !== artifact.prestate.byte_sha256) throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
-  const fd = openSync(temp, 'wx', 0o600)
   try {
-    writeFileSync(fd, bytes)
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
+    const fd = openSync(temp, 'wx', 0o600)
+    try {
+      writeFileSync(fd, bytes)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    chmodSync(temp, artifact.prestate.mode)
+    chownSync(temp, artifact.prestate.uid, artifact.prestate.gid)
+    const immediatelyBeforeReplace = fileArtifactIdentity(configPath)
+    if (!sameProviderArtifact(immediatelyBeforeReplace, expectedCurrent)) {
+      throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
+    }
+    renameSync(temp, configPath)
+    fsyncDirectory(parent)
+    return providerArtifactIdentity(dirname(configPath))
+  } catch (error) {
+    if (existsSync(temp)) rmSync(temp)
+    throw error
   }
-  chmodSync(temp, artifact.prestate.mode)
-  chownSync(temp, artifact.prestate.uid, artifact.prestate.gid)
-  renameSync(temp, configPath)
-  fsyncDirectory(parent)
-  return providerArtifactIdentity(dirname(configPath))
 }
 
 function realpathOrResolve(path: string): string {
@@ -561,7 +574,25 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
           },
         })
 
+        context.admitRecoveryMutation?.({
+          ...legacyMutation(null, null),
+          rollback_payload: {
+            ...legacyMutation(null, null).rollback_payload,
+            recovery_admission_phase: 'B4_PRE_PROVIDER_REMOVE',
+          },
+        })
+
         const removed = await deps.run('codex', ['mcp', 'remove', 'aun'], { ...options, timeoutMs: 120_000 })
+        let postRemoveState: ProviderArtifactIdentity | null = null
+        try { postRemoveState = providerArtifactIdentity(root) } catch {}
+        context.admitRecoveryMutation?.({
+          ...legacyMutation(postRemoveState, null),
+          rollback_payload: {
+            ...legacyMutation(postRemoveState, null).rollback_payload,
+            post_remove_state: postRemoveState,
+            recovery_admission_phase: 'B4_POST_PROVIDER_REMOVE',
+          },
+        })
         const absence = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
           exactAbsenceReadback(recoveryContext, deps))
         if (removed.exitCode !== 0 && !absence.ok) {
@@ -570,13 +601,16 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
           let current: ProviderArtifactIdentity | null = null
           try { current = providerArtifactIdentity(root) } catch {}
           if (legacyStillExact.ok && current && sameProviderArtifact(current, prestate)) {
-            cleanupLegacyRollbackArtifact({
+            const cleaned = cleanupLegacyRollbackArtifact({
               private_backup_directory: backup.directory,
               private_backup_path: backup.path,
               private_backup_identity: backup.identity,
               private_backup_directory_identity: backup.directoryIdentity,
             })
-            return { ok: false, reasonCodes: ['NO_GO_MCP_REGISTRATION'], evidenceRefs: legacyStillExact.evidenceRefs }
+            if (cleaned) {
+              context.cancelRecoveryAdmission?.(`codex:aun:${context.runId}`)
+              return { ok: false, reasonCodes: ['NO_GO_MCP_REGISTRATION'], evidenceRefs: legacyStillExact.evidenceRefs }
+            }
           }
           return {
             ok: false,
@@ -656,7 +690,6 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
 
       const tuple = expectedBootstrapMcpTuple(context, deps)
       const args = registrationArgs(tuple)
-      const applied = await deps.run('codex', args, { ...options, timeoutMs: 120_000 })
       const mutation = {
         kind: 'mcp_registration' as const,
         owner_key: `codex:aun:${context.runId}`,
@@ -666,6 +699,14 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         rollback_action: 'codex mcp remove aun; verify native get absence and list absence',
         rollback_payload: { created_by_run: true, tuple_digest: bootstrapDigest(tuple) },
       }
+      context.admitRecoveryMutation?.({
+        ...mutation,
+        rollback_payload: {
+          ...mutation.rollback_payload,
+          recovery_admission_phase: 'B4_PRE_PROVIDER_ADD',
+        },
+      })
+      const applied = await deps.run('codex', args, { ...options, timeoutMs: 120_000 })
       const readback = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
         exactReadback(recoveryContext, deps))
       if (readback.ok) {
@@ -683,6 +724,7 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
       const absence = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
         exactAbsenceReadback(recoveryContext, deps))
       if (absence.ok) {
+        context.cancelRecoveryAdmission?.(`codex:aun:${context.runId}`)
         return {
           ...absence,
           ok: false,
@@ -745,26 +787,60 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         try { current = providerArtifactIdentity(root) } catch {
           return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         }
-        if (!sameProviderArtifact(current, payload.post_state)) {
+        const admissionOpen = payload.recovery_admission === true && mutation.actual_after_digest === null
+        if (admissionOpen) {
+          const legacyUnchanged = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+            exactLegacyReadback(recoveryContext, deps, artifact.legacy_tuple_digest))
+          if (legacyUnchanged.ok && sameProviderArtifact(current, artifact.prestate)) {
+            if (!cleanupLegacyRollbackArtifact(payload)) {
+              return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+            }
+            mutation.rollback_payload = {
+              ...payload,
+              backup_retained: false,
+              backup_deleted: true,
+              recovery_admission_no_effect: true,
+            }
+            return {
+              ok: true,
+              readinessPredicates: { rollback_verified: true, recovery_admission_no_effect: true },
+              evidenceRefs: [`codex-mcp-recovery-admission-no-effect:${bootstrapDigest(current)}`],
+              readbackDigest: bootstrapDigest({ legacy_tuple_digest: artifact.legacy_tuple_digest, no_effect: true }),
+            }
+          }
+        } else if (!sameProviderArtifact(current, payload.post_state)) {
           return {
             ok: false,
             reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
             evidenceRefs: [`codex-mcp-rollback-foreign-artifact:${bootstrapDigest(current)}`],
           }
         }
+
         const intended = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
           exactReadback(recoveryContext, deps))
-        if (!intended.ok || intended.readbackDigest !== mutation.actual_after_digest) {
+        let postRemoveFence: ProviderArtifactIdentity | null = null
+        if (intended.ok && (admissionOpen || intended.readbackDigest === mutation.actual_after_digest)) {
+          const removed = await deps.run('codex', ['mcp', 'remove', 'aun'], commandOptions(context, 120_000))
+          if (removed.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+          try { postRemoveFence = providerArtifactIdentity(root) } catch {
+            return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+          }
+        } else if (admissionOpen && sameProviderArtifact(current, payload.post_remove_state)) {
+          postRemoveFence = current
+        } else {
           return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: intended.evidenceRefs }
         }
-        const removed = await deps.run('codex', ['mcp', 'remove', 'aun'], commandOptions(context, 120_000))
-        if (removed.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         const absence = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
           exactAbsenceReadback(recoveryContext, deps))
         if (!absence.ok) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: absence.evidenceRefs }
+        if (!postRemoveFence) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         let restored: ProviderArtifactIdentity
-        try { restored = atomicRestoreProviderArtifact(artifact, context) } catch {
-          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        try { restored = atomicRestoreProviderArtifact(artifact, context, postRemoveFence) } catch {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+            evidenceRefs: [`codex-mcp-rollback-post-remove-foreign-artifact:${bootstrapDigest(postRemoveFence)}`],
+          }
         }
         const restoredIdentity = restored.byte_sha256 === artifact.prestate.byte_sha256
           && restored.byte_length === artifact.prestate.byte_length
