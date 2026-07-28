@@ -2,7 +2,14 @@ name: Shirube Rapid/Lite Gates Report
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - labeled
+      - unlabeled
 
 permissions:
   contents: read
