@@ -2,159 +2,20 @@ name: Shirube Rapid/Lite Gates Report
 
 on:
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-      - edited
-      - labeled
-      - unlabeled
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
 
-env:
-  NODE_VERSION: "20"
-  RESULT_DIR: .shirube-rapid-lite
-
 jobs:
   shirube-rapid-lite-gates-report:
     name: Shirube Rapid/Lite Gates Report
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout target head
-        uses: actions/checkout@v4
-        with:
-          path: target
-          fetch-depth: 0
-
-      - name: Checkout trusted base runtime
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: trusted
-          fetch-depth: 1
-          sparse-checkout: .shirube/runtime/rapid-lite
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Verify trusted runtime bundle
-        run: |
-          node <<'NODE'
-          const crypto = require("crypto");
-          const fs = require("fs");
-          const path = require("path");
-          const root = "trusted/.shirube/runtime/rapid-lite";
-          try {
-            const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
-            const entries = Object.entries(manifest.files || {});
-            if (manifest.schema_version !== "shirube-runtime-manifest/v1" || entries.length === 0) {
-              throw new Error("runtime manifest schema or inventory is invalid");
-            }
-            for (const [file, expected] of entries) {
-              if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) {
-                throw new Error(`invalid digest: ${file}`);
-              }
-              if (!file || file === "manifest.json" || file.includes("\\") || path.posix.isAbsolute(file) || path.posix.normalize(file) !== file || file.split("/").some((part) => !part || part === "." || part === "..")) {
-                throw new Error(`unsafe runtime path: ${file}`);
-              }
-            }
-            const actualFiles = [];
-            const walk = (directory, prefix = "") => {
-              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-                const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-                const absolute = path.join(directory, entry.name);
-                if (entry.isSymbolicLink()) throw new Error(`runtime symlink is forbidden: ${relative}`);
-                if (entry.isDirectory()) walk(absolute, relative);
-                else if (entry.isFile()) actualFiles.push(relative);
-                else throw new Error(`unsupported runtime entry: ${relative}`);
-              }
-            };
-            walk(root);
-            const expectedFiles = entries.map(([file]) => file).sort();
-            const observedFiles = actualFiles.filter((file) => file !== "manifest.json").sort();
-            if (JSON.stringify(observedFiles) !== JSON.stringify(expectedFiles)) {
-              throw new Error("runtime manifest inventory mismatch");
-            }
-            for (const [file, expected] of entries) {
-              const actual = crypto.createHash("sha256").update(fs.readFileSync(path.join(root, file))).digest("hex");
-              if (actual !== expected) throw new Error(`digest mismatch: ${file}`);
-            }
-            console.log(JSON.stringify({ result: "EVALUATOR_READY", version: manifest.version, files: entries.length }));
-          } catch (error) {
-            console.error(JSON.stringify({ result: "EVALUATOR_UNAVAILABLE", error: error.message }));
-            process.exit(2);
-          }
-          NODE
-
-      - name: Run trusted Rapid/Lite report
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          node trusted/.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs \
-            --target-dir target \
-            --result-dir "$RESULT_DIR"
-          cat "target/$RESULT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
-          cat "target/$RESULT_DIR/aggregate.json"
-
-      - name: Upsert PR comment
-        if: always()
-        continue-on-error: true
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require("fs");
-            const marker = "<!-- shirube-rapid-lite-gates-report/v1 -->";
-            const summary = "target/.shirube-rapid-lite/summary.md";
-            const body = fs.existsSync(summary)
-              ? fs.readFileSync(summary, "utf8")
-              : `${marker}\n\n## Shirube Rapid/Lite Gates Report\n\nRuntime was unavailable before summary creation.`;
-            const { owner, repo } = context.repo;
-            const issue_number = context.payload.pull_request.number;
-            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
-            const previous = comments.find((comment) => comment.user?.type === "Bot" && comment.body?.includes(marker));
-            if (previous) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-
-      - name: Upload Rapid/Lite gate JSON artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shirube-rapid-lite-gates-${{ github.event.pull_request.number }}
-          path: target/${{ env.RESULT_DIR }}
-          if-no-files-found: warn
-          retention-days: 14
-          include-hidden-files: true
-
-      - name: Enforce flow-safety activation
-        if: always()
-        run: |
-          node <<'NODE'
-          const fs = require("fs");
-          const reportPath = `target/${process.env.RESULT_DIR}/aggregate.json`;
-          if (!fs.existsSync(reportPath)) throw new Error("EVALUATOR_UNAVAILABLE: missing Rapid/Lite aggregate");
-          const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
-          const gate = report.gates?.find((entry) => entry.gate === "flow-safety");
-          if (!gate) throw new Error("Missing flow-safety gate record.");
-          if (gate.status === "ran" && gate.verdict !== "PASS") {
-            throw new Error(`Flow-safety must PASS before audit handoff: ${gate.verdict}.`);
-          }
-          console.log(`Flow-safety activation: ${gate.status}/${gate.verdict}`);
-          NODE
-
-      - name: Report-only completion
-        if: always()
-        run: |
-          echo "Rapid/Lite gates other than flow-safety remain report-only."
-          echo "Required-check and branch-protection settings are unchanged."
+    uses: "watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@a435c3bfad72805ced34d53884eccf30f8ebe690"
+    with:
+      framework_ref: "watchout/ai-dev-framework@a435c3bfad72805ced34d53884eccf30f8ebe690"
+      profile: "hotel-lite"
+      report_only: true
+      validation_evidence_ref: ""
+      owner_decision_ref: ""
