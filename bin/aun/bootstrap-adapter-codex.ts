@@ -20,6 +20,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
+import { PgAdapter } from '../../core/db/pg-adapter'
 import type {
   BootstrapCommandResult,
   BootstrapMutation,
@@ -40,6 +41,8 @@ export type BootstrapAdapterDependencies = {
   serverEntry: string
   /** Deterministic fault-injection seam immediately before the no-clobber provider commit. */
   beforeProviderArtifactNoClobberCommit?: (configPath: string) => void
+  /** Deterministic fault-injection seam after owned-tuple readback and before conditional removal. */
+  beforeOwnedTupleConditionalRemove?: (configPath: string) => void
 }
 
 export type BootstrapMcpTuple = {
@@ -90,6 +93,85 @@ function fsyncDirectory(path: string): void {
 function providerRoot(context: BootstrapStageContext): string | null {
   const root = context.providerRootAuthority?.canonicalRoot ?? context.env.CODEX_HOME
   return typeof root === 'string' && root.length > 0 ? root : null
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) } catch { return {} }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function providerAuthorityTupleDigest(agentId: string, row: Record<string, unknown>): string {
+  const metadata = objectRecord(row.metadata)
+  const projection = objectRecord(row.ordinary_projection)
+  return bootstrapDigest({
+    agent_id: String(row.agent_id ?? agentId),
+    repo_url: typeof row.repo_url === 'string' ? row.repo_url : null,
+    workspace_path: typeof row.workspace_path === 'string'
+      ? row.workspace_path
+      : typeof row.canonical_workspace === 'string'
+        ? row.canonical_workspace
+        : typeof row.home_directory === 'string'
+          ? row.home_directory
+          : null,
+    config_profile: {
+      runtime_engine_preference: String(row.runtime_engine_preference ?? '').toLowerCase() || null,
+      metadata_codex_home: typeof metadata.codex_home === 'string' ? metadata.codex_home : null,
+    },
+    provider_binding: {
+      expected_provider_identity_ref: typeof row.expected_provider_identity_ref === 'string'
+        ? row.expected_provider_identity_ref
+        : null,
+      provider_token_source_ref: typeof row.provider_token_source_ref === 'string'
+        ? row.provider_token_source_ref
+        : null,
+      projection_provider_config_root: typeof projection.provider_config_root === 'string'
+        ? projection.provider_config_root
+        : null,
+    },
+    projection_digest: bootstrapDigest(projection),
+  })
+}
+
+async function liveProviderAuthorityDigest(context: BootstrapStageContext): Promise<string | null> {
+  const recorded = context.providerRootAuthority?.authorityTupleDigest ?? null
+  const runtimeState = context.priorState?.schema_version === 'shirube-v3/aun-bootstrap-run/v1'
+  const explicit = context.env.AGENT_COM_DB?.trim().toLowerCase()
+  const postgres = explicit === 'postgres' || explicit === 'postgresql'
+  if (!runtimeState || !postgres) return recorded
+  const databaseUrl = context.env.DATABASE_URL?.trim()
+  if (!databaseUrl) return null
+  const db = new PgAdapter(databaseUrl)
+  try {
+    const result = await db.queryOne<{ row: Record<string, unknown>; repo_url: string | null; workspace_path: string | null }>(
+      `SELECT to_jsonb(a) AS row, workspace.repo_url, workspace.local_path AS workspace_path
+         FROM agents a
+         LEFT JOIN LATERAL (
+           SELECT w.repo_url, w.local_path
+             FROM agent_workspace_bindings b
+             JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+            WHERE b.agent_id = a.agent_id AND b.active = true
+            ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+            LIMIT 1
+         ) workspace ON true
+        WHERE a.agent_id = $1`,
+      [context.agentId],
+    )
+    if (!result?.row) return null
+    const row = { ...result.row, repo_url: result.repo_url, workspace_path: result.workspace_path }
+    const metadata = objectRecord(row.metadata)
+    const projection = objectRecord(row.ordinary_projection)
+    const root = providerRoot(context)
+    if (!root || metadata.codex_home !== root || projection.provider_config_root !== root) return null
+    return providerAuthorityTupleDigest(context.agentId, row)
+  } catch {
+    return null
+  } finally {
+    await db.close().catch(() => {})
+  }
 }
 
 function commandOptions(
@@ -337,6 +419,189 @@ function atomicRestoreProviderArtifact(
     }
     if (existsSync(temp)) unlinkSync(temp)
     throw error
+  }
+}
+
+async function atomicRemoveOwnedMcpTuple(
+  context: BootstrapStageContext,
+  deps: BootstrapAdapterDependencies,
+  expectedCurrent: ProviderArtifactIdentity | null,
+): Promise<BootstrapStageOutcome> {
+  const configuredRoot = providerRoot(context)
+  if (!configuredRoot) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+  let root = configuredRoot
+  if (!existsSync(root) && expectedCurrent === null) {
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+      chmodSync(root, 0o700)
+      fsyncDirectory(dirname(root))
+    } catch {
+      return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+    }
+  }
+  if (context.providerRootAuthority?.existingTarget === false
+    && context.providerRootAuthority.canonicalSourceField === 'clean_host_default') {
+    try { root = realpathSync(root) } catch {
+      return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+    }
+  }
+  try { directoryIdentity(root) } catch {
+    return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+  }
+
+  const configPath = join(root, 'config.toml')
+  const transactionRoot = join(root, `.aun-bootstrap-remove-${context.runId}`)
+  const transactionConfig = join(transactionRoot, 'config.toml')
+  const displaced = join(root, `.config.toml.aun-remove-owned-${context.runId}`)
+  if (existsSync(transactionRoot) || existsSync(displaced)) {
+    return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+  }
+
+  let displacedOwned = false
+  let sentinelOwned = false
+  let sentinelIdentity: ProviderArtifactIdentity | null = null
+  try {
+    if (expectedCurrent) {
+      const immediatelyBeforeClaim = providerArtifactIdentity(root)
+      if (!sameProviderArtifact(immediatelyBeforeClaim, expectedCurrent)) {
+        throw new Error('owned provider artifact changed before conditional remove')
+      }
+      renameSync(configPath, displaced)
+      fsyncDirectory(root)
+      const displacedIdentity = fileArtifactIdentity(displaced)
+      if (!sameProviderArtifactObject(displacedIdentity, expectedCurrent)) {
+        throw new Error('conditional remove claimed a foreign provider artifact')
+      }
+      displacedOwned = true
+    } else {
+      const fd = openSync(configPath, 'wx', 0o600)
+      try { fsyncSync(fd) } finally { closeSync(fd) }
+      fsyncDirectory(root)
+      sentinelIdentity = fileArtifactIdentity(configPath)
+      sentinelOwned = true
+    }
+
+    mkdirSync(transactionRoot, { mode: 0o700 })
+    chmodSync(transactionRoot, 0o700)
+    if (statSync(transactionRoot).dev !== statSync(root).dev) {
+      throw new Error('conditional remove transaction crosses devices')
+    }
+    const sourceBytes = expectedCurrent ? readFileSync(displaced) : Buffer.from('')
+    const sourceMode = expectedCurrent ? expectedCurrent.mode : 0o600
+    const sourceUid = expectedCurrent ? expectedCurrent.uid : statSync(root).uid
+    const sourceGid = expectedCurrent ? expectedCurrent.gid : statSync(root).gid
+    const transactionFd = openSync(transactionConfig, 'wx', 0o600)
+    try {
+      writeFileSync(transactionFd, sourceBytes)
+      fsyncSync(transactionFd)
+    } finally {
+      closeSync(transactionFd)
+    }
+    chmodSync(transactionConfig, sourceMode)
+    chownSync(transactionConfig, sourceUid, sourceGid)
+    fsyncDirectory(transactionRoot)
+
+    const transactionContext: BootstrapStageContext = {
+      ...context,
+      providerRootAuthority: context.providerRootAuthority
+        ? { ...context.providerRootAuthority, canonicalRoot: transactionRoot }
+        : undefined,
+      env: { ...context.env, CODEX_HOME: transactionRoot },
+    }
+    const removed = await deps.run(
+      'codex',
+      ['mcp', 'remove', 'aun'],
+      commandOptions(transactionContext, 120_000),
+    )
+    if (removed.exitCode !== 0) throw new Error(`conditional native remove failed:${removed.exitCode}`)
+    const transactionAbsence = await withFreshBootstrapRecoverySignal(
+      transactionContext,
+      (recoveryContext) => exactAbsenceReadback(recoveryContext, deps),
+    )
+    if (!transactionAbsence.ok) throw new Error('conditional native remove absence readback failed')
+
+    if (expectedCurrent) {
+      if (existsSync(transactionConfig)) {
+        fileArtifactIdentity(transactionConfig)
+        linkSync(transactionConfig, configPath)
+        unlinkSync(transactionConfig)
+      } else if (existsSync(configPath)) {
+        throw new Error('foreign provider artifact won empty-result commit')
+      }
+      fsyncDirectory(root)
+      unlinkSync(displaced)
+      displacedOwned = false
+      fsyncDirectory(root)
+    } else {
+      if (!sentinelIdentity || !sameProviderArtifact(providerArtifactIdentity(root), sentinelIdentity)) {
+        throw new Error('absent provider artifact sentinel was replaced')
+      }
+      unlinkSync(configPath)
+      sentinelOwned = false
+      fsyncDirectory(root)
+    }
+
+    rmSync(transactionRoot, { recursive: true, force: true })
+    fsyncDirectory(root)
+    const absence = await withFreshBootstrapRecoverySignal(
+      context,
+      (recoveryContext) => exactAbsenceReadback(recoveryContext, deps),
+    )
+    return absence.ok
+      ? {
+          ...absence,
+          readinessPredicates: {
+            ...(absence.readinessPredicates ?? {}),
+            rollback_verified: true,
+            provider_owned_tuple_conditional_remove_verified: true,
+          },
+          evidenceRefs: [
+            ...(absence.evidenceRefs ?? []),
+            `codex-mcp-conditional-remove:${bootstrapDigest({
+              provider_root: root,
+              expected_artifact: expectedCurrent,
+              authority_tuple_digest: context.providerRootAuthority?.authorityTupleDigest ?? null,
+            })}`,
+          ],
+        }
+      : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: absence.evidenceRefs }
+  } catch (error) {
+    if (displacedOwned && existsSync(displaced)) {
+      if (!existsSync(configPath)) {
+        try {
+          linkSync(displaced, configPath)
+          unlinkSync(displaced)
+          displacedOwned = false
+          fsyncDirectory(root)
+        } catch {}
+      } else {
+        try {
+          unlinkSync(displaced)
+          displacedOwned = false
+          fsyncDirectory(root)
+        } catch {}
+      }
+    }
+    if (sentinelOwned && sentinelIdentity && existsSync(configPath)) {
+      try {
+        if (sameProviderArtifact(providerArtifactIdentity(root), sentinelIdentity)) {
+          unlinkSync(configPath)
+          sentinelOwned = false
+          fsyncDirectory(root)
+        }
+      } catch {}
+    }
+    if (existsSync(transactionRoot)) {
+      try {
+        rmSync(transactionRoot, { recursive: true, force: true })
+        fsyncDirectory(root)
+      } catch {}
+    }
+    return {
+      ok: false,
+      reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+      evidenceRefs: [`codex-mcp-conditional-remove-failed:${bootstrapDigest(String(error))}`],
+    }
   }
 }
 
@@ -797,6 +1062,11 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
 
       const tuple = expectedBootstrapMcpTuple(context, deps)
       const args = registrationArgs(tuple)
+      const admittedProviderAuthorityDigest = await liveProviderAuthorityDigest(context)
+      if (context.priorState?.schema_version === 'shirube-v3/aun-bootstrap-run/v1'
+        && !admittedProviderAuthorityDigest) {
+        return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+      }
       const mutation = {
         kind: 'mcp_registration' as const,
         owner_key: `codex:aun:${context.runId}`,
@@ -810,7 +1080,7 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
           admitted_run_id: context.runId,
           admitted_repo_head: context.repoHead,
           admitted_provider_root_digest: bootstrapDigest(providerRoot(context)),
-          admitted_provider_authority_digest: context.providerRootAuthority?.authorityTupleDigest ?? null,
+          admitted_provider_authority_digest: admittedProviderAuthorityDigest,
         },
       }
       context.admitRecoveryMutation?.({
@@ -1007,9 +1277,12 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         }
       }
 
-      const options = commandOptions(context)
       const tupleDigest = typeof payload.tuple_digest === 'string' ? payload.tuple_digest : null
       const admissionOpen = payload.recovery_admission === true && mutation.actual_after_digest === null
+      const admittedAuthorityDigest = typeof payload.admitted_provider_authority_digest === 'string'
+        ? payload.admitted_provider_authority_digest
+        : null
+      const liveAuthorityDigest = await liveProviderAuthorityDigest(context)
       const ownershipFences = {
         absent_prestate: mutation.before_digest === bootstrapDigest({ absent: true }),
         tuple_digest_present: tupleDigest !== null,
@@ -1017,6 +1290,8 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         run_id: payload.admitted_run_id === context.runId,
         repo_head: payload.admitted_repo_head === context.repoHead,
         provider_root: payload.admitted_provider_root_digest === bootstrapDigest(providerRoot(context)),
+        provider_authority_digest_present: admittedAuthorityDigest !== null,
+        provider_authority_digest: admittedAuthorityDigest === liveAuthorityDigest,
       }
       const failedOwnershipFences = Object.entries(ownershipFences)
         .filter(([, matches]) => !matches)
@@ -1027,6 +1302,22 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
           reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
           evidenceRefs: [`codex-mcp-rollback-ownership-fence-failed:${failedOwnershipFences.join(',')}`],
         }
+      }
+      const configuredRoot = providerRoot(context)
+      let root = configuredRoot
+      let providerArtifactBeforeReadback: ProviderArtifactIdentity | null = null
+      try {
+        if (!root) throw new Error('provider root unavailable')
+        if (context.providerRootAuthority?.existingTarget === false
+          && context.providerRootAuthority.canonicalSourceField === 'clean_host_default'
+          && existsSync(root)) {
+          root = realpathSync(root)
+        }
+        providerArtifactBeforeReadback = existsSync(join(root, 'config.toml'))
+          ? providerArtifactIdentity(root)
+          : null
+      } catch {
+        return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
       const intended = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
         exactOwnedTupleDigestReadback(recoveryContext, deps, tupleDigest))
@@ -1047,27 +1338,15 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
           evidenceRefs: [...(intended.evidenceRefs ?? []), ...(absence.evidenceRefs ?? [])],
         }
       }
-      const removed = await deps.run('codex', ['mcp', 'remove', 'aun'], options)
-      if (removed.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
-      const [getResult, listResult] = await Promise.all([
-        deps.run('codex', ['mcp', 'get', 'aun', '--json'], options),
-        deps.run('codex', ['mcp', 'list', '--json'], options),
-      ])
-      const listState = codexListState(parseJson(listResult))
-      const readbackDigest = bootstrapDigest({
-        absent: true,
-        get_exit: getResult.exitCode,
-        list_exit: listResult.exitCode,
-        list_count: listState.count,
-      })
-      return nativeAbsence(getResult) && listResult.exitCode === 0 && listState.count === 0
-        ? {
-            ok: true,
-            readinessPredicates: { rollback_verified: true },
-            evidenceRefs: [`codex-mcp-native-absence:${readbackDigest}`],
-            readbackDigest,
-          }
-        : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+      deps.beforeOwnedTupleConditionalRemove?.(join(root, 'config.toml'))
+      if (admittedAuthorityDigest !== await liveProviderAuthorityDigest(context)) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+          evidenceRefs: ['codex-mcp-rollback-ownership-fence-failed:provider_authority_digest'],
+        }
+      }
+      return atomicRemoveOwnedMcpTuple(context, deps, providerArtifactBeforeReadback)
     },
 
     async finalizeRuntimeRegistration(context, mutation): Promise<BootstrapStageOutcome> {
