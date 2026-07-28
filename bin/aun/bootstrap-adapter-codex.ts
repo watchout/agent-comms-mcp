@@ -5,6 +5,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -14,6 +15,7 @@ import {
   rmdirSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -36,6 +38,8 @@ export type BootstrapAdapterDependencies = {
   run: BootstrapAdapterCommandRunner
   bunPath: string
   serverEntry: string
+  /** Deterministic fault-injection seam immediately before the no-clobber provider commit. */
+  beforeProviderArtifactNoClobberCommit?: (configPath: string) => void
 }
 
 export type BootstrapMcpTuple = {
@@ -162,6 +166,19 @@ function sameProviderArtifact(actual: ProviderArtifactIdentity, expected: unknow
     && actual.link_count === 1
 }
 
+function sameProviderArtifactObject(actual: ProviderArtifactIdentity, expected: unknown): boolean {
+  if (!expected || typeof expected !== 'object') return false
+  const value = expected as Record<string, unknown>
+  return actual.device === Number(value.device)
+    && actual.inode === Number(value.inode)
+    && actual.uid === Number(value.uid)
+    && actual.gid === Number(value.gid)
+    && actual.mode === Number(value.mode)
+    && actual.byte_length === Number(value.byte_length)
+    && actual.byte_sha256 === value.byte_sha256
+    && actual.link_count === 1
+}
+
 function writeLegacyRollbackArtifact(
   context: BootstrapStageContext,
   root: string,
@@ -260,13 +277,16 @@ function atomicRestoreProviderArtifact(
   artifact: LegacyRollbackArtifact,
   context: BootstrapStageContext,
   expectedCurrent: ProviderArtifactIdentity,
+  beforeNoClobberCommit?: (configPath: string) => void,
 ): ProviderArtifactIdentity {
   const configPath = artifact.config_path
   const parent = dirname(configPath)
   const temp = join(parent, `.config.toml.aun-restore-${context.runId}`)
-  if (existsSync(temp)) throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
+  const displaced = join(parent, `.config.toml.aun-displaced-${context.runId}`)
+  if (existsSync(temp) || existsSync(displaced)) throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
   const bytes = Buffer.from(artifact.config_bytes_base64, 'base64')
   if (sha256Bytes(bytes) !== artifact.prestate.byte_sha256) throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
+  let displacedOwned = false
   try {
     const fd = openSync(temp, 'wx', 0o600)
     try {
@@ -281,11 +301,41 @@ function atomicRestoreProviderArtifact(
     if (!sameProviderArtifact(immediatelyBeforeReplace, expectedCurrent)) {
       throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
     }
-    renameSync(temp, configPath)
+
+    // Move the expected run-owned current artifact aside atomically, then
+    // revalidate the moved inode. The final hard-link commit is no-clobber: a
+    // foreign writer that recreates configPath wins and is never overwritten.
+    renameSync(configPath, displaced)
+    fsyncDirectory(parent)
+    const displacedIdentity = fileArtifactIdentity(displaced)
+    if (!sameProviderArtifactObject(displacedIdentity, expectedCurrent)) {
+      throw new Error('NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS')
+    }
+    displacedOwned = true
+    beforeNoClobberCommit?.(configPath)
+    linkSync(temp, configPath)
+    unlinkSync(temp)
+    fsyncDirectory(parent)
+    unlinkSync(displaced)
+    displacedOwned = false
     fsyncDirectory(parent)
     return providerArtifactIdentity(dirname(configPath))
   } catch (error) {
-    if (existsSync(temp)) rmSync(temp)
+    if (existsSync(displaced)) {
+      if (!existsSync(configPath)) {
+        try {
+          linkSync(displaced, configPath)
+          unlinkSync(displaced)
+          fsyncDirectory(parent)
+        } catch {}
+      } else if (displacedOwned) {
+        try {
+          unlinkSync(displaced)
+          fsyncDirectory(parent)
+        } catch {}
+      }
+    }
+    if (existsSync(temp)) unlinkSync(temp)
     throw error
   }
 }
@@ -439,6 +489,63 @@ async function exactReadback(
         reasonCodes: ['NO_GO_PROVIDER_ADAPTER_MISMATCH'],
         evidenceRefs: [`codex-mcp-mismatch:${bootstrapDigest({ get_exit: getResult.exitCode, list_exit: listResult.exitCode, list })}`],
         readinessPredicates: { mcp_registered: false, mcp_native_get_exact: false, mcp_native_list_exact: false },
+      }
+}
+
+async function exactOwnedTupleDigestReadback(
+  context: BootstrapStageContext,
+  deps: BootstrapAdapterDependencies,
+  expectedDigest: string,
+): Promise<BootstrapStageOutcome> {
+  const options = commandOptions(context)
+  const [getResult, listResult] = await Promise.all([
+    deps.run('codex', ['mcp', 'get', 'aun', '--json'], options),
+    deps.run('codex', ['mcp', 'list', '--json'], options),
+  ])
+  const get = parseJson(getResult)
+  const list = codexListState(parseJson(listResult))
+  const environment = stringRecord(get?.transport?.env)
+  const argv = get?.transport?.args
+  const projection: BootstrapMcpTuple | null = get?.name === 'aun'
+    && get?.enabled === true
+    && get?.transport?.type === 'stdio'
+    && typeof get?.transport?.command === 'string'
+    && Array.isArray(argv)
+    && argv.every((item: unknown) => typeof item === 'string')
+    && environment !== null
+    ? {
+        name: 'aun',
+        enabled: true,
+        transport: 'stdio',
+        command: realpathOrResolve(get.transport.command),
+        argv: [...argv],
+        environment,
+        scope: 'user',
+      }
+    : null
+  const actualDigest = projection ? bootstrapDigest(projection) : null
+  const ok = getResult.exitCode === 0
+    && listResult.exitCode === 0
+    && list.count === 1
+    && list.enabled
+    && actualDigest === expectedDigest
+  return ok
+    ? {
+        ok: true,
+        evidenceRefs: [`codex-mcp-exact-owned-tuple:${expectedDigest}`],
+        readinessPredicates: { mcp_registered: true, mcp_native_get_exact: true, mcp_native_list_exact: true },
+        readbackDigest: expectedDigest,
+      }
+    : {
+        ok: false,
+        reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+        evidenceRefs: [`codex-mcp-owned-tuple-mismatch:${bootstrapDigest({
+          get_exit: getResult.exitCode,
+          list_exit: listResult.exitCode,
+          list_count: list.count,
+          actual_digest: actualDigest,
+          expected_digest: expectedDigest,
+        })}`],
       }
 }
 
@@ -697,7 +804,14 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         intended_after_digest: bootstrapDigest(tuple),
         actual_after_digest: null,
         rollback_action: 'codex mcp remove aun; verify native get absence and list absence',
-        rollback_payload: { created_by_run: true, tuple_digest: bootstrapDigest(tuple) },
+        rollback_payload: {
+          created_by_run: true,
+          tuple_digest: bootstrapDigest(tuple),
+          admitted_run_id: context.runId,
+          admitted_repo_head: context.repoHead,
+          admitted_provider_root_digest: bootstrapDigest(providerRoot(context)),
+          admitted_provider_authority_digest: context.providerRootAuthority?.authorityTupleDigest ?? null,
+        },
       }
       context.admitRecoveryMutation?.({
         ...mutation,
@@ -835,7 +949,14 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         if (!absence.ok) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: absence.evidenceRefs }
         if (!postRemoveFence) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
         let restored: ProviderArtifactIdentity
-        try { restored = atomicRestoreProviderArtifact(artifact, context, postRemoveFence) } catch {
+        try {
+          restored = atomicRestoreProviderArtifact(
+            artifact,
+            context,
+            postRemoveFence,
+            deps.beforeProviderArtifactNoClobberCommit,
+          )
+        } catch {
           return {
             ok: false,
             reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
@@ -887,6 +1008,45 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
       }
 
       const options = commandOptions(context)
+      const tupleDigest = typeof payload.tuple_digest === 'string' ? payload.tuple_digest : null
+      const admissionOpen = payload.recovery_admission === true && mutation.actual_after_digest === null
+      const ownershipFences = {
+        absent_prestate: mutation.before_digest === bootstrapDigest({ absent: true }),
+        tuple_digest_present: tupleDigest !== null,
+        intended_digest: tupleDigest === mutation.intended_after_digest,
+        run_id: payload.admitted_run_id === context.runId,
+        repo_head: payload.admitted_repo_head === context.repoHead,
+        provider_root: payload.admitted_provider_root_digest === bootstrapDigest(providerRoot(context)),
+      }
+      const failedOwnershipFences = Object.entries(ownershipFences)
+        .filter(([, matches]) => !matches)
+        .map(([name]) => name)
+      if (failedOwnershipFences.length > 0) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+          evidenceRefs: [`codex-mcp-rollback-ownership-fence-failed:${failedOwnershipFences.join(',')}`],
+        }
+      }
+      const intended = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+        exactOwnedTupleDigestReadback(recoveryContext, deps, tupleDigest))
+      if (!intended.ok || intended.readbackDigest !== tupleDigest) {
+        const absence = await withFreshBootstrapRecoverySignal(context, (recoveryContext) =>
+          exactAbsenceReadback(recoveryContext, deps))
+        if (admissionOpen && absence.ok) {
+          return {
+            ok: true,
+            readinessPredicates: { rollback_verified: true, recovery_admission_no_effect: true },
+            evidenceRefs: absence.evidenceRefs,
+            readbackDigest: absence.readbackDigest,
+          }
+        }
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+          evidenceRefs: [...(intended.evidenceRefs ?? []), ...(absence.evidenceRefs ?? [])],
+        }
+      }
       const removed = await deps.run('codex', ['mcp', 'remove', 'aun'], options)
       if (removed.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       const [getResult, listResult] = await Promise.all([

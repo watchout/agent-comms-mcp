@@ -100,6 +100,68 @@ describe('aun bootstrap Codex adapter', () => {
     expect(added).toBe(false)
   })
 
+  test('absent-prestate recovery preserves a foreign current tuple without invoking remove', async () => {
+    let state: 'absent' | 'intended' | 'foreign' = 'absent'
+    let removeCalls = 0
+    let admission: any = null
+    const foreignTuple = {
+      name: 'aun', enabled: true,
+      transport: { type: 'stdio', command: '/foreign/bun', args: ['foreign-server.ts'], env: { OWNER: 'foreign' } },
+    }
+    const recoveryContext: BootstrapStageContext = {
+      ...context,
+      admitRecoveryMutation: (mutation) => { admission = structuredClone(mutation) },
+    }
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args) => {
+        const joined = args.join(' ')
+        if (joined === 'mcp get aun --json') {
+          if (state === 'absent') return { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+          return { exitCode: 0, stdout: state === 'intended' ? exactGet() : JSON.stringify(foreignTuple), stderr: '' }
+        }
+        if (joined === 'mcp list --json') return {
+          exitCode: 0,
+          stdout: JSON.stringify(state === 'absent' ? [] : [{ name: 'aun', enabled: true }]),
+          stderr: '',
+        }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') {
+          state = 'intended'
+          return { exitCode: 0, stdout: 'added', stderr: '' }
+        }
+        if (joined === 'mcp remove aun') {
+          removeCalls++
+          state = 'absent'
+          return { exitCode: 0, stdout: 'removed', stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+    const applied = await adapter.applyMcpRegistration(recoveryContext)
+    expect(applied.ok).toBe(true)
+    expect(admission).not.toBeNull()
+    state = 'foreign'
+    const foreignBefore = JSON.stringify(foreignTuple)
+    const rolledBack = await adapter.rollbackRuntimeRegistration(recoveryContext, {
+      mutation_id: 'absent-admission-foreign',
+      stage: 'B4_MCP_REGISTRATION',
+      rollback_status: 'not_run',
+      ...admission,
+      rollback_payload: { ...admission.rollback_payload, recovery_admission: true },
+    })
+    expect(rolledBack.ok).toBe(false)
+    expect(rolledBack.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+    expect(removeCalls).toBe(0)
+    expect(state).toBe('foreign')
+    expect(JSON.stringify(foreignTuple)).toBe(foreignBefore)
+    console.log(JSON.stringify({
+      fixture: 'B4_ABSENT_PRESTATE_FOREIGN_TUPLE_FENCE',
+      rollback_result: 'NO_GO_ROLLBACK_UNVERIFIED',
+      remove_calls: removeCalls,
+      foreign_tuple_preserved: state === 'foreign' && JSON.stringify(foreignTuple) === foreignBefore,
+    }))
+  })
+
   test('post-exit readback uses a fresh bounded signal after the stage signal aborts', async () => {
     const stageController = new AbortController()
     const postAddSignals: Array<{ signal: AbortSignal | undefined; aborted: boolean }> = []
@@ -392,6 +454,7 @@ describe('aun bootstrap Codex adapter', () => {
     const admissionTrace: string[] = []
     let addExitCode = 0
     let injectForeignEditDuringAbsenceReadback = false
+    let injectForeignEditAtAtomicCommit = false
     candidateContext.admitRecoveryMutation = (mutation) => {
       admissionTrace.push(`admit:${String(mutation.rollback_payload?.recovery_admission_phase)}`)
     }
@@ -400,6 +463,11 @@ describe('aun bootstrap Codex adapter', () => {
     }
     const adapter = createCodexBootstrapAdapter({
       bunPath: '/bin/bun', serverEntry: 'server.ts',
+      beforeProviderArtifactNoClobberCommit: () => {
+        if (!injectForeignEditAtAtomicCommit) return
+        injectForeignEditAtAtomicCommit = false
+        writeFileSync(configPath, foreignBytes, { mode: 0o600 })
+      },
       run: async (_command, args, options) => {
         seenRoots.push(options.env.CODEX_HOME)
         const joined = args.join(' ')
@@ -492,6 +560,32 @@ describe('aun bootstrap Codex adapter', () => {
       expect(foreignRollback.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
       expect(readFileSync(configPath).equals(foreignBytes)).toBe(true)
       expect(existsSync(foreignBackupPath)).toBe(true)
+
+      rmSync(join(root, `.aun-bootstrap-rollback-${candidateContext.runId}`), { recursive: true, force: true })
+      writeFileSync(configPath, original, { mode: 0o600 })
+      const atomicRaceUpgrade = await adapter.applyMcpRegistration(candidateContext)
+      expect(atomicRaceUpgrade.ok).toBe(true)
+      const atomicRaceBackupPath = String(atomicRaceUpgrade.mutation?.rollback_payload?.private_backup_path)
+      injectForeignEditAtAtomicCommit = true
+      const atomicRaceRollback = await adapter.rollbackRuntimeRegistration(candidateContext, {
+        mutation_id: 'legacy-final-no-clobber-race',
+        stage: 'B4_MCP_REGISTRATION',
+        rollback_status: 'not_run',
+        ...atomicRaceUpgrade.mutation!,
+      })
+      expect(atomicRaceRollback.ok).toBe(false)
+      expect(atomicRaceRollback.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+      expect(readFileSync(configPath).equals(foreignBytes)).toBe(true)
+      expect(existsSync(atomicRaceBackupPath)).toBe(true)
+      expect(existsSync(join(root, `.config.toml.aun-displaced-${candidateContext.runId}`))).toBe(false)
+      console.log(JSON.stringify({
+        fixture: 'B4_PROVIDER_FINAL_CHECK_TO_COMMIT_RACE',
+        rollback_result: 'NO_GO_ROLLBACK_UNVERIFIED',
+        no_clobber_commit: true,
+        foreign_bytes_preserved: readFileSync(configPath).equals(foreignBytes),
+        private_backup_retained: existsSync(atomicRaceBackupPath),
+        displaced_run_owned_residue: false,
+      }))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
