@@ -116,15 +116,30 @@ requireText(".shirube/lifecycle-state.yaml", [
   "owner_must_not_merge_until_exact_head_decision: true",
 ]);
 
-requireText(".github/workflows/shirube-rapid-lite-gates-report.yml", [
+const rapidLiteWorkflowPath = ".github/workflows/shirube-rapid-lite-gates-report.yml";
+requireText(rapidLiteWorkflowPath, [
   "name: Shirube Rapid/Lite Gates Report",
-  "uses: \"watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@",
-  "report_only: true",
-  "validation_evidence_ref: \"\"",
-  "owner_decision_ref: \"\"",
+  "TARGET_DIR: target",
+  "RUNTIME_DIR: runtime-source",
+  "PUBLIC_RUNTIME_REF: 4ea4b8bc122e22c47323fc8836dc3d7aedd487e9",
+  "repository: watchout/agent-comms-mcp",
+  "ref: ${{ env.PUBLIC_RUNTIME_REF }}",
+  "path: ${{ env.TARGET_DIR }}",
+  "path: ${{ env.RUNTIME_DIR }}",
+  ".shirube/runtime/rapid-lite/manifest.json",
+  "sha256sum --check --strict",
+  ".shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs",
+  "shirube-rapid-lite-gates-report/v1",
+  "shirube-rapid-lite-gates-${{ github.event.pull_request.number }}",
+  'entry.gate === "flow-safety"',
+  'gate.status === "ran" && gate.verdict !== "PASS"',
+  "Rapid/Lite gates other than flow-safety remain report-only in this slice.",
 ]);
-requireRegex(".github/workflows/shirube-rapid-lite-gates-report.yml", /uses: "watchout\/ai-dev-framework\/\.github\/workflows\/shirube-rapid-lite-reusable\.yml@[a-f0-9]{40}"/u, "Rapid/Lite workflow caller must use a pinned ADF SHA.");
-requirePullRequestTypes(".github/workflows/shirube-rapid-lite-gates-report.yml", [
+requireTextCount(rapidLiteWorkflowPath, "repository: watchout/agent-comms-mcp", 1, "Rapid/Lite workflow must checkout the public same-repository runtime exactly once.");
+requireTextCount(rapidLiteWorkflowPath, "PUBLIC_RUNTIME_REF: 4ea4b8bc122e22c47323fc8836dc3d7aedd487e9", 1, "Rapid/Lite workflow must declare the exact pinned public runtime ref once.");
+requireTextCount(rapidLiteWorkflowPath, ".shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs", 1, "Rapid/Lite workflow must invoke the repository-local runtime entry exactly once.");
+forbidText(rapidLiteWorkflowPath, ["watchout/ai-dev-framework"], "Rapid/Lite workflow must not call or checkout the private ADF repository.");
+requirePullRequestTypes(rapidLiteWorkflowPath, [
   "opened",
   "synchronize",
   "reopened",
@@ -468,6 +483,27 @@ function requireText(filePath, needles) {
   }
   for (const needle of needles) {
     if (!text.includes(needle)) errors.push(`${filePath} must include ${needle}.`);
+  }
+}
+
+function requireTextCount(filePath, needle, expectedCount, message) {
+  const text = readText(filePath);
+  if (!text) {
+    errors.push(`Required file is missing or empty: ${filePath}`);
+    return;
+  }
+  const count = text.split(needle).length - 1;
+  if (count !== expectedCount) errors.push(`${filePath}: ${message} Found ${count}.`);
+}
+
+function forbidText(filePath, needles, message) {
+  const text = readText(filePath);
+  if (!text) {
+    errors.push(`Required file is missing or empty: ${filePath}`);
+    return;
+  }
+  for (const needle of needles) {
+    if (text.includes(needle)) errors.push(`${filePath}: ${message} Forbidden text: ${needle}.`);
   }
 }
 

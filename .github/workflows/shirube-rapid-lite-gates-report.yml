@@ -16,13 +16,122 @@ permissions:
   pull-requests: write
   issues: write
 
+env:
+  TARGET_DIR: target
+  RUNTIME_DIR: runtime-source
+  RESULT_DIR: target/.shirube-rapid-lite
+  PUBLIC_RUNTIME_REF: 4ea4b8bc122e22c47323fc8836dc3d7aedd487e9
+
 jobs:
   shirube-rapid-lite-gates-report:
     name: Shirube Rapid/Lite Gates Report
-    uses: "watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@a435c3bfad72805ced34d53884eccf30f8ebe690"
-    with:
-      framework_ref: "watchout/ai-dev-framework@a435c3bfad72805ced34d53884eccf30f8ebe690"
-      profile: "hotel-lite"
-      report_only: true
-      validation_evidence_ref: ""
-      owner_decision_ref: ""
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target exact head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: ${{ env.TARGET_DIR }}
+          fetch-depth: 0
+
+      - name: Checkout pinned public Rapid/Lite runtime
+        uses: actions/checkout@v4
+        with:
+          repository: watchout/agent-comms-mcp
+          ref: ${{ env.PUBLIC_RUNTIME_REF }}
+          path: ${{ env.RUNTIME_DIR }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Verify pinned public runtime manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNTIME_DIR"
+          jq -r '.files | to_entries[] | "\(.value)  .shirube/runtime/rapid-lite/\(.key)"' \
+            .shirube/runtime/rapid-lite/manifest.json |
+            sha256sum --check --strict
+
+      - name: Run repository-local Rapid/Lite report
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node "$RUNTIME_DIR/.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs" \
+            --target-dir "$TARGET_DIR" \
+            --result-dir .shirube-rapid-lite
+          cat "$RESULT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RESULT_DIR/aggregate.json"
+
+      - name: Upsert PR comment
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- shirube-rapid-lite-gates-report/v1 -->";
+            const summaryPath = process.env.RESULT_DIR + "/summary.md";
+            const body = fs.existsSync(summaryPath)
+              ? fs.readFileSync(summaryPath, "utf8")
+              : marker + "\n\n## Shirube Rapid/Lite Gates Report\n\nReport generation failed before summary creation.";
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const previous = comments.find((comment) =>
+              comment.user?.type === "Bot" && comment.body?.includes(marker)
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Upload Rapid/Lite gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shirube-rapid-lite-gates-${{ github.event.pull_request.number }}
+          path: ${{ env.RESULT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Enforce flow-safety activation
+        if: always()
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const reportPath = process.env.RESULT_DIR + "/aggregate.json";
+          if (!fs.existsSync(reportPath)) {
+            throw new Error("Missing Rapid/Lite aggregate; flow-safety was not verified.");
+          }
+          const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+          const gate = report.gates?.find((entry) => entry.gate === "flow-safety");
+          if (!gate) throw new Error("Missing flow-safety gate record.");
+          if (gate.status === "ran" && gate.verdict !== "PASS") {
+            throw new Error(`Flow-safety must PASS before audit handoff: ${gate.verdict}.`);
+          }
+          console.log(`Flow-safety activation: ${gate.status}/${gate.verdict}`);
+          NODE
+
+      - name: Report-only completion
+        if: always()
+        run: |
+          echo "Rapid/Lite gates other than flow-safety remain report-only in this slice."
+          echo "This workflow does not mutate required checks or branch protection."
+          exit 0

@@ -1,11 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const repoRoot = process.cwd();
 const headSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const rapidLiteWorkflowPath = ".github/workflows/shirube-rapid-lite-gates-report.yml";
+const overlayFixturePaths = [
+  ".shirube/repo-spec.yaml",
+  ".shirube/execution-context.yaml",
+  ".shirube/adoption-intake.yaml",
+  ".shirube/existing-state-scan.yaml",
+  ".shirube/control-handoffs/CH-001.yaml",
+  ".shirube/lifecycle-state.yaml",
+  ".shirube/enforcement-policy.yaml",
+  ".shirube/control-state-completeness.yaml",
+  ".shirube/source-mirrors/control-issue.yaml",
+  "docs/shirube/README.md",
+  rapidLiteWorkflowPath,
+  ".github/pull_request_template.md",
+  ".github/workflows/pr-checks.yml",
+  "scripts/shirube-current-overlay-check.mjs",
+];
 
 function runGate(
   body: string,
@@ -18,6 +35,7 @@ function runGate(
     expectedHeadSha?: string;
     requiredMergeMethod?: string;
     eventHeadSha?: string;
+    workflowBody?: string;
     ownerDecisions?: Array<{
       mergeMethod: string;
       supersedesDecisionRef?: string;
@@ -69,6 +87,17 @@ function runGate(
   });
   writeFileSync(commentsPath, JSON.stringify(comments));
 
+  let gateRoot = repoRoot;
+  if (options.workflowBody !== undefined) {
+    gateRoot = join(dir, "repo");
+    for (const relativePath of overlayFixturePaths) {
+      const destination = join(gateRoot, relativePath);
+      mkdirSync(dirname(destination), { recursive: true });
+      copyFileSync(join(repoRoot, relativePath), destination);
+    }
+    writeFileSync(join(gateRoot, rapidLiteWorkflowPath), options.workflowBody);
+  }
+
   try {
     return spawnSync("node", [
       "scripts/shirube-current-overlay-check.mjs",
@@ -83,7 +112,7 @@ function runGate(
       ...(options.expectedHeadSha ? ["--expected-head", options.expectedHeadSha] : []),
       ...(options.requiredMergeMethod ? ["--required-merge-method", options.requiredMergeMethod] : []),
     ], {
-      cwd: repoRoot,
+      cwd: gateRoot,
       encoding: "utf8",
     });
   } finally {
@@ -350,4 +379,70 @@ describe("shirube-current-overlay-check", () => {
       expect(result.stdout).toContain(`Execution requires merge_method=squash, but the authoritative owner decision selects ${currentMethod}.`);
     },
   );
+
+  test("accepts the public same-repository exact-ref manifest-verified local runtime topology", () => {
+    const workflowBody = readFileSync(join(repoRoot, rapidLiteWorkflowPath), "utf8");
+    const result = runGate(
+      baseBody("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001", "R3"),
+      [rapidLiteWorkflowPath],
+      { workflowBody },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Shirube current-overlay gate passed.");
+  });
+
+  test("rejects a private ADF reusable workflow call or checkout", () => {
+    const canonical = readFileSync(join(repoRoot, rapidLiteWorkflowPath), "utf8");
+    const privateRef = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const variants = [
+      canonical.replace(
+        "jobs:\n",
+        `jobs:\n  forbidden-private-call:\n    uses: \"watchout/ai-dev-framework/.github/workflows/shirube-rapid-lite-reusable.yml@${privateRef}\"\n`,
+      ),
+      canonical.replace(
+        "repository: watchout/agent-comms-mcp",
+        "repository: watchout/ai-dev-framework",
+      ),
+    ];
+
+    for (const workflowBody of variants) {
+      const result = runGate(
+        baseBody("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001", "R3"),
+        [rapidLiteWorkflowPath],
+        { workflowBody },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("must not call or checkout the private ADF repository");
+    }
+  });
+
+  test("rejects a drifted public runtime ref", () => {
+    const canonical = readFileSync(join(repoRoot, rapidLiteWorkflowPath), "utf8");
+    const workflowBody = canonical.replace(
+      "4ea4b8bc122e22c47323fc8836dc3d7aedd487e9",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    const result = runGate(
+      baseBody("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001", "R3"),
+      [rapidLiteWorkflowPath],
+      { workflowBody },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("must declare the exact pinned public runtime ref once");
+  });
+
+  test("rejects missing strict runtime manifest verification", () => {
+    const canonical = readFileSync(join(repoRoot, rapidLiteWorkflowPath), "utf8");
+    const workflowBody = canonical.replace("sha256sum --check --strict", "sha256sum --check");
+    const result = runGate(
+      baseBody("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001", "R3"),
+      [rapidLiteWorkflowPath],
+      { workflowBody },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("must include sha256sum --check --strict");
+  });
 });
