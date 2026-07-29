@@ -370,6 +370,62 @@ function cleanupConditionalRemoveTransaction(transactionRoot: string): boolean {
   }
 }
 
+function restoreClaimedForeignArtifact(
+  root: string,
+  transactionRoot: string,
+  configPath: string,
+  claimedPath: string,
+): boolean {
+  try {
+    if (existsSync(configPath)) return false
+    linkSync(claimedPath, configPath)
+    fsyncDirectory(root)
+    if (!sameProviderArtifactObjectWithLinks(
+      fileArtifactIdentityWithLinks(configPath),
+      fileArtifactIdentityWithLinks(claimedPath),
+    )) return false
+    unlinkSync(claimedPath)
+    fsyncDirectory(transactionRoot)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function atomicClaimAndRemoveOwnedSentinel(
+  root: string,
+  transactionRoot: string,
+  configPath: string,
+  sentinelIdentity: ProviderArtifactIdentity | null,
+): { ok: true } | { ok: false; reason: 'foreign-live-won' | 'sentinel-claim-unverified' } {
+  if (!sentinelIdentity) return { ok: false, reason: 'sentinel-claim-unverified' }
+  const claimedPath = join(transactionRoot, 'live-absence-claimed')
+  try {
+    if (!existsSync(claimedPath)) {
+      if (!existsSync(configPath)) return { ok: true }
+      renameSync(configPath, claimedPath)
+      fsyncDirectory(root)
+      fsyncDirectory(transactionRoot)
+    }
+
+    const claimedOwned = sameProviderArtifactObjectWithLinks(
+      fileArtifactIdentityWithLinks(claimedPath),
+      sentinelIdentity,
+    )
+    if (!claimedOwned) {
+      return restoreClaimedForeignArtifact(root, transactionRoot, configPath, claimedPath)
+        ? { ok: false, reason: 'foreign-live-won' }
+        : { ok: false, reason: 'sentinel-claim-unverified' }
+    }
+
+    unlinkSync(claimedPath)
+    fsyncDirectory(transactionRoot)
+    return { ok: true }
+  } catch {
+    return { ok: false, reason: 'sentinel-claim-unverified' }
+  }
+}
+
 function writeLegacyRollbackArtifact(
   context: BootstrapStageContext,
   root: string,
@@ -705,17 +761,18 @@ async function recoverConditionalRemoveTransaction(
     unlinkSync(displaced)
     fsyncDirectory(root)
   } else {
-    if (existsSync(configPath)) {
-      let ownedSentinel = false
-      try { ownedSentinel = sameProviderArtifactObjectWithLinks(fileArtifactIdentityWithLinks(configPath), journal.sentinel_initial) } catch {}
-      if (!ownedSentinel) {
-        if (!cleanupConditionalRemoveTransaction(transactionRoot)) {
-          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
-        }
+    const sentinelRemoval = atomicClaimAndRemoveOwnedSentinel(
+      root,
+      transactionRoot,
+      configPath,
+      journal.sentinel_initial,
+    )
+    if (!sentinelRemoval.ok) {
+      if (sentinelRemoval.reason === 'foreign-live-won'
+        && cleanupConditionalRemoveTransaction(transactionRoot)) {
         return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: ['codex-mcp-conditional-remove-recovery:foreign-live-won'] }
       }
-      unlinkSync(configPath)
-      fsyncDirectory(root)
+      return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'], evidenceRefs: ['codex-mcp-conditional-remove-recovery:sentinel-claim-unverified'] }
     }
   }
   if (!cleanupConditionalRemoveTransaction(transactionRoot)) {
@@ -849,13 +906,14 @@ async function atomicRemoveOwnedMcpTuple(
       displacedOwned = false
       fsyncDirectory(root)
     } else {
-      if (!sentinelIdentity
-        || !sameProviderArtifactObjectWithLinks(fileArtifactIdentityWithLinks(configPath), sentinelIdentity)) {
-        throw new Error('absent provider artifact sentinel was replaced')
-      }
-      unlinkSync(configPath)
+      const sentinelRemoval = atomicClaimAndRemoveOwnedSentinel(
+        root,
+        transactionRoot,
+        configPath,
+        sentinelIdentity,
+      )
+      if (!sentinelRemoval.ok) throw new Error(`absent provider artifact ${sentinelRemoval.reason}`)
       sentinelOwned = false
-      fsyncDirectory(root)
       deps.afterOwnedTupleLiveCommit?.(configPath)
     }
 

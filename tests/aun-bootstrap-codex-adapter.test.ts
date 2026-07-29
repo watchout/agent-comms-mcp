@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrapDigest } from '../core/aun-bootstrap-state'
@@ -289,6 +289,174 @@ describe('aun bootstrap Codex adapter', () => {
         rollback_result: 'NO_GO_ROLLBACK_UNVERIFIED',
         remove_calls: removeCalls,
         foreign_tuple_preserved: state === 'foreign' && readFileSync(configPath).equals(foreignBytes),
+      }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('null-prestate sentinel commit atomically preserves a foreign winner with zero residue', async () => {
+    const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-codex-null-sentinel-foreign-')))
+    const configPath = join(root, 'config.toml')
+    const transactionRoot = join(root, '.aun-bootstrap-remove-run-1')
+    const claimedPath = join(transactionRoot, 'live-absence-claimed')
+    const foreignBytes = Buffer.from('[mcp_servers.aun]\ncommand = "/foreign/bun"\nowner = "foreign"\n')
+    let privateRemoved = false
+    const candidateContext = withProviderAuthority(root)
+    const mutation = absentPrestateMutation(candidateContext, false)
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      afterOwnedTuplePrivateRemove: () => {
+        const foreignTemp = join(root, 'foreign-winner.tmp')
+        writeFileSync(foreignTemp, foreignBytes, { mode: 0o600 })
+        renameSync(foreignTemp, configPath)
+      },
+      run: async (_command, args, options) => {
+        const privateRoot = options.env.CODEX_HOME !== root
+        const present = !privateRoot || !privateRemoved
+        const joined = args.join(' ')
+        if (joined === 'mcp get aun --json') return present
+          ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+          : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+        if (joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(present ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+        if (joined === 'mcp remove aun') {
+          privateRemoved = true
+          return { exitCode: 0, stdout: 'removed', stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+    try {
+      const rolledBack = await adapter.rollbackRuntimeRegistration(candidateContext, mutation)
+      expect(rolledBack.ok).toBe(false)
+      expect(rolledBack.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+      expect(readFileSync(configPath).equals(foreignBytes)).toBe(true)
+      expect(statSync(configPath).nlink).toBe(1)
+      expect(existsSync(claimedPath)).toBe(false)
+      expect(existsSync(transactionRoot)).toBe(false)
+      expect(existsSync(join(root, '.config.toml.aun-remove-owned-run-1'))).toBe(false)
+      console.log(JSON.stringify({
+        fixture: 'B4_NULL_SENTINEL_ATOMIC_FOREIGN_WINNER',
+        rollback_result: 'NO_GO_ROLLBACK_UNVERIFIED',
+        foreign_bytes_preserved: true,
+        foreign_link_count: statSync(configPath).nlink,
+        residue: false,
+      }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('null-prestate SIGKILL recovery atomically preserves a foreign winner with zero residue', async () => {
+    const repoRoot = process.cwd()
+    const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-codex-null-sentinel-crash-')))
+    const configPath = join(root, 'config.toml')
+    const transactionRoot = join(root, '.aun-bootstrap-remove-null-sentinel-crash')
+    const claimedPath = join(transactionRoot, 'live-absence-claimed')
+    const foreignBytes = Buffer.from('[mcp_servers.aun]\ncommand = "/foreign/bun"\nowner = "foreign-after-crash"\n')
+    const candidateContext: BootstrapStageContext = {
+      ...withProviderAuthority(root),
+      runId: 'null-sentinel-crash',
+    }
+    const mutation = absentPrestateMutation(candidateContext, false)
+    const childScript = String.raw`
+      const source = await import(process.env.HARD_REPO + '/bin/aun/bootstrap-adapter-codex.ts')
+      const state = await import(process.env.HARD_REPO + '/core/aun-bootstrap-state.ts')
+      const root = process.env.HARD_ROOT
+      let privateRemoved = false
+      const candidateContext = {
+        runId: 'null-sentinel-crash', agentId: 'codex-probe', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+        repoRoot: '/repo', workspaceRoot: '/workspace', repoHead: 'a'.repeat(40), dryRun: false,
+        env: { DATABASE_URL: 'postgresql:///probe', AUN_BOOTSTRAP_CHANNEL_PORT: '8891', AUN_BOOTSTRAP_PROCESS_RUNTIME: 'codex', CODEX_HOME: root },
+        priorState: {},
+        providerRootAuthority: {
+          existingTarget: false, canonicalSourceField: 'clean_host_default', canonicalRoot: root,
+          canonicalRootDigest: 'canonical-root', canonicalRealpathDigest: 'canonical-realpath',
+          projectionMatches: true, callerMismatch: false, authorityTupleDigest: 'authority-tuple-v1',
+        },
+      }
+      const tuple = source.expectedBootstrapMcpTuple(candidateContext, {
+        bunPath: '/bin/bun', serverEntry: 'server.ts', run: async () => ({ exitCode: 1, stdout: '', stderr: '' }),
+      })
+      const exactGet = JSON.stringify({
+        name: 'aun', enabled: true,
+        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: {
+          AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
+          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8891',
+        } },
+      })
+      const adapter = source.createCodexBootstrapAdapter({
+        bunPath: '/bin/bun', serverEntry: 'server.ts',
+        afterOwnedTuplePrivateRemove: () => process.kill(process.pid, 'SIGKILL'),
+        run: async (_command, args, options) => {
+          const privateRoot = options.env.CODEX_HOME !== root
+          const present = !privateRoot || !privateRemoved
+          const joined = args.join(' ')
+          if (joined === 'mcp get aun --json') return present
+            ? { exitCode: 0, stdout: exactGet, stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+          if (joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(present ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+          if (joined === 'mcp remove aun') { privateRemoved = true; return { exitCode: 0, stdout: 'removed', stderr: '' } }
+          return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+        },
+      })
+      await adapter.rollbackRuntimeRegistration(candidateContext, {
+        mutation_id: 'null-sentinel-crash', stage: 'B4_MCP_REGISTRATION', kind: 'mcp_registration',
+        owner_key: 'codex:aun:null-sentinel-crash', before_digest: state.bootstrapDigest({ absent: true }),
+        intended_after_digest: state.bootstrapDigest(tuple), actual_after_digest: state.bootstrapDigest(tuple),
+        rollback_action: 'conditional remove fixture', rollback_status: 'not_run',
+        rollback_payload: {
+          created_by_run: true, tuple_digest: state.bootstrapDigest(tuple), admitted_run_id: 'null-sentinel-crash',
+          admitted_repo_head: 'a'.repeat(40), admitted_provider_root_digest: state.bootstrapDigest(root),
+          admitted_provider_authority_digest: 'authority-tuple-v1',
+        },
+      })
+      process.exit(91)
+    `
+    try {
+      const crashed = Bun.spawnSync([process.execPath, '-e', childScript], {
+        cwd: repoRoot,
+        env: { ...process.env, HARD_REPO: repoRoot, HARD_ROOT: root },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      expect(crashed.exitCode).toBeNull()
+      expect(crashed.signalCode).toBe('SIGKILL')
+      expect(existsSync(configPath)).toBe(true)
+      expect(existsSync(join(transactionRoot, 'remove-state.json'))).toBe(true)
+
+      const foreignTemp = join(root, 'foreign-winner.tmp')
+      writeFileSync(foreignTemp, foreignBytes, { mode: 0o600 })
+      renameSync(foreignTemp, configPath)
+
+      const adapter = createCodexBootstrapAdapter({
+        bunPath: '/bin/bun', serverEntry: 'server.ts',
+        run: async (_command, args, options) => {
+          const privateRoot = options.env.CODEX_HOME !== root
+          const joined = args.join(' ')
+          if (joined === 'mcp get aun --json') return privateRoot
+            ? { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+            : { exitCode: 0, stdout: exactGet(), stderr: '' }
+          if (joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(privateRoot ? [] : [{ name: 'aun', enabled: true }]), stderr: '' }
+          return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+        },
+      })
+      const recovered = await adapter.rollbackRuntimeRegistration(candidateContext, mutation)
+      expect(recovered.ok).toBe(false)
+      expect(recovered.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+      expect(recovered.evidenceRefs).toContain('codex-mcp-conditional-remove-recovery:foreign-live-won')
+      expect(readFileSync(configPath).equals(foreignBytes)).toBe(true)
+      expect(statSync(configPath).nlink).toBe(1)
+      expect(existsSync(claimedPath)).toBe(false)
+      expect(existsSync(transactionRoot)).toBe(false)
+      expect(existsSync(join(root, '.config.toml.aun-remove-owned-null-sentinel-crash'))).toBe(false)
+      console.log(JSON.stringify({
+        fixture: 'B4_NULL_SENTINEL_SIGKILL_FOREIGN_WINNER_RECOVERY',
+        child_exit_signal: crashed.signalCode,
+        rollback_result: 'NO_GO_ROLLBACK_UNVERIFIED',
+        foreign_bytes_preserved: true,
+        foreign_link_count: statSync(configPath).nlink,
+        residue: false,
       }))
     } finally {
       rmSync(root, { recursive: true, force: true })
